@@ -614,6 +614,7 @@ def _draft_for(
         degree=_param(params, "degree"),
         join=params.get("join", "tangent"),
         X=X,
+        sample_weight=sample_weight,
         draft_spec=draft,
     )
 

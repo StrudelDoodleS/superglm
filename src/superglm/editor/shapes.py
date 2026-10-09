@@ -7,6 +7,7 @@ from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
@@ -21,7 +22,7 @@ from superglm.features.rebuild import (
     base_names_level,
     current_ranges,
     edge_text,
-    merged_ranges,
+    painted_ranges,
     pristine_basis,
     rebuilt_ordered_spec,
     shape_unavailable_reason,
@@ -45,6 +46,10 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
 # The joins the editor offers: Tangent, and Corner (the library's kink).
 EDITOR_JOINS = ("tangent", "kink")
 _LINEAR_TANGENT = "A degree-1 spline cannot join a range along its tangent; choose Corner."
+_PIECE_TOO_SHORT = (
+    "That range would cut the {shape} range {span} down to {piece}, too short for a {shape}. "
+    "Cover all of it, or leave more of it outside the new range."
+)
 
 
 def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
@@ -106,12 +111,7 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
     spec = model._specs[name]
     if X is None or not isinstance(spec, _SplineBase) or shape_unavailable_reason(model, name):
         return None
-    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64)
-    if sample_weight is not None:
-        x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
-    binned = should_discretize(spec, model._discrete)
-    n_bins = resolve_discrete_n_bins(name, spec, model._n_bins) if binned else None
-    support = fit_support(x, n_bins)
+    support = _refit_support(model, name, spec, X, sample_weight)
     boundary = spec.fitted_boundary
     lows = [_snapped_edge(boundary, value, -1) for value in grid]
     highs = [_snapped_edge(boundary, value, 1) for value in grid]
@@ -122,18 +122,30 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
 
 
 def shaped_feature_spec(
-    model, name: str, *, lo, hi, degree: int, join: str = "tangent", X, draft_spec=None
+    model,
+    name: str,
+    *,
+    lo,
+    hi,
+    degree: int,
+    join: str = "tangent",
+    X,
+    sample_weight=None,
+    draft_spec=None,
 ) -> tuple[Any, dict[str, Any]]:
     """A fresh spec for ``name`` with ``[lo, hi]`` pinned to a ``degree`` polynomial.
 
     ``join`` is ``"tangent"`` (the curve leaves the range along its slope) or
-    ``"kink"`` (the slope may change at the edge). Ranges already in force are
-    kept; the same range with a new degree or join replaces the old one, and
-    any other overlap is refused by name. A
+    ``"kink"`` (the slope may change at the edge). The new range is painted
+    over the ranges already there (``painted_ranges``): a range it covers
+    goes, the same range included, and one it overlaps keeps the part outside
+    it, which is refused by name when it holds too few values for its shape.
+    The label names each range the new one cuts. A
     numeric term keeps its fitted base knots and boundary, so the free
     part's knots never move; an ordered term rebuilds from its declaration,
     whose placement is deterministic on the same level axis.
 
+    ``X`` and ``sample_weight`` are the rows and weights the refit reads.
     ``draft_spec`` is the term's spec as waiting changes leave it (None: the
     fitted spec); a numeric draft is the unfitted spline an earlier waiting
     shape built, and keeps the fitted knots and boundary it states.
@@ -153,9 +165,9 @@ def shaped_feature_spec(
     try:
         lo, hi = band_edges(spec, name, lo, hi) if ordered else _numeric_edges(spec, lo, hi)
         new = PolynomialRange(lo, hi, degree, join)
-        ranges = merged_ranges(current_ranges(spec), new, position)
     except RangePlacementError as exc:
         raise EditorValueError(str(exc)) from exc
+    ranges, cut = painted_ranges(current_ranges(spec), new, position)
     if ordered:
         source = pristine_basis(spec)
         knots = source._named_knots or source._explicit_knots
@@ -164,9 +176,12 @@ def shaped_feature_spec(
         source = spec
         knots, boundary = _free_geometry(spec)
     basis = shaped_spline(source, ranges, knots=knots, boundary=boundary)
+    if any(pieces for _, pieces in cut):
+        _require_pieces_hold(cut, *_piece_support(model, name, spec, basis, X, sample_weight))
     setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
     replacement = _hosted(spec, basis, name, X) if ordered else basis
-    span = f"{edge_text(lo)}–{edge_text(hi)}"
+    span = _span_text(new)
+    cuts = ", ".join(_cut_text(old, pieces, new, position) for old, pieces in cut)
     return replacement, {
         "format": "superglm.editor.shaped_range.v1",
         "term": name,
@@ -174,10 +189,74 @@ def shaped_feature_spec(
         "hi": hi,
         "degree": degree,
         "join": join,
-        "label": f"{new.label} {span} in {name}",
+        "label": f"{new.label} {span} in {name}" + (f" ({cuts})" if cuts else ""),
         "message": f"{name} was given a {new.label} range {span} in the editor "
         "and the full model was refit.",
     }
+
+
+def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
+    """The sorted values a numeric term's refit evaluates its basis at.
+
+    The distinct positive-weight values, or the occupied bin centres when the
+    refit bins: the support the library certifies a range against.
+    """
+    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64)
+    if sample_weight is not None:
+        x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
+    binned = should_discretize(spec, model._discrete)
+    n_bins = resolve_discrete_n_bins(name, spec, model._n_bins) if binned else None
+    return fit_support(x, n_bins)
+
+
+def _piece_support(model, name: str, spec, basis, X, sample_weight):
+    """The values a cut range's pieces are counted on, and where an edge sits among them.
+
+    An ordered term counts its distinct band positions, as the palette counts
+    a selection's bands; a numeric term the values its refit of ``basis``
+    sees. None when a numeric term has no rows to count.
+    """
+    if isinstance(spec, OrderedCategorical):
+        bands = [float(spec._level_to_value[level]) for level in spec._smooth_levels]
+        return np.unique(bands), spec._range_edge_value
+    support = None if X is None else _refit_support(model, name, basis, X, sample_weight)
+    return support, float
+
+
+def _require_pieces_hold(cut, support: NDArray | None, position) -> None:
+    """Refuse a piece of a cut range that holds no more values than its degree.
+
+    A degree-d range needs d + 1 distinct values in it, closed at both edges:
+    the count the library certifies (``certify_determined``), here said of
+    the range the new one cuts rather than of the new one.
+    """
+    if support is None:
+        return
+    pieces = [(old, piece) for old, kept in cut for piece in kept]
+    lows = np.array([position(piece.lo) for _, piece in pieces], dtype=np.float64)
+    highs = np.array([position(piece.hi) for _, piece in pieces], dtype=np.float64)
+    held = np.searchsorted(support, highs, side="right") - np.searchsorted(support, lows)
+    short = np.flatnonzero(held <= np.array([piece.degree for _, piece in pieces]))
+    if short.size:
+        old, piece = pieces[short[0]]
+        raise EditorValueError(
+            _PIECE_TOO_SHORT.format(shape=old.label, span=_span_text(old), piece=_span_text(piece))
+        )
+
+
+def _cut_text(old: PolynomialRange, pieces, new: PolynomialRange, position) -> str:
+    """What painting ``new`` does to ``old``, as the change's label says it."""
+    named = f"{old.label} {_span_text(old)}"
+    if len(pieces) == 2:
+        return f"splits {named} into {_span_text(pieces[0])} and {_span_text(pieces[1])}"
+    if pieces:
+        return f"trims {named} to {_span_text(pieces[0])}"
+    same = (position(old.lo), position(old.hi)) == (position(new.lo), position(new.hi))
+    return f"{'replaces' if same else 'removes'} {named}"
+
+
+def _span_text(r: PolynomialRange) -> str:
+    return f"{edge_text(r.lo)}–{edge_text(r.hi)}"
 
 
 def snap_edge(value: float, span: float, direction: int) -> float:

@@ -221,6 +221,31 @@ test("a change refitted at once reads the same as a staged one", () => {
   ]]]);
 });
 
+test("a shape painted over other ranges names what it cuts, staged or refitted at once", () => {
+  const node = { innerHTML: "" };
+  renderHistory([
+    { kind: "structural", status: "applied", id: "c000001",
+      label: "Flat 85–110 in BonusMalus (trims Line 97–150 to 110–150)", term: "BonusMalus",
+      operation: "shape_range", redo: false },
+    { kind: "structural", status: "applied", id: "c000002",
+      label: "Flat 20–30 in age (years) (removes Line 22–28, trims Cubic 29–60 to 30–60)",
+      term: "age (years)", operation: "shape_range", redo: false },
+    { kind: "pending", status: "waiting", id: "c000003", note: null,
+      label: "Flat 40–50 in DrivAge (splits Quadratic 30–60 into 30–40 and 50–60)",
+      term: "DrivAge", operation: "shape", params: { lo: 40, hi: 50, degree: 0, join: "tangent" },
+      redo: false },
+    { kind: "marker" },
+  ], node);
+  assert.deepEqual(sections(node), [
+    ["waiting", ["Flat 40 – 50 (splits Quadratic 30 – 60 into 30 – 40 and 50 – 60)"]],
+    ["applied", [
+      "Flat 20 – 30 (removes Line 22 – 28, trims Cubic 29 – 60 to 30 – 60)",
+      "Flat 85 – 110 (trims Line 97 – 150 to 110 – 150)",
+      "Opened model",
+    ]],
+  ]);
+});
+
 test("the history ends at its root, the opened model, below every applied step", () => {
   const node = { innerHTML: "" };
   renderHistory(TIMELINE.slice(0, 4), node);

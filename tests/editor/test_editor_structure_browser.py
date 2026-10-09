@@ -678,6 +678,100 @@ def test_a_waiting_range_is_a_dashed_box_until_refit_pins_it(open_editor_page):
         assert page.locator("#chart .shape-range").count() == 1
 
 
+def test_a_range_painted_over_one_in_force_waits_with_the_part_it_keeps(open_editor_page):
+    with open_editor_page() as (page, session):
+        session.replace_with_shaped_range("curve", lo=2.0, hi=6.0, degree=1, method="fit")
+        grid = session.terms["curve"].x
+        session.select_indices("curve", np.flatnonzero((grid >= 4.0) & (grid <= 8.0)).tolist())
+        _reload_editor(page, "curve")
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/stage")) as staged:
+            page.locator("#shapeFlat").click()
+        assert staged.value.status == 200
+        [step] = session.pending
+        lo, hi = step.params["lo"], step.params["hi"]
+        # Precondition: the Flat overlaps the Line's upper end, so it trims it.
+        assert 2.0 < lo < 6.0 < hi
+        assert step.label == f"Flat {lo:g}–{hi:g} in curve (trims Line 2–6 to 2–{lo:g})"
+
+        # The Line keeps its band until Refit; the change draws the Flat and
+        # the part of the Line it keeps as dashed boxes that meet at the cut.
+        page.wait_for_function("() => document.querySelectorAll('#chart .pending-range').length")
+        assert page.locator("#chart .shape-range").count() == 1
+        drawn = page.evaluate(
+            """edges => {
+                const svg = document.querySelector('#chart');
+                return {
+                    boxes: Array.from(svg.querySelectorAll('.pending-range'), band => {
+                        const rect = band.querySelector('.pending-range-box');
+                        const left = Number(rect.getAttribute('x'));
+                        return [
+                            band.dataset.popoverTitle,
+                            left,
+                            left + Number(rect.getAttribute('width')),
+                        ];
+                    }),
+                    at: edges.map(edge => svg._scale.sx(edge)),
+                };
+            }""",
+            [2.0, lo, hi],
+        )
+        at = drawn["at"]
+        assert [title for title, _, _ in drawn["boxes"]] == [
+            "Line · waiting for refit",
+            "Flat · waiting for refit",
+        ]
+        assert [edges for _, *edges in drawn["boxes"]] == [
+            pytest.approx([at[0], at[1]], abs=1e-9),
+            pytest.approx([at[1], at[2]], abs=1e-9),
+        ]
+
+        # The History names what the change cuts.
+        page.locator("#historyTab").click()
+        waiting = page.locator(f'#historyFrame [data-step-id="{step.step_id}"]')
+        assert waiting.locator(".history-label").text_content() == (
+            f"Flat {lo:g} – {hi:g} (trims Line 2 – 6 to 2 – {lo:g})"
+        )
+
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+        with page.expect_response(_posted("/refit_pending")):
+            page.keyboard.press("r")
+        _settled_after_refit(page)
+        assert page.locator("#chart .pending-range").count() == 0
+        ranges = session.model._specs["curve"].polynomial_ranges
+        assert [(r.lo, r.hi, r.degree) for r in ranges] == [(2.0, lo, 1), (lo, hi, 0)]
+        assert page.locator("#chart .shape-range").count() == 2
+
+
+def test_a_split_range_waits_as_three_boxes_whose_tags_stay_inside_them(open_editor_page):
+    with open_editor_page() as (page, session):
+        session.replace_with_shaped_range("curve", lo=2.0, hi=8.0, degree=1, method="fit")
+        session.stage_structural("shape", "curve", {"lo": 4.0, "hi": 5.0, "degree": 0})
+        _reload_editor(page, "curve")
+        drawn = page.evaluate(
+            """() => Array.from(document.querySelectorAll('#chart .pending-range'), band => {
+                const box = band.querySelector('.pending-range-box').getBBox();
+                const tag = band.querySelector('.pending-range-tag')?.getBBox();
+                return {
+                    title: band.dataset.popoverTitle,
+                    label: band.querySelector('.pending-range-label')?.textContent ?? null,
+                    box: [box.x, box.x + box.width],
+                    tag: tag ? [tag.x, tag.x + tag.width] : null,
+                };
+            })"""
+        )
+        assert [band["title"] for band in drawn] == [
+            "Line · waiting for refit",
+            "Flat · waiting for refit",
+            "Line · waiting for refit",
+        ]
+        # A tag ends inside its box, so it never runs under the next box's tag;
+        # the narrow Flat's tag names only its shape.
+        for band in filter(lambda band: band["tag"] is not None, drawn):
+            assert band["box"][0] < band["tag"][0] and band["tag"][1] <= band["box"][1]
+        assert drawn[1]["label"] == "Flat"
+
+
 def test_new_levels_goes_into_the_structure_file_and_undo_takes_it_back(
     open_editor_page, choose_feature, tmp_path
 ):
