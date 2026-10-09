@@ -34,7 +34,7 @@ from superglm.editor.errors import (
     EditorTypeError,
     EditorValueError,
 )
-from superglm.editor.knots import LEVEL_OPERATIONS, knots_feature_spec
+from superglm.editor.knots import LEVEL_OPERATIONS, knots_feature_spec, probe_build
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.specials import special_feature_spec
 from superglm.editor.unseen import require_group_kept
@@ -119,6 +119,11 @@ _REFIT_AT_ONCE = {
     "on_curve": "on_curve_levels",
     "knots": "set_knots",
 }
+_CANNOT_FIT = (
+    "{change} cannot be fitted on the data the refit reads. Choose another range or shape, "
+    "or undo the change it builds on."
+)
+_REFIT_NAMED = "The refit was refused: {sentence} Undo that change and try again."
 _UNKNOWN_ENTRY = "Unknown history entry."
 _NOTE_LIMIT = 2000
 _REFIT_REFUSED = "The refit was refused. Undo the last waiting change and try again."
@@ -207,6 +212,7 @@ def stage_structural(
             raise
         raise EditorValueError(sentence) from exc
     require_group_kept(term, replacement)
+    _require_fits(session, operation, term, replacement, metadata, X_ref, weights)
     step = PendingStep(
         operation=operation,
         term=term,
@@ -239,7 +245,7 @@ def refit_pending(
     except EditorClientError:
         raise
     except ValueError as exc:
-        raise EditorValueError(_REFIT_REFUSED) from exc
+        raise EditorValueError(_refit_refusal(session, refit_kwargs) or _REFIT_REFUSED) from exc
 
 
 def stage_and_refit(
@@ -494,6 +500,45 @@ def _carry_edits(
     label = f"Hand edits carried over: {', '.join(carried)}"
     session.structure_history.append(StructuralStep(refitted, "carry_edits", None, label))
     session._advance_model_revision()
+
+
+def _require_fits(session, operation, term, replacement, metadata, X, sample_weight) -> None:
+    """Refuse now, in its sentence, a change whose draft the fit would refuse at Refit.
+
+    The fit's first step places the term's knots and certifies its shaped
+    ranges on the refit's data; doing that here moves the refusal from the
+    Refit, where it could only say the refit was refused, to the change.
+    """
+    try:
+        probe_build(session.model, term, replacement, X, sample_weight)
+    except EditorClientError:
+        raise
+    except ValueError as exc:
+        sentence = _range_refusal(exc, _STAGED_SENTENCES.get(operation, ())) or _range_refusal(
+            exc, _SHAPE_SENTENCES
+        )
+        change = str(metadata["label"])
+        raise EditorValueError(
+            sentence or _CANNOT_FIT.format(change=change[:1].upper() + change[1:])
+        ) from exc
+
+
+def _refit_refusal(session: EditorSession, refit_kwargs: dict[str, Any]) -> str | None:
+    """The refusal of the first waiting change whose draft the fit refuses, named, or None."""
+    X, _y, weights, _offset = session._resolve_refit_data(
+        refit_kwargs.get("X"),
+        refit_kwargs.get("y"),
+        refit_kwargs.get("sample_weight"),
+        refit_kwargs.get("offset"),
+    )
+    for step in session.pending:
+        try:
+            _require_fits(
+                session, step.operation, step.term, step.draft_spec, step.metadata, X, weights
+            )
+        except EditorValueError as exc:
+            return _REFIT_NAMED.format(sentence=str(exc))
+    return None
 
 
 def _waiting_draft(session: EditorSession, term: str):

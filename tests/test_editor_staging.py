@@ -1420,3 +1420,31 @@ def test_exported_models_carry_the_history_and_the_session_models_are_left_alone
     assert session._materialized_edit_model is not None
     assert not hasattr(session.model, "_editor_history")
     assert not hasattr(session._materialized_edit_model, "_editor_history")
+
+
+def test_a_flat_range_over_the_whole_axis_is_refused_when_staged(book):
+    """The fit would refuse it; the refusal comes with the change, in its own sentence."""
+    model, _, _ = book
+    session = _session(model)
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", "age", {"lo": 0.0, "hi": 100.0, "degree": 0})
+    assert refused.value.public_message == (
+        "A Flat range over the whole axis leaves the term one constant, which the intercept "
+        "already carries. Choose a Line, or leave part of the axis free."
+    )
+    assert session.pending == []
+
+
+def test_a_refit_a_waiting_change_cannot_fit_names_that_change(book):
+    """Refit data with no rows inside a shaped range: the refusal says which change and why."""
+    model, X, y = book
+    session = _session(model)
+    session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
+    outside = (X["age"] < 30.0) | (X["age"] > 45.0)
+    with pytest.raises(EditorValueError) as refused:
+        session.refit_pending(X=X[outside], y=y[outside])
+    assert refused.value.public_message == (
+        "The refit was refused: That range cannot be shaped. Choose a range with more distinct "
+        "values, or a lower degree. Undo that change and try again."
+    )
+    assert len(session.pending) == 1 and session.model is model

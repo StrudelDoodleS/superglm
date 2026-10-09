@@ -461,7 +461,9 @@ def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical
     )
 
 
-def _placed_knots(model, name: str, replacement, X, sample_weight) -> tuple[NDArray, str]:
+def _placed_knots(
+    model, name: str, replacement, X, sample_weight, *, raw: bool = False
+) -> tuple[NDArray, str]:
     """The interior knots ``replacement`` takes on the refit's data, and the rule that placed them.
 
     The knots are on the spline's own axis; the rule is ``"explicit"`` for
@@ -491,8 +493,23 @@ def _placed_knots(model, name: str, replacement, X, sample_weight) -> tuple[NDAr
                 probe._place_knots(x[keep], None if weights is None else weights[keep], n_bins)
                 built = probe
     except RangeError as exc:
+        if raw:
+            raise
         raise EditorValueError(_SHAPED_EDGE) from exc
     return np.asarray(built.fitted_base_knots, dtype=np.float64), _strategy(built)
+
+
+def probe_build(model, name: str, replacement, X, sample_weight) -> None:
+    """Place ``replacement``'s knots on the refit's data, as the fit's first step does.
+
+    A numeric spline places its knots and certifies its shaped ranges; an
+    ordered term builds on its column. Other terms have nothing to place. A
+    placement the library refuses raises its own error.
+    """
+    if isinstance(replacement, _SplineBase) or (
+        isinstance(replacement, OrderedCategorical) and source_spline(replacement) is not None
+    ):
+        _placed_knots(model, name, replacement, X, sample_weight, raw=True)
 
 
 def _strategy(spline: _SplineBase) -> str:
