@@ -34,6 +34,9 @@ const DENSE_POINT_COUNT = 40;
 const LENS_HALF_WIDTH = 26;
 // The x-axis title's own row, as planCategoricalAxis reserves it by default.
 const AXIS_TITLE_HEIGHT = 14;
+// Where Free levels and the curve both draw an interval at one level, each
+// steps this far, in svg px, to its own side, so the two read as two series.
+const DODGE = 5;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -247,9 +250,12 @@ export function drawChart(term, selection, context) {
   // layer's frame and gesture fill it once they are known.
   svg.appendChild(el("g", { class: "knot-basis-layer", "clip-path": "url(#plotClip)" }));
 
+  const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
+  const freeMarks = freeLevelMarks(freeLevels, view);
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
-      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
+      // Beside Free levels' intervals, the curve's step left of the level.
+      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, freeMarks.length ? -DODGE : 0);
     } else {
       band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
     }
@@ -267,8 +273,6 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
-  const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
-  const freeMarks = freeLevelMarks(freeLevels, view);
   if (freeMarks.length) {
     drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), {
       sx, sy, yMin, yMax, intervals: context.showCi()
@@ -1416,7 +1420,15 @@ function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
     const px = sx(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
     if (intervals) {
-      line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
+      // Right of the level, beside the curve's own interval on its left.
+      const wx = px + DODGE;
+      const whisker = line(
+        layer, wx, inside(mark.upper), wx, inside(mark.lower), `free-whisker${flagged}`
+      );
+      const said = el("title", {});
+      said.textContent = `${mark.level} fitted free: 95% interval against the reference, `
+        + `${fmt(mark.lower)} to ${fmt(mark.upper)}`;
+      whisker.appendChild(said);
     }
     const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
@@ -1478,10 +1490,10 @@ function diamond(cx, cy, r) {
     + `L ${at(cx - r)} ${at(cy)} Z`;
 }
 
-function errorBars(svg, x, lower, upper, sx, sy) {
+function errorBars(svg, x, lower, upper, sx, sy, dodge = 0) {
   const cap = 6;
   for (let i = 0; i < x.length; i++) {
-    const px = sx(x[i]);
+    const px = sx(x[i]) + dodge;
     const lo = sy(lower[i]);
     const hi = sy(upper[i]);
     line(svg, px, hi, px, lo, "ci-whisker");

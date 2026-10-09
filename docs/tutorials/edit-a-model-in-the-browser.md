@@ -251,8 +251,11 @@ and reference, and each level is drawn behind the curve as a green diamond at it
 reference, the diamonds joined by a green line. The reference's diamond sits at 1, as in a
 categorical's output. One button turns both on and off.
 
-- Each diamond's 95% interval against the reference shows while **Reference CI** is on, as a
-  whisker. The reference has none: it is 1 by definition.
+- Each diamond's 95% interval against the reference shows while **Reference CI** is on, as a green
+  whisker just right of the level. The curve's own interval, in blue with caps, steps just left of
+  it, so the two are told apart. The reference has neither: it is 1 by definition.
+- The free interval is usually the wider: each level is estimated from its own rows alone, while
+  the curve borrows strength from its neighbours, most of all beside the reference.
 - A level the smoothing overrides has its diamond filled in: the curve holds it away from what
   its own data says. It is marked whether the intervals show or not.
 - That judgement compares the free fit with the curve after centring both on the levels'

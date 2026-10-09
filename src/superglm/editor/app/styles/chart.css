@@ -198,12 +198,12 @@
 
 /* A level fitted free, behind the curve: an open diamond on its interval. A
    level whose interval misses the curve is filled, the smoothing overrides it. */
-.free-whisker { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.2; }
+.free-whisker { stroke: var(--unsmoothed); stroke-opacity: 0.6; stroke-width: 1.4; }
 /* The levels fitted free: one green series, a line joining open diamonds. */
 .free-line { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
 .free-level { fill: var(--surface); stroke: var(--unsmoothed); stroke-width: 1.4; }
 .free-level.is-flagged { fill: var(--unsmoothed); }
-.free-whisker.is-flagged { stroke: var(--unsmoothed); stroke-opacity: 0.8; }
+.free-whisker.is-flagged { stroke-opacity: 0.9; }
 /* The term fitted with its smoothing switched off: solid, over the curve. */
 .unsmoothed { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
 .unsmoothed-dot { fill: var(--unsmoothed); stroke: none; }
