@@ -49,8 +49,11 @@ EDITOR_KNOTS_ATTRIBUTE = "_editor_chosen_knots"
 # editor, read by structure.py: a structure file records the basis of a spline
 # carrying it, and no others.
 EDITOR_BASIS_ATTRIBUTE = "_editor_chosen_basis"
+# Set on a spline whose knots a shape froze from a rule's placement, read by knots.py: the
+# spline states them as positions, but they are the rule's, and the value is that rule.
+SHAPE_FROZEN_ATTRIBUTE = "_editor_shape_frozen_rule"
 # The editor's marks, which a spline rebuilt from a marked one keeps.
-EDITOR_MARKS = (EDITOR_KNOTS_ATTRIBUTE, EDITOR_BASIS_ATTRIBUTE)
+EDITOR_MARKS = (EDITOR_KNOTS_ATTRIBUTE, EDITOR_BASIS_ATTRIBUTE, SHAPE_FROZEN_ATTRIBUTE)
 # The kinds that are cubic whatever spline they are rebuilt from.
 CUBIC_KINDS = frozenset({"cr", "cr_cardinal", "ns"})
 
@@ -591,6 +594,17 @@ def declared_spline(model, name: str) -> _SplineBase | None:
     return copy.deepcopy(declared) if isinstance(declared, _SplineBase) else None
 
 
+def stated_knots(spline: _SplineBase) -> Any:
+    """The knots ``spline`` states, or None where it places them by its rule.
+
+    A shape freezes a rule's knots as positions. Those stay the rule's, so
+    they are not stated.
+    """
+    if getattr(spline, SHAPE_FROZEN_ATTRIBUTE, None) is not None:
+        return None
+    return spline._named_knots or spline._explicit_knots
+
+
 def respaced_spline(
     source: _SplineBase,
     *,
@@ -610,6 +624,8 @@ def respaced_spline(
     build-time state is reset, and the fit places everything again.
     """
     spline = copy.deepcopy(source)
+    # Knots placed afresh are no longer frozen by the shape they came from.
+    spline.__dict__.pop(SHAPE_FROZEN_ATTRIBUTE, None)
     strategy = source.knot_strategy if knot_strategy is None else knot_strategy
     initialize_runtime_state(spline, strategy, source._lambda_policy)
     configure_knots(
@@ -648,6 +664,10 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
         polynomial_ranges=ranges,
     )
     _carry_marks(source, shaped)
+    if knots is not None and stated_knots(source) is None:
+        # Frozen knots keep their rule: the source's own if it froze them, else its placed one.
+        rule = getattr(source, SHAPE_FROZEN_ATTRIBUTE, None) or source._knot_strategy_actual
+        setattr(shaped, SHAPE_FROZEN_ATTRIBUTE, str(rule))
     return shaped
 
 
@@ -705,4 +725,4 @@ def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
     """Mark ``spline`` with the editor's marks ``source`` carries."""
     for mark in EDITOR_MARKS:
         if getattr(source, mark, False):
-            setattr(spline, mark, True)
+            setattr(spline, mark, getattr(source, mark))

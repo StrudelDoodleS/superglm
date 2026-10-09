@@ -358,6 +358,28 @@ def test_a_shaped_range_and_a_knot_change_compose_in_either_order(book):
     np.testing.assert_array_equal(applied.predict(X), session.model.predict(X))
 
 
+def test_a_shape_alone_leaves_the_knots_on_their_rule_with_nothing_to_reset(book):
+    """A shape keeps the knots a rule placed: the toolbar names the rule and offers no reset."""
+    session = _session(book)
+    before = session_payload(session)["age"]["knots"]
+    session.replace_with_shaped_range("age", lo=50.0, hi=70.0, degree=1)
+    shaped = session_payload(session)["age"]["knots"]
+    assert shaped["positions"] == before["positions"]
+    assert (shaped["strategy"], shaped["from_editor"], shaped["resettable"]) == (
+        "uniform",
+        False,
+        False,
+    )
+    # Knots placed by hand after the shape are hand-placed, and reset.
+    session.replace_with_knots("age", {"positions": [20.0, 25.0, 30.0, 40.0]})
+    by_hand = session_payload(session)["age"]["knots"]
+    assert (by_hand["strategy"], by_hand["from_editor"], by_hand["resettable"]) == (
+        "explicit",
+        True,
+        True,
+    )
+
+
 def test_the_widget_stages_knots_and_refits_them_at_once(book):
     session = _session(book)
     widget = session.widget()

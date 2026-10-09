@@ -29,6 +29,7 @@ from superglm.features._spline_ranges import RangeError
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
     EDITOR_KNOTS_ATTRIBUTE,
+    SHAPE_FROZEN_ATTRIBUTE,
     base_names_level,
     declared_spline,
     interaction_users,
@@ -36,6 +37,7 @@ from superglm.features.rebuild import (
     rebuilt_ordered_spec,
     respaced_spline,
     source_spline,
+    stated_knots,
 )
 from superglm.features.spline import (
     CardinalCRSpline,
@@ -330,7 +332,7 @@ def _reset_basis(reference_model, name: str, source: _SplineBase) -> tuple[_Spli
     reference = None if reference_model is None else declared_spline(reference_model, name)
     if reference is None:
         raise EditorValueError(_NO_REFERENCE.format(term=name))
-    stated = reference._named_knots or reference._explicit_knots
+    stated = stated_knots(reference)
     basis = respaced_spline(
         source,
         knots=None if stated is None else stated,
@@ -446,7 +448,7 @@ def _resettable(session, name: str) -> bool:
 
 
 def _settings(spline: _SplineBase) -> tuple:
-    stated = spline._named_knots or spline._explicit_knots
+    stated = stated_knots(spline)
     if stated is not None:
         return ("stated", tuple(str(v) for v in stated))
     return (spline.knot_strategy, int(spline.n_knots), float(spline.knot_alpha))
@@ -544,8 +546,11 @@ def probe_build(model, name: str, replacement, X, sample_weight) -> None:
 
 def _strategy(spline: _SplineBase) -> str:
     """The rule that placed a built spline's knots, or ``"explicit"`` for stated ones."""
-    if spline._explicit_knots is not None or spline._named_knots is not None:
+    if stated_knots(spline) is not None:
         return "explicit"
+    frozen = getattr(spline, SHAPE_FROZEN_ATTRIBUTE, None)
+    if frozen is not None:
+        return frozen
     return str(getattr(spline, "_knot_strategy_actual", spline.knot_strategy))
 
 
