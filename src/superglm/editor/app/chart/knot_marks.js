@@ -99,7 +99,8 @@ export function knotFrame(term, plot, editing) {
     : { placed: shown.positions.map(() => false), ghosts: [] };
   return {
     axis, positions: shown.positions, placed, ghosts, inForce, waiting: shown.waiting,
-    basis: term.knots?.basis ?? null, editing, ...plot
+    // A waiting change of kind draws the basis it puts in force.
+    basis: term.knots?.waiting_basis ?? term.knots?.basis ?? null, editing, ...plot
   };
 }
 

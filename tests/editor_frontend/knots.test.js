@@ -556,3 +556,12 @@ test("a change that is not staged drops the one waiting to follow it and gives t
   assert.deepEqual(drawnKnots(harness), [2, 4, 6, 8]);
 });
 
+test("while a kind change waits, the frame carries the basis it puts in force", () => {
+  const inForce = { degree: 2, ends: "open", boundary: [0, 10], level_values: null };
+  const waiting = { degree: 3, ends: "clamped", boundary: [0, 10], level_values: null };
+  assert.equal(knotFrame(numericTerm({ knots: { basis: inForce } }), PLOT, true).basis, inForce);
+  const frame = knotFrame(
+    numericTerm({ knots: { basis: inForce, waiting_basis: waiting } }), PLOT, true,
+  );
+  assert.equal(frame.basis, waiting);
+});

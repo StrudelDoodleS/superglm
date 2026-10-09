@@ -144,7 +144,17 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
     if reason is not None:
         return {
             **dict.fromkeys(
-                ("positions", "count", "strategy", "alpha", "lo", "hi", "min_gap", "basis")
+                (
+                    "positions",
+                    "count",
+                    "strategy",
+                    "alpha",
+                    "lo",
+                    "hi",
+                    "min_gap",
+                    "basis",
+                    "waiting_basis",
+                )
             ),
             "available": False,
             "reason": reason,
@@ -173,7 +183,25 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "resettable": _resettable(session, name),
         "even_only": _even_only_reason(name, _waiting_spline(session, name)),
         "basis": _basis_payload(fitted, axis, float(lo), float(hi)),
+        "waiting_basis": _waiting_basis_payload(session, name, fitted, axis, float(lo), float(hi)),
     }
+
+
+def _waiting_basis_payload(session, name: str, fitted, axis: _Axis, lo: float, hi: float):
+    """How the browser rebuilds the basis waiting changes put in force, or None.
+
+    None while it is built as the one in force, and while a waiting change
+    moves an ordered term's levels, whose axis the knots in force no longer
+    sit on.
+    """
+    waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
+    if not waiting or any(step.operation in LEVEL_OPERATIONS for step in waiting):
+        return None
+    spline = source_spline(waiting[-1].draft_spec)
+    if spline is None:
+        return None
+    drawn = _basis_payload(spline, axis, lo, hi)
+    return None if drawn == _basis_payload(fitted, axis, lo, hi) else drawn
 
 
 def _basis_payload(spline: _SplineBase, axis: _Axis, lo: float, hi: float) -> dict[str, Any] | None:

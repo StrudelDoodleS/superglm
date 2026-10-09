@@ -492,6 +492,23 @@ def test_the_payload_describes_the_basis_the_browser_draws(kind):
     np.testing.assert_allclose(rebuilt, model._specs["age"]._knots, rtol=0, atol=pad)
 
 
+@pytest.mark.parametrize(
+    ("term", "kind", "ends"), [("age", "ps", "open"), ("band", "cr", "clamped")]
+)
+def test_a_waiting_kind_change_sends_the_basis_it_puts_in_force(book, term, kind, ends):
+    """age is a cubic regression spline, band's basis a P-spline: the browser draws the waiting
+    kind's functions while it waits."""
+    session = _session(book)
+    assert session_payload(session)[term]["knots"]["waiting_basis"] is None
+    session.stage_structural("basis", term, {"kind": kind})
+    knots = session_payload(session)[term]["knots"]
+    assert knots["basis"]["ends"] != ends
+    assert knots["waiting_basis"] == {**knots["basis"], "ends": ends}
+    session.refit_pending()
+    knots = session_payload(session)[term]["knots"]
+    assert (knots["basis"]["ends"], knots["waiting_basis"]) == (ends, None)
+
+
 def test_an_ordered_terms_basis_is_built_on_its_level_values():
     values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
     X, y, w = _book(n=4000)

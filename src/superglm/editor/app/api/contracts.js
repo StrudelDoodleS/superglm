@@ -145,6 +145,9 @@
  *   degree), as Python refuses uneven ones; null where any spacing goes
  * @property {KnotBasis|null} [basis] how the browser rebuilds the term's
  *   B-spline basis to draw it; null for a cardinal spline, which has none
+ * @property {KnotBasis|null} [waiting_basis] how it rebuilds the basis the
+ *   term's waiting changes put in force, such as another kind's, while that is
+ *   built differently from the one in force; null otherwise
  * @property {BasisKind|null} [kind] the spline's kind in force
  * @property {boolean|null} [select] whether shrinkage (``select=True``) is on
  * @property {BasisKind[]} [kinds] the kinds the term can be switched to
