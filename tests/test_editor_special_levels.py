@@ -197,8 +197,8 @@ def test_make_special_and_back_on_the_curve_refuse_in_fixed_sentences(book):
             session.stage_structural(operation, "band", {"levels": levels})
         assert str(refused.value) == sentence
     session.pending.clear()
-    # The refit's own rows and weights decide: these hold no Mi072, and then
-    # none of positive weight.
+    # The refit's own rows and weights decide: these hold no Mi072, then none
+    # of positive weight, then the session's rows under the caller's weights.
     X, _y, w = book[1:]
     sentence = (
         "'Mi072' has no rows of positive weight in the data the refit reads, so it has nothing "
@@ -207,6 +207,7 @@ def test_make_special_and_back_on_the_curve_refuse_in_fixed_sentences(book):
     for rows, weights in (
         (X[X["band"] != "Mi072"], None),
         (X, np.where(X["band"] == "Mi072", 0.0, w)),
+        (None, np.where(X["band"] == "Mi072", 0.0, w)),
     ):
         with pytest.raises(EditorValueError) as refused:
             session.stage_structural(
@@ -389,7 +390,7 @@ def test_free_levels_refuse_a_categorical_term_and_a_session_without_its_data(bo
     assert str(missing.value) == free_levels_module._NO_DATA
 
 
-def test_the_widget_fits_free_levels_once_per_model_revision(book, monkeypatch):
+def test_the_widget_fits_free_levels_once_per_fit_in_force(book, monkeypatch):
     calls = []
     real = free_levels_module.free_level_comparison
 
@@ -504,7 +505,31 @@ def test_both_fits_are_centred_over_the_levels_the_free_fit_estimated():
     term = session.terms["band"]
     curve = {level: term.original_log_effect[i] for i, level in enumerate(term.levels)}
     gaps = [np.log(free["y"][k]) - curve[level] for k, level in enumerate(free["levels"])]
-    assert abs(sum(gaps)) < 1e-9
+    # Each gap is (f_k - mean f) - (c_k - mean c), carried through exp and log
+    # on the chart's scale. Each mean errs by at most gamma_L of its largest
+    # value and is shared by all L gaps, and each gap takes six more roundings.
+    u = np.finfo(np.float64).eps / 2
+    L = len(gaps)
+    scale = max(np.max(np.abs(np.log(free["y"]))), np.max(np.abs(term.original_log_effect)))
+    assert abs(sum(gaps)) <= (2 * L * L + 6 * L) * u * scale
+
+
+def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(book):
+    """An export with hand edits baked in keeps the covariance of the fit before them.
+
+    ``term_inference`` gives such a curve no errors. Free levels subtracted the
+    stale curve variance anyway, narrowing the intervals; taken as fixed, each
+    interval is the free estimate's own, and no narrower.
+    """
+    model, X, y, w = book
+    fresh = free_level_comparison(_session(book), "band")
+    edited = pickle.loads(pickle.dumps(model))
+    edited._editor_inference_stale = True
+    stale = free_level_comparison(EditorSession.from_model(edited, train_data=(X, y, w)), "band")
+    assert stale["levels"] == fresh["levels"] and stale["y"] == fresh["y"]
+    widths = [np.log(np.array(c["upper"]) / np.array(c["lower"])) for c in (fresh, stale)]
+    assert np.any(widths[1] > widths[0])
+    assert set(stale["flagged"]) <= set(fresh["flagged"])
 
 
 def test_free_levels_put_both_variances_on_one_dispersion():
@@ -657,6 +682,8 @@ def test_a_response_the_curve_fits_exactly_compares_with_no_dispersion():
         features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
         spline_penalty=20.0,
     ).fit(X, y)
+    # Exact on any platform: the sums of 10.0 are integers, so the centred
+    # response, the band's coefficients and the residuals are all zero.
     assert model.result.phi == 0.0
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     assert free["levels"] == TWELVE

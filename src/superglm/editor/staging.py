@@ -181,7 +181,8 @@ def stage_structural(
     if not isinstance(params, dict):
         raise EditorValueError("params must be an object.")
     if X is None:
-        X_ref, _y, weights, _offset = session._resolve_refit_data(None, None, None, None)
+        # The session's frame with the caller's weights, if given, as the refit reads them.
+        X_ref, _y, weights, _offset = session._resolve_refit_data(None, None, sample_weight, None)
     else:
         X_ref, weights = X, sample_weight
     try:

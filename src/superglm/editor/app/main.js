@@ -1564,7 +1564,7 @@ function renderSpecialAction(button, state) {
 }
 
 // The free-level comparison in view: the last one fitted, while its term and
-// model revision are the ones shown.
+// the fit in force are the ones shown.
 function shownFreeLevels() {
   const state = store.getState();
   const free = state.view.freeLevels;

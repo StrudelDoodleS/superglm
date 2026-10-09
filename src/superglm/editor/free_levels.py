@@ -42,6 +42,7 @@ from superglm.features.rebuild import clone_with_replaced_features, special_labe
 from superglm.inference._term_helpers import _spline_se
 from superglm.inference._term_types import _safe_exp
 from superglm.inference.covariance import covariance_selected_block
+from superglm.model.explain_ops import _shape_repaired
 
 # The chance, across all the levels of one term, that no level's interval
 # misses the curve when every level lies on it.
@@ -139,7 +140,7 @@ def _centred_pair(free_model, model, name: str) -> tuple[dict, dict, list[str]]:
         (free_model, _categorical_centred_se(free_model, name, labels)),
         (model, _ordered_centred_se(model, name, [declared[label] for label in labels])),
     ):
-        values = np.array([_value(fitted, name, label) for label in labels])
+        values = _values(fitted, name, labels)
         centred = values - values.mean()
         pair.append(
             {label: (float(c), float(s)) for label, c, s in zip(labels, centred, se, strict=True)}
@@ -183,17 +184,21 @@ def _determined(model, name: str, labels: list[str]) -> tuple[list[str], list[st
     return kept, [label for label in labels if label not in kept]
 
 
-def _value(model, name: str, label: str) -> float:
-    """The native log-relativity of fitted level ``label``; a grouped fit may report its members."""
+def _values(model, name: str, labels: list[str]) -> np.ndarray:
+    """The native log-relativities of fitted levels ``labels``; a grouped fit may report members."""
     native = model.term_inference(name, with_se=False)
     reported = {
         str(level): float(value)
         for level, value in zip(native.levels, native.log_relativity, strict=True)
     }
     grouping = getattr(model._specs[name], "_grouping", None)
-    members = [] if grouping is None else grouping.group_to_originals.get(label, [])
-    found = [reported[str(m)] for m in [label, *members] if str(m) in reported]
-    return found[0] if found else 0.0
+
+    def value(label: str) -> float:
+        members = [] if grouping is None else grouping.group_to_originals.get(label, [])
+        found = [reported[str(m)] for m in [label, *members] if str(m) in reported]
+        return found[0] if found else 0.0
+
+    return np.array([value(label) for label in labels], dtype=np.float64)
 
 
 def _term_covariance(model, name: str):
@@ -223,9 +228,19 @@ def _categorical_centred_se(model, name: str, labels: list[str]) -> np.ndarray:
 
 
 def _ordered_centred_se(model, name: str, levels: list) -> np.ndarray:
-    """Errors of an ordered term's ``levels`` centred on their mean."""
+    """Errors of an ordered term's ``levels`` centred on their mean.
+
+    Zero where the fit's covariance no longer describes the curve, as
+    ``term_inference`` decides: hand edits an export baked in, or a shape
+    repair after the fit. The curve is then taken as fixed, and each gap is
+    judged on the free estimate's variance, which bounds it as at high leverage.
+    """
     found = _term_covariance(model, name)
-    if found is None:
+    if (
+        found is None
+        or getattr(model, "_editor_inference_stale", False)
+        or _shape_repaired(model, name)
+    ):
         return np.zeros(len(levels))
     covariance, active = found
     spec = model._specs[name]
