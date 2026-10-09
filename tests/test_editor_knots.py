@@ -13,6 +13,7 @@ import pytest
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, read_structure
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
+from superglm.editor.knots import decade_step
 from superglm.editor.payloads import session_payload
 from tests.test_editor import _post_json
 
@@ -211,6 +212,78 @@ def test_an_ordered_term_takes_at_most_one_knot_fewer_than_its_levels(book):
     )
 
 
+@pytest.mark.parametrize("levels", [["B6", "B7"], ["B2", "B3"]])
+def test_a_collapsed_ordered_term_keeps_its_knots_on_the_expanded_level_axis(book, levels):
+    """The chart draws each original band at its own place, and the knots sit on those places."""
+    session = _session(book)
+    session.stage_structural("collapse", "band", {"levels": levels})
+    session.refit_pending()
+    knots = session_payload(session)["band"]["knots"]
+    assert (knots["available"], knots["reason"]) == (True, None)
+    # Seven levels on the curve, one of them a group.
+    assert knots["max_count"] == 6
+    original = session.model._specs["band"]._original_level_to_value
+    values = [original[band] for band in BANDS]
+    np.testing.assert_allclose(
+        np.interp(knots["positions"], np.arange(len(BANDS)), values),
+        _knots(session.model, "band"),
+        rtol=0,
+        atol=1e-12,
+    )
+    session.stage_structural("knots", "band", {"positions": [1.5, 4.0, 5.5]})
+    session.refit_pending()
+    np.testing.assert_allclose(
+        session_payload(session)["band"]["knots"]["positions"], [1.5, 4.0, 5.5], rtol=0, atol=1e-12
+    )
+
+
+def test_a_level_change_under_knots_at_fixed_positions_names_the_knots_it_strands(book):
+    """Stated knots stay put while a level change moves the curve's levels under them."""
+    session = _session(book)
+    session.stage_structural("knots", "band", {"positions": [0.5 + i for i in range(7)]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B3"]})
+    assert str(refused.value) == (
+        "That change leaves 7 levels on the curve of 'band', which take at most 6 knots, and it "
+        "has 7 at fixed positions. Remove knots, or place them by a rule, before this change."
+    )
+    session.stage_structural("knots", "band", {"positions": [0.5, 3.5, 6.8]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B7"]})
+    assert str(refused.value) == (
+        "That change leaves the curve of 'band' running from B0 to B6, and 1 of its knots at "
+        "fixed positions lies outside it. Move or remove it, or place the knots by a rule, "
+        "before this change."
+    )
+    assert session.pending == []
+    # Knots placed by a rule are placed again on the new levels.
+    session.stage_structural("knots", "band", {"count": 7, "strategy": "uniform"})
+    session.refit_pending()
+    session.stage_structural("special", "band", {"levels": ["B7"]})
+    session.refit_pending()
+    assert session_payload(session)["band"]["knots"]["count"] == 6
+
+
+def test_a_change_the_fit_would_refuse_is_refused_when_staged(book, monkeypatch):
+    """The stage builds the term as the fit does, penalty included, not only its knots."""
+    from superglm.features.spline import BSplineSmooth
+
+    def refuse(self):
+        raise ValueError("no penalty for this term")
+
+    monkeypatch.setattr(BSplineSmooth, "_build_penalty", refuse)
+    session = _session(book)
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("basis", "age", {"kind": "bs"})
+    assert str(refused.value) == (
+        "Kind bs in age cannot be fitted on the data the refit reads. Undo the change it builds "
+        "on, or choose another."
+    )
+    assert session.pending == []
+
+
 def test_a_knot_between_two_levels_sits_between_their_values_on_the_axis():
     """Chart positions run 0..L-1 over the smooth levels; the spline's own axis is their values."""
     values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
@@ -233,9 +306,11 @@ def test_knot_changes_refuse_in_fixed_sentences(book):
         "or tempered quantiles."
     )
     count = "The knot count must be a whole number of at least 1."
-    positions = (
-        "Knot positions must be numbers inside the range of 'age', at least 0.1 apart "
-        "and at least 0.1 from its ends."
+    positions = "Knot positions must be numbers inside the range of 'age'."
+    # The knots either side of 30 are 12 apart, so it keeps two significant figures of that.
+    crowded = (
+        "The knot at 30 sits closer than 1 to the knot or end beside it on 'age'; "
+        "move it further from them."
     )
     forms = "Give a knot count and placement rule, a list of positions, or reset."
     refusals = [
@@ -254,7 +329,7 @@ def test_knot_changes_refuse_in_fixed_sentences(book):
             "Tempered quantiles take an alpha from 0 to 1.",
         ),
         ("age", {"positions": [10.0, 30.0]}, positions),
-        ("age", {"positions": [30.0, 30.05]}, positions),
+        ("age", {"positions": [30.0, 30.05]}, crowded),
         ("age", {"positions": ["30"]}, positions),
         ("age", {"positions": [30.0, float("nan")]}, positions),
         ("age", {"count": 4}, forms),
@@ -283,34 +358,32 @@ def _axis_session(lo: float, hi: float) -> EditorSession:
 
 
 @pytest.mark.parametrize(
-    ("lo", "hi", "gap", "positions", "accepted"),
+    ("lo", "hi", "positions", "accepted"),
     [
-        # 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which the old 1e-9 slack refused.
-        (1e7, 1e7 + 50.0, "0.1", [1e7 + 0.1, 1e7 + 20.0, 1e7 + 40.0], True),
-        (1e7, 1e7 + 50.0, "0.1", [1e7 + 20.0, 1e7 + 20.1, 1e7 + 40.0], True),
-        # Outside the round-off at that magnitude (5.6e-9): 1e-8 short of the gap.
-        (1e7, 1e7 + 50.0, "0.1", [1e7 + 0.1 - 1e-8, 1e7 + 20.0], False),
-        (0.0, 50.0, "0.1", [0.1, 10.0], True),
-        # Near zero, 5e-11 short is outside the round-off, though the old slack took it.
-        (0.0, 50.0, "0.1", [0.1 - 5e-11, 10.0], False),
-        (0.0, 50.0, "0.1", [10.0, 10.1 - 5e-11], False),
-        # Where five roundings reach the gap, float64 cannot tell a knot from its end.
-        (1e15, 1e15 + 10.0, "0.1", [1e15 + 2.0], False),
+        # Each knot's step is two figures of the space between its neighbours: 0.1 for the
+        # first, 1 for the second. 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which a 1e-9 relative
+        # slack refused.
+        (1e7, 1e7 + 50.0, [1e7 + 0.1, 1e7 + 1.1], True),
+        # Outside the round-off at that magnitude (5.6e-9): 1e-8 short of the step.
+        (1e7, 1e7 + 50.0, [1e7 + 0.1 - 1e-8, 1e7 + 1.1], False),
+        (0.0, 50.0, [0.1, 1.1], True),
+        # Near zero, 5e-11 short is outside the round-off, though a 1e-9 slack took it.
+        (0.0, 50.0, [0.1 - 5e-11, 1.1], False),
+        # Where five roundings reach the step (0.1 on a span of 2 at 1e15), float64 cannot tell
+        # a knot from its end.
+        (1e15, 1e15 + 2.0, [1e15 + 1.0], False),
     ],
 )
-def test_the_least_gap_is_held_to_the_round_off_of_the_values(lo, hi, gap, positions, accepted):
+def test_a_knots_room_is_held_to_the_round_off_of_the_values(lo, hi, positions, accepted):
     session = _axis_session(lo, hi)
     if accepted:
         step = session.stage_structural("knots", "x", {"positions": positions})
         assert step.metadata["positions"] == positions
         return
-    sentence = (
-        f"Knot positions must be numbers inside the range of 'x', at least {gap} apart "
-        f"and at least {gap} from its ends."
-    )
     with pytest.raises(EditorValueError) as refused:
         session.stage_structural("knots", "x", {"positions": positions})
-    assert str(refused.value) == sentence
+    assert str(refused.value).startswith("The knot at ")
+    assert "sits closer than" in str(refused.value)
     assert session.pending == []
 
 
@@ -600,6 +673,23 @@ def test_the_knot_basis_fixture_is_current():
             )
 
 
+@pytest.mark.parametrize(
+    ("term", "kind", "ends"), [("age", "ps", "open"), ("band", "cr", "clamped")]
+)
+def test_a_waiting_kind_change_sends_the_basis_it_puts_in_force(book, term, kind, ends):
+    """age is a cubic regression spline, band's basis a P-spline: the browser draws the waiting
+    kind's functions while it waits."""
+    session = _session(book)
+    assert session_payload(session)[term]["knots"]["waiting_basis"] is None
+    session.stage_structural("basis", term, {"kind": kind})
+    knots = session_payload(session)[term]["knots"]
+    assert knots["basis"]["ends"] != ends
+    assert knots["waiting_basis"] == {**knots["basis"], "ends": ends}
+    session.refit_pending()
+    knots = session_payload(session)[term]["knots"]
+    assert (knots["basis"]["ends"], knots["waiting_basis"]) == (ends, None)
+
+
 def test_an_ordered_terms_basis_is_built_on_its_level_values():
     model, X, y, w = _ordered_band_fit()
     knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
@@ -630,6 +720,60 @@ def test_a_term_whose_column_holds_one_value_opens_with_its_knots_unavailable():
         "Every value of this term's column is the same, so it has no range to place knots on.",
     )
     session.widget().close()
+
+
+def test_a_term_whose_column_holds_one_value_opens_with_its_data_kept():
+    """With the training data the editor also counts a term's values for shaped ranges; a term
+    with no range has none to count, and says so."""
+    X = pd.DataFrame({"x": np.full(100, 5.0)})
+    y = np.arange(100) / 100
+    model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps")}, selection_penalty=0).fit(
+        X, y
+    )
+    session = EditorSession.from_model(model, train_data=(X, y))
+    payload = session_payload(session)["x"]
+    assert (payload["shape"]["available"], payload["shape"]["reason"]) == (
+        False,
+        "Every value of this term's column is the same, so it has no range to shape.",
+    )
+    assert payload["shape"]["support"] is None
+    assert payload["knots"]["available"] is False
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", "x", {"lo": 4.0, "hi": 6.0, "degree": 1})
+    assert str(refused.value) == payload["shape"]["reason"]
+
+
+def test_quantile_knots_crowded_where_the_data_is_dense_still_move_by_hand():
+    """A knot keeps the step of its own neighbourhood; the knots a change keeps are not checked."""
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"value": np.exp(rng.normal(9.5, 1.6, 4000))})
+    y = rng.poisson(np.exp(0.1 * np.log(X["value"].to_numpy()) - 0.8)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        spline_penalty=0.1,
+        selection_penalty=0.0,
+        features={"value": Spline(kind="ps", n_knots=20, knot_strategy="quantile")},
+    ).fit(X, y)
+    session = EditorSession.from_model(model, train_data=(X, y))
+    knots = session_payload(session)["value"]["knots"]
+    positions, lo, hi = knots["positions"], knots["lo"], knots["hi"]
+    assert knots["min_gap"] is None
+    # Most of the rule's knots sit closer together than three figures of the whole span.
+    assert np.count_nonzero(np.diff(positions) < 10.0 ** (np.floor(np.log10(hi - lo)) - 2)) > 10
+    last = positions[-1] + decade_step(hi - positions[-2])
+    session.stage_structural("knots", "value", {"positions": [*positions[:-1], last]})
+    first = positions[0] - decade_step(positions[1] - lo)
+    step = session.stage_structural(
+        "knots", "value", {"positions": [first, *positions[1:-1], last]}
+    )
+    assert step.metadata["chart_positions"] == [first, *positions[1:-1], last]
+    # A knot added inside the cluster keeps the cluster's own step from its neighbours.
+    a, b = positions[2], positions[3]
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(
+            "knots", "value", {"positions": sorted([*positions, a + decade_step(b - a) / 2])}
+        )
+    assert str(refused.value).startswith(f"The knot at {a + decade_step(b - a) / 2:g} sits closer")
 
 
 if __name__ == "__main__":

@@ -99,13 +99,14 @@ export function knotFrame(term, plot, editing) {
     : { placed: shown.positions.map(() => false), ghosts: [] };
   return {
     axis, positions: shown.positions, placed, ghosts, inForce, waiting: shown.waiting,
-    basis: term.knots?.basis ?? null, editing, ...plot
+    // A waiting change of kind draws the basis it puts in force.
+    basis: term.knots?.waiting_basis ?? term.knots?.basis ?? null, editing, ...plot
   };
 }
 
-/** Two positions this close are one knot: far below the grid. @param {KnotAxis} axis */
+/** Two positions this close are one knot: far below any grid. @param {KnotAxis} axis */
 function sameKnotTolerance(axis) {
-  return axis.step * 1e-6;
+  return (axis.hi - axis.lo) * 1e-9;
 }
 
 /**
@@ -226,7 +227,7 @@ export function inRemoveZone(frame, point) {
  * knots in their new places and waiting, the ones it moves or removes as ghosts.
  * @param {KnotFrame} frame @param {number[]} positions @returns {KnotFrame}
  */
-function pendingFrame(frame, positions) {
+export function pendingFrame(frame, positions) {
   const dropped = frame.positions.filter((x) => !positions.includes(x));
   const removed = positions.length < frame.positions.length;
   return {

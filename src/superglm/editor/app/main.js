@@ -11,7 +11,7 @@ import { chartSize } from "./chart/geometry.js";
 import { drawKnotBasis } from "./chart/basis_overlay.js";
 import { NO_KNOT_GESTURE, drawKnotLayer } from "./chart/knot_marks.js";
 import { bindKnotGestures } from "./knot_gestures.js";
-import { knotToolState } from "./knots.js";
+import { CHANGE_RUNNING, knotToolState } from "./knots.js";
 import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -1155,16 +1155,24 @@ function renderKnotStatusLine() {
 
 // One knot change, staged like every structural change; true once it is.
 async function stageKnotChange(params) {
-  knotGestures?.say(null);
+  if (knotChangeHeld()) return false;
   const result = await runStructuralChange(stageKnots(selectedTerm(), params));
   return Boolean(result && result.state);
 }
 
 // One basis change, staged like every structural change.
 async function stageBasisChange(params) {
-  knotGestures?.say(null);
+  if (knotChangeHeld()) return false;
   const result = await runStructuralChange(stageBasis(selectedTerm(), params));
   return Boolean(result && result.state);
+}
+
+// While another change runs a knot or basis change is not sent; the status
+// line says so rather than letting it vanish.
+function knotChangeHeld() {
+  const held = editorOccupied();
+  knotGestures?.say(held ? CHANGE_RUNNING : null);
+  return held;
 }
 
 // Table puts the term's rating-table block where the chart was; the chart

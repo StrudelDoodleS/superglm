@@ -79,7 +79,8 @@
  * reason when the term cannot take one, a numeric term's support counts and
  * an ordered term's special levels, which no range can cover.
  * @typedef {Object} TermShape
- * @property {boolean} available
+ * @property {boolean} available whether a new range can be drawn on the term
+ *   as its waiting changes leave it
  * @property {string|null} reason
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support
@@ -131,8 +132,11 @@
  * @property {boolean} from_editor the knots in force were set in the editor
  * @property {number|null} lo knots lie strictly between ``lo`` and ``hi``
  * @property {number|null} hi
- * @property {number|null} min_gap the least distance between two knots, and
- *   between a knot and ``lo`` or ``hi``
+ * @property {number|null} min_gap an ordered term's least distance between two
+ *   knots, and between a knot and ``lo`` or ``hi``: a tenth of a level, also
+ *   its grid. Null on a numeric term, where a knot a change places keeps two
+ *   significant figures of the space between the knots or ends beside it
+ *   (``knotGrid``); the knots it keeps stay as close as they are
  * @property {number|null} max_count the most knots the term takes; null for no limit
  * @property {boolean} resettable the knots in force or waiting differ from the
  *   original model's
@@ -141,6 +145,9 @@
  *   degree), as Python refuses uneven ones; null where any spacing goes
  * @property {KnotBasis|null} [basis] how the browser rebuilds the term's
  *   B-spline basis to draw it; null for a cardinal spline, which has none
+ * @property {KnotBasis|null} [waiting_basis] how it rebuilds the basis the
+ *   term's waiting changes put in force, such as another kind's, while that is
+ *   built differently from the one in force; null otherwise
  * @property {BasisKind|null} [kind] the spline's kind in force
  * @property {boolean|null} [select] whether shrinkage (``select=True``) is on
  * @property {BasisKind[]} [kinds] the kinds the term can be switched to

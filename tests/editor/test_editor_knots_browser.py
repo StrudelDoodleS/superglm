@@ -96,6 +96,50 @@ def test_a_dropped_knot_stays_where_it_was_dropped_while_its_change_is_staged(op
         assert len(released) == len(before)
 
 
+def test_arrow_keys_pressed_while_a_knot_change_is_staged_move_the_same_knot(open_editor_page):
+    """Each press acts on the knots as the presses left them; the latest follows the first."""
+    with open_editor_page() as (page, session):
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Knots", exact=True
+        ).click()
+        handles = page.locator("#chart .knot-handle")
+        handles.first.wait_for()
+        before = [float(x) for x in handles.evaluate_all("els => els.map(e => e.dataset.knotX)")]
+        box = handles.nth(3).bounding_box()
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        held = []
+
+        def hold(route):
+            held.append(route)
+
+        page.route("**/stage*", hold)
+        page.keyboard.press("ArrowRight")
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(20)
+        assert len(held) == 1
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowRight")
+        # A control that would send a change of its own says why it waits.
+        page.get_by_role("button", name="One knot more").click()
+        page.wait_for_function(
+            "text => document.querySelector('#status')?.textContent.includes(text)",
+            arg="Another change is still running; try again once it has finished.",
+        )
+        # Unrouting sends the held request on.
+        page.unroute("**/stage*")
+        page.wait_for_function(
+            "() => document.querySelector('#refitPendingAction')?.getAttribute('aria-label')"
+            " === 'Refit, 2 changes waiting'"
+        )
+        moved = session.pending[-1].params["positions"]
+        assert [x for i, x in enumerate(moved) if i != 3] == [
+            x for i, x in enumerate(before) if i != 3
+        ]
+        assert 0.25 < moved[3] - before[3] < 0.35
+
+
 def _in_force_kind(session) -> str:
     return type(session.model._specs["curve"]).__name__
 

@@ -8,11 +8,13 @@ import {
   SHOWN_GROUPED,
   addOutcome,
   addSpot,
+  decadeGrid,
   dropOutcome,
   freeSpot,
   knotAxis,
   knotChip,
   knotFits,
+  knotGrid,
   knotTagText,
   knotToolState,
   nudgeKnot,
@@ -39,7 +41,7 @@ import { bindKnotGestures } from "../../src/superglm/editor/app/knot_gestures.js
 const NO_UI = { selected: null, drag: null, hover: null };
 const AGE_BANDS = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"];
 
-/** A numeric spline on 0..10: the grid, and Python's least gap, is 0.1. */
+/** A numeric spline on 0..10, knots 2 apart: its grid there, and Python's least gap, is 0.1. */
 function numericTerm({ knots = {}, pending = null } = {}) {
   return {
     kind: "spline",
@@ -49,7 +51,7 @@ function numericTerm({ knots = {}, pending = null } = {}) {
     shape: { available: true, reason: null, ranges: [], support: null, specials: [] },
     knots: {
       available: true, reason: null, positions: [2, 4, 6, 8], count: 4, strategy: "uniform",
-      alpha: 0.2, from_editor: false, lo: 0, hi: 10, min_gap: 0.1, max_count: null,
+      alpha: 0.2, from_editor: false, lo: 0, hi: 10, min_gap: null, max_count: null,
       resettable: false, ...knots,
     },
     pending,
@@ -73,29 +75,39 @@ function orderedTerm({ knots = {}, specials = [], levels = AGE_BANDS } = {}) {
   };
 }
 
-/** A numeric axis with ends and least gap of its own. */
-function axisOf(lo, hi, gap) {
-  return knotAxis(numericTerm({ knots: { lo, hi, min_gap: gap } }));
+/** A numeric axis with ends of its own. */
+function axisOf(lo, hi) {
+  return knotAxis(numericTerm({ knots: { lo, hi, min_gap: null } }));
 }
 
 const PLOT = { xMin: 0, xMax: 10, left: 50, right: 450, top: 20, axisY: 300, bottom: 360 };
 
-test("a numeric term snaps to three significant figures of its span, an ordered one to a tenth", () => {
+test("a numeric knot snaps to two significant figures of the space it sits in, an ordered one to a tenth", () => {
+  assert.deepEqual(decadeGrid(4), { step: 0.1, places: 1 });
+  assert.deepEqual(decadeGrid(10), { step: 1, places: 0 });
+  assert.deepEqual(decadeGrid(999.9), { step: 10, places: 0 });
+  assert.deepEqual(decadeGrid(1000), { step: 100, places: 0 });
+  assert.deepEqual(decadeGrid(0.05), { step: 0.001, places: 3 });
   const ten = knotAxis(numericTerm());
-  assert.equal(snapKnot(3.14159, ten), 3.1);
-  assert.equal(snapKnot(2.71, ten, 1), 2.8);
-  assert.equal(snapKnot(2.79, ten, -1), 2.7);
-  assert.equal(snapKnot(2.7, ten, 1), 2.7);
+  assert.equal(ten.gap, null);
+  const grid = knotGrid(3.14159, [2, 4, 6, 8], ten);
+  assert.deepEqual(grid, { step: 0.1, places: 1 });
+  assert.equal(snapKnot(3.14159, grid), 3.1);
+  assert.equal(snapKnot(2.71, grid, 1), 2.8);
+  assert.equal(snapKnot(2.79, grid, -1), 2.7);
+  assert.equal(snapKnot(2.7, grid, 1), 2.7);
   // Rounding to the grid's places drops the binary residue of k * step.
-  assert.equal(snapKnot(0.30000000000000004, ten), 0.3);
-  assert.equal(snapKnot(0.7, ten), 0.7);
-  assert.equal(snapKnot(24.36, axisOf(18, 100, 0.1)), 24.4);
-  assert.equal(snapKnot(345.6, axisOf(0, 999, 1)), 346);
-  assert.equal(snapKnot(345.6, axisOf(0, 1000, 10)), 350);
-  assert.equal(snapKnot(0.12345, axisOf(0, 0.5, 0.001)), 0.123);
+  assert.equal(snapKnot(0.30000000000000004, grid), 0.3);
+  assert.equal(snapKnot(0.7, grid), 0.7);
+  // Knots a rule put close together where the data is dense take a finer grid
+  // than knots far apart on the same axis.
+  const wide = axisOf(0, 27000);
+  const crowded = [29, 61, 95, 140, 9000, 20000];
+  assert.equal(knotGrid(45, crowded, wide).step, 1);
+  assert.equal(knotGrid(15000, crowded, wide).step, 1000);
   const ordered = knotAxis(orderedTerm());
-  assert.equal(ordered.step, 0.1);
-  assert.equal(snapKnot(2.46, ordered), 2.5);
+  assert.equal(ordered.gap, 0.1);
+  assert.equal(snapKnot(2.46, knotGrid(2.46, [], ordered)), 2.5);
   assert.equal(ordered.maxCount, 5);
 });
 
@@ -115,29 +127,33 @@ test("a term without knots to adjust has no axis, and its tool says why", () => 
 });
 
 test("a knot dropped too close to another settles on the nearest free spot, or stays put", () => {
-  const axis = axisOf(0, 10, 0.5);
+  const axis = knotAxis(numericTerm());
   assert.equal(freeSpot([3, 5], 4, axis), 4);
-  assert.equal(freeSpot([3, 5], 3.2, axis), 3.5);
-  assert.equal(freeSpot([3, 5], 4.7, axis), 4.5);
-  // Too near an end is too near: the nearest free spot keeps the gap from it.
-  assert.equal(freeSpot([5], 0.2, axis), 0.5);
-  // On a span with no room left, it goes back where it was.
-  assert.equal(freeSpot([0.5], 0.52, axisOf(0, 1, 0.4)), null);
+  assert.equal(freeSpot([3, 5], 3.05, axis), 3.1);
+  assert.equal(freeSpot([3, 5], 4.97, axis), 4.9);
+  // Too near an end is too near: the nearest free spot keeps the step from it.
+  assert.equal(freeSpot([5], 0.05, axis), 0.1);
+  // Among knots crowded where the data is dense, a drop keeps their own step.
+  assert.equal(freeSpot([29, 61, 95, 9000], 45, axisOf(0, 27000)), 45);
+  assert.equal(freeSpot([29, 61, 95, 9000], 61.4, axisOf(0, 27000)), 62);
+  // On an ordered span with no room left, it goes back where it was.
+  const tight = knotAxis(orderedTerm({ knots: { lo: 0, hi: 0.25 } }));
+  assert.equal(freeSpot([0.1], 0.12, tight), null);
 });
 
-test("the least gap is held to the round-off of the values, at any magnitude", () => {
-  // 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which the old 1e-9 relative slack refused.
-  const far = axisOf(1e7, 1e7 + 50, 0.1);
+test("a knot's room is held to the round-off of the values, at any magnitude", () => {
+  // On 1e7 to 1e7 + 5 the step is 0.1, and 1e7 + 0.1 reads 0.1 - 3.7e-10 from
+  // 1e7, which a 1e-9 relative slack refused.
+  const far = axisOf(1e7, 1e7 + 5);
   assert.equal(knotFits(1e7 + 0.1, [], far), true);
-  assert.equal(knotFits(1e7 + 20.1, [1e7 + 20], far), true);
+  assert.equal(knotFits(1e7 + 2.1, [1e7 + 2], far), true);
   assert.equal(knotFits(1e7 + 0.1 - 1e-8, [], far), false);
-  // Near zero, 5e-11 short is outside the round-off, though the old slack took it.
-  const near = axisOf(0, 50, 0.1);
+  // Near zero, 5e-11 short of the step is outside the round-off.
+  const near = axisOf(0, 5);
   assert.equal(knotFits(0.1, [], near), true);
   assert.equal(knotFits(0.1 - 5e-11, [], near), false);
-  assert.equal(knotFits(10.1 - 5e-11, [10], near), false);
-  // Where five roundings reach the gap, float64 cannot tell a knot from its end.
-  assert.equal(knotFits(1e15 + 2, [], axisOf(1e15, 1e15 + 10, 0.1)), false);
+  // Where five roundings reach the step, float64 cannot tell a knot from its end.
+  assert.equal(knotFits(1e16 + 2, [], axisOf(1e16, 1e16 + 10)), false);
 });
 
 test("a dragged knot may pass its neighbours; below the axis it is removed, never the last", () => {
@@ -159,13 +175,16 @@ test("a dragged knot may pass its neighbours; below the axis it is removed, neve
 });
 
 test("an arrow key nudges a knot one step, ten with Shift, and hops a neighbour it would crowd", () => {
-  const axis = axisOf(0, 10, 0.5);
+  const axis = knotAxis(numericTerm());
   assert.equal(nudgeKnot([3, 5], 0, 1, 1, axis), 3.1);
   assert.equal(nudgeKnot([3, 5], 0, 1, 10, axis), 4);
-  assert.equal(nudgeKnot([3, 3.5], 0, 1, 1, axis), 4);
-  assert.equal(nudgeKnot([3, 3.5], 1, -1, 1, axis), 2.5);
+  assert.equal(nudgeKnot([3, 3.1], 0, 1, 1, axis), 3.2);
+  assert.equal(nudgeKnot([3, 3.1], 1, -1, 1, axis), 2.9);
   // At the end of the axis there is nowhere further to go.
-  assert.equal(nudgeKnot([0.5, 5], 0, -1, 1, axis), null);
+  assert.equal(nudgeKnot([0.1, 5], 0, -1, 1, axis), null);
+  // A knot among others crowded where the data is dense moves by their step.
+  assert.equal(nudgeKnot([1000, 1010, 1030, 9000], 1, 1, 1, axisOf(0, 10000)), 1011);
+  assert.equal(nudgeKnot([1000, 1010, 1030, 9000], 3, -1, 1, axisOf(0, 10000)), 8900);
 });
 
 test("a click on the axis adds a knot on the grid, except where it crowds one or the term is full", () => {
@@ -338,7 +357,7 @@ test("a handle answers within its reach, the band along the axis, and the zone b
  * The gestures on a fake chart whose client and svg coordinates agree, with
  * the knot frame chart.js would leave on it.
  */
-function gestureHarness(term, { editing = true, staged = true, plot = PLOT } = {}) {
+function gestureHarness(term, { editing = true, staged = true, plot = PLOT, onChange = null } = {}) {
   const listeners = new Map();
   const changes = [];
   let statusRenders = 0;
@@ -355,7 +374,9 @@ function gestureHarness(term, { editing = true, staged = true, plot = PLOT } = {
   const gestures = bindKnotGestures({
     svg,
     active: () => editing,
-    onChange: async (params) => { changes.push(params); return staged; },
+    onChange: onChange
+      ? (params) => { changes.push(params); return onChange(params); }
+      : async (params) => { changes.push(params); return staged; },
     onStatus: () => { statusRenders += 1; },
     redraw: () => {},
   });
@@ -383,6 +404,8 @@ test("dragging a knot along the axis stages its new place, and below the axis re
   assert.deepEqual(changes, [{ positions: [2, 5.1, 6, 8] }]);
   assert.equal(gestures.ui().selected, 5.1);
   assert.equal(gestures.ui().drag, null);
+  // The change is answered before the next gesture.
+  await new Promise((resolve) => setImmediate(resolve));
 
   pointer("pointerdown", px(6), 300);
   pointer("pointermove", px(6), 330);
@@ -491,4 +514,91 @@ test("a change that is not staged gives the selection back, and outside Knots mo
   idle.key("Delete");
   assert.deepEqual(idle.changes, []);
   assert.equal(idle.gestures.ui().selected, null);
+});
+
+/**
+ * A /stage that answers only when told to, as the server does some time
+ * after a change is sent; ``answer`` also redraws the frame from the payload.
+ */
+function slowStage() {
+  const waiting = [];
+  return {
+    onChange: () => new Promise((resolve) => waiting.push(resolve)),
+    get sent() { return waiting.length; },
+    async answer(harness, staged, positions) {
+      if (staged) {
+        harness.svg._knotFrame = knotFrame(numericTerm({
+          pending: { knots: { positions, count: positions.length, strategy: "explicit", alpha: 0.2 } },
+        }), PLOT, true);
+      }
+      waiting.shift()(staged);
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+const drawnKnots = (harness) =>
+  knotLayout(harness.svg._knotFrame, harness.gestures.ui()).handles.map((handle) => handle.x);
+
+test("arrow keys pressed while a knot change is being staged move the same knot on", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, key, px, changes, gestures } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointerup", px(4), 300);
+  key("ArrowRight");
+  key("ArrowRight");
+  key("ArrowRight");
+  // One change is sent; the knot moves on from where the arrow keys left it.
+  assert.deepEqual(changes, [{ positions: [2, 4.1, 6, 8] }]);
+  assert.equal(gestures.ui().selected, 4.3);
+  assert.deepEqual(drawnKnots(harness), [2, 4.3, 6, 8]);
+  // Once the first is staged, the latest of the presses follows it, and the
+  // knot never flashes back on the way.
+  await stage.answer(harness, true, [2, 4.1, 6, 8]);
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.3, 6, 8] });
+  assert.equal(changes.length, 2);
+  assert.deepEqual(drawnKnots(harness), [2, 4.3, 6, 8]);
+  await stage.answer(harness, true, [2, 4.3, 6, 8]);
+  assert.equal(gestures.ui().pending, null);
+  key("ArrowRight");
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.4, 6, 8] });
+});
+
+test("a click while a dropped knot is being staged adds to the knots as dropped", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, px, changes } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointermove", px(5.1), 302);
+  pointer("pointerup", px(5.1), 302);
+  pointer("pointerdown", px(9), 296);
+  pointer("pointerup", px(9), 296);
+  assert.deepEqual(drawnKnots(harness), [2, 5.1, 6, 8, 9]);
+  await stage.answer(harness, true, [2, 5.1, 6, 8]);
+  assert.deepEqual(changes, [{ positions: [2, 5.1, 6, 8] }, { positions: [2, 5.1, 6, 8, 9] }]);
+});
+
+test("a change that is not staged drops the one waiting to follow it and gives the selection back", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, key, px, changes, gestures } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointerup", px(4), 300);
+  key("ArrowRight");
+  key("ArrowRight");
+  await stage.answer(harness, false);
+  assert.equal(changes.length, 1);
+  assert.equal(gestures.ui().selected, 4);
+  assert.deepEqual(drawnKnots(harness), [2, 4, 6, 8]);
+});
+
+test("while a kind change waits, the frame carries the basis it puts in force", () => {
+  const inForce = { degree: 2, ends: "open", boundary: [0, 10], level_values: null };
+  const waiting = { degree: 3, ends: "clamped", boundary: [0, 10], level_values: null };
+  assert.equal(knotFrame(numericTerm({ knots: { basis: inForce } }), PLOT, true).basis, inForce);
+  const frame = knotFrame(
+    numericTerm({ knots: { basis: inForce, waiting_basis: waiting } }), PLOT, true,
+  );
+  assert.equal(frame.basis, waiting);
 });

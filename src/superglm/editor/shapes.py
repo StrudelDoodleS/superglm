@@ -38,10 +38,38 @@ from superglm.features.spline import _SplineBase
 EDITOR_CHOSEN_SHAPE_ATTRIBUTE = "_editor_chosen_shape"
 
 
-def shape_availability(model, name: str) -> tuple[bool, str | None]:
-    """Whether ``name`` can take a shaped range, and the hover reason when it can't."""
-    reason = shape_unavailable_reason(model, name)
+_NO_RANGE = "Every value of this term's column is the same, so it has no range to shape."
+_SELECT_WAITING = (
+    "Shrinkage cannot be combined with shaped ranges, and a waiting change turns it on for "
+    "{term!r}; turn Shrink off first."
+)
+
+
+def shape_availability(model, name: str, draft=None) -> tuple[bool, str | None]:
+    """Whether ``name`` can take a shaped range, and the hover reason when it can't.
+
+    ``draft`` is the term's spec as waiting changes leave it, which is what a
+    new range is drawn on: a waiting basis change can allow ranges the fitted
+    spline refuses (Shrink off, or a cardinal spline made ``cr``) or refuse
+    ranges it allows (Shrink on). None judges the fitted spec.
+    """
+    reason = shape_refusal(model, name, draft)
     return reason is None, reason
+
+
+def shape_refusal(model, name: str, draft=None) -> str | None:
+    """Why ``name``, as ``draft`` leaves it, cannot take a shaped range, or None."""
+    spec = model._specs[name]
+    fitted = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    boundary = getattr(fitted, "fitted_boundary", None)
+    if isinstance(fitted, _SplineBase) and boundary is not None and not boundary[1] > boundary[0]:
+        return _NO_RANGE
+    waiting = None if draft is None else source_spline(draft)
+    reason = shape_unavailable_reason(model, name, waiting)
+    shrinking = waiting is not None and waiting.select
+    if reason is not None and shrinking and not source_spline(spec).select:
+        return _SELECT_WAITING.format(term=name)
+    return reason
 
 
 # The joins the editor offers: Tangent, and Corner (the library's kink).
@@ -57,8 +85,14 @@ _PIECE_TOO_SHORT = (
 )
 
 
-def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
+def shape_payload(
+    model, name: str, support: dict[str, list[int]] | None, draft=None
+) -> dict[str, Any]:
     """The palette's state for one term: availability, the ranges in force, ``support``.
+
+    Availability and the joins are judged on ``draft``, the term's spec as
+    waiting changes leave it (None: the fitted spec), on which a new range is
+    drawn.
 
     ``specials`` names an ordered term's special levels as the axis shows them,
     and ``returnable`` those of them that can go back on the curve: the ones a
@@ -67,13 +101,13 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
     from superglm.editor.specials import returnable_levels
 
     spec = model._specs[name]
-    available, reason = shape_availability(model, name)
+    available, reason = shape_availability(model, name, draft)
     ranges = [
         {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label, "join": r.join}
         for r in current_ranges(spec)
     ]
     specials = spec._special_display if isinstance(spec, OrderedCategorical) else ()
-    linear = available and source_spline(spec).degree < 2
+    linear = available and source_spline(spec if draft is None else draft).degree < 2
     return {
         "available": available,
         "reason": reason,
@@ -114,7 +148,7 @@ def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[in
     was retained.
     """
     spec = model._specs[name]
-    if X is None or not isinstance(spec, _SplineBase) or shape_unavailable_reason(model, name):
+    if X is None or not isinstance(spec, _SplineBase) or shape_refusal(model, name):
         return None
     support = _refit_support(model, name, spec, X, sample_weight)
     boundary = spec.fitted_boundary
@@ -155,7 +189,7 @@ def shaped_feature_spec(
     fitted spec); a numeric draft is the unfitted spline an earlier waiting
     shape built, and keeps the fitted knots and boundary it states.
     """
-    reason = shape_unavailable_reason(model, name)
+    reason = shape_refusal(model, name, draft_spec)
     if reason is not None:
         raise EditorValueError(reason)
     if not _is_shape_degree(degree):
