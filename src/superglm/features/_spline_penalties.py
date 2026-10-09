@@ -20,6 +20,45 @@ def build_difference_penalty(n_basis: int, order: int) -> NDArray:
     return Dm.T @ Dm
 
 
+def build_general_difference_penalty(knots: NDArray, degree: int, order: int) -> NDArray:
+    """General difference penalty for B-spline coefficients on any knot vector.
+
+    Li and Cao, "General P-splines for non-uniform B-splines" (2022,
+    arXiv:2201.06808, section 2): each difference step divides by the span of
+    the derivative's B-spline, ``(t[j+d-k] - t[j]) / (d - k)`` with
+    ``d = degree + 1`` (de Boor's derivative formula), so ``D_m beta`` holds the
+    B-spline coefficients of the m-th derivative and the null space is the
+    polynomials of degree below ``order`` however the knots are spaced. The
+    standard difference penalty loses that on uneven knots. ``D_m`` is scaled by
+    ``hbar**order``, ``hbar`` the basis domain's span over its interval count,
+    so the scale stays that of the standard penalty on knots of the same count.
+    """
+    t = np.asarray(knots, dtype=np.float64)
+    d = degree + 1
+    n_basis = len(t) - d
+    if not 1 <= order <= degree:
+        raise ValueError(f"General difference order {order} needs 1 <= order <= degree ({degree}).")
+    hbar = (t[n_basis] - t[degree]) / (n_basis - degree)
+    D = np.eye(n_basis)
+    for k in range(1, order + 1):
+        j = np.arange(k, n_basis)
+        span = (t[j + d - k] - t[j]) / (d - k)
+        D = np.diff(D, axis=0) * (hbar / span)[:, None]
+    return D.T @ D
+
+
+def difference_penalty_for(spec, order: int) -> NDArray:
+    """A difference-penalised spline's penalty: general once its knots are not evenly placed.
+
+    Knots placed by the ``"uniform"`` rule keep the standard penalty. Stated
+    knots and quantile-placed ones take the general one, which needs
+    ``order <= degree``; a higher order keeps the standard penalty.
+    """
+    if spec._knot_strategy_actual != "uniform" and order <= spec.degree:
+        return build_general_difference_penalty(spec._knots, spec.degree, order)
+    return build_difference_penalty(spec._n_basis, order)
+
+
 def build_integrated_derivative_penalty(
     knots: NDArray,
     degree: int,

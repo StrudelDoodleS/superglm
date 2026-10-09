@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from superglm.features._spline_config import configure_knots
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, native_by_text
@@ -39,6 +40,9 @@ SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
 # neither, so they cannot go onto the curve. A plain dict of tuples, so a
 # pickled spec needs no class from here.
 FREED_LEVELS_ATTRIBUTE = "_freed_levels"
+# Set on a spline whose knots were chosen in the editor, read by structure.py:
+# a structure file records the knots of a spline carrying it, and no others.
+EDITOR_KNOTS_ATTRIBUTE = "_editor_chosen_knots"
 
 TOO_FEW_POINTS = "Select at least two points to shape a range."
 
@@ -518,14 +522,58 @@ def merged_ranges(
     return [*kept, new]
 
 
+def declared_spline(model, name: str) -> _SplineBase | None:
+    """A copy of the spline ``name`` is declared with in ``model``, unfitted, or None.
+
+    An ordered term's declared basis; a numeric term's own declaration, which
+    the model keeps unfitted in its configuration. None for a term with no
+    spline, or a model too old to keep its declarations.
+    """
+    spec = model._specs[name]
+    if isinstance(spec, OrderedCategorical):
+        return pristine_basis(spec) if source_spline(spec) is not None else None
+    declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ())).get(name)
+    return copy.deepcopy(declared) if isinstance(declared, _SplineBase) else None
+
+
+def respaced_spline(
+    source: _SplineBase,
+    *,
+    knots=None,
+    n_knots: int | None = None,
+    knot_strategy: str | None = None,
+    knot_alpha: float | None = None,
+) -> _SplineBase:
+    """A copy of the unfitted spline ``source`` with new knots, every other setting kept.
+
+    ``knots`` states interior positions on the spline's own axis, or band
+    names on an ordered term's basis; otherwise ``n_knots`` knots are placed
+    by ``knot_strategy``. Unset arguments keep ``source``'s. The boundary,
+    shaped ranges, constraint, penalty and smoothing settings carry over.
+    """
+    if source._knots.size:
+        raise ValueError("respaced_spline needs an unfitted spline: a declaration.")
+    spline = copy.deepcopy(source)
+    configure_knots(
+        spline,
+        knots=knots,
+        n_knots=source.n_knots if n_knots is None else n_knots,
+        knot_strategy=source.knot_strategy if knot_strategy is None else knot_strategy,
+        knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
+        boundary=source._explicit_boundary,
+    )
+    return spline
+
+
 def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBase:
     """``source``'s settings with ``ranges``; a ``ps``/``ns`` source becomes ``bs``.
 
     Range edges repeat knots, which the equal-spacing difference penalties
     cannot take; a ``bs`` with the same knots, degree and penalty order is
     the derivative-penalty spline whose penalty can skip the pinned ranges.
+    Knots chosen in the editor stay marked as such.
     """
-    return Spline(
+    shaped = Spline(
         kind="cr" if _spline_kind_name(source) == "cr" else "bs",
         n_knots=source.n_knots,
         knots=knots,
@@ -541,6 +589,9 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
         lambda_policy=source._lambda_policy,
         polynomial_ranges=ranges,
     )
+    if getattr(source, EDITOR_KNOTS_ATTRIBUTE, False):
+        setattr(shaped, EDITOR_KNOTS_ATTRIBUTE, True)
+    return shaped
 
 
 def edge_text(edge) -> str:

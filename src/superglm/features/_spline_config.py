@@ -144,6 +144,36 @@ def initialize_spec(
     validate_m_orders(spec)
     validate_select(spec)
 
+    spec.degree = degree
+    spec.penalty = penalty
+    spec.discrete = discrete
+    spec.n_bins = n_bins
+    if extrapolation not in {"clip", "extend", "error"}:
+        raise ValueError(
+            f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
+        )
+    spec.extrapolation = extrapolation
+    configure_knots(
+        spec,
+        knots=knots,
+        n_knots=n_knots,
+        knot_strategy=knot_strategy,
+        knot_alpha=knot_alpha,
+        boundary=boundary,
+    )
+    _initialize_runtime_state(spec, knot_strategy, lambda_policy)
+
+
+def configure_knots(
+    spec: Any,
+    *,
+    knots: ArrayLike | None,
+    n_knots: int,
+    knot_strategy: str,
+    knot_alpha: float,
+    boundary: tuple[float, float] | None,
+) -> None:
+    """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
     if knots is not None and _knots_contain_names(knots):
         # Level-name knots: resolvable only against an OrderedCategorical's
         # declared levels, so resolution is deferred to that host (which
@@ -168,20 +198,10 @@ def initialize_spec(
         spec._explicit_knots = None
         spec._named_knots = None
 
-    spec.degree = degree
     spec.knot_strategy = knot_strategy
-    spec.penalty = penalty
-    spec.discrete = discrete
-    spec.n_bins = n_bins
-    if extrapolation not in {"clip", "extend", "error"}:
-        raise ValueError(
-            f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
-        )
-    spec.extrapolation = extrapolation
     spec.knot_alpha = knot_alpha
     spec._explicit_boundary = _coerce_boundary(boundary, spec._explicit_knots)
-
-    _initialize_runtime_state(spec, knot_strategy, lambda_policy)
+    spec._knot_strategy_actual = knot_strategy
 
 
 def _coerce_boundary(
