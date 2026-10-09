@@ -22,6 +22,7 @@ from superglm.editor._types import (
     SessionState,
     StructuralStep,
 )
+from superglm.editor.basis import basis_feature_spec
 from superglm.editor.carry import carried_curve
 from superglm.editor.collapse import (
     collapsed_feature_spec,
@@ -119,6 +120,7 @@ _REFIT_AT_ONCE = {
     "special": "special_levels",
     "on_curve": "on_curve_levels",
     "knots": "set_knots",
+    "basis": "set_basis",
 }
 _CANNOT_FIT = (
     "{change} cannot be fitted on the data the refit reads. Choose another range or shape, "
@@ -178,9 +180,10 @@ def stage_structural(
     ``"ungroup"`` (``levels``), ``"set_reference"`` (``level``),
     ``"shape"`` (``lo``, ``hi``, ``degree``, optional ``join``), ``"special"``
     (``levels``, taken off an ordered term's curve), ``"on_curve"``
-    (``levels``, put back on it) or ``"knots"`` (``count`` and ``strategy``
+    (``levels``, put back on it), ``"knots"`` (``count`` and ``strategy``
     with an optional ``alpha``, ``positions`` in chart coordinates, or
-    ``reset``); levels are display labels. A change its builder refuses is refused now, with
+    ``reset``) or ``"basis"`` (``kind``, or ``select``); levels are display
+    labels. A change its builder refuses is refused now, with
     today's sentence. Nothing is fitted: the model, the curves and the model
     revision stay as they are. ``X`` and ``sample_weight`` are the frame and
     weights the refit will read (default: the session's refit data).
@@ -593,6 +596,17 @@ def _draft_for(
             reference_model=session.reference_model,
             levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
         )
+    if operation == "basis":
+        waiting = [step.operation for step in session.pending if step.term == editable.name]
+        return basis_feature_spec(
+            session.model,
+            editable,
+            params,
+            X=X,
+            draft_spec=draft,
+            reference_model=session.reference_model,
+            levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
+        )
     if operation in {"special", "on_curve"}:
         levels = _param(params, "levels")
         if not isinstance(levels, list | tuple):
@@ -652,6 +666,8 @@ def _label_params(operation: str, metadata: dict[str, Any]) -> dict[str, Any]:
             "alpha": metadata["alpha"],
             "positions": list(metadata["chart_positions"]),
         }
+    if operation == "basis":
+        return {"kind": metadata["kind"], "select": metadata["select"]}
     return {name: metadata[name] for name in ("lo", "hi", "degree", "join")}
 
 

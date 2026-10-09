@@ -1357,6 +1357,16 @@ class EditorSession:
         """
         return staging.stage_and_refit(self, "knots", term, dict(params), **refit_kwargs)
 
+    def replace_with_basis(self, term: str, params: dict[str, Any], **refit_kwargs: Any):
+        """Change ``term``'s basis and refit at once, as one structural step.
+
+        ``params`` is ``{"kind": "ps" | "bs" | "cr" | "ns"}`` or
+        ``{"select": True | False}``, the double penalty that lets the fit
+        shrink the term towards a straight line and to nothing
+        (``superglm.editor.basis``).
+        """
+        return staging.stage_and_refit(self, "basis", term, dict(params), **refit_kwargs)
+
     def replace_with_shaped_range(
         self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
     ):

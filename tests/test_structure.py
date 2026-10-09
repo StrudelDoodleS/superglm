@@ -16,6 +16,7 @@ import pytest
 from superglm import (
     BSplineSmooth,
     Categorical,
+    Constraint,
     OrderedCategorical,
     Piecewise,
     PolynomialRange,
@@ -1675,5 +1676,93 @@ def test_stated_knots_outside_a_declared_boundary_are_refused_on_apply():
         structure.apply(declared)
     assert str(refused.value) == (
         "The knots recorded for 'age' do not fit its declared spline; "
+        "export the structure from a model with the same declaration."
+    )
+
+
+# -- A basis chosen in the editor -----------------------------------------------
+
+
+def _basis_round_trip(tmp_path, declared, term, params, X, y):
+    """Change ``term``'s basis in the editor, export, read the file back and apply it."""
+    session = EditorSession.from_model(declared().fit(X, y), train_data=(X, y))
+    session.replace_with_basis(term, params)
+    edited = session.model
+    structure = Structure.from_model(edited)
+    path = tmp_path / "structure.json"
+    path.write_text(structure.to_json(), encoding="utf-8")
+    assert read_structure(path) == structure
+    applied = read_structure(path).apply(declared()).fit(X, y)
+    np.testing.assert_array_equal(applied.predict(X), edited.predict(X))
+    return structure
+
+
+def test_only_a_basis_chosen_in_the_editor_is_recorded():
+    X, y = _knot_frame()
+    model = _knot_declared().fit(X, y)
+    assert "basis" not in Structure.from_model(model).to_json()
+    session = EditorSession.from_model(model, train_data=(X, y))
+    session.replace_with_basis("band", {"kind": "cr"})
+    features = json.loads(Structure.from_model(session.model).to_json())["features"]
+    assert "basis" not in features["age"]
+    assert features["band"]["basis"] == {"kind": "cr", "select": False}
+
+
+def test_an_editor_kind_on_a_numeric_spline_round_trips_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    structure = _basis_round_trip(tmp_path, _knot_declared, "age", {"kind": "ns"}, X, y)
+    assert structure.features["age"].basis == {"kind": "ns", "select": False}
+    assert json.loads(structure.to_json())["features"]["age"]["basis"] == {
+        "kind": "ns",
+        "select": False,
+    }
+
+
+def test_editor_shrinkage_on_an_ordered_spline_basis_round_trips_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    structure = _basis_round_trip(tmp_path, _knot_declared, "band", {"select": True}, X, y)
+    assert structure.features["band"].basis == {"kind": "bs", "select": True}
+
+
+BASIS_MALFORMED = {
+    "a missing field": {"kind": "ps"},
+    "an extra field": {"kind": "ps", "select": False, "degree": 3},
+    "an unknown kind": {"kind": "tp", "select": False},
+    "select as text": {"kind": "ps", "select": "false"},
+    "select as a number": {"kind": "ps", "select": 0},
+    "not a mapping": ["ps", False],
+}
+
+
+@pytest.mark.parametrize("basis", list(BASIS_MALFORMED.values()), ids=list(BASIS_MALFORMED))
+def test_a_malformed_basis_object_is_refused_by_read_structure(basis):
+    sentence = "The structure entry for 'age' has a malformed 'basis'; export the structure again."
+    # The well-formed object reads, so each refusal is about its one change.
+    read_structure(_payload(age={"kind": "spline", "basis": {"kind": "ps", "select": False}}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(age={"kind": "spline", "basis": basis}))
+    assert str(refused.value) == sentence
+
+
+def test_a_basis_on_a_categorical_entry_is_refused_by_read_structure():
+    sentence = "The structure entry for 'area' has a malformed 'basis'; export the structure again."
+    # The same basis on a spline reads, so the refusal is the categorical kind's alone.
+    read_structure(_payload(age={"kind": "spline", "basis": {"kind": "ps", "select": False}}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(area=_categorical(basis={"kind": "ps", "select": False})))
+    assert str(refused.value) == sentence
+
+
+def test_a_basis_the_declared_spline_cannot_take_is_refused_on_apply():
+    structure = read_structure(
+        _payload(age={"kind": "spline", "basis": {"kind": "ns", "select": False}})
+    )
+    declared = _declared(
+        {"age": Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing)}
+    )
+    with pytest.raises(StructureError) as refused:
+        structure.apply(declared)
+    assert str(refused.value) == (
+        "The basis recorded for 'age' does not fit its declared spline; "
         "export the structure from a model with the same declaration."
     )

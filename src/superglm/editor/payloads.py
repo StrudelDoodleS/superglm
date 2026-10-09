@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from superglm.editor._types import PendingStep, StructuralStep
+from superglm.editor.basis import basis_payload, pending_basis
 from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
 from superglm.editor.controls import (
     CONTROL_HANDLE_TERM_TYPES,
@@ -71,7 +72,7 @@ def session_payload(
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
             "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
-            "knots": knots_payload(session, name, term),
+            "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
             "pending": _pending_term_payload(session, name),
             "unseen": unseen_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
@@ -173,11 +174,20 @@ def _pending_term_payload(session, name: str) -> dict[str, Any]:
     or changes; ``reference`` is the level or group the draft pins in place of
     the fitted reference; ``specials`` are the draft's special levels once a
     waiting step takes levels off the curve or puts them back; ``knots`` are
-    the knots a waiting knot change places (``superglm.editor.knots.pending_knots``).
+    the knots a waiting knot change places (``superglm.editor.knots.pending_knots``);
+    ``basis`` is the draft's ``{kind, select}`` while it differs from the one in
+    force (``superglm.editor.basis.pending_basis``).
     """
     waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
     if not waiting:
-        return {"groups": None, "ranges": [], "reference": None, "specials": None, "knots": None}
+        return {
+            "groups": None,
+            "ranges": [],
+            "reference": None,
+            "specials": None,
+            "knots": None,
+            "basis": None,
+        }
     draft, fitted = waiting[-1].draft_spec, session.model._specs[name]
     regrouped = any(step.operation in {"collapse", "ungroup"} for step in waiting)
     respecified = any(step.operation in {"special", "on_curve"} for step in waiting)
@@ -187,6 +197,7 @@ def _pending_term_payload(session, name: str) -> dict[str, Any]:
         "reference": _waiting_reference(draft, fitted),
         "specials": [str(level) for level in draft._special_display] if respecified else None,
         "knots": pending_knots(session, name),
+        "basis": pending_basis(session, name),
     }
 
 

@@ -151,7 +151,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "min_gap": axis.min_gap(float(lo), float(hi)),
         "max_count": axis.max_count,
         "resettable": _resettable(session, name),
-        "even_only": _even_only_reason(name, declared_spline(model, name)),
+        "even_only": _even_only_reason(name, _waiting_spline(session, name)),
         "basis": _basis_payload(fitted, axis, float(lo), float(hi)),
     }
 
@@ -411,6 +411,19 @@ def _even_only_reason(name: str, source: _SplineBase) -> str | None:
     if isinstance(source, PSpline) and max(source._m_orders) > source.degree:
         return _EVEN_ONLY_ORDER.format(term=name)
     return None
+
+
+def _waiting_spline(session, name: str) -> _SplineBase:
+    """The spline the next knot change is made on: the last waiting draft's, else declared.
+
+    A waiting basis change can make the term a natural spline, whose knots
+    are evenly spaced only.
+    """
+    waiting = next(
+        (step.draft_spec for step in reversed(session.pending) if step.term == name), None
+    )
+    spline = None if waiting is None else source_spline(waiting)
+    return declared_spline(session.model, name) if spline is None else spline
 
 
 def _resettable(session, name: str) -> bool:
