@@ -18,6 +18,7 @@ const {
   revertTransition,
   runOffsetRefit,
   stageCollapse,
+  stageKnots,
   stageOnCurve,
   stageReference,
   stageShapeRange,
@@ -257,6 +258,37 @@ test("with Refit after every change on, a change goes to its operation's own rou
     name: "put levels back on the curve",
     path: "/special_levels",
     payload: { term: "band", levels: ["B3"], special: false, method: "auto" }
+  });
+});
+
+test("a knot change is staged in one of its three forms, or refitted at once on /knots", () => {
+  assert.deepEqual(stageKnots("age", { count: 8, strategy: "quantile" }), {
+    name: "re-place knots",
+    path: "/stage",
+    payload: { operation: "knots", term: "age", params: { count: 8, strategy: "quantile" } }
+  });
+  assert.deepEqual(stageKnots("age", { count: 8, strategy: "quantile_tempered", alpha: 0.4 })
+    .payload.params, { count: 8, strategy: "quantile_tempered", alpha: 0.4 });
+  const positions = [24.5, 31, 60.2];
+  const placed = stageKnots("age", { positions });
+  positions.push(90);
+  assert.deepEqual(placed, {
+    name: "place knots",
+    path: "/stage",
+    payload: { operation: "knots", term: "age", params: { positions: [24.5, 31, 60.2] } }
+  });
+  assert.deepEqual(stageKnots("band", { reset: true }), {
+    name: "reset knots",
+    path: "/stage",
+    payload: { operation: "knots", term: "band", params: { reset: true } }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageKnots("age", { positions: [24.5, 31] })), {
+    name: "place knots",
+    path: "/knots",
+    payload: { term: "age", params: { positions: [24.5, 31] }, method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageKnots("band", { reset: true })).payload, {
+    term: "band", params: { reset: true }, method: "auto"
   });
 });
 

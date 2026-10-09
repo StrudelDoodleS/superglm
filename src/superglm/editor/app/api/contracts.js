@@ -1,7 +1,7 @@
 // @ts-check
 
 /** @typedef {'editor'|'validation'|'cv'|'final'} AppView */
-/** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
+/** @typedef {'select'|'move'|'zoom'|'handles'|'knots'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
@@ -109,7 +109,58 @@
  * @property {string} level
  * @property {string} method
  */
-/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"} StagedOperation */
+/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"|"knots"} StagedOperation */
+/**
+ * How a spline's knots are placed: a rule, or "explicit" positions (set in
+ * code, or by hand in the editor).
+ * @typedef {"uniform"|"quantile"|"quantile_rows"|"quantile_tempered"|"explicit"} KnotStrategy
+ */
+/** @typedef {Exclude<KnotStrategy, "explicit">} KnotRule */
+/**
+ * A spline term's knots, in chart x: a numeric spline's own values, an
+ * ordered term's display positions (smooth level ``i`` at ``i``). The fields
+ * after ``reason`` are null, and the flags false, where the term has no knots
+ * to adjust.
+ * @typedef {Object} TermKnots
+ * @property {boolean} available whether the Knots tool works on the term
+ * @property {string|null} reason why it does not, for the tool's popover
+ * @property {number[]|null} positions the interior knots in force, ascending
+ * @property {number|null} count
+ * @property {KnotStrategy|null} strategy
+ * @property {number|null} alpha the tempered quantiles' power
+ * @property {boolean} from_editor the knots in force were set in the editor
+ * @property {number|null} lo knots lie strictly between ``lo`` and ``hi``
+ * @property {number|null} hi
+ * @property {number|null} min_gap the least distance between two knots, and
+ *   between a knot and ``lo`` or ``hi``
+ * @property {number|null} max_count the most knots the term takes; null for no limit
+ * @property {boolean} resettable the knots in force or waiting differ from the
+ *   original model's
+ */
+/**
+ * The knots a waiting change leaves on a term, in chart x, ascending.
+ * @typedef {Object} PendingKnots
+ * @property {number[]} positions
+ * @property {number} count
+ * @property {KnotStrategy} strategy
+ * @property {number|null} alpha
+ */
+/**
+ * One knot change, as /stage and /knots take it: a count placed by a rule
+ * (``alpha`` with tempered quantiles only), positions placed by hand in chart
+ * x, or back to the knots the original model declares.
+ * @typedef {{count:number, strategy:KnotRule, alpha?:number}
+ *   |{positions:number[]}
+ *   |{reset:true}} KnotParams
+ */
+/**
+ * The /knots request, which refits at once: Settings' "Refit after every
+ * structural change" sends a knot change this way.
+ * @typedef {Object} KnotsRequest
+ * @property {string} term
+ * @property {KnotParams} params
+ * @property {string} method
+ */
 /**
  * The /special_levels request, which refits at once: ``special`` takes the
  * levels off an ordered term's curve, ``false`` puts them back on it.
@@ -153,6 +204,8 @@
  * @property {string|null} reference
  * @property {string[]|null} [specials] the term's special levels once its
  *   waiting changes apply, when one of them takes levels off the curve or back
+ * @property {PendingKnots|null} [knots] the term's knots once its waiting
+ *   changes apply, while a knot change waits
  */
 /**
  * An ordered term's levels fitted free beside its curve (/free_levels): for
@@ -214,6 +267,7 @@
  *   (Python's `EditorSession.edited_terms()`)
  * @property {SplineView|null} [spline_view]
  * @property {TermUnseen|null} [unseen] the New levels choice; null except on a plain categorical
+ * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
  */
 /**
  * Where a plain categorical's levels unseen at fit go: the in-force

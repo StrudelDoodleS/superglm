@@ -30,6 +30,12 @@ export const TOOL_HELP = Object.freeze({
     body: "Edit spline control handles and inspect basis contributions.",
     shortcut: "H",
   }),
+  knots: Object.freeze({
+    title: "Knots",
+    body:
+      "Drag a knot along the axis to move it, click the axis to add one, or drag one below the axis to remove it. Each change waits for Refit.",
+    shortcut: "K",
+  }),
   help: Object.freeze({
     title: "Help",
     body: "Open modes, gestures, shortcuts, curve operations, refits, and exporting.",
@@ -180,7 +186,7 @@ export const CONTROL_HELP = Object.freeze({
 export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Modes",
-    keys: Object.freeze(["select", "move", "zoom", "handles"]),
+    keys: Object.freeze(["select", "move", "zoom", "handles", "knots"]),
   }),
   Object.freeze({
     title: "Selecting points",
@@ -203,6 +209,19 @@ export const HELP_SECTIONS = Object.freeze([
       "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
       "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Undo takes back the latest shape.",
       "A P-spline or natural spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range; a natural spline's ends are then no longer held straight.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Knots",
+    items: Object.freeze([
+      "Small ticks under the x-axis mark a spline term's knots in every mode. The Knots tool (K) turns them into diamonds on the axis that you can move.",
+      "Drag a knot along the axis to move it. It may pass its neighbours; one dropped too close to another settles on the nearest free spot.",
+      "Click the axis where the dashed diamond shows to add a knot there. Drag a knot below the axis, onto Drop here to remove the knot, to remove it. A spline keeps at least one knot.",
+      "Click a knot to select it. The arrow keys nudge it one step, ten with Shift; Delete removes it and Escape lets it go.",
+      "The count and Placed by above the chart place every knot again by a rule: even spacing, quantiles of the values, quantiles of the rows, or tempered quantiles, which weight each value by its row count to the power alpha. Knots you placed by hand are dropped; Undo brings them back. Reset knots goes back to the knots declared in code.",
+      "Each change waits for Refit, or refits at once when Settings says so. The knots it places are amber, and the knots it moves or removes stay as grey ghosts until Refit. Hand edits on the term are dropped by the refit, as for every structural change; Undo brings them back.",
+      "On a P-spline (kind=\"ps\"), moved knots switch the term to the general P-spline penalty, which measures wiggliness on unevenly spaced knots, so the smoothing stays sound.",
+      "An ordered term takes at most one knot fewer than the levels on its curve, and its knots can sit between levels. The tool is off where a term's knots cannot change; hovering it says why.",
     ]),
   }),
   Object.freeze({

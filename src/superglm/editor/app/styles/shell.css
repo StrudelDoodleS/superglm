@@ -509,3 +509,82 @@ body {
     overflow: hidden;
   }
 }
+
+/* Knots mode's controls: a count stepper, the placement rule, alpha and Reset. */
+.knot-bar {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+.knot-bar[hidden] {
+  display: none;
+}
+.knot-stepper {
+  display: inline-flex;
+  height: var(--control-height);
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.context-bar .knot-stepper button {
+  width: 26px;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+/* Off with a reason: still hoverable, so its popover can say why. */
+.context-bar .knot-stepper button[aria-disabled="true"],
+.context-bar .knot-bar > button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.context-bar .knot-stepper button[aria-disabled="true"]:hover,
+.context-bar .knot-bar > button[aria-disabled="true"]:hover {
+  background: transparent;
+}
+.knot-stepper output {
+  min-width: 30px;
+  border-inline: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: calc(var(--control-height) - 2px);
+  text-align: center;
+}
+.knot-field {
+  display: inline-flex;
+  height: var(--control-height);
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.knot-field[hidden] {
+  display: none;
+}
+.knot-field select {
+  min-width: 132px;
+  height: 26px;
+  padding: 0 4px;
+  border-color: var(--border);
+  color: var(--text);
+}
+.knot-field input {
+  width: 58px;
+  height: 26px;
+  border-color: var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+#status kbd {
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}

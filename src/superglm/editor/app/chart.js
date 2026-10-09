@@ -5,6 +5,7 @@ import {
   placeAnchorMarks,
   spanRange
 } from "./chart/anchor_marks.js";
+import { NO_KNOT_GESTURE, drawKnotLayer, knotFrame } from "./chart/knot_marks.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
   WAITING_BRACKET_ROW,
@@ -80,6 +81,7 @@ export function drawChart(term, selection, context) {
   const visualMode = context.visualMode();
   svg.innerHTML = "";
   svg._anchorMarks = null;
+  svg._knotFrame = null;
   // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
   // its nominal size and the plot fills its panel. A hidden chart, or a DOM
   // without layout, draws at the fallback size.
@@ -259,6 +261,9 @@ export function drawChart(term, selection, context) {
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
+  // Knots mode keeps the points and the selection, but the knots take the
+  // gestures, so the selection palette stays away.
+  const paletteOff = Boolean(handlesMode) || visualMode === "knots";
   const plot = { top: margin.top, height: innerH };
   if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds, plot);
   if (!handlesMode) {
@@ -311,6 +316,19 @@ export function drawChart(term, selection, context) {
     sx, sy, x, y, xMin, xMax, margin, innerW, innerH
   });
   applyPlotClip(svg);
+  // The knots: ticks under the axis in every mode, handles in Knots mode. A
+  // collapsed display's axis is not the one they sit on.
+  svg._knotFrame = view.displayIsCollapsed || buildActive
+    ? null
+    : knotFrame(term, {
+        xMin, xMax,
+        left: margin.left,
+        right: margin.left + innerW,
+        top: margin.top,
+        axisY: margin.top + innerH,
+        bottom: height
+      }, visualMode === "knots");
+  drawKnotLayer(svg, svg._knotFrame, context.knotUi ? context.knotUi() : NO_KNOT_GESTURE);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
   legend(legendLayer, width - 10, 13, {
@@ -331,8 +349,8 @@ export function drawChart(term, selection, context) {
     displayToSourceIndices: view.displayToSourceIndices,
     displayIsCollapsed: view.displayIsCollapsed
   };
-  svg._selectionView = { term, view, handlesMode, pointLayer };
-  positionSelectionMenu(svg, context.selectionMenu, handlesMode ? null : selectedBounds);
+  svg._selectionView = { term, view, handlesMode, paletteOff, pointLayer };
+  positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : selectedBounds);
 }
 
 export function updateChartSelection(term, selection, context) {
@@ -342,7 +360,7 @@ export function updateChartSelection(term, selection, context) {
   if (!scale || !selectionView) return;
   selectionView.term = term;
 
-  const { view, handlesMode, pointLayer } = selectionView;
+  const { view, handlesMode, paletteOff, pointLayer } = selectionView;
   const displaySelected = displaySelection(view, selection);
   const basePoints = new Set(basePointIndices(view));
   const showSupplementalPoints = displaySelected.size <= basePoints.size;
@@ -406,7 +424,7 @@ export function updateChartSelection(term, selection, context) {
         scale.innerH
       );
   updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
-  positionSelectionMenu(svg, context.selectionMenu, bounds);
+  positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : bounds);
   placeChartAnchorMarks(svg, view, selection, context, scale);
 }
 

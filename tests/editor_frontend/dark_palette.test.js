@@ -265,6 +265,10 @@ const SVG_TEXT_ON_GROUND = {
   "anchor-tag-label": ["--surface"],
   "shape-range-label": ["--surface"],
   "pending-range-label": ["--sig-weak-bg"],
+  // A dragged or selected knot's dark tag, and the zone below the axis that
+  // removes it, an 8% tint of --danger over --surface.
+  "knot-tag-label": ["--text"],
+  "knot-remove-label": ["--surface", "--danger-surface"],
   // The profile search's trace plot.
   "profile-trace-label": ["--surface"],
   "profile-trace-best-label": ["--surface"],

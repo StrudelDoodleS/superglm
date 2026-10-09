@@ -212,3 +212,73 @@
   stroke-dasharray: 3 2;
   pointer-events: none;
 }
+
+/* A spline's knots. Ticks under the axis in every mode; in Knots mode,
+   diamonds on the axis with faint guides, over a band where a click adds one.
+   A knot a waiting change places is amber; a knot in force it moves or
+   removes is a dashed grey ghost, a removed one crossed out. */
+.knot-tick { stroke: var(--muted); stroke-width: 1.4; pointer-events: none; }
+.knot-tick.is-placed { stroke: var(--group-0); stroke-width: 2; }
+.knot-band { fill: var(--blue-soft); opacity: 0.55; pointer-events: none; }
+.knot-band-hit { fill: transparent; cursor: copy; }
+.knot-guide {
+  stroke: var(--blue);
+  stroke-opacity: 0.22;
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  pointer-events: none;
+}
+.knot-guide.is-placed { stroke: var(--group-0); stroke-opacity: 0.6; }
+.knot-guide.is-selected { stroke-opacity: 0.55; }
+.knot-handle {
+  fill: color-mix(in srgb, var(--blue) 38%, var(--surface));
+  stroke: var(--blue);
+  stroke-width: 1.7;
+  pointer-events: none;
+}
+.knot-handle.is-selected { fill: var(--blue); }
+.knot-handle.is-placed { fill: color-mix(in srgb, var(--group-0) 42%, var(--surface)); stroke: var(--group-0); }
+.knot-handle.is-placed.is-selected { fill: var(--group-0); }
+.knot-handle.is-removing { fill: var(--surface); stroke: var(--danger); stroke-dasharray: 2 2; }
+.knot-hit { fill: transparent; cursor: ew-resize; }
+.knot-ghost {
+  fill: none;
+  stroke: var(--grey);
+  stroke-width: 1.3;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
+}
+.knot-ghost-cross { stroke: var(--danger); stroke-width: 1.6; pointer-events: none; }
+.knot-add {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.3;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
+}
+.knot-tag { pointer-events: none; }
+.knot-tag-box { fill: var(--text); }
+.knot-tag-label {
+  fill: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+/* Opaque, so it covers the axis title while a knot is dragged. */
+.knot-remove-zone {
+  fill: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  stroke: var(--danger);
+  stroke-opacity: 0.4;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+.knot-remove-label {
+  fill: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+/* In Knots mode the chart takes the arrow keys, so it takes focus. */
+#chart:focus { outline: none; }
+#chart:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }

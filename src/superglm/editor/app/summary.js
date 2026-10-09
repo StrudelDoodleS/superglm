@@ -10,6 +10,8 @@ import {
 } from "./views/summary_view.js";
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
+/** @typedef {import('./api/contracts.js').KnotParams} KnotParams */
+/** @typedef {import('./api/contracts.js').KnotsRequest} KnotsRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
 /** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
 /** @typedef {import('./api/contracts.js').StageRequest} StageRequest */
@@ -227,6 +229,20 @@ export function stageShapeRange(term, lo, hi, degree, join = "tangent") {
 }
 
 /**
+ * One knot change on ``term``: a count placed by a rule, positions placed by
+ * hand, or back to the knots declared in code. The positions are copied, so
+ * the descriptor is the caller's own.
+ * @param {string} term @param {KnotParams} params
+ */
+export function stageKnots(term, params) {
+  if ("reset" in params) return stageTransition("knots", term, { reset: true }, "reset knots");
+  if ("positions" in params) {
+    return stageTransition("knots", term, { positions: [...params.positions] }, "place knots");
+  }
+  return stageTransition("knots", term, { ...params }, "re-place knots");
+}
+
+/**
  * Refit: every waiting change in one fit, and one step on the timeline.
  * @param {number} count how many changes wait, for the busy overlay
  * @returns {{name:string, path:string, payload:EmptyStructuralRequest}}
@@ -246,10 +262,10 @@ export function refitPendingTransition(count) {
  * back, refused with the operation's own sentences. Collapse and ungroup act
  * on the selection Python holds, the one their levels were read from.
  * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
- *   stageUngroup, stageReference, stageShapeRange, stageSpecial or stageOnCurve
+ *   stageUngroup, stageReference, stageShapeRange, stageSpecial, stageOnCurve or stageKnots
  * @returns {{name:string, path:string,
  *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest
- *     |SpecialLevelsRequest}}
+ *     |SpecialLevelsRequest|KnotsRequest}}
  */
 export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
   const method = "auto";
@@ -265,6 +281,10 @@ export function refitAtOnceTransition({ name, payload: { operation, term, params
       const levels = /** @type {string[]} */ (params.levels);
       const special = operation === "special";
       return { name, path: "/special_levels", payload: { term, levels, special, method } };
+    }
+    case "knots": {
+      const knots = /** @type {KnotParams} */ (params);
+      return { name, path: "/knots", payload: { term, params: knots, method } };
     }
     default: {
       const { lo, hi, degree, join } = params;

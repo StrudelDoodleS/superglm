@@ -65,7 +65,7 @@
     <div class="app-actions" aria-label="Edit actions">
       <button id="refitPendingAction" class="refit-action" type="button"
         aria-label="Refit, nothing waiting" aria-keyshortcuts="R" data-popover-title="Refit"
-        data-popover-body="Nothing is waiting. Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes wait here for one refit."
+        data-popover-body="Nothing is waiting. Collapse, Ungroup, Set reference, Make special, Back on the curve, the shapes and knots wait here for one refit."
         disabled>
         <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M20 11a8 8 0 1 0-2.3 5.7"></path>
@@ -200,6 +200,15 @@
                 <circle cx="20" cy="17" r="2"></circle>
               </svg>
             </button>
+            <button type="button" role="radio" aria-checked="false" aria-label="Knots"
+              aria-keyshortcuts="K" data-tool="knots" tabindex="-1" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 14c3-7 6-7 9-2s6 5 9-2"></path>
+                <path d="M3 20h18"></path>
+                <path d="M7 17.5 8.5 20 7 22.5 5.5 20zM12 17.5 13.5 20 12 22.5 10.5 20zM17 17.5 18.5 20 17 22.5 15.5 20z"
+                  fill="currentColor" stroke-width="1"></path>
+              </svg>
+            </button>
           </div>
         </nav>
         <div class="term-context">
@@ -207,6 +216,7 @@
           <span id="termKind" class="context-chip"></span>
           <span id="termEdf" class="context-chip"></span>
           <span id="termReference" class="context-chip" hidden></span>
+          <span id="termKnots" class="context-chip" hidden></span>
         </div>
         <div id="termViewToggle" class="tool-rail term-view-toggle" role="radiogroup"
           aria-label="Term view">
@@ -250,6 +260,29 @@
           <button id="contribPlay" type="button" hidden
             title="Animate basis contributions into the spline">Build</button>
         </span>
+        <div id="knotBar" class="knot-bar" role="group" aria-label="Knots" hidden>
+          <div class="knot-stepper" role="group" aria-label="Knot count">
+            <button id="knotFewer" type="button" aria-label="One knot fewer">&minus;</button>
+            <output id="knotCount" aria-live="polite">0</output>
+            <button id="knotMore" type="button" aria-label="One knot more">+</button>
+          </div>
+          <label class="knot-field">
+            <span>Placed by</span>
+            <select id="knotRule">
+              <option value="uniform">Even spacing</option>
+              <option value="quantile">Quantiles of values</option>
+              <option value="quantile_rows">Quantiles of rows</option>
+              <option value="quantile_tempered">Tempered quantiles</option>
+              <option id="knotRuleHand" value="explicit" disabled hidden>Hand</option>
+            </select>
+          </label>
+          <label id="knotAlphaWrap" class="knot-field" hidden data-popover-title="alpha"
+            data-popover-body="Tempered quantiles weight each distinct value by its row count to this power: 0 gives quantiles of values, 1 quantiles of rows.">
+            <span>alpha</span>
+            <input id="knotAlpha" type="number" min="0" max="1" step="0.1" value="0.2">
+          </label>
+          <button id="knotReset" type="button">Reset knots</button>
+        </div>
         <div class="toolbar-actions">
         <button id="ciToggle" type="button" aria-pressed="false" aria-label="Reference CI"
           title="Show the fitted term's confidence band">Reference CI</button>
@@ -586,7 +619,7 @@
         <div class="setting-row">
           <div class="setting-text">
             <span id="settingRefitEveryChangeLabel" class="setting-title">Refit after every structural change</span>
-            <span id="settingRefitEveryChangeHint" class="setting-hint">Off: Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes wait for the Refit button, so you can make several in one go.</span>
+            <span id="settingRefitEveryChangeHint" class="setting-hint">Off: Collapse, Ungroup, Set reference, Make special, Back on the curve, the shapes and knots wait for the Refit button, so you can make several in one go.</span>
           </div>
           <button id="settingRefitEveryChange" class="setting-switch" type="button" role="switch"
             aria-checked="false" aria-labelledby="settingRefitEveryChangeLabel"

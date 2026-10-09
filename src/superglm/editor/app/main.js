@@ -8,6 +8,9 @@ import {
 } from "./chart.js";
 import { bindDragWatch } from "./chart/anchor_marks.js";
 import { chartSize } from "./chart/geometry.js";
+import { NO_KNOT_GESTURE, drawKnotLayer } from "./chart/knot_marks.js";
+import { bindKnotGestures } from "./knot_gestures.js";
+import { knotToolState } from "./knots.js";
 import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -46,6 +49,7 @@ import {
   runOffsetRefit,
   revertTransition,
   stageCollapse,
+  stageKnots,
   stageOnCurve,
   stageReference,
   stageShapeRange,
@@ -69,6 +73,12 @@ import {
   storeFeatureListOpen
 } from "./views/feature_list.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
+import {
+  bindKnotBar,
+  renderKnotBar,
+  renderKnotChip,
+  renderKnotStatus
+} from "./views/knot_bar.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import {
   bindJoinToggle,
@@ -149,6 +159,20 @@ const termNameNode = document.getElementById("termName");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
+const termKnots = document.getElementById("termKnots");
+const knotBarNodes = Object.freeze({
+  root: document.getElementById("knotBar"),
+  fewer: document.getElementById("knotFewer"),
+  count: document.getElementById("knotCount"),
+  more: document.getElementById("knotMore"),
+  rule: document.getElementById("knotRule"),
+  hand: document.getElementById("knotRuleHand"),
+  alphaWrap: document.getElementById("knotAlphaWrap"),
+  alpha: document.getElementById("knotAlpha"),
+  reset: document.getElementById("knotReset")
+});
+// Knots mode's gesture in progress; bound once the chart's other gestures are.
+let knotGestures = null;
 const helpAction = document.getElementById("helpAction");
 const inspectorToggle = document.getElementById("inspectorToggle");
 const inspectorNode = document.getElementById("inspector");
@@ -349,7 +373,8 @@ const chartContext = {
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode(),
   selectionAnchor: () => store.getState().view.selectionAnchor,
-  selectionSpan: () => store.getState().view.selectionSpan
+  selectionSpan: () => store.getState().view.selectionSpan,
+  knotUi: () => (knotGestures ? knotGestures.ui() : NO_KNOT_GESTURE)
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -455,6 +480,7 @@ bindToolRail({
       : mode === "handles" && canShowContributions(currentTerm());
     if (view.mode === mode && view.showContrib === showContrib) return;
     stopContributionBuild();
+    knotGestures?.reset();
     actions.patchView({ mode, showContrib });
   },
   onHelp: () => openHelp()
@@ -1037,6 +1063,7 @@ function renderChartWorkspace() {
   if (selected !== renderedTerm) {
     renderedTerm = selected;
     stopContributionBuild();
+    knotGestures?.reset();
   }
   if (applyTermDefaults(term)) return;
   const tableView = renderTermView(view.termView);
@@ -1045,11 +1072,15 @@ function renderChartWorkspace() {
     : currentSelection();
   statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
+  const knotTool = knotToolState(term, displayCollapsed(term));
   renderToolRail(toolRail, {
     mode: view.mode,
     handlesAvailable: Boolean(term.controls),
-    handlesReason: term.spline_view?.reason ?? null
+    handlesReason: term.spline_view?.reason ?? null,
+    knotsAvailable: knotTool.available,
+    knotsReason: knotTool.reason
   });
+  renderKnotControls(term, view.mode === "knots" && knotTool.available);
   updateGroupDisplayControl(term);
   updateNewLevelsControl(term);
   updateCollapseAction(term, selection);
@@ -1074,7 +1105,45 @@ function renderChartWorkspace() {
       range: selectionSpanRange(term, selection, chartContext)
     }
   );
+  renderKnotStatusLine();
   placeTermViewToggle(contextBar, termViewToggle, contribTools);
+}
+
+// A grouped term drawn collapsed: its axis is not the one its knots sit on.
+function displayCollapsed(term) {
+  return activeGroupDisplayMode() === "collapsed" &&
+    Boolean(term.group_display && term.group_display.available && term.group_display.collapsed);
+}
+
+function knotsModeOn(term = currentTerm()) {
+  return store.getState().view.mode === "knots" && Boolean(term) &&
+    knotToolState(term, displayCollapsed(term)).available;
+}
+
+// The knots chip shows in every mode; the knot controls, and the chart's
+// focus for the arrow keys, only in Knots mode.
+function renderKnotControls(term, knotsOn) {
+  renderKnotChip(termKnots, term);
+  renderKnotBar(knotBarNodes, term, knotsOn);
+  if (knotsOn) svg.setAttribute("tabindex", "0");
+  else svg.removeAttribute("tabindex");
+}
+
+// In Knots mode the status line says what each gesture does, or why the
+// last one did nothing.
+function renderKnotStatusLine() {
+  if (!knotGestures || !knotsModeOn()) return;
+  renderKnotStatus(statusNode, {
+    pendingCount: selectPendingSteps(store.getState()).length,
+    message: knotGestures.message()
+  });
+}
+
+// One knot change, staged like every structural change; true once it is.
+async function stageKnotChange(params) {
+  knotGestures?.say(null);
+  const result = await runStructuralChange(stageKnots(selectedTerm(), params));
+  return Boolean(result && result.state);
 }
 
 // Table puts the term's rating-table block where the chart was; the chart
@@ -1311,6 +1380,7 @@ function renderSelectionState({ termName, indices }) {
       range: selectionSpanRange(term, selection, chartContext)
     }
   );
+  renderKnotStatusLine();
 }
 
 function selectSelectionState(state) {
@@ -1716,6 +1786,10 @@ function applyTermDefaults(term) {
       [selectedTerm()]: loadSettings().groupsDefault
     };
   }
+  // A term whose knots cannot change, or a display that hides them, leaves Knots for Select.
+  if (view.mode === "knots" && !knotToolState(term, displayCollapsed(term)).available) {
+    patch.mode = "select";
+  }
   if (!term.controls) {
     if (view.mode === "handles") patch.mode = "select";
     if (view.showContrib) patch.showContrib = false;
@@ -1831,6 +1905,22 @@ const interactions = bindInteractions({
   setZoom,
   clearZoom,
   actions,
+});
+knotGestures = bindKnotGestures({
+  svg,
+  active: () => knotsModeOn(),
+  onChange: stageKnotChange,
+  onStatus: renderKnotStatusLine,
+  redraw: (ui) => drawKnotLayer(svg, svg._knotFrame ?? null, ui)
+});
+bindKnotBar(knotBarNodes, {
+  term: currentTerm,
+  onChange: stageKnotChange,
+  onRefuse: (message) => knotGestures.say(message),
+  onSettled: () => {
+    const term = currentTerm();
+    if (term) renderKnotBar(knotBarNodes, term, knotsModeOn(term));
+  }
 });
 bindPointLens(svg);
 // The anchor's tags step aside while the pointer drags on the chart.
