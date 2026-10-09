@@ -304,12 +304,11 @@ def test_a_level_returning_between_members_of_one_group_is_refused():
 
 
 def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_overrides():
-    """A 0.3 bump the smooth spreads is flagged; judged against the free interval alone, it is not.
+    """A 0.3 bump the smooth spreads is flagged, and no other level.
 
     The curve has moved toward the bump's own data, so the gap is the
-    smoother's residual: on this book its standardised value is 3.3 against
-    the Sidak cut of 2.86, and the free estimate's own interval alone gives
-    2.4, which misses it.
+    smoother's residual: on this book it is 4.9 standard errors against the
+    Sidak cut of 2.86.
     """
     X, y, w = _book(bump=0.3)
     model = _declared().fit(X, y, sample_weight=w)
@@ -554,7 +553,7 @@ def test_both_fits_are_centred_on_one_exposure_weighted_mean(monkeypatch):
     assert abs(math.fsum(share * gaps)) <= (2 * L + 8) * u * scale
 
 
-def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed():
+def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(monkeypatch):
     """An export with hand edits baked in keeps the covariance of the fit before them.
 
     ``term_inference`` gives such a curve no errors, and Free levels takes it
@@ -585,6 +584,12 @@ def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed():
         (first, scale), (second, other) = widths[20.0, stale], widths[2.0, stale]
         tolerance = 8 * u * (1.0 + max(scale, other))
         assert bool(np.max(np.abs(first - second)) <= tolerance) == same
+    # A shape repair after the fit leaves its covariance as stale: the same path.
+    model._editor_inference_stale = False
+    monkeypatch.setattr(free_levels_module, "_shape_repaired", lambda model, name: True)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    ends = np.log(np.array([free["lower"], free["upper"]]))
+    np.testing.assert_array_equal(ends[1] - ends[0], widths[2.0, True][0])
 
 
 @pytest.mark.parametrize("family", ["poisson", "gamma"])

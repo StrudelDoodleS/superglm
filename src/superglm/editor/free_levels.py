@@ -135,9 +135,9 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     values = np.asarray(column, dtype=object).ravel()
     codes, texts = pd.factorize(_grouping_labels(values))
     first = np.unique(codes, return_index=True)[1]
-    free = _free_categorical(spec, values[first], texts)
+    free, to_group = _free_categorical(spec, values[first], texts)
     supported = np.bincount(codes, weights=weights > 0.0, minlength=len(texts)) > 0.0
-    held = {free._grouping.original_to_group[str(text)] for text in texts[supported]}
+    held = {to_group[str(text)] for text in texts[supported]}
     if len(held) < 2:
         raise EditorValueError(_ONE_LEVEL.format(term=name, count=len(held)))
     free_model = clone_with_replaced_features(session.model, {name: free})
@@ -163,7 +163,6 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     # its every positive-weight response is at the family's bound.
     levels = [str(level) for level in free_model._specs[name]._levels]
     index = {level: i for i, level in enumerate(levels)}
-    to_group = free._grouping.original_to_group
     rows = np.array([index[to_group[str(text)]] for text in texts], dtype=np.intp)[codes]
     separated = {}
     for boundary in response_boundaries(free_model._distribution, free_model._link):
@@ -391,23 +390,26 @@ def _gap_variances(
             return None, _UNMEASURED
         if fingerprints[0] != fingerprints[1]:
             return None, _OTHER_ROWS
-    sides = [(_influence(free_model, name), free_rows)]
+    free_side = _influence(free_model, name)
+    if isinstance(free_side, str):
+        return None, free_side
+    if free_side.width != free_rows.shape[1]:
+        return None, _UNMEASURED
+    curve_side, ratio = None, None
     if curve_rows is not None:
-        sides.append((_influence(model, name), curve_rows))
-    for side, rows in sides:
-        if isinstance(side, str):
-            return None, side
-        if side.width != rows.shape[1]:
+        found = _influence(model, name)
+        if isinstance(found, str):
+            return None, found
+        if found.width != curve_rows.shape[1]:
             return None, _UNMEASURED
-    free_side = sides[0][0]
+        # The curve's influence goes onto the free fit's rows by this ratio.
+        curve_side, ratio = found, free_side.spread / found.spread
     informative = free_side.fisher > 0.0
     root = np.sqrt(free_side.fisher[informative])
-    curve_side = sides[1][0] if len(sides) > 1 else None
-    ratio = None if curve_side is None else free_side.spread / curve_side.spread
     variances = np.empty(len(free_rows))
     for i, row in enumerate(free_rows):
         moved = free_side.influence(row)
-        if curve_side is not None:
+        if curve_side is not None and ratio is not None and curve_rows is not None:
             moved = moved - ratio * curve_side.influence(curve_rows[i])
         variances[i] = phi * float(np.sum((root * moved[informative]) ** 2))
     return variances, None
@@ -502,7 +504,7 @@ def _influence(model, name: str) -> _Influence | str:
     return _Influence(influence=influence, width=len(columns), fisher=fisher, spread=spread)
 
 
-def _free_categorical(spec: OrderedCategorical, raw, texts) -> Categorical:
+def _free_categorical(spec: OrderedCategorical, raw, texts) -> tuple[Categorical, dict[str, str]]:
     """``spec``'s levels as a plain categorical: the same groups, the same reference.
 
     The ordered term reads its column through its declaration (a column of
@@ -512,7 +514,8 @@ def _free_categorical(spec: OrderedCategorical, raw, texts) -> Categorical:
     the categorical reads them, ``raw`` a value of each: 1 and 1.0 are one
     value to a hash but two texts to the column, and each needs its level. A
     reference the rows do not hold gives way to the first level they do; the
-    comparison is centred, so the reference moves nothing.
+    comparison is centred, so the reference moves nothing. Comes with the
+    map from each text to its level or group.
     """
     levels = [str(level) for level in spec._canonical(raw)]
     grouping = getattr(spec, "_grouping", None)
@@ -538,7 +541,7 @@ def _free_categorical(spec: OrderedCategorical, raw, texts) -> Categorical:
     )
     # The reference is a level, whatever it is called ("first" included).
     free._base_is_level = True
-    return free
+    return free, to_group
 
 
 def _lift_selection(free_model, model, name: str) -> bool:
