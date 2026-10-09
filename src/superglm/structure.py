@@ -3,8 +3,10 @@
 A structure records, per feature, the decisions that shape a term rather than
 its fitted values: how a categorical's levels are grouped, which level or
 group is the reference, where levels unseen at fit go, which levels of an
-ordered term are fitted off its curve, and the polynomial ranges of a spline. :meth:`Structure.apply` builds those decisions into another
-model's features, ready to fit on new data.
+ordered term are fitted off its curve, the polynomial ranges of a spline, and
+the knots of a spline whose knots were chosen in the editor.
+:meth:`Structure.apply` builds those decisions into another model's features,
+ready to fit on new data.
 
 The file is JSON, written with sorted keys so that two exports of one model
 are byte-identical and a change to it reads as a diff::
@@ -50,6 +52,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.grouping import native_by_text
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
+    EDITOR_KNOTS_ATTRIBUTE,
     accepted_levels,
     band_edges,
     clone_with_replaced_features,
@@ -60,8 +63,10 @@ from superglm.features.rebuild import (
     pristine_basis,
     rebuilt_categorical,
     rebuilt_ordered_spec,
+    respaced_spline,
     shape_unavailable_reason,
     shaped_spline,
+    source_spline,
     states_positional_breaks,
 )
 from superglm.features.spline import _SplineBase
@@ -74,10 +79,12 @@ _POLICIES = ("error", "base")
 # The fields each kind of entry holds, besides "kind".
 _FIELDS = {
     "categorical": ("groups", "levels", "reference", "unseen"),
-    "ordered": ("groups", "levels", "ranges", "reference", "specials", "unseen"),
-    "spline": ("ranges",),
+    "ordered": ("groups", "knots", "levels", "ranges", "reference", "specials", "unseen"),
+    "spline": ("knots", "ranges"),
 }
 _RANGE_FIELDS = ("degree", "hi", "join", "lo")
+_KNOT_FIELDS = ("knot_alpha", "n_knots", "positions", "strategy")
+_KNOT_STRATEGIES = ("explicit", "quantile", "quantile_rows", "quantile_tempered", "uniform")
 _FILE_FIELDS = ("features", "format", "superglm_version")
 
 # One fixed sentence per refusal.
@@ -89,6 +96,10 @@ _UNKNOWN_FORMAT = (
 _MALFORMED_FILE = "The structure's {field!r} field is malformed; export the structure again."
 _MALFORMED = (
     "The structure entry for {feature!r} has a malformed {field!r}; export the structure again."
+)
+_KNOTS = (
+    "The knots recorded for {feature!r} do not fit its declared spline; "
+    "export the structure from a model with the same declaration."
 )
 _MEMBER = (
     "Group {group!r} of {feature!r} holds {member!r}, which is not one of its levels; add it "
@@ -213,6 +224,13 @@ class FeatureStructure:
         An ordered term's special levels, fitted off its curve each with a
         free estimate of its own. None, as in a file that names none, keeps
         the specials the model declares.
+    knots : dict or None
+        The knots of a spline, or of an ordered term's spline basis, chosen in
+        the editor: ``n_knots``, ``strategy`` (``"explicit"`` or a placement
+        rule), ``knot_alpha`` and ``positions``, the interior knots the fit
+        placed on the spline's own axis. An explicit strategy states the
+        positions; a rule places ``n_knots`` knots on the data the model is
+        fit on. None, as in a file that names none, keeps the declared knots.
     """
 
     kind: str
@@ -222,6 +240,7 @@ class FeatureStructure:
     unseen: str = "error"
     ranges: list = field(default_factory=list)
     specials: list | None = None
+    knots: dict | None = None
 
 
 @dataclass
@@ -307,7 +326,9 @@ class Structure:
             if not isinstance(name, str):
                 raise StructureError(_NOT_WRITABLE.format(value=name, feature=name))
             if kind == "spline":
-                features[name] = FeatureStructure(kind=kind, ranges=list(current_ranges(spec)))
+                features[name] = FeatureStructure(
+                    kind=kind, ranges=list(current_ranges(spec)), knots=_knots_entry(spec)
+                )
             else:
                 features[name] = _level_structure(name, spec, kind, frame)
         if getattr(model, "_result", None) is None:
@@ -580,6 +601,7 @@ def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:
         unseen=unseen,
         ranges=ranges,
         specials=specials,
+        knots=_knots_entry(spec) if kind == "ordered" else None,
     )
 
 
@@ -751,15 +773,16 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     # The reference is a band or group, whatever its name (level=True below).
     base = entry.reference if grouping is None else str(entry.reference)
     data = np.asarray(entry.levels, dtype=object)
+    knotted = None if entry.knots is None else _knotted(name, pristine_basis(spec), entry.knots)
     # A model that declares these ranges keeps its spline, unless X needs it
     # fitted out to hold them.
     same = _same_ranges(entry.ranges, current_ranges(spec))
     if same and (column is None or not entry.ranges):
         return rebuilt_ordered_spec(
-            spec, grouping=grouping, base=base, data=data, level=True, **changes
+            spec, grouping=grouping, base=base, data=data, basis=knotted, level=True, **changes
         )
     _require_shapes(model, name, entry)
-    source = pristine_basis(spec)
+    source = pristine_basis(spec) if knotted is None else knotted
     knots = source._named_knots or source._explicit_knots
     boundary = source._explicit_boundary
 
@@ -798,7 +821,7 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
     placed = _placed_boundary(name, in_order, fits, boundary, extent, position)
     if same and placed == boundary:
         return rebuilt_ordered_spec(
-            spec, grouping=grouping, base=base, data=data, level=True, **changes
+            spec, grouping=grouping, base=base, data=data, basis=knotted, level=True, **changes
         )
     return hosted(ranges, placed)
 
@@ -806,6 +829,9 @@ def _rebuilt_ordered(model, name: str, spec, entry: FeatureStructure, column):
 def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
     from superglm.features._spline_ranges import validate_ranges
+
+    if entry.knots is not None:
+        spec = _knotted(name, spec, entry.knots)
 
     # A model that declares these ranges keeps its spline, unless X needs it
     # fitted out to hold them.
@@ -953,6 +979,70 @@ def _refuse_constant(constant: str):
     raise ValueError(f"non-finite constant {constant}")
 
 
+def _knots_entry(spec) -> dict | None:
+    """The knots of a spline term or ordered basis chosen in the editor, or None.
+
+    ``positions`` are where the fit placed them; a rule's count, name and
+    alpha are its declaration's.
+    """
+    declared = source_spline(spec)
+    if declared is None or not getattr(declared, EDITOR_KNOTS_ATTRIBUTE, False):
+        return None
+    fitted = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    positions = [float(v) for v in fitted.fitted_base_knots]
+    stated = declared._named_knots is not None or declared._explicit_knots is not None
+    return {
+        "knot_alpha": float(declared.knot_alpha),
+        "n_knots": len(positions) if stated else int(declared.n_knots),
+        "positions": positions,
+        "strategy": "explicit" if stated else str(declared.knot_strategy),
+    }
+
+
+def _knots_json(name: str, knots: dict) -> dict[str, Any]:
+    return {
+        "knot_alpha": float(knots["knot_alpha"]),
+        "n_knots": int(knots["n_knots"]),
+        "positions": [float(v) for v in knots["positions"]],
+        "strategy": str(knots["strategy"]),
+    }
+
+
+def _is_knots(value) -> bool:
+    """Whether ``value`` is a well-formed ``knots`` object."""
+    if not isinstance(value, Mapping) or set(value) != set(_KNOT_FIELDS):
+        return False
+    count, alpha, positions = value["n_knots"], value["knot_alpha"], value["positions"]
+    if not isinstance(count, Integral) or isinstance(count, bool) or count < 1:
+        return False
+    if not _is_finite(alpha) or not 0.0 <= alpha <= 1.0:
+        return False
+    if value["strategy"] not in _KNOT_STRATEGIES or not isinstance(positions, list):
+        return False
+    if not positions or not all(_is_finite(v) for v in positions):
+        return False
+    if any(b <= a for a, b in zip(positions, positions[1:], strict=False)):
+        return False
+    return value["strategy"] != "explicit" or len(positions) == count
+
+
+def _knotted(name: str, source, knots: dict):
+    """``source``, a declared spline, with the knots a structure entry records."""
+    stated = knots["strategy"] == "explicit"
+    try:
+        spline = respaced_spline(
+            source,
+            knots=knots["positions"] if stated else None,
+            n_knots=int(knots["n_knots"]),
+            knot_strategy=None if stated else knots["strategy"],
+            knot_alpha=float(knots["knot_alpha"]),
+        )
+    except ValueError as exc:
+        raise StructureError(_KNOTS.format(feature=name)) from exc
+    setattr(spline, EDITOR_KNOTS_ATTRIBUTE, True)
+    return spline
+
+
 def _plain(value, feature: str):
     """``value`` as a JSON scalar of the same kind: a numpy scalar becomes its Python one."""
     if isinstance(value, bool | np.bool_):
@@ -976,8 +1066,9 @@ def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
         }
         for r in entry.ranges
     ]
+    knots = None if entry.knots is None else _knots_json(name, entry.knots)
     if entry.kind == "spline":
-        return {"kind": "spline", "ranges": ranges}
+        return {"kind": "spline", "ranges": ranges, **({} if knots is None else {"knots": knots})}
     payload = {
         "groups": {
             label: [_plain(member, name) for member in members]
@@ -992,6 +1083,8 @@ def _entry_json(name: str, entry: FeatureStructure) -> dict[str, Any]:
         payload["ranges"] = ranges
         if entry.specials is not None:
             payload["specials"] = [_plain(level, name) for level in entry.specials]
+        if knots is not None:
+            payload["knots"] = knots
     return payload
 
 
@@ -1009,8 +1102,11 @@ def _entry_from_json(name: str, entry) -> FeatureStructure:
     if not isinstance(ranges, list) or not all(_is_range_json(r) for r in ranges):
         raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
     parsed = [_range_from_json(name, r) for r in ranges]
+    knots = entry.get("knots")
+    if knots is not None:
+        knots = dict(knots) if isinstance(knots, Mapping) else knots
     if kind == "spline":
-        return FeatureStructure(kind=kind, ranges=parsed)
+        return FeatureStructure(kind=kind, ranges=parsed, knots=knots)
     groups = entry.get("groups", {})
     if not isinstance(groups, Mapping) or not all(isinstance(m, list) for m in groups.values()):
         raise StructureError(_MALFORMED.format(feature=name, field="groups"))
@@ -1024,6 +1120,7 @@ def _entry_from_json(name: str, entry) -> FeatureStructure:
         unseen=entry.get("unseen", "error"),
         ranges=parsed,
         specials=list(specials) if isinstance(specials, list) else specials,
+        knots=knots,
     )
 
 
@@ -1055,6 +1152,8 @@ def _check_feature(name: str, entry: FeatureStructure) -> None:
         raise StructureError(_MALFORMED.format(feature=name, field="ranges"))
     if entry.kind != "ordered" and entry.specials is not None:
         raise StructureError(_MALFORMED.format(feature=name, field="specials"))
+    if entry.knots is not None and (entry.kind == "categorical" or not _is_knots(entry.knots)):
+        raise StructureError(_MALFORMED.format(feature=name, field="knots"))
     if entry.kind == "spline":
         if entry.levels or entry.groups or entry.reference is not None or entry.unseen != "error":
             raise StructureError(_MALFORMED.format(feature=name, field="levels"))
