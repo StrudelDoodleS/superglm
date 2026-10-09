@@ -249,12 +249,16 @@ interval.
 - The intervals also allow for any correlation between the two fits, and a note says why, when
   the session's training data holds the model's rows in another order or other rows, when the
   family and link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian
-  response with a log link, say), or when the model has a shape-constrained P-spline.
+  response with a log link, say), when the model has a shape-constrained P-spline, or when a
+  curve's binding constraints cross a level of almost no weight.
+- No level is judged, and a note says why, when either fit stops before it converges (raise the
+  model's `max_iter`), or when a custom penalty removes the term from the free fit, which then
+  draws its levels flat.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
   free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
-  to some terms shrinks the free levels too, and the legend then says so.
+  to some terms shrinks the free levels too, or removes them, and the legend then says so.
 - Hand edits are not part of either side: the curve and the free levels are both fits.
 
 ### Make special and Back on the curve
