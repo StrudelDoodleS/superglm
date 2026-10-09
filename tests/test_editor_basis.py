@@ -160,6 +160,55 @@ def test_a_shaped_range_holds_the_kinds_that_take_ranges_and_refuses_shrinkage(b
     assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(40.0, 60.0, 1)]
 
 
+@pytest.mark.parametrize(
+    ("term", "shape"),
+    [
+        ("age", {"lo": 50.0, "hi": 70.0, "degree": 1}),
+        ("band", {"lo": "B4", "hi": "B7", "degree": 1}),
+    ],
+)
+def test_shrinkage_waiting_holds_a_new_range_as_shrinkage_in_force_does(book, term, shape):
+    """The range is drawn on the term as its waiting changes leave it, so the refit never drops
+    the waiting shrinkage."""
+    session = _session(book)
+    session.stage_structural("basis", term, {"select": True})
+    sentence = (
+        "Shrinkage cannot be combined with shaped ranges, and a waiting change turns it on for "
+        f"{term!r}; turn Shrink off first."
+    )
+    assert session_payload(session)[term]["shape"]["available"] is False
+    assert session_payload(session)[term]["shape"]["reason"] == sentence
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", term, shape)
+    assert str(refused.value) == sentence
+    assert [step.operation for step in session.pending] == ["basis"]
+    session.refit_pending()
+    assert _basis(session.model, term)[1] is True
+
+
+@pytest.mark.parametrize(
+    ("declared", "change"),
+    [
+        (Spline(kind="ps", n_knots=6, select=True), {"select": False}),
+        (Spline(kind="cr_cardinal", n_knots=6), {"kind": "cr"}),
+    ],
+    ids=["shrink-off", "cardinal-to-cr"],
+)
+def test_a_waiting_basis_change_that_allows_ranges_takes_a_range_before_the_refit(declared, change):
+    """The fitted spline refuses ranges; the waiting one takes them, and both refit as one."""
+    X, y, w = _book(n=4000)
+    model = _declared(age=declared).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    assert session_payload(session)["age"]["shape"]["available"] is False
+    session.stage_structural("basis", "age", change)
+    assert session_payload(session)["age"]["shape"]["available"] is True
+    session.stage_structural("shape", "age", {"lo": 50.0, "hi": 70.0, "degree": 1})
+    session.refit_pending()
+    spec = session.model._specs["age"]
+    assert not spec.select
+    assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(50.0, 70.0, 1)]
+
+
 def test_a_natural_spline_refuses_uneven_knots_and_shrinkage_and_takes_even_knots_only(book):
     session = _session(book)
     session.stage_structural("knots", "age", {"count": 6, "strategy": "quantile"})

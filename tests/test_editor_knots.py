@@ -478,3 +478,24 @@ def test_a_term_whose_column_holds_one_value_opens_with_its_knots_unavailable():
         "Every value of this term's column is the same, so it has no range to place knots on.",
     )
     session.widget().close()
+
+
+def test_a_term_whose_column_holds_one_value_opens_with_its_data_kept():
+    """With the training data the editor also counts a term's values for shaped ranges; a term
+    with no range has none to count, and says so."""
+    X = pd.DataFrame({"x": np.full(100, 5.0)})
+    y = np.arange(100) / 100
+    model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps")}, selection_penalty=0).fit(
+        X, y
+    )
+    session = EditorSession.from_model(model, train_data=(X, y))
+    payload = session_payload(session)["x"]
+    assert (payload["shape"]["available"], payload["shape"]["reason"]) == (
+        False,
+        "Every value of this term's column is the same, so it has no range to shape.",
+    )
+    assert payload["shape"]["support"] is None
+    assert payload["knots"]["available"] is False
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", "x", {"lo": 4.0, "hi": 6.0, "degree": 1})
+    assert str(refused.value) == payload["shape"]["reason"]

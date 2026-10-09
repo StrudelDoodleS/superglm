@@ -79,7 +79,8 @@
  * reason when the term cannot take one, a numeric term's support counts and
  * an ordered term's special levels, which no range can cover.
  * @typedef {Object} TermShape
- * @property {boolean} available
+ * @property {boolean} available whether a new range can be drawn on the term
+ *   as its waiting changes leave it
  * @property {string|null} reason
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support

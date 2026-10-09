@@ -72,7 +72,9 @@ def session_payload(
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
-            "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
+            "shape": shape_payload(
+                session.model, name, term.metadata.get("shape_support"), _draft(session, name)
+            ),
             "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
             "pending": _pending_term_payload(session, name),
             "unseen": unseen_payload(session, name),
@@ -166,6 +168,12 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
         "hash": _record_hash(item, parent_hash),
         "redo": redo,
     }
+
+
+def _draft(session, name: str):
+    """``name``'s spec as its waiting changes leave it, or None while none waits."""
+    waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
+    return waiting[-1].draft_spec if waiting else None
 
 
 def _pending_term_payload(session, name: str) -> dict[str, Any]:
