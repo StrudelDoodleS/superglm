@@ -137,7 +137,9 @@ on a spline term and on an ordered term with a spline basis.
   reference. An ordered term's line is placed against the levels' exposure-weighted average, as
   the diamonds are, so it need not meet the curve at the reference.
 - The line is one fit per term. The icon is busy while it runs, and you can go on editing.
-- The choice stays on as you move between terms, until you turn it off.
+- The choice stays on as you move between terms, until you turn it off. Turning it off also
+  turns **Free levels** off, so no marks of the fit are left; **Free levels** comes back at once
+  if you turn it on again.
 - Hand edits keep the line. A refit fits it again.
 - A level the free fit cannot estimate leaves a gap in the line: one with no rows, one whose
   every response is 0 (or 1 for a yes/no response), or one whose rows another term covers

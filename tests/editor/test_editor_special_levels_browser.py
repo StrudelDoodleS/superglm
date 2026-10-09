@@ -110,3 +110,14 @@ def test_free_levels_off_and_on_again_takes_no_fit_and_unsmoothed_runs_through_i
         diamonds = _diamond_centres(page)
         for (dx, dy), (fx, fy) in zip(sorted(map(tuple, centres)), diamonds, strict=True):
             assert abs(dx - fx) <= 0.01 and abs(dy - fy) <= 0.01
+
+        # Unsmoothed off clears every mark of the fit, the diamonds too.
+        page.locator("#unsmoothedToggle").click()
+        page.wait_for_function(
+            "() => !document.querySelector('#chart .unsmoothed-layer')"
+            " && !document.querySelector('#chart .free-levels .free-level')"
+        )
+        assert toggle.get_attribute("aria-pressed") == "false"
+        toggle.click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        assert len(fits) == 1

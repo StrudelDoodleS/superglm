@@ -1756,6 +1756,9 @@ function requestUnsmoothed(need) {
 
 // The choice lasts the session, across terms. Turned on again, it retries a
 // request that failed, though not a fit Python refused.
+// Turned off, Unsmoothed takes Free levels' diamonds with it: on an ordered
+// term they mark the same fit, so off clears every mark of it. Free levels
+// keeps its comparison, so turning it on again draws it at once.
 function toggleUnsmoothed() {
   if (!unsmoothedButton || unsmoothedButton.getAttribute("aria-disabled") === "true") return;
   const state = store.getState();
@@ -1764,7 +1767,9 @@ function toggleUnsmoothed() {
   const entry = unsmoothedEntry(state.view.unsmoothed, term, state.remote.snapshot?.fit_token);
   const unsmoothed = { ...state.view.unsmoothed };
   if (show && entry?.status === "failed") delete unsmoothed[term];
-  actions.patchView({ showUnsmoothed: show, unsmoothed });
+  actions.patchView(show
+    ? { showUnsmoothed: true, unsmoothed }
+    : { showUnsmoothed: false, unsmoothed, showFreeLevels: false });
 }
 
 function renderUnsmoothedToggle(snapshot) {
