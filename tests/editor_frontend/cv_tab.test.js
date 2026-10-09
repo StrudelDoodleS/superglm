@@ -221,6 +221,14 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.match(markup, /<title>Mean: [^<]*, off the strip<\/title>/);
   assert.equal([...markup.matchAll(/class="cv-card-dot is-off"/g)].length, 1);
   assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
+  // Two far-off folds at one end share one ring that names both.
+  const twice = cvTabMarkup(cvPayload({
+    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    results: [result("As supplied", "supplied", [63.4, 3.0e10, 2.0e10, 62.8, 62.9]), result("Current model", "run", current)]
+  }), idle());
+  const rings = [...twice.matchAll(/class="cv-card-dot is-off"[^>]*><title>([^<]*)<\/title>/g)];
+  assert.equal(rings.length, 1);
+  assert.match(rings[0][1], /^Fold 2: [^;]*; Fold 3: [^;]*, off the strip$/);
   // The current model's row spreads across the strip.
   const currentRow = markup.slice(markup.indexOf('data-origin="run"'));
   const xs = [...currentRow.matchAll(/<circle cx="([\d.]+)"/g)].slice(0, 5).map((m) => Number(m[1]));

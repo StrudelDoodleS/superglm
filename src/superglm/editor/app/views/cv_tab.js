@@ -395,14 +395,26 @@ function metricCard(metric, results) {
   const rows = results.map((result) => {
     const mean = result.mean[metric.name];
     const pooled = result.pooled[metric.name];
+    // Far-off folds at one end share one ring, whose tooltip names each.
+    /** @type {Map<number, {number:number, value:number}[]>} */
+    const pinnedAt = new Map();
     const dots = result.folds.map((fold, index) => {
       const value = fold.scores[metric.name];
       const number = foldNumber(fold, index);
       if (!isNumber(value)) return "";
-      const far = off(value);
-      return `<circle cx="${px(x(value))}" cy="12" r="4.5" class="cv-card-dot${far ? " is-off" : ""}"`
+      if (off(value)) {
+        const end = x(value);
+        pinnedAt.set(end, [...(pinnedAt.get(end) || []), { number, value }]);
+        return "";
+      }
+      return `<circle cx="${px(x(value))}" cy="12" r="4.5" class="cv-card-dot"`
         + ` style="${foldMarkStyle(number)}">`
-        + `<title>Fold ${number + 1}: ${metricText(value)}${far ? ", off the strip" : ""}</title></circle>`;
+        + `<title>Fold ${number + 1}: ${metricText(value)}</title></circle>`;
+    }).join("") + [...pinnedAt].map(([end, folds]) => {
+      const names = folds.map(({ number, value }) => `Fold ${number + 1}: ${metricText(value)}`);
+      return `<circle cx="${px(end)}" cy="12" r="4.5" class="cv-card-dot is-off"`
+        + ` style="${foldMarkStyle(folds[0].number)}">`
+        + `<title>${names.join("; ")}, off the strip</title></circle>`;
     }).join("");
     const meanOff = isNumber(mean) && off(mean);
     const meanTick = isNumber(mean)
