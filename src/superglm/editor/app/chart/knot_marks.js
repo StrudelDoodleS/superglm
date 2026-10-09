@@ -226,7 +226,7 @@ export function inRemoveZone(frame, point) {
  * knots in their new places and waiting, the ones it moves or removes as ghosts.
  * @param {KnotFrame} frame @param {number[]} positions @returns {KnotFrame}
  */
-function pendingFrame(frame, positions) {
+export function pendingFrame(frame, positions) {
   const dropped = frame.positions.filter((x) => !positions.includes(x));
   const removed = positions.length < frame.positions.length;
   return {

@@ -320,7 +320,7 @@ test("a handle answers within its reach, the band along the axis, and the zone b
  * The gestures on a fake chart whose client and svg coordinates agree, with
  * the knot frame chart.js would leave on it.
  */
-function gestureHarness(term, { editing = true, staged = true, plot = PLOT } = {}) {
+function gestureHarness(term, { editing = true, staged = true, plot = PLOT, onChange = null } = {}) {
   const listeners = new Map();
   const changes = [];
   let statusRenders = 0;
@@ -337,7 +337,9 @@ function gestureHarness(term, { editing = true, staged = true, plot = PLOT } = {
   const gestures = bindKnotGestures({
     svg,
     active: () => editing,
-    onChange: async (params) => { changes.push(params); return staged; },
+    onChange: onChange
+      ? (params) => { changes.push(params); return onChange(params); }
+      : async (params) => { changes.push(params); return staged; },
     onStatus: () => { statusRenders += 1; },
     redraw: () => {},
   });
@@ -365,6 +367,8 @@ test("dragging a knot along the axis stages its new place, and below the axis re
   assert.deepEqual(changes, [{ positions: [2, 5.1, 6, 8] }]);
   assert.equal(gestures.ui().selected, 5.1);
   assert.equal(gestures.ui().drag, null);
+  // The change is answered before the next gesture.
+  await new Promise((resolve) => setImmediate(resolve));
 
   pointer("pointerdown", px(6), 300);
   pointer("pointermove", px(6), 330);
@@ -474,3 +478,81 @@ test("a change that is not staged gives the selection back, and outside Knots mo
   assert.deepEqual(idle.changes, []);
   assert.equal(idle.gestures.ui().selected, null);
 });
+
+/**
+ * A /stage that answers only when told to, as the server does some time
+ * after a change is sent; ``answer`` also redraws the frame from the payload.
+ */
+function slowStage() {
+  const waiting = [];
+  return {
+    onChange: () => new Promise((resolve) => waiting.push(resolve)),
+    get sent() { return waiting.length; },
+    async answer(harness, staged, positions) {
+      if (staged) {
+        harness.svg._knotFrame = knotFrame(numericTerm({
+          pending: { knots: { positions, count: positions.length, strategy: "explicit", alpha: 0.2 } },
+        }), PLOT, true);
+      }
+      waiting.shift()(staged);
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+const drawnKnots = (harness) =>
+  knotLayout(harness.svg._knotFrame, harness.gestures.ui()).handles.map((handle) => handle.x);
+
+test("arrow keys pressed while a knot change is being staged move the same knot on", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, key, px, changes, gestures } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointerup", px(4), 300);
+  key("ArrowRight");
+  key("ArrowRight");
+  key("ArrowRight");
+  // One change is sent; the knot moves on from where the arrow keys left it.
+  assert.deepEqual(changes, [{ positions: [2, 4.1, 6, 8] }]);
+  assert.equal(gestures.ui().selected, 4.3);
+  assert.deepEqual(drawnKnots(harness), [2, 4.3, 6, 8]);
+  // Once the first is staged, the latest of the presses follows it, and the
+  // knot never flashes back on the way.
+  await stage.answer(harness, true, [2, 4.1, 6, 8]);
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.3, 6, 8] });
+  assert.equal(changes.length, 2);
+  assert.deepEqual(drawnKnots(harness), [2, 4.3, 6, 8]);
+  await stage.answer(harness, true, [2, 4.3, 6, 8]);
+  assert.equal(gestures.ui().pending, null);
+  key("ArrowRight");
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.4, 6, 8] });
+});
+
+test("a click while a dropped knot is being staged adds to the knots as dropped", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, px, changes } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointermove", px(5.1), 302);
+  pointer("pointerup", px(5.1), 302);
+  pointer("pointerdown", px(9), 296);
+  pointer("pointerup", px(9), 296);
+  assert.deepEqual(drawnKnots(harness), [2, 5.1, 6, 8, 9]);
+  await stage.answer(harness, true, [2, 5.1, 6, 8]);
+  assert.deepEqual(changes, [{ positions: [2, 5.1, 6, 8] }, { positions: [2, 5.1, 6, 8, 9] }]);
+});
+
+test("a change that is not staged drops the one waiting to follow it and gives the selection back", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, key, px, changes, gestures } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointerup", px(4), 300);
+  key("ArrowRight");
+  key("ArrowRight");
+  await stage.answer(harness, false);
+  assert.equal(changes.length, 1);
+  assert.equal(gestures.ui().selected, 4);
+  assert.deepEqual(drawnKnots(harness), [2, 4, 6, 8]);
+});
+

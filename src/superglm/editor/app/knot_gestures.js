@@ -7,7 +7,11 @@
 // a term that takes evenly spaced knots only, none of these move a knot: the
 // status line says why, and the count above the chart still works.
 // A gesture lives here while it runs and redraws only the knot layer; the
-// finished change goes to Python as one structural change.
+// finished change goes to Python as one structural change. One change is
+// staged at a time: a gesture finished while one is being staged acts on the
+// knots as the gestures left them, and its change follows once that one is
+// staged, the latest such gesture's only, so a held arrow key moves the
+// selected knot on.
 
 import {
   addOutcome,
@@ -18,7 +22,14 @@ import {
   nudgeKnot,
   removeOutcome
 } from "./knots.js";
-import { inRemoveZone, knotAt, knotIndex, knotX, onKnotBand } from "./chart/knot_marks.js";
+import {
+  inRemoveZone,
+  knotAt,
+  knotIndex,
+  knotX,
+  onKnotBand,
+  pendingFrame
+} from "./chart/knot_marks.js";
 
 /** @typedef {import('./api/contracts.js').KnotParams} KnotParams */
 /** @typedef {import('./chart/knot_marks.js').KnotFrame} KnotFrame */
@@ -56,11 +67,25 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
   let press = null;
   /** @type {string|null} */
   let message = null;
+  // The change being staged, the latest gesture's change waiting to follow it,
+  // and the selection before the first of them, given back if one is not staged.
+  let staging = false;
+  /** @type {{params:KnotParams, select:number|null}|null} */
+  let queued = null;
+  /** @type {number|null} */
+  let before = null;
+  // Bumped by reset, so an answer for a forgotten change touches nothing.
+  let generation = 0;
 
-  /** @returns {KnotFrame|null} */
+  /**
+   * The knot frame as drawn: the knots a change still being staged in the
+   * places its gesture left them, so the next gesture finds them there.
+   * @returns {KnotFrame|null}
+   */
   function frame() {
     const current = svg._knotFrame ?? null;
-    return active() && current?.editing ? current : null;
+    if (!active() || !current?.editing) return null;
+    return ui.pending ? pendingFrame(current, ui.pending) : current;
   }
 
   function draw() {
@@ -75,8 +100,9 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
   }
 
   /**
-   * Stage a finished gesture's change and select the knot it leaves; if the
-   * change is not staged, the selection goes back.
+   * Stage a finished gesture's change and select the knot it leaves, or, while
+   * a change is being staged, keep it to follow that one. If a change is not
+   * staged, any kept to follow it is dropped and the selection goes back.
    * @param {KnotOutcome|null} outcome
    */
   function apply(outcome) {
@@ -85,16 +111,32 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       say(outcome.refusal);
       return;
     }
-    const before = ui.selected;
+    if (!staging) before = ui.selected;
     ui.selected = outcome.select;
     // Drawn where the gesture left them until the change is answered, so a
     // dropped knot does not flash back to its old place on the way.
     const positions = "positions" in outcome.params ? outcome.params.positions : null;
     ui.pending = positions ? [...positions].sort((a, b) => a - b) : null;
     draw();
-    void Promise.resolve(onChange(outcome.params)).then((staged) => {
+    if (staging) queued = { params: outcome.params, select: outcome.select };
+    else send(outcome.params, outcome.select);
+  }
+
+  /** @param {KnotParams} params @param {number|null} select */
+  function send(params, select) {
+    staging = true;
+    const run = generation;
+    void Promise.resolve(onChange(params)).then((staged) => {
+      if (run !== generation) return;
+      staging = false;
+      const next = queued;
+      queued = null;
+      if (staged && next) {
+        send(next.params, next.select);
+        return;
+      }
       ui.pending = null;
-      if (!staged && ui.selected === outcome.select) ui.selected = before;
+      if (!staged && ui.selected === (next ?? { select }).select) ui.selected = before;
       draw();
     });
   }
@@ -251,9 +293,13 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       ui.selected = null;
       ui.drag = null;
       ui.hover = null;
+      ui.pending = null;
       dragStart = null;
       press = null;
       message = null;
+      staging = false;
+      queued = null;
+      generation += 1;
     },
     destroy() {
       svg.removeEventListener("pointerdown", onPointerDown);

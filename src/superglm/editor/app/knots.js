@@ -66,6 +66,7 @@ const RULE_TEXT = Object.freeze({
 /** superglm's ``knot_alpha`` default. */
 export const DEFAULT_ALPHA = 0.2;
 export const AT_LEAST_ONE = "A spline needs at least one knot.";
+export const CHANGE_RUNNING = "Another change is still running; try again once it has finished.";
 export const SHOWN_GROUPED =
   "Knots sit on the expanded level axis. Show the groups expanded to see them.";
 // A distance on the grid may fall short of the least gap by this fraction of
