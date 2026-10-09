@@ -788,14 +788,16 @@ def _all_thin_frame():
     return frame, y
 
 
-def _all_thin_model(solve: str = "auto") -> SuperGLM:
+def _all_thin_model(
+    solve: str = "auto", lines: LambdaPolicy | None = None, *, select: bool = False
+) -> SuperGLM:
+    """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
+    policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family="gaussian",
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
         interactions=[
-            FactorSmooth(
-                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
-            )
+            FactorSmooth("x", group="g", basis="sz", lambda_policy=policy, select=select)
         ],
         selection_penalty=0,
         direct_solve=solve,
@@ -811,7 +813,9 @@ def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
     to 0.954 (Codex and Sol reviews, P1).  The population is now the family's
     canonical point, where each level's free part is zero, named in a warning
     at fit; the predictions on the training rows are the fit's own to their
-    rounding, and the rule follows the family there as well.
+    rounding, and the rule follows the family there as well.  Without
+    ``select=True`` the term's lines stay unpenalized whatever its data, and
+    the warning names that option (#444).  Mutation: the warning without it.
     """
     from superglm.model import base
 
@@ -819,7 +823,9 @@ def test_an_sz_term_whose_every_level_is_thin_reproduces_its_fit() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model = _all_thin_model().fit_reml(frame, y)
-    assert [w for w in caught if "fixed by convention" in str(w.message)]
+    convention = [w for w in caught if "fixed by convention" in str(w.message)]
+    assert len(convention) == 1 and "select=True" in str(convention[0].message)
+    assert "x:g:sz:null" not in model._reml_lambdas
     spec = model._interaction_specs["x:g:sz"]
     assert spec._population_convention == "canonical"
     eta = base.predict_eta_exact(model, frame, warn=False)
@@ -1135,17 +1141,28 @@ def _separated_poisson():
     return frame, y
 
 
-def _separated_model(separation: str = "warn") -> SuperGLM:
+def _separated_model(
+    separation: str = "warn",
+    direct_solve: str = "auto",
+    lines: LambdaPolicy | None = None,
+    *,
+    family: str = "poisson",
+    discrete: bool = False,
+    m: int = 2,
+    select: bool = False,
+) -> SuperGLM:
+    """``lines``: one policy for every component of the term; by default only ``wiggle`` is fixed."""
+    policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
-        family="poisson",
+        family=family,
         features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
         interactions=[
-            FactorSmooth(
-                "x", group="g", basis="sz", lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
-            )
+            FactorSmooth("x", group="g", basis="sz", m=m, lambda_policy=policy, select=select)
         ],
         selection_penalty=0,
         separation=separation,
+        direct_solve=direct_solve,
+        discrete=discrete,
     )
 
 
@@ -1162,8 +1179,11 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
     into the level and ``-d / K`` from every level, the population and every
     other level do not move (``_assert_rule_follows``).  The binomial scan,
     on the same design, finds the level whose ones all lie above its zeros
-    (the linear program's side).  Mutations: no scan; the separated levels
-    kept in the mean.
+    (the linear program's side).  Without ``select=True`` the term's lines
+    stay unpenalized whatever its data, and the warning names that option and
+    ``basis="fs"`` (#444).  Mutations: no scan; the separated levels kept in
+    the mean; the lines penalized from the data (the first rule of #457) or
+    on every fit; the warning without the option.
     """
     from superglm.diagnostics.separation import (
         SeparationWarning,
@@ -1181,6 +1201,8 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
     assert issubclass(named[0].category, SeparationWarning)
     assert "'g000'" in str(named[0].message) and "'g001'" in str(named[0].message)
     assert "'g002'" not in str(named[0].message)
+    assert "select=True" in str(named[0].message) and "basis='fs'" in str(named[0].message)
+    assert "x:g:sz:null" not in model._reml_lambdas
     group = next(g for g in model._groups if g.name == "x:g:sz")
     blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
     shifted, step = _family_shift(spec, blocks, (0, 1), float(np.max(np.abs(blocks))))
@@ -1201,6 +1223,639 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
         dm, spec._population_null_space, None, binary, ("zero", "one")
     )
     assert 3 in found and 2 not in found
+
+
+def _working_rows(model: SuperGLM):
+    """``(A, S, theta, mu, slope, fisher)`` at the retained fit, in the predictor's coordinates.
+
+    ``A = [1, X - 1 c']`` and ``theta = (alpha, beta)`` with the fit's centred
+    state ``(alpha, c)`` (``prediction_centred_state``), so ``A theta`` is the
+    fit's linear predictor; ``S`` is the penalty, with a zero row and column
+    for the intercept.  Unit prior weights; ``slope = h' / V`` and ``fisher =
+    h' slope``, the observed weight as well under the canonical links used here.
+    """
+    from superglm.model.base import prediction_centred_state
+
+    alpha, centre, _ = prediction_centred_state(model.result)
+    dm = model._dm
+    X = np.asarray(dm.toarray(), dtype=np.float64)
+    if centre is not None:
+        X = X - centre[None, :]
+    A = np.column_stack([np.ones(len(X)), X])
+    S = np.zeros((A.shape[1], A.shape[1]))
+    S[1:, 1:] = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, dm.p, model._reml_penalties
+    )
+    theta = np.concatenate([[alpha], np.asarray(model.result.beta, dtype=np.float64)])
+    eta = A @ theta
+    link, family = model._link, model._distribution
+    mu, d1 = link.inverse(eta), link.deriv_inverse(eta)
+    slope = d1 / family.variance(mu)
+    return A, S, theta, mu, slope, d1 * slope
+
+
+def _scaled_kappa_eta(model: SuperGLM) -> float:
+    """``kappa_s eta`` of the fit's ``H = A' W A + S`` (``_working_rows``).
+
+    A backward-stable factorization perturbs the Jacobi-scaled ``H`` by at
+    most ``eta = q gamma_(n+q+1) max_ij (|A|' W |A| + |S|)_ij / sqrt(H_ii
+    H_jj)`` in the 2-norm (Higham 2002, Theorems 10.3 and 19.4, as
+    ``test_sum_to_zero_tree_factor._logdet_agreement``); ``kappa_s`` is the
+    scaled condition number.  Below ``1 / 2`` the system has one solution in
+    working precision.  An exact alias makes ``kappa_s`` near ``1 / u``.
+    """
+    A, S, _, _, _, fisher = _working_rows(model)
+    H = A.T @ (fisher[:, None] * A) + S
+    magnitude = np.abs(A).T @ (fisher[:, None] * np.abs(A)) + np.abs(S)
+    scale = 1.0 / np.sqrt(np.diag(H))
+    q = H.shape[0]
+    eta = q * _gamma(A.shape[0] + q + 1) * float(np.max(scale[:, None] * magnitude * scale))
+    return float(np.linalg.cond(scale[:, None] * H * scale[None, :])) * eta
+
+
+def _mode_gap(model: SuperGLM, y: np.ndarray) -> np.ndarray:
+    """A first-order bound on ``|theta - theta*|``, entrywise, at the retained fit.
+
+    ``test_nested_structured_fit._fixed_point_gap`` in ``_working_rows``'
+    coordinates: ``theta - theta* = H^-1 g`` to first order, ``g = A's - S
+    theta`` the penalized score with ``s = (y - mu) h' / V``, summed exactly
+    over products rounded once (``2 eps |A|' |s| + 2 eps |S| |theta|``).  Each
+    score row is within ``16 eps |h' / V| (|y| + |mu|)`` and moves by ``W |d
+    eta|``, ``|d eta| <= (m + 1) eps |A| |theta|`` over a row's ``m``
+    nonzeros.  These go through ``|H^-1|`` and add to ``|H^-1 g|``: the solves'
+    rounding and the stop rule's resolution together, whichever iteration
+    stopped the fit.
+    """
+    A, S, theta, mu, slope, fisher = _working_rows(model)
+    inverse = np.linalg.inv(A.T @ (fisher[:, None] * A) + S)
+    score = (y - mu) * slope
+    terms = np.vstack([A * score[:, None], -(S * theta).T])
+    g = np.array([math.fsum(column) for column in terms.T])
+    d_eta = (np.count_nonzero(A, axis=1) + 1) * EPS * (np.abs(A) @ np.abs(theta))
+    rows = fisher * d_eta + 16 * EPS * np.abs(slope) * (np.abs(y) + np.abs(mu))
+    error = np.abs(A).T @ (rows + 2 * EPS * np.abs(score)) + 2 * EPS * np.abs(S) @ np.abs(theta)
+    return np.abs(inverse @ g) + np.abs(inverse) @ error
+
+
+def _prediction_rows(model: SuperGLM, frame: pd.DataFrame, *, population: bool) -> np.ndarray:
+    """``Z`` with ``Z theta`` the predictor ``predict`` evaluates (``_working_rows``' coordinates).
+
+    The intercept and each term's centred columns; the population skips the
+    ``sz`` term, which no level stays out of once it selects its lines.
+    """
+    from superglm.model.base import _prediction_plan, prediction_centred_state
+
+    _, centre, _ = prediction_centred_state(model.result)
+    Z = np.zeros((len(frame), 1 + len(model.result.beta)))
+    Z[:, 0] = 1.0
+    plan = _prediction_plan(model)
+    for term in plan["features"] + plan["interactions"]:
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth):
+            if population:
+                continue
+            columns = spec.transform(frame["x"].to_numpy(dtype=float), frame["g"].to_numpy())
+        else:
+            columns = spec.transform(frame[term["name"]].to_numpy(dtype=float))
+        index = np.asarray(term["beta_idx"])
+        shift = 0.0 if centre is None else centre[index][None, :]
+        Z[:, 1 + index] = np.asarray(columns, dtype=np.float64) - shift
+    return Z
+
+
+def _line_bound(model: SuperGLM, frame: pd.DataFrame, y: np.ndarray) -> np.ndarray:
+    """Per row of ``frame``, a bound on ``|b(x)' beta_l|``, any level's deviation from the population.
+
+    Each of the ``K`` levels' blocks pays ``beta_l' P beta_l``, ``P = lambda_w
+    Omega_w + lambda_N Omega_N`` (the term's two components; their sum over
+    the levels is the term's penalty), so ``|b(x)' beta_l| <= sqrt(b(x)' P^-1
+    b(x)) sqrt(beta_l' P beta_l)`` (Cauchy-Schwarz in ``P``).  The fit
+    minimizes ``D + theta' S theta`` to within ``eps = 2 phi reml_tol (1 +
+    |V|)`` (``_assert_fits_as_gram``), so it costs no more than the same
+    coefficients with the term removed, which keeps every other penalty:
+    ``sum_l beta_l' P beta_l <= D(theta_0) - D(theta) + eps``.  The data and
+    the other terms fix that, wherever the solver went.  Without the lines'
+    penalty (``select=False``) ``P`` is singular on them and nothing bounds a
+    separated line.
+    """
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    lam = model._reml_lambdas
+    components = dict(spec._base_penalty_components)
+    P = np.diag(
+        lam["x:g:sz:wiggle"] * np.diag(components["wiggle"])
+        + lam["x:g:sz:null"] * np.diag(components["null"])
+    )
+    # A zero here makes the bound +inf, which every deviation would pass.
+    assert np.all(np.diag(P) > 0.0), "the term's penalty leaves a coordinate unpenalized"
+    A, _, theta, _, _, _ = _working_rows(model)
+    term = slice(1 + group.sl.start, 1 + group.sl.stop)
+    eta = A @ theta
+
+    def deviance(eta: np.ndarray) -> float:
+        return float(np.sum(model._distribution.deviance_unit(y, model._link.inverse(eta))))
+
+    eps = 2.0 * float(model.result.phi) * 1e-9 * (1.0 + abs(float(model._reml_result.objective)))
+    room = deviance(eta - A[:, term] @ theta[term]) - deviance(eta) + eps
+    basis = spec.marginal_basis(frame["x"].to_numpy(dtype=float))
+    return np.sqrt(np.einsum("ij,ij->i", basis, basis / np.diag(P)[None, :]) * max(room, 0.0))
+
+
+def _sz_warnings(caught) -> list:
+    """The warnings an ``sz`` term raises at fit: every one names ``(basis='sz')``."""
+    return [w for w in caught if "(basis='sz')" in str(w.message)]
+
+
+def test_a_selected_sz_term_bounds_its_separated_lines() -> None:
+    """``select=True`` bounds separated ``sz`` lines, on both solvers, and only when the term asks (#444).
+
+    g000 has no claim and g001's claims sit at one ``x`` below its other rows:
+    neither unpenalized line has a finite estimate, and on master each walked
+    for as long as the fit ran (to the log link's clip, ``eta = -80``, on its
+    rows, as the real-data model #444 reports does), the solver deciding
+    where it stopped.  With ``select=True`` every level's line carries Marra
+    & Wood's null-space penalty, with a smoothing parameter REML estimates
+    (``x:g:sz:null``), so no line is unpenalized and the fit warns of none.
+    Each level's deviation from the population curve is within
+    ``_line_bound``, which the data fix, and the structured and dense
+    solvers reach one fit (``_assert_fits_as_gram``).  No level stays out of
+    the population, so the report carries no population diagnostics, as for
+    any such fit.  The term's option decides, never the data: a response
+    that no line separates keeps the penalty.  Mutations: no penalty
+    (master); the penalty from the data alone (the first rule of #457, which
+    drops it for the joined response); every penalized fit's report given
+    the population diagnostics (ec74c786).
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    grid = pd.DataFrame(
+        {
+            "x": np.tile(np.linspace(0.0, 1.0, 21), 3),
+            "g": np.repeat(np.array(["g000", "g001", "g002"], dtype=object), 21),
+        }
+    )
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = _separated_model(direct_solve=solve, select=True).fit_reml(frame, y)
+        assert not _sz_warnings(caught)
+        lam = model._reml_lambdas.get("x:g:sz:null")
+        assert lam is not None and 0.0 < lam < np.inf
+        assert bool(model._reml_result.converged)
+        assert not model._interaction_specs["x:g:sz"]._has_population_offset
+        eta = base.predict_eta_exact(model, grid, warn=False)
+        population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
+        slack = 4.0 * _rounding_bound(model, grid)
+        assert np.all(np.abs(eta - population) <= _line_bound(model, grid, y) + slack)
+        models[solve] = model
+    _assert_fits_as_gram(models["structured"], models["gram"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        diagnostics = models["gram"].factor_smooth("x:g:sz").diagnostics
+    assert not {"population_convention", "thin_levels", "separated_levels"} & set(diagnostics)
+
+    joined = y.copy()
+    g, x = frame["g"].to_numpy(), frame["x"].to_numpy()
+    none, one = np.flatnonzero(g == "g000"), np.flatnonzero(g == "g001")
+    joined[none[:2]] = 1.0
+    joined[one[np.argmax(x[one])]] = 1.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        plain = _separated_model(select=True).fit_reml(frame, joined)
+    assert not _sz_warnings(caught)
+    assert 0.0 < plain._reml_lambdas["x:g:sz:null"] < np.inf
+
+
+def test_an_sz_term_selects_its_lines_when_declared() -> None:
+    """``select=True`` puts the lines' ``null`` component in the term's design at build (#444).
+
+    The component is Marra & Wood's null-space penalty: the indicator of the
+    wiggle penalty's zero diagonal (the natural parameterization), exactly,
+    one coordinate per order of ``m``.  One policy for the term covers both
+    components, and a dict may name ``null``.  A policy that fixes either
+    component at zero would leave part of every level unpenalized, so it is
+    refused when the term is declared, as are ``select`` on ``basis="fs"``
+    and a ``null`` entry without ``select``.  Mutations: no ``null``
+    component at build; no check of a zero policy.
+    """
+    rng = np.random.default_rng(5)
+    x = rng.uniform(size=400)
+    g = np.array([f"g{v}" for v in rng.integers(0, 4, 400)], dtype=object)
+    fixed = LambdaPolicy.fixed
+    for m in (2, 3):
+        plain = FactorSmooth("x", group="g", basis="sz", m=m).build(x, g, {})
+        assert [name for name, _ in plain.repeated_penalty_components] == ["wiggle"]
+        policy = {"null": fixed(2.0)}
+        info = FactorSmooth(
+            "x", group="g", basis="sz", m=m, select=True, lambda_policy=policy
+        ).build(x, g, {})
+        assert [name for name, _ in info.repeated_penalty_components] == ["wiggle", "null"]
+        wiggle, null = (component for _, component in info.repeated_penalty_components)
+        assert np.array_equal(wiggle, plain.repeated_penalty_components[0][1])
+        assert np.array_equal(null, np.diag((np.diag(wiggle) == 0.0).astype(np.float64)))
+        assert np.count_nonzero(null) == m
+        assert info.lambda_policies == {"wiggle": LambdaPolicy.estimate(), "null": fixed(2.0)}
+    single = FactorSmooth("x", group="g", basis="sz", select=True, lambda_policy=fixed(3.0))
+    assert single.build(x, g, {}).lambda_policies == {"wiggle": fixed(3.0), "null": fixed(3.0)}
+
+    off = LambdaPolicy.off()
+    for policy in (off, {"wiggle": off}, {"null": off}, {"null": fixed(0.0)}):
+        with pytest.raises(ValueError, match="at zero"):
+            FactorSmooth("x", group="g", basis="sz", select=True, lambda_policy=policy)
+    with pytest.raises(ValueError, match="applies to basis='sz'"):
+        FactorSmooth("x", group="g", basis="fs", select=True)
+    with pytest.raises(ValueError, match="unknown component names"):
+        FactorSmooth("x", group="g", basis="sz", lambda_policy={"null": fixed(1.0)})
+    with pytest.raises(TypeError, match="select must be a bool"):
+        FactorSmooth("x", group="g", basis="sz", select=1)
+
+
+def test_selected_sz_lines_are_a_selection_component() -> None:
+    """``select=True``'s ``null`` component carries the ``selection`` tag, as ``Spline(select=True)``'s does.
+
+    The exact and discrete REML bootstraps key their no-signal snap on that
+    tag (``quad << trace``: the Fellner-Schall update is then nearly a fixed
+    point for any lambda).  The snap targets the upper bound, but an ``sz``
+    group's name holds ``:``, so the bootstrap's step cap limits it to
+    ``e**4`` per step, where a ``Spline`` main effect jumps to the bound.
+    This test pins the tag only, not a change in any fit.  Mutation: the
+    component tagged ``"null"`` fails.
+    """
+    rng = np.random.default_rng(11)
+    n = 1500
+    x = rng.uniform(size=n)
+    frame = pd.DataFrame(
+        {"x": x, "g": np.array([f"g{v:02d}" for v in rng.integers(0, 8, n)], dtype=object)}
+    )
+    y = rng.poisson(np.exp(0.4 + 0.5 * np.sin(3 * x))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(n_knots=6)},
+        interactions=[FactorSmooth("x", group="g", basis="sz", select=True)],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    types = {pc.name: pc.component_type for pc in model._reml_penalties}
+    assert types["x:g:sz:null"] == "selection"
+    assert types["x:g:sz:wiggle"] == "wiggle"
+
+
+def test_an_all_thin_sz_term_names_select_whatever_its_separation_mode() -> None:
+    """Without ``select``, an all-thin term with a separated line names the option in every mode (#444).
+
+    Every level at one ``x`` and one level without claims.  Under
+    ``"ignore"`` the canonical population's warning is the only sign, and it
+    names ``select=True``; under ``"warn"`` the ``SeparationWarning`` does
+    too.  With ``select=True`` neither warning fires: no line is unpenalized.
+    Mutations: the remedy left out of either warning; the penalty from the
+    data alone.
+    """
+    rng = np.random.default_rng(11)
+    g = np.repeat(np.arange(8), 200)
+    x = np.linspace(0.05, 0.95, 8)[g]
+    y = rng.poisson(np.exp(-2.0 + x)).astype(float)
+    y[g == 3] = 0.0
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v:03d}" for v in g], dtype=object)})
+    for separation, separated in (("ignore", 0), ("warn", 1)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = _separated_model(separation, direct_solve="gram").fit_reml(frame, y)
+        assert "x:g:sz:null" not in model._reml_lambdas
+        convention = [w for w in caught if "fixed by convention" in str(w.message)]
+        assert len(convention) == 1 and "select=True" in str(convention[0].message)
+        lines = [w for w in caught if "unpenalized line" in str(w.message)]
+        assert len(lines) == separated
+        assert all("select=True" in str(w.message) for w in lines)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _separated_model(direct_solve="gram", select=True).fit_reml(frame, y)
+    assert 0.0 < model._reml_lambdas["x:g:sz:null"] < np.inf
+    assert not _sz_warnings(caught)
+
+
+def test_a_declared_empty_sz_level_is_weightless_when_the_term_selects_its_lines() -> None:
+    """``levels=`` may name a level the fit never sees once the term selects its lines (#457).
+
+    Without ``select`` the empty level breaks the sum-to-zero contrast, so it
+    is refused, and the message names ``select=True``. With it, every level's
+    line is penalized, so the empty block is proper: it is recorded as
+    weightless and predicted at the population curve, as a zero-weight level
+    is. Mutation: the guard applied whatever ``select`` is.
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    declared = [*sorted(frame["g"].unique()), "g999"]
+
+    def model(select: bool) -> SuperGLM:
+        return SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    levels=declared,
+                    select=select,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        )
+
+    with pytest.raises(ValueError, match="select=True"):
+        model(False).fit_reml(frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = model(True).fit_reml(frame, y)
+    spec = fitted._interaction_specs["x:g:sz"]
+    assert spec._weightless_levels == (declared.index("g999"),)
+    grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 11), "g": "g999"})
+    eta = base.predict_eta_exact(fitted, grid, warn=False)
+    population = base.predict_eta_exact(fitted, grid, random_effects="population", warn=False)
+    assert np.array_equal(eta, population)
+
+
+def _superlss_with_a_declared_empty_sz_level():
+    """A SuperLSS location with a ``select=True`` sz term whose declared level ``d`` has no weight.
+
+    The ``g`` main effect declares ``d`` too, so public prediction accepts it.
+    """
+    from superglm.distributional import Predictor
+    from superglm.distributional.families.gaussian import GaussianLS
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(7)
+    n = 900
+    x = rng.uniform(-1.0, 1.0, n)
+    g = rng.choice(["a", "b", "c", "d"], n)
+    slope = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.1, "d": 0.6}).to_numpy()
+    y = 0.7 * np.sin(2.2 * x) + slope * x + 0.3 * rng.standard_normal(n)
+    weight = np.where(g == "d", 0.0, 1.0)
+    frame = pd.DataFrame({"x": x, "g": g})
+    declared = ["a", "b", "c", "d"]
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor(
+                "location",
+                {"x": Spline("cr", k=6), "g": Categorical(levels=declared)},
+                interaction_specs={
+                    "x:g:sz": FactorSmooth(
+                        "x", group="g", basis="sz", k=6, select=True, levels=declared
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ],
+    )
+    lambdas = {"location:x#wiggle": 1.0, "location:x:g:sz#wiggle": 1.0, "location:x:g:sz#null": 1.0}
+    return model, frame, y, weight, lambdas
+
+
+def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
+    """SuperLSS records a ``select=True`` sz term's weightless levels and predicts them as SuperGLM does (#457).
+
+    SuperLSS drops rows of weight 0 before it builds the design, so a level
+    is weightless there when ``levels=`` declares it and no row of positive
+    weight carries it (allowed under ``select=True``). Its block has no data
+    term, and the sum-to-zero constraint alone fixes it. It is predicted at
+    the population curve, as an unseen level is, and public prediction names
+    it in one warning, as SuperGLM's ``predict`` does; rows of other levels
+    warn nothing. Mutations: no recording at the SuperLSS fit; the
+    prediction scoring raw blocks; the names discarded, on either the point
+    or the posterior-draw path.
+    """
+    model, frame, y, weight, lambdas = _superlss_with_a_declared_empty_sz_level()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = model.fit(frame, y, sample_weight=weight, lambdas=lambdas)._require_fitted()
+    from superglm.distributional.prediction_design import _score_interaction, _term_indices
+
+    predictor = fitted.compiled_predictors[0]
+    spec = predictor.compiled.interaction_specs["x:g:sz"]
+    assert spec._weightless_levels == (3,)
+    # The term's coefficients as SuperLSS's prediction slices them (``_predict_one_eta``).
+    state = fitted.layout.predictors[predictor.parameter_index]
+    local = fitted.result.coefficients[state.coefficient_slice]
+    slopes = local[int(state.intercept_index is not None) :]
+    beta = slopes[_term_indices(predictor.compiled.groups, "x:g:sz")]
+    grid_x = np.linspace(-0.9, 0.9, 7)
+    level_d = np.array(["d"] * len(grid_x), dtype=object)
+    scored = _score_interaction(spec, grid_x, level_d, beta)
+    population, _ = spec._score_identified(grid_x, level_d, beta, population=True)
+    assert np.array_equal(scored, population)
+    assert not np.allclose(spec.score(grid_x, level_d, beta), population)
+
+    named = "predicted at the population value: location term 'x:g:sz' levels d."
+    for predict in (
+        model.predict_link,
+        lambda frame: model.posterior_predictive(frame, n_draws=4, seed=0),
+        lambda frame: model.posterior_bounds(frame, "mean", n_draws=4, seed=0),
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            predict(pd.DataFrame({"x": grid_x, "g": level_d}))
+            predict(pd.DataFrame({"x": grid_x, "g": "a"}))
+        user = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert [(str(w.message).endswith(named), w.filename) for w in user] == [(True, __file__)]
+
+
+@pytest.mark.parametrize("component", ["wiggle", "null"])
+def test_superlss_refuses_a_zero_fixed_lambda_on_selected_sz_lines(component) -> None:
+    """A fixed-lambda SuperLSS fit refuses zero on a ``select=True`` sz term's components (#457).
+
+    The constructor refuses a ``LambdaPolicy`` fixed at zero there; a zero in
+    ``fit(lambdas=)`` is the same model.  With ``null`` at zero, the declared
+    empty level's line has neither data nor penalty.  Mutation: without the
+    check the fit is accepted and the level recorded as weightless.
+    """
+    model, frame, y, weight, lambdas = _superlss_with_a_declared_empty_sz_level()
+    lambdas[f"location:x:g:sz#{component}"] = 0.0
+    with pytest.raises(ValueError, match=r"select=True penalizes every level's line"):
+        model.fit(frame, y, sample_weight=weight, lambdas=lambdas)
+
+
+def test_a_weightless_sz_level_beside_selected_lines_predicts_the_population() -> None:
+    """A level without weight is predicted at the population curve when the term selects its lines (#444).
+
+    The level has no data term, so the sum-to-zero constraint alone fixes its
+    block: minus the other levels' deviations, shrunk but not zero.  As in
+    every other ``sz`` fit and for an unseen level, it is predicted at the
+    population curve, which stays the main effect (``c = 0`` to the rule's
+    rounding), and ``predict`` names it.  ``factor_smooth()`` reports a curve
+    of zero with no band, as for an unpenalized fit
+    (``test_sz_reports_agree_with_the_population_prediction``), and lists it
+    as the one level the data leave out; no line separates.  Mutations: the
+    selected record without the weightless levels (Claude review of
+    4dd54555); the report's band kept for it (Claude review of 8fbdadda);
+    ``_unidentified_level_names`` without the weightless levels, which
+    leaves ``thin_levels`` empty (Claude review of ec74c786).
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    weight = np.where(frame["g"].to_numpy() == "g005", 0.0, 1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _separated_model(direct_solve="gram", select=True).fit_reml(
+            frame, y, sample_weight=weight
+        )
+    spec = model._interaction_specs["x:g:sz"]
+    assert "x:g:sz:null" in model._reml_lambdas
+    assert spec._weightless_levels == (5,)
+    assert spec._unidentified_levels == () and spec._separated_levels == ()
+    grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 21), "g": "g005"})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = base.predict_eta_exact(model, grid)
+    named = _thin_warnings(caught)
+    assert len(named) == 1 and "g005" in str(named[0].message)
+    population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
+    assert np.array_equal(eta, population)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        report = model.factor_smooth("x:g:sz", levels=["g005"])
+    assert np.all(report.curves["effect"].to_numpy() == 0.0)
+    assert np.all(report.curves["posterior_se"].to_numpy() == 0.0)
+    assert report.diagnostics["population_convention"] == "main"
+    assert report.diagnostics["thin_levels"] == ["g005"]
+    assert report.diagnostics["separated_levels"] == []
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    offset = spec._population_offset(blocks)
+    count = len(blocks) * spec.k + 4 * spec.k + 2
+    assert np.all(np.abs(offset) <= _gamma(count) * np.abs(blocks).sum(axis=0))
+
+
+@pytest.mark.parametrize(
+    ("family", "discrete", "m"),
+    [("poisson", True, 2), ("binomial", False, 2), ("poisson", False, 3)],
+    ids=["discrete", "binomial", "m3"],
+)
+def test_selected_sz_lines_stay_bounded_across_designs(family, discrete, m) -> None:
+    """``select=True`` bounds separated lines on a discrete design, under binomial, and at ``m = 3``.
+
+    ``test_a_selected_sz_term_bounds_its_separated_lines``' fixture, its
+    responses made binary for the binomial case: each fit carries the
+    ``null`` component on a discrete design's bins, the binomial boundary and
+    a quadratic null space, warns of no unpenalized line and keeps every
+    level within ``_line_bound`` of the population (Claude review of
+    55eda85f).  Mutation: no penalty (master).
+    """
+    from superglm.model import base
+
+    frame, y = _separated_poisson()
+    if family == "binomial":
+        y = (y > 0).astype(float)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _separated_model(family=family, discrete=discrete, m=m, select=True).fit_reml(
+            frame, y
+        )
+    assert not _sz_warnings(caught)
+    assert 0.0 < model._reml_lambdas["x:g:sz:null"] < np.inf
+    grid = pd.DataFrame(
+        {
+            "x": np.tile(np.linspace(0.0, 1.0, 21), 3),
+            "g": np.repeat(np.array(["g000", "g001", "g002"], dtype=object), 21),
+        }
+    )
+    eta = base.predict_eta_exact(model, grid, warn=False)
+    population = base.predict_eta_exact(model, grid, random_effects="population", warn=False)
+    slack = 4.0 * _rounding_bound(model, grid)
+    assert np.all(np.abs(eta - population) <= _line_bound(model, grid, y) + slack)
+
+
+@pytest.mark.parametrize("case", ["all_thin", "separated"])
+def test_selected_sz_lines_predict_alike_on_both_solvers(case) -> None:
+    """With every level thin, or a line separated, ``select=True`` fits predict alike on both solvers (#444).
+
+    Every level at one ``x`` (the Sol review's fixture): the levels' lines
+    and the main effect's unpenalized curve were an exact alias, and the
+    population off the levels' ``x`` values followed each solver's point
+    along it (``+-585`` on ``auto`` against ``-0.03 .. 1.07`` on ``gram`` at
+    #440's head, and still ``7.9e-4`` apart on master, as without
+    ``select``).  With the lines' penalty (``select=True``) and every
+    smoothing parameter fixed (one policy for the term), the
+    penalized system has one solution in working precision (``kappa_s eta <
+    1/2``, ``_scaled_kappa_eta``; master's alias puts it near ``1 / u``), and
+    each fit is within ``_mode_gap`` of it, so on a grid every level's curve
+    and the population's agree within ``|Z| (gap_a + gap_g)`` plus each
+    evaluation's ``(m + 1) eps |Z| |theta|`` (``Z`` the predictor's rows,
+    ``_prediction_rows``, checked against ``predict`` first).  The separated
+    fixture holds the same on its walked levels.  Mutation: no penalty
+    (master, or ``select=False``), where the singular system fails the first
+    check.
+    """
+    from superglm.model import base
+
+    if case == "all_thin":
+        frame, y = _all_thin_frame()
+        build = lambda solve: _all_thin_model(  # noqa: E731
+            solve, LambdaPolicy.fixed(1.0), select=True
+        )
+        levels = ("g0", "g3", "g9")
+    else:
+        frame, y = _separated_poisson()
+        build = lambda solve: _separated_model(  # noqa: E731
+            direct_solve=solve, lines=LambdaPolicy.fixed(1.0), select=True
+        )
+        levels = ("g000", "g001", "g002")
+    x = np.linspace(float(frame["x"].min()), float(frame["x"].max()), 41)
+    grid = pd.DataFrame(
+        {"x": np.tile(x, len(levels)), "g": np.repeat(np.array(levels, dtype=object), len(x))}
+    )
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            models[solve] = build(solve).fit_reml(frame, y)
+        assert models[solve]._reml_lambdas["x:g:sz:null"] == 1.0
+    assert models["structured"]._reml_profile["direct_backend"] == "structured"
+    for population in (False, True):
+        etas, reach = [], np.zeros(len(grid))
+        for model in models.values():
+            assert _scaled_kappa_eta(model) < 0.5
+            theta = _working_rows(model)[2]
+            Z = _prediction_rows(model, grid, population=population)
+            eta = base.predict_eta_exact(
+                model,
+                grid,
+                random_effects="population" if population else "conditional",
+                warn=False,
+            )
+            rounding = (np.count_nonzero(Z, axis=1) + 1) * EPS * (np.abs(Z) @ np.abs(theta))
+            assert np.all(np.abs(Z @ theta - eta) <= 2.0 * rounding)
+            reach += np.abs(Z) @ _mode_gap(model, y) + rounding
+            etas.append(eta)
+        assert np.all(np.abs(etas[0] - etas[1]) <= reach)
+
+
+def test_an_all_thin_sz_term_selects_its_lines_under_reml() -> None:
+    """The Sol review's all-thin fit with ``select=True``, its lines' smoothing parameter estimated.
+
+    The fit estimates ``x:g:sz:null`` by REML and warns of nothing: no level
+    is left to a convention.  The structured and dense solvers reach the same
+    penalized objective and rank (``_assert_fits_as_gram``), where without
+    the penalty the objective was flat along the alias and each solver kept
+    its own point.  Mutation: no penalty (master, or ``select=False``).
+    """
+    frame, y = _all_thin_frame()
+    models = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            models[solve] = _all_thin_model(solve, select=True).fit_reml(frame, y)
+        assert not _sz_warnings(caught)
+        assert 0.0 < models[solve]._reml_lambdas["x:g:sz:null"] < np.inf
+    _assert_fits_as_gram(models["structured"], models["gram"])
 
 
 def test_an_sz_model_saved_before_the_record_predicts_as_refitted() -> None:
@@ -2115,3 +2770,27 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     np.testing.assert_array_equal(
         _nan_mask(model, frame, y, weight), _nan_mask(gram, frame, y, weight)
     )
+
+
+@pytest.mark.parametrize("solve", ["structured", "gram"])
+def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
+    """``select=True`` adds a penalty, not data, so standard errors keep the data-only estimability rule.
+
+    Every level of Sol's all-thin fixture sits at one ``x``: the data alias
+    each level's line with the main effect, and the ``null`` penalty alone
+    pins it.  A direction only a penalty pins is not estimable, so its
+    standard errors are missing (NaN), on exactly the coordinates a null
+    vector of ``[1, X]`` touches, as without ``select`` and as a random
+    effect's ridge-identified directions are.  The credibility page says so.
+    Mutation: estimability read from the fit's penalized system, which
+    ``select=True`` makes positive definite, reports every one finite.
+    """
+    frame, y = _all_thin_frame()
+    weight = np.ones(len(y))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _all_thin_model(solve, select=True).fit_reml(frame, y)
+    assert model._reml_profile["direct_backend"] == solve
+    missing = _nan_mask(model, frame, y, weight)
+    assert missing.any()
+    assert np.array_equal(missing, _structurally_non_estimable(model, weight))

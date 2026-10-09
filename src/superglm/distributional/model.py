@@ -32,6 +32,7 @@ from superglm.distributional.prediction_design import (
     _score_feature,
     _score_interaction,
     _term_indices,
+    warn_population_levels,
 )
 from superglm.distributional.predictor import (
     CompiledPredictor,
@@ -162,6 +163,7 @@ def _predict_one_eta(
     layout: StackedLayout,
     result: DenseSolverResult,
     offset: NDArray,
+    named: list[str] | None = None,
 ) -> NDArray[np.float64]:
     state = layout.predictors[predictor.parameter_index]
     local_coefficients = result.coefficients[state.coefficient_slice]
@@ -184,12 +186,16 @@ def _predict_one_eta(
         interaction = predictor.compiled.interaction_specs[name]
         indices = _term_indices(predictor.compiled.groups, name)
         left_name, right_name = interaction.parent_names
+        levels: list = []
         contribution = _score_interaction(
             interaction,
             frame.column_array(left_name),
             frame.column_array(right_name),
             slopes[indices],
+            named=levels,
         )
+        if levels and named is not None:
+            named.append(f"{predictor.name} term {name!r} levels {', '.join(map(str, levels))}")
         eta += _as_contribution(contribution, n_observations=len(frame), term_name=name)
         assigned[indices] = True
 
@@ -319,6 +325,7 @@ class DenseDistributionalModel:
             )
         )
         frame.require_columns(required_columns)
+        named: list[str] = []
         eta = np.column_stack(
             tuple(
                 _predict_one_eta(
@@ -327,10 +334,12 @@ class DenseDistributionalModel:
                     self.layout,
                     self.result,
                     resolved_offsets[predictor.name],
+                    named,
                 )
                 for predictor in self.compiled_predictors
             )
         )
+        warn_population_levels(named)
         return _readonly(eta)
 
     def predict_parameters(
@@ -427,7 +436,15 @@ def _clone_predictor_templates(predictors: Sequence[Predictor]) -> tuple[Predict
 def _fixed_fit_lambdas(
     layout: StackedLayout,
     supplied: Mapping[str, float] | None,
+    selected_lines: tuple[str, ...] = (),
 ) -> dict[str, float]:
+    """The fit's lambda for every penalty component, in layout order.
+
+    ``selected_lines`` holds the name prefixes of ``select=True`` ``sz``
+    terms.  Their components refuse zero, as ``FactorSmooth`` refuses a
+    policy fixed at zero: part of every level would stay unpenalized, and a
+    declared level with no rows would leave the system singular.
+    """
     values: Mapping[str, float] = {} if supplied is None else supplied
     if not isinstance(values, Mapping):
         raise TypeError("lambdas must be a qualified penalty-name mapping")
@@ -454,9 +471,30 @@ def _fixed_fit_lambdas(
         if not np.isfinite(numeric) or numeric < 0.0:
             raise ValueError(f"lambda for {component.name!r} must be finite and nonnegative")
         resolved[component.name] = numeric
+    unpenalized = sorted(
+        name for name, value in resolved.items() if value == 0.0 and name.startswith(selected_lines)
+    )
+    if unpenalized:
+        raise ValueError(
+            f"select=True penalizes every level's line beside its wiggle, but lambdas fixes "
+            f"{unpenalized!r} at zero, which leaves part of every level unpenalized. Use "
+            "select=False for unpenalized lines, or pass a positive lambda."
+        )
     if missing:
         raise ValueError(f"missing penalty lambda names: {sorted(missing)}")
     return resolved
+
+
+def _selected_line_prefixes(compiled: Sequence[CompiledPredictor]) -> tuple[str, ...]:
+    """Penalty-name prefixes of every ``select=True`` ``sz`` term, ``"<parameter>:<term>#"``."""
+    from superglm.features.factor_smooth import FactorSmooth
+
+    return tuple(
+        f"{predictor.name}:{name}#"
+        for predictor in compiled
+        for name, spec in predictor.compiled.interaction_specs.items()
+        if isinstance(spec, FactorSmooth) and spec._selects_lines
+    )
 
 
 def _fit_candidate(
@@ -562,7 +600,7 @@ def _fit_candidate(
     allow_wide_design(layout.n_coefficients)
     if efs_config is None:
         with measure_phase(phase_recorder, "layout_penalty_assembly"):
-            ordered_lambdas = _fixed_fit_lambdas(layout, lambdas)
+            ordered_lambdas = _fixed_fit_lambdas(layout, lambdas, _selected_line_prefixes(compiled))
             penalty = layout.penalty_matrix(ordered_lambdas)
         result = fit_dense_fixed_lambda(
             family,

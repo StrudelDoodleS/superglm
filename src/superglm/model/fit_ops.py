@@ -769,10 +769,13 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     leaves them out, ``FactorSmooth._population_map``), unless the model's
     ``separation`` is ``"ignore"``; a population fixed by the canonical
     convention, or by separated lines alone, is named in a ``UserWarning``.
+    Each names the term's remedy, ``select=True`` (#444): a term that
+    selects its lines has none of these, and nothing here warns for it.
     """
     import warnings
 
     from superglm.diagnostics.separation import (
+        SZ_SELECT_REMEDY,
         SeparationWarning,
         format_factor_smooth_separation,
         response_boundaries,
@@ -805,7 +808,7 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 "polynomial part zero); away from the levels' own x values the population curve, "
                 "and every level's curve, still follow the fit's point along the main effect's "
                 "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
-                "training rows reproduce the fit.",
+                f"training rows reproduce the fit. {SZ_SELECT_REMEDY}",
                 UserWarning,
                 stacklevel=level,
             )
@@ -813,7 +816,7 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
             warnings.warn(
                 f"FactorSmooth {group.name!r} (basis='sz'): every level the data identify has "
                 "an unpenalized line that separates the response, so the population curve is "
-                "their mean and moves with how far the fit walked those lines.",
+                f"their mean and moves with how far the fit walked those lines. {SZ_SELECT_REMEDY}",
                 UserWarning,
                 stacklevel=level,
             )

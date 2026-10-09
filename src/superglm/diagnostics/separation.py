@@ -479,6 +479,15 @@ def separated_factor_smooth_levels(
     return tuple(int(level) for level in np.flatnonzero(separated))
 
 
+#: What a term whose ``sz`` lines are unpenalized can do about it (#444): the
+#: lines' null-space penalty is the term's own option, never the data's.
+SZ_SELECT_REMEDY = (
+    "To give every level a finite, unique curve, pass select=True to this FactorSmooth, "
+    "which penalizes every level's line with a smoothing parameter of its own (the "
+    "null-space penalty of mgcv's select=TRUE), or use basis='fs'."
+)
+
+
 def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int) -> str:
     """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_levels``)."""
     return (
@@ -486,7 +495,6 @@ def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int)
         f"unpenalized line that separates the response: {_format_labels(labels)}. The "
         "likelihood keeps increasing along each such line, so their fitted values walk to "
         "the response boundary for as long as the fit runs. They are left out of the "
-        "population curve, the mean of the levels the data identify. Merge them into "
-        "neighbouring levels, or model the group with a RandomEffect, to give them finite "
-        "estimates; separation='ignore' silences this warning."
+        f"population curve, the mean of the levels the data identify. {SZ_SELECT_REMEDY} "
+        "separation='ignore' silences this warning."
     )

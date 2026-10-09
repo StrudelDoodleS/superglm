@@ -2133,42 +2133,50 @@ def build_penalty_components(
             lp_map = gm.lambda_policies or {}
             if gm.factor_basis == "sz":
                 repeated_components = gm.repeated_penalty_components
-                if len(repeated_components) != 1 or repeated_components[0][0] != "wiggle":
-                    raise ValueError("SZ factor smooths require exactly one 'wiggle' component.")
-                suffix, omega_j = repeated_components[0]
-                local_rank, local_log_det, local_eigvals, omega_ssp_j = _rank_and_logdet(
-                    omega_j,
-                    omega_j,
-                )
+                suffixes = tuple(suffix for suffix, _ in repeated_components)
+                if suffixes not in (("wiggle",), ("wiggle", "null")):
+                    raise ValueError(
+                        "SZ factor smooths require a 'wiggle' component, optionally "
+                        "followed by its level lines' 'null' component."
+                    )
                 n_levels = gm.n_levels
-                full_eigvals = np.sort(
-                    np.concatenate(
-                        (
-                            np.tile(local_eigvals, max(n_levels - 2, 0)),
-                            n_levels * local_eigvals,
+                for suffix, omega_j in repeated_components:
+                    local_rank, local_log_det, local_eigvals, omega_ssp_j = _rank_and_logdet(
+                        omega_j,
+                        omega_j,
+                    )
+                    full_eigvals = np.sort(
+                        np.concatenate(
+                            (
+                                np.tile(local_eigvals, max(n_levels - 2, 0)),
+                                n_levels * local_eigvals,
+                            )
+                        )
+                    )[::-1]
+                    group_components.append(
+                        PenaltyComponent(
+                            name=f"{g.name}:{suffix}",
+                            group_name=g.name,
+                            group_index=idx,
+                            group_sl=g.sl,
+                            omega_raw=omega_j,
+                            omega_ssp=omega_ssp_j,
+                            rank=float((n_levels - 1) * local_rank),
+                            log_det_omega_plus=float(
+                                (n_levels - 1) * local_log_det + local_rank * np.log(n_levels)
+                            ),
+                            eigvals_omega=full_eigvals,
+                            # select=True's lines are a selection penalty, as Spline's null space
+                            # is, so the REML bootstraps' no-signal snap targets them.  For this
+                            # group, whose name holds ':', the bootstrap's step cap limits that
+                            # move to e**4 in lambda per bootstrap step.
+                            component_type="wiggle" if suffix == "wiggle" else "selection",
+                            lambda_policy=lp_map.get(suffix),
+                            penalty_kind="sum_to_zero",
+                            repeat_count=n_levels,
+                            block_width=gm.block_size,
                         )
                     )
-                )[::-1]
-                group_components.append(
-                    PenaltyComponent(
-                        name=f"{g.name}:{suffix}",
-                        group_name=g.name,
-                        group_index=idx,
-                        group_sl=g.sl,
-                        omega_raw=omega_j,
-                        omega_ssp=omega_ssp_j,
-                        rank=float((n_levels - 1) * local_rank),
-                        log_det_omega_plus=float(
-                            (n_levels - 1) * local_log_det + local_rank * np.log(n_levels)
-                        ),
-                        eigvals_omega=full_eigvals,
-                        component_type="wiggle",
-                        lambda_policy=lp_map.get(suffix),
-                        penalty_kind="sum_to_zero",
-                        repeat_count=n_levels,
-                        block_width=gm.block_size,
-                    )
-                )
                 _attach_context_geometry(group_components)
                 components.extend(group_components)
                 continue
@@ -2996,16 +3004,23 @@ def _compute_penalty_logdet_evaluation(
         else:
             result, volume, volume_error = geometry.evaluate(group_values)
             grad, hess = result.gradient, result.hessian
+            if component.penalty_kind == "sum_to_zero":
+                # The local blocks repeat K - 1 times under (I + 1 1') kron P,
+                # whose determinant adds rank(P) log K (the one-component case).
+                extra_volume = math.log(_sum_to_zero_penalty_geometry(component)[0])
         certificate = result._certificate
         if certificate is None:
             raise ValueError("penalty evaluation did not provide arithmetic evidence")
         rank += repeat * result.rank
         term = repeat * math.fsum([result.logdet_s_plus, volume])
-        log_terms.append(term)
-        log_errors.append(
-            repeat * (certificate.logdet_error + volume_error)
-            + 4 * unit * repeat * (abs(result.logdet_s_plus) + abs(volume))
+        error = repeat * (certificate.logdet_error + volume_error) + 4 * unit * repeat * (
+            abs(result.logdet_s_plus) + abs(volume)
         )
+        if extra_volume:
+            term = math.fsum([term, result.rank * extra_volume])
+            error += 4 * unit * (abs(term) + abs(result.rank * extra_volume))
+        log_terms.append(term)
+        log_errors.append(error)
         for i, name_i in enumerate(group_names):
             gradient[name_i] = float(repeat * grad[i])
             gradient_error[name_i] = float(

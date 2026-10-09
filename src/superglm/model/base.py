@@ -631,7 +631,7 @@ def _predict_eta(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
 
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
     from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
@@ -706,10 +706,7 @@ def _predict_eta(
         score(term)
     if unidentified and warn:
         warnings.warn(
-            "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
-            "penalty's null space keep the curve their rows identify and follow the population "
-            "curve's shape where their rows say nothing; levels without weight are predicted at "
-            "the population value: " + "; ".join(unidentified) + ".",
+            SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".",
             UserWarning,
             stacklevel=_PREDICTION_WARNING_STACKLEVEL,
         )

@@ -286,6 +286,28 @@ def _centering_target(spec: Any) -> Any:
     return spec._basis_spline
 
 
+def _record_selected_sz_levels(compiled: CompiledPredictorDesign, weights: NDArray) -> None:
+    """Record each ``select=True`` sz term's weightless levels, as SuperGLM's fit does (#457).
+
+    A level without weight has no data term beside its penalized line, so it
+    is predicted at the population curve (``FactorSmooth._record_unidentified_levels``,
+    read at prediction by ``prediction_design._score_interaction``).  Terms
+    with unpenalized lines keep their SuperLSS prediction.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.group_matrix import FactorSmoothGroupMatrix
+
+    matrices = compiled.design.group_matrices
+    for group, matrix in zip(compiled.groups, matrices, strict=True):
+        spec = compiled.interaction_specs.get(group.feature_name)
+        if (
+            isinstance(spec, FactorSmooth)
+            and spec._selects_lines
+            and isinstance(matrix, FactorSmoothGroupMatrix)
+        ):
+            spec._record_unidentified_levels(matrix, weights)
+
+
 def _center_selected_smooths(
     compiled: CompiledPredictorDesign,
     geometry_weight: NDArray,
@@ -542,6 +564,7 @@ def compile_predictors(
             geometry_weight,
             intercept=predictor.intercept,
         )
+        _record_selected_sz_levels(compiled, weights)
         local_groups = list(compiled.groups)
         local_matrices = list(compiled.design.group_matrices)
         reml_groups = collect_reml_groups(local_groups, local_matrices)

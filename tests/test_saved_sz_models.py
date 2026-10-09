@@ -133,3 +133,44 @@ def test_a_released_sz_model_saved_by_v0_35_0_predicts_and_asks_for_a_refit() ->
     for call in (model.summary, lambda: model.factor_smooth("x:g:sz")):
         with pytest.raises(RuntimeError, match="refit with retain_fit_state=True"):
             call()
+
+
+@pytest.mark.parametrize(
+    "name", ["sz_poisson_separated", "sz_gaussian_all_thin", "sz_gaussian_one_row"]
+)
+def test_an_sz_model_saved_by_v0_36_0_predicts_as_saved(name) -> None:
+    """A v0.36.0 model whose levels its data identify only in part predicts as it did (#444).
+
+    v0.36.0 recorded at fit the thin levels and the levels whose line
+    separates, and predicted them by convention
+    (``scripts/make_saved_sz_v0_36_0_fixtures.py``).  A term penalizes its
+    lines only when it selects them (``select=True``), which a model saved by
+    v0.36.0 cannot: it keeps its convention.  Its conditional
+    predictor on the training rows and on a grid over every level, and its
+    population predictor on the grid, are v0.36.0's within two evaluations'
+    rounding: ``gamma`` over the predictor's products and the convention's
+    rule, times every magnitude they touch (``_eta_magnitude``, Higham 2002,
+    sections 3.1 and 3.5).
+    """
+    from superglm.model import base
+
+    from .test_factor_smooth_sz_thin_and_influence import _eta_magnitude
+
+    with open(FIXTURES.parent / "saved_v0_36_0" / f"{name}.pkl", "rb") as handle:
+        record = pickle.load(handle)
+    assert record["version"] == "0.36.0"
+    model = record["model"]
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._has_population_offset
+    assert not spec._selects_lines
+    assert [name for name, _ in spec._base_penalty_components] == ["wiggle"]
+    count = len(model.result.beta) + len(spec._levels) * spec.k + 4 * spec.k + 2
+    cases = (
+        (record["frame"], "conditional", record["eta"]),
+        (record["grid"], "conditional", record["eta_grid"]),
+        (record["grid"], "population", record["eta_population"]),
+    )
+    for frame, effects, saved in cases:
+        eta = base.predict_eta_exact(model, frame, random_effects=effects, warn=False)
+        bound = 2.0 * _gamma(count) * _eta_magnitude(model, frame)
+        assert np.all(np.abs(eta - saved) <= bound), (effects, float(np.max(np.abs(eta - saved))))
