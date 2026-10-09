@@ -11,46 +11,54 @@ its levels are not shrunk and the other terms are penalised as before.
 
 A level is flagged where the curve lies outside its interval. The curve has
 already moved toward each level's own data, so the gap between them is the
-smoother's residual at that level, whose variance is the free estimate's less
-the curve's (``var(b - f) = var(b)(1 - h)``, with ``h`` the level's leverage
-on the curve): the standardised residual of the mean-shift outlier test (She
-and Owen, "Outlier detection using nonconvex penalized regression", JASA
-2011). Using the curve's Bayesian variance makes the gap's variance an upper
-bound, so the flag errs towards none. The interval is drawn round the free
-estimate with that variance, so a flag and an interval that misses the curve
-are the same thing, and it is widened for the number of levels compared
-(Sidak), so a flag is rarely chance. Each level is judged on its own: making
-one level special changes the curve, and with it every other level's flag.
+smoother's residual at that level, the statistic of the mean-shift outlier
+test (She and Owen, "Outlier detection using nonconvex penalized regression",
+JASA 2011). Both fits are linear in the response to first order, so the gap
+is too, and its variance comes from both linearisations on the same rows,
+taken under the free fit, which holds whether or not the level lies on the
+curve: the cross-model covariance of seemingly unrelated estimation (Weesie,
+Stata Technical Bulletin 52, sg121, 1999), with the family's variance in place
+of the empirical one. The free estimate's variance less the curve's is the
+special case of an efficient curve (Hausman, Econometrica 46(6), 1978), which
+a penalised curve fitted with its own working weights is not. The interval is
+drawn round the free estimate with the gap's variance, so a flag and an
+interval that misses the curve are the same thing, and it is widened for the
+number of levels compared (Sidak), so a flag is rarely chance. Each level is
+judged on its own: making one level special changes the curve, and with it
+every other level's flag.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
+from superglm.distributions import clip_mu
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.editor.refit import fit_refit_model
-from superglm.features.categorical import Categorical
+from superglm.features.categorical import Categorical, _grouping_labels
 from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features, special_labels
-from superglm.inference._term_helpers import _spline_se
 from superglm.inference._term_types import _safe_exp
 from superglm.inference.covariance import covariance_selected_block
+from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
+from superglm.model.state_ops import _grouped_active_state
+from superglm.solvers.mode_score import linear_predictor
+from superglm.solvers.working_rows import fisher_working_weights
 
 # The chance, across all the levels of one term, that no level's interval
 # misses the curve when every level lies on it.
 CONFIDENCE = 0.95
-# Past this leverage the curve's variance leaves the residual's bound no
-# room, so the gap is judged on the free estimate's own variance, which
-# bounds it too: a penalised smoother's residual ``(I - H) b`` varies no
-# more than ``b``.
+# Past this leverage the curve all but passes through the level: what is
+# left of the gap is the two fits' own tolerance, not data, so it is judged
+# on the free estimate's variance instead.
 _MAX_LEVERAGE = 0.99
 _NOT_ORDERED = (
     "Compare with free levels is for ordered terms: every level of {term!r} is free already."
@@ -59,6 +67,11 @@ _NOT_FITTED = "The free levels of {term!r} could not be estimated, so there is n
 _UNDETERMINED = (
     "No free value is drawn for {levels}: the model's other terms cover the same rows, "
     "so the data cannot separate {whose} value from theirs."
+)
+_NOT_LINEARISED = (
+    "Each interval is the free estimate's own, without the curve's pull toward the level: the "
+    "model keeps no fitted design on these rows to measure it. Refit it with "
+    "retain_fit_state=True to include it."
 )
 _NO_DATA = (
     "Comparing with free levels refits the model, which needs its training data: open the "
@@ -101,31 +114,41 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     )
     # Both on the mean-centred scale: a gap measured from the reference
     # would carry the curve's misfit at the reference into every level.
-    free_levels, curve, undetermined = _centred_pair(free_model, session.model, name)
-    # The two fits estimate their dispersion apart; the curve's variance is
-    # put on the free fit's, so the two variances share one scale. A response
-    # the curve fits exactly has no dispersion, and no variance to rescale.
-    curve_phi = float(session.model.result.phi)
-    scale = float(free_model.result.phi) / curve_phi if curve_phi > 0.0 else 0.0
-    payload = _comparison(term, spec, free_levels, curve, curve_scale=scale, shrunk=shrunk)
-    payload["notice"] = (
-        _UNDETERMINED.format(
-            levels=", ".join(undetermined), whose="its" if len(undetermined) == 1 else "their"
+    gaps = _gaps(free_model, session.model, name)
+    payload = _comparison(term, spec, gaps, shrunk=shrunk)
+    notes = []
+    if gaps.undetermined:
+        notes.append(
+            _UNDETERMINED.format(
+                levels=", ".join(gaps.undetermined),
+                whose="its" if len(gaps.undetermined) == 1 else "their",
+            )
         )
-        if undetermined
-        else None
-    )
+    if not gaps.linearised:
+        notes.append(_NOT_LINEARISED)
+    payload["notice"] = " ".join(notes) or None
     return payload
 
 
-def _centred_pair(free_model, model, name: str) -> tuple[dict, dict, list[str]]:
-    """Both fits' level values and errors, centred on the mean of one set of levels.
+@dataclass(frozen=True)
+class _Gaps:
+    """The compared levels' centred values on both fits, and the variances that judge them."""
+
+    labels: list[str]
+    free: np.ndarray
+    curve: np.ndarray
+    free_var: np.ndarray
+    gap_var: np.ndarray
+    undetermined: list[str]
+    linearised: bool
+
+
+def _gaps(free_model, model, name: str) -> _Gaps:
+    """Both fits' level values centred on the mean of one set of levels, and each gap's variance.
 
     The set is the levels the free fit estimated: a declared level with no
     rows has a value on the curve but none free, and centring the two over
-    different sets would move every gap by the same amount. The errors are
-    those of that one contrast, each from its fit's covariance. A term the
-    selection penalty removed is flat, with no variance. The levels whose
+    different sets would move every gap by the same amount. The levels whose
     free value the data cannot separate from other terms are returned apart.
     """
     free_spec, spec = free_model._specs[name], model._specs[name]
@@ -135,17 +158,25 @@ def _centred_pair(free_model, model, name: str) -> tuple[dict, dict, list[str]]:
     labels, undetermined = _determined(
         free_model, name, [label for label in declared if label in estimated]
     )
-    pair = []
-    for fitted, se in (
-        (free_model, _categorical_centred_se(free_model, name, labels)),
-        (model, _ordered_centred_se(model, name, [declared[label] for label in labels])),
-    ):
-        values = _values(fitted, name, labels)
-        centred = values - values.mean()
-        pair.append(
-            {label: (float(c), float(s)) for label, c, s in zip(labels, centred, se, strict=True)}
-        )
-    return pair[0], pair[1], undetermined
+    free_rows = _categorical_contrasts(free_model, name, labels)
+    free_var = _free_variances(free_model, name, free_rows)
+    gap_var = _gap_variances(
+        free_model,
+        free_rows,
+        model,
+        _ordered_contrasts(model, name, [declared[x] for x in labels]),
+        name,
+    )
+    free_values, curve_values = (_values(fitted, name, labels) for fitted in (free_model, model))
+    return _Gaps(
+        labels=labels,
+        free=free_values - free_values.mean(),
+        curve=curve_values - curve_values.mean(),
+        free_var=free_var,
+        gap_var=free_var if gap_var is None else gap_var,
+        undetermined=undetermined,
+        linearised=gap_var is not None,
+    )
 
 
 def _determined(model, name: str, labels: list[str]) -> tuple[list[str], list[str]]:
@@ -209,31 +240,27 @@ def _term_covariance(model, name: str):
     return covariance, active
 
 
-def _categorical_centred_se(model, name: str, labels: list[str]) -> np.ndarray:
-    """Errors of a categorical's levels centred on the mean of ``labels``."""
-    found = _term_covariance(model, name)
-    if found is None:
-        return np.zeros(len(labels))
-    covariance, active = found
-    spec = model._specs[name]
-    indices = np.concatenate([np.arange(g.start, g.end) for g in active if g.feature_name == name])
-    block = covariance_selected_block(covariance, indices)
-    column = {str(level): j for j, level in enumerate(spec._non_base)}
+def _term_columns(active, name: str) -> np.ndarray:
+    """The term's columns in the fit's active coordinates."""
+    return np.concatenate([np.arange(g.start, g.end) for g in active if g.feature_name == name])
+
+
+def _categorical_contrasts(model, name: str, labels: list[str]) -> np.ndarray:
+    """Rows over a categorical's columns giving its levels ``labels``, centred on their mean."""
+    column = {str(level): j for j, level in enumerate(model._specs[name]._non_base)}
     rows = np.zeros((len(labels), len(column)))
     for i, label in enumerate(labels):
         if label in column:
             rows[i, column[label]] = 1.0
-    rows -= rows.mean(axis=0)
-    return np.sqrt(np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0))
+    return rows - rows.mean(axis=0)
 
 
-def _ordered_centred_se(model, name: str, levels: list) -> np.ndarray:
-    """Errors of an ordered term's ``levels`` centred on their mean.
+def _ordered_contrasts(model, name: str, levels: list) -> np.ndarray | None:
+    """Rows over an ordered term's active columns giving its ``levels``, centred on their mean.
 
-    Zero where the fit's covariance no longer describes the curve, as
-    ``term_inference`` decides: hand edits an export baked in, or a shape
-    repair after the fit. The curve is then taken as fixed, and each gap is
-    judged on the free estimate's variance, which bounds it as at high leverage.
+    None where the curve is taken as fixed: the selection penalty removed the
+    term, or the fit's covariance no longer describes it, as ``term_inference``
+    decides (hand edits an export baked in, or a shape repair after the fit).
     """
     found = _term_covariance(model, name)
     if (
@@ -241,20 +268,99 @@ def _ordered_centred_se(model, name: str, levels: list) -> np.ndarray:
         or getattr(model, "_editor_inference_stale", False)
         or _shape_repaired(model, name)
     ):
-        return np.zeros(len(levels))
-    covariance, active = found
-    spec = model._specs[name]
-    return _spline_se(
-        spec,
-        name,
-        model.result.beta,
-        [group for group in model._groups if group.feature_name == name],
-        active,
-        covariance,
-        x_eval=np.array(levels, dtype=object),
-        reference_x=np.array([spec._base_level], dtype=object),
-        center=True,
+        return None
+    active = {group.name for group in found[1] if group.feature_name == name}
+    groups = [group for group in model._groups if group.feature_name == name]
+    columns = np.concatenate(
+        [np.arange(g.start, g.end) - groups[0].start for g in groups if g.name in active]
     )
+    spec = model._specs[name]
+    rows = np.asarray(spec.transform(np.array(levels, dtype=object)), dtype=np.float64)[:, columns]
+    return rows - rows.mean(axis=0)
+
+
+def _free_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
+    """Each free contrast's variance from the free fit's covariance; zero when selection removed it."""
+    found = _term_covariance(model, name)
+    if found is None:
+        return np.zeros(len(rows))
+    block = covariance_selected_block(found[0], _term_columns(found[1], name))
+    return np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0)
+
+
+def _gap_variances(free_model, free_rows, model, curve_rows, name: str) -> np.ndarray | None:
+    """Each gap's variance, from both fits linearised on the same rows; None without a design.
+
+    To first order a fit's contrast moves with the response as ``s'y``, with
+    ``s = W g'(mu) X_c F c``, so the gap moves with ``s_free - s_curve``. Its
+    variance is ``sum (s_free - s_curve)^2 var(y)``, with ``var(y) = phi V(mu) / w
+    = phi / (W g'(mu)^2)`` under the free fit. A curve taken as fixed
+    (``curve_rows`` None) contributes nothing.
+    """
+    phi = float(free_model.result.phi)
+    if not phi > 0.0:
+        return np.zeros(len(free_rows))
+    free_side = _influence(free_model, name)
+    curve_side = None if curve_rows is None else _influence(model, name)
+    if free_side is None or (curve_rows is not None and curve_side is None):
+        return None
+    free_influence, weights, slope = free_side
+    if curve_side is not None and len(curve_side[1]) != len(weights):
+        # The curve was fitted on other rows than the refit reads.
+        return None
+    informative = weights > 0.0
+    precision = weights[informative] * slope[informative] ** 2
+    variances = np.empty(len(free_rows))
+    for i, row in enumerate(free_rows):
+        moved = free_influence(row)
+        if curve_side is not None:
+            moved = moved - curve_side[0](curve_rows[i])
+        variances[i] = phi * float(np.sum(moved[informative] ** 2 / precision))
+    return variances
+
+
+def _influence(model, name: str):
+    """``c -> W g'(mu) X_c F c`` over the term's active columns, with ``W`` and ``g'(mu)``; or None.
+
+    ``F`` is the fit's slope covariance over its dispersion, the inverse of
+    the penalised information with the intercept profiled out, so the design
+    is centred on the working weights' mean. None when the fit kept no design
+    (``retain_fit_state=False``) or the fit has no dispersion to divide out.
+    """
+    scale = float(model.result.phi)
+    if getattr(model, "_dm", None) is None or not scale > 0.0:
+        return None
+    covariance, active = model._coef_covariance
+    X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
+    if X.p != covariance.shape[0]:
+        return None
+    solver = model._solver_pirls_result()
+    eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    weights = fisher_working_weights(
+        distribution=model._distribution,
+        link=model._link,
+        mu=mu,
+        eta=eta,
+        sample_weight=model._fit_weights,
+    )
+    slope = np.asarray(model._link.deriv(mu), dtype=np.float64)
+    lever = weights * slope
+    total = float(np.sum(weights))
+    columns = _term_columns(active, name)
+
+    def apply(contrast: np.ndarray) -> np.ndarray:
+        if hasattr(covariance, "solve"):
+            return np.asarray(covariance.solve(contrast), dtype=np.float64)
+        return np.asarray(covariance @ contrast, dtype=np.float64)
+
+    def influence(row: np.ndarray) -> np.ndarray:
+        contrast = np.zeros(covariance.shape[0])
+        contrast[columns] = row
+        moved = X.matvec(apply(contrast) / scale)
+        return lever * (moved - float(weights @ moved) / total)
+
+    return influence, weights, slope
 
 
 def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
@@ -263,20 +369,28 @@ def _free_categorical(spec: OrderedCategorical, column) -> Categorical:
     The ordered term reads its column through its declaration (a column of
     1.0, 2.0 against ``order=[1, 2]`` is levels 1 and 2), so the categorical
     groups the column's own texts under the term's levels and groups, and is
-    named as the term names them.
+    named as the term names them. Each text the categorical reads gets one:
+    1 and 1.0 are one value to a hash but two texts to the column. A
+    reference the rows do not hold gives way to the first level they do; the
+    comparison is centred on the levels' mean, so the reference moves nothing.
     """
-    raw = pd.unique(np.asarray(column, dtype=object).ravel())
-    levels = [str(level) for level in spec._canonical(raw)]
+    values = np.asarray(column, dtype=object).ravel()
+    texts, first = np.unique(_grouping_labels(values), return_index=True)
+    levels = [str(level) for level in spec._canonical(values[first])]
     grouping = getattr(spec, "_grouping", None)
     to_group = {
         str(text): level if grouping is None else str(grouping.original_to_group.get(level, level))
-        for text, level in zip(raw, levels, strict=True)
+        for text, level in zip(texts, levels, strict=True)
     }
     members: dict[str, list[str]] = {}
     for text, group in to_group.items():
         members.setdefault(group, []).append(text)
+    present = [
+        label for label in (str(level) for level in spec._ordered_levels) if label in members
+    ]
+    base = str(spec._base_level)
     free = Categorical(
-        base=str(spec._base_level),
+        base=base if base in members or not present else present[0],
         grouping=LevelGrouping(
             original_to_group=to_group,
             group_to_originals=members,
@@ -315,15 +429,7 @@ def _lift_selection(free_model, model, name: str) -> bool:
     return False
 
 
-def _comparison(
-    term,
-    spec: OrderedCategorical,
-    free: dict[str, tuple[float, float]],
-    curve: dict[str, tuple[float, float]],
-    *,
-    curve_scale: float,
-    shrunk: bool,
-) -> dict[str, Any]:
+def _comparison(term, spec: OrderedCategorical, gaps: _Gaps, *, shrunk: bool) -> dict[str, Any]:
     """Each level's mean-centred free estimate against the mean-centred curve.
 
     The gap is drawn on the chart's own scale: the diamond sits that far from
@@ -334,15 +440,15 @@ def _comparison(
     grouping = getattr(spec, "_grouping", None)
     shown = np.asarray(term.original_log_effect, dtype=np.float64)
     at = {level: i for i, level in enumerate(levels)}
+    compared = {label: i for i, label in enumerate(gaps.labels)}
     found = []
     for level in levels:
         group = level if grouping is None else str(grouping.original_to_group.get(level, level))
-        if level in specials or group not in free or group not in curve:
+        if level in specials or group not in compared:
             continue
-        (free_value, free_se), (curve_value, curve_se) = free[group], curve[group]
-        gap = free_value - curve_value
-        free_var = free_se**2
-        gap_var = free_var - curve_scale * curve_se**2
+        i = compared[group]
+        gap = float(gaps.free[i] - gaps.curve[i])
+        free_var, gap_var = float(gaps.free_var[i]), float(gaps.gap_var[i])
         if gap_var <= (1.0 - _MAX_LEVERAGE) * free_var:
             gap_var = free_var
         found.append((level, group, gap, gap_var, free_var > 0.0))

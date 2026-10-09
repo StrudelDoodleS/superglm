@@ -41,7 +41,8 @@ export function specialActions(term, labels) {
   const returnable = new Set(term.shape.returnable || []);
   const allSpecial = labels.every((label) => specials.has(label));
   const noneSpecial = labels.every((label) => !specials.has(label));
-  const reference = term.reference?.level ?? null;
+  // The reference once the waiting changes apply: one staged to move frees this one.
+  const reference = term.pending?.reference ?? term.reference?.level ?? null;
   const holdsReference = reference !== null && labels.includes(String(reference));
   return {
     make: noneSpecial

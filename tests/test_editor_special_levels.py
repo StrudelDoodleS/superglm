@@ -237,6 +237,21 @@ def test_a_declared_special_cannot_go_on_the_curve_and_a_grouped_level_cannot_le
         session.stage_structural("special", "area", {"levels": ["A"]})
 
 
+def test_a_level_its_grouping_renames_is_refused_in_a_sentence():
+    """A group of one under another name: rebuilt special, the term refused it as a 500."""
+    X, y, w = _book(n=3000)
+    grouping = collapse_levels(X["band"], groups={"Bumped": [BUMP]}, order=BANDS)
+    band = OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6), grouping=grouping)
+    model = SuperGLM(family="poisson", features={"band": band}, spline_penalty=20.0)
+    session = EditorSession.from_model(model.fit(X, y, sample_weight=w), train_data=(X, y, w))
+    with pytest.raises(EditorValueError) as renamed:
+        session.stage_structural("special", "band", {"levels": [BUMP]})
+    assert str(renamed.value) == (
+        f"{BUMP!r} is named 'Bumped' by the grouping of 'band', and a special level keeps its "
+        f"own name: take {BUMP!r} out of that grouping where the model is declared first."
+    )
+
+
 def test_make_special_refuses_breaks_positional_breaks_and_a_basis_left_too_small():
     X, y, w = _book(n=3000)
     cases = [
@@ -514,22 +529,74 @@ def test_both_fits_are_centred_over_the_levels_the_free_fit_estimated():
     assert abs(sum(gaps)) <= (2 * L * L + 6 * L) * u * scale
 
 
-def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed(book):
+def test_a_curve_whose_covariance_is_stale_is_taken_as_fixed():
     """An export with hand edits baked in keeps the covariance of the fit before them.
 
-    ``term_inference`` gives such a curve no errors. Free levels subtracted the
-    stale curve variance anyway, narrowing the intervals; taken as fixed, each
-    interval is the free estimate's own, and no narrower.
+    ``term_inference`` gives such a curve no errors, and Free levels takes it
+    as fixed: its intervals come from the free fit alone, so two curves on the
+    same data, smoothed differently, get the same widths. Fitted, they differ.
     """
-    model, X, y, w = book
-    fresh = free_level_comparison(_session(book), "band")
-    edited = pickle.loads(pickle.dumps(model))
-    edited._editor_inference_stale = True
-    stale = free_level_comparison(EditorSession.from_model(edited, train_data=(X, y, w)), "band")
-    assert stale["levels"] == fresh["levels"] and stale["y"] == fresh["y"]
-    widths = [np.log(np.array(c["upper"]) / np.array(c["lower"])) for c in (fresh, stale)]
-    assert np.any(widths[1] > widths[0])
-    assert set(stale["flagged"]) <= set(fresh["flagged"])
+    X, y, w = _book(n=6000)
+    widths = {}
+    for penalty in (20.0, 2.0):
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6)),
+                "area": Categorical(),
+            },
+            spline_penalty=penalty,
+        ).fit(X, y, sample_weight=w)
+        for stale in (False, True):
+            model._editor_inference_stale = stale
+            free = free_level_comparison(
+                EditorSession.from_model(model, train_data=(X, y, w)), "band"
+            )
+            ends = np.log(np.array([free["lower"], free["upper"]]))
+            widths[penalty, stale] = (ends[1] - ends[0], np.max(np.abs(ends)))
+    # Each end is one exp and one log away from its log value.
+    u = np.finfo(np.float64).eps / 2
+    for stale, same in ((True, True), (False, False)):
+        (first, scale), (second, other) = widths[20.0, stale], widths[2.0, stale]
+        tolerance = 8 * u * (1.0 + max(scale, other))
+        assert bool(np.max(np.abs(first - second)) <= tolerance) == same
+
+
+def test_the_gap_variance_is_both_fits_linearised_on_the_same_rows(monkeypatch):
+    """Poisson bands whose totals the curve cannot follow, so the fits weigh them apart.
+
+    The free estimate's variance less the curve's was the gap's variance only
+    for a curve fitted with the free fit's weights: it put B11's at half what
+    its band totals carry through both fits, and flagged B11. The variance is
+    checked against central differences of both refits in every band's total.
+    """
+    totals = np.array([43, 152, 2188, 85, 15, 11, 114, 142, 39, 151, 43, 532], dtype=float)
+    k = np.repeat(np.arange(12), 50)
+    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
+    found = []
+    gaps = free_levels_module._gaps
+    monkeypatch.setattr(
+        free_levels_module, "_gaps", lambda *args: found.append(gaps(*args)) or found[-1]
+    )
+
+    def compared(totals):
+        y = totals[k] / 50.0
+        band = OrderedCategorical(order=TWELVE, base="B00", basis=Spline(kind="ps", n_knots=6))
+        model = SuperGLM(family="poisson", features={"band": band}, spline_penalty=1.0).fit(X, y)
+        free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+        return free, found[-1].free - found[-1].curve
+
+    free, _gap = compared(totals)
+    assert "B11" not in free["flagged"]
+    h = 0.25
+    jacobian = np.empty((12, 12))
+    for j in range(12):
+        step = np.where(np.arange(12) == j, h, 0.0)
+        jacobian[:, j] = (compared(totals + step)[1] - compared(totals - step)[1]) / (2 * h)
+    # A band total's variance is its mean, the free fit's fitted total. Central
+    # differences err by about (h / T)^2 / 3 of each entry, T >= 11 the totals.
+    expected = (jacobian**2) @ totals
+    np.testing.assert_allclose(found[0].gap_var, expected, rtol=4 * (h / totals.min()) ** 2)
 
 
 def test_free_levels_put_both_variances_on_one_dispersion():
@@ -733,3 +800,49 @@ def test_a_level_put_back_beside_an_equal_value_keeps_its_place(collapse):
     smooth = [str(level) for level in spec._smooth_levels]
     assert smooth[smooth.index("B05") + 1] == "B06"
     session.stage_structural("collapse", "band", {"levels": ["B04", "B05"]})
+
+
+def _twelve_bands(retain_fit_state: bool = True, **declared):
+    X, y, _k = _gaussian(0)
+    band = OrderedCategorical(basis=Spline(kind="ps", n_knots=6), **declared)
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": band},
+        spline_penalty=20.0,
+        retain_fit_state=retain_fit_state,
+    )
+    return model, X, y
+
+
+def test_free_levels_compare_a_term_whose_reference_has_no_rows():
+    """The categorical took the reference B11, which the rows do not hold, and refused to fit."""
+    model, X, y = _twelve_bands(order=TWELVE, base="B11")
+    held = X["band"] != "B11"
+    X, y = X[held], y[held.to_numpy()]
+    model.fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE[:11]
+
+
+def test_free_levels_give_each_text_of_the_column_its_level():
+    """An object column of 1 and 1.0: one value to a hash, two texts to the categorical."""
+    model, X, y = _twelve_bands(order=list(range(1, 13)))
+    k = np.repeat(np.arange(12), 50)
+    column = [int(v + 1) if i % 2 else float(v + 1) for i, v in enumerate(k)]
+    X = pd.DataFrame({"band": pd.Series(column, dtype=object)})
+    assert {type(value) for value in X["band"]} == {int, float}
+    model.fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == [str(level) for level in range(1, 13)]
+
+
+def test_free_levels_without_a_fitted_design_say_their_intervals_are_the_free_estimates():
+    model, X, y = _twelve_bands(retain_fit_state=False, order=TWELVE)
+    model.fit(X, y)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert free["levels"] == TWELVE
+    assert free["notice"] == (
+        "Each interval is the free estimate's own, without the curve's pull toward the level: "
+        "the model keeps no fitted design on these rows to measure it. Refit it with "
+        "retain_fit_state=True to include it."
+    )

@@ -47,6 +47,10 @@ _DECLARED = (
     "declare it in the term's order to put it there."
 )
 _GROUPED = "{level!r} is in group {group!r} of {term!r}; ungroup it first."
+_RENAMED = (
+    "{level!r} is named {group!r} by the grouping of {term!r}, and a special level keeps its own "
+    "name: take {level!r} out of that grouping where the model is declared first."
+)
 _REFERENCE = (
     "{level!r} is the reference of {term!r}, which must stay on the curve; "
     "set another reference first."
@@ -172,14 +176,22 @@ def returnable_levels(spec) -> list[str]:
 
 
 def _require_alone(spec, grouping, term: EditableTerm, label: str) -> None:
-    """Refuse a label that is not one of the term's levels, or stands in a group."""
+    """Refuse a label that is not one of the term's levels, or stands in a group.
+
+    A group of one renamed is a group too: the term would carry the level
+    under the group's name, which a special level cannot have.
+    """
     if grouping is not None and len(grouping.group_to_originals.get(label, ())) > 1:
         raise EditorValueError(_GROUPED.format(level=label, group=label, term=term.name))
     if term.levels is None or label not in term.levels:
         raise EditorValueError(f"{label!r} is not a level of term {term.name!r}.")
     group = None if grouping is None else grouping.original_to_group.get(label)
-    if group is not None and len(grouping.group_to_originals.get(group, ())) > 1:
+    if group is None:
+        return
+    if len(grouping.group_to_originals.get(group, ())) > 1:
         raise EditorValueError(_GROUPED.format(level=label, group=group, term=term.name))
+    if str(group) != label:
+        raise EditorValueError(_RENAMED.format(level=label, group=group, term=term.name))
 
 
 def _require_free_to_leave(

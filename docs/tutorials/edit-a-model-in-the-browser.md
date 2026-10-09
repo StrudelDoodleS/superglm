@@ -232,7 +232,9 @@ interval.
 
 - A level whose interval misses the curve is filled in orange: the curve holds it away from what
   its own data says.
-- The intervals allow for the curve's own pull toward each level.
+- The intervals allow for the curve's own pull toward each level. A model fitted with
+  `retain_fit_state=False` keeps nothing to measure that pull, so each interval is the free
+  estimate's own, and a note says so.
 - The intervals are widened for the number of levels compared, so a filled diamond is rarely
   chance.
 - Each level is judged on its own. Making one level special moves the curve, and with it the other

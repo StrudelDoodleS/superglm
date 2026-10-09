@@ -45,6 +45,12 @@ test("each action says why it is disabled: the reference, or a level the code de
   assert.deepEqual(specialActions(term, ["E", "Z"]).back, {
     visible: true, enabled: false, reason: DECLARED_SPECIAL
   });
+  // A waiting reference change decides: B can go once C is to be the reference.
+  const moved = ordered({ pending: { groups: null, ranges: [], reference: "C", specials: null } });
+  assert.deepEqual(specialActions(moved, ["B"]).make, { visible: true, enabled: true, reason: null });
+  assert.deepEqual(specialActions(moved, ["C"]).make, {
+    visible: true, enabled: false, reason: REFERENCE_STAYS
+  });
   // Neither shows on a categorical term, or with nothing selected.
   const categorical = specialActions(ordered({ term_type: "categorical" }), ["C"]);
   assert.deepEqual([categorical.make.visible, categorical.back.visible], [false, false]);
