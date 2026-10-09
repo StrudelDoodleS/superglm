@@ -137,7 +137,7 @@ redraw the chart.
 
 ## Waiting Changes, Refit and Notes
 
-Collapse, Ungroup, Set reference, Make special, Back on the curve, the shapes and knot changes are staged, not fitted. Each one is a
+Collapse, Ungroup, Set reference, Make special, Back on the curve, the shapes, knot changes and basis changes are staged, not fitted. Each one is a
 `PendingStep` in `session.pending` holding its labels-only `params` and the draft spec it leaves;
 a term's draft is the last waiting step's spec for it, else the in-force fitted spec, so staged
 changes on one term compose. One Refit fits every draft in a single clone, records one
@@ -160,24 +160,28 @@ waiting), and re-applies hand edits on the terms it did not restructure as one m
 - `knots`: exactly one of `{count, strategy, alpha?}`, with `strategy` one of `"uniform"`,
   `"quantile"`, `"quantile_rows"` and `"quantile_tempered"` and `alpha` (0 to 1) sent with
   tempered quantiles only; `{positions: [x, ...]}`, the knots placed by hand in chart
-  coordinates; or `{reset: true}`, back to the knots the opened model declares.
+  coordinates; or `{reset: true}`, back to the knots the opened model declares;
+- `basis`: exactly one of `{kind}`, with `kind` one of `"ps"`, `"bs"`, `"cr"` and `"ns"`, or
+  `{select}`, a JSON boolean that turns shrinkage (`select=True`) on or off.
 
 `keep_reference` is a JSON boolean, true when absent; any other value is refused with the fixed
 sentence "keep_reference must be true or false.". With Settings' "Refit after every structural
 change" on, the browser posts to the operation's own route (`/collapse_levels`,
-`/ungroup_levels`, `/set_reference`, `/shape_range`, `/special_levels`, `/knots`) instead, which
-stages the change and refits it as one step that one Undo takes back. `/knots` takes
-`{term, params, method, level_display}`, with `params` in one of the three forms above.
+`/ungroup_levels`, `/set_reference`, `/shape_range`, `/special_levels`, `/knots`, `/basis`)
+instead, which stages the change and refits it as one step that one Undo takes back. `/knots` takes
+`{term, params, method, level_display}`, with `params` in one of the three forms above; `/basis`
+takes the same fields, with `params` in one of its two.
 
 The state snapshot carries the waiting changes in three places:
 
 - top-level `pending`: `[{id, operation, term, label, params, note, time}]`, oldest first;
-- per term, `pending`: `{groups, ranges, reference, specials, knots}`. `groups` is the draft's
+- per term, `pending`: `{groups, ranges, reference, specials, knots, basis}`. `groups` is the draft's
   whole grouping once a waiting collapse or ungroup touches the term, else null; `ranges` lists
   the shaped ranges the draft adds or changes; `reference` is the level or group the draft pins,
   else null; `specials` is the draft's special levels once a waiting change moves one, else null;
   `knots` is `{positions, count, strategy, alpha}`, the draft's knots while a knot change waits,
-  else null;
+  else null; `basis` is `{kind, select}`, the draft's kind and shrinkage while they differ from the
+  ones in force (a shaped range makes a P-spline or natural spline a B-spline), else null;
 - each top-level `timeline` entry: `id` (seven hex digits), `time` (seconds since the epoch), `note`
   and `status`, one of `"applied"`, `"waiting"` or `"edit"`. A waiting or applied change is a
   `"pending"` entry.
@@ -202,6 +206,11 @@ resettable             the knots in force or waiting differ from the opened mode
 even_only              why the term takes evenly spaced knots only, else null
 basis                  {degree, ends, boundary, level_values}: how the browser rebuilds the
                        B-spline basis to draw it; null for a cardinal spline
+kind, select           the spline's kind ("ps", "bs", "cr", "ns" or "cr_cardinal") and
+                       shrinkage in force (superglm/editor/basis.py)
+kinds                  the kinds the Kind dropdown offers; a cardinal spline is named, not offered
+select_available       whether Shrink can be turned on or off on the term as its waiting
+select_reason          changes leave it, and the fixed sentence why not
 ```
 
 Chart coordinates are a numeric spline's own values, and an ordered term's display positions,
@@ -213,7 +222,8 @@ by offers even spacing alone; the count and Reset knots still stage a change.
 
 Every finished gesture stages one `knots` change: a drag, a click on the axis, a drag below it or
 a key sends `{positions}` with the whole new list; the count stepper and Placed by send
-`{count, strategy, alpha?}`; Reset knots sends `{reset: true}`.
+`{count, strategy, alpha?}`; Reset knots sends `{reset: true}`. Kind sends one `basis` change,
+`{kind}`, and Shrink sends `{select}`; each waits for Refit like a knot change.
 
 ## Settings and the Theme Switch
 
@@ -294,8 +304,8 @@ one of the fixed sentences in `rating_preview.py`, never builder text.
   it (Piegl and Tiller's FindSpan and BasisFuns); it says which functions a dragged knot or a
   waiting change reshapes. `chart/basis_overlay.js` draws them, while a knot is dragged in Knots
   mode or a knot change waits, in a band along the bottom of the plot beneath the curve.
-- `views/knot_bar.js` renders and binds the count stepper, Placed by, alpha and Reset knots,
-  the knots chip in the term line, and the status line's sentence in Knots mode.
+- `views/knot_bar.js` renders and binds the count stepper, Placed by, alpha, Reset knots, Kind
+  and Shrink, the knots chip in the term line, and the status line's sentence in Knots mode.
 - `views/summary_view.js` decides which summary rows a search and the All / Edited / Waiting filter
   keep and which term sections are open as Summary follows the chart; `summary.js` turns the
   result into markup and reapplies it after every render.
