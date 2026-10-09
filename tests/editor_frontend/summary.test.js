@@ -17,6 +17,7 @@ const {
   runDistributionProfile,
   revertTransition,
   runOffsetRefit,
+  stageBasis,
   stageCollapse,
   stageKnots,
   stageOnCurve,
@@ -289,6 +290,28 @@ test("a knot change is staged in one of its three forms, or refitted at once on 
   });
   assert.deepEqual(refitAtOnceTransition(stageKnots("band", { reset: true })).payload, {
     term: "band", params: { reset: true }, method: "auto"
+  });
+});
+
+test("a basis change is staged as a kind or a shrinkage, or refitted at once on /basis", () => {
+  assert.deepEqual(stageBasis("age", { kind: "cr" }), {
+    name: "change the spline kind",
+    path: "/stage",
+    payload: { operation: "basis", term: "age", params: { kind: "cr" } }
+  });
+  assert.deepEqual(stageBasis("age", { select: true }), {
+    name: "turn shrinkage on",
+    path: "/stage",
+    payload: { operation: "basis", term: "age", params: { select: true } }
+  });
+  assert.equal(stageBasis("age", { select: false }).name, "turn shrinkage off");
+  assert.deepEqual(refitAtOnceTransition(stageBasis("band", { kind: "ns" })), {
+    name: "change the spline kind",
+    path: "/basis",
+    payload: { term: "band", params: { kind: "ns" }, method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageBasis("band", { select: false })).payload, {
+    term: "band", params: { select: false }, method: "auto"
   });
 });
 

@@ -1,8 +1,9 @@
 // @ts-check
 // Knots mode's controls in the toolbar: the count stepper, the rule that
-// places the knots, the tempered quantiles' alpha and Reset knots. Also the
-// context chip that names a term's knots in every mode, and the status line's
-// sentence while Knots mode is on.
+// places the knots, the tempered quantiles' alpha, Reset knots, and the
+// spline's basis: its Kind and the Shrink switch. Also the context chip that
+// names a term's knots in every mode, and the status line's sentence while
+// Knots mode is on.
 
 import {
   DEFAULT_ALPHA,
@@ -17,6 +18,8 @@ import {
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../api/contracts.js').KnotParams} KnotParams */
 /** @typedef {import('../api/contracts.js').KnotRule} KnotRule */
+/** @typedef {import('../api/contracts.js').BasisKind} BasisKind */
+/** @typedef {import('../api/contracts.js').BasisParams} BasisParams */
 /**
  * @typedef {object} KnotBarNodes
  * @property {HTMLElement} root
@@ -28,11 +31,38 @@ import {
  * @property {HTMLElement} alphaWrap
  * @property {HTMLInputElement} alpha
  * @property {HTMLButtonElement} reset
+ * @property {HTMLSelectElement} kind
+ * @property {HTMLButtonElement} shrink the Shrink switch, ``aria-pressed`` while it is on
  */
 
 const RULES = new Set(["uniform", "quantile", "quantile_rows", "quantile_tempered"]);
 const RESET_BODY = "Back to the knots declared in code. It waits for Refit.";
 const RESET_NOTHING = "The knots are the ones declared in code.";
+const KINDS = new Set(["ps", "bs", "cr", "ns"]);
+export const SHRINK_BODY =
+  "A second penalty, on the term's straight-line part, so the fit can shrink the term towards a"
+  + " straight line and, where the data do not support it, out of the model. The change waits"
+  + " for Refit.";
+
+/**
+ * The basis a term shows: the one its waiting changes put in force, else
+ * the one in force, with which of its two parts a waiting change sets.
+ * @param {TermPayload} term
+ * @returns {{kind:BasisKind, select:boolean, kindWaiting:boolean, selectWaiting:boolean}|null}
+ */
+export function shownBasis(term) {
+  const knots = term.knots;
+  if (!knots || !knots.kind) return null;
+  const waiting = term.pending?.basis ?? null;
+  const kind = waiting ? waiting.kind : knots.kind;
+  const select = waiting ? waiting.select : Boolean(knots.select);
+  return {
+    kind,
+    select,
+    kindWaiting: kind !== knots.kind,
+    selectWaiting: select !== Boolean(knots.select),
+  };
+}
 
 /**
  * Show the controls for ``term`` while Knots mode is on for it, else hide them.
@@ -65,6 +95,31 @@ export function renderKnotBar(nodes, term, visible) {
   }
   const resettable = Boolean(term.knots?.resettable);
   renderAction(nodes.reset, "Reset knots", resettable, resettable ? RESET_BODY : RESET_NOTHING);
+  renderBasis(nodes, term);
+}
+
+/**
+ * The Kind dropdown offers the kinds the term can be switched to; a kind in
+ * force it does not offer, the cardinal cubic regression spline, stays named
+ * but cannot be chosen. Shrink is pressed while it is on, and says why when
+ * it cannot change. Either takes the waiting tint while a change sets it.
+ * @param {KnotBarNodes} nodes @param {TermPayload} term
+ */
+function renderBasis(nodes, term) {
+  const basis = shownBasis(term);
+  /** @type {Set<string>} */
+  const offered = new Set(term.knots?.kinds ?? []);
+  for (const option of Array.from(nodes.kind.options)) {
+    option.disabled = !offered.has(option.value);
+    option.hidden = option.disabled && option.value !== basis?.kind;
+  }
+  nodes.kind.value = basis?.kind ?? "";
+  nodes.kind.dataset.waiting = String(Boolean(basis?.kindWaiting));
+  nodes.shrink.setAttribute("aria-pressed", String(Boolean(basis?.select)));
+  nodes.shrink.dataset.waiting = String(Boolean(basis?.selectWaiting));
+  const available = Boolean(term.knots?.select_available);
+  const reason = term.knots?.select_reason ?? null;
+  renderAction(nodes.shrink, "Shrink", available, available || !reason ? SHRINK_BODY : reason);
 }
 
 /**
@@ -85,15 +140,25 @@ function renderAction(button, title, enabled, body) {
  * @param {object} options
  * @param {()=>TermPayload|null} options.term the term the controls show
  * @param {(params:KnotParams)=>unknown} options.onChange stages the change
+ * @param {(params:BasisParams)=>unknown} options.onBasis stages a basis change
  * @param {(message:string)=>void} options.onRefuse
  * @param {()=>void} options.onSettled redraws the controls once a change is
  *   staged or refused, so they show what is in force
  */
-export function bindKnotBar(nodes, { term, onChange, onRefuse, onSettled }) {
+export function bindKnotBar(nodes, { term, onChange, onBasis, onRefuse, onSettled }) {
   /** @param {KnotParams} params */
   async function send(params) {
     try {
       await onChange(params);
+    } finally {
+      onSettled();
+    }
+  }
+
+  /** @param {BasisParams} params */
+  async function sendBasis(params) {
+    try {
+      await onBasis(params);
     } finally {
       onSettled();
     }
@@ -144,11 +209,34 @@ export function bindKnotBar(nodes, { term, onChange, onRefuse, onSettled }) {
     void send({ reset: true });
   };
 
+  const onKind = () => {
+    const current = term();
+    const shown = current ? shownBasis(current) : null;
+    const kind = nodes.kind.value;
+    if (!shown || kind === shown.kind || !KINDS.has(kind)) {
+      onSettled();
+      return;
+    }
+    void sendBasis({ kind: /** @type {Exclude<BasisKind, "cr_cardinal">} */ (kind) });
+  };
+  const onShrink = () => {
+    const current = term();
+    const shown = current ? shownBasis(current) : null;
+    if (!shown) return;
+    if (nodes.shrink.getAttribute("aria-disabled") === "true") {
+      onRefuse(nodes.shrink.dataset.popoverBody ?? "");
+      return;
+    }
+    void sendBasis({ select: !shown.select });
+  };
+
   nodes.fewer.addEventListener("click", onFewer);
   nodes.more.addEventListener("click", onMore);
   nodes.rule.addEventListener("change", onRule);
   nodes.alpha.addEventListener("change", onAlpha);
   nodes.reset.addEventListener("click", onReset);
+  nodes.kind.addEventListener("change", onKind);
+  nodes.shrink.addEventListener("click", onShrink);
   return Object.freeze({
     destroy() {
       nodes.fewer.removeEventListener("click", onFewer);
@@ -156,6 +244,8 @@ export function bindKnotBar(nodes, { term, onChange, onRefuse, onSettled }) {
       nodes.rule.removeEventListener("change", onRule);
       nodes.alpha.removeEventListener("change", onAlpha);
       nodes.reset.removeEventListener("click", onReset);
+      nodes.kind.removeEventListener("change", onKind);
+      nodes.shrink.removeEventListener("click", onShrink);
     }
   });
 }

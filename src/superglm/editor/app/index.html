@@ -282,6 +282,20 @@
             <input id="knotAlpha" type="number" min="0" max="1" step="0.1" value="0.2">
           </label>
           <button id="knotReset" type="button">Reset knots</button>
+          <div class="knot-basis" role="group" aria-label="Basis">
+            <label class="knot-field" data-popover-title="Kind"
+              data-popover-body="How the spline is built and penalised. The knots stay where they are, and the change waits for Refit.">
+              <span>Kind</span>
+              <select id="knotKind">
+                <option value="ps">P-spline</option>
+                <option value="bs">B-spline</option>
+                <option value="cr">Cubic regression</option>
+                <option value="ns">Natural</option>
+                <option value="cr_cardinal" disabled hidden>Cardinal cubic regression</option>
+              </select>
+            </label>
+            <button id="knotShrink" type="button" aria-pressed="false">Shrink</button>
+          </div>
         </div>
         <div class="toolbar-actions">
         <button id="ciToggle" type="button" aria-pressed="false" aria-label="Reference CI"

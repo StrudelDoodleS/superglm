@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { AT_LEAST_ONE, tooManyKnots } from "../../src/superglm/editor/app/knots.js";
 import {
+  SHRINK_BODY,
   bindKnotBar,
   renderKnotBar,
   renderKnotChip,
@@ -57,10 +58,13 @@ function nodes() {
   rule.options = [
     ...["uniform", "quantile", "quantile_rows", "quantile_tempered"].map(option), hand,
   ];
+  const kind = make("select");
+  kind.options = ["ps", "bs", "cr", "ns", "cr_cardinal"].map(option);
   return {
     doc,
     root: make("div"), fewer: make("button"), count: make("output"), more: make("button"),
     rule, hand, alphaWrap: make("label"), alpha: make("input"), reset: make("button"),
+    kind, shrink: make("button"),
   };
 }
 
@@ -82,7 +86,8 @@ function orderedTerm(knots = {}, pending = null) {
     knots: {
       available: true, reason: null, positions: [2.5], count: 1, strategy: "uniform",
       alpha: 0.2, from_editor: false, lo: 0, hi: 5, min_gap: 0.1, max_count: 5,
-      resettable: false, ...knots,
+      resettable: false, kind: "ps", select: false, kinds: ["ps", "bs", "cr", "ns"],
+      select_available: true, select_reason: null, ...knots,
     },
     pending,
   };
@@ -203,6 +208,90 @@ test("a term that takes evenly spaced knots only is offered even spacing alone",
   renderKnotBar(bar, term, true);
   assert.deepEqual(offered(bar), ["uniform"]);
   assert.equal(bar.rule.options[1].hidden, true);
+});
+
+/** The kind choices on offer: shown, and not disabled. */
+function kindsOffered(bar) {
+  return bar.kind.options.filter((option) => !option.hidden && !option.disabled)
+    .map((option) => option.value);
+}
+
+test("Kind offers the four kinds and shows the waiting one; a cardinal spline is named, not offered", () => {
+  const bar = nodes();
+  renderKnotBar(bar, orderedTerm(), true);
+  assert.equal(bar.kind.value, "ps");
+  assert.deepEqual(kindsOffered(bar), ["ps", "bs", "cr", "ns"]);
+  assert.equal(bar.kind.options[4].hidden, true);
+  assert.equal(bar.kind.dataset.waiting, "false");
+
+  // A waiting change shows its kind, in the waiting tint; Shrink keeps its own state.
+  renderKnotBar(bar, orderedTerm({}, { basis: { kind: "cr", select: false } }), true);
+  assert.equal(bar.kind.value, "cr");
+  assert.equal(bar.kind.dataset.waiting, "true");
+  assert.equal(bar.shrink.dataset.waiting, "false");
+
+  // Declared in code as a cardinal spline: named in force, but it cannot be chosen.
+  renderKnotBar(bar, orderedTerm({ kind: "cr_cardinal" }), true);
+  assert.equal(bar.kind.value, "cr_cardinal");
+  const cardinal = bar.kind.options[4];
+  assert.deepEqual([cardinal.hidden, cardinal.disabled], [false, true]);
+  assert.deepEqual(kindsOffered(bar), ["ps", "bs", "cr", "ns"]);
+});
+
+const NO_SHRINK = "A natural spline cannot take shrinkage. To shrink 'age_band', choose another "
+  + "kind; to make it a natural spline, turn Shrink off first.";
+
+test("Shrink is pressed while on, and says why it cannot change instead of staging", () => {
+  const bar = nodes();
+  renderKnotBar(bar, orderedTerm(), true);
+  assert.equal(bar.shrink.getAttribute("aria-pressed"), "false");
+  assert.equal(bar.shrink.getAttribute("aria-disabled"), "false");
+  assert.equal(bar.shrink.dataset.popoverTitle, "Shrink");
+  assert.equal(bar.shrink.dataset.popoverBody, SHRINK_BODY);
+
+  renderKnotBar(bar, orderedTerm({}, { basis: { kind: "ps", select: true } }), true);
+  assert.equal(bar.shrink.getAttribute("aria-pressed"), "true");
+  assert.equal(bar.shrink.dataset.waiting, "true");
+
+  const natural = orderedTerm({
+    kind: "ns", select_available: false, select_reason: NO_SHRINK,
+  });
+  renderKnotBar(bar, natural, true);
+  assert.equal(bar.shrink.getAttribute("aria-disabled"), "true");
+  assert.equal(bar.shrink.dataset.popoverBody, NO_SHRINK);
+});
+
+test("Kind and Shrink each stage one basis change, and an unchanged kind stages nothing", async () => {
+  const bar = nodes();
+  let term = orderedTerm({ select: true });
+  const changes = [];
+  const basis = [];
+  const refusals = [];
+  let settled = 0;
+  bindKnotBar(bar, {
+    term: () => term,
+    onChange: async (params) => { changes.push(params); },
+    onBasis: async (params) => { basis.push(params); },
+    onRefuse: (message) => refusals.push(message),
+    onSettled: () => { settled += 1; },
+  });
+  renderKnotBar(bar, term, true);
+
+  bar.kind.value = "cr";
+  bar.kind.emit("change");
+  bar.kind.value = "ps";
+  bar.kind.emit("change");
+  bar.shrink.emit("click");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(basis, [{ kind: "cr" }, { select: false }]);
+  assert.deepEqual(changes, []);
+  assert.equal(settled, 3);
+
+  term = orderedTerm({ kind: "ns", select_available: false, select_reason: NO_SHRINK });
+  renderKnotBar(bar, term, true);
+  bar.shrink.emit("click");
+  assert.deepEqual(refusals, [NO_SHRINK]);
+  assert.equal(basis.length, 2);
 });
 
 test("the chip names the knots in every mode and takes the waiting tint", () => {

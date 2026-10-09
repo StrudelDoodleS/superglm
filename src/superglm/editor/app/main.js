@@ -49,6 +49,7 @@ import {
   showDistributionProfileDialog,
   runOffsetRefit,
   revertTransition,
+  stageBasis,
   stageCollapse,
   stageKnots,
   stageOnCurve,
@@ -170,7 +171,9 @@ const knotBarNodes = Object.freeze({
   hand: document.getElementById("knotRuleHand"),
   alphaWrap: document.getElementById("knotAlphaWrap"),
   alpha: document.getElementById("knotAlpha"),
-  reset: document.getElementById("knotReset")
+  reset: document.getElementById("knotReset"),
+  kind: document.getElementById("knotKind"),
+  shrink: document.getElementById("knotShrink")
 });
 // Knots mode's gesture in progress; bound once the chart's other gestures are.
 let knotGestures = null;
@@ -1148,6 +1151,13 @@ async function stageKnotChange(params) {
   return Boolean(result && result.state);
 }
 
+// One basis change, staged like every structural change.
+async function stageBasisChange(params) {
+  knotGestures?.say(null);
+  const result = await runStructuralChange(stageBasis(selectedTerm(), params));
+  return Boolean(result && result.state);
+}
+
 // Table puts the term's rating-table block where the chart was; the chart
 // keeps its mode, zoom and selection for when Chart comes back.
 function renderTermView(termView) {
@@ -1921,6 +1931,7 @@ knotGestures = bindKnotGestures({
 bindKnotBar(knotBarNodes, {
   term: currentTerm,
   onChange: stageKnotChange,
+  onBasis: stageBasisChange,
   onRefuse: (message) => knotGestures.say(message),
   onSettled: () => {
     const term = currentTerm();
