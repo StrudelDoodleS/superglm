@@ -150,13 +150,13 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.equal(strip.x(3.0e10), 210);
   const spread = (/** @type {number[]} */ values) =>
     Math.max(...values.map(strip.x)) - Math.min(...values.map(strip.x));
-  assert.ok(spread(current) > 190, String(spread(current)));
+  assert.ok(spread(current) > 170, String(spread(current)));
   assert.ok(current.every((value) => !strip.off(value)));
   // A run with a far-off fold of its own, as a re-run on the same folds may
   // have, keeps its other folds readable too.
   const both = foldStrip([supplied, [63.38, 63.81, 2.9e10, 62.83, 62.9]]);
   assert.deepEqual([both.off(3.0e10), both.off(2.9e10), both.off(63.81)], [true, true, false]);
-  assert.ok(Math.max(both.x(63.81), both.x(63.4)) - Math.min(both.x(62.8), both.x(62.83)) > 190);
+  assert.ok(Math.max(both.x(63.81), both.x(63.4)) - Math.min(both.x(62.8), both.x(62.83)) > 170);
   // So do two far-off folds in one row, one of two folds, and one row alone.
   assert.equal(foldStrip([[63.4, 3.0e10, 2.0e10, 62.8, 62.9], current]).off(2.0e10), true);
   assert.equal(foldStrip([[63.4, 3.0e10], [63.38, 63.81]]).off(3.0e10), true);
@@ -166,9 +166,24 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.equal(foldStrip([supplied, [63.38, 63.81, 1.0e5, 62.83, 62.9]]).off(1.0e5), true);
   const near = foldStrip([[63.4, 63.8, 100, 62.8, 62.9], current]);
   assert.deepEqual([near.off(64.71), near.off(100)], [false, true]);
-  // Scores near both ends of the float64 range still land on the strip.
-  const huge = foldStrip([[-Number.MAX_VALUE, Number.MAX_VALUE]]);
-  assert.deepEqual([huge.x(-Number.MAX_VALUE), huge.x(Number.MAX_VALUE)], [10, 210]);
+  // A pinned ring has the strip's end to itself, clear of every kept fold.
+  const alone = foldStrip([supplied]);
+  const ring = alone.x(3.0e10);
+  assert.ok(supplied.filter((v) => !alone.off(v)).every((v) => Math.abs(alone.x(v) - ring) >= 9));
+  // Scores near both ends of the float64 range land on the strip, and pin
+  // nothing they should not; subnormal scores keep their spread.
+  const MAX = Number.MAX_VALUE;
+  const huge = foldStrip([[-MAX, MAX]]);
+  assert.deepEqual([huge.x(-MAX), huge.x(MAX)], [10, 210]);
+  const across = foldStrip([[-MAX, 0, MAX]]);
+  assert.deepEqual([across.pinned, across.x(0)], [false, 110]);
+  // Near the limit the strip is the one the same folds give at a plain scale.
+  const unit = [0, 0.9, 0.95, 1];
+  const [small, large] = [foldStrip([unit]), foldStrip([unit.map((v) => v * MAX)])];
+  assert.deepEqual(unit.map((v) => large.x(v * MAX)), unit.map(small.x));
+  assert.equal(foldStrip([[0, 5e-324, 1e-323]]).x(5e-324), 110);
+  const tiny = foldStrip([[-Number.MIN_VALUE, Number.MIN_VALUE]]);
+  assert.deepEqual([tiny.x(-Number.MIN_VALUE), tiny.x(Number.MIN_VALUE)], [10, 210]);
 
   // Rows of comparable spread pin nothing, so they compare at a glance; so
   // does a steady row beside a spread one, whose folds bunch together.
@@ -210,7 +225,7 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   const currentRow = markup.slice(markup.indexOf('data-origin="run"'));
   const xs = [...currentRow.matchAll(/<circle cx="([\d.]+)"/g)].slice(0, 5).map((m) => Number(m[1]));
   assert.equal(xs.length, 5);
-  assert.ok(Math.max(...xs) - Math.min(...xs) > 190, String(xs));
+  assert.ok(Math.max(...xs) - Math.min(...xs) > 170, String(xs));
 });
 
 test("the fold table lists the latest run's folds and a mean row", () => {

@@ -287,18 +287,30 @@ const UNIT_ROUNDOFF = 2 ** -53;
  * the strip, with the folds beside the cores while the cores keep at least
  * READABLE_SHARE of it; the folds beyond are far off, however far the other
  * far-off folds are. A steadier row beside a spread one pins nothing, which
- * shows it is steadier.
- * Folds that differ by rounding alone sit mid-strip, and every position is
- * held on the strip.
+ * shows it is steadier. Pinned marks have the strip's ends to themselves:
+ * the kept folds then lie a mark's width inside them. Folds that differ by
+ * rounding alone sit mid-strip, and every position is held on the strip.
+ *
+ * Scores beyond 2^1021 in size are first scaled by 1/4, a power of two and
+ * so exact for them, so that no difference, sum or span below overflows;
+ * smaller scores, subnormal ones included, are left exactly as they are.
  * @param {number[][]} rows each row's finite values
  * @returns {{pinned: boolean, x: (value:number) => number, off: (value:number) => boolean}}
  */
 export function foldStrip(rows) {
-  const all = rows.flat().sort((a, b) => a - b);
-  const kept = withoutFarOff(all, rows);
+  const k = Math.max(0, ...rows.flat().map(Math.abs)) > 2 ** 1021 ? 0.25 : 1;
+  const scaled = rows.map((values) => values.map((value) => value * k));
+  const all = scaled.flat().sort((a, b) => a - b);
+  const kept = withoutFarOff(all, scaled);
   const pinned = kept.length < all.length;
   const [lo, hi] = [kept[0], kept[kept.length - 1]];
-  return { pinned, x: stripScale(kept), off: (value) => pinned && (value < lo || value > hi) };
+  const inner = stripScale(kept, pinned ? [22, 198] : [10, 210]);
+  const off = (/** @type {number} */ value) => pinned && (value * k < lo || value * k > hi);
+  return {
+    pinned,
+    off,
+    x: (value) => (!off(value) ? inner(value * k) : value * k < lo ? 10 : 210)
+  };
 }
 
 /**
@@ -314,11 +326,11 @@ function withoutFarOff(sorted, rows) {
   if (!cores.length || !spreads(sorted)) return sorted;
   let lo = sorted.indexOf(Math.min(...cores));
   let hi = sorted.lastIndexOf(Math.max(...cores));
-  const limit = (sorted[hi] - sorted[lo]) / READABLE_SHARE;
+  const coreSpan = sorted[hi] - sorted[lo];
   for (;;) {
     const below = lo > 0 ? sorted[hi] - sorted[lo - 1] : Number.POSITIVE_INFINITY;
     const above = hi < sorted.length - 1 ? sorted[hi + 1] - sorted[lo] : Number.POSITIVE_INFINITY;
-    if (!(Math.min(below, above) < limit)) break;
+    if (!(Math.min(below, above) * READABLE_SHARE < coreSpan)) break;
     if (below <= above) lo -= 1;
     else hi += 1;
   }
@@ -343,9 +355,7 @@ function core(values, centre) {
 
 /** Whether ``values`` spread wider than ``n`` roundings of their largest magnitude. @param {number[]} values */
 function spreads(values) {
-  const half = Math.max(...values) / 2 - Math.min(...values) / 2;
-  return values.length > 0
-    && half > values.length * UNIT_ROUNDOFF * Math.max(0, ...values.map(Math.abs)) / 2;
+  return range(values) > values.length * UNIT_ROUNDOFF * Math.max(0, ...values.map(Math.abs));
 }
 
 /** @param {number[]} values */
@@ -354,18 +364,16 @@ function range(values) {
 }
 
 /**
- * ``values`` onto the strip, 10 to 210, held on it. Values that spread no
- * wider than their rounding sit mid-strip. Positions are taken from halved
- * values, which halving leaves exact, so two finite scores of opposite sign
- * near the float64 limit do not overflow their span.
- * @param {number[]} values
+ * ``values`` onto ``[from, to]`` of the strip, held there. Values that
+ * spread no wider than their rounding sit mid-strip.
+ * @param {number[]} values @param {[number, number]} ends
  * @returns {(value:number) => number}
  */
-function stripScale(values) {
-  if (!spreads(values)) return () => 110;
-  const lo = Math.min(...values) / 2;
-  const span = Math.max(...values) / 2 - lo;
-  return (value) => Math.min(210, Math.max(10, 10 + ((value / 2 - lo) / span) * 200));
+function stripScale(values, [from, to]) {
+  if (!spreads(values)) return () => (from + to) / 2;
+  const lo = Math.min(...values);
+  const span = Math.max(...values) - lo;
+  return (value) => Math.min(to, Math.max(from, from + ((value - lo) / span) * (to - from)));
 }
 
 /** @param {number[]} values */
