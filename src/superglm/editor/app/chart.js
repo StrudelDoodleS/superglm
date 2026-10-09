@@ -25,6 +25,7 @@ import {
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
 import { freeLevelMarks, waitingSpecials } from "./specials.js";
+import { unsmoothedRange, unsmoothedRuns, unsmoothedSeries } from "./unsmoothed.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 // A curve drawn with more points than this hides them until they are
@@ -153,7 +154,7 @@ export function drawChart(term, selection, context) {
   // A grouped display never carries a spline: the tools are off for groups.
   const spline = view.displayIsCollapsed ? null : splineCurves(term);
   const splineValues = spline ? [...(spline.y || []), ...(spline.originalY || [])] : [];
-  const yMinRaw = Math.min(
+  const curveMin = Math.min(
     ...y,
     ...original,
     ...previousValues,
@@ -162,7 +163,7 @@ export function drawChart(term, selection, context) {
     ...buildValues,
     ...splineValues
   );
-  const yMaxRaw = Math.max(
+  const curveMax = Math.max(
     ...y,
     ...original,
     ...previousValues,
@@ -171,6 +172,13 @@ export function drawChart(term, selection, context) {
     ...buildValues,
     ...splineValues
   );
+  // The Unsmoothed line takes part in the range like any series, up to a
+  // reach that keeps the curve readable; past it the line runs off the plot.
+  const unsmoothedLine = buildActive ? null : (context.unsmoothed?.() ?? null);
+  const unsmoothed = unsmoothedSeries(unsmoothedLine, view);
+  const [yMinRaw, yMaxRaw] = unsmoothed
+    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
+    : [curveMin, curveMax];
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
@@ -262,6 +270,7 @@ export function drawChart(term, selection, context) {
   const freeMarks = buildActive ? [] : freeLevelMarks(context.freeLevels?.() ?? null, view);
   if (freeMarks.length) drawFreeLevels(svg, freeMarks, { sx, sy, yMin, yMax });
   if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
+  if (unsmoothed && unsmoothedLine) drawUnsmoothed(svg, unsmoothed, unsmoothedLine, sx, sy);
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
@@ -342,6 +351,7 @@ export function drawChart(term, selection, context) {
   legend(legendLayer, width - 10, 13, {
     originalProjected: view.displayIsCollapsed,
     hasPrevious: Boolean(previous),
+    unsmoothed: Boolean(unsmoothed),
     freeLevels: freeMarks.length > 0
       ? (context.freeLevels?.()?.shrunk ? "fitted free, shrunk by the penalty" : "fitted free")
       : null,
@@ -576,6 +586,8 @@ function applyPlotClip(svg) {
     ".free-whisker",
     ".free-level",
     ".free-curve-tick",
+    ".unsmoothed",
+    ".unsmoothed-dot",
     ".point",
     ".spline-level-dot",
     ".control-stem",
@@ -1408,6 +1420,26 @@ function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
   }
 }
 
+// The term fitted with its smoothing switched off, dashed over the curve: one
+// path per run between the levels the free fit left out, and a dot for a
+// level alone between two of them. Its hover text names what it is and any
+// level it skips.
+function drawUnsmoothed(svg, series, line, sx, sy) {
+  const layer = el("g", { class: "unsmoothed-layer" });
+  svg.appendChild(layer);
+  const label = `${line.term} fitted with its smoothing switched off`
+    + `${line.note ? `. ${line.note}` : ""}`;
+  for (const run of unsmoothedRuns(series)) {
+    const node = run.x.length > 1
+      ? path(layer, run.x, run.y, sx, sy, "unsmoothed")
+      : el("circle", { cx: sx(run.x[0]), cy: sy(run.y[0]), r: 2.6, class: "unsmoothed-dot" });
+    if (!node.parentNode) layer.appendChild(node);
+    const title = el("title", {});
+    title.textContent = label;
+    node.appendChild(title);
+  }
+}
+
 // A level a waiting change takes off the curve, or puts back on it: a dashed
 // ring round its point until Refit.
 function drawWaitingSpecials(svg, term, view, sx, sy) {
@@ -1452,10 +1484,13 @@ function errorBars(svg, x, lower, upper, sx, sy) {
 
 // One quiet row above the plot, ending at `right`: the series, then the
 // exposure strip's swatch.
-function legend(svg, right, y, { originalProjected, hasPrevious, freeLevels, exposureLabel }) {
+function legend(
+  svg, right, y, { originalProjected, hasPrevious, unsmoothed, freeLevels, exposureLabel }
+) {
   const items = [["original", originalProjected ? "original projection" : "original"]];
   if (hasPrevious) items.push(["previous-edit", "previous edit"]);
   items.push(["edited", "current edit"]);
+  if (unsmoothed) items.push(["unsmoothed", "unsmoothed"]);
   if (freeLevels) items.push(["free-level", freeLevels]);
   if (exposureLabel) items.push(["legend-swatch", exposureLabel]);
   const keyWidth = 22;

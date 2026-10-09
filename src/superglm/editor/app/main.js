@@ -1,4 +1,4 @@
-import { editorClient } from "./api/client.js";
+import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
   drawChart,
@@ -58,6 +58,7 @@ import {
   stageUngroup
 } from "./summary.js";
 import { freeLevelsShown, specialActions } from "./specials.js";
+import { unsmoothedEntry, unsmoothedToggle, withUnsmoothed } from "./unsmoothed.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import {
@@ -211,6 +212,7 @@ const setReference = document.getElementById("setReference");
 const makeSpecial = document.getElementById("makeSpecial");
 const returnToCurve = document.getElementById("returnToCurve");
 const freeLevelsToggle = document.getElementById("freeLevelsToggle");
+const unsmoothedButton = document.getElementById("unsmoothedToggle");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
 const shapeJoin = document.getElementById("shapeJoin");
 const shapeJoinSeparator = document.getElementById("shapeJoinSeparator");
@@ -370,6 +372,7 @@ const chartContext = {
   visualMode,
   showCi: () => store.getState().view.showCi,
   freeLevels: () => shownFreeLevels(),
+  unsmoothed: () => shownUnsmoothed(),
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode(),
@@ -1058,6 +1061,7 @@ function renderChartWorkspace() {
   const view = editorState.view;
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
   renderFreeLevelsToggle(snapshot);
+  renderUnsmoothedToggle(snapshot);
   const selected = selectedTerm();
   const term = currentTerm();
   if (!term) return;
@@ -1254,6 +1258,8 @@ function selectChartRenderState(state) {
     showCi: view.showCi,
     showContrib: view.showContrib,
     freeLevels: view.freeLevels,
+    showUnsmoothed: view.showUnsmoothed,
+    unsmoothed: view.unsmoothed,
     zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
@@ -1270,6 +1276,8 @@ function sameChartRenderState(next, previous) {
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.freeLevels === previous.freeLevels &&
+    next.showUnsmoothed === previous.showUnsmoothed &&
+    next.unsmoothed === previous.unsmoothed &&
     next.zoom === previous.zoom &&
     next.groupMode === previous.groupMode;
 }
@@ -1663,6 +1671,91 @@ async function toggleFreeLevels() {
   } finally {
     setAppBusy(false);
   }
+}
+
+// The Unsmoothed line in view: the term's line for the fit in force, while
+// the toggle is on.
+function shownUnsmoothed() {
+  const state = store.getState();
+  if (!state.view.showUnsmoothed) return null;
+  const fitToken = state.remote.snapshot?.fit_token;
+  const entry = unsmoothedEntry(state.view.unsmoothed, selectedTerm(), fitToken);
+  return entry?.status === "ready" ? entry.line : null;
+}
+
+function patchUnsmoothed(term, entry) {
+  actions.patchView({ unsmoothed: withUnsmoothed(store.getState().view.unsmoothed, term, entry) });
+}
+
+// One fit per term and fit in force, asked for while the toggle is on. It
+// runs without holding the editor, so nothing blocks: the toggle is busy, and
+// a refusal disables it with Python's sentence for that fit.
+async function fetchUnsmoothed(term, fitToken) {
+  patchUnsmoothed(term, { fit_token: fitToken, status: "running", line: null, reason: null });
+  try {
+    const line = await editorClient.unsmoothed(term);
+    patchUnsmoothed(term, { fit_token: line.fit_token, status: "ready", line, reason: null });
+  } catch (error) {
+    const refused = error instanceof EditorAPIError && error.status === 400;
+    patchUnsmoothed(term, {
+      fit_token: fitToken,
+      status: refused ? "refused" : "failed",
+      line: null,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function selectUnsmoothedNeed(state) {
+  const snapshot = state.remote.snapshot;
+  const term = selectActiveTermName(state);
+  const fitToken = snapshot?.fit_token;
+  return {
+    show: state.view.showUnsmoothed,
+    term,
+    fitToken,
+    offered: Boolean(snapshot?.terms?.[term]?.unsmoothed),
+    known: unsmoothedEntry(state.view.unsmoothed, term, fitToken) !== null
+  };
+}
+
+function sameUnsmoothedNeed(next, previous) {
+  return next.show === previous.show && next.term === previous.term &&
+    next.fitToken === previous.fitToken && next.offered === previous.offered &&
+    next.known === previous.known;
+}
+
+function requestUnsmoothed(need) {
+  if (need.show && need.offered && !need.known && need.fitToken !== undefined) {
+    void fetchUnsmoothed(need.term, need.fitToken);
+  }
+}
+
+// The choice lasts the session, across terms. Turned on again, it retries a
+// request that failed, though not a fit Python refused.
+function toggleUnsmoothed() {
+  if (!unsmoothedButton || unsmoothedButton.getAttribute("aria-disabled") === "true") return;
+  const state = store.getState();
+  const show = !state.view.showUnsmoothed;
+  const term = selectedTerm();
+  const entry = unsmoothedEntry(state.view.unsmoothed, term, state.remote.snapshot?.fit_token);
+  const unsmoothed = { ...state.view.unsmoothed };
+  if (show && entry?.status === "failed") delete unsmoothed[term];
+  actions.patchView({ showUnsmoothed: show, unsmoothed });
+}
+
+function renderUnsmoothedToggle(snapshot) {
+  if (!unsmoothedButton) return;
+  const view = store.getState().view;
+  const term = selectedTerm();
+  const entry = unsmoothedEntry(view.unsmoothed, term, snapshot.fit_token);
+  const toggle = unsmoothedToggle(view.showUnsmoothed, snapshot.terms?.[term], entry);
+  unsmoothedButton.hidden = toggle.hidden;
+  unsmoothedButton.setAttribute("aria-pressed", String(toggle.pressed));
+  unsmoothedButton.setAttribute("aria-disabled", String(toggle.disabled));
+  if (toggle.busy) unsmoothedButton.setAttribute("aria-busy", "true");
+  else unsmoothedButton.removeAttribute("aria-busy");
+  unsmoothedButton.dataset.popoverBody = toggle.body;
 }
 
 function renderFreeLevelsToggle(snapshot) {
@@ -2133,6 +2226,7 @@ for (const [button, stage] of [[makeSpecial, stageSpecial], [returnToCurve, stag
   });
 }
 if (freeLevelsToggle) freeLevelsToggle.addEventListener("click", toggleFreeLevels);
+if (unsmoothedButton) unsmoothedButton.addEventListener("click", toggleUnsmoothed);
 for (const button of shapeButtons) {
   button.addEventListener("click", async () => {
     const term = currentTerm();
@@ -2150,6 +2244,7 @@ for (const button of shapeButtons) {
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(selectUnsmoothedNeed, requestUnsmoothed, sameUnsmoothedNeed);
 store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
 store.subscribe(
   selectFeatureListRenderState,

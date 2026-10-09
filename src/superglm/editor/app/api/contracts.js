@@ -287,6 +287,34 @@
  * @property {SplineView|null} [spline_view]
  * @property {TermUnseen|null} [unseen] the New levels choice; null except on a plain categorical
  * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
+ * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
+ *   toggle can switch off: a spline, or an ordered term with a spline basis
+ */
+/**
+ * A term fitted with its smoothing switched off (/unsmoothed). A spline's
+ * line is on the term's own ``x``; an ordered term's runs through ``levels``,
+ * its levels on the curve in axis order, with ``y`` null at a level the free
+ * fit cannot estimate, which ``note`` names. Relativities on the chart's
+ * reference; ``fit_token`` is the fit in force it was fitted beside.
+ * @typedef {Object} UnsmoothedLine
+ * @property {string} term
+ * @property {'spline'|'free'} kind
+ * @property {string[]|null} levels
+ * @property {number[]|null} x
+ * @property {Array<number|null>} y
+ * @property {string[]} gaps
+ * @property {string|null} note
+ * @property {number} fit_token
+ */
+/**
+ * One term's Unsmoothed line in the browser, for one fit in force: its fit
+ * running, the line, the sentence Python refused it with, or the failure of
+ * the request itself, which turning the toggle on again retries.
+ * @typedef {Object} UnsmoothedEntry
+ * @property {number} fit_token
+ * @property {'running'|'ready'|'refused'|'failed'} status
+ * @property {UnsmoothedLine|null} line
+ * @property {string|null} reason
  */
 /**
  * Where a plain categorical's levels unseen at fit go: the in-force
@@ -338,6 +366,7 @@
  * @property {boolean} in_force_is_original
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
+ * @property {number} [fit_token] changes only when the fitted model in force is replaced
  */
 /**
  * @typedef {Object} StructuralTransitionTiming
@@ -388,6 +417,9 @@
  * @property {boolean} showContrib
  * @property {FreeLevels|null} freeLevels the last free-level comparison, drawn
  *   while its term and the fit in force are the ones in view
+ * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
+ * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
+ *   or refusal, drawn while its fit is the one in force
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm
