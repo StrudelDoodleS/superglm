@@ -137,6 +137,37 @@ def test_a_term_a_refit_left_alone_still_takes_a_knot_change(book):
     np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
 
 
+@pytest.mark.parametrize("term", ["age", "band"])
+def test_the_waiting_knots_are_the_ones_the_refit_places(book, term):
+    """Under prior weights the fit places knots on the rows, not on the exposure."""
+    session = _session(book)
+    step = session.stage_structural("knots", term, {"count": 5, "strategy": "quantile_rows"})
+    session.refit_pending()
+    np.testing.assert_array_equal(_knots(session.model, term), step.metadata["positions"])
+    assert step.metadata["strategy"] == "quantile_rows"
+
+
+def test_a_rule_that_would_fall_back_to_even_spacing_is_refused_with_a_count_that_works():
+    """Most rows at one value put several quantile knots there; the fit would space them evenly."""
+    X, y, w = _book(n=4000)
+    X = X.assign(age=np.where(np.arange(len(X)) % 10 < 6, 18.0, X["age"]))
+    model = _declared().fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "age", {"count": 10, "strategy": "quantile_rows"})
+    sentence = str(refused.value)
+    most = int(sentence.split("Choose ")[1].split(" knots")[0])
+    assert sentence == (
+        "Quantiles of rows put several of the 10 knots of 'age' on one value (60% of its rows "
+        f"are at 18), so the fit would fall back to even spacing. Choose {most} knots or "
+        "fewer, or another rule."
+    )
+    step = session.stage_structural("knots", "age", {"count": most, "strategy": "quantile_rows"})
+    session.refit_pending()
+    assert session.model._specs["age"]._knot_strategy_actual == "quantile_rows"
+    assert _knots(session.model, "age").size == most == step.metadata["count"]
+
+
 def test_an_ordered_term_takes_at_most_one_knot_fewer_than_its_levels(book):
     """The constructor clamps a larger count; the editor refuses it and names the maximum."""
     session = _session(book)

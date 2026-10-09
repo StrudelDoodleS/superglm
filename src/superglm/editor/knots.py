@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
+from superglm.dm_builder import knot_geometry_weight, resolve_discrete_n_bins, should_discretize
 from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorValueError
@@ -93,6 +93,10 @@ _EVEN_ONLY_ORDER = (
 _SHAPED_EDGE = (
     "A knot falls too close to the edge of a shaped range or the end of the axis. "
     "Move it, or undo the range first."
+)
+_COLLAPSED = (
+    "{rule} put several of the {count} knots of {term!r} on one value{where}, so the fit "
+    "would fall back to even spacing. {remedy}"
 )
 _NO_REFERENCE = (
     "The opened model does not keep the declaration of {term!r}, so there is nothing to reset to."
@@ -240,6 +244,10 @@ def knots_feature_spec(
         basis.__dict__.pop(EDITOR_KNOTS_ATTRIBUTE, None)
     replacement = _hosted(spec, basis, name, X) if ordered else basis
     placed, strategy = _placed_knots(model, name, replacement, X, sample_weight)
+    if form == "rule" and params["strategy"] != "uniform" and strategy == "uniform":
+        raise EditorValueError(
+            _collapsed(model, name, spec, source, params, X, sample_weight, placed.size)
+        )
     count = int(placed.size)
     alpha = float(basis.knot_alpha)
     if form == "rule":
@@ -331,6 +339,54 @@ def _reset_basis(reference_model, name: str, source: _SplineBase) -> tuple[_Spli
 # -- Checks -----------------------------------------------------------------------
 
 
+def _collapsed(model, name: str, spec, source, params, X, sample_weight, count: int) -> str:
+    """The refusal for a quantile rule that would fall back to even spacing.
+
+    The library spaces the knots evenly when a quantile rule gives fewer
+    distinct knots than asked, as it does where many rows share one value.
+    The sentence names that value on a numeric term, and the most knots the
+    rule places without falling back.
+    """
+    strategy, alpha = params["strategy"], params.get("alpha", source.knot_alpha)
+    most = 0
+    for fewer in range(count - 1, 0, -1):
+        basis = respaced_spline(
+            source, n_knots=fewer, knot_strategy=strategy, knot_alpha=float(alpha)
+        )
+        replacement = (
+            _hosted(spec, basis, name, X) if isinstance(spec, OrderedCategorical) else basis
+        )
+        if _placed_knots(model, name, replacement, X, sample_weight)[1] != "uniform":
+            most = fewer
+            break
+    remedy = f"Choose {most} knots or fewer, or another rule." if most else "Choose another rule."
+    return _COLLAPSED.format(
+        rule=_RULE_TEXT[strategy].capitalize(),
+        count=count,
+        term=name,
+        where=_crowded_value(model, name, spec, X, sample_weight),
+        remedy=remedy,
+    )
+
+
+def _crowded_value(model, name: str, spec, X, sample_weight) -> str:
+    """ "(60% of its rows are at 18)" for a numeric term's most shared value; empty otherwise."""
+    if isinstance(spec, OrderedCategorical):
+        return ""
+    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64).ravel()
+    weights = knot_geometry_weight(sample_weight, model._weight_semantics)
+    keep = np.isfinite(x) if weights is None else np.isfinite(x) & (np.asarray(weights) > 0)
+    values, mass = np.unique(x[keep], return_counts=True)
+    if weights is not None and np.any(np.asarray(weights)[keep] != 1.0):
+        mass = np.bincount(
+            np.searchsorted(values, x[keep]),
+            weights=np.asarray(weights)[keep],
+            minlength=values.size,
+        )
+    top = int(np.argmax(mass))
+    return f" ({mass[top] / mass.sum():.0%} of its rows are at {values[top]:g})"
+
+
 def _require_count(name: str, axis: _Axis, count: int) -> None:
     if axis.max_count is not None and count > axis.max_count:
         raise EditorValueError(
@@ -416,12 +472,16 @@ def _placed_knots(model, name: str, replacement, X, sample_weight) -> tuple[NDAr
     """
     probe = copy.deepcopy(replacement)
     column = as_eager_frame(X).column_array(name)
-    weights = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    reporting = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    # The fit's own rule for the weights that place knots.
+    weights = knot_geometry_weight(reporting, model._weight_semantics)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             if isinstance(probe, OrderedCategorical):
-                probe.build(column, sample_weight=weights)
+                probe._build_with_geometry(
+                    column, reporting_weight=reporting, geometry_weight=weights
+                )
                 built = probe._basis_spline
             else:
                 x = np.asarray(column, dtype=np.float64).ravel()

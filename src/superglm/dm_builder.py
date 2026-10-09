@@ -232,6 +232,18 @@ def resolve_discrete_n_bins(
     return n_bins
 
 
+def knot_geometry_weight(sample_weight, weight_semantics: str):
+    """The weights that place a spline's knots: the rows' own under prior weights.
+
+    Frequency weights are replicated rows and place knots as such. Prior
+    weights say how precisely a row was measured, so knots follow the physical
+    rows, less those of zero weight, which were not observed at all.
+    """
+    if sample_weight is None or weight_semantics != PRIOR_WEIGHTS:
+        return sample_weight
+    return (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
+
+
 def _discretize_spline_column(
     x: NDArray,
     n_bins: int,
@@ -1007,11 +1019,7 @@ def build_design_matrix(
     # ``None``) wherever the weights are strictly positive, which is every
     # Tweedie prior fit.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
-    geometry_weight = (
-        (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
-        if physical_rows
-        else sample_weight
-    )
+    geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
 
     compiled = compile_predictor_design(
         X,
