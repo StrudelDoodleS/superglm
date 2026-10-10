@@ -233,8 +233,8 @@ def build_integrated_derivative_penalty(
             "Integrated-derivative penalty requires order <= degree."
         )
     K = len(knots) - degree - 1
-    knots, excluded = _unit_knots(knots, degree, excluded)
-    return sum(_interval_blocks(knots, degree, order, excluded), np.zeros((K, K)))
+    knots, bounds = _unit_knots(knots, degree, excluded)
+    return sum(_interval_blocks(knots, degree, order, bounds), np.zeros((K, K)))
 
 
 def mean_knot_interval(breaks: NDArray) -> float:
@@ -279,8 +279,8 @@ def structural_derivative_penalty(
     ``width**-3`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
-    knots, excluded = _unit_knots(knots, degree, excluded)
-    blocks = _interval_blocks(knots, degree, order, excluded)
+    knots, bounds = _unit_knots(knots, degree, excluded)
+    blocks = _interval_blocks(knots, degree, order, bounds)
     return sum((block / np.linalg.norm(block) for block in blocks), np.zeros((K, K)))
 
 

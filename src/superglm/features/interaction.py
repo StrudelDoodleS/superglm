@@ -1811,6 +1811,7 @@ class TensorInteraction:
                 (self.feat1_name, self._marginal1),
                 (self.feat2_name, self._marginal2),
             )
+            if margin is not None
         }
         margin = min(spreads, key=spreads.__getitem__)
         return (
