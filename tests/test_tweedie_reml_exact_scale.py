@@ -231,7 +231,9 @@ class TestSmoothTermMovesToExactOptimum:
             model.fit_reml(pd.DataFrame({"x": x}), y)
         assert float(model.result.effective_df) == pytest.approx(7.32, abs=0.10)
         log10_lam = float(np.log10(dict(model._reml_result.lambdas)["x"]))
-        assert log10_lam == pytest.approx(-1.973, abs=0.04)
+        # -1.973 over x; the penalty is measured in its eleven knot intervals.
+        per_knot = -3.0 * np.log10(np.ptp(x) / 11)
+        assert log10_lam == pytest.approx(-1.973 + per_knot, abs=0.04)
 
 
 class TestScaleProfileUnit:

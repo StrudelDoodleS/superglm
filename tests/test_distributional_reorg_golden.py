@@ -39,6 +39,20 @@ inner iterations Fisher -> observed, was:
 The ``:reml`` cases pin ``outer="efs"`` so they stay on the Fellner--Schall
 path they were recorded on; the ``:reml+newton`` cases also exercise the
 Newton endgame.
+
+Re-recorded 2026-10-10, when a ``cr`` penalty became the curvature integral
+over the covariate in knot intervals, ``hbar**3`` times the integral over the
+covariate (``hbar`` the mean knot interval, about 2/7 on ``x`` and 2/5 on
+``z``). The cases keep their models by multiplying every lambda and start by
+``hbar**-3`` (``_per_knot``), and the record keeps lambdas over the covariate
+(``_in_recorded_units``). Against the previous record the 16 smoothing cases'
+fitted parameters reproduced to 4.5e-10 relative and their EDF to 1.5e-11,
+the fixed cases' to 1.8e-13, the objectives to 4.3e-12 and the unsaturated
+lambdas to 1.4e-12 in log. Two lambdas on flat directions moved further,
+``gaussian`` ``scale:z#wiggle`` (saturated) by 6.5e-4 and ``nb2``
+``theta:z#wiggle`` by 1.8e-6 in log, with the fits unmoved. Coefficients and
+covariance are in the SSP basis, whose ridge ``0.1 Omega`` the new scale of
+``Omega`` changes, so they moved and were re-recorded with the rest.
 """
 
 from __future__ import annotations
@@ -239,24 +253,51 @@ def _wiggle_names(predictors) -> list[str]:
     return names
 
 
+def _per_knot(frame, predictors) -> dict[str, float]:
+    """``hbar**-3`` for each wiggle penalty, ``hbar`` its spline's mean knot interval.
+
+    The record was taken on penalties integrated over the covariate; they are
+    now integrated over the covariate in knot intervals, ``hbar**3`` times as
+    large, so a lambda this many times larger fits the same model.
+    """
+    return {
+        f"{predictor.name}:{feature}#wiggle": float(
+            (np.ptp(frame[feature]) / (spec.n_knots + 1)) ** -3
+        )
+        for predictor in predictors
+        for feature, spec in predictor.features.items()
+        if isinstance(spec, CubicRegressionSpline)
+    }
+
+
+def _in_recorded_units(record: dict[str, object], per_knot: dict[str, float]):
+    if "lambdas" in record:
+        record["lambdas"] = {
+            key: value / per_knot.get(key, 1.0) for key, value in record["lambdas"].items()
+        }
+    return record
+
+
 def _compute() -> dict[str, dict[str, object]]:
     cases, frame = _cases()
     out = {}
     for name, (family, predictors, y) in cases.items():
+        per_knot = _per_knot(frame, predictors)
         fixed = model_from_templates(family=family, predictors=predictors).fit(
-            frame, y, lambdas={key: 1.0 for key in _wiggle_names(predictors)}
+            frame, y, lambdas={key: 1.0 * per_knot[key] for key in _wiggle_names(predictors)}
         )
         out[f"{name}:fixed"] = _record(fixed)
         # The record predates automatic initialization. Keep its numerical
         # configuration fixed; default-start behavior has its own regressions.
+        starts = {key: 0.1 * value for key, value in per_knot.items()}
         reml = model_from_templates(family=family, predictors=predictors).fit_reml(
-            frame, y, outer="efs", initial_lambda=0.1
+            frame, y, outer="efs", initial_lambda=0.1, lambdas=starts
         )
-        out[f"{name}:reml"] = _record(reml)
+        out[f"{name}:reml"] = _in_recorded_units(_record(reml), per_knot)
         newton = model_from_templates(family=family, predictors=predictors).fit_reml(
-            frame, y, outer="efs+newton", initial_lambda=0.1
+            frame, y, outer="efs+newton", initial_lambda=0.1, lambdas=starts
         )
-        out[f"{name}:reml+newton"] = _record(newton)
+        out[f"{name}:reml+newton"] = _in_recorded_units(_record(newton), per_knot)
     return out
 
 
@@ -273,11 +314,14 @@ def test_outputs_reproduce_the_golden_record_within_tolerance(request) -> None:
 
 # The value ``gaussian:reml`` and ``gaussian:reml+newton`` carried for
 # ``scale:z#wiggle`` on the stack that recorded the original byte-identical
-# record (0x1.2f6f026a3e63dp+26), against the 79541630.3960821 recorded here.
-# That is |log(new/old)| = 2.1e-5 on a lambda the REML objective is flat in:
-# every objective in the record agrees to 4.1e-14 and every lambda below the
-# saturation floor to 1.2e-8.
-_PRE_CONVERSION_SATURATED_LAMBDA = float.fromhex("0x1.2f6f026a3e63dp+26")
+# record (0x1.2f6f026a3e63dp+26), against the 79541630.3960821 the tolerance
+# form first recorded. That is |log(new/old)| = 2.1e-5 on a lambda the REML
+# objective is flat in: every objective in the record agrees to 4.1e-14 and
+# every lambda below the saturation floor to 1.2e-8. The drift is applied to
+# the value recorded now.
+_SATURATED_DRIFT_BETWEEN_STACKS = float.fromhex("0x1.2f6f026a3e63dp+26") / float.fromhex(
+    "0x1.2f6d5f995968cp+26"
+)
 
 
 def _recorded_entry(name: str) -> dict[str, object]:
@@ -289,7 +333,7 @@ def test_a_saturated_lambda_tolerates_the_drift_measured_between_stacks(name: st
     recorded = _recorded_entry(name)
     assert recorded["lambdas"]["scale:z#wiggle"] >= _SATURATED_LAMBDA
     computed = _recorded_entry(name)
-    computed["lambdas"]["scale:z#wiggle"] = _PRE_CONVERSION_SATURATED_LAMBDA
+    computed["lambdas"]["scale:z#wiggle"] *= _SATURATED_DRIFT_BETWEEN_STACKS
     _assert_close(name, computed, recorded)
 
 

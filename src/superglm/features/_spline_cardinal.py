@@ -34,8 +34,8 @@ def structural_cr_penalty(knots: NDArray) -> NDArray:
     return unit.T @ unit
 
 
-def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
-    """Build the cardinal CR second-derivative map and penalty matrix."""
+def _second_derivative_map(knots: NDArray) -> tuple[NDArray, NDArray]:
+    """``B_d`` and ``D^{-1} B_d``, the map from knot values to second derivatives at the knots."""
     K = len(knots)
     h = np.diff(knots)
 
@@ -47,9 +47,23 @@ def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
         if i < K - 3:
             D[i, i + 1] = h[i + 1] / 6.0
             D[i + 1, i] = h[i + 1] / 6.0
+    return B_d, np.linalg.solve(D, B_d)
 
-    D_inv_Bd = np.linalg.solve(D, B_d)
-    cr_S = B_d.T @ D_inv_Bd
+
+def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
+    """Build the cardinal CR second-derivative map and penalty matrix.
+
+    The penalty is ``integral f''**2`` over ``u = (x - knots[0]) / hbar``,
+    ``hbar`` the mean knot interval, which is ``hbar**3`` times the integral
+    over ``x`` and so independent of the column's units, as
+    ``build_integrated_derivative_penalty`` takes it for the B-spline kinds.
+    The second-derivative map stays in the units of ``x``: the basis needs it.
+    """
+    K = len(knots)
+    _, D_inv_Bd = _second_derivative_map(knots)
+    hbar = (knots[-1] - knots[0]) / (K - 1)
+    B_u, D_inv_Bu = _second_derivative_map((knots - knots[0]) / hbar)
+    cr_S = B_u.T @ D_inv_Bu
 
     cr_M = np.zeros((K, K))
     cr_M[1 : K - 1, :] = D_inv_Bd

@@ -103,13 +103,23 @@ def _fit_raw_and_penalise(spec, x, y, order):
     return float(beta @ S_raw @ beta)
 
 
+def _knot_units(spec, order):
+    """``hbar**(2 * order - 1)``: the penalty integrates over ``x / hbar``, ``hbar`` the mean knot interval."""
+    from superglm.features._spline_penalties import mean_knot_interval
+
+    hbar = mean_knot_interval(spec._knots[spec.degree : -spec.degree])
+    return hbar ** (2 * order - 1)
+
+
 class TestAnalyticPenalties:
     """Verify integral penalty values against known analytic results.
 
     Uses the raw (unprojected) penalty so that the identifiability
     constraint does not change the integral domain.  Expected values
     are computed analytically over the full knot span [a, b] (which
-    extends beyond [0, 1] due to open-knot padding).
+    extends beyond [0, 1] due to open-knot padding), in the units of
+    ``x``, and converted to the mean knot interval's units the penalty
+    is measured in.
     """
 
     def test_linear_has_zero_second_deriv_penalty(self):
@@ -127,7 +137,7 @@ class TestAnalyticPenalties:
         spec = BSplineSmooth(n_knots=20, degree=3, penalty="none", m=2)
         penalty_val = _fit_raw_and_penalise(spec, x, y, order=2)
         a, b = spec._knots[0], spec._knots[-1]
-        expected = 4.0 * (b - a)
+        expected = 4.0 * (b - a) * _knot_units(spec, 2)
         np.testing.assert_allclose(penalty_val, expected, rtol=1e-3)
 
     def test_cubic_second_deriv_penalty(self):
@@ -137,7 +147,7 @@ class TestAnalyticPenalties:
         spec = BSplineSmooth(n_knots=20, degree=3, penalty="none", m=2)
         penalty_val = _fit_raw_and_penalise(spec, x, y, order=2)
         a, b = spec._knots[0], spec._knots[-1]
-        expected = 36.0 * (b**3 - a**3) / 3.0
+        expected = 36.0 * (b**3 - a**3) / 3.0 * _knot_units(spec, 2)
         np.testing.assert_allclose(penalty_val, expected, rtol=1e-3)
 
     def test_quadratic_first_deriv_penalty(self):
@@ -147,7 +157,7 @@ class TestAnalyticPenalties:
         spec = BSplineSmooth(n_knots=20, degree=3, penalty="none", m=1)
         penalty_val = _fit_raw_and_penalise(spec, x, y, order=1)
         a, b = spec._knots[0], spec._knots[-1]
-        expected = 4.0 * (b**3 - a**3) / 3.0
+        expected = 4.0 * (b**3 - a**3) / 3.0 * _knot_units(spec, 1)
         np.testing.assert_allclose(penalty_val, expected, rtol=1e-3)
 
 

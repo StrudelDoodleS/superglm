@@ -205,11 +205,27 @@ def build_integrated_derivative_penalty(
     order: int,
     excluded: Sequence[tuple[float, float]] = (),
 ) -> NDArray:
-    """Integrated squared derivative penalty via Gauss-Legendre quadrature.
+    """Integrated squared derivative penalty via Gauss-Legendre quadrature, in knot-interval units.
 
     The integral is an exact sum of per-knot-interval blocks (Wood 2016,
     arXiv:1605.02446, section 1), so leaving out the intervals inside an
     ``excluded`` ``(lo, hi)`` leaves the curve there unpenalised.
+
+    The integral is taken over ``u = (x - t[degree]) / hbar``, ``hbar`` the
+    mean knot interval (``mean_knot_interval``), which is
+    ``hbar**(2 * order - 1)`` times the integral over ``x``. Over ``x`` it
+    scales with the column's units to the power ``1 - 2 * order``, so a fixed
+    ``spline_penalty`` would smooth age in months a thousandfold less than age
+    in years at ``order = 2``; over ``u`` it is unit-free. On evenly spaced
+    knots, away from clamped ends, it is ``Delta_m' G Delta_m``, the standard difference penalty
+    sandwiched by the Gram ``G`` of the degree ``degree - order`` B-splines on
+    unit spacing (Li and Cao, arXiv:2201.06808, section 2.4), so a fixed
+    ``spline_penalty`` smooths it about as strongly as a P-spline's. Smoothing
+    splines standardise the covariate the same way, to the unit interval (R's
+    ``smooth.spline`` documentation); the knot interval rather than the range
+    is what keeps the scale independent of the number of knots. Forming the
+    integral on the mapped knots, rather than scaling the one over ``x``,
+    keeps every intermediate near one whatever the units.
     """
     if order > degree:
         raise ValueError(
@@ -217,7 +233,37 @@ def build_integrated_derivative_penalty(
             "Integrated-derivative penalty requires order <= degree."
         )
     K = len(knots) - degree - 1
+    knots, excluded = _unit_knots(knots, degree, excluded)
     return sum(_interval_blocks(knots, degree, order, excluded), np.zeros((K, K)))
+
+
+def mean_knot_interval(breaks: NDArray) -> float:
+    """The mean width of the intervals between the distinct ``breaks``.
+
+    The length an integrated derivative penalty is measured in
+    (``build_integrated_derivative_penalty``): it scales with the column's
+    units and, on evenly spaced knots, is the knot spacing. Repeated knots,
+    such as a polynomial range's edges, are one break.
+    """
+    distinct = np.unique(breaks)
+    return float((distinct[-1] - distinct[0]) / (distinct.size - 1))
+
+
+def _unit_knots(
+    knots: NDArray, degree: int, excluded: Sequence[tuple[float, float]]
+) -> tuple[NDArray, NDArray]:
+    """``knots`` and the ``excluded`` bounds mapped to ``(x - t[degree]) / hbar``.
+
+    ``hbar`` is the mean knot interval on the basis's domain
+    ``[t[degree], t[n_basis]]``. Both go through the same monotone map, so a
+    bound equal to a knot stays equal to it and the pinned intervals are the
+    same ones.
+    """
+    t = np.asarray(knots, dtype=np.float64)
+    origin = t[degree]
+    hbar = mean_knot_interval(t[degree : t.size - degree])
+    bounds = np.asarray(excluded, dtype=np.float64).reshape(-1, 2)
+    return (t - origin) / hbar, (bounds - origin) / hbar
 
 
 def structural_derivative_penalty(
@@ -233,6 +279,7 @@ def structural_derivative_penalty(
     ``width**-3`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
+    knots, excluded = _unit_knots(knots, degree, excluded)
     blocks = _interval_blocks(knots, degree, order, excluded)
     return sum((block / np.linalg.norm(block) for block in blocks), np.zeros((K, K)))
 
@@ -306,6 +353,7 @@ def _gapped_rank(values: NDArray) -> int | None:
 __all__ = [
     "build_difference_penalty",
     "build_integrated_derivative_penalty",
+    "mean_knot_interval",
     "structural_derivative_penalty",
     "structural_penalty_ranks",
 ]

@@ -18,6 +18,23 @@ _MISSING = _datasets.skip_reason("freMTPL2freq.parquet") or _datasets.skip_reaso
 pytestmark = pytest.mark.skipif(_MISSING is not None, reason=_MISSING or "")
 
 
+def _weak_starts(data, predictors) -> dict[str, float]:
+    """The weak start of 0.1 these fits were calibrated on, per spline penalty.
+
+    That start weighed the curvature integral over each covariate; the
+    penalty is now integrated over the covariate in knot intervals, ``hbar**3``
+    times as large (``hbar`` the mean knot interval), so the same start is
+    ``0.1 / hbar**3``.
+    """
+    return {
+        f"{name}:{feature}#wiggle": 0.1
+        * float((np.ptp(data[feature]) / (features[feature].n_knots + 1)) ** -3)
+        for name, features in predictors
+        for feature in features
+        if feature in _NUMERIC
+    }
+
+
 @pytest.fixture(scope="module")
 def uncapped_claims():
     claims = _datasets.load_sev().merge(
@@ -61,13 +78,18 @@ def test_uncapped_gamma_mean_and_scale_converge(uncapped_claims, case):
 
     all_features = _NUMERIC + _CATEGORICAL
     scale_features = ["DrivAge", "VehPower"] if case == "selected_full" else all_features
-    options = {"initial_lambda": 0.1} if case == "selected_full" else {}
+    named = [("mean", features(all_features)), ("scale", features(scale_features))]
+    options = {}
+    if case == "selected_full":
+        starts = _weak_starts(data, named)
+        # VehAge's lambda reached the default cap of 1e10 over the covariate,
+        # an exact face; in its knot intervals that cap is 1e10 times the same
+        # hbar**-3, and every other lambda stops far below it.
+        cap = 1.0e10 * starts["mean:VehAge#wiggle"] / 0.1
+        options = {"initial_lambda": 0.1, "lambdas": starts, "max_lambda": cap}
     model = model_from_templates(
         family=GammaLS(),
-        predictors=[
-            Predictor("mean", features(all_features)),
-            Predictor("scale", features(scale_features)),
-        ],
+        predictors=[Predictor(name, spec) for name, spec in named],
     ).fit_reml(data[all_features], data.y.to_numpy(), **options)
     state = model._require_fitted().fit_state
     fit = state.solver_result
@@ -103,15 +125,19 @@ def test_uncapped_gamma_explicit_weak_start_refuses_unresolved_stationarity(unca
             for name in all_features
         }
 
+    named = [("mean", features()), ("scale", features())]
+    starts = _weak_starts(train, named)
     model = model_from_templates(
         family=GammaLS(),
-        predictors=[Predictor("mean", features()), Predictor("scale", features())],
-    ).fit_reml(train[all_features], train.y.to_numpy(), initial_lambda=0.1)
+        predictors=[Predictor(name, spec) for name, spec in named],
+    ).fit_reml(train[all_features], train.y.to_numpy(), initial_lambda=0.1, lambdas=starts)
     state = model._require_fitted().fit_state
     fit = state.solver_result
     np.testing.assert_array_equal(state.retained_rows.response, train.y.to_numpy())
     assert len(fit.theta) == len(train)
-    assert all(value == 0.1 for value in state.smoothing.initial_lambdas.values())
+    assert all(
+        value == starts.get(name, 0.1) for name, value in state.smoothing.initial_lambdas.items()
+    )
     mean, scale = fit.theta.T
     shape = 1.0 / scale**2
     ratio = train.y.to_numpy() / mean

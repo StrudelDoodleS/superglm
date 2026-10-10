@@ -168,8 +168,14 @@ def _predictors(
     )
 
 
-def _fixed_lambdas() -> dict[str, float]:
-    return dict.fromkeys(_PENALTY_NAMES, 1.0)
+def _fixed_lambdas(n_knots: int = 5) -> dict[str, float]:
+    """Unit smoothing over the covariates on [-1, 1], in the knot intervals the penalties use.
+
+    A ``cr`` penalty is the curvature integral over ``x / hbar``, ``hbar`` the
+    mean knot interval, ``hbar**3`` times the one over ``x`` these fixtures
+    were calibrated on.
+    """
+    return dict.fromkeys(_PENALTY_NAMES, (2.0 / (n_knots + 1)) ** -3)
 
 
 def _fit_tweedie(
@@ -191,7 +197,7 @@ def _fit_tweedie(
             coefficient_curvature="observed",
             tolerance=_FIT_TOLERANCE,
         ),
-        lambdas=_fixed_lambdas(),
+        lambdas=_fixed_lambdas(n_knots),
         initial=initial,
         discrete=False,
         chunk_size=None,
@@ -681,7 +687,8 @@ def _assert_independent_fit_geometry(
     ) == (local_width, local_width, local_width)
     assert tuple(model.layout.penalty_names) == _PENALTY_NAMES
     if require_unit_lambdas:
-        assert dict(model.lambdas) == _fixed_lambdas()
+        # A cr spline on n_knots carries an intercept beside n_knots + 1 columns.
+        assert dict(model.lambdas) == _fixed_lambdas(local_width - 2)
     assert np.array_equal(result.penalty, diagnostics.expected_penalty), (
         "published aggregate penalty differs from the named lambda-scaled component blocks"
     )
@@ -1510,7 +1517,7 @@ def _fit_tweedie_cross_family_route(
             coefficient_curvature="observed",
             tolerance=inner_tolerance,
         ),
-        lambdas=_fixed_lambdas() if lambdas is None else lambdas,
+        lambdas=_fixed_lambdas(4) if lambdas is None else lambdas,
         initial=initial,
         efs_config=DistributionalEFSConfig(**config_options),
         retain_rows=False,
