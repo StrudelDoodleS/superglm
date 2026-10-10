@@ -75,7 +75,8 @@ whatever its knots.
   eigenvalues". 0.40 fits them, unless the knots are too uneven for double
   precision (the bullet above).
 - **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit()` at a fixed
-  `spline_penalty`, or with fixed `lambdas` in `SuperLSS`**: the fit changes.
+  `spline_penalty`, held by `LambdaPolicy.fixed` under `fit_reml()`, or with
+  fixed `lambdas` in `SuperLSS`**: the fit changes.
   The penalty is now measured in the spline's knot intervals instead of the
   column's units. In 0.39 the same `spline_penalty` barely smoothed a column
   measured in thousands, such as a density, and heavily smoothed a share between
@@ -83,14 +84,17 @@ whatever its knots.
   whatever the units, and about as strongly as a P-spline with the same knots.
 - **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit_reml()`**: the curve,
   the effective degrees of freedom and the deviance are unchanged, to the
-  convergence tolerance. The reported smoothing parameter is larger by `h**-3`,
-  where `h` is the mean knot interval in the column's units: 729 times for nine
-  intervals across a column from 0 to 1. A penalty order `m` other than 2 takes
-  `h**-(2m - 1)`.
-- **`SuperLSS.fit_reml()` with such a spline on a column in large units**: a
-  smoothing parameter that 0.39 stopped at the cap of `max_lambda` can now stop
-  below it, because the cap no longer depends on the column's units. The curve
-  is still close to a straight line.
+  convergence tolerance, unless the 0.39 smoothing parameter stopped at the
+  search's bound of 1e-6 or 1e10. Those bounds applied in the column's units and
+  now apply in knot intervals, so such a term can move: smoother on a column in
+  large units, less smooth on one in small units. The reported smoothing
+  parameter is larger by `h**-3`, where `h` is the mean knot interval in the
+  column's units: 729 times for nine intervals across a column from 0 to 1. A
+  penalty order `m` other than 2 takes `h**-(2m - 1)`.
+- **`SuperGLM.fit_reml()` or `SuperLSS.fit_reml()` with such a spline on a column
+  in large units**: a smoothing parameter that 0.39 stopped at the cap (1e10, or
+  `max_lambda`) can now stop below it, because the cap no longer depends on the
+  column's units. The curve is still close to a straight line.
 - **`SuperLSS.fit_reml()` with a numeric `initial_lambda`**: the start now
   means the same smoothing on every spline, so the search can take another path
   and stop at another point within its tolerance.
