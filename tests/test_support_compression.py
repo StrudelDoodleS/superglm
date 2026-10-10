@@ -2415,3 +2415,52 @@ def test_exact_tensor_keeps_its_support_when_its_csr_basis_is_larger(monkeypatch
 
     kinds = [type(group) for group in model._dm.group_matrices]
     assert kinds.count(SupportCompressedSSPGroupMatrix) == 3, kinds
+
+
+def test_decomposed_exact_tensor_detects_and_stores_one_support(monkeypatch):
+    # A decompose=True tensor's bilinear and wiggly groups share one basis and
+    # differ only in R_inv. Detected per group, the basis was hashed and
+    # verified twice and each group kept its own rows: 2S + 16n retained,
+    # against the one CSR basis that each group's 3S + 8n charge assumed.
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(10)
+    n = 8000
+    frame = pd.DataFrame(
+        {"a": gen.integers(0, 60, n).astype(float), "b": gen.integers(0, 25, n).astype(float)}
+    )
+    widths = []
+    detect = _group_matrix_support.detect_row_support
+
+    def counted(basis, **kwargs):
+        widths.append(basis.shape[1])
+        return detect(basis, **kwargs)
+
+    monkeypatch.setattr(_group_matrix_support, "detect_row_support", counted)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=False,
+        features={"a": Spline(kind="cr", n_knots=8), "b": Spline(kind="cr", n_knots=5)},
+    )
+    model._add_interaction("a", "b", decompose=True)
+    model._build_design_matrix(frame, gen.poisson(1.0, n).astype(float), np.ones(n), None)
+
+    subgroups = {
+        group.subgroup_type: matrix
+        for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True)
+        if group.subgroup_type is not None
+    }
+    bilinear, wiggly = subgroups["bilinear"], subgroups["wiggly"]
+    assert type(bilinear) is type(wiggly) is SupportCompressedSSPGroupMatrix
+    assert bilinear.B_unique is wiggly.B_unique
+    assert bilinear.bin_idx is wiggly.bin_idx
+    assert widths.count(bilinear.B_unique.shape[1]) == 1
+    # Null plus range space: the subgroups' Gram products total one block.
+    assert bilinear.shape[1] + wiggly.shape[1] == bilinear.B_unique.shape[1]
