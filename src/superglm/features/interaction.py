@@ -1859,11 +1859,14 @@ class TensorInteraction:
                     )
                 except ValueError as err:
                     raise ValueError(self._split_refusal()) from err
+            # Each component symmetrised on its own, so the components sum to
+            # the penalty exactly: an unnormalised margin (bs) puts the
+            # congruence's asymmetric round-off far above any absolute bar.
             omega_1_range = U_range.T @ omega_1 @ U_range
+            omega_1_range = 0.5 * (omega_1_range + omega_1_range.T)
             omega_2_range = U_range.T @ omega_2 @ U_range
-            omega_range = 0.5 * (
-                (omega_1_range + omega_2_range) + (omega_1_range + omega_2_range).T
-            )
+            omega_2_range = 0.5 * (omega_2_range + omega_2_range.T)
+            omega_range = omega_1_range + omega_2_range
             return [
                 GroupInfo(
                     columns=None,

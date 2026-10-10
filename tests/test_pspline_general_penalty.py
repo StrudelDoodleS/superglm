@@ -530,35 +530,43 @@ def _assert_names_the_tensor_and_its_spread_margin(message, tensor, margin):
     assert f"is {_range_spread(marginal):.1e} of the penalty" in message
 
 
-@pytest.mark.parametrize("kind", ["cr", "bs"])
-def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind):
-    """The split counted the eigenvalues under eps**(2/3) of the largest: a skewed cr
-    margin's spread put a range direction there (2 null eigenvalues, not 1), and the
-    kindless default is cr. The structural margins give the bilinear direction; a bs
-    margin's tail curvature (2.5e-15 of the largest) is refused by name instead."""
-    from superglm.features._spline_select import _null_mask
-    from superglm.features.interaction import TensorInteraction, _normalize_tensor_penalty
-
-    x1, rng = _skewed(2.0, 6_000, 3)
+def _skewed_tensor_margins(kind, sigma):
+    x1, rng = _skewed(sigma, 6_000, 3)
     x2 = rng.uniform(0.0, 1.0, x1.size)
     margin_1 = Spline(kind=kind, n_knots=10, knot_strategy="quantile_rows")
     margin_2 = Spline(kind=kind, n_knots=5)
     margin_1.build(x1)
     margin_2.build(x2)
+    return x1, x2, {"a": margin_1, "b": margin_2}
+
+
+@pytest.mark.parametrize("kind", ["cr", "bs"])
+def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind):
+    """The split counted the eigenvalues under eps**(2/3) of the largest: a skewed cr
+    margin's spread put a range direction there (2 null eigenvalues, not 1), and the
+    kindless default is cr. The structural margins give the bilinear direction. A bs
+    margin's tail, at 1.6e-13 of its largest curvature, is certified 54 times over;
+    its penalty is not normalised, and its components, symmetrised only as a sum,
+    missed that sum by round-off of its 2.6e10 scale and failed GroupInfo's check."""
+    from superglm.features._spline_select import _null_mask
+    from superglm.features.interaction import TensorInteraction, _normalize_tensor_penalty
+
+    x1, x2, margins = _skewed_tensor_margins(kind, 2.0)
     tensor = TensorInteraction("a", "b", decompose=True)
-    if kind == "bs":
-        with pytest.raises(ValueError) as refusal:
-            tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256))
-        _assert_names_the_tensor_and_its_spread_margin(str(refusal.value), tensor, "a")
-        return
-    infos = tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256)).infos
+    infos = tensor.build_discrete(x1, x2, margins, n_bins=(256, 256)).infos
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
-    m1, m2 = tensor._marginal1, tensor._marginal2
-    omega = np.kron(_normalize_tensor_penalty(m1.penalty), np.eye(tensor._p2)) + np.kron(
-        np.eye(tensor._p1), _normalize_tensor_penalty(m2.penalty)
+    wiggly = infos[1]
+    assert np.array_equal(
+        sum(omega for _, omega in wiggly.penalty_components), wiggly.penalty_matrix
     )
-    # The real penalty alone puts a second direction under the cut.
-    assert np.sum(_null_mask(np.linalg.eigvalsh(omega))) == 2
+    m1, m2 = tensor._marginal1, tensor._marginal2
+    s1, s2 = (
+        _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty for m in (m1, m2)
+    )
+    omega = np.kron(s1, np.eye(tensor._p2)) + np.kron(np.eye(tensor._p1), s2)
+    # The real penalty alone puts more than the one null direction under the cut (for
+    # bs, whose margins are not normalised, the narrow margin's whole range).
+    assert np.sum(_null_mask(np.linalg.eigvalsh(omega))) >= 2
     # The bilinear direction must lie in the REAL penalty's null space. It is the
     # structural tensor penalty's computed null vector, within Davis and Kahan's
     # ``delta = p(n) eps ||S|| / lambda_2(S)`` of the exact one (``lambda_2`` the
@@ -574,6 +582,20 @@ def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_m
         np.abs(bilinear) @ np.abs(omega) @ np.abs(bilinear)
     )
     assert bilinear @ omega @ bilinear <= bound
+
+
+def test_a_decomposed_tensor_it_cannot_split_is_refused_by_name():
+    """A bs margin on lognormal(0, 2.5) puts its tail at a fraction of its largest
+    curvature that Rump's test cannot certify positive (the certificate's radius is
+    nine times its least eigenvalue), so the split is refused, naming the tensor and
+    the margin."""
+    from superglm.features.interaction import TensorInteraction
+
+    x1, x2, margins = _skewed_tensor_margins("bs", 2.5)
+    tensor = TensorInteraction("a", "b", decompose=True)
+    with pytest.raises(ValueError) as refusal:
+        tensor.build_discrete(x1, x2, margins, n_bins=(256, 256))
+    _assert_names_the_tensor_and_its_spread_margin(str(refusal.value), tensor, "a")
 
 
 def test_the_structural_cardinal_penalty_has_the_real_penalty_null_space():
