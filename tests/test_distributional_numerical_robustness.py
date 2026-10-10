@@ -97,7 +97,12 @@ def _fit(kind, smoothing=False, discrete=False, transform="original", shared=Fal
         )
     else:
         names = ("location", "scale") if kind == "gaussian" else ("mean", "scale")
-        lambdas = {f"{name}:{key}#wiggle": 1.0 for name in names for key in ("x", "z")}
+        # One on the curvature over [0, 1], the model this test was validated on: the
+        # penalty in knot intervals is h**3 that, h = 1 / (n_knots + 1) on this data.
+        # At one in knot intervals the gamma fit is penalised 343 times less and stops
+        # at its resolution on Haswell kernels.
+        per_knot = float((4 if shared else 6) + 1) ** 3
+        lambdas = {f"{name}:{key}#wiggle": per_knot for name in names for key in ("x", "z")}
         if shared:
             for name in names:
                 lambdas[f"{name}:x:z#margin_x"] = 0.7
