@@ -610,7 +610,7 @@ def compile_predictor_design(
                 build_kwargs["alias_prune"] = alias_prune
             result = ispec.build(x1, x2, parent_specs, **build_kwargs)
 
-        pi_kwargs = dict(
+        pi_kwargs: dict[str, Any] = dict(
             B_unique=B_unique_inter,
             bin_idx=bin_idx_inter,
             sample_weight=sample_weight,
@@ -624,8 +624,10 @@ def compile_predictor_design(
             has_subgroups = any(info.subgroup_name is not None for info in result)
             if has_subgroups:
                 r_inv_parts_i: list[NDArray] = []
+                # A decomposed tensor's subgroups share one basis and its support.
+                ssp_supports: dict = {}
                 for info in result:
-                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs)
+                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs, ssp_supports=ssp_supports)
                     if r_inv is not None:
                         r_inv_parts_i.append(r_inv)
 
