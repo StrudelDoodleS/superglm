@@ -113,8 +113,8 @@ def _certified_range(
             f"width that the curvature it puts on the widest is {ratio:.1e} "
             "of the curvature on the narrowest, which double precision cannot hold beside "
             "it. The widest interval is usually the tail of a heavy-tailed column under "
-            'quantile knots. Pass kind="ps", whose penalty does not depend on the knot '
-            "spacing, transform the column (for example, take its logarithm), or place "
+            'quantile knots. Pass kind="ps", whose penalty double precision can hold on '
+            "any knots, transform the column (for example, take its logarithm), or place "
             "the knots yourself."
         )
     return basis @ vectors, np.diag(values)
