@@ -366,6 +366,7 @@ def test_select_names_the_knot_spread_binary64_cannot_hold():
     """On lognormal(0, 3) quantile knots the cr penalty's tail curvature is below 1e-15 of
     its largest, under the eigensolver's resolution: no split can recover it. The refusal
     blamed the kind ("may not support select=True"); it names the spread and what to do.
+    The kind it names, ps, fits these knots and REML ranks its penalty at n_basis - 2.
     """
     x, rng = _skewed(3.0, 10_000, 0)
     y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
@@ -375,6 +376,12 @@ def test_select_names_the_knot_spread_binary64_cannot_hold():
         model.fit(pd.DataFrame({"x": x}), y)
     assert "may not support" not in str(raised.value)
     assert 'kind="ps"' in str(raised.value)
+    assert "whose penalty double precision can hold on any knots" in str(raised.value)
+    ps = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="ps", n_knots=10, knot_strategy="quantile_rows", select=True)},
+    ).fit_reml(pd.DataFrame({"x": x}), y)
+    assert _reml_ranks(ps)["x:wiggle"] == ps._specs["x"]._n_basis - 2
 
 
 @pytest.mark.parametrize("fit", ["fit", "fit_reml"])
