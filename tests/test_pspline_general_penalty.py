@@ -160,6 +160,42 @@ def test_a_fit_on_clustered_stated_knots_is_the_line(fit):
     assert np.abs(model.predict(frame) - y).max() <= np.sqrt(u) * np.ptp(y)
 
 
+@pytest.mark.parametrize(
+    ("knots", "x", "kind"),
+    [
+        (np.linspace(0.0, 10.0, 10)[1:-1], np.linspace(0.0, 10.0, 400), "standard"),
+        (UNEVEN, np.linspace(0.0, 10.0, 400), "general"),
+        (CLUSTER_KNOTS, CLUSTER_X, "projected"),
+    ],
+    ids=["even", "uneven", "clustered"],
+)
+def test_the_spec_records_which_difference_penalty_it_took(knots, x, kind):
+    """The clustered knots' general penalty has a condition of 1e19, past 1/sqrt(eps)."""
+    spline = Spline(kind="ps", knots=knots)
+    spline.build(x)
+    assert spline._difference_penalty == {2: kind}
+
+
+@pytest.mark.parametrize(
+    ("knots", "x", "kind"),
+    [(UNEVEN, np.linspace(0.0, 10.0, 400), "general"), (CLUSTER_KNOTS, CLUSTER_X, "projected")],
+    ids=["uneven", "clustered"],
+)
+def test_the_reports_name_the_difference_penalty(knots, x, kind):
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=1.0,
+        features={"x": Spline(kind="ps", knots=knots)},
+    ).fit(frame, np.sin(3.0 * frame["x"]))
+    rows = [row for row in model.summary()._coef_rows if row.is_spline]
+    assert [row.difference_penalty for row in rows] == [kind]
+    assert model.diagnostics()["x"]["difference_penalty"] == kind
+    assert model.term_inference("x").spline.difference_penalty == kind
+    assert model.knot_summary()["x"]["difference_penalty"] == kind
+
+
 def _skewed(sigma: float, n: int, seed: int):
     rng = np.random.default_rng(seed)
     x = rng.lognormal(0.0, sigma, n)

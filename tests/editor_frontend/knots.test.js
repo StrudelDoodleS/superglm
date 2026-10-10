@@ -14,6 +14,7 @@ import {
   knotAxis,
   knotChip,
   knotFits,
+  knotPenaltyTitle,
   knotGrid,
   knotTagText,
   knotToolState,
@@ -252,6 +253,24 @@ test("the chip names the shown knots and their rule, and tints while a knot chan
   });
   assert.deepEqual(knotChip(waiting), { text: "1 knot · quantiles of rows", waiting: true });
   assert.equal(knotChip(numericTerm({ knots: { positions: null } })), null);
+});
+
+test("the chip's hover text names a penalty other than the standard one, for the knots in force", () => {
+  assert.equal(knotPenaltyTitle(numericTerm()), null);
+  assert.equal(knotPenaltyTitle(numericTerm({ knots: { difference_penalty: "standard" } })), null);
+  assert.equal(
+    knotPenaltyTitle(numericTerm({ knots: { difference_penalty: "general" } })),
+    "Smoothing penalty: general, for unevenly spaced knots.",
+  );
+  assert.equal(
+    knotPenaltyTitle(numericTerm({ knots: { difference_penalty: "projected" } })),
+    "Smoothing penalty: standard, adjusted for knots too uneven for the general one.",
+  );
+  const waiting = numericTerm({
+    knots: { difference_penalty: "projected" },
+    pending: { knots: { positions: [5], count: 1, strategy: "quantile_rows", alpha: 0.2 } },
+  });
+  assert.equal(knotPenaltyTitle(waiting), null);
 });
 
 test("a waiting reset reads as listed in code, a waiting hand move as placed by hand", () => {

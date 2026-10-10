@@ -148,6 +148,12 @@
  * @property {KnotBasis|null} [waiting_basis] how it rebuilds the basis the
  *   term's waiting changes put in force, such as another kind's, while that is
  *   built differently from the one in force; null otherwise
+ * @property {string|null} [difference_penalty] a P-spline's smoothing penalty
+ *   in force: "standard" on evenly spaced knots, "general" (Li and Cao's) on
+ *   uneven ones, "projected" (the standard one with the polynomials of degree
+ *   below m left unpenalised) on knots too uneven for the general one; each
+ *   order's, as "m=2 general, m=3 projected", when they differ; null for
+ *   other kinds
  * @property {BasisKind|null} [kind] the spline's kind in force
  * @property {boolean|null} [select] whether shrinkage (``select=True``) is on
  * @property {BasisKind[]} [kinds] the kinds the term can be switched to

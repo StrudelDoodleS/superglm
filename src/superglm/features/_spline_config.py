@@ -236,6 +236,7 @@ def initialize_runtime_state(
     spec._lo = 0.0
     spec._hi = 1.0
     spec._knot_strategy_actual = knot_strategy
+    spec._difference_penalty = {}
     spec._R_inv = None
     spec._interaction_projection = None
     spec._basis_lo = None

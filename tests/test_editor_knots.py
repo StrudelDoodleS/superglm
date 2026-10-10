@@ -126,6 +126,17 @@ def test_the_structure_export_records_the_knots_and_applies_them_to_the_declarat
     assert "knots" not in json.loads(_session(book).export_structure())["features"][term]
 
 
+def test_the_payload_names_the_difference_penalty_in_force(book):
+    """A cubic regression spline has none; a P-spline's is standard on even knots, general on uneven."""
+    model, X, y, w = book
+    payload = session_payload(_session(book))
+    assert payload["age"]["knots"]["difference_penalty"] is None
+    assert payload["band"]["knots"]["difference_penalty"] == "standard"
+    uneven = _declared(age=Spline(kind="ps", knots=AGE_KNOTS)).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(uneven, train_data=(X, y, w))
+    assert session_payload(session)["age"]["knots"]["difference_penalty"] == "general"
+
+
 def test_a_term_a_refit_left_alone_still_takes_a_knot_change(book):
     """After a refit for another term, this term's declaration holds the fit's state."""
     model, X, *_ = book

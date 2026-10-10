@@ -49,6 +49,7 @@ class _CoefRow:
     spline_kind: str | None = None  # "PSpline", "NaturalSpline", etc.
     knot_strategy: str | None = None
     boundary: tuple[float, float] | None = None
+    difference_penalty: str | None = None  # "standard", "general" or "projected"
     # Monotonicity
     monotone: str | None = None  # "increasing", "decreasing", or None
     monotone_engine: str | None = None  # "qp" or "scop"

@@ -25,6 +25,7 @@ from superglm.dm_builder import knot_geometry_weight, resolve_discrete_n_bins, s
 from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorValueError
+from superglm.features._spline_penalties import difference_penalty_kind
 from superglm.features._spline_ranges import RangeError
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
@@ -160,6 +161,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
                     "min_gap",
                     "basis",
                     "waiting_basis",
+                    "difference_penalty",
                 )
             ),
             "available": False,
@@ -190,6 +192,7 @@ def knots_payload(session, name: str, term: EditableTerm) -> dict[str, Any]:
         "even_only": _even_only_reason(name, _waiting_spline(session, name)),
         "basis": _basis_payload(fitted, axis, float(lo), float(hi)),
         "waiting_basis": _waiting_basis_payload(session, name, fitted, axis, float(lo), float(hi)),
+        "difference_penalty": difference_penalty_kind(fitted),
     }
 
 

@@ -65,6 +65,24 @@ def build_general_difference_penalty(knots: NDArray, degree: int, order: int) ->
     and spread are the standard penalty's, and the penalty is a Gram of its
     factor, never of a matrix with ``(hbar / span)**order`` entries.
     """
+    return _general_difference_penalty(knots, degree, order)[0]
+
+
+def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tuple[NDArray, str]:
+    """``build_general_difference_penalty`` and which penalty it took: ``"general"`` or ``"projected"``.
+
+    The limit is on the general penalty's own condition, not on its condition
+    over the standard penalty's on the same basis, although the standard
+    penalty's condition grows with the basis, about ``4**order / (order * pi /
+    n_basis)**(2 * order)``, and so leaves less room for uneven knots as the
+    basis grows: 6.7e7 over 633 on 12 basis functions at ``order = 2``, over
+    4e6 on 40 at ``order = 3``. The fit's numerics see the absolute condition:
+    a limit relative to the standard penalty would keep the general penalty at
+    1.9e10 on freMTPL2's ``VehAge`` with 12 ``quantile_rows`` knots, the case
+    whose ``select=True`` REML derivatives failed their certificate. The
+    switch is therefore a step in the knots, and the spec records which side
+    a term fell on (``difference_penalty_kind``).
+    """
     t = np.asarray(knots, dtype=np.float64)
     d = degree + 1
     n_basis = len(t) - d
@@ -85,10 +103,10 @@ def build_general_difference_penalty(knots: NDArray, degree: int, order: int) ->
         eigenvalues = np.linalg.eigvalsh(penalty)
         if eigenvalues[order] * _CONDITION_LIMIT >= eigenvalues[-1]:
             top = np.linalg.eigvalsh(standard.T @ standard)[-1]
-            return penalty * (top / eigenvalues[-1])
+            return penalty * (top / eigenvalues[-1]), "general"
     Q, _ = np.linalg.qr(_polynomial_coefficients(t, degree, order))
     standard -= (standard @ Q) @ Q.T
-    return standard.T @ standard
+    return standard.T @ standard, "projected"
 
 
 def _polynomial_coefficients(knots: NDArray, degree: int, order: int) -> NDArray:
@@ -118,14 +136,40 @@ def difference_penalty_for(spec, order: int) -> NDArray:
     states them. Other stated and quantile-placed knots take the general
     penalty, which needs ``order <= degree``; a higher order keeps the
     standard penalty.
+
+    Records the penalty taken for ``order`` in ``spec._difference_penalty``,
+    which knot placement empties: ``"standard"``, ``"general"`` or
+    ``"projected"`` (the standard factor with the polynomials projected out,
+    for knots too uneven for the general penalty).
     """
     if (
         spec._knot_strategy_actual != "uniform"
         and order <= spec.degree
         and not _evenly_spaced(spec)
     ):
-        return build_general_difference_penalty(spec._knots, spec.degree, order)
-    return build_difference_penalty(spec._n_basis, order)
+        penalty, kind = _general_difference_penalty(spec._knots, spec.degree, order)
+    else:
+        penalty, kind = build_difference_penalty(spec._n_basis, order), "standard"
+    # A spec saved before the record existed has no attribute until it is placed again.
+    if getattr(spec, "_difference_penalty", None) is None:
+        spec._difference_penalty = {}
+    spec._difference_penalty[order] = kind
+    return penalty
+
+
+def difference_penalty_kind(spec) -> str | None:
+    """Which difference penalty a built spline took, for reports; None without one.
+
+    One name when every penalty order took the same one, otherwise each
+    order's, as ``"m=2 general, m=3 projected"``.
+    """
+    kinds = getattr(spec, "_difference_penalty", None) or {}
+    named = [(order, kinds[order]) for order in getattr(spec, "_m_orders", ()) if order in kinds]
+    if not named:
+        return None
+    if len({kind for _, kind in named}) == 1:
+        return named[0][1]
+    return ", ".join(f"m={order} {kind}" for order, kind in named)
 
 
 def _evenly_spaced(spec) -> bool:

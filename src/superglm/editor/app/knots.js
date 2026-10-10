@@ -63,6 +63,11 @@ const RULE_TEXT = Object.freeze({
   quantile_rows: "quantiles of rows",
   quantile_tempered: "tempered quantiles",
 });
+/** @type {Readonly<Record<string, string>>} */
+const PENALTY_TEXT = Object.freeze({
+  general: "general, for unevenly spaced knots",
+  projected: "standard, adjusted for knots too uneven for the general one",
+});
 /** superglm's ``knot_alpha`` default. */
 export const DEFAULT_ALPHA = 0.2;
 export const AT_LEAST_ONE = "A spline needs at least one knot.";
@@ -427,6 +432,18 @@ export function knotChip(term) {
     : fromEditor ? "placed by hand" : "listed in code";
   const count = `${shown.count} ${shown.count === 1 ? "knot" : "knots"}`;
   return { text: `${count} · ${placed}`, waiting: shown.waiting };
+}
+
+/**
+ * The context chip's hover text: the smoothing penalty in force, named only
+ * when it is not the standard one, and not while a knot change waits, whose
+ * penalty the refit decides. Null otherwise.
+ * @param {TermPayload} term @returns {string|null}
+ */
+export function knotPenaltyTitle(term) {
+  const penalty = term.knots?.difference_penalty ?? null;
+  if (penalty === null || penalty === "standard" || shownKnots(term)?.waiting) return null;
+  return `Smoothing penalty: ${PENALTY_TEXT[penalty] ?? penalty}.`;
 }
 
 /**
