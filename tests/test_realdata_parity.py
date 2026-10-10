@@ -565,17 +565,25 @@ def test_discrete_select_reml_on_the_books_density_quantile_rows_knots_fits(kind
 @pytest.mark.parametrize(
     ("kind", "n_knots", "penalty"), [(None, 15, {"selection_penalty": 0}), ("ps", 10, {})]
 )
-def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty):
+def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty, monkeypatch):
     """The Density x Area spline-by-factor fit on the whole frequency book.
 
     Area A and B each fall in one Density bin, so each level's constant is
     aliased with its dummy and the cached REML trial Hessian is singular in
-    exact arithmetic; its null eigenvalue rounded to ``-1.8e-12`` (kindless,
-    now cr) and ``-1.1e-12`` (ps, 10 knots, default selection penalty) against
-    an eigensolver bar of ``2.4e-13`` and ``3.5e-13``, and both refused as
-    materially indefinite at 6eb42f3f, the second on 0.39 as well.  Its
-    formation rounding is the binned weight sums over 678,013 rows.
+    exact arithmetic.  The Categorical x spline-by-categorical cross summed
+    each row's product while the level's other blocks scaled its summed
+    weight; over 678,013 rows the alias came out at ``-1.8e-12`` (kindless,
+    now cr) and ``-1.1e-12`` (ps, 10 knots, default selection penalty)
+    against an eigensolver bar of ``2.4e-13`` and ``3.5e-13``, refused at
+    6eb42f3f (the second on 0.39 as well) and solved under the formation
+    bound at 94879f33.  Formed from the one weight sum, no trial's Hessian
+    falls past the bar, so none needs the bound.
     """
+    import superglm.reml.discrete as discrete_module
+
+    from .test_discrete_reml_profiled_cache import _spy_old_refusals
+
+    refused = _spy_old_refusals(monkeypatch, discrete_module)
     df = _datasets.load_freq()
     frame = df[["Density", "Area"]].reset_index(drop=True)
     frame["Density"] = frame["Density"].astype(float)
@@ -592,5 +600,6 @@ def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty)
     ).fit_reml(frame, y, sample_weight=exposure)
     diagnostics = model.reml_diagnostics()
     assert diagnostics["converged"]
-    assert "reml_n_formation_limited_trials" in diagnostics["profile"]
+    assert not any(refused)
+    assert diagnostics["profile"]["reml_n_formation_limited_trials"] == 0
     assert np.all(np.isfinite(model.predict(frame)))

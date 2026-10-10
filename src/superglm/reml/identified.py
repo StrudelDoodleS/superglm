@@ -361,15 +361,29 @@ def separated_set_labels(groups: Sequence, sets: Sequence[tuple]) -> tuple[str, 
     return tuple(labels)
 
 
-def dense_hessian(cache: dict | None) -> tuple[NDArray, float] | None:
-    """``(H_c, sum w)`` a dense PIRLS left in its ``cache_out``; ``None`` without one.
+def dense_hessian(cache: dict | None) -> tuple | None:
+    """``(H_c, sum w[, g])`` a dense PIRLS left in its ``cache_out``; ``None`` without one.
 
     ``H_c`` is the centred slope Hessian the fit's slope decomposition was
-    taken of: the dense identified part restricts exactly that matrix.
+    taken of: the dense identified part restricts exactly that matrix.  ``g``
+    is its formation bound (``reml.discrete._profiled_formation_error``),
+    from the data Gram, means and row count the same cache holds, so the
+    restriction is refused only where ``H_c``'s own rounding cannot explain
+    a negative eigenvalue.
     """
     if not cache or "centered_hessian" not in cache:
         return None
-    return cache["centered_hessian"], float(cache["sum_W"])
+    hessian = cache["centered_hessian"]
+    sum_w = float(cache["sum_W"])
+    if "n_rows" not in cache or "centered_XtWX" not in cache:
+        return hessian, sum_w
+    from superglm.reml.discrete import _profiled_formation_error
+
+    data_gram = cache["centered_XtWX"]
+    bound = _profiled_formation_error(
+        data_gram, hessian - data_gram, cache["mean_x"], sum_w, cache["n_rows"]
+    )
+    return hessian, sum_w, bound
 
 
 @dataclasses.dataclass(frozen=True)
@@ -400,7 +414,8 @@ class IdentifiedLaplace:
     generalized inverse no longer determines ``H_II`` (the Jacobi-type
     identities for generalized inverses carry nullity terms instead), so it
     is not used.  A dense input therefore needs its centred Hessian
-    (``dense=(H_c, sum_w)``), which every dense caller holds.
+    (``dense=(H_c, sum_w)``), which every dense caller holds, and may carry
+    its formation bound as a third entry (``_dense_part``).
 
     Every method returns its argument unchanged when ``W`` is empty.
     ``unsupported`` counts the inputs this cannot restrict -- an excluded
@@ -520,15 +535,29 @@ class IdentifiedLaplace:
         self.unsupported += 1
         return None
 
-    def _dense_part(self, hessian, sum_w: float, *, with_inverse: bool) -> _IdentifiedPart:
-        """``H_c[I, I]`` decomposed by the shared rule; ``W`` rows and columns of the inverse zero."""
+    def _dense_part(
+        self, hessian, sum_w: float, formation_error=None, *, with_inverse: bool
+    ) -> _IdentifiedPart:
+        """``H_c[I, I]`` decomposed by the shared rule; ``W`` rows and columns of the inverse zero.
+
+        ``formation_error``, a dense input's optional third entry, bounds how
+        far forming ``H_c`` moved it, ``|dH_ij| <= sqrt(g_i g_j)``
+        (``decompose_gram``).  A principal block inherits that bound on its
+        kept indices, so ``H_c[I, I]`` is refused only where ``H_c`` itself
+        would be (``reml.discrete._profiled_formation_error``).
+        """
         from superglm.solvers.rank import decompose_gram
 
         matrix = np.asarray(hessian, dtype=np.float64)
         kept = np.ones(matrix.shape[0], dtype=bool)
         kept[self.excluded] = False
         block = matrix[np.ix_(kept, kept)]
-        decomposition = decompose_gram(0.5 * (block + block.T))
+        decomposition = decompose_gram(
+            0.5 * (block + block.T),
+            formation_error=(
+                None if formation_error is None else np.asarray(formation_error)[kept]
+            ),
+        )
         inverse = None
         if with_inverse:
             inverse = np.zeros_like(matrix)

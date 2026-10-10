@@ -2222,6 +2222,47 @@ def test_categorical_by_spline_cat_expands_rows_in_chunks(monkeypatch):
     assert sum(seen) == rows.size
 
 
+def test_categorical_by_own_spline_cat_scales_the_levels_binned_weight():
+    """The spline's own factor: the cross is the level's binned weight times the support.
+
+    Every row of a spline_cat block is one level of its own factor, so the
+    cross with that factor is ``sum_b w_b B_b R`` with ``w_b`` the binned
+    weight sums the block's own Gram and ``X'W`` form.  Summing each row's
+    ``W_r B_k`` instead rounds apart from them: 5.5e4 u over 103,957 rows on
+    freMTPL2, where a level in one bin makes its dummy an exact alias of its
+    smooth and that residue landed past the eigensolver's bar.  Here 200,000
+    rows of weight 0.1 sit in one bin: the cross must be ``w (B_b R)`` within
+    the products' rounding, ``2 gamma_{K+2} w (|B_b| |R|)``.  Mutation: the
+    chunked row sum (6eb42f3f) misses by about ``n u``.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+
+    gen = np.random.default_rng(91)
+    n, p_b, p_g = 200_000, 6, 4
+    codes = np.ones(n, dtype=np.int32)
+    gm_cat = CategoricalGroupMatrix(codes, 3)
+    rows = np.arange(n, dtype=np.intp)
+    support = gen.normal(size=(8, p_b))
+    transform = gen.normal(size=(p_b, p_g))
+    spline_cat = DiscretizedSplineCategoricalGroupMatrix(
+        support, transform, np.full(n, 5, dtype=np.intp), rows
+    )
+    weights = np.full(n, 0.1)
+
+    cross = algebra._cross_gram_categorical_spline_categorical(gm_cat, spline_cat, weights)
+
+    binned = np.bincount(spline_cat.bin_idx_level, weights=weights[rows])[5]
+    u = np.finfo(float).eps / 2
+    gamma = (p_b + 2) * u / (1 - (p_b + 2) * u)
+    bound = 2 * gamma * binned * (np.abs(support[5]) @ np.abs(transform))
+    assert np.all(cross[[0, 2]] == 0.0)
+    assert np.all(np.abs(cross[1] - binned * (support[5] @ transform)) <= bound)
+
+
 def test_row_chunking_below_the_threshold_is_bit_identical():
     """Chunking reorders a sum, so it must not engage on ordinary fits."""
     from superglm._group_matrix import _group_matrix_algebra as algebra

@@ -123,19 +123,27 @@ def _profiled_formation_error(
     rounds at most nine times per term, taken as nine more counts in each
     ``gamma`` (``gamma_j (1 + gamma_k) <= gamma_{j+k}``, Higham, Lemma 3.3).
 
-    A kernel that multiplies margins through their transform after the
-    products (the tensor grids) multiplies operands larger than the columns,
-    so this under-estimates its rounding.  An under-estimate can only refuse
-    a semidefinite matrix, as the eigensolver's bar alone did, never accept
-    one its rounding cannot explain.
+    A kernel that applies a basis transform after accumulating (the
+    spline-by-categorical blocks, ``R' (B'WB) R``, and the tensor grids)
+    multiplies ``|B||R|`` rather than the column, so this under-estimates its
+    rounding by the ratio of ``sum_b w_b (|B_b||R|)_i^2`` to the column's own
+    moment (up to 166, median 1.3 to 2, on the freMTPL2 Density x Area
+    supports).  An under-estimate can only refuse a semidefinite matrix, as
+    the eigensolver's bar alone did, never accept one its rounding cannot
+    explain.
 
-    Measured on the freMTPL2 Density x Area fit (678,013 rows): the worst
-    entry of ``G`` rounded by ``5.5e4 u`` of ``sqrt(R_ii R_jj)``, at one
-    level of 103,957 rows whose weight sums rounded by ``6.5e3 u``, far past
-    the ``sqrt(n) u`` a probabilistic bound assumes.  Against an
-    extended-precision reference ``||dE||_2`` was ``5.9e-12``, the smallest
-    scaled eigenvalue ``-1.8e-12`` against the eigensolver's bar of
-    ``2.4e-13``, and this bound gives ``2.5e-8``.
+    Measured on the freMTPL2 Density x Area fit (678,013 rows), where Area A
+    and B each sit in one Density bin: the Categorical x spline-by-categorical
+    cross block summed each row's ``W_r B_k`` while the diagonals scale the
+    level's summed weight, and over 103,957 rows the two rounded ``5.5e4 u``
+    and ``6.5e3 u`` from the exact sum, far past the ``sqrt(n) u`` a
+    probabilistic bound assumes.  Against an extended-precision reference
+    ``||dE||_2`` was ``5.9e-12`` and the smallest scaled eigenvalue
+    ``-1.8e-12``, against the eigensolver's bar of ``2.4e-13``; this bound
+    gives ``2.5e-8``.  That cross now scales the level's binned weight
+    (``_cross_gram_categorical_spline_categorical``), which leaves ``-5e-16``,
+    inside the bar on either sign; this bound remains the gate for the
+    residues that change does not remove.
     """
     p = int(np.size(mean_x))
     data = np.maximum(np.diag(centered_XtWX), 0.0)
@@ -1448,8 +1456,15 @@ def optimize_discrete_reml_cached_w(
                 )
                 intercept_trial = centred_intercept_trial - math.fsum(cand_centre * beta_trial)
                 if identified:
-                    # the identified part of the same trial Hessian H_c
-                    trial_dense = (c_centered_XtWX + S_trial, float(c_sum_W))
+                    # the identified part of the same trial Hessian H_c, under
+                    # the same formation bound, restricted to its kept slopes
+                    trial_dense = (
+                        c_centered_XtWX + S_trial,
+                        float(c_sum_W),
+                        _profiled_formation_error(
+                            c_centered_XtWX, S_trial, c_mean_x, c_sum_W, dm.n
+                        ),
+                    )
                     log_det_H_trial = identified.log_det(None, log_det_H_trial, trial_dense)
                     hessian_rank_trial = identified.rank(hessian_rank_trial, None, trial_dense)
             cached_solve_elapsed = _time.perf_counter() - _tls0
