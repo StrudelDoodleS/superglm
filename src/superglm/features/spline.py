@@ -401,12 +401,21 @@ class _SplineBase:
 
     def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
         """Eigendecompose the constrained penalty for select=True splitting."""
+        structural = self._structural_penalty_for_order(max(self._m_orders))
+        if structural is not None and Z is not None:
+            structural = Z.T @ structural @ Z
         self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
             omega_c,
             Z,
             n_basis=self._n_basis,
             spline_kind=type(self).__name__,
+            structural=structural,
         )
+
+    def _structural_penalty_for_order(self, order: int) -> NDArray | None:
+        """A penalty with this one's exact null space and no knot-spacing spread, if known."""
+        del order
+        return None
 
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
@@ -530,11 +539,16 @@ class _IntegratedPenaltySpline(_SplineBase):
             self._knots, self.degree, order, excluded=excluded
         )
         if self._polynomial_ranges:
-            structural = _spline_penalties.structural_derivative_penalty(
-                self._knots, self.degree, order, excluded=excluded
-            )
+            structural = self._structural_penalty_for_order(order)
             _spline_ranges.certify_penalty_rank(omega, structural, self._constraint_rows())
         return omega
+
+    def _structural_penalty_for_order(self, order: int) -> NDArray:
+        """Each unpinned knot interval's block at unit norm (``structural_derivative_penalty``)."""
+        excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
+        return _spline_penalties.structural_derivative_penalty(
+            self._knots, self.degree, order, excluded=excluded
+        )
 
 
 class PSpline(_BSplineBase):

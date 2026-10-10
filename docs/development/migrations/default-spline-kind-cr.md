@@ -54,6 +54,11 @@ Four changes follow from it:
   spline basis has no range to place its knots on. Drop the term, or pass
   basis=Spline(kind='ps'), which fits a term with one observed level.` A P-spline
   fitted it.
+- **A spline with no kind and `select=True` on a column with a very long tail**
+  (quantile knots on, for example, a sum insured or a mileage): when the widest
+  knot interval is so much wider than the narrowest that double precision cannot
+  hold the penalty on both, the fit stops with an error that says so and names
+  `kind="ps"`. A P-spline fitted it.
 - **`FactorSmooth` curves**: nothing changes. They stay P-splines whatever the
   main effect's kind.
 - **`splines=` auto-detection and `SuperGLMRegressor(spline_features=...)`**:
@@ -66,6 +71,8 @@ Four changes follow from it:
   `OrderedCategorical` that omits `basis`.
 - **A degree other than 3**: pass `kind="ps"` or `kind="bs"` with it.
 - **A penalty order above 3**: pass `kind="ps"` with it.
+- **A very long-tailed column with `select=True`**: pass `kind="ps"`, or fit the
+  column's logarithm.
 - **To move to `cr`**: refit under 0.40 and compare the validation deviance and
   the curves with the 0.39 fit on the same data.
 - **Saved models**: a model fitted and saved under 0.39 keeps its P-splines.
@@ -101,5 +108,8 @@ fit converged.
 - `tests/test_spline_factory.py::TestDefaultKindIsCr` pins the default kind for
   `Spline()` and `s()`, the degree refusal and the penalty-order refusal for `cr`
   and `cr_cardinal`.
+- `tests/test_pspline_general_penalty.py` pins `select=True` and the REML rank of
+  `cr` and `bs` terms on quantile knots of lognormal(0, 2) and lognormal(0, 1.5)
+  data, and the error that names the knot spread on lognormal(0, 3) data.
 - `tests/test_ordered_categorical_api.py` pins the ordered default basis, its
   clamp warning, and a bit-identical fit against `Spline(kind="cr", n_knots=5)`.

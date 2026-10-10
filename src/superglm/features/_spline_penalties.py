@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from math import comb
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.features._spline_ranges import derivative_design
+from superglm.features._spline_ranges import _REML_RANK_THRESHOLD, derivative_design
+from superglm.solvers.rank import SHARED_RANK_POLICY
 
 # 1/sqrt(eps): solvers/rank.py's warning_condition for a Gram.
 _CONDITION_LIMIT = float(1.0 / np.sqrt(np.finfo(np.float64).eps))
@@ -250,8 +252,60 @@ def _interval_blocks(knots, degree, order, excluded):
         yield Dm_q.T @ (Dm_q * w_q[:, None])
 
 
+def structural_penalty_ranks(spec: Any, info: Any) -> dict[str, int] | None:
+    """The rank of each of ``info``'s penalties, from the structural penalty in its coordinates.
+
+    An integrated derivative penalty's null space is the polynomials of degree
+    below its order, wherever the knots are, so its rank is a property of the
+    construction and not of its spectrum, which spreads as ``width**-3`` over
+    the knot intervals. Smoothers declare it with the penalty for that reason
+    (mgcv's ``smooth.construct`` documentation lists ``rank``, "the ranks of
+    the penalties", and ``null.space.dim`` among a constructor's outputs), and
+    Wood, Pya and Saefken (JASA 111, 2016, section 3.1.1) read a block's
+    penalised and unpenalised spaces from a balanced version of it for the
+    same reason. Each penalty in ``info`` is ``T' S T`` for the raw penalty
+    ``S`` and the projection ``T``, so ``T' structural T`` has its null space;
+    that matrix has no spread, and its rank is decided at REML's cut only
+    inside a gap of ``certification_band``, else nothing is declared.
+
+    Keys are the component suffixes, or ``""`` for ``penalty_matrix`` when
+    there are no components; ``"null"`` (select's identity) is not declared.
+    Returns ``None`` when the spec has no structural penalty.
+    """
+    if info.penalty_matrix is None or spec._structural_penalty_for_order(spec._m_orders[0]) is None:
+        return None
+    projection = info.projection
+
+    def rank_for(orders: Sequence[int]) -> int | None:
+        structural = sum(spec._structural_penalty_for_order(order) for order in orders)
+        if projection is not None:
+            structural = projection.T @ structural @ projection
+        return _gapped_rank(np.linalg.eigvalsh(structural))
+
+    if info.penalty_components is None:
+        keyed = {"": spec._m_orders}
+    else:
+        keyed = {
+            suffix: (int(suffix[1:]),) if suffix.startswith("d") else spec._m_orders
+            for suffix, _ in info.penalty_components
+            if suffix != "null"
+        }
+    ranks = {key: rank_for(orders) for key, orders in keyed.items()}
+    return {key: rank for key, rank in ranks.items() if rank is not None} or None
+
+
+def _gapped_rank(values: NDArray) -> int | None:
+    top = max(float(values[-1]), 0.0)
+    cut = _REML_RANK_THRESHOLD * top
+    band = SHARED_RANK_POLICY.certification_band
+    if top == 0.0 or np.any((values > cut / band) & (values <= cut * band)):
+        return None
+    return int(np.count_nonzero(values > cut))
+
+
 __all__ = [
     "build_difference_penalty",
     "build_integrated_derivative_penalty",
     "structural_derivative_penalty",
+    "structural_penalty_ranks",
 ]
