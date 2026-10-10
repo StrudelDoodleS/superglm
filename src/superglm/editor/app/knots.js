@@ -66,7 +66,7 @@ const RULE_TEXT = Object.freeze({
 /** @type {Readonly<Record<string, string>>} */
 const PENALTY_TEXT = Object.freeze({
   general: "general, for unevenly spaced knots",
-  projected: "standard, adjusted for knots too uneven for the general one",
+  projected: "standard, adjusted because the general one would be too ill-conditioned here",
 });
 /** superglm's ``knot_alpha`` default. */
 export const DEFAULT_ALPHA = 0.2;

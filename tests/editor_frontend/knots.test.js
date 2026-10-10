@@ -264,7 +264,7 @@ test("the chip's hover text names a penalty other than the standard one, for the
   );
   assert.equal(
     knotPenaltyTitle(numericTerm({ knots: { difference_penalty: "projected" } })),
-    "Smoothing penalty: standard, adjusted for knots too uneven for the general one.",
+    "Smoothing penalty: standard, adjusted because the general one would be too ill-conditioned here.",
   );
   const waiting = numericTerm({
     knots: { difference_penalty: "projected" },
