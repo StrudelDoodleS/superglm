@@ -34,7 +34,17 @@ Four changes follow from it:
 
 ## Who is affected
 
-- **Code that names a kind**: nothing changes.
+- **Code that names a kind**: nothing changes, except explicit `cr` or `bs`
+  on strongly skewed knots (the next three bullets).
+- **Explicit `cr` or `bs` on strongly skewed knots** (quantile knots on a
+  long-tailed column, for example): under `fit_reml`, REML counts one more
+  penalised direction, so the smoothing parameter, the effective degrees of
+  freedom and the curve can all move.
+- **Explicit `cr` or `bs` with `select=True` and `discrete=True` on strongly
+  skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
+- **Explicit `cr` or `bs` with `select=True` on a very long tail** (quantile
+  knots on, for example, a sum insured or a mileage): a fit that 0.39 fitted
+  now stops with an error that names `kind="ps"`.
 - **`Spline(...)` or `s(...)` with no kind**: a refit can change.
 - **`OrderedCategorical` with no `basis`**: a refit can change.
 - **Interactions of splines with no kind**: a refit can change. A tensor

@@ -52,8 +52,18 @@ whatever its knots.
   parameter, the effective degrees of freedom and the curve can all move.
 - **A penalty order `m` above the degree**: the standard penalty is kept, so
   nothing changes.
-- **`bs` and `cr` splines**: nothing changes. Their penalties already handle
-  uneven knots.
+- **`bs` and `cr` splines**: the general penalty does not change them, because
+  their penalties already handle uneven knots. On strongly skewed knots, see the
+  next three bullets.
+- **Explicit `cr` or `bs` on strongly skewed knots** (quantile knots on a
+  long-tailed column, for example): under `fit_reml`, REML counts one more
+  penalised direction, so the smoothing parameter, the effective degrees of
+  freedom and the curve can all move.
+- **Explicit `cr` or `bs` with `select=True` and `discrete=True` on strongly
+  skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
+- **Explicit `cr` or `bs` with `select=True` on a very long tail** (quantile
+  knots on, for example, a sum insured or a mileage): a fit that 0.39 fitted
+  now stops with an error that names `kind="ps"`.
 - **`ns` splines**: nothing changes. They keep the standard penalty.
 
 ## What to do
