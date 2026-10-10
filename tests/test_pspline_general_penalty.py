@@ -12,7 +12,7 @@ from superglm.features._spline_penalties import (
     build_difference_penalty,
     build_general_difference_penalty,
 )
-from superglm.solvers.rank import SHARED_RANK_POLICY
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
 UNEVEN = [0.5, 0.8, 1.1, 1.4, 1.7, 2.0, 5.0, 8.0]
 u = np.finfo(np.float64).eps / 2
@@ -543,13 +543,91 @@ def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_m
     )
     # The real penalty alone puts a second direction under the cut.
     assert np.sum(_null_mask(np.linalg.eigvalsh(omega))) == 2
-    # The bilinear direction is the product of the margins' centred lines: the
-    # structural tensor penalty annihilates it to round-off of its own norm.
-    bilinear = infos[0].projection
-    structural = tensor._structural_tensor_penalty()
-    unit = np.finfo(float).eps / 2
-    residual = np.linalg.norm(structural @ bilinear)
-    assert residual <= 8 * omega.shape[0] * unit * np.linalg.norm(structural, 2)
+    # The bilinear direction must lie in the REAL penalty's null space. It is the
+    # structural tensor penalty's computed null vector, within Davis and Kahan's
+    # ``delta = p(n) eps ||S|| / lambda_2(S)`` of the exact one (``lambda_2`` the
+    # structural penalty's smallest nonzero eigenvalue), so ``b' Omega b`` is under
+    # ``delta**2 ||Omega||`` plus the quadratic form's rounding,
+    # ``gamma_{2n} |b|' |Omega| |b|`` (Higham 2002, section 3.5).
+    bilinear = infos[0].projection[:, 0]
+    structural = np.linalg.eigvalsh(tensor._structural_tensor_penalty())
+    n = omega.shape[0]
+    delta = _eigensolver_relative_bar(n) * structural[-1] / structural[1]
+    gamma = 2 * n * u / (1 - 2 * n * u)
+    bound = delta**2 * np.linalg.norm(omega, 2) + gamma * (
+        np.abs(bilinear) @ np.abs(omega) @ np.abs(bilinear)
+    )
+    assert bilinear @ omega @ bilinear <= bound
+
+
+def test_the_structural_cardinal_penalty_has_the_real_penalty_null_space():
+    """structural_cr_penalty must annihilate exactly the lines through the real knot
+    values, the cardinal penalty's own null space: a version built on other knots (say
+    evenly spaced) would split off the wrong two directions. Its rank, decided in its
+    gap, is ``K - 2``. Its computed null vectors are within Davis and Kahan's
+    ``delta = p(n) eps ||S|| / lambda_3(S)`` of the exact ones, so the real penalty's
+    quadratic form on them is under ``delta**2 ||P||`` plus its rounding."""
+    from superglm.features._spline_cardinal import (
+        build_cr_penalty_matrices,
+        structural_cr_penalty,
+    )
+    from superglm.features._spline_penalties import _gapped_rank
+
+    x, _ = _skewed(2.0, 10_000, 0)
+    knots = np.quantile(x, np.linspace(0.0, 1.0, 12))
+    real = build_cr_penalty_matrices(knots)[1]
+    values, vectors = np.linalg.eigh(structural_cr_penalty(knots))
+    n = knots.size
+    assert _gapped_rank(values) == n - 2
+    null = vectors[:, :2]
+    delta = _eigensolver_relative_bar(n) * values[-1] / values[2]
+    gamma = 2 * n * u / (1 - 2 * n * u)
+    for column in null.T:
+        bound = delta**2 * np.linalg.norm(real, 2) + gamma * (
+            np.abs(column) @ np.abs(real) @ np.abs(column)
+        )
+        assert column @ real @ column <= bound
+    # The lines through the knot values span that null space.
+    lines = np.linalg.qr(np.column_stack([np.ones(n), knots - knots.mean()]))[0]
+    assert np.linalg.norm(lines - null @ (null.T @ lines), 2) <= delta + 4 * n * u
+
+
+@pytest.mark.parametrize("select", [False, True], ids=["plain", "select"])
+def test_cr_cardinal_reml_ranks_a_skewed_penalty_at_its_structural_rank(select):
+    """cr_cardinal's tail direction on lognormal(0, 2.5) quantile knots sits at 7e-12 of
+    the largest curvature, under REML's eps**(2/3) cut; its structural penalty gives
+    the rank, n_basis less the lines."""
+    x, rng = _skewed(2.5, 10_000, 0)
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
+    spline = Spline(kind="cr_cardinal", n_knots=10, knot_strategy="quantile_rows", select=select)
+    model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
+    ranks = _reml_ranks(model)
+    assert (ranks["x:wiggle"] if select else ranks["x"]) == model._specs["x"]._n_basis - 2
+
+
+def test_a_kindless_decomposed_tensor_fits_by_reml_at_its_structural_ranks():
+    """The model path: kindless margins, decompose=True, discrete, fit_reml. The split
+    takes the bilinear direction from the structural margins and REML ranks each
+    wiggly component at ``rank(A) q``: one centred line per margin is unpenalised."""
+    x, rng = _skewed(2.0, 6_000, 3)
+    z = rng.uniform(0.0, 1.0, x.size)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * np.tanh(np.log(x)) * (1 + z)))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        features={"x": Spline(n_knots=10, knot_strategy="quantile_rows"), "z": Spline(n_knots=5)},
+    )
+    model._add_interaction("x", "z", decompose=True)
+    model.fit_reml(pd.DataFrame({"x": x, "z": z}), y)
+    assert [g.name for g in model._groups if g.feature_name == "x:z"] == [
+        "x:z:bilinear",
+        "x:z:wiggly",
+    ]
+    ranks = {c.name: c.rank for c in _reml_components(model) if c.group_name == "x:z:wiggly"}
+    p1, p2 = 11, 6  # ten and five interior knots: two more cardinal values, less centring
+    assert ranks == {"x:z:wiggly:margin_x": (p1 - 1) * p2, "x:z:wiggly:margin_z": p1 * (p2 - 1)}
+    assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x, "z": z}))))
 
 
 @pytest.mark.slow
