@@ -12,7 +12,6 @@ from superglm.features._spline_identifiability import (
     build_identifiability_projection_for_spec,
 )
 from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
-from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import GroupInfo, LambdaPolicy
 
 
@@ -93,20 +92,30 @@ def _require_two_null(null_mask: NDArray, spline_kind: str) -> None:
 def _certified_range(
     omega_c: NDArray, basis: NDArray, *, subject: str = "select=True"
 ) -> tuple[NDArray, NDArray]:
-    """The penalty on the structural range, diagonalised, once round-off cannot hide a direction.
+    """The penalty on the structural range, diagonalised, where binary64 certifies it definite.
 
-    In exact arithmetic ``basis' omega_c basis`` is positive definite, since
-    ``basis`` spans the complement of the penalty's null space. Its computed
-    eigenvalues are within ``p(n) eps ||omega_c||_2`` of the exact ones
-    (*LAPACK Users' Guide*, 3rd ed., section 4.7; ``_eigensolver_relative_bar``),
-    a bar that also covers forming the product. The smallest must clear it by
-    the shared policy's ``certification_band``, else the tail direction's
-    curvature is below what binary64 holds beside the bulk's and no rank
-    decision can recover it.
+    In exact arithmetic ``M = basis' omega_c basis`` is positive definite, since
+    ``basis`` spans the complement of the penalty's null space, but an
+    integrated derivative penalty on skewed knots puts its tail direction at
+    a tiny fraction of the bulk. The split is refused only where the computed
+    ``M`` cannot certify that direction positive: Rump's test
+    (``reml.multi_penalty._certifies_positive_definite``) holds every
+    symmetric matrix within the formation enclosure of ``M`` positive
+    definite, so a refusal means binary64 cannot certify the direction
+    penalised at all. The bar it replaces, the eigensolver's ``p(n) eps``
+    times the shared ``certification_band``, refused directions 30 times
+    above that resolution (bs, lognormal(0, 2), 20 knots: 1.5e-13 of the
+    largest). The computed eigenvalues must also be positive for the
+    diagonal returned.
     """
-    values, vectors = np.linalg.eigh(basis.T @ omega_c @ basis)
-    resolution = _eigensolver_relative_bar(omega_c.shape[0]) * max(values[-1], 0.0)
-    if not values[0] > SHARED_RANK_POLICY.certification_band * resolution:
+    from superglm.reml.multi_penalty import (
+        _certified_congruence,
+        _certifies_positive_definite,
+    )
+
+    product, radius = _certified_congruence(basis, omega_c)
+    values, vectors = np.linalg.eigh(product)
+    if not (values[0] > 0 and _certifies_positive_definite(product, radius)):
         ratio = max(values[0], 0.0) / values[-1]
         raise ValueError(
             f"{subject} cannot split this penalty: its knot intervals differ so much in "

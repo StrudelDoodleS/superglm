@@ -418,6 +418,104 @@ def _materialization_logdet_bound(
     )
 
 
+def _certified_congruence(basis: NDArray, matrix: NDArray) -> tuple[NDArray, NDArray]:
+    """``B' S B`` for the symmetric part ``S`` of ``W``, and an upward enclosure of its error.
+
+    A quadratic form sees only ``S``; ``fl((W + W') / 2)`` is ``W`` itself when
+    ``W`` is symmetric and otherwise costs one rounding, ``|S^ - S| <= u |S^|
+    / (1 - u)``, carried through ``|B|' . |B|``. Each product is formed by
+    ``_matmul_enclosed`` and sharpened entrywise by Dot2 (``_refine_product``;
+    Ogita, Rump and Oishi 2005), and the first product's enclosure is carried
+    through the second: ``|T^ B^ - S B| <= E_M + E_T |B|`` with ``T^ = fl(B' S)``.
+    Plain products would leave ``gamma_{2n} |B|' |S| |B|``, which on a skewed
+    spline penalty is three times the eigenvalue a tail direction keeps
+    (1.6e-14 against 6e-15 of the largest). The exact product is symmetric,
+    so one computed triangle is mirrored under the larger of the two mirrored
+    enclosures.
+    """
+    basis = np.asarray(basis, dtype=np.float64)
+    matrix = np.asarray(matrix, dtype=np.float64)
+    symmetric = matrix if np.array_equal(matrix, matrix.T) else 0.5 * (matrix + matrix.T)
+    left = np.ascontiguousarray(basis.T)
+    first, first_error = _matmul_enclosed(left, symmetric)
+    _refine_product(left, symmetric, first, first_error)
+    product, error = _matmul_enclosed(first, basis)
+    _refine_product(first, basis, product, error)
+    radius = error + _positive_product(first_error, np.abs(basis))
+    if symmetric is not matrix:
+        rounding = _upper(_UNIT_ROUNDOFF * np.abs(symmetric) / (1 - _UNIT_ROUNDOFF))
+        radius = radius + _positive_product(
+            _positive_product(np.abs(left), rounding), np.abs(basis)
+        )
+    radius = _upper(radius / (1 - _gamma(2)))
+    radius = np.maximum(radius, radius.T)
+    product = np.triu(product) + np.triu(product, 1).T
+    return product, radius
+
+
+def _certifies_positive_definite(matrix: NDArray, radius: NDArray) -> bool:
+    """Whether every symmetric ``X`` with ``|X - matrix| <= radius`` is positive definite.
+
+    Rump, *Verification of positive definiteness*, BIT 46 (2006), Corollary 2.7
+    with bound I of section 3: with ``c >= gamma_{k+1} (1 - gamma_{k+1})^-1
+    tr(A) + k M eta`` (``M = 3 (2k + max a_ii)``, ``eta`` the smallest
+    subnormal) and ``r >= ||radius||_2``, a floating-point Cholesky of ``A``
+    with its diagonal lowered by ``c + r`` (Lemma 2.5's rounding) that runs to
+    completion proves it. The analysis holds for any order of the inner sums,
+    so the substitution below may use any dot product; it is unblocked so no
+    other algorithm's rounding enters.
+    """
+    a = np.asarray(matrix, dtype=np.float64)
+    k = a.shape[0]
+    diagonal = np.diag(a)
+    if k == 0:
+        return True
+    if not np.all(np.isfinite(a)) or np.any(diagonal < 0) or np.any(a != a.T):
+        return False
+    gamma = _gamma(k + 1)
+    eta = np.nextafter(0.0, 1.0)
+    trace = float(_upper(np.sum(diagonal) / (1 - _gamma(k))))
+    shift = float(
+        _upper(
+            gamma / (1 - gamma) * trace / (1 - _gamma(2))
+            + k * 3 * (2 * k + float(np.max(diagonal))) * eta
+            + _norm_upper(radius)
+        )
+    )
+    phi = _UNIT_ROUNDOFF * (1 + 2 * _UNIT_ROUNDOFF)
+    lowered = diagonal - shift
+    reduced = a.copy()
+    reduced[np.diag_indices(k)] = lowered - phi * np.abs(lowered)
+    factor = np.zeros_like(reduced)
+    for j in range(k):
+        column = factor[:j, j]
+        pivot = reduced[j, j] - column @ column
+        if not pivot > 0:
+            return False
+        factor[j, j] = np.sqrt(pivot)
+        factor[j, j + 1 :] = (reduced[j, j + 1 :] - column @ factor[:j, j + 1 :]) / factor[j, j]
+    return bool(np.all(np.isfinite(factor)))
+
+
+def _certifies_rank_at_least(matrix: NDArray, rank: int, vectors: NDArray | None = None) -> bool:
+    """Whether symmetric ``matrix`` certifiably has at least ``rank`` positive eigenvalues.
+
+    For any ``V`` of ``rank`` columns with ``V' W V`` positive definite, ``W``
+    is positive on the ``rank``-dimensional range of ``V`` and so has that
+    many positive eigenvalues (Courant-Fischer; ``V`` need not be
+    orthonormal). ``V`` is the computed leading eigenvectors (``vectors``
+    from ``eigh``, ascending, when the caller has them); the congruence is
+    certified with its formation error by Rump's test.
+    """
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if not 0 < rank <= matrix.shape[0]:
+        return False
+    if vectors is None:
+        vectors = np.linalg.eigh(matrix)[1]
+    product, radius = _certified_congruence(vectors[:, -rank:], matrix)
+    return _certifies_positive_definite(product, radius)
+
+
 def _weights(lambdas: NDArray, count: int) -> NDArray:
     source = np.asarray(lambdas)
     if np.iscomplexobj(source):

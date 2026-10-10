@@ -438,6 +438,29 @@ def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
         assert geometry.raw_family is None and geometry.raw_refusal is None
 
 
+@pytest.mark.parametrize(
+    ("kind", "sigma", "n_knots", "nullity"),
+    [("bs", 2.0, 20, 2), ("bs", 2.25, 20, 2), ("cr", 2.5, 10, 4)],
+)
+def test_select_splits_a_long_tail_binary64_still_resolves(kind, sigma, n_knots, nullity):
+    """These tails sit at 1.5e-13, 6.8e-15 and 6.3e-15 of the largest curvature. The
+    split refused anything under 32 times the eigensolver's ``p(n) eps`` (1.7e-13 here),
+    30 times above that resolution for bs on lognormal(0, 2); 0.39 fitted them. It now
+    refuses only where Rump's test cannot certify the range penalty positive definite
+    within its formation enclosure, and REML ranks the wiggle penalty at its structure."""
+    from superglm.reml.multi_penalty import _certified_congruence, _certifies_positive_definite
+
+    x, rng = _skewed(sigma, 10_000, 0)
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
+    spline = Spline(kind=kind, n_knots=n_knots, knot_strategy="quantile_rows", select=True)
+    model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
+    spec = model._specs["x"]
+    assert _reml_ranks(model)["x:wiggle"] == spec._n_basis - nullity
+    product, radius = _certified_congruence(spec._U_range, spec._build_penalty())
+    assert _certifies_positive_definite(product, radius)
+    assert np.all(np.diag(spec._omega_range) > 0)
+
+
 def test_select_names_the_knot_spread_binary64_cannot_hold():
     """On lognormal(0, 3) quantile knots the cr penalty's tail curvature is below 1e-15 of
     its largest, under the eigensolver's resolution: no split can recover it. The refusal
