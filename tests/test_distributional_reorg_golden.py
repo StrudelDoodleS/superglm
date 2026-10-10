@@ -25,9 +25,10 @@ all 8 objectives agree to 4.1e-14 and the 14 unsaturated lambdas to 1.2e-8,
 while ``gaussian:reml`` and ``gaussian:reml+newton`` both carry
 ``scale:z#wiggle`` 79543305.66 there against 79541630.40 here -- |log| 2.1e-5,
 on a lambda the REML objective is flat in, and with the objective itself
-unmoved at 4.1e-14.  That is the drift the saturated bound is sized for; a
-uniform 1e-6 would have made the record reproduce on this stack and fail on
-the stack that recorded it.
+unmoved at 4.1e-14.  A uniform 1e-6 would have made the record reproduce on
+this stack and fail on the stack that recorded it; that drift, and the wider
+one CI's kernels showed later, is why a saturated lambda's value is not held
+(``_SATURATED_LAMBDA``).
 
 The record also distinguishes the observed-Hessian path used by families with
 expected information from the Fisher path.  The Gaussian and Gamma cases reach
@@ -214,7 +215,8 @@ def _record(model: SuperLSS) -> dict[str, object]:
 # 1.09e7 (``scale:z#wiggle``, each twice), a gap of 25.7: the floor sits 2.35
 # times above the first and 10.9 times below the second.
 #
-# A saturated lambda is held only to staying saturated. Fellner-Schall advances
+# A saturated lambda that is not drifting (below) is held only to staying
+# saturated. Fellner-Schall advances
 # a lambda on that ridge by a constant additive step, so |dlog lambda| decays as
 # 1/iteration (``DistributionalEFSConfig``) and the stopping test does not bound
 # where it stops: that is set by the rounding path. The 1e-4 bound this replaces

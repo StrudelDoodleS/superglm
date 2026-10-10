@@ -153,6 +153,8 @@ memory is the whole process's, data loading included. Re-measured on
 | `BonusMalus` increasing | 0.39 | `ps` | 71.32, 69.14 | 1,015 | 213,678.3 | 59.35 | SCOP |
 | `BonusMalus` increasing | 0.40 | `cr` | 10.03, 9.55 | 1,007 | 215,699.2 | 61.16 | QP, Gram |
 
+At the head, the solver was checked from the fits themselves: `reml_diagnostics()` reports the `gram` backend for both 0.40 fits, and the constrained `BonusMalus` group's monotone engine is `qp`. The two 0.40 fits' total EDF differ only in the third decimal (61.163 unconstrained, 61.164 constrained).
+
 On this book both 0.40 fits also emit a `SeparationWarning`. It comes from one
 inner fit during the smoothing-parameter search, and names `VehAge`. The final
 fit converged.
