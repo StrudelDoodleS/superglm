@@ -1749,6 +1749,39 @@ def test_negative_roundoff_eigenvalue_requests_factor_certification() -> None:
     assert needs_factor_certification(decomposition)
 
 
+def test_formation_bound_admits_rounding_negativity_and_drops_both_signs() -> None:
+    """A formation bound turns an unexplained refusal into a semidefinite decomposition.
+
+    ``J = 11'`` (3x3) has a two-dimensional null space; its rounding residue
+    is put there as ``-3e-12`` and ``+2e-12`` (scaled eigenvalues, against an
+    eigensolver bar of ``100 eps 3 = 6.7e-14``), beside ``diag(1, 2)``.
+    Without a formation bound the matrix is refused.  With ``|dA_ij| <=
+    sqrt(g_i g_j)``, ``g = 1e-12 d``, the slack is ``sum(g / d) = 5e-12``
+    and the negative eigenvalue is rounding: both null directions drop,
+    the positive one too, since it is no larger than the error the negative
+    one demonstrates.  ``g = 1e-13 d`` (slack ``5e-13``) cannot explain
+    ``-3e-12`` and still raises.  Mutations: no slack raises on the first;
+    an unbounded one accepts the second; no cutoff at ``|w_min|`` keeps the
+    ``+2e-12`` direction (rank 4).
+    """
+    along = np.array([1.0, -1.0, 0.0]) / np.sqrt(2.0)
+    across = np.array([1.0, 1.0, -2.0]) / np.sqrt(6.0)
+    matrix = np.zeros((5, 5))
+    matrix[:3, :3] = np.ones((3, 3)) - 3.0e-12 * np.outer(along, along)
+    matrix[:3, :3] += 2.0e-12 * np.outer(across, across)
+    matrix[3, 3], matrix[4, 4] = 1.0, 2.0
+    diagonal = np.diag(matrix)
+
+    with pytest.raises(ValueError, match="materially indefinite"):
+        decompose_gram(matrix)
+    decomposition = decompose_gram(matrix, formation_error=1.0e-12 * diagonal)
+    assert decomposition.formation_limited
+    assert decomposition.rank == 3
+    assert decomposition.resolution_limited
+    with pytest.raises(ValueError, match="materially indefinite"):
+        decompose_gram(matrix, formation_error=1.0e-13 * diagonal)
+
+
 def test_factor_certificate_does_not_request_recursion() -> None:
     factor = np.array([[1.0, 1.0], [0.0, 1.0e-9]])
 

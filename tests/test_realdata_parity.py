@@ -558,3 +558,39 @@ def test_discrete_select_reml_on_the_books_density_quantile_rows_knots_fits(kind
     ).fit_reml(frame, y, offset=offset)
     assert set(model._reml_lambdas) == {"Density:null", "Density:wiggle"}
     assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+
+
+@NB2_SKIP
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("kind", "n_knots", "penalty"), [(None, 15, {"selection_penalty": 0}), ("ps", 10, {})]
+)
+def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty):
+    """The Density x Area spline-by-factor fit on the whole frequency book.
+
+    Area A and B each fall in one Density bin, so each level's constant is
+    aliased with its dummy and the cached REML trial Hessian is singular in
+    exact arithmetic; its null eigenvalue rounded to ``-1.8e-12`` (kindless,
+    now cr) and ``-1.1e-12`` (ps, 10 knots, default selection penalty) against
+    an eigensolver bar of ``2.4e-13`` and ``3.5e-13``, and both refused as
+    materially indefinite at 6eb42f3f, the second on 0.39 as well.  Its
+    formation rounding is the binned weight sums over 678,013 rows.
+    """
+    df = _datasets.load_freq()
+    frame = df[["Density", "Area"]].reset_index(drop=True)
+    frame["Density"] = frame["Density"].astype(float)
+    frame["Area"] = frame["Area"].astype(str)
+    exposure = df["Exposure"].to_numpy(float)
+    y = df["ClaimNb"].clip(upper=4).to_numpy(float) / exposure
+    kw = {} if kind is None else {"kind": kind}
+    model = SuperGLM(
+        family="poisson",
+        discrete=True,
+        features={"Density": Spline(n_knots=n_knots, **kw), "Area": Categorical()},
+        interactions=[("Density", "Area")],
+        **penalty,
+    ).fit_reml(frame, y, sample_weight=exposure)
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"]
+    assert "reml_n_formation_limited_trials" in diagnostics["profile"]
+    assert np.all(np.isfinite(model.predict(frame)))

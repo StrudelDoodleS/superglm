@@ -297,3 +297,132 @@ def test_a_discrete_trial_forms_eta_about_the_prior_weighted_centre(monkeypatch)
             np.sum(weights * np.abs(units))
         )
         assert abs(deviance - reference) <= bound, (deviance - reference, bound)
+
+
+def _aliased_profiled_system(residue: float) -> tuple[np.ndarray, ...]:
+    """An exactly singular profiled system, its data Gram moved by ``residue``.
+
+    Columns 0 and 1 of the design are equal (a factor level and the constant
+    of a smooth that sees that level at one value), and the penalty leaves
+    both free, so ``H = B'B + S`` is semidefinite with the null vector ``e0 -
+    e1`` in exact arithmetic (small integers: exact in binary64).  ``residue``
+    is the formation rounding moved onto that direction, ``-residue (e0 -
+    e1)(e0 - e1)'``, the sign a level's two weight sums rounded apart give.
+    """
+    design = np.array(
+        [[1, 1, 2, 0], [1, 1, 0, 1], [2, 2, 1, 1], [0, 0, 1, 3], [1, 1, 3, 2], [0, 0, 2, 1]],
+        dtype=float,
+    )
+    exact_gram = design.T @ design
+    penalty = np.diag([0.0, 0.0, 1.0, 2.0])
+    alias = np.array([1.0, -1.0, 0.0, 0.0])
+    formed_gram = exact_gram - residue * np.outer(alias, alias)
+    rhs = (exact_gram + penalty) @ np.array([0.5, 0.5, -1.0, 2.0])
+    return exact_gram, formed_gram, penalty, rhs
+
+
+def test_cached_trial_solves_formation_rounding_negativity_as_the_semidefinite_system() -> None:
+    """A trial Hessian negative only within its formation rounding is solved, not refused.
+
+    The freMTPL2 Density x Area fit (PR #485's default ``cr``) refused here at
+    ``-1.8e-12`` against the eigensolver's bar of ``2.4e-13``: one level's
+    103,957 rows rounded its weight sums ``5.5e4 u`` apart, far inside the
+    ``5 gamma_{n+4}`` the formation can reach.  ``1e-10`` on a diagonal of
+    ``7`` is inside that bound at ``n = 1e5`` rows (``g / d ~ 5.6e-11``) and
+    gives a scaled eigenvalue of ``-2.9e-11``.  Solved as the exact
+    semidefinite matrix, the trial agrees with that matrix's own
+    decomposition within first-order perturbation of its retained spectrum,
+    ``eta = (||dE||_2 + p eps ||E||_2) / w_r``, ``w_r`` the smallest retained
+    scaled eigenvalue.  Mutation: without the formation bound (no
+    ``n_rows``, as at 6eb42f3f) the same call raises.
+    """
+    from superglm.solvers.rank import decompose_gram
+
+    exact_gram, formed_gram, penalty, rhs = _aliased_profiled_system(1.0e-10)
+    mean_x = np.zeros(4)
+    sum_w, mean_z = 50.0, 0.3
+    with pytest.raises(ValueError, match="materially indefinite"):
+        _solve_cached_profiled_system(formed_gram, penalty, rhs, mean_x, sum_w, mean_z)
+
+    disclosure: dict[str, int] = {}
+    beta, intercept, log_det_h, rank = _solve_cached_profiled_system(
+        formed_gram, penalty, rhs, mean_x, sum_w, mean_z, n_rows=10**5, disclosure=disclosure
+    )
+
+    exact = exact_gram + penalty
+    reference = decompose_gram(exact)
+    scale = np.sqrt(np.diag(exact))
+    scaled = exact / np.outer(scale, scale)
+    spectrum = np.linalg.eigvalsh(scaled)
+    smallest_retained = spectrum[spectrum > np.sqrt(np.finfo(float).eps)].min()
+    eta = (
+        np.linalg.norm((formed_gram - exact_gram) / np.outer(scale, scale), 2)
+        + 4 * np.finfo(float).eps * spectrum[-1]
+    ) / smallest_retained
+    beta_reference = reference.solve(rhs)
+    assert disclosure == {"formation_limited": 1}
+    assert rank == 1 + reference.rank == 4
+    assert abs(log_det_h - (np.log(sum_w) + reference.log_pdet)) <= 2 * reference.rank * eta
+    assert np.linalg.norm(scale * (beta - beta_reference)) <= 4 * eta * np.linalg.norm(
+        scale * beta_reference
+    )
+    assert intercept == pytest.approx(mean_z - mean_x @ beta)
+
+
+def test_cached_trial_still_refuses_curvature_its_formation_cannot_explain() -> None:
+    """Negative curvature past the formation bound is material and still raises.
+
+    ``1e-3`` on the alias (a scaled eigenvalue of ``-2.9e-4``) is seven orders
+    past ``5 gamma_{n+4}`` at ``n = 1e5``, and an indefinite penalty is not a
+    rounding at all.  Mutation: an unbounded formation slack accepts both.
+    """
+    exact_gram, formed_gram, penalty, rhs = _aliased_profiled_system(1.0e-3)
+    with pytest.raises(ValueError, match="materially indefinite"):
+        _solve_cached_profiled_system(
+            formed_gram, penalty, rhs, np.zeros(4), 50.0, 0.3, n_rows=10**5
+        )
+    indefinite_penalty = np.diag([0.0, 0.0, 1.0, -0.5]) - 1.0e-2 * np.eye(4)
+    with pytest.raises(ValueError, match="materially indefinite"):
+        _solve_cached_profiled_system(
+            exact_gram, indefinite_penalty, rhs, np.zeros(4), 50.0, 0.3, n_rows=10**5
+        )
+
+
+@pytest.mark.slow
+def test_discrete_spline_by_factor_fits_when_levels_sit_at_one_value() -> None:
+    """Three levels whose rows share one ``x`` each: the fit completes.
+
+    Each such level's constant is aliased with its dummy, so the cached trial
+    Hessian is singular in exact arithmetic and its computed null eigenvalue
+    lands on either side of zero, by the weight sums' rounding over the
+    level's 15,000 rows.  At 6eb42f3f this fit raised "materially indefinite"
+    (``-8.7e-13`` against a bar of ``1.1e-13``, OpenBLAS on x86-64); which
+    platforms put the residue below zero is not asserted.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, Spline, SuperGLM
+
+    rng = np.random.default_rng(2)
+    n, per_level = 60000, 15000
+    x = np.exp(rng.normal(5.0, 1.5, n))
+    level = np.where(x < np.quantile(x, 0.5), "B", "C")
+    for k, (name, value) in enumerate((("A", 3.0), ("D", 11.0), ("E", 40.0))):
+        rows = slice(k * per_level, (k + 1) * per_level)
+        level[rows] = name
+        x[rows] = value
+    exposure = np.full(n, 0.5)
+    y = rng.poisson(0.1 * np.exp(0.1 * np.log(x)) * exposure) / exposure
+    frame = pd.DataFrame({"x": x, "g": level})
+    model = SuperGLM(
+        family="poisson",
+        discrete=True,
+        selection_penalty=0,
+        features={"x": Spline(n_knots=10), "g": Categorical()},
+        interactions=[("x", "g")],
+    ).fit_reml(frame, y, sample_weight=exposure)
+
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"]
+    assert "reml_n_formation_limited_trials" in diagnostics["profile"]
+    assert np.all(np.isfinite(model.predict(frame)))

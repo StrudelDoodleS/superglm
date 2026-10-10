@@ -38,7 +38,7 @@ from superglm.reml.convergence import (
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.identified import IdentifiedLaplace, dense_hessian
+from superglm.reml.identified import IdentifiedLaplace, _gamma, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
@@ -89,6 +89,65 @@ from superglm.solvers.structured import (
 from superglm.types import GroupSlice, PenaltyComponent
 
 
+def _profiled_formation_error(
+    centered_XtWX: NDArray, S: NDArray, mean_x: NDArray, sum_W: float, n_rows: int
+) -> NDArray:
+    """``g`` with ``|dH_ij| <= sqrt(g_i g_j)`` between the cached ``H_c`` and its exact value.
+
+    ``H_c = X_c' W X_c + S`` is positive semidefinite by construction (``W >=
+    0`` is checked where the centred system is built, and every penalty block
+    is formed as a Gram), so the only negative curvature it can show is the
+    rounding of its formation, which the eigensolver's bar in
+    ``decompose_gram`` leaves out.
+
+    Every route that builds the centred data Gram ``G``
+    (``solvers.centered_system``) sums at most ``n`` row terms per entry,
+    ``W_r x_ri x_rj`` about zero or about a centre.  Whatever the summation
+    tree (rows into bins, bins into cells), a term meets at most ``n - 1``
+    additions and three products: ``gamma_{n+2} sum_r W_r |x_ri x_rj| <=
+    gamma_{n+2} sqrt(M_i M_j)`` (Higham 2002, eq. 3.13, and Cauchy-Schwarz),
+    ``M_i`` the second moment about the centre used.  A raw-moment rung then
+    subtracts ``a a' / s``, ``a = X'W1``, whose formed ``a`` and ``s`` add
+    ``2 gamma_{n+1} + gamma_{n-1}`` of ``|a_i a_j| / s <= sqrt(R_ii R_jj)``,
+    ``R_ii = sum_r W_r x_ri^2``; it admits a column only when ``s mean_i^2 <=
+    C_ii`` (``_raw_centering_admitted``), so there ``M_i = R_ii <= 2 C_ii``,
+    and on a centred route ``M_i`` is ``C_ii`` to within rounding.  Hence
+    ``|dG_ij| <= 5 gamma_{n+4} sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``:
+    four for the first-order terms, the fifth holding the subtraction's, the
+    symmetrisation's and the second-order terms while ``n u < 1/5``.  A
+    penalty block is the Gram of a root (``penalty_algebra.ssp_penalty_matrix``,
+    or a component's retained eigenpairs), within ``gamma_r sqrt(S_ii
+    S_jj)``, ``r <= p``, then scaled and accumulated: ``gamma_{2p+2}``.
+    ``G + S`` rounds once more, ``gamma_2 sqrt(d_i d_j)``.  Forming ``g``
+    rounds at most nine times per term, taken as nine more counts in each
+    ``gamma`` (``gamma_j (1 + gamma_k) <= gamma_{j+k}``, Higham, Lemma 3.3).
+
+    A kernel that multiplies margins through their transform after the
+    products (the tensor grids) multiplies operands larger than the columns,
+    so this under-estimates its rounding.  An under-estimate can only refuse
+    a semidefinite matrix, as the eigensolver's bar alone did, never accept
+    one its rounding cannot explain.
+
+    Measured on the freMTPL2 Density x Area fit (678,013 rows): the worst
+    entry of ``G`` rounded by ``5.5e4 u`` of ``sqrt(R_ii R_jj)``, at one
+    level of 103,957 rows whose weight sums rounded by ``6.5e3 u``, far past
+    the ``sqrt(n) u`` a probabilistic bound assumes.  Against an
+    extended-precision reference ``||dE||_2`` was ``5.9e-12``, the smallest
+    scaled eigenvalue ``-1.8e-12`` against the eigensolver's bar of
+    ``2.4e-13``, and this bound gives ``2.5e-8``.
+    """
+    p = int(np.size(mean_x))
+    data = np.maximum(np.diag(centered_XtWX), 0.0)
+    moment = np.minimum(data + sum_W * np.square(mean_x), 2.0 * data)
+    penalty = np.maximum(np.diag(S), 0.0)
+    formed = 9
+    return (
+        5.0 * _gamma(int(n_rows) + 4 + formed) * moment
+        + _gamma(2 * p + 2 + formed) * penalty
+        + _gamma(2 + formed) * (data + penalty)
+    )
+
+
 def _solve_cached_profiled_system(
     centered_XtWX: NDArray,
     S: NDArray,
@@ -96,6 +155,9 @@ def _solve_cached_profiled_system(
     mean_x: NDArray,
     sum_W: float,
     mean_z: float,
+    *,
+    n_rows: int | None = None,
+    disclosure: dict | None = None,
 ) -> tuple[NDArray, float, float, int]:
     """Solve one cached trial in the authoritative intercept-profiled geometry.
 
@@ -104,6 +166,11 @@ def _solve_cached_profiled_system(
     decomposition of ``H_c = X_c' W X_c + S``.  The same decomposition solves
     the coefficients, applies the shared retained-rank policy, and supplies
     ``log(sum(W)) + log|H_c|_+`` for Wood's REML/LAML criterion.
+
+    With ``n_rows`` (the design's row count) a negative eigenvalue of ``H_c``
+    within its formation rounding (``_profiled_formation_error``) is taken
+    as the semidefinite matrix it was formed from rather than refused;
+    ``disclosure["formation_limited"]`` then counts the trial.
     """
     if not np.isfinite(sum_W) or sum_W <= 0.0:
         raise ValueError("cached sum_W must be positive and finite")
@@ -151,7 +218,16 @@ def _solve_cached_profiled_system(
         except (np.linalg.LinAlgError, ValueError):
             pass
     if beta is None or log_pdet is None or slope_rank is None:
-        decomposition = decompose_gram(hessian)
+        decomposition = decompose_gram(
+            hessian,
+            formation_error=(
+                None
+                if n_rows is None
+                else _profiled_formation_error(centered_XtWX, S, mean_x, sum_W, n_rows)
+            ),
+        )
+        if decomposition.formation_limited and disclosure is not None:
+            disclosure["formation_limited"] = disclosure.get("formation_limited", 0) + 1
         beta = decomposition.solve(centered_XtWz)
         log_pdet = decomposition.log_pdet
         slope_rank = decomposition.rank
@@ -507,6 +583,9 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
+    # cached trials whose Hessian was negative only within its formation
+    # rounding, solved as the semidefinite matrix (``_solve_cached_profiled_system``)
+    _cached_solve_disclosure: dict[str, int] = {}
     _outer_step_stats: list[dict[str, Any]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
@@ -1359,6 +1438,8 @@ def optimize_discrete_reml_cached_w(
                         c_mean_x,
                         c_sum_W,
                         c_mean_z,
+                        n_rows=dm.n,
+                        disclosure=_cached_solve_disclosure,
                     )
                 )
                 centred_intercept_trial = _cached_centred_intercept(
@@ -1806,6 +1887,9 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_formation_limited_trials"] = _cached_solve_disclosure.get(
+            "formation_limited", 0
+        )
         profile["reml_n_outer_iter"] = poi_iter + 1
         profile["reml_n_analytical_iters"] = _n_newton_steps
         profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
