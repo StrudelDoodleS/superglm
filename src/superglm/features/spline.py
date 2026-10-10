@@ -1128,8 +1128,8 @@ def Spline(
 
     ``kind`` defaults to ``"cr"``, a cubic regression spline (``"ps"``, a
     P-spline, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always cubic
-    and refuse a ``degree`` other than 3; pass ``kind="ps"`` or ``"bs"`` for
-    another degree.
+    and refuse a ``degree`` other than 3, and take penalty orders ``m`` up to 3
+    and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond those.
 
     ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
     polynomial on each :class:`PolynomialRange` and leaves the rest the

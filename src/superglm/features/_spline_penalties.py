@@ -73,10 +73,10 @@ def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tupl
 
     The limit is on the general penalty's own condition, not on its condition
     over the standard penalty's on the same basis, although the standard
-    penalty's condition grows with the basis, about ``4**order / (order * pi /
-    n_basis)**(2 * order)``, and so leaves less room for uneven knots as the
-    basis grows: 6.7e7 over 633 on 12 basis functions at ``order = 2``, over
-    4e6 on 40 at ``order = 3``. The fit's numerics see the absolute condition:
+    penalty's condition grows with the basis (roughly as ``n_basis**(2 * order)``)
+    and so leaves less room for uneven knots as the basis grows: 6.7e7 over a
+    measured 633 on 12 basis functions at ``order = 2``, over a measured 4.2e6
+    on 40 at ``order = 3``. The fit's numerics see the absolute condition:
     a limit relative to the standard penalty would keep the general penalty at
     1.9e10 on freMTPL2's ``VehAge`` with 12 ``quantile_rows`` knots, the case
     whose ``select=True`` REML derivatives failed their certificate. The

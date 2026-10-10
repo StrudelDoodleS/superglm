@@ -28,7 +28,7 @@ keep that fit. See the
 
 | Kind | Use when | Notes |
 |------|----------|-------|
-| `"cr"` | the default; you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability; always cubic, so a `degree` other than 3 is refused |
+| `"cr"` | the default; you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability; always cubic, so a `degree` other than 3 is refused, and penalty orders `m` go up to 3 |
 | `"ps"` | you want a P-spline, or a degree other than 3 | P-spline with difference penalty |
 | `"bs"` | you want a proper B-spline smooth / mgcv-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
 | `"ns"` | you want a natural spline with fixed natural boundaries | does not support monotone fitting |
