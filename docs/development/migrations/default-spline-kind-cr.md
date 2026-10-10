@@ -45,6 +45,15 @@ Four changes follow from it:
   P-spline fitted it.
 - **An ordered term with no `basis` whose levels are all grouped into one
   band**: the fit now stops with an error. A P-spline fitted it.
+- **`Spline(...)` or `s(...)` with no kind and a penalty order above 3** (`m=4`, or a
+  tuple such as `m=(2, 4)`): the call now raises an error. It says the default kind
+  takes penalty orders up to 3 and names `kind="ps"`. A P-spline fitted it.
+- **An ordered term with no `basis` and one observed level in the data** (for example
+  a CV fold or a per-segment fit): `fit` now raises a `ValueError` whose message reads
+  `Feature '<name>': every row of this ordered term is at one level, so its natural
+  spline basis has no range to place its knots on. Drop the term, or pass
+  basis=Spline(kind='ps'), which fits a term with one observed level.` A P-spline
+  fitted it.
 - **`FactorSmooth` curves**: nothing changes. They stay P-splines whatever the
   main effect's kind.
 - **`splines=` auto-detection and `SuperGLMRegressor(spline_features=...)`**:
@@ -56,6 +65,7 @@ Four changes follow from it:
   that names no kind. Add `basis=Spline(kind="ps", n_knots=5)` to every
   `OrderedCategorical` that omits `basis`.
 - **A degree other than 3**: pass `kind="ps"` or `kind="bs"` with it.
+- **A penalty order above 3**: pass `kind="ps"` with it.
 - **To move to `cr`**: refit under 0.40 and compare the validation deviance and
   the curves with the 0.39 fit on the same data.
 - **Saved models**: a model fitted and saved under 0.39 keeps its P-splines.
@@ -89,6 +99,7 @@ fit converged.
 ## Verification trail
 
 - `tests/test_spline_factory.py::TestDefaultKindIsCr` pins the default kind for
-  `Spline()` and `s()` and the degree refusal for `cr` and `cr_cardinal`.
+  `Spline()` and `s()`, the degree refusal and the penalty-order refusal for `cr`
+  and `cr_cardinal`.
 - `tests/test_ordered_categorical_api.py` pins the ordered default basis, its
   clamp warning, and a bit-identical fit against `Spline(kind="cr", n_knots=5)`.
