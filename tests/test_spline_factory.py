@@ -429,3 +429,102 @@ class TestBsFactory:
     def test_bs_creates_bspline_smooth(self):
         s = Spline(kind="bs", n_knots=8)
         assert isinstance(s, BSplineSmooth)
+
+
+# ── A fixed penalty is measured in knot intervals ───────────────
+
+
+class TestPenaltyUnits:
+    """``cr``, ``cr_cardinal`` and ``bs`` penalties are integrated over ``x / hbar``.
+
+    ``hbar`` is the mean knot interval. Over ``x`` the curvature integral
+    scales as ``units**-3``, so on d4e8b4c9 the kindless default fitted at the
+    default ``spline_penalty`` smoothed the same column a thousandfold less
+    when it was measured in units a tenth the size.
+    """
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"kind": "cr_cardinal"},
+            {"kind": "bs"},
+            {"kind": "bs", "m": (1, 2)},
+            {"kind": "ps"},
+        ],
+        ids=["default", "cr_cardinal", "bs", "bs_m12", "ps"],
+    )
+    @pytest.mark.parametrize("units", [2.0**10, 2.0**-10])
+    def test_a_fixed_penalty_fit_ignores_the_columns_units(self, kwargs, units):
+        """A power-of-two change of units is exact (Higham, *Accuracy and
+        Stability of Numerical Algorithms*, 2nd ed., section 2.1, absent
+        underflow and overflow): knots, intervals and the mapped knots scale
+        or stay bitwise, so the basis and the penalty, and so the fit, are
+        bitwise those of the original units. Over ``x`` the penalty scaled by
+        ``units**-3``. ``ps``, whose difference penalty never saw the units,
+        is the control."""
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(3)
+        x = rng.uniform(0.0, 10.0, 2_000)
+        y = rng.poisson(np.exp(0.3 + 0.5 * np.sin(x / 1.5))).astype(float)
+
+        def fitted(scale):
+            model = SuperGLM(family="poisson", features={"x": Spline(n_knots=8, **kwargs)})
+            frame = pd.DataFrame({"x": scale * x})
+            return model.fit(frame, y).predict(frame)
+
+        np.testing.assert_array_equal(fitted(units), fitted(1.0))
+
+    def test_a_shaped_range_fit_ignores_the_columns_units(self):
+        """The range's real penalty and its structural one, in knot intervals too."""
+        import pandas as pd
+
+        from superglm import PolynomialRange, SuperGLM
+
+        rng = np.random.default_rng(4)
+        x = rng.uniform(0.0, 10.0, 2_000)
+        y = rng.poisson(np.exp(0.3 + 0.5 * np.sin(x / 1.5))).astype(float)
+
+        def fitted(scale):
+            ranges = [PolynomialRange(3.0 * scale, 6.0 * scale, 1)]
+            spec = Spline(kind="cr", n_knots=8, polynomial_ranges=ranges)
+            frame = pd.DataFrame({"x": scale * x})
+            return SuperGLM(family="poisson", features={"x": spec}).fit(frame, y).predict(frame)
+
+        np.testing.assert_array_equal(fitted(2.0**10), fitted(1.0))
+
+    def test_on_even_knots_the_curvature_penalty_is_a_sandwiched_difference_penalty(self):
+        """``hbar**3 integral f''**2 = (D2 beta)' G (D2 beta)`` on evenly spaced
+        knots (Li and Cao, arXiv:2201.06808, section 2.4), ``G`` the Gram of the
+        linear B-splines on unit spacing, ``tridiag(1/6, 2/3, 1/6)``: the
+        standard second-difference penalty weighted by a matrix whose
+        eigenvalues lie in (1/3, 1), which is why a fixed ``spline_penalty``
+        smooths these kinds about as a P-spline. Gauss-Legendre is exact on
+        the piecewise quadratic integrand, so the two agree to the round-off
+        of the quadrature's sums. The comparison is on the basis functions
+        four or more from either end, whose entries see only knot intervals
+        inside ``[t[3], t[n]]``: the builder also integrates the intervals
+        outside it, where the evaluator extends the end polynomials."""
+        from superglm.features._spline_penalties import build_integrated_derivative_penalty
+
+        knots = 0.37 * np.arange(-3.0, 16.0)  # open, evenly spaced, cubic
+        penalty = build_integrated_derivative_penalty(knots, 3, 2)
+        n_basis = penalty.shape[0]
+        D2 = np.diff(np.eye(n_basis), n=2, axis=0)
+        G = (
+            np.diag(np.full(n_basis - 2, 2.0 / 3.0))
+            + np.diag(np.full(n_basis - 3, 1.0 / 6.0), 1)
+            + np.diag(np.full(n_basis - 3, 1.0 / 6.0), -1)
+        )
+        inside = slice(4, n_basis - 4)
+        expected = (D2.T @ G @ D2)[inside, inside]
+        penalty = penalty[inside, inside]
+        u = np.finfo(np.float64).eps / 2
+        # Each entry sums at most 4 intervals' blocks of 3 nodes, each a product
+        # of B-spline derivative values below 4 in magnitude, over unit knots
+        # within u of their places: 64 n u of the largest entry covers both.
+        tolerance = 64 * n_basis * u * np.abs(expected).max()
+        assert np.abs(penalty - expected).max() <= tolerance

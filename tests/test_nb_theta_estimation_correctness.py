@@ -379,9 +379,14 @@ class TestJointRefitLimit:
 
         monkeypatch.setattr(fit_ops, "_NB_JOINT_MAX_REFITS", 0)
         data = pd.read_csv(FIXTURES / "nb_worst.csv")
+        # The start is the fit at the configured penalty, 0.1 over x when the
+        # fixture was calibrated: 0.1 / hbar**3 in the knot intervals it is
+        # now measured in.
+        hbar = float(np.ptp(data["x"])) / 21
         model = SuperGLM(
             features={"x": CubicRegressionSpline(n_knots=20)},
             family=NegativeBinomial("auto"),
+            spline_penalty=0.1 / hbar**3,
         )
         with pytest.warns(UserWarning, match="did not reach a joint fixed point"):
             model.fit_reml(data[["x"]], data["y"].to_numpy(dtype=np.float64))

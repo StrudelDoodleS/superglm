@@ -53,8 +53,8 @@ whatever its knots.
 - **A penalty order `m` above the degree**: the standard penalty is kept, so
   nothing changes.
 - **`bs` and `cr` splines**: the general penalty does not change them, because
-  their penalties already handle uneven knots. On strongly skewed knots, see the
-  bullets below.
+  their penalties already handle uneven knots. On strongly skewed knots, and for
+  their units, see the bullets below.
 - **Explicit `cr`, `bs` or `cr_cardinal` on strongly skewed knots** (quantile
   knots on a long-tailed column, for example): under `fit_reml`, REML counts
   more penalised directions, so the smoothing parameter, the effective degrees
@@ -73,6 +73,26 @@ whatever its knots.
   hundredths): 0.39 refused some of these fits with "requires exactly 2 null
   eigenvalues". 0.40 fits them, unless the knots are too uneven for double
   precision (the bullet above).
+- **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit()` at a fixed
+  `spline_penalty`, or with fixed `lambdas` in `SuperLSS`**: the fit changes.
+  The penalty is now measured in the spline's knot intervals instead of the
+  column's units. In 0.39 the same `spline_penalty` barely smoothed a column
+  measured in thousands, such as a density, and heavily smoothed a share between
+  0 and 1, and rescaling a column changed the fit. It now smooths the same
+  whatever the units, and about as strongly as a P-spline with the same knots.
+- **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit_reml()`**: the curve,
+  the effective degrees of freedom and the deviance are unchanged, to the
+  convergence tolerance. The reported smoothing parameter is larger by `h**-3`,
+  where `h` is the mean knot interval in the column's units: 729 times for nine
+  intervals across a column from 0 to 1. A penalty order `m` other than 2 takes
+  `h**-(2m - 1)`.
+- **`SuperLSS.fit_reml()` with such a spline on a column in large units**: a
+  smoothing parameter that 0.39 stopped at the cap of `max_lambda` can now stop
+  below it, because the cap no longer depends on the column's units. The curve
+  is still close to a straight line.
+- **`SuperLSS.fit_reml()` with a numeric `initial_lambda`**: the start now
+  means the same smoothing on every spline, so the search can take another path
+  and stop at another point within its tolerance.
 - **`ns` splines**: nothing changes. They keep the standard penalty.
 
 ## What to do
@@ -81,6 +101,11 @@ whatever its knots.
   summary is unchanged. Only a refit uses the new penalty.
 
 - **Uniform knots**: nothing.
+- **To keep a 0.39 fixed-penalty fit of an explicit `cr`, `cr_cardinal` or
+  `bs` spline**, or to reuse a smoothing parameter a 0.39 `fit_reml()` reported:
+  multiply it by `h**-3`, where `h` is the mean knot interval, the fitted
+  boundary's width over the number of knot intervals (`n_knots + 1`). A
+  penalty order `m` other than 2 takes `h**-(2m - 1)`.
 - **Stated or quantile-placed knots**: refit under 0.40 and compare the
   validation deviance and the curve with the 0.39 fit on the same data. A change
   in the curve is expected. Re-check any threshold tuned on the old fit.

@@ -55,7 +55,29 @@ Four changes follow from it:
   hundredths): 0.39 refused some of these fits with "requires exactly 2 null
   eigenvalues". 0.40 fits them, unless the knots are too uneven for double
   precision (the bullet above).
-- **`Spline(...)` or `s(...)` with no kind**: a refit can change.
+- **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit()` at a fixed
+  `spline_penalty`, or with fixed `lambdas` in `SuperLSS`**: the fit changes.
+  The penalty is now measured in the spline's knot intervals instead of the
+  column's units. In 0.39 the same `spline_penalty` barely smoothed a column
+  measured in thousands, such as a density, and heavily smoothed a share between
+  0 and 1, and rescaling a column changed the fit. It now smooths the same
+  whatever the units, and about as strongly as a P-spline with the same knots.
+- **Explicit `cr`, `cr_cardinal` or `bs` fitted with `fit_reml()`**: the curve,
+  the effective degrees of freedom and the deviance are unchanged, to the
+  convergence tolerance. The reported smoothing parameter is larger by `h**-3`,
+  where `h` is the mean knot interval in the column's units: 729 times for nine
+  intervals across a column from 0 to 1. A penalty order `m` other than 2 takes
+  `h**-(2m - 1)`.
+- **`SuperLSS.fit_reml()` with such a spline on a column in large units**: a
+  smoothing parameter that 0.39 stopped at the cap of `max_lambda` can now stop
+  below it, because the cap no longer depends on the column's units. The curve
+  is still close to a straight line.
+- **`SuperLSS.fit_reml()` with a numeric `initial_lambda`**: the start now
+  means the same smoothing on every spline, so the search can take another path
+  and stop at another point within its tolerance.
+- **`Spline(...)` or `s(...)` with no kind**: a refit can change. Under
+  `fit()`, a fixed `spline_penalty` smooths about as strongly as it smoothed the
+  0.39 P-spline, whatever the column's units.
 - **`OrderedCategorical` with no `basis`**: a refit can change.
 - **Interactions of splines with no kind**: a refit can change. A tensor
   interaction or a spline-by-factor interaction takes its margins from its
@@ -91,6 +113,11 @@ Four changes follow from it:
   `OrderedCategorical` that omits `basis`.
 - **A degree other than 3**: pass `kind="ps"` or `kind="bs"` with it.
 - **A penalty order above 3**: pass `kind="ps"` with it.
+- **To keep a 0.39 fixed-penalty fit of an explicit `cr`, `cr_cardinal` or
+  `bs` spline**, or to reuse a smoothing parameter a 0.39 `fit_reml()` reported:
+  multiply it by `h**-3`, where `h` is the mean knot interval, the fitted
+  boundary's width over the number of knot intervals (`n_knots + 1`). A
+  penalty order `m` other than 2 takes `h**-(2m - 1)`.
 - **A very long-tailed column with `select=True`**: pass `kind="ps"`, or fit the
   column's logarithm.
 - **To move to `cr`**: refit under 0.40 and compare the validation deviance and

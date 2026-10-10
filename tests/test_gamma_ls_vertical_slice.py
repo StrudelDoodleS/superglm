@@ -325,6 +325,16 @@ def _gamma_surface_fixture(*, repetitions: int) -> _GammaFixture:
     )
 
 
+def _per_knot(n_knots: int) -> float:
+    """``hbar**-3`` for a covariate on [-1, 1]: the factor that keeps a fixture's smoothing.
+
+    A ``cr`` penalty is the curvature integral over ``x / hbar``, ``hbar`` the
+    mean knot interval, ``hbar**3`` times the one over ``x`` these lambdas
+    were calibrated on.
+    """
+    return (2.0 / (n_knots + 1)) ** -3
+
+
 def _gamma_predictors(
     *,
     n_knots: int = 5,
@@ -1048,7 +1058,11 @@ def _fit_gamma_cross_family_route(
         predictors=_gamma_predictors(estimate_smoothing=True),
         weight_contract=WeightContract("prior"),
         sample_weight=fixture.counts,
-        lambdas=({"mean:x#wiggle": 0.1, "scale:z#wiggle": 0.1} if lambdas is None else lambdas),
+        lambdas=(
+            {"mean:x#wiggle": 0.1 * _per_knot(5), "scale:z#wiggle": 0.1 * _per_knot(5)}
+            if lambdas is None
+            else lambdas
+        ),
         initial=initial,
         config=DenseSolverConfig(
             max_iterations=100,
@@ -1230,7 +1244,7 @@ def _fit_gamma_compact_route(
         predictors=_gamma_predictors(n_knots=4),
         weight_contract=WeightContract(semantics),
         sample_weight=fixture.counts if weights is None and response is None else weights,
-        lambdas={"mean:x#wiggle": 0.25, "scale:z#wiggle": 0.5},
+        lambdas={"mean:x#wiggle": 0.25 * _per_knot(4), "scale:z#wiggle": 0.5 * _per_knot(4)},
         config=DenseSolverConfig(tolerance=_COMPLETE_FIT_TOLERANCE),
         retain_rows=False,
         discrete=discrete,
