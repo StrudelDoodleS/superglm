@@ -388,20 +388,80 @@ def test_cached_trial_still_refuses_curvature_its_formation_cannot_explain() -> 
         )
 
 
-@pytest.mark.slow
-def test_discrete_spline_by_factor_fits_when_levels_sit_at_one_value() -> None:
-    """Three levels whose rows share one ``x`` each: the fit completes.
+def test_identified_part_of_a_trial_restricts_under_the_same_formation_bound() -> None:
+    """A trial's identified part decomposes ``H_c[I, I]`` under ``H_c``'s formation bound.
+
+    With a slope left out of the Laplace term, the cached trial decomposes
+    its Hessian a second time, restricted to the kept slopes.  The alias
+    (columns 0 and 1) is kept when column 3 is left out, so the block shows the
+    same ``-2.9e-11`` and, without the bound (the two-entry ``dense`` the trial
+    passed at 94879f33), raises "materially indefinite".  A principal block
+    inherits ``|dH_ij| <= sqrt(g_i g_j)`` on its kept indices: with it the
+    block decomposes as the exact semidefinite one, within first-order
+    perturbation of its retained spectrum (``eta`` as above).
+    """
+    from superglm.reml.discrete import _profiled_formation_error
+    from superglm.reml.identified import IdentifiedLaplace
+    from superglm.solvers.rank import decompose_gram
+
+    exact_gram, formed_gram, penalty, _ = _aliased_profiled_system(1.0e-10)
+    hessian = formed_gram + penalty
+    with pytest.raises(ValueError, match="materially indefinite"):
+        IdentifiedLaplace(np.array([3])).log_det(None, 0.0, (hessian, 50.0))
+
+    bound = _profiled_formation_error(formed_gram, penalty, np.zeros(4), 50.0, 10**5)
+    identified = IdentifiedLaplace(np.array([3]))
+    dense = (hessian, 50.0, bound)
+    log_det = identified.log_det(None, 0.0, dense)
+    rank = identified.rank(0, None, dense)
+
+    kept = np.array([0, 1, 2])
+    exact = (exact_gram + penalty)[np.ix_(kept, kept)]
+    reference = decompose_gram(exact)
+    scale = np.sqrt(np.diag(exact))
+    spectrum = np.linalg.eigvalsh(exact / np.outer(scale, scale))
+    smallest_retained = spectrum[spectrum > np.sqrt(np.finfo(float).eps)].min()
+    residue = (formed_gram - exact_gram)[np.ix_(kept, kept)] / np.outer(scale, scale)
+    eta = (np.linalg.norm(residue, 2) + 3 * np.finfo(float).eps * spectrum[-1]) / smallest_retained
+    assert rank == 1 + reference.rank == 3
+    assert abs(log_det - (np.log(50.0) + reference.log_pdet)) <= 2 * reference.rank * eta
+
+
+def _spy_old_refusals(monkeypatch: pytest.MonkeyPatch, module) -> list[bool]:
+    """Wrap ``module.decompose_gram``: per call given a formation bound, whether
+    the same matrix without one is refused as materially indefinite (the rule
+    at 6eb42f3f).  The matrix is decomposed twice; the answer returned is the
+    bounded one."""
+    original = module.decompose_gram
+    refused: list[bool] = []
+
+    def spy(matrix, **kwargs):
+        if kwargs.get("formation_error") is not None:
+            try:
+                original(matrix)
+            except ValueError as error:
+                if "materially indefinite" not in str(error):
+                    raise
+                refused.append(True)
+            else:
+                refused.append(False)
+        return original(matrix, **kwargs)
+
+    monkeypatch.setattr(module, "decompose_gram", spy)
+    return refused
+
+
+def _levels_at_one_value(*, weak_level: bool = False):
+    """Three levels of ``g`` whose rows share one ``x`` each, as on the book's Area A and B.
 
     Each such level's constant is aliased with its dummy, so the cached trial
     Hessian is singular in exact arithmetic and its computed null eigenvalue
-    lands on either side of zero, by the weight sums' rounding over the
-    level's 15,000 rows.  At 6eb42f3f this fit raised "materially indefinite"
-    (``-8.7e-13`` against a bar of ``1.1e-13``, OpenBLAS on x86-64); which
-    platforms put the residue below zero is not asserted.
+    falls on either side of zero by the rounding of the level's weight sums
+    over its 15,000 rows.  ``weak_level`` adds a factor ``h`` with one level
+    whose 50 rows carry prior weight ``1e-20``: a slope the Laplace term
+    leaves out (``reml.identified``).
     """
     import pandas as pd
-
-    from superglm import Categorical, Spline, SuperGLM
 
     rng = np.random.default_rng(2)
     n, per_level = 60000, 15000
@@ -414,15 +474,81 @@ def test_discrete_spline_by_factor_fits_when_levels_sit_at_one_value() -> None:
     exposure = np.full(n, 0.5)
     y = rng.poisson(0.1 * np.exp(0.1 * np.log(x)) * exposure) / exposure
     frame = pd.DataFrame({"x": x, "g": level})
-    model = SuperGLM(
+    if weak_level:
+        rare = rng.choice(n, size=50, replace=False)
+        frame["h"] = np.where(np.isin(np.arange(n), rare), "rare", "common")
+        exposure[rare] = 1.0e-20
+        y[rare] = 0.0
+    return frame, y, exposure
+
+
+def _fit_levels_at_one_value(frame, y, exposure):
+    from superglm import Categorical, Spline, SuperGLM
+
+    features = {"x": Spline(n_knots=10), "g": Categorical()}
+    if "h" in frame:
+        features["h"] = Categorical()
+    return SuperGLM(
         family="poisson",
         discrete=True,
         selection_penalty=0,
-        features={"x": Spline(n_knots=10), "g": Categorical()},
+        features=features,
         interactions=[("x", "g")],
     ).fit_reml(frame, y, sample_weight=exposure)
 
+
+@pytest.mark.slow
+def test_discrete_spline_by_factor_fits_when_levels_sit_at_one_value(monkeypatch) -> None:
+    """The alias residue is gone at its source: no cached trial needs the formation bound.
+
+    At 6eb42f3f this fit raised "materially indefinite" (``-8.7e-13`` against
+    a bar of ``1.1e-13``, OpenBLAS on x86-64).  With the formation bound alone
+    (94879f33) it completed, solving 8 trials as formation-limited, and the
+    alias was dropped where its residue landed negative and kept where it
+    landed positive.  The Categorical x spline-by-categorical cross now scales
+    the level's binned weight sum, the one the level's other blocks use, so
+    the residue is at the rounding of products (``~5e-16``) and inside the
+    eigensolver's bar on either sign.  The spy re-decomposes every bounded
+    trial without the bound: none may be refused, and none counted.
+    """
+    import superglm.reml.discrete as discrete_module
+
+    refused = _spy_old_refusals(monkeypatch, discrete_module)
+    frame, y, exposure = _levels_at_one_value()
+    model = _fit_levels_at_one_value(frame, y, exposure)
+
     diagnostics = model.reml_diagnostics()
     assert diagnostics["converged"]
-    assert "reml_n_formation_limited_trials" in diagnostics["profile"]
     assert np.all(np.isfinite(model.predict(frame)))
+    assert not any(refused)
+    assert diagnostics["profile"]["reml_n_formation_limited_trials"] == 0
+
+
+@pytest.mark.slow
+def test_identified_trials_restrict_under_the_formation_bound_in_a_fit(monkeypatch) -> None:
+    """A weak slope left out of the Laplace term: the fit converges, and every
+    restricted decomposition of a cached Hessian carries its formation bound.
+
+    The weak level of ``h`` makes the identified part non-empty, so each
+    candidate and each cached trial decomposes ``H_c[I, I]`` again
+    (``reml.identified``).  At 94879f33 the trial's restriction had no bound
+    and raised "materially indefinite" from ``identified.py`` (``-7.6e-13``).
+    Given the bound but with the residue still formed, the candidate's
+    restriction kept it at the policy cutoff where it landed positive and
+    dropped it where negative: its rank moved between 57 and 59 across
+    iterations, its objective by about 22, and the fit stopped at
+    ``max_reml_iter``.  With the residue removed at its source
+    (``_cross_gram_categorical_spline_categorical``) no restriction is
+    refused and the fit converges.
+    """
+    import superglm.solvers.rank as rank_module
+
+    refused = _spy_old_refusals(monkeypatch, rank_module)
+    frame, y, exposure = _levels_at_one_value(weak_level=True)
+    model = _fit_levels_at_one_value(frame, y, exposure)
+
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"]
+    assert diagnostics["profile"]["reml_laplace_excluded"]
+    assert refused, "no restricted decomposition received a formation bound"
+    assert not any(refused)

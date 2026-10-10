@@ -1859,20 +1859,37 @@ def _cross_gram_categorical_spline_categorical(
 ) -> NDArray:
     """Cross-gram X_cat.T W X_spline_cat via one categorical aggregation."""
     if hasattr(gm_spline_cat, "B_unique"):
-        rows = gm_spline_cat.row_idx
+        spline = cast("DiscretizedSplineCategoricalGroupMatrix", gm_spline_cat)
+        factor = cast("CategoricalGroupMatrix", gm_cat)
+        rows = spline.row_idx
+        codes = factor.codes[rows]
+        if codes.size and codes.min() == codes.max() and codes[0] < factor.n_levels:
+            # The spline's own factor: every row is one level.  Its weight
+            # summed per support bin, as the spline's own Gram and X'W sum it
+            # (``gram_rmatvec``, the same rows in the same order), then times
+            # the support.  Summing each row's ``W_r B_k`` instead rounded
+            # apart from that weight sum by ``5.5e4 u`` over 103,957 rows on
+            # freMTPL2, where a level sitting in one bin makes its dummy an
+            # exact alias of its smooth: the alias came out at ``-1.8e-12``
+            # against the eigensolver's bar of ``2.4e-13``, and ``5e-16`` from
+            # the one weight sum.
+            binned = np.bincount(spline.bin_idx_level, weights=W[rows], minlength=spline.n_bins)
+            B_agg = np.zeros((factor.n_levels, spline.B_unique.shape[1]))
+            B_agg[int(codes[0])] = binned @ spline.B_unique
+            return B_agg @ spline.R_inv
         # Chunked: this expands the level to observation rows, which no cap
         # above it bounds.  Pre-dates support compression -- the binned path
         # reaches it too -- but compression puts it on the hot path of every
         # model pairing a Categorical main effect with a spline_cat term,
         # which is every model this compression targets.
         B_agg = _chunked_support_bincount_2d(
-            gm_cat.codes[rows],
+            codes,
             W[rows],
-            gm_spline_cat.B_unique,
-            gm_spline_cat.bin_idx_level,
-            gm_cat.n_levels + 1,
+            spline.B_unique,
+            spline.bin_idx_level,
+            factor.n_levels + 1,
         )
-        return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
+        return B_agg[: factor.n_levels] @ spline.R_inv
 
     B_agg = _csr_weighted_bincount(
         gm_spline_cat._data,

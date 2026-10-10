@@ -1782,6 +1782,33 @@ def test_formation_bound_admits_rounding_negativity_and_drops_both_signs() -> No
         decompose_gram(matrix, formation_error=1.0e-13 * diagonal)
 
 
+def test_formation_bound_decides_refusals_not_the_rank_of_a_positive_residue() -> None:
+    """The same residue on one null direction, one sign at a time: the ranks differ.
+
+    ``-3e-12`` on the alias is past the eigensolver's bar and inside the
+    formation bound, so it drops (rank 3).  ``+3e-12`` never consults the bound
+    and is kept at the policy cutoff (rank 4, ``log_pdet`` near ``log 3e-12``),
+    exactly as without it, as the PIRLS's own decomposition of the same
+    system keeps it.  This records the sign dependence the bound leaves
+    across matrices: flooring the cutoff at the bound for both signs would
+    remove it, at a bound ~4e3 times the measured rounding (2.5e-8 against
+    5.9e-12 on freMTPL2), dropping directions every caller without the bound
+    keeps.  A floor that changes this outcome must change this test.
+    """
+    along = np.array([1.0, -1.0, 0.0]) / np.sqrt(2.0)
+    ranks = {}
+    for sign in (-1.0, 1.0):
+        matrix = np.zeros((5, 5))
+        matrix[:3, :3] = np.ones((3, 3)) + sign * 3.0e-12 * np.outer(along, along)
+        matrix[3, 3], matrix[4, 4] = 1.0, 2.0
+        bounded = decompose_gram(matrix, formation_error=1.0e-12 * np.diag(matrix))
+        ranks[sign] = (bounded.rank, bounded.formation_limited)
+        if sign > 0:
+            plain = decompose_gram(matrix)
+            assert (bounded.rank, bounded.log_pdet) == (plain.rank, plain.log_pdet)
+    assert ranks == {-1.0: (3, True), 1.0: (4, False)}
+
+
 def test_factor_certificate_does_not_request_recursion() -> None:
     factor = np.array([[1.0, 1.0], [0.0, 1.0e-9]])
 

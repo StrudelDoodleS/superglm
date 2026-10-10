@@ -2208,11 +2208,16 @@ def _decompose_gram(
     )
     if formation_limited:
         # The exact matrix has no negative eigenvalue, so this one's magnitude
-        # is a lower bound on the formation error: an eigenvalue no larger is
-        # unresolved whichever its sign, and is dropped on both, so the rank
-        # stays a function of the data rather than of where the rounding fell
-        # (the rule of `_eigensolver_relative_bar`, at the error this matrix
-        # has shown).
+        # is a lower bound on the formation error: within this matrix an
+        # eigenvalue no larger is unresolved whichever its sign and drops on
+        # both.  Across matrices the rank still follows the sign: a residue of
+        # the same size that lands positive never reaches this branch and is
+        # kept at the policy cutoff, as before and as every other Gram
+        # decomposition keeps it.  Flooring the cutoff at the formation bound
+        # for both signs would end that, but the bound is a worst case (2.5e-8
+        # against a measured 5.9e-12 on the freMTPL2 fit it was derived for):
+        # it would drop resolvable directions that callers without the bound,
+        # the PIRLS whose system a cached trial re-solves among them, keep.
         cutoff = max(cutoff, -float(raw_eigenvalues[0]))
     retained_mask = eigenvalues > cutoff if psd_semantics else np.abs(eigenvalues) > cutoff
     rank = int(np.count_nonzero(retained_mask))
@@ -2406,9 +2411,11 @@ def decompose_gram(
     componentwise bound in the form Higham (2002), eq. 3.13, gives a formed
     product.  A negative eigenvalue within the eigensolver's bar plus that
     bound (``_formation_slack``) is then rounding: the matrix is decomposed as
-    semidefinite, every eigenvalue no larger in magnitude is dropped, and the
-    result carries ``formation_limited``.  Past the widened bar it still
-    raises.  Without it nothing changes.
+    semidefinite, every eigenvalue no larger in magnitude than that negative
+    one is dropped, and the result carries ``formation_limited``.  Past the
+    widened bar it still raises.  The bound decides only refusals: a matrix
+    whose residues all land positive, or inside the eigensolver's bar, is
+    decomposed exactly as without it.
     """
     decomposition = _decompose_gram(
         matrix,
