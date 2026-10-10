@@ -12,10 +12,12 @@ objective to the outer loop's acceptance band (``objective_tolerance``, 1e-9,
 times 1 + |V|), and the convergence reason exactly.  Lambdas are compared on
 the log scale, because a smoothing parameter is a positive quantity and the
 record spans 0.079 to 7.9e7: |log(new/old)| <= 1e-6 below the saturation floor,
-and such a lambda may not cross that floor. A saturated lambda is held only to
-staying above it, and one the loop was still moving when it stopped only to
-drifting the same way as in the record (``_SATURATED_LAMBDA``,
-``_DRIFTING_LOG_STEP``).
+and such a lambda may not cross that floor. A lambda the loop was still moving
+when it stopped, saturated or not (``gaussian:reml`` and ``lognormal:reml``
+``scale:z#wiggle`` are both), is held only to drifting the same way as in the
+record, since one ridge step can carry it across the floor either way; any
+other saturated lambda is held to staying above the floor
+(``_SATURATED_LAMBDA``, ``_DRIFTING_LOG_STEP``).
 
 Re-recording the 12 pre-existing entries in tolerance form did move two
 numbers, and only two.  Decoding the byte-identical record against this one,
