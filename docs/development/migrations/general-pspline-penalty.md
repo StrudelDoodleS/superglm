@@ -24,12 +24,14 @@ towards polynomials of degree below the penalty order `m`, wherever the knots
 sit. It is scaled to the size of the standard penalty for the same number of
 coefficients, so a fixed `spline_penalty` smooths about as strongly as it did.
 
-Some knots are too uneven for the general penalty to be computed reliably. Its
-largest and smallest stiffnesses then differ by more than a factor of
-`1/sqrt(eps)`, about 7e7. This happens on heavily skewed columns such as
-freMTPL2's `Density`, and on knots crowded into a small part of the axis. For
-those the penalty is the standard one with the polynomials of degree below `m`
-taken out of it. A heavily smoothed term is still a straight line.
+Sometimes the general penalty cannot be computed reliably. Its largest and
+smallest stiffnesses then differ by more than a factor of `1/sqrt(eps)`, about
+7e7. This happens on heavily skewed columns such as freMTPL2's `Density`, and
+on knots crowded into a small part of the axis. With cubic splines and `m = 3`,
+it also happens from about 60 knots, even when the knots are only a little
+uneven. For those the penalty is the standard one with the polynomials
+of degree below `m` taken out of it. A heavily smoothed term is still a
+straight line.
 The switch between the two is a step, not a gradual change: a knot more or
 fewer, or a refit on new data, can move a term across the limit and change its
 fit by more than the knots alone explain; `diagnostics()` and `knot_summary()`
