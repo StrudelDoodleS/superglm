@@ -522,3 +522,84 @@ class TestGammaGroupLassoSanity:
         r = np.corrcoef(y, mu)[0, 1]
         # Severity prediction is inherently weak
         assert r > 0.01, f"pred-response correlation {r:.3f} too low"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Shrinkage on the book's skewed quantile_rows knots
+#
+# Li and Cao's general penalty on these knots reaches 1e8 against the
+# standard penalty's 16, and select=True found one null eigenvalue where the
+# straight line gives two, blaming the P-spline kind. 0.39 fitted all three.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@NB2_SKIP
+@pytest.mark.parametrize(("column", "n_knots"), [("VehAge", 12), ("Density", 10), ("Density", 12)])
+def test_select_on_the_books_quantile_rows_knots_fits(column, n_knots):
+    df, y, offset = _load_nb2_data()
+    spline = Spline(kind="ps", n_knots=n_knots, knot_strategy="quantile_rows", select=True)
+    frame = df[[column]].astype(float)
+    model = SuperGLM(family="poisson", features={column: spline}).fit_reml(frame, y, offset=offset)
+    assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+
+
+@NB2_SKIP
+@pytest.mark.parametrize("kind", [None, "bs"])
+def test_discrete_select_reml_on_the_books_density_quantile_rows_knots_fits(kind):
+    """kind=None is cr since 0.39 and raised PenaltyNumericalError here, at the
+    discrete start (null penalty at its cap beside a small wiggle weight); 0.39's
+    kindless P-spline fitted it."""
+    df, y, offset = _load_nb2_data()
+    kw = {} if kind is None else {"kind": kind}
+    spline = Spline(n_knots=10, knot_strategy="quantile_rows", select=True, **kw)
+    frame = df[["Density"]].astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0, discrete=True, features={"Density": spline}
+    ).fit_reml(frame, y, offset=offset)
+    assert set(model._reml_lambdas) == {"Density:null", "Density:wiggle"}
+    assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+
+
+@NB2_SKIP
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("kind", "n_knots", "penalty"), [(None, 15, {"selection_penalty": 0}), ("ps", 10, {})]
+)
+def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty, monkeypatch):
+    """The Density x Area spline-by-factor fit on the whole frequency book.
+
+    Area A and B each fall in one Density bin, so each level's constant is
+    aliased with its dummy and the cached REML trial Hessian is singular in
+    exact arithmetic.  The Categorical x spline-by-categorical cross summed
+    each row's product while the level's other blocks scaled its summed
+    weight; over 678,013 rows the alias came out at ``-1.8e-12`` (kindless,
+    now cr) and ``-1.1e-12`` (ps, 10 knots, default selection penalty)
+    against an eigensolver bar of ``2.4e-13`` and ``3.5e-13``, refused at
+    6eb42f3f (the second on 0.39 as well) and solved under the formation
+    bound at 94879f33.  Formed from the one weight sum, no trial's Hessian
+    falls past the bar, so none needs the bound.
+    """
+    import superglm.reml.discrete as discrete_module
+
+    from .test_discrete_reml_profiled_cache import _spy_old_refusals
+
+    refused = _spy_old_refusals(monkeypatch, discrete_module)
+    df = _datasets.load_freq()
+    frame = df[["Density", "Area"]].reset_index(drop=True)
+    frame["Density"] = frame["Density"].astype(float)
+    frame["Area"] = frame["Area"].astype(str)
+    exposure = df["Exposure"].to_numpy(float)
+    y = df["ClaimNb"].clip(upper=4).to_numpy(float) / exposure
+    kw = {} if kind is None else {"kind": kind}
+    model = SuperGLM(
+        family="poisson",
+        discrete=True,
+        features={"Density": Spline(n_knots=n_knots, **kw), "Area": Categorical()},
+        interactions=[("Density", "Area")],
+        **penalty,
+    ).fit_reml(frame, y, sample_weight=exposure)
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"]
+    assert not any(refused)
+    assert diagnostics["profile"]["reml_n_formation_limited_trials"] == 0
+    assert np.all(np.isfinite(model.predict(frame)))

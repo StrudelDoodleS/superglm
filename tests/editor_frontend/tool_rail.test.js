@@ -195,3 +195,46 @@ test("Handles off with a reason stay hoverable and say why", () => {
   assert.equal(buttons[3].dataset.popoverBody, undefined);
   binding.destroy();
 });
+
+test("Knots takes K, and off for a term it stays hoverable with the term's reason", () => {
+  const buttons = ["select", "move", "zoom", "handles", "knots", "help"].map(
+    (tool) => new FakeButton(tool),
+  );
+  const root = new FakeEventHub(buttons);
+  const shortcuts = new FakeEventHub();
+  const modes = [];
+  const binding = bindToolRail({
+    root,
+    shortcutRoot: shortcuts,
+    onMode: (mode) => modes.push(mode),
+    onHelp: () => {},
+  });
+  const knots = buttons[4];
+
+  renderToolRail(root, { mode: "select", handlesAvailable: true, knotsAvailable: true });
+  assert.equal(knots.disabled, false);
+  assert.equal(knots.getAttribute("aria-disabled"), "false");
+  shortcuts.emit("keydown", { target: root, key: "k" });
+  root.emit("click", { target: knots });
+  assert.deepEqual(modes, ["knots", "knots"]);
+
+  const reason = "A term used by an interaction keeps its knots.";
+  renderToolRail(root, { mode: "knots", handlesAvailable: true, knotsAvailable: false, knotsReason: reason });
+  assert.equal(knots.disabled, false);
+  assert.equal(knots.getAttribute("aria-disabled"), "true");
+  assert.equal(knots.dataset.popoverTitle, "Knots");
+  assert.equal(knots.dataset.popoverBody, reason);
+  // The mode it cannot take shows as Select.
+  assert.equal(knots.getAttribute("aria-checked"), "false");
+  assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+  const ignored = shortcuts.emit("keydown", { target: root, key: "K" });
+  root.emit("click", { target: knots });
+  assert.equal(ignored.defaultPrevented, false);
+  assert.deepEqual(modes, ["knots", "knots"]);
+
+  // Without a reason it is plainly disabled, as a term without a spline is.
+  renderToolRail(root, { mode: "select", handlesAvailable: true });
+  assert.equal(knots.disabled, true);
+  assert.equal(knots.dataset.popoverBody, undefined);
+  binding.destroy();
+});

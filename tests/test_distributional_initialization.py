@@ -39,16 +39,18 @@ def _fit_start(
     return model._require_fitted().smoothing
 
 
-def test_default_initial_penalty_tracks_cubic_feature_units():
-    """Kills a raw common lambda: integral squared curvature scales as units^-3."""
+def test_default_initial_penalty_ignores_feature_units():
+    """The curvature integral is over the knot interval, so the start ignores the units.
+
+    Over the feature it scales as units^-3, and the information-scaled start
+    tracked it a thousandfold for a tenfold change of units.
+    """
     base = _fit_start()
     scaled = _fit_start(units=10.0)
     name = "location:x#wiggle"
     # The spline construction and eigensolve are well-conditioned here.
     tolerance = 4096 * 8 * np.finfo(float).eps
-    assert scaled.initial_lambdas[name] == pytest.approx(
-        1000.0 * base.initial_lambdas[name], rel=tolerance
-    )
+    assert scaled.initial_lambdas[name] == pytest.approx(base.initial_lambdas[name], rel=tolerance)
 
 
 def test_none_requests_an_automatic_start():

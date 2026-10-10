@@ -59,7 +59,7 @@ def test_scalar_dense_compilation_snapshot_preserves_weighted_offset_prediction(
         features={
             "x": Numeric(),
             "cat": Categorical(base="first"),
-            "z": Spline(n_knots=4, degree=2, penalty="ssp", select=True),
+            "z": Spline(kind="ps", n_knots=4, degree=2, penalty="ssp", select=True),
         },
         interactions=[("x", "cat")],
         selection_penalty=0.0,
@@ -124,7 +124,7 @@ def test_scalar_discrete_compilation_snapshot_preserves_prediction() -> None:
     model = SuperGLM(
         family="gaussian",
         link="identity",
-        features={"z": Spline(n_knots=5, degree=2, penalty="ssp")},
+        features={"z": Spline(kind="ps", n_knots=5, degree=2, penalty="ssp")},
         discrete=True,
         n_bins=7,
         selection_penalty=0.0,
@@ -177,7 +177,7 @@ def test_independent_builds_do_not_mutate_caller_or_prior_compiled_state() -> No
     state leaking between builds would silently couple predictors that the
     model treats as independent.
     """
-    caller_spec = Spline(n_knots=5, degree=2, penalty="ssp")
+    caller_spec = Spline(kind="ps", n_knots=5, degree=2, penalty="ssp")
     specs = {"x": caller_spec}
     caller_before = pickle.dumps(caller_spec)
 
@@ -223,7 +223,7 @@ def test_scalar_build_keeps_its_documented_in_place_spec_contract() -> None:
     it keeps that contract and skips a deepcopy per REML rebuild and CV fold.
     Asserting both here keeps the difference deliberate rather than latent.
     """
-    caller_spec = Spline(n_knots=5, degree=2, penalty="ssp")
+    caller_spec = Spline(kind="ps", n_knots=5, degree=2, penalty="ssp")
     values = np.linspace(0.0, 1.0, 16)
     n = len(values)
     result = build_design_matrix(

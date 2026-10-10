@@ -51,6 +51,7 @@ def _builds():
         )
     )
     smooth = Spline(
+        kind="ps",
         n_knots=5,
         degree=2,
         penalty="ssp",

@@ -64,7 +64,11 @@ class TestREMLFiniteDifference:
 
         sample_weight = np.ones(n)
         offset_arr = np.zeros(n)
-        lambdas = {"x1": 10.0, "x2": 0.5}
+        # 10.0 and 0.5 over x: the penalties are measured in their nine knot intervals.
+        lambdas = {
+            "x1": 10.0 * float((np.ptp(x1) / 9) ** -3),
+            "x2": 0.5 * float((np.ptp(x2) / 9) ** -3),
+        }
 
         reml_groups = []
         penalty_ranks = {}

@@ -12,6 +12,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import (
     CubicRegressionSpline,
     NaturalSpline,
+    PSpline,
     Spline,
     _SplineBase,
 )
@@ -107,7 +108,7 @@ class TestSpline:
 
     def test_n_basis(self):
         for nk in [5, 10, 20]:
-            info = Spline(n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
+            info = Spline(kind="ps", n_knots=nk, degree=3).build(np.linspace(0, 1, 100))
             assert info.n_cols == nk + 3  # K - 1 = n_interior + degree (identifiability)
 
     def test_penalty_psd(self):
@@ -249,7 +250,7 @@ class TestSplineBaseHierarchy:
 
 
 class TestSplineExtrapolation:
-    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    @pytest.mark.parametrize("spec_cls", [PSpline, NaturalSpline, CubicRegressionSpline])
     def test_clip_freezes_at_boundary(self, spec_cls):
         """Default clipping should reuse the boundary basis outside fit range."""
         x_train = np.linspace(0.0, 1.0, 200)
@@ -264,7 +265,7 @@ class TestSplineExtrapolation:
         np.testing.assert_allclose(below, at_lo, atol=1e-12)
         np.testing.assert_allclose(above, at_hi, atol=1e-12)
 
-    @pytest.mark.parametrize("spec_cls", [Spline, NaturalSpline, CubicRegressionSpline])
+    @pytest.mark.parametrize("spec_cls", [PSpline, NaturalSpline, CubicRegressionSpline])
     def test_error_mode_rejects_out_of_range(self, spec_cls):
         """extrapolation='error' should fail on out-of-range prediction."""
         x_train = np.linspace(0.0, 1.0, 200)
@@ -851,7 +852,7 @@ class TestStrategyActualTracking:
         y = rng.poisson(2.0, len(x)).astype(float)
 
         model = SuperGLM(
-            features={"x": Spline(n_knots=8, knot_strategy="quantile")},
+            features={"x": Spline(kind="ps", n_knots=8, knot_strategy="quantile")},
             family="poisson",
         )
         model.fit(X=df, y=y)

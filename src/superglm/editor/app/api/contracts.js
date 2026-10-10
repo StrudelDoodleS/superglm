@@ -1,7 +1,7 @@
 // @ts-check
 
 /** @typedef {'editor'|'validation'|'cv'|'final'} AppView */
-/** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
+/** @typedef {'select'|'move'|'zoom'|'handles'|'knots'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
@@ -79,7 +79,8 @@
  * reason when the term cannot take one, a numeric term's support counts and
  * an ordered term's special levels, which no range can cover.
  * @typedef {Object} TermShape
- * @property {boolean} available
+ * @property {boolean} available whether a new range can be drawn on the term
+ *   as its waiting changes leave it
  * @property {string|null} reason
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support
@@ -109,7 +110,123 @@
  * @property {string} level
  * @property {string} method
  */
-/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"} StagedOperation */
+/** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"|"knots"|"basis"} StagedOperation */
+/**
+ * How a spline's knots are placed: a rule, or "explicit" positions (set in
+ * code, or by hand in the editor).
+ * @typedef {"uniform"|"quantile"|"quantile_rows"|"quantile_tempered"|"explicit"} KnotStrategy
+ */
+/** @typedef {Exclude<KnotStrategy, "explicit">} KnotRule */
+/**
+ * A spline term's knots, in chart x: a numeric spline's own values, an
+ * ordered term's display positions (smooth level ``i`` at ``i``). The fields
+ * after ``reason`` are null, and the flags false, where the term has no knots
+ * to adjust.
+ * @typedef {Object} TermKnots
+ * @property {boolean} available whether the Knots tool works on the term
+ * @property {string|null} reason why it does not, for the tool's popover
+ * @property {number[]|null} positions the interior knots in force, ascending
+ * @property {number|null} count
+ * @property {KnotStrategy|null} strategy
+ * @property {number|null} alpha the tempered quantiles' power
+ * @property {boolean} from_editor the knots in force were set in the editor
+ * @property {number|null} lo knots lie strictly between ``lo`` and ``hi``
+ * @property {number|null} hi
+ * @property {number|null} min_gap an ordered term's least distance between two
+ *   knots, and between a knot and ``lo`` or ``hi``: a tenth of a level, also
+ *   its grid. Null on a numeric term, where a knot a change places keeps two
+ *   significant figures of the space between the knots or ends beside it
+ *   (``knotGrid``); the knots it keeps stay as close as they are
+ * @property {number|null} max_count the most knots the term takes; null for no limit
+ * @property {boolean} resettable the knots in force or waiting differ from the
+ *   original model's
+ * @property {string|null} even_only why the term takes evenly spaced knots
+ *   only (a natural spline, or a P-spline whose penalty order exceeds its
+ *   degree), as Python refuses uneven ones; null where any spacing goes
+ * @property {KnotBasis|null} [basis] how the browser rebuilds the term's
+ *   B-spline basis to draw it; null for a cardinal spline, which has none
+ * @property {KnotBasis|null} [waiting_basis] how it rebuilds the basis the
+ *   term's waiting changes put in force, such as another kind's, while that is
+ *   built differently from the one in force; null otherwise
+ * @property {string|null} [difference_penalty] a P-spline's smoothing penalty
+ *   in force: "standard" on evenly spaced knots, "general" (Li and Cao's) on
+ *   uneven ones, "projected" (the standard one with the polynomials of degree
+ *   below m left unpenalised) on knots too uneven for the general one; each
+ *   order's, as "m=2 general, m=3 projected", when they differ; null for
+ *   other kinds
+ * @property {BasisKind|null} [kind] the spline's kind in force
+ * @property {boolean|null} [select] whether shrinkage (``select=True``) is on
+ * @property {BasisKind[]} [kinds] the kinds the term can be switched to
+ * @property {boolean} [select_available] whether Shrink can be turned on or
+ *   off on the term as its waiting changes leave it
+ * @property {string|null} [select_reason] why it cannot, for its popover
+ */
+/**
+ * A spline's kind: P-spline, B-spline, cubic regression, natural, or the
+ * cardinal cubic regression spline, which code can declare and the editor
+ * shows but does not offer.
+ * @typedef {"ps"|"bs"|"cr"|"ns"|"cr_cardinal"} BasisKind
+ */
+/**
+ * The basis a term's waiting changes put in force, while it differs from the
+ * one in force.
+ * @typedef {Object} PendingBasis
+ * @property {BasisKind} kind
+ * @property {boolean} select
+ */
+/**
+ * One basis change, as /stage and /basis take it: another kind, or Shrink
+ * turned on or off.
+ * @typedef {{kind:Exclude<BasisKind, "cr_cardinal">}|{select:boolean}} BasisParams
+ */
+/**
+ * The /basis request, which refits at once: Settings' "Refit after every
+ * structural change" sends a basis change this way.
+ * @typedef {Object} BasisRequest
+ * @property {string} term
+ * @property {BasisParams} params
+ * @property {string} method
+ */
+/**
+ * A spline basis's construction: its ``degree``; its ``ends``, "open" for a
+ * P-spline or B-spline (the boundary widened by 0.001 of its range, the knots
+ * carried on past it at the end spacings) or "clamped" for a cubic regression
+ * or natural spline (each end repeated ``degree + 1`` times); the fitted
+ * ``boundary`` in chart x; and an ordered term's ``level_values``, its smooth
+ * levels on the spline's own axis, through which chart x maps to it (null on
+ * a numeric term).
+ * @typedef {Object} KnotBasis
+ * @property {number} degree
+ * @property {"open"|"clamped"} ends
+ * @property {[number, number]} boundary
+ * @property {number[]|null} level_values
+ */
+/**
+ * The knots a waiting change leaves on a term, in chart x, ascending.
+ * @typedef {Object} PendingKnots
+ * @property {number[]} positions
+ * @property {number} count
+ * @property {KnotStrategy} strategy
+ * @property {number|null} alpha
+ * @property {boolean} from_editor the knots it leaves were set in the editor, as
+ *   `TermKnots.from_editor` reads them after a Refit
+ */
+/**
+ * One knot change, as /stage and /knots take it: a count placed by a rule
+ * (``alpha`` with tempered quantiles only), positions placed by hand in chart
+ * x, or back to the knots the original model declares.
+ * @typedef {{count:number, strategy:KnotRule, alpha?:number}
+ *   |{positions:number[]}
+ *   |{reset:true}} KnotParams
+ */
+/**
+ * The /knots request, which refits at once: Settings' "Refit after every
+ * structural change" sends a knot change this way.
+ * @typedef {Object} KnotsRequest
+ * @property {string} term
+ * @property {KnotParams} params
+ * @property {string} method
+ */
 /**
  * The /special_levels request, which refits at once: ``special`` takes the
  * levels off an ordered term's curve, ``false`` puts them back on it.
@@ -153,6 +270,10 @@
  * @property {string|null} reference
  * @property {string[]|null} [specials] the term's special levels once its
  *   waiting changes apply, when one of them takes levels off the curve or back
+ * @property {PendingKnots|null} [knots] the term's knots once its waiting
+ *   changes apply, while a knot change waits
+ * @property {PendingBasis|null} [basis] the term's kind and shrinkage once its
+ *   waiting changes apply, while they differ from the ones in force
  */
 /**
  * An ordered term's levels fitted free beside its curve (/free_levels): for
@@ -162,11 +283,11 @@
  * @property {string} term
  * @property {string[]} levels
  * @property {number[]} y
- * @property {number[]} curve the fitted curve at each level, the one the flags are
- *   judged against; with hand edits in force it is not the drawn line
  * @property {number[]} lower
  * @property {number[]} upper
  * @property {string[]} flagged
+ * @property {string[]} gaps the levels on the curve with no free value, where the line
+ *   joining the free estimates breaks
  * @property {number} confidence the chance no interval misses a curve every level lies on
  * @property {number} z
  * @property {boolean} shrunk whether a selection penalty still shrinks the free levels
@@ -214,6 +335,32 @@
  *   (Python's `EditorSession.edited_terms()`)
  * @property {SplineView|null} [spline_view]
  * @property {TermUnseen|null} [unseen] the New levels choice; null except on a plain categorical
+ * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
+ * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
+ *   toggle can switch off: a spline
+ */
+/**
+ * A spline term fitted with its smoothing switched off (/unsmoothed). Its line
+ * is on the term's own ``x``, with relativities under the same centring as the
+ * curve. ``note`` holds what to show when the refit stopped before it
+ * converged or a selection penalty shrinks the line, and null otherwise;
+ * ``fit_token`` is the fit in force it was fitted beside.
+ * @typedef {Object} UnsmoothedLine
+ * @property {string} term
+ * @property {number[]} x
+ * @property {number[]} y
+ * @property {string|null} note
+ * @property {number} fit_token
+ */
+/**
+ * One term's Unsmoothed line in the browser, for one fit in force: its fit
+ * running, the line, the sentence Python refused it with, or the failure of
+ * the request itself, which turning the toggle on again retries.
+ * @typedef {Object} UnsmoothedEntry
+ * @property {number} fit_token
+ * @property {'running'|'ready'|'refused'|'failed'} status
+ * @property {UnsmoothedLine|null} line
+ * @property {string|null} reason
  */
 /**
  * Where a plain categorical's levels unseen at fit go: the in-force
@@ -265,6 +412,7 @@
  * @property {boolean} in_force_is_original
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
+ * @property {number} [fit_token] changes only when the fitted model in force is replaced
  */
 /**
  * @typedef {Object} StructuralTransitionTiming
@@ -314,7 +462,12 @@
  * @property {boolean} showCi
  * @property {boolean} showContrib
  * @property {FreeLevels|null} freeLevels the last free-level comparison, drawn
- *   while its term and the fit in force are the ones in view
+ *   while it is shown and its term and the fit in force are the ones in view
+ * @property {boolean} showFreeLevels Free levels is on; turned off, the comparison
+ *   is kept, so turning it on again for the same term and fit draws it at once
+ * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
+ * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
+ *   or refusal, drawn while its fit is the one in force
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm

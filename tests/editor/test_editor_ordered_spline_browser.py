@@ -219,9 +219,10 @@ def _same_row(a, b) -> bool:
 def test_contrib_and_build_share_a_toolbar_row_and_the_view_switch_gives_way(open_editor_page):
     # Mutation checks: without the switch stepping to the end of the row, at
     # 1440 px it stays ahead of Contrib and Build, on the row above them; with
-    # the handle-count slider at its old 92 px, the 1600 px row is 4 px short
-    # and the switch has to give way there too.
-    wide = {"width": 1600, "height": 900}
+    # the handle-count slider at its old 92 px, the 1752 px row is 8 px short
+    # and the switch has to give way there too. The term line carries the
+    # knots chip ("1 knot · even spacing"), so the row needs 1732 px in place.
+    wide = {"width": 1752, "height": 900}
     with open_editor_page(selected_term="age_band", viewport=wide) as (page, _session):
         _handles_tool(page).click()
         page.locator("#contribPlay").wait_for()
@@ -230,7 +231,7 @@ def test_contrib_and_build_share_a_toolbar_row_and_the_view_switch_gives_way(ope
             assert _same_row(contrib, build)
             assert 0 <= build[0] - contrib[1] <= 8
 
-        # At 1600 px the switch, Contrib and Build share one row, in place.
+        # At 1752 px the switch, Contrib and Build share one row, in place.
         switch, contrib, build = page.evaluate(_TOOLBAR_BOXES)
         side_by_side(contrib, build)
         assert _same_row(switch, contrib) and switch[1] <= contrib[0]

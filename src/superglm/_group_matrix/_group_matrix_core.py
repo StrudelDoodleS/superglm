@@ -228,6 +228,7 @@ class FactorSmoothGroupMatrix:
         "omega",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "projection",
         "structured_kind",
         "factor_basis",
@@ -283,6 +284,7 @@ class FactorSmoothGroupMatrix:
         self.omega = None
         self.omega_components = None
         self.component_types = None
+        self.structural_ranks = None
         self.projection = None
         self.structured_kind = "factor_smooth"
         self._structured_feasibility_key = None
@@ -682,6 +684,7 @@ class SparseSSPGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
     )
 
@@ -695,6 +698,7 @@ class SparseSSPGroupMatrix:
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
+        self.structural_ranks = None
         self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
 
     @property
@@ -798,6 +802,7 @@ class SparseSSPGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         return sub
 
 
@@ -823,8 +828,18 @@ _MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
 def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> bool:
     """Screen cancellation in the two raw-moment projection products.
 
-    With unit roundoff u=eps/2, the two products' componentwise error scale
-    is gamma_(2*k) |R|' |G| |R|, where gamma_m=m*u/(1-m*u).
+    With unit roundoff u=eps/2, diagonal c of R' G R carries at most
+    gamma_(2*m_c) (|R|' |G| |R|)_cc, where gamma_m=m*u/(1-m*u) and m_c counts
+    the nonzeros of column c of R. Each of that diagonal's two inner
+    products sums m_c terms: a zero entry of R makes an exact zero product,
+    and adding a zero is exact in any summation order, so it rounds nothing
+    (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., 2002,
+    section 3.1; the sparse matrix-vector bound of Graillat, Jezequel, Mary
+    and Molina, SIAM J. Sci. Comput. 46(1), 2024, counts nonzeros per row
+    the same way). Charging all k = R.shape[0] rows made the bound exceed
+    the budget below with no cancellation at all once k reached
+    max(100, p): an identity R, whose products are exact, screened as
+    cancelling.
     If even a diagonal exceeds a dimension/epsilon resolution budget, form
     projected rows instead. This is an arithmetic dispatch screen, not a
     rank certificate; the solver's existing rank checks remain authoritative.
@@ -833,7 +848,7 @@ def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> 
     envelope = np.sum((absolute.T @ np.abs(raw)) * absolute.T, axis=1)
     eps = np.finfo(float).eps
     unit = eps / 2
-    count_u = 2 * transform.shape[0] * unit
+    count_u = 2 * np.count_nonzero(transform, axis=0) * unit
     gamma = count_u / (1 - count_u)
     return bool(np.any(gamma * envelope > max(100, gram.shape[0]) * eps * np.abs(np.diag(gram))))
 
@@ -939,6 +954,7 @@ class SplineCategoricalGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
@@ -981,6 +997,7 @@ class SplineCategoricalGroupMatrix:
         self.projection = None
         self.omega_components = None
         self.component_types = None
+        self.structural_ranks = None
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
@@ -1076,6 +1093,7 @@ class SplineCategoricalGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         sub.lambda_policies = self.lambda_policies
         sub.spline_cat_level = self.spline_cat_level
         sub.spline_cat_feature = self.spline_cat_feature

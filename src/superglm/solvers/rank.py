@@ -58,6 +58,9 @@ class RankPolicy:
 
 
 _EPS = np.finfo(float).eps
+# ``gamma_6 = 6u / (1 - 6u)`` (Higham 2002, section 3.1), ``u = eps / 2``; the
+# quotient's one rounding taken outward.
+_GAMMA_6 = float(np.nextafter(3.0 * _EPS / (1.0 - 3.0 * _EPS), np.inf))
 SHARED_RANK_POLICY = RankPolicy(
     # Version 2 -- the deficient path answers differently under version 1's
     # thresholds, in two independent ways.
@@ -911,6 +914,10 @@ class RankDecomposition:
     # bases. Keep their bounded coordinates separate until an action is asked.
     equilibrated_solution_basis: NDArray | None = None
     equilibrated_null_basis: NDArray | None = None
+    # A negative eigenvalue past the eigensolver's bar that the caller's
+    # formation bound explains (``decompose_gram(formation_error=...)``): the
+    # matrix was taken as the semidefinite one it was formed from.
+    formation_limited: bool = False
 
     @property
     def width(self) -> int:
@@ -1980,6 +1987,29 @@ def _retained_log_pdet(
     return coordinate_logdet + float(np.sum(np.log(np.abs(retained_values))))
 
 
+def _formation_slack(formation_error: NDArray, diagonal: NDArray) -> float:
+    """A bound on ``||dE||_2``, the formation error in Jacobi-scaled coordinates.
+
+    ``A`` is the matrix as computed, with diagonal ``d``, and ``A + dA`` the
+    positive semidefinite matrix it was formed from; the caller bounds
+    ``|dA_ij| <= sqrt(g_i g_j)`` with ``g = formation_error``.  Scaled by
+    ``C = diag(sqrt(d))``, ``|dE_ij| <= sqrt(q_i q_j)`` with ``q = g / d``, so
+    ``||dE||_2 <= ||dE||_F <= sum(q)``.  The scaling then rounds every entry
+    three times (the product ``c_i c_j``, the quotient, the symmetrising
+    sum), at most ``gamma_3 |E_ij|`` with ``|E_ij| <= sqrt((1 + q_i)(1 +
+    q_j)) + sqrt(q_i q_j)``: ``2 gamma_3 (n + sum(q))`` more, inside
+    ``gamma_6 (n + sum(q))``; the rounded square roots only rescale, a
+    congruence, which keeps the signs (Sylvester's law of inertia).  Every
+    operation below is nondecreasing in nonnegative operands, so it is
+    accumulated outward one ``nextafter`` per rounding.
+    """
+    quotient = np.nextafter(formation_error / diagonal, np.inf)
+    total = float(np.nextafter(math.fsum(quotient), np.inf))
+    width = float(np.nextafter(diagonal.size + total, np.inf))
+    scaling = float(np.nextafter(_GAMMA_6 * width, np.inf))
+    return float(np.nextafter(total + scaling, np.inf))
+
+
 def _decompose_gram(
     matrix: NDArray,
     *,
@@ -1989,6 +2019,7 @@ def _decompose_gram(
     allow_indefinite: bool = False,
     omit_uncertifiable: bool = False,
     psd_by_construction: bool = False,
+    formation_error: NDArray | None = None,
 ) -> RankDecomposition | None:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
 
@@ -1999,9 +2030,10 @@ def _decompose_gram(
     owns the predicate -- see :func:`decompose_gram_if_authoritative`.
     ``psd_by_construction`` (only with ``omit_uncertifiable``) returns
     ``None`` where a materially negative eigenvalue would otherwise raise:
-    see :func:`decompose_gram_if_authoritative`.
+    see :func:`decompose_gram_if_authoritative`.  ``formation_error``: see
+    :func:`decompose_gram`.
     """
-    equilibrated, column_scale, active_columns, _ = _equilibrate_gram(
+    equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
     )
     width = len(column_scale)
@@ -2131,6 +2163,22 @@ def _decompose_gram(
         max_abs_eigenvalue, 1.0
     )
     materially_indefinite = bool(eigenvalues[0] < -negative_tolerance)
+    # That bar is the eigensolver's alone.  A caller whose matrix is
+    # semidefinite by construction also bounds how far forming it moved it
+    # (``formation_error``); by Weyl's inequality a negative eigenvalue inside
+    # the two together is that rounding, and the matrix is taken as the
+    # semidefinite one it was formed from.  Only a matrix that raised here
+    # before reaches this, so every decomposition returned before is unchanged.
+    formation_limited = False
+    if materially_indefinite and formation_error is not None and not allow_indefinite:
+        slack = _formation_slack(
+            np.asarray(formation_error, dtype=np.float64)[active_columns],
+            np.diag(symmetric)[active_columns],
+        )
+        formation_limited = bool(
+            -eigenvalues[0] <= np.nextafter(negative_tolerance + slack, np.inf)
+        )
+        materially_indefinite = not formation_limited
     if not allow_indefinite and materially_indefinite:
         if omit_uncertifiable and psd_by_construction:
             return None
@@ -2158,6 +2206,19 @@ def _decompose_gram(
     cutoff = (
         max(policy.gram_rcond, _eigensolver_relative_bar(len(active_columns))) * max_abs_eigenvalue
     )
+    if formation_limited:
+        # The exact matrix has no negative eigenvalue, so this one's magnitude
+        # is a lower bound on the formation error: within this matrix an
+        # eigenvalue no larger is unresolved whichever its sign and drops on
+        # both.  Across matrices the rank still follows the sign: a residue of
+        # the same size that lands positive never reaches this branch and is
+        # kept at the policy cutoff, as before and as every other Gram
+        # decomposition keeps it.  Flooring the cutoff at the formation bound
+        # for both signs would end that, but the bound is a worst case (2.5e-8
+        # against a measured 5.9e-12 on the freMTPL2 fit it was derived for):
+        # it would drop resolvable directions that callers without the bound,
+        # the PIRLS whose system a cached trial re-solves among them, keep.
+        cutoff = max(cutoff, -float(raw_eigenvalues[0]))
     retained_mask = eigenvalues > cutoff if psd_semantics else np.abs(eigenvalues) > cutoff
     rank = int(np.count_nonzero(retained_mask))
     positive = np.abs(eigenvalues[np.abs(eigenvalues) > 0.0])
@@ -2306,6 +2367,7 @@ def _decompose_gram(
                     estimable_functional_basis=_freeze(estimable_basis),
                     structural_aliases=_freeze(representative_aliases, dtype=bool),
                     retained_values=_freeze(retained_values),
+                    formation_limited=formation_limited,
                 )
             except (np.linalg.LinAlgError, ValueError):
                 pass
@@ -2326,6 +2388,7 @@ def _decompose_gram(
         estimable_functional_basis=_freeze(estimable_basis),
         structural_aliases=_freeze(structural_aliases, dtype=bool),
         retained_values=_freeze(retained_values),
+        formation_limited=formation_limited,
     )
 
 
@@ -2336,14 +2399,31 @@ def decompose_gram(
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
     allow_indefinite: bool = False,
+    formation_error: NDArray | None = None,
 ) -> RankDecomposition:
-    """Equilibrate and decompose a symmetric positive-semidefinite matrix."""
+    """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    A matrix whose smallest equilibrated eigenvalue is negative past the
+    eigensolver's bar raises as materially indefinite.  ``formation_error``
+    widens that bar for a matrix that is semidefinite by construction and
+    rounded in its formation: ``g`` with ``|dA_ij| <= sqrt(g_i g_j)`` between
+    the matrix given and the semidefinite one it was formed from, a
+    componentwise bound in the form Higham (2002), eq. 3.13, gives a formed
+    product.  A negative eigenvalue within the eigensolver's bar plus that
+    bound (``_formation_slack``) is then rounding: the matrix is decomposed as
+    semidefinite, every eigenvalue no larger in magnitude than that negative
+    one is dropped, and the result carries ``formation_limited``.  Past the
+    widened bar it still raises.  The bound decides only refusals: a matrix
+    whose residues all land positive, or inside the eigensolver's bar, is
+    decomposed exactly as without it.
+    """
     decomposition = _decompose_gram(
         matrix,
         policy=policy,
         residual_tol=residual_tol,
         fallback_factor=fallback_factor,
         allow_indefinite=allow_indefinite,
+        formation_error=formation_error,
     )
     if decomposition is None:  # pragma: no cover - omit_uncertifiable defaults off
         raise RuntimeError("gram decomposition omitted its subspace without being asked to")

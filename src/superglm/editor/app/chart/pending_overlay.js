@@ -13,6 +13,7 @@ import { labelWidth } from "./shape_overlay.js";
 import { el, text } from "./svg.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
+/** @typedef {import('../api/contracts.js').ShapedRange} ShapedRange */
 /** @typedef {import('../shapes.js').DisplayAxis} DisplayAxis */
 /** @typedef {(slot:number, alpha?:number)=>string} GroupColor */
 /**
@@ -148,7 +149,22 @@ function waitingBracketPopover(mark) {
 }
 
 /**
- * Each waiting range as a dashed box over the plot, tagged at its top.
+ * The tag a waiting range's box has room for: "Flat · waiting for refit", else
+ * the shape's name alone, else none. Boxes a painted range leaves sit side by
+ * side, so a tag wider than its box would run under the next box's tag; the
+ * box's popover names the range in full either way.
+ * @param {ShapedRange} range @param {number} room the box's width in px
+ * @param {(text:string)=>number} measure a text's width in px
+ * @returns {string|null}
+ */
+export function pendingTagText(range, room, measure) {
+  const fits = (/** @type {string} */ name) => TAG_INSET + measure(name) + TAG_PADDING * 2 <= room;
+  return [`${range.label} · waiting for refit`, range.label].find(fits) ?? null;
+}
+
+/**
+ * Each waiting range as a dashed box over the plot, tagged at its top when
+ * the tag fits (``pendingTagText``).
  * @param {SVGElement} svg
  * @param {{term:TermPayload, view:DisplayAxis, sx:(v:number)=>number,
  *   margin:{left:number, top:number}, innerW:number, innerH:number}} options
@@ -181,6 +197,15 @@ export function drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH 
       band, x0 + TAG_INSET + TAG_PADDING, margin.top + TAG_BASELINE, name,
       "pending-range-label", "start"
     );
+    const tag = pendingTagText(range, x1 - x0, (shown) => {
+      label.textContent = shown;
+      return labelWidth(label);
+    });
+    if (tag === null) {
+      label.remove();
+      continue;
+    }
+    label.textContent = tag;
     band.insertBefore(el("rect", {
       class: "pending-range-tag",
       x: x0 + TAG_INSET,

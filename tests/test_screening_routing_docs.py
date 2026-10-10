@@ -161,17 +161,18 @@ def test_a_too_wide_spline_cat_pair_is_retried_not_refused():
     # the same counting correction, one paragraph down, for numeric_cat
     assert "1710 UNPINNED levels" in DOC
 
-    # A library-default Spline() margin is 13 columns wide in the probe, so it
-    # crosses the 1357 cap at 105 contrasts: 13 * 104 = 1352, 13 * 105 = 1365.
-    assert "``L = 106`` UNPINNED levels" in DOC
-    for levels, expected in ((105, "dense"), (106, "arrow")):
+    # A library-default Spline() margin (a cr since 0.40) is 11 columns wide in
+    # the probe, so it crosses the 1357 cap at 124 contrasts: 11 * 123 = 1353,
+    # 11 * 124 = 1364. The 0.39 default, a ps, was 13 wide and crossed at 105.
+    assert "``L = 125`` UNPINNED levels" in DOC
+    for levels, expected in ((124, "dense"), (125, "arrow")):
         df, y = _spline_cat_frame(levels, support=400, rows=8_000)
         model = SuperGLM(family="gaussian", features={"x": Spline(), "g": Categorical()})
         model.fit_reml(df, y)
         route, seen, row = _route(("x", "g"), model, df, y)
-        assert seen["k_s"] == 13
+        assert seen["k_s"] == 11
         assert seen["levels"] == levels - 1, "contrasts, one per non-base level"
-        assert route == expected, f"{levels} levels, block {13 * (levels - 1)}"
+        assert route == expected, f"{levels} levels, block {11 * (levels - 1)}"
         assert np.isfinite(row["z"]), "the wide pair is scored, not refused"
 
 
@@ -203,7 +204,7 @@ def test_a_pinned_level_widens_no_block_so_the_threshold_is_the_unpinned_count()
     y = rng.normal(size=8_000)
     model = SuperGLM(
         family="gaussian",
-        features={"x": Spline(), "g": Categorical(levels=levels)},
+        features={"x": Spline(kind="ps"), "g": Categorical(levels=levels)},
     )
     with pytest.warns(UserWarning, match="pinned to base"):
         model.fit_reml(df, y)

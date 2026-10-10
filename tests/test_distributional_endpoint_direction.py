@@ -254,11 +254,16 @@ def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
     y = _gamma_response(mean)
     outcomes = {}
     diagnostics = {}
+    # The cap this was calibrated on, with the curvature over the covariate: the
+    # penalty in knot intervals is hbar**3 that (hbar = ptp / 6 for five knots), so
+    # the start and the cap are scaled by hbar**-3.
+    per_knot = (np.ptp(frame["x"]) / 6.0) ** -3
+    starts = {key: value * per_knot for key, value in _cap_start().items()}
     for label, family in (("analytic", GammaLS()), ("fd", _GammaWithoutDirection())):
         model = model_from_templates(
             family=family, predictors=(_mean_predictor(), Predictor("scale", {}))
         )
-        model.fit_reml(frame, y, lambdas=_cap_start(), practical_reml=False)
+        model.fit_reml(frame, y, lambdas=starts, practical_reml=False, max_lambda=1.0e10 * per_knot)
         smoothing = model._require_fitted().smoothing
         outcomes[label] = (
             smoothing.convergence_reason,

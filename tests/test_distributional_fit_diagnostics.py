@@ -48,6 +48,16 @@ def _fixed_model(*, retain_rows: bool = False):
     )
 
 
+def _per_knot(values, n_knots: int = 5) -> float:
+    """``hbar**-3``, ``hbar`` the knot interval: the factor that keeps a fixture's smoothing.
+
+    A ``cr`` penalty is the curvature integral over ``x / hbar``, ``hbar**3``
+    times the one over ``x`` these fixtures were calibrated on, so a lambda
+    this much larger fits the same model.
+    """
+    return float((np.ptp(values) / (n_knots + 1)) ** -3)
+
+
 def _smooth_fixture():
     rng = np.random.default_rng(23)
     x = np.linspace(-1.0, 1.0, 48)
@@ -69,7 +79,7 @@ def _fit_smooth(*, inner_iterations: int, outer_iterations: int, tolerance: floa
         family=GaussianLS(scale_floor=0.01),
         predictors=predictors,
         weight_contract=WeightContract("prior"),
-        lambdas={"scale:z#wiggle": 0.3},
+        lambdas={"scale:z#wiggle": 0.3 * _per_knot(frame["z"])},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=inner_iterations),
         efs_config=DistributionalEFSConfig(
             outer="efs",
@@ -300,14 +310,14 @@ def unresolved_cap_model():
             Predictor("scale", {"z": Spline(kind="cr", n_knots=5)}),
         ),
         weight_contract=WeightContract("prior"),
-        lambdas={"location:z#wiggle": 0.3, "scale:z#wiggle": 0.3},
+        lambdas={"location:z#wiggle": 0.3 * _per_knot(z), "scale:z#wiggle": 0.3 * _per_knot(z)},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
         efs_config=DistributionalEFSConfig(
             outer="efs",
             tolerance=1.0e-8,
             max_iterations=8,
-            initial_lambda=0.1,
-            maximum_lambda=0.3,
+            initial_lambda=0.1 * _per_knot(z),
+            maximum_lambda=0.3 * _per_knot(z),
         ),
         retain_rows=False,
     )
@@ -336,7 +346,7 @@ def rejected_step_model():
             Predictor("scale", {"z": Spline(kind="cr", n_knots=5)}),
         ),
         weight_contract=WeightContract("prior"),
-        lambdas={"location:z#wiggle": 0.1, "scale:z#wiggle": 0.1},
+        lambdas={"location:z#wiggle": 0.1 * _per_knot(z), "scale:z#wiggle": 0.1 * _per_knot(z)},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
         efs_config=DistributionalEFSConfig(
             outer="efs",
@@ -376,7 +386,7 @@ def two_component_model():
             Predictor("scale", {"z": Spline(kind="cr", n_knots=5)}),
         ),
         weight_contract=WeightContract("prior"),
-        lambdas={"location:z#wiggle": 0.3, "scale:z#wiggle": 0.3},
+        lambdas={"location:z#wiggle": 0.3 * _per_knot(z), "scale:z#wiggle": 0.3 * _per_knot(z)},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
         efs_config=DistributionalEFSConfig(
             outer="efs",
@@ -873,8 +883,8 @@ def test_lambda_cap_unresolved_is_per_qualified_component_with_refusal_evidence(
         for finding in findings
     }
     for evidence in by_subject.values():
-        assert evidence["terminal_lambda"] == 0.3
-        assert evidence["configured_maximum_lambda"] == 0.3
+        assert evidence["terminal_lambda"] == 0.3 * _per_knot(np.linspace(0.0, 1.0, 40))
+        assert evidence["configured_maximum_lambda"] == 0.3 * _per_knot(np.linspace(0.0, 1.0, 40))
         assert evidence["terminal_stationarity_evidence"] > 0.0
     assert {name: evidence["endpoint_refusal_reason"] for name, evidence in by_subject.items()} == {
         "penalty:location:z#wiggle": "joint_objective_rejected",
@@ -1305,7 +1315,7 @@ def _stationary_model():
         family=GaussianLS(scale_floor=0.01),
         predictors=predictors,
         weight_contract=WeightContract("prior"),
-        lambdas={"scale:z#wiggle": 0.3},
+        lambdas={"scale:z#wiggle": 0.3 * _per_knot(frame["z"])},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
         efs_config=DistributionalEFSConfig(
             tolerance=1.0e-3,

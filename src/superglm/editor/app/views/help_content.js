@@ -1,5 +1,7 @@
 // @ts-check
 
+import { UNSMOOTHED_HELP } from "../unsmoothed.js";
+
 /**
  * @typedef {object} HelpEntry
  * @property {string} title
@@ -29,6 +31,12 @@ export const TOOL_HELP = Object.freeze({
     title: "Handles",
     body: "Edit spline control handles and inspect basis contributions.",
     shortcut: "H",
+  }),
+  knots: Object.freeze({
+    title: "Knots",
+    body:
+      "Drag a knot along the axis to move it, click the axis to add one, or drag one below the axis to remove it. Each change waits for Refit.",
+    shortcut: "K",
   }),
   help: Object.freeze({
     title: "Help",
@@ -180,7 +188,7 @@ export const CONTROL_HELP = Object.freeze({
 export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Modes",
-    keys: Object.freeze(["select", "move", "zoom", "handles"]),
+    keys: Object.freeze(["select", "move", "zoom", "handles", "knots"]),
   }),
   Object.freeze({
     title: "Selecting points",
@@ -201,8 +209,24 @@ export const HELP_SECTIONS = Object.freeze([
       "Select points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. The range runs from the first selected point to the last, gaps included, and is pinned to the shape fitted to the data across it at the next Refit; the rest of the term stays the fitted smooth.",
       "At each edge the curve leaves the shape along its slope (Tangent). The toggle beside the shape icons chooses Corner instead, where the slope may change at the edge. Select all, then a shape, for one polynomial over the whole axis.",
       "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
-      "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Undo takes back the latest shape.",
+      "A new range paints over the ranges it overlaps: one it covers goes, one it overlaps at an end keeps the part outside it, and one it falls inside is split in two. Each part keeps its shape. One selected right beside a range meets it. Undo takes back the latest shape.",
       "A P-spline or natural spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range; a natural spline's ends are then no longer held straight.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Knots",
+    items: Object.freeze([
+      "Small ticks under the x-axis mark a spline term's knots in every mode. The Knots tool (K) turns them into diamonds on the axis that you can move.",
+      "Drag a knot along the axis to move it. It may pass its neighbours; one dropped too close to another settles on the nearest free spot.",
+      "Click the axis where the dashed diamond shows to add a knot there. Drag a knot below the axis, onto Drop here to remove the knot, to remove it. A spline keeps at least one knot.",
+      "Click a knot to select it. The arrow keys nudge it one step, ten with Shift; Delete removes it and Escape lets it go.",
+      "While a knot is dragged, or a knot change waits, the spline's basis functions show as bumps in a band along the bottom of the plot. The ones the change reshapes are in colour, the rest faint. Each knot is shared by a few neighbouring functions, so moving one reshapes only the curve near it.",
+      "The count and Placed by above the chart place every knot again by a rule: even spacing, quantiles of the values, quantiles of the rows, or tempered quantiles, which weight each value by its row count to the power alpha. Knots you placed by hand are dropped; Undo brings them back. Reset knots goes back to the knots declared in code.",
+      "Kind above the chart rebuilds the spline as another kind and keeps its knots. A P-spline penalises the differences between neighbouring coefficients; a B-spline penalises the curve's bending itself; a cubic regression spline and a natural spline are cubic and held straight at each end of the data. A P-spline or B-spline takes the degree declared in code. A cardinal cubic regression spline declared in code is named there, but cannot be chosen.",
+      "Shrink adds a second penalty, on the term's straight-line part, so the fit can shrink the term towards a straight line and, where the data do not support it, out of the model. It is off where the term cannot take it, such as a natural spline or a term with shaped ranges; hovering it says why. A Kind or Shrink change waits for Refit like a knot change, and Undo takes it back.",
+      "Each change waits for Refit, or refits at once when Settings says so. The knots it places are amber, and the knots it moves or removes stay as grey ghosts until Refit. Hand edits on the term are dropped by the refit, as for every structural change; Undo brings them back.",
+      "On a P-spline (kind=\"ps\"), moved knots switch the term to the general P-spline penalty, which measures wiggliness on unevenly spaced knots, so the smoothing stays sound.",
+      "An ordered term takes at most one knot fewer than the levels on its curve, and its knots can sit between levels. The tool is off where a term's knots cannot change; hovering it says why.",
     ]),
   }),
   Object.freeze({
@@ -211,6 +235,16 @@ export const HELP_SECTIONS = Object.freeze([
       "An ordered categorical fitted with a spline is drawn as its spline, with a dot on each level. Special levels are separate dots.",
       "Handles edit it like a numeric spline: each handle is one spline coefficient, and moving it sets every level to the spline the handles draw, so a handle can sit off the curve. Special levels do not move. Contrib and Build show the spline's basis.",
       "Handles are off while levels are grouped or a band is shaped; the Handles tool says which.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Unsmoothed line",
+    items: Object.freeze([
+      `The Unsmoothed icon above the chart, on a spline term: ${UNSMOOTHED_HELP}`,
+      "It stays on as you move between terms. Each term's line is fitted the first time it shows; the icon is busy meanwhile, and the editor stays free. Hand edits keep the line; a refit fits it again.",
+      "On an ordered term, Free levels draws each level fitted free, joined by a line: one button for the diamonds and the line. A level with no free value leaves a gap in the line.",
+      "A spline whose rows cannot pin down every basis function without smoothing, as across a gap in the data, gets no line: the icon stays on, and its hover text says why.",
+      "The line widens the chart's range by at most the curve's own range on each side; past that it runs off the plot.",
     ]),
   }),
   Object.freeze({

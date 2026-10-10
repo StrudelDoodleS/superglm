@@ -22,6 +22,8 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
+from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
     _codes_against,
@@ -31,6 +33,7 @@ from superglm.features.categorical import (
     _warn_unseen_routed,
 )
 from superglm.group_matrix import _discretize_column
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import (
     DiscreteTensorBuildResult,
     GroupInfo,
@@ -127,9 +130,9 @@ def interaction_spline_spec(
     placement the screening probe uses, which is what keeps probe and refit
     identical; an explicitly knotted or already-quantile parent is left alone.
 
-    Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
-    default -- is untouched, and for the cr configurations the cardinal basis
-    cannot express (below).  The returned spec has its knots already placed on
+    Returns *spec* unchanged for every other spline kind, so ``ps`` is
+    untouched, and so are the cr configurations the cardinal basis cannot
+    express (below).  The returned spec has its knots already placed on
     *x*; callers must STORE it and read the basis back from the stored copy,
     since a predict-time basis rebuilt from the original spec would disagree
     with the design that was fitted.
@@ -426,7 +429,7 @@ class SplineCategorical:
                         **shared,
                     )
                 )
-        return groups
+        return _with_structural_ranks(spline_spec, groups)
 
     def build_discrete(
         self,
@@ -500,7 +503,7 @@ class SplineCategorical:
                     spline_cat_feature=self.cat_name,
                 )
             )
-        return groups
+        return _with_structural_ranks(spline_spec, groups)
 
     def set_reparametrisation(self, R_inv_dict: dict[str, NDArray] | NDArray) -> None:
         if isinstance(R_inv_dict, dict):
@@ -1386,18 +1389,68 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
     return np.einsum("ij,ik->ijk", B1, B2).reshape(B1.shape[0], B1.shape[1] * B2.shape[1])
 
 
+def _with_structural_ranks(spline_spec, groups: list[GroupInfo]) -> list[GroupInfo]:
+    """Declare each level's penalty rank from the margin's structural penalty.
+
+    Every level shares one projected penalty, so one declaration serves them
+    all; REML then ranks a skewed cr margin's tail direction as the main
+    effect does (``structural_penalty_ranks``), not at its spread.
+    """
+    ranks = structural_penalty_ranks(spline_spec, groups[0]) if groups else None
+    for info in groups:
+        info.structural_ranks = ranks
+    return groups
+
+
+def _require_one_tensor_null(null_mask: NDArray) -> None:
+    n_null = int(np.sum(null_mask))
+    if n_null != 1:
+        raise ValueError(f"Expected 1 null eigenvalue for centered tensor penalty, got {n_null}.")
+
+
 def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     """Scale a marginal tensor penalty to unit leading eigenvalue.
 
     mgcv rescales marginal penalties before constructing tensor penalties.
     Matching that convention keeps different
     margins on comparable penalty scales.
+
+    A penalty is left as it is when its largest eigenvalue is not positive and
+    finite, or when its spectrum is not positive semidefinite to the
+    eigensolver's resolution: a computed eigenvalue of a semidefinite matrix
+    is at least ``-p(n) eps`` times the largest (``_eigensolver_relative_bar``,
+    widened by the shared rank policy's ``certification_band``), and one
+    further below is round-off of a zero penalty, not a penalty. Both tests
+    are relative, so a margin's units cannot trip them: the absolute floor of
+    1e-12 they replace left a margin whose knots were 3.6e4 apart unscaled
+    beside a unit one, and ``decompose=True`` then refused the tensor.
     """
     eigvals = np.linalg.eigvalsh(S)
-    max_eig = float(np.max(eigvals)) if eigvals.size else 0.0
-    if max_eig <= 1e-12:
+    if not eigvals.size:
+        return S
+    max_eig = float(eigvals[-1])
+    if not (np.isfinite(max_eig) and max_eig > 0.0):
+        return S
+    resolution = SHARED_RANK_POLICY.certification_band * _eigensolver_relative_bar(S.shape[0])
+    if -float(eigvals[0]) > resolution * max_eig:
         return S
     return S / max_eig
+
+
+def _range_spread(margin: TensorMarginalInfo) -> float:
+    """A margin's least penalised direction's eigenvalue over its most penalised's, on its range.
+
+    The range is the structural penalty's (``TensorMarginalInfo.structural_penalty``),
+    so a direction the real penalty puts under round-off still counts; 1.0 for a
+    margin without a structural penalty, whose spectrum the split does not read
+    against one.
+    """
+    if margin.structural_penalty is None:
+        return 1.0
+    values, vectors = np.linalg.eigh(_normalize_tensor_penalty(margin.structural_penalty))
+    basis = vectors[:, ~_null_mask(values)]
+    restricted = np.linalg.eigvalsh(basis.T @ margin.penalty @ basis)
+    return max(float(restricted[0]), 0.0) / float(restricted[-1])
 
 
 _TENSOR_SCORE_CHUNK_SIZE = 8192
@@ -1711,6 +1764,68 @@ class TensorInteraction:
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
         return B1, B2, S1, S2
 
+    def _structural_tensor_penalty(self) -> NDArray | None:
+        """The tensor penalty built from margins without knot-spacing spread, if any margin has one.
+
+        ``A (x) I + I (x) B`` with ``A`` and ``B`` positive semidefinite has null
+        space ``null(A) (x) null(B)``, so margins with the real penalties' null
+        spaces (``TensorMarginalInfo.structural_penalty``) give the real
+        tensor penalty's null space without the spread a skewed ``cr`` or
+        ``bs`` margin carries. A margin without one keeps its own penalty.
+        """
+        m1, m2 = self._marginal1, self._marginal2
+        if m1.structural_penalty is None and m2.structural_penalty is None:
+            return None
+        S1, S2 = (
+            _normalize_tensor_penalty(
+                m.penalty if m.structural_penalty is None else m.structural_penalty
+            )
+            for m in (m1, m2)
+        )
+        return np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
+
+    def _structural_margin_ranks(self) -> dict[str, int] | None:
+        """Each margin component's rank from its margin's structural penalty.
+
+        ``rank(A (x) I_q) = rank(A) q``, and restricting it to the complement
+        of the tensor null space (``decompose=True``) keeps that rank, since
+        the tensor null space lies in the component's own.
+        """
+        ranks = {}
+        for name, margin, repeat in (
+            (self.feat1_name, self._marginal1, self._p2),
+            (self.feat2_name, self._marginal2, self._p1),
+        ):
+            if margin.structural_penalty is None:
+                continue
+            rank = _gapped_rank(np.linalg.eigvalsh(margin.structural_penalty))
+            if rank is not None:
+                ranks[f"margin_{name}"] = rank * repeat
+        return ranks or None
+
+    def _split_refusal(self) -> str:
+        """Why ``decompose=True`` cannot split this tensor, naming it and its spread margin."""
+        spreads = {
+            name: _range_spread(margin)
+            for name, margin in (
+                (self.feat1_name, self._marginal1),
+                (self.feat2_name, self._marginal2),
+            )
+            if margin is not None
+        }
+        margin = min(spreads, key=spreads.__getitem__)
+        return (
+            f"TensorInteraction({self.feat1_name!r}, {self.feat2_name!r}, decompose=True) cannot "
+            "split its penalty into a bilinear part and the rest. On the "
+            f"{margin!r} margin the penalty on the least penalised curve shape is "
+            f"{spreads[margin]:.1e} of the penalty on the most penalised one, too small for "
+            "double precision to hold beside it; that comes from knot intervals that differ "
+            "greatly in width, usually the tail of a heavy-tailed column under quantile knots. "
+            f"Pass decompose=False, which needs no split. To keep the split, give {margin!r} "
+            'kind="ps", transform it (for example, take its logarithm), or place its knots '
+            "yourself."
+        )
+
     def _build_group_infos(
         self,
         omega_1: NDArray,
@@ -1721,20 +1836,38 @@ class TensorInteraction:
         n_cols = omega.shape[0]
         if self._decompose:
             eigvals, eigvecs = np.linalg.eigh(omega)
-            tol = 1e-8 * max(float(np.max(eigvals)), 1e-12)
-            null_mask = eigvals < tol
-            n_null = int(np.sum(null_mask))
-            if n_null != 1:
-                raise ValueError(
-                    f"Expected 1 null eigenvalue for centered tensor penalty, got {n_null}."
-                )
-            U_null = eigvecs[:, null_mask]
-            U_range = eigvecs[:, ~null_mask]
+            # REML's rank rule, as select=True splits a spline: a margin's
+            # general penalty spans more of float64 than a fixed 1e-8 allows.
+            null_mask = _null_mask(eigvals)
+            # As select=True does (eigendecompose_select), a skewed cr or bs
+            # margin's spread can put range directions under that cut, so the
+            # structural penalty decides the nullity. Where the real spectrum
+            # agrees its eigenvectors are kept, and those fits are unchanged.
+            structural = self._structural_tensor_penalty()
+            if structural is not None:
+                structural_values, structural_vectors = np.linalg.eigh(structural)
+                structural_null = _null_mask(structural_values)
+                _require_one_tensor_null(structural_null)
+            if structural is None or np.sum(null_mask) == np.sum(structural_null):
+                _require_one_tensor_null(null_mask)
+                U_null = eigvecs[:, null_mask]
+                U_range = eigvecs[:, ~null_mask]
+            else:
+                U_null = structural_vectors[:, structural_null]
+                try:
+                    U_range, _ = _certified_range(
+                        omega, structural_vectors[:, ~structural_null], subject="decompose=True"
+                    )
+                except ValueError as err:
+                    raise ValueError(self._split_refusal()) from err
+            # Each component symmetrised on its own, so the components sum to
+            # the penalty exactly: an unnormalised margin (bs) puts the
+            # congruence's asymmetric round-off far above any absolute bar.
             omega_1_range = U_range.T @ omega_1 @ U_range
+            omega_1_range = 0.5 * (omega_1_range + omega_1_range.T)
             omega_2_range = U_range.T @ omega_2 @ U_range
-            omega_range = 0.5 * (
-                (omega_1_range + omega_2_range) + (omega_1_range + omega_2_range).T
-            )
+            omega_2_range = 0.5 * (omega_2_range + omega_2_range.T)
+            omega_range = omega_1_range + omega_2_range
             return [
                 GroupInfo(
                     columns=None,
@@ -1756,6 +1889,7 @@ class TensorInteraction:
                         (f"margin_{self.feat1_name}", omega_1_range),
                         (f"margin_{self.feat2_name}", omega_2_range),
                     ],
+                    structural_ranks=self._structural_margin_ranks(),
                 ),
             ]
 
@@ -1771,6 +1905,7 @@ class TensorInteraction:
                 (f"margin_{self.feat1_name}", omega_1),
                 (f"margin_{self.feat2_name}", omega_2),
             ],
+            structural_ranks=self._structural_margin_ranks(),
         )
 
     def build(

@@ -376,7 +376,7 @@ def test_scaled_contrast_fit_selects_the_solver_space_smoothing_parameter(monkey
 
     model = fit()
     # The solver-space support everywhere is the behaviour before the raw path.
-    monkeypatch.setattr(algebra, "_single_penalty_raw_family", lambda *args: None)
+    monkeypatch.setattr(algebra, "_single_penalty_raw_family", lambda *args, **kwargs: None)
     reference = fit()
     assert model._reml_lambdas == reference._reml_lambdas
     assert model._reml_result.objective == reference._reml_result.objective

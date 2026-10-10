@@ -198,11 +198,15 @@
 
 /* A level fitted free, behind the curve: an open diamond on its interval. A
    level whose interval misses the curve is filled, the smoothing overrides it. */
-.free-whisker { stroke: var(--muted); stroke-opacity: 0.55; stroke-width: 1.2; }
-.free-level { fill: var(--surface); stroke: var(--muted); stroke-width: 1.4; }
-.free-level.is-flagged { fill: var(--orange); stroke: var(--orange); }
-.free-whisker.is-flagged { stroke: var(--orange); stroke-opacity: 0.8; }
-.free-curve-tick { stroke: var(--text); stroke-width: 1.5; }
+.free-whisker { stroke: var(--unsmoothed); stroke-opacity: 0.6; stroke-width: 1.4; }
+/* The levels fitted free: one green series, a line joining open diamonds. */
+.free-line { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
+.free-level { fill: var(--surface); stroke: var(--unsmoothed); stroke-width: 1.4; }
+.free-level.is-flagged { fill: var(--unsmoothed); }
+.free-whisker.is-flagged { stroke-opacity: 0.9; }
+/* The term fitted with its smoothing switched off: solid, over the curve. */
+.unsmoothed { fill: none; stroke: var(--unsmoothed); stroke-width: 1.8; stroke-linejoin: round; }
+.unsmoothed-dot { fill: var(--unsmoothed); stroke: none; }
 
 /* A level a waiting change takes off the curve, or puts back on it. */
 .pending-special-ring {
@@ -211,4 +215,100 @@
   stroke-width: 1.6;
   stroke-dasharray: 3 2;
   pointer-events: none;
+}
+
+/* A spline's knots. Ticks under the axis in every mode; in Knots mode,
+   diamonds on the axis with faint guides, over a band where a click adds one.
+   A knot a waiting change places is amber; a knot in force it moves or
+   removes is a dashed grey ghost, a removed one crossed out. */
+.knot-tick { stroke: var(--muted); stroke-width: 1.6; pointer-events: none; }
+.knot-tick.is-placed { stroke: var(--group-0); stroke-width: 2; }
+/* In Knots mode the knots take the pointer: the points are marks only, and a
+   dense curve's points stay hidden rather than following the pointer. */
+.point-layer[data-knots="true"] .point { pointer-events: none; }
+.point-layer[data-knots="true"][data-dense="true"] .point:not(.selected) { opacity: 0; }
+.knot-band { fill: var(--blue-soft); opacity: 0.55; pointer-events: none; }
+.knot-band-hit { fill: transparent; cursor: copy; }
+.knot-guide {
+  stroke: var(--blue);
+  stroke-opacity: 0.22;
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  pointer-events: none;
+}
+.knot-guide.is-placed { stroke: var(--group-0); stroke-opacity: 0.6; }
+.knot-guide.is-selected { stroke-opacity: 0.55; }
+.knot-handle {
+  fill: color-mix(in srgb, var(--blue) 38%, var(--surface));
+  stroke: var(--blue);
+  stroke-width: 1.7;
+  pointer-events: none;
+}
+.knot-handle.is-selected { fill: var(--blue); }
+.knot-handle.is-placed { fill: color-mix(in srgb, var(--group-0) 42%, var(--surface)); stroke: var(--group-0); }
+.knot-handle.is-placed.is-selected { fill: var(--group-0); }
+.knot-layer .knot-handle.is-removing { fill: var(--surface); stroke: var(--danger); stroke-dasharray: 2 2; }
+.knot-hit { fill: transparent; cursor: ew-resize; }
+.knot-ghost {
+  fill: none;
+  stroke: var(--grey);
+  stroke-width: 1.3;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
+}
+.knot-ghost-cross { stroke: var(--danger); stroke-width: 1.6; pointer-events: none; }
+.knot-add {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.3;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
+}
+.knot-tag { pointer-events: none; }
+.knot-tag-box { fill: var(--text); }
+.knot-tag-label {
+  fill: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+/* Opaque, so it covers the axis title while a knot is dragged. */
+.knot-remove-zone {
+  fill: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  stroke: var(--danger);
+  stroke-opacity: 0.4;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+.knot-remove-label {
+  fill: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+/* In Knots mode the chart takes the arrow keys, so it takes focus. */
+#chart:focus { outline: none; }
+#chart:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* A term that takes evenly spaced knots only: nothing on the axis moves by
+   hand, and the hover text says why. */
+.knot-layer.is-even-only .knot-band-hit,
+.knot-layer.is-even-only .knot-hit { cursor: not-allowed; }
+
+/* The basis a knot change reshapes, in a band along the bottom of the plot,
+   beneath the curve: the functions it reaches in the basis palette, a pastel
+   fill under a line of the same hue; the rest faint, for the tiling. */
+.knot-basis-layer { pointer-events: none; }
+.knot-basis-band { fill: var(--surface); fill-opacity: 0.62; }
+.knot-basis {
+  fill: none;
+  stroke: var(--muted);
+  stroke-opacity: 0.3;
+  stroke-width: 1;
+}
+.knot-basis.is-reached {
+  fill: color-mix(in srgb, var(--knot-basis) 18%, transparent);
+  stroke: var(--knot-basis);
+  stroke-opacity: 0.9;
+  stroke-width: 1.6;
 }

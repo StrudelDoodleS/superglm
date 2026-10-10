@@ -814,6 +814,7 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
 
 def knot_summary(model) -> dict[str, dict[str, Any]]:
     """Return fitted knot metadata for all spline features."""
+    from superglm.features._spline_penalties import difference_penalty_kind
     from superglm.features.spline import _SplineBase
 
     out: dict[str, dict[str, Any]] = {}
@@ -826,6 +827,7 @@ def knot_summary(model) -> dict[str, dict[str, Any]]:
             "interior_knots": spec.fitted_knots,
             "boundary": spec.fitted_boundary,
             "n_basis": spec._n_basis,
+            "difference_penalty": difference_penalty_kind(spec),
         }
         if spec._knot_strategy_actual == "quantile_tempered":
             entry["knot_alpha"] = spec.knot_alpha

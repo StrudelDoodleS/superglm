@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DECLARED_SPECIAL,
   REFERENCE_STAYS,
+  freeLevelLine,
   freeLevelMarks,
   freeLevelsShown,
   specialActions,
@@ -66,13 +67,12 @@ test("waiting specials are the levels a waiting change takes off the curve or pu
 test("free-level marks sit at each compared level's point, a collapsed group's once", () => {
   const free = {
     term: "band", levels: ["A", "B", "C", "D"], y: [0.9, 1, 1.3, 1.1],
-    curve: [0.95, 1, 1.1, 1.1],
-    lower: [0.8, 1, 1.2, 1], upper: [1, 1, 1.4, 1.2], flagged: ["C"],
+    lower: [0.8, 1, 1.2, 1], upper: [1, 1, 1.4, 1.2], flagged: ["C"], gaps: ["E"],
     confidence: 0.95, z: 2.6, shrunk: false, fit_token: 4, notice: null
   };
   const expanded = freeLevelMarks(free, { x: [0, 1, 2, 3, 4, 5], levels: ["A", "B", "C", "D", "E", "Z"] });
-  assert.deepEqual(expanded.map((mark) => [mark.level, mark.x, mark.flagged, mark.curve]), [
-    ["A", 0, false, 0.95], ["B", 1, false, 1], ["C", 2, true, 1.1], ["D", 3, false, 1.1]
+  assert.deepEqual(expanded.map((mark) => [mark.level, mark.x, mark.flagged, mark.y]), [
+    ["A", 0, false, 0.9], ["B", 1, false, 1], ["C", 2, true, 1.3], ["D", 3, false, 1.1]
   ]);
   // In the Collapsed display C and D are one group point, which takes one mark.
   const collapsed = freeLevelMarks(free, {
@@ -85,4 +85,21 @@ test("free-level marks sit at each compared level's point, a collapsed group's o
   assert.equal(freeLevelsShown(free, "band", 4), true);
   assert.equal(freeLevelsShown(free, "band", 5), false);
   assert.equal(freeLevelsShown(free, "area", 4), false);
+});
+
+test("the line joining the free levels breaks at a level with none, and skips a special", () => {
+  const free = /** @type {any} */ ({
+    term: "band", levels: ["A", "B", "D"], y: [0.9, 1, 1.1], gaps: ["C"], flagged: []
+  });
+  // Z is special: off the curve, it keeps no place on the line.
+  const expanded = { x: [0, 1, 2, 3, 4], levels: ["A", "B", "C", "D", "Z"] };
+  assert.deepEqual(freeLevelLine(free, expanded), { x: [0, 1, 2, 3], y: [0.9, 1, null, 1.1] });
+  // Collapsed, B and C are one group point: the group's free value, once.
+  const grouped = /** @type {any} */ ({ ...free, levels: ["A", "B", "C", "D"], y: [0.9, 1.2, 1.2, 1.1], gaps: [] });
+  const collapsed = {
+    x: [0, 1, 2, 3], levels: ["A", "B+C", "D", "Z"], displayIsCollapsed: true,
+    displaySourceLevels: [["A"], ["B", "C"], ["D"], ["Z"]]
+  };
+  assert.deepEqual(freeLevelLine(grouped, collapsed), { x: [0, 1, 2], y: [0.9, 1.2, 1.1] });
+  assert.equal(freeLevelLine(null, expanded), null);
 });

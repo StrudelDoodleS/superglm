@@ -2870,7 +2870,7 @@ class TestModelSummaryAPI:
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.01,
-            features={"x": Spline(n_knots=8, penalty="ssp")},
+            features={"x": Spline(kind="ps", n_knots=8, penalty="ssp")},
         )
         model.fit(X, y)
         return model, X, y

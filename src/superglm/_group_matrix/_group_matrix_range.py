@@ -31,7 +31,7 @@ _SPLINE_CATEGORY = (
     DiscretizedSplineCategoricalGroupMatrix,
     SupportCompressedSplineCategoricalGroupMatrix,
 )
-_METADATA = ("omega", "projection", "omega_components", "component_types")
+_METADATA = ("omega", "projection", "omega_components", "component_types", "structural_ranks")
 _CATEGORY_METADATA = (
     *_METADATA,
     "lambda_policies",
@@ -169,5 +169,5 @@ def group_row_range(group, start: int, stop: int):
             )
         metadata = _CATEGORY_METADATA
     for name in metadata:
-        setattr(sub, name, getattr(group, name))
+        setattr(sub, name, getattr(group, name, None))
     return sub

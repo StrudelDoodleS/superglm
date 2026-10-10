@@ -89,6 +89,14 @@ class _DualityEvidence:
 
 
 @dataclass(frozen=True)
+class _StoredFactorEvidence:
+    """The QR factor and old-action bounds behind one set of stored factors."""
+
+    upper: NDArray
+    action_bounds: tuple[NDArray, ...]
+
+
+@dataclass(frozen=True)
 class _BasisGramEvidence:
     owner: int
     basis: NDArray
@@ -410,6 +418,104 @@ def _materialization_logdet_bound(
     )
 
 
+def _certified_congruence(basis: NDArray, matrix: NDArray) -> tuple[NDArray, NDArray]:
+    """``B' S B`` for the symmetric part ``S`` of ``W``, and an upward enclosure of its error.
+
+    A quadratic form sees only ``S``; ``fl((W + W') / 2)`` is ``W`` itself when
+    ``W`` is symmetric and otherwise costs one rounding, ``|S^ - S| <= u |S^|
+    / (1 - u)``, carried through ``|B|' . |B|``. Each product is formed by
+    ``_matmul_enclosed`` and sharpened entrywise by Dot2 (``_refine_product``;
+    Ogita, Rump and Oishi 2005), and the first product's enclosure is carried
+    through the second: ``|T^ B^ - S B| <= E_M + E_T |B|`` with ``T^ = fl(B' S)``.
+    Plain products would leave ``gamma_{2n} |B|' |S| |B|``, which on a skewed
+    spline penalty is three times the eigenvalue a tail direction keeps
+    (1.6e-14 against 6e-15 of the largest). The exact product is symmetric,
+    so one computed triangle is mirrored under the larger of the two mirrored
+    enclosures.
+    """
+    basis = np.asarray(basis, dtype=np.float64)
+    matrix = np.asarray(matrix, dtype=np.float64)
+    symmetric = matrix if np.array_equal(matrix, matrix.T) else 0.5 * (matrix + matrix.T)
+    left = np.ascontiguousarray(basis.T)
+    first, first_error = _matmul_enclosed(left, symmetric)
+    _refine_product(left, symmetric, first, first_error)
+    product, error = _matmul_enclosed(first, basis)
+    _refine_product(first, basis, product, error)
+    radius = error + _positive_product(first_error, np.abs(basis))
+    if symmetric is not matrix:
+        rounding = _upper(_UNIT_ROUNDOFF * np.abs(symmetric) / (1 - _UNIT_ROUNDOFF))
+        radius = radius + _positive_product(
+            _positive_product(np.abs(left), rounding), np.abs(basis)
+        )
+    radius = _upper(radius / (1 - _gamma(2)))
+    radius = np.maximum(radius, radius.T)
+    product = np.triu(product) + np.triu(product, 1).T
+    return product, radius
+
+
+def _certifies_positive_definite(matrix: NDArray, radius: NDArray) -> bool:
+    """Whether every symmetric ``X`` with ``|X - matrix| <= radius`` is positive definite.
+
+    Rump, *Verification of positive definiteness*, BIT 46 (2006), Corollary 2.7
+    with bound I of section 3: with ``c >= gamma_{k+1} (1 - gamma_{k+1})^-1
+    tr(A) + k M eta`` (``M = 3 (2k + max a_ii)``, ``eta`` the smallest
+    subnormal) and ``r >= ||radius||_2``, a floating-point Cholesky of ``A``
+    with its diagonal lowered by ``c + r`` (Lemma 2.5's rounding) that runs to
+    completion proves it. The analysis holds for any order of the inner sums,
+    so the substitution below may use any dot product; it is unblocked so no
+    other algorithm's rounding enters.
+    """
+    a = np.asarray(matrix, dtype=np.float64)
+    k = a.shape[0]
+    diagonal = np.diag(a)
+    if k == 0:
+        return True
+    if not np.all(np.isfinite(a)) or np.any(diagonal < 0) or np.any(a != a.T):
+        return False
+    gamma = _gamma(k + 1)
+    eta = np.nextafter(0.0, 1.0)
+    trace = float(_upper(np.sum(diagonal) / (1 - _gamma(k))))
+    shift = float(
+        _upper(
+            gamma / (1 - gamma) * trace / (1 - _gamma(2))
+            + k * 3 * (2 * k + float(np.max(diagonal))) * eta
+            + _norm_upper(radius)
+        )
+    )
+    phi = _UNIT_ROUNDOFF * (1 + 2 * _UNIT_ROUNDOFF)
+    lowered = diagonal - shift
+    reduced = a.copy()
+    reduced[np.diag_indices(k)] = lowered - phi * np.abs(lowered)
+    factor = np.zeros_like(reduced)
+    for j in range(k):
+        column = factor[:j, j]
+        pivot = reduced[j, j] - column @ column
+        if not pivot > 0:
+            return False
+        factor[j, j] = np.sqrt(pivot)
+        factor[j, j + 1 :] = (reduced[j, j + 1 :] - column @ factor[:j, j + 1 :]) / factor[j, j]
+    return bool(np.all(np.isfinite(factor)))
+
+
+def _certifies_rank_at_least(matrix: NDArray, rank: int, vectors: NDArray | None = None) -> bool:
+    """Whether symmetric ``matrix`` certifiably has at least ``rank`` positive eigenvalues.
+
+    For any ``V`` of ``rank`` columns with ``V' W V`` positive definite, ``W``
+    is positive on the ``rank``-dimensional range of ``V`` and so has that
+    many positive eigenvalues (Courant-Fischer; ``V`` need not be
+    orthonormal). ``V`` is the computed leading eigenvectors (``vectors``
+    from ``eigh``, ascending, when the caller has them); the congruence is
+    certified with its formation error by Rump's test.
+    """
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if not 0 < rank <= matrix.shape[0]:
+        return False
+    if vectors is None:
+        vectors = np.linalg.eigh(matrix)[1]
+    product, radius = _certified_congruence(vectors[:, -rank:], matrix)
+    return _certifies_positive_definite(product, radius)
+
+
 def _weights(lambdas: NDArray, count: int) -> NDArray:
     source = np.asarray(lambdas)
     if np.iscomplexobj(source):
@@ -684,8 +790,9 @@ def _reference_correct_once(
     _evidence: list | None = None,
     _refine: bool = True,
 ) -> tuple[NDArray, NDArray, float, tuple[NDArray, ...]]:
-    actions, _ = _reference_root_actions(roots, lambdas, J, _refine=_refine)
-    upper = scipy.linalg.qr(np.vstack(actions), mode="r", check_finite=False)[0][: J.shape[1]]
+    actions, action_bounds = _reference_root_actions(roots, lambdas, J, _refine=_refine)
+    stacked = np.vstack(actions)
+    upper = scipy.linalg.qr(stacked, mode="r", check_finite=False)[0][: J.shape[1]]
     if upper.shape != (J.shape[1], J.shape[1]) or np.any(np.diag(upper) == 0):
         raise PenaltyNumericalError("reference QR cannot retain the fixed support")
     product_evidence = [] if _evidence is not None else None
@@ -694,10 +801,11 @@ def _reference_correct_once(
     _finite_double(new_J, "corrected inverse root")
     terms = [2 * math.log(abs(v)) for v in np.diag(upper)]
     new_logdet = math.fsum([logdet, *terms])
-    factors = tuple(
-        scipy.linalg.solve_triangular(upper.T, action.T, lower=True, check_finite=False).T
-        for action in actions
-    )
+    # The same substitution as new_J, so Higham's Theorem 8.5 bounds both
+    # residuals in _stored_factor_bound.
+    solved = _triangular_solve(upper.T, stacked.T).T
+    offsets = np.cumsum([len(action) for action in actions])[:-1]
+    factors = tuple(np.split(solved, offsets))
     if _evidence is not None:
         duality_evidence = []
         materialization = _materialization_logdet_bound(
@@ -715,9 +823,70 @@ def _reference_correct_once(
                 _gamma(4 * len(terms) + 2) * (abs(logdet) + math.fsum(map(abs, terms))),
                 materialization,
                 duality_evidence[0],
+                _StoredFactorEvidence(upper, action_bounds),
             )
         )
     return new_E, new_J, new_logdet, factors
+
+
+def _stored_factor_bound(
+    roots: Sequence[NDArray],
+    lambdas: NDArray,
+    inverse_root: NDArray,
+    factors: Sequence[NDArray],
+    evidence: _StoredFactorEvidence,
+) -> float:
+    """Bound ``||H_k J - F_k||_F`` summed over components, or 0 when unresolved.
+
+    ``H_k = sqrt(lambda_k) R_k`` is a weighted root. The correction formed
+    ``A_k``, within ``B_k`` of ``H_k J_old``, its QR factor ``U``, and by
+    substitution the stored factors ``F_k U = A_k`` and the inverse root
+    ``J U = J_old``. With the residuals ``P = J_old - J U`` and
+    ``Q_k = A_k - F_k U``, exactly
+
+        H_k J - F_k = ((H_k J_old - A_k) - H_k P + Q_k) U^{-1}.
+
+    Higham (2002), Theorem 8.5, applied row by row, gives ``|P| <= gamma_r
+    |J| |U|`` and ``|Q_k| <= gamma_r |F_k| |U|`` for rank ``r``, plus one
+    half subnormal per product and per quotient under gradual underflow.
+    ``H_k P`` is the representation error of the rounded ``J``: a reference
+    action of ``J`` meets it in full however accurate its own dot products
+    are, and it is large when ``|H_k| |J|`` far exceeds ``|H_k J|``. With
+    ``D = sign(diag U)``, ``||U^{-1}||_2 <= 1 / (1 - ||I - D U||_F)``
+    (Golub and Van Loan, 4th ed., Lemma 2.3.3). Without that bound the
+    function charges nothing, so the caller's comparison stays strict.
+    """
+    upper = evidence.upper
+    rank = len(upper)
+    signs = np.sign(np.diag(upper))
+    defect = _upper(_norm_upper(signs[:, None] * upper - np.eye(rank)) / (1 - _gamma(1)))
+    if not defect < 1:
+        return 0.0
+    inverse_norm = float(_upper(1 / (1 - defect) / (1 - _gamma(3))))
+    absolute_upper = np.abs(upper)
+    underflow = (rank + 1 + float(np.max(np.abs(np.diag(upper))))) * _SMALLEST_SUBNORMAL
+    solve = _gamma(rank)
+
+    def residual(solution: NDArray) -> NDArray:
+        magnitude = _positive_product(np.abs(solution), absolute_upper)
+        return _upper((solve * magnitude + underflow) / (1 - _gamma(3)))
+
+    representation = residual(inverse_root)
+    terms = [
+        _norm_upper(bound)
+        + _norm_upper(
+            _positive_product(
+                _upper((np.sqrt(weight) * np.abs(root) + _SMALLEST_SUBNORMAL) / (1 - _gamma(3))),
+                representation,
+            )
+        )
+        + _norm_upper(residual(factor))
+        for root, weight, factor, bound in zip(
+            roots, lambdas, factors, evidence.action_bounds, strict=True
+        )
+        if len(root)
+    ]
+    return float(_upper(inverse_norm * math.fsum(terms) / (1 - _gamma(len(terms) + 2))))
 
 
 def _triangular_solve(matrix: NDArray, rhs: NDArray) -> NDArray:
@@ -1057,9 +1226,87 @@ def _evaluate_penalty_summary(
             # Every factor, correction and error ledger below starts again
             # from the original proposal. No failed candidate state transfers.
             object.__setattr__(support, "_basis_gram_evidence", previous_basis)
-    return cast(
-        _PenaltySummary,
-        _evaluate_penalty_geometry(support, values, eps_rank, summary_only=True),
+    try:
+        return cast(
+            _PenaltySummary,
+            _evaluate_penalty_geometry(support, values, eps_rank, summary_only=True),
+        )
+    except PenaltyNumericalError:
+        direct_sum = _direct_sum_summary(support, values, eps_rank)
+        if direct_sum is None:
+            raise
+        return direct_sum
+
+
+def _direct_sum_summary(
+    support: _PenaltySupport, values: NDArray, eps_rank: float | None
+) -> _PenaltySummary | None:
+    """The affine log-lambda identity for components whose ranges form a direct sum.
+
+    When the component roots ``R_k`` (``r_k`` independent rows each) stack to
+    exactly the support rank ``r``, ``R Q`` is square for the support basis
+    ``Q``, and with ``Lambda = diag(lambda_k I_{r_k})``
+
+        log|Q' S(lambda) Q| = log|det(Lambda)| + log|det(R Q)|**2
+                            = sum_k r_k log(lambda_k) + log|Q' S(1) Q|,
+
+    by multiplicativity of the determinant. The derivatives in
+    ``log(lambda)`` are ``r_k`` with a zero Hessian, as ``tr(S^- S_k) =
+    rank(S_k) / lambda_k`` for non-overlapping penalties (Wood and Fasiolo,
+    2017, section 2), and the root-error term is the unit-weight one, because
+    exact roots obeying the same rank pattern satisfy the same identity. A
+    ``select=True`` pair (Marra and Wood, 2011) is the standard case. The
+    general evaluation at a large weight ratio represents ``S(lambda)`` by a
+    root whose condition is the square root of that ratio times the roots'
+    own, and can then legitimately miss its accuracy contract; the unit-weight
+    evaluation carries no ratio. ``None`` when the identity does not apply,
+    or at unit weights, where it would repeat the refused evaluation.
+    """
+    roots = support.component_roots
+    if (
+        not np.all(values > 0)
+        or np.all(values == 1)
+        or any(len(root) == 0 for root in roots)
+        or sum(len(root) for root in roots) != support.rank
+    ):
+        return None
+    try:
+        unit = cast(
+            _PenaltySummary,
+            _evaluate_penalty_geometry(support, np.ones(len(roots)), eps_rank, summary_only=True),
+        )
+    except PenaltyNumericalError:
+        return None
+    ranks = np.array([len(root) for root in roots], dtype=np.float64)
+    terms = [unit.logdet_s_plus, *(float(rank * math.log(v)) for rank, v in zip(ranks, values))]
+    logdet = math.fsum(terms)
+    # Each log carries at most one ulp (2u), its integer multiple one more
+    # rounding, and the correctly rounded fsum one; gamma(4) covers them.
+    logdet_error = float(
+        _upper(
+            unit._certificate.logdet_error
+            + _gamma(4) * math.fsum(abs(term) for term in terms)
+            + _UNIT_ROUNDOFF * abs(logdet)
+        )
+    )
+    count = len(roots)
+    gradient, hessian = _readonly(ranks), _readonly(np.zeros((count, count)))
+    return _PenaltySummary(
+        logdet,
+        support.rank,
+        gradient,
+        hessian,
+        unit._support,
+        _PenaltySummaryCertificate(
+            unit._certificate.whitening_error,
+            unit._certificate.duality_error,
+            logdet_error,
+            _readonly(np.zeros(count)),
+            _readonly(np.zeros((count, count))),
+            unit._certificate.resolution_limited,
+        ),
+        _readonly(values),
+        unit._correction_count,
     )
 
 
@@ -1217,11 +1464,21 @@ def _evaluate_penalty_geometry(
             )
             cache_allowance = target * rank + math.fsum(_norm_upper(b) for b in bounds)
             if discrepancy > cache_allowance:
-                if correction_index > 0:
+                # A first-pass disagreement only asks for a refined second
+                # correction. Refusing after it must also charge the stored
+                # factors' own arithmetic and the rounded J's representation.
+                if correction_index == 0:
+                    break
+                stored = evidence[0][5] if len(evidence[0]) > 5 else None
+                charged = (
+                    0.0
+                    if stored is None
+                    else _stored_factor_bound(support.component_roots, values, J, cached, stored)
+                )
+                if discrepancy > float(_upper(cache_allowance + charged)):
                     raise PenaltyNumericalError(
                         "stored derivative factor disagrees with reference action accuracy certificate"
                     )
-                break
             gradient, hessian, g_error, h_error = _derivative_values(action, bounds, eta)
             log_error = (
                 factor_log_error + _logdet_defect_bound(*whitening_evidence[0]) + dual_log_error

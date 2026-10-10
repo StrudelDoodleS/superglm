@@ -59,7 +59,7 @@ def book():
         features={
             "brand": Categorical(base="first"),
             "area": Categorical(base="first"),
-            "age": Spline(n_knots=6),
+            "age": Spline(kind="ps", n_knots=6),
         },
     )
     model.fit(X, y)
@@ -481,8 +481,16 @@ def test_two_waiting_shapes_on_one_spline_compose_on_the_fitted_knots(book):
     np.testing.assert_array_equal(second._explicit_knots, fitted.fitted_base_knots)
     assert second._explicit_boundary == fitted.fitted_boundary
     assert step["label"] == "Flat 60–70 in age"
-    with pytest.raises(EditorValueError, match="^This range overlaps the Line range 30–45."):
-        shaped_feature_spec(model, "age", lo=40.0, hi=50.0, degree=0, X=X, draft_spec=first)
+    # A third is painted over the waiting Line, which keeps the part outside it.
+    third, step = shaped_feature_spec(
+        model, "age", lo=40.0, hi=50.0, degree=0, X=X, draft_spec=second
+    )
+    assert [(r.lo, r.hi, r.degree) for r in third.polynomial_ranges] == [
+        (30.0, 40.0, 1),
+        (40.0, 50.0, 0),
+        (60.0, 70.0, 0),
+    ]
+    assert step["label"] == "Flat 40–50 in age (trims Line 30–45 to 30–40)"
 
 
 def test_step_ids_are_seven_hex_digits_unique_in_the_process():
@@ -1175,18 +1183,25 @@ def test_widget_http_stage_waits_without_fitting_and_says_what_waits(book, monke
         "ranges": [],
         "reference": None,
         "specials": None,
+        "knots": None,
+        "basis": None,
     }
     assert terms["area"]["pending"] == {
         "groups": None,
         "ranges": [],
         "reference": "B",
         "specials": None,
+        "knots": None,
+        "basis": None,
     }
     assert terms["age"]["pending"] == {
         "groups": None,
         "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line", "join": "tangent"}],
         "reference": None,
         "specials": None,
+        "knots": None,
+        # A shaped range makes the P-spline a B-spline at the Refit.
+        "basis": {"kind": "bs", "select": False},
     }
     assert state["undo_redo"]["undo"] == "Line 30–45 in age"
     assert [(entry["kind"], entry.get("status")) for entry in state["timeline"]] == [
@@ -1417,3 +1432,32 @@ def test_exported_models_carry_the_history_and_the_session_models_are_left_alone
     assert session._materialized_edit_model is not None
     assert not hasattr(session.model, "_editor_history")
     assert not hasattr(session._materialized_edit_model, "_editor_history")
+
+
+def test_a_flat_range_over_the_whole_axis_is_refused_when_staged(book):
+    """The fit would refuse it; the refusal comes with the change, in its own sentence."""
+    model, _, _ = book
+    session = _session(model)
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", "age", {"lo": 0.0, "hi": 100.0, "degree": 0})
+    assert refused.value.public_message == (
+        "A Flat range over the whole axis would set this term to 1 at every value: the intercept "
+        "already carries any constant, so the term would have no effect left. To take the term "
+        "out of the model, remove it in code; here, leave part of the axis free or choose a Line."
+    )
+    assert session.pending == []
+
+
+def test_a_refit_a_waiting_change_cannot_fit_names_that_change(book):
+    """Refit data with no rows inside a shaped range: the refusal says which change and why."""
+    model, X, y = book
+    session = _session(model)
+    session.stage_structural("shape", "age", {"lo": 30.0, "hi": 45.0, "degree": 1})
+    outside = (X["age"] < 30.0) | (X["age"] > 45.0)
+    with pytest.raises(EditorValueError) as refused:
+        session.refit_pending(X=X[outside], y=y[outside])
+    assert refused.value.public_message == (
+        "The refit was refused: That range cannot be shaped. Choose a range with more distinct "
+        "values, or a lower degree. Undo that change and try again."
+    )
+    assert len(session.pending) == 1 and session.model is model

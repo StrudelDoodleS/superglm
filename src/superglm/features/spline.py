@@ -53,6 +53,18 @@ def _weighted_quantile_knots(
     )
 
 
+# A natural spline (``cr``, the default, or ``ns``) has no range to place its
+# knots on when the column holds one value.
+_ONE_VALUE = (
+    "every value of this column is {value}, so a natural spline has no range to place its "
+    "knots on. Drop the term, or pass kind='ps', which fits a column with one value."
+)
+
+
+class OneValueError(ValueError):
+    """A natural spline's column holds one value, so its knots have no range."""
+
+
 class _SplineBase:
     """Base class for all spline feature specs.
 
@@ -121,6 +133,31 @@ class _SplineBase:
     # class attribute is shared by every instance that never assigns its own.
     _polynomial_ranges: tuple[PolynomialRange, ...] = ()
     _base_interior_knots: NDArray | None = None
+
+    # Configuration and build-time state, assigned by ``_spline_config`` and by the
+    # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations
+    # only: they declare the types for the checker and add no class attribute, so
+    # runtime lookups are unchanged.
+    n_knots: int
+    degree: int
+    knot_strategy: str
+    knot_alpha: float
+    penalty: str
+    discrete: bool | None
+    n_bins: int | None
+    extrapolation: str
+    select: bool
+    constraint_kind: str | None
+    constraint_mode: str
+    _m_orders: tuple[int, ...]
+    _explicit_knots: NDArray | None
+    _named_knots: list[Any] | None
+    _explicit_boundary: tuple[float, float] | None
+    _knot_strategy_actual: str
+    _difference_penalty: dict[int, str]
+    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None
+    _lo: float
+    _hi: float
 
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
         """Whether select=True is supported with these m orders.
@@ -353,6 +390,8 @@ class _SplineBase:
 
     def _natural_constraint_rows(self) -> NDArray:
         """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
+        if not self._hi > self._lo:
+            raise OneValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
         return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,
@@ -362,12 +401,21 @@ class _SplineBase:
 
     def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
         """Eigendecompose the constrained penalty for select=True splitting."""
+        structural = self._structural_penalty_for_order(max(self._m_orders))
+        if structural is not None and Z is not None:
+            structural = Z.T @ structural @ Z
         self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
             omega_c,
             Z,
             n_basis=self._n_basis,
             spline_kind=type(self).__name__,
+            structural=structural,
         )
+
+    def _structural_penalty_for_order(self, order: int) -> NDArray | None:
+        """A penalty with this one's exact null space and no knot-spacing spread, if known."""
+        del order
+        return None
 
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
@@ -488,14 +536,30 @@ class _IntegratedPenaltySpline(_SplineBase):
         """
         excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
         omega = _spline_penalties.build_integrated_derivative_penalty(
-            self._knots, self.degree, order, excluded=excluded
+            self._knots, self.degree, order, excluded=excluded, intervals=self._penalty_intervals()
         )
         if self._polynomial_ranges:
-            structural = _spline_penalties.structural_derivative_penalty(
-                self._knots, self.degree, order, excluded=excluded
-            )
+            structural = self._structural_penalty_for_order(order)
             _spline_ranges.certify_penalty_rank(omega, structural, self._constraint_rows())
         return omega
+
+    def _structural_penalty_for_order(self, order: int) -> NDArray:
+        """Each unpinned knot interval's block at unit norm (``structural_derivative_penalty``)."""
+        excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
+        return _spline_penalties.structural_derivative_penalty(
+            self._knots, self.degree, order, excluded=excluded, intervals=self._penalty_intervals()
+        )
+
+    def _penalty_intervals(self) -> int | None:
+        """The base layout's knot intervals, which the penalty's ``hbar`` divides the domain into.
+
+        A polynomial range swaps the knots inside it for its edges; counting
+        the merged knots would rescale the penalty everywhere else when a range
+        is drawn, at a fixed ``spline_penalty``.
+        """
+        if not self._polynomial_ranges or self._base_interior_knots is None:
+            return None
+        return int(np.unique(self._base_interior_knots).size) + 1
 
 
 class PSpline(_BSplineBase):
@@ -507,6 +571,17 @@ class PSpline(_BSplineBase):
 
     The ``m`` parameter controls the discrete difference order(s) for the
     penalty (default 2, second-difference).
+
+    Evenly spaced knots, placed by the ``"uniform"`` rule or stated at its
+    positions, take the standard difference penalty of Eilers and Marx
+    (1996). On unevenly spaced stated or quantile-placed knots the standard
+    penalty no longer measures wiggliness, so they take the general
+    difference penalty of Li and Cao (2022, arXiv:2201.06808), whose null
+    space is the polynomials of degree below ``m`` however the knots are
+    spaced, scaled to the standard penalty's size. Knots too uneven for it
+    in double precision take the standard penalty with those polynomials
+    projected out. A penalty order above ``degree`` keeps the standard
+    penalty.
 
     Parameters
     ----------
@@ -595,7 +670,7 @@ class PSpline(_BSplineBase):
         return _spline_subclass_ops.build_scop_reparameterization(self, B, omega)
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
-        return _spline_penalties.build_difference_penalty(self._n_basis, order)
+        return _spline_penalties.difference_penalty_for(self, order)
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
@@ -1004,6 +1079,11 @@ class CardinalCRSpline(_SplineBase):
     def _build_penalty(self) -> NDArray:
         return self._cr_S
 
+    def _structural_penalty_for_order(self, order: int) -> NDArray:
+        """The fixed penalty's null space without its spread (``structural_cr_penalty``)."""
+        del order
+        return _spline_cardinal_spec.structural_penalty(self)
+
     def _basis_matrix(self, x: NDArray):
         """Evaluate the cardinal CR basis at data points."""
         return _spline_cardinal_spec.basis_matrix(self, x)
@@ -1055,7 +1135,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "ps",
+    kind: str = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -1075,6 +1155,11 @@ def Spline(
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
     """Create a spline feature spec.
+
+    ``kind`` defaults to ``"cr"``, a cubic regression spline (``"ps"``, a
+    P-spline, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always cubic
+    and refuse a ``degree`` other than 3, and take penalty orders ``m`` up to 3
+    and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond those.
 
     ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
     polynomial on each :class:`PolynomialRange` and leaves the rest the

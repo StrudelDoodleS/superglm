@@ -41,6 +41,7 @@ from superglm.editor.staging import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
+from superglm.features.rebuild import current_ranges
 from superglm.features.spline import _SplineBase
 from tests.test_editor import _editor_token_header, _post_json
 
@@ -57,7 +58,7 @@ def region_model():
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.1,
-        features={"region": Categorical(base="first"), "x": Spline(n_knots=6)},
+        features={"region": Categorical(base="first"), "x": Spline(kind="ps", n_knots=6)},
     )
     model.fit(X, y)
     return model, X
@@ -773,22 +774,194 @@ def test_second_shape_keeps_the_free_knots(aged):
     assert spec.fitted_boundary == model._specs["age"].fitted_boundary
 
 
-def test_overlapping_range_is_refused_by_name_and_same_range_replaces(aged):
+def test_the_same_range_replaces_and_a_range_meeting_it_at_an_edge_keeps_it(aged):
     model, _ = aged
     session = EditorSession.from_model(model, terms=["age"])
     session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit")
-    shaped = session.model
-    with pytest.raises(
-        EditorValueError,
-        match="^This range overlaps the Line range 30–45. Undo it or choose a range outside it.$",
-    ):
-        session.replace_with_shaped_range("age", lo=40.0, hi=50.0, degree=0, method="fit")
-    assert session.model is shaped and len(session.structure_history) == 1
     session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=2, method="fit")
     assert _ranges(session.model._specs["age"]) == [(30.0, 45.0, 2)]
-    # Ranges meeting at an edge do not overlap: they join at a kink.
+    # Ranges meeting at an edge do not overlap: they join at a kink, and the
+    # new one cuts nothing.
     session.replace_with_shaped_range("age", lo=45.0, hi=60.0, degree=0, method="fit")
     assert _ranges(session.model._specs["age"]) == [(30.0, 45.0, 2), (45.0, 60.0, 0)]
+    assert session.structure_history[-1].label == "Flat 45–60 in age"
+
+
+# A Line with Corner joins is in force on each term, and a Flat is painted
+# over it: the Flat's span, the ranges the refit puts in force, and the label.
+_IN_FORCE = {"aged": ("age", 30.0, 60.0), "banded": ("band", "B2", "B7")}
+_PAINTED = {
+    "age-trims-left": (
+        "aged",
+        (20.0, 40.0),
+        [(20.0, 40.0, 0, "tangent"), (40.0, 60.0, 1, "kink")],
+        "Flat 20–40 in age (trims Line 30–60 to 40–60)",
+    ),
+    "age-trims-right": (
+        "aged",
+        (50.0, 70.0),
+        [(30.0, 50.0, 1, "kink"), (50.0, 70.0, 0, "tangent")],
+        "Flat 50–70 in age (trims Line 30–60 to 30–50)",
+    ),
+    "age-splits": (
+        "aged",
+        (40.0, 50.0),
+        [(30.0, 40.0, 1, "kink"), (40.0, 50.0, 0, "tangent"), (50.0, 60.0, 1, "kink")],
+        "Flat 40–50 in age (splits Line 30–60 into 30–40 and 50–60)",
+    ),
+    "age-covers": (
+        "aged",
+        (25.0, 65.0),
+        [(25.0, 65.0, 0, "tangent")],
+        "Flat 25–65 in age (removes Line 30–60)",
+    ),
+    "age-same-span": (
+        "aged",
+        (30.0, 60.0),
+        [(30.0, 60.0, 0, "tangent")],
+        "Flat 30–60 in age (replaces Line 30–60)",
+    ),
+    "band-trims-left": (
+        "banded",
+        ("B1", "B4"),
+        [("B1", "B4", 0, "tangent"), ("B4", "B7", 1, "kink")],
+        "Flat B1–B4 in band (trims Line B2–B7 to B4–B7)",
+    ),
+    "band-trims-right": (
+        "banded",
+        ("B5", "B8"),
+        [("B2", "B5", 1, "kink"), ("B5", "B8", 0, "tangent")],
+        "Flat B5–B8 in band (trims Line B2–B7 to B2–B5)",
+    ),
+    "band-splits": (
+        "banded",
+        ("B4", "B5"),
+        [("B2", "B4", 1, "kink"), ("B4", "B5", 0, "tangent"), ("B5", "B7", 1, "kink")],
+        "Flat B4–B5 in band (splits Line B2–B7 into B2–B4 and B5–B7)",
+    ),
+    "band-covers": (
+        "banded",
+        ("B1", "B7"),
+        [("B1", "B7", 0, "tangent")],
+        "Flat B1–B7 in band (removes Line B2–B7)",
+    ),
+    "band-same-span": (
+        "banded",
+        ("B2", "B7"),
+        [("B2", "B7", 0, "tangent")],
+        "Flat B2–B7 in band (replaces Line B2–B7)",
+    ),
+}
+_PIECE_SENTENCE = (
+    "That range would cut the Quadratic range {span} down to {piece}, too short for a "
+    "Quadratic. Cover all of it, or leave more of it outside the new range."
+)
+
+
+def _in_force(spec):
+    return [(r.lo, r.hi, r.degree, r.join) for r in current_ranges(spec)]
+
+
+@pytest.mark.parametrize(("fixture", "span", "painted", "label"), _PAINTED.values(), ids=_PAINTED)
+def test_a_new_range_paints_over_the_ranges_it_overlaps(request, fixture, span, painted, label):
+    model = request.getfixturevalue(fixture)[0]
+    term, lo, hi = _IN_FORCE[fixture]
+    session = EditorSession.from_model(model, terms=[term])
+    session.replace_with_shaped_range(term, lo=lo, hi=hi, degree=1, join="kink", method="fit")
+    shaped = session.model
+    before = _in_force(shaped._specs[term])
+
+    step = session.stage_structural("shape", term, {"lo": span[0], "hi": span[1], "degree": 0})
+    assert step.label == label
+    assert undo_redo_payload(session)["undo"] == label
+    # The chart draws as waiting each range the refit would put in force that
+    # is not in force now: the new one, and the part a cut range keeps.
+    waiting = session_payload(session)[term]["pending"]["ranges"]
+    assert [(r["lo"], r["hi"], r["degree"], r["join"]) for r in waiting] == [
+        r for r in painted if r not in before
+    ]
+
+    session.refit_pending(method="fit")
+    assert _in_force(session.model._specs[term]) == painted
+    # Undo puts the ranges from before back in force, and the change waits again.
+    session.undo()
+    assert session.model is shaped and _in_force(session.model._specs[term]) == before
+    assert [change.label for change in session.pending] == [label]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "old", "short", "piece", "enough", "after"),
+    [
+        (
+            "aged",
+            (30.0, 45.0),
+            (31.0, 50.0),
+            "30–31",
+            (32.0, 50.0),
+            [(30.0, 32.0, 2), (32.0, 50.0, 0)],
+        ),
+        # Every piece is counted: here the second piece of a split.
+        (
+            "aged",
+            (30.0, 45.0),
+            (35.0, 44.0),
+            "44–45",
+            (35.0, 43.0),
+            [(30.0, 35.0, 2), (35.0, 43.0, 0), (43.0, 45.0, 2)],
+        ),
+        (
+            "banded",
+            ("B2", "B5"),
+            ("B3", "B8"),
+            "B2–B3",
+            ("B4", "B8"),
+            [("B2", "B4", 2), ("B4", "B8", 0)],
+        ),
+    ],
+    ids=["left-piece", "split-right-piece", "bands"],
+)
+def test_a_cut_range_left_too_short_for_its_shape_is_refused_by_name(
+    request, fixture, old, short, piece, enough, after
+):
+    # A Quadratic needs three values: whole-year ages hold two in 30-31, and
+    # each band is one value.
+    model = request.getfixturevalue(fixture)[0]
+    term = _IN_FORCE[fixture][0]
+    session = EditorSession.from_model(model, terms=[term])
+    session.replace_with_shaped_range(term, lo=old[0], hi=old[1], degree=2, method="fit")
+    shaped = session.model
+    with pytest.raises(EditorValueError) as caught:
+        session.stage_structural("shape", term, {"lo": short[0], "hi": short[1], "degree": 0})
+    span = f"{old[0]:g}–{old[1]:g}" if fixture == "aged" else f"{old[0]}–{old[1]}"
+    assert str(caught.value) == _PIECE_SENTENCE.format(span=span, piece=piece)
+    assert session.pending == [] and session.model is shaped
+    # A piece holding one value more is enough, and the refit fits it.
+    session.stage_structural("shape", term, {"lo": enough[0], "hi": enough[1], "degree": 0})
+    session.refit_pending(method="fit")
+    assert [r[:3] for r in _in_force(session.model._specs[term])] == after
+
+
+def test_a_cut_range_counts_only_the_values_the_refit_weighs(aged):
+    # Rows aged 31 weigh nothing, so 30-31 holds one value the refit sees: too
+    # few for a Line, though the frame holds two there.
+    model, X = aged
+    weights = np.where(X["age"] == 31, 0.0, 1.0)
+    weighed = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.0,
+        features={"age": Spline(kind="bs", k=12)},
+    )
+    weighed.fit(X[["age"]], model._fit_y_ref, sample_weight=weights)
+    session = EditorSession.from_model(weighed, terms=["age"])
+    session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit")
+    with pytest.raises(EditorValueError) as caught:
+        session.stage_structural("shape", "age", {"lo": 31.0, "hi": 50.0, "degree": 0})
+    assert str(caught.value) == (
+        "That range would cut the Line range 30–45 down to 30–31, too short for a Line. "
+        "Cover all of it, or leave more of it outside the new range."
+    )
+    assert session.pending == []
 
 
 def test_single_point_selection_is_refused_before_the_library(aged):
@@ -898,7 +1071,9 @@ def test_the_palette_counts_the_values_in_the_range_a_refit_builds(aged):
     support = session_payload(session)["age"]["shape"]["support"]
     counted = np.unique(X["age"][weight > 0])
     runs = [(i, i + 1) for i in range(grid.size - 1)] + [(0, grid.size - 1), (3, 40)]
-    edges = np.array([_numeric_edges(weighted._specs["age"], grid[i], grid[j]) for i, j in runs])
+    edges = np.array(
+        [_numeric_edges(weighted._specs["age"].fitted_boundary, grid[i], grid[j]) for i, j in runs]
+    )
     held = np.searchsorted(counted, edges[:, 1], side="right") - np.searchsorted(
         counted, edges[:, 0]
     )
@@ -1263,12 +1438,10 @@ def test_an_ordered_term_pins_whole_bands_and_becomes_a_b_spline(banded):
     )
 
 
-def test_ordered_ranges_overlap_by_band_and_collapse_respects_their_edges(banded):
+def test_a_collapse_respects_an_ordered_ranges_edges(banded):
     model, _, _ = banded
     session = EditorSession.from_model(model, terms=["band"])
     session.replace_with_shaped_range("band", lo="B3", hi="B6", degree=1, method="fit")
-    with pytest.raises(EditorValueError, match="overlaps the Line range B3–B6"):
-        session.replace_with_shaped_range("band", lo="B5", hi="B8", degree=0, method="fit")
     shaped = session.model
     # A group taking in an edge band is refused in words, before the library.
     session.select_levels("band", ["B2", "B3"])

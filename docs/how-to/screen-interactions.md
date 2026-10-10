@@ -163,7 +163,7 @@ cannot re-screen a term already in the model.
 A mixed sweep comes back as one sorted table. The example below screens an
 80,000-row sample of the freMTPL2 frequency book under
 `weight_semantics="frequency"` (`y` the claim *rate* `ClaimNb / Exposure`,
-`sample_weight` the exposure, `phi` estimated at 4.82). Every number here is
+`sample_weight` the exposure, `phi` estimated at 4.81). Every number here is
 therefore on the replication contract's `sum(sample_weight) - edf` scale, not
 the default prior one.
 
@@ -196,18 +196,18 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus           ti   5.691019  2.323521   1.999999 1.023168e+02     5244   False
-# BonusMalus   VehBrand   spline_cat  11.960557  0.438411   9.999937 7.818059e+09     1012   False
-#    DrivAge BonusMalus           ti   1.810771 -0.121587   2.000001 2.611293e+02     7360   False
-#     VehAge   VehBrand   spline_cat   7.805321 -0.490671   9.999576 3.779926e+09      627   False
-#    DrivAge     VehAge           ti   0.547723 -0.925665   2.000001 5.044218e+01     4560   False
-#    DrivAge   VehBrand   spline_cat   1.958228 -1.798192   9.999927 1.301005e+10      880   False
-# LogDensity   VehBrand  numeric_cat   1.087366 -1.992925  10.000000 0.000000e+00       11   False
-# BonusMalus     Region   spline_cat   6.972190 -2.164533  20.999891 4.198786e+09     2024   False
-#    DrivAge     Region   spline_cat   6.753990 -2.198200  20.999860 6.858867e+09     1760   False
-# LogDensity     Region  numeric_cat   5.266162 -2.427784  21.000000 0.000000e+00       22   False
-#     VehAge     Region   spline_cat   2.008917 -2.930369  20.998740 2.449233e+09     1254   False
-#   VehBrand     Region      cat_cat  39.860759 -8.243705 208.000000 0.000000e+00      242   False
+#     VehAge BonusMalus          ti   6.173586  2.657017   2.000000 2.136412e+02     5244   False
+# BonusMalus   VehBrand  spline_cat  12.415513  0.540125  10.000000 1.724599e+10     1012   False
+#    DrivAge BonusMalus          ti   1.325982 -0.413100   2.000000 1.256993e+03     7360   False
+#     VehAge   VehBrand  spline_cat   7.844563 -0.481896   9.999576 3.781106e+09      627   False
+#    DrivAge     VehAge          ti   0.551591 -0.923205   2.000000 5.047925e+01     4560   False
+#    DrivAge   VehBrand  spline_cat   1.974106 -1.794641   9.999927 1.301108e+10      880   False
+# LogDensity   VehBrand numeric_cat   1.098423 -1.990453  10.000000 0.000000e+00       11   False
+# BonusMalus     Region  spline_cat   7.159724 -2.135602  21.000000 9.263282e+09     2024   False
+#    DrivAge     Region  spline_cat   6.724113 -2.202810  20.999860 6.858572e+09     1760   False
+# LogDensity     Region numeric_cat   5.250606 -2.430184  21.000000 0.000000e+00       22   False
+#     VehAge     Region  spline_cat   2.008774 -2.930391  20.998739 2.449505e+09     1254   False
+#   VehBrand     Region     cat_cat  39.936018 -8.240015 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
@@ -219,11 +219,11 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 2.32 | 2 | 43.0 |
-| `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.0 |
+| `VehAge x BonusMalus` | `ti` | 2.66 | 2 | 41.7 |
+| `BonusMalus x VehBrand` | `spline_cat` | 0.54 | 10 | 72.5 |
 
-The second pair buys *more* deviance and ranks *below* the first: 43.0 on 2 df
-is 21.5 per df against 7.3 for the second pair. The current `z` adjusts the
+The second pair buys *more* deviance and ranks *below* the first: 41.7 on 2 df
+is 20.8 per df against 7.2 for the second pair. The current `z` adjusts the
 local score for probe complexity; it does not rank by total refit gain or
 directly by gain per df.
 These two gains are measured on the training data. They show that complexity
@@ -245,7 +245,7 @@ a pair down the queue; it never promotes one. Nothing here was binned or
 refused (`approx` is False throughout, no NaN rows).
 
 Read the top row against its own kind's measured noise maximum below (9.48 for
-`ti`): 2.32 does not clear it — and the refit bought 43.0 deviance anyway. That
+`ti`): 2.66 does not clear it — and the refit bought 41.7 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.
@@ -493,8 +493,8 @@ discretize at all, so OC pairs stay exact on both sides.
   fallback is a third door. So do not read the level count alone to decide
   which kernel scored a pair — and read the *unpinned* level count when you
   do, since a `levels=` universe with no training rows behind it is pinned to
-  base and widens no block: against a library-default `Spline()` margin (13
-  probe columns) over a 400-point support, 140 declared levels of which 105
+  base and widens no block: against a `Spline(kind="ps")` margin of the default
+  size (13 probe columns) over a 400-point support, 140 declared levels of which 105
   are populated stays on the dense path at a block of 13 x 104 = 1,352, where
   106 populated levels would not. The support matters because the block width
   is only the first gate — hold that same 140/105 factor and widen the spline

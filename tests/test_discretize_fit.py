@@ -362,6 +362,27 @@ class TestDiscretizedREML:
         assert model.result.converged
         assert hasattr(model, "_reml_lambdas")
 
+    @pytest.mark.parametrize("kind", [None, "bs"])
+    def test_freml_select_true_on_heavy_tailed_quantile_knots(self, kind):
+        """The default (cr) and bs select pairs raised PenaltyNumericalError
+        ("stored derivative factor disagrees ...") at the discrete start, where the
+        null penalty sits at its cap beside a small wiggle weight; 0.39's kindless
+        P-spline fitted this column."""
+        rng = np.random.default_rng(0)
+        x = rng.lognormal(0.0, 2.0, 5000)
+        y = rng.poisson(np.exp(-1.0 + 0.2 * np.tanh(np.log(x)))).astype(float)
+        kw = {} if kind is None else {"kind": kind}
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=True,
+            features={"x": Spline(n_knots=10, knot_strategy="quantile_rows", select=True, **kw)},
+        )
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+
+        assert set(model._reml_lambdas) == {"x:null", "x:wiggle"}
+        assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x}))))
+
     def test_fit_reml_rejects_nonpositive_n_bins(self):
         """fit_reml() should validate per-feature n_bins before discretizing."""
         rng = np.random.default_rng(42)
@@ -820,8 +841,8 @@ class TestDiscretizedTensorInteraction:
             family="poisson",
             selection_penalty=0.0,
             features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "bm": Spline(n_knots=8, penalty="ssp"),
+                "age": Spline(kind="ps", n_knots=10, penalty="ssp"),
+                "bm": Spline(kind="ps", n_knots=8, penalty="ssp"),
             },
             interactions=[("age", "bm")],
         )
@@ -833,8 +854,8 @@ class TestDiscretizedTensorInteraction:
             discrete=True,
             n_bins={"age": 64, "bm": 48},
             features={
-                "age": Spline(n_knots=10, penalty="ssp"),
-                "bm": Spline(n_knots=8, penalty="ssp"),
+                "age": Spline(kind="ps", n_knots=10, penalty="ssp"),
+                "bm": Spline(kind="ps", n_knots=8, penalty="ssp"),
             },
             interactions=[("age", "bm")],
         )

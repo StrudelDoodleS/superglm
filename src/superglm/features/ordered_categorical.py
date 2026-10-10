@@ -383,9 +383,9 @@ class OrderedCategorical:
 
             OrderedCategorical(order=[...], basis=Spline(kind="cr", k=6))
 
-        Omitting ``basis`` retains the historical default P-spline,
-        ``Spline(kind="ps", n_knots=5, degree=3, penalty="ssp",
-        select=False)``.  In either form ``n_knots`` is clamped to
+        Omitting ``basis`` gives the default cubic regression spline,
+        ``Spline(kind="cr", n_knots=5, penalty="ssp", select=False)``
+        (a P-spline before 0.40).  In either form ``n_knots`` is clamped to
         ``n_levels - 1`` with a warning.  ``Spline(knots=[...])`` may state
         knots as BAND NAMES (``knots=["Mi060", "Mi066"]``): each name resolves
         to that level's VALUE on the smooth's axis at construction --
@@ -561,13 +561,13 @@ class OrderedCategorical:
         # point at, so the remedy has to be spelled out rather than assumed.
         basis_was_explicit = basis is not None
         if basis is None:
-            # The historical default smooth, unchanged by the basis-only API.
-            basis = Spline(kind="ps", n_knots=5, degree=3, penalty="ssp", select=False)
+            # The default smooth: a cubic regression spline, as Spline's default is.
+            basis = Spline(kind="cr", n_knots=5, penalty="ssp", select=False)
         elif isinstance(basis, str) and basis in ("spline", "step"):
             raise ValueError(
                 f"OrderedCategorical no longer accepts basis={basis!r}: the legacy "
                 "string modes were removed in 0.24.0. Pass the smooth itself with "
-                "basis=Spline(...) -- or omit basis for the default P-spline. For "
+                "basis=Spline(...) -- or omit basis for the default cubic regression spline. For "
                 "independent, unsmoothed level effects use Categorical(...)."
             )
         elif not isinstance(basis, _SplineBase | Piecewise | Polynomial):
@@ -1250,8 +1250,8 @@ class OrderedCategorical:
                 # came from, then give them the declaration that silences it.
                 remedy = (
                     f"No basis= was given, so this is the default "
-                    f"Spline(kind='ps', n_knots={requested}); pass "
-                    f"basis=Spline(kind='ps', n_knots={effective}) to declare it."
+                    f"Spline(kind={kind!r}, n_knots={requested}); pass "
+                    f"basis=Spline(kind={kind!r}, n_knots={effective}) to declare it."
                 )
             warnings.warn(
                 f"{_CLAMP_WARNING_PREFIX}: n_knots={requested} clamped to "
@@ -1406,11 +1406,20 @@ class OrderedCategorical:
         """
         from dataclasses import replace
 
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import OneValueError, _SplineBase
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
-            return inner.build(numeric, sample_weight=sample_weight)
+            try:
+                return inner.build(numeric, sample_weight=sample_weight)
+            except OneValueError:
+                # The spline's message names a level score and its kind=, which
+                # an ordered term has neither of; it takes its kind in basis=.
+                raise OneValueError(
+                    "every row of this ordered term is at one level, so its natural "
+                    "spline basis has no range to place its knots on. Drop the term, or "
+                    "pass basis=Spline(kind='ps'), which fits a term with one observed level."
+                ) from None
         info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
             # Structurally unpenalized main block for BOTH parametric bases --

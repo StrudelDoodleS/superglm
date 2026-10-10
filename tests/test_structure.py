@@ -16,6 +16,7 @@ import pytest
 from superglm import (
     BSplineSmooth,
     Categorical,
+    Constraint,
     OrderedCategorical,
     Piecewise,
     PolynomialRange,
@@ -569,7 +570,7 @@ def _plain(**overrides) -> SuperGLM:
     features = {
         "brand": Categorical(base="first"),
         "area": Categorical(base="first"),
-        "age": Spline(n_knots=6),
+        "age": Spline(kind="ps", n_knots=6),
         "band": OrderedCategorical(order=BANDS, basis=Spline(kind="bs", n_knots=4)),
     }
     features.update(overrides)
@@ -1519,4 +1520,274 @@ def test_only_an_ordered_entry_may_name_specials():
         Structure(features={"brand": entry})
     assert str(refused.value) == (
         "The structure entry for 'brand' has a malformed 'specials'; export the structure again."
+    )
+
+
+# -- Knots chosen in the editor -------------------------------------------------
+
+KNOT_LEVELS = [str(i) for i in range(8)]
+
+
+def _knot_frame(seed: int = 20261009, n: int = 600):
+    rng = np.random.default_rng(seed)
+    age = rng.uniform(18.0, 80.0, n)
+    band = rng.choice(KNOT_LEVELS, n)
+    y = 0.5 + 0.2 * np.sin(age / 15.0) + 0.03 * band.astype(int) + rng.normal(0.0, 0.05, n)
+    return pd.DataFrame({"age": age, "band": band}), y
+
+
+def _knot_declared(kind: str = "cr", boundary=None) -> SuperGLM:
+    age = Spline(kind=kind, n_knots=6, boundary=boundary)
+    band = OrderedCategorical(order=KNOT_LEVELS, basis=Spline(kind="bs", n_knots=4))
+    return _declared({"age": age, "band": band})
+
+
+def _fitted_knots(model, term: str):
+    spec = model._specs[term]
+    fitted = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    return np.asarray(fitted.fitted_base_knots, dtype=np.float64)
+
+
+def _knots_round_trip(tmp_path, declared, term, params, X, y):
+    """Edit ``term``'s knots, export, read the file back and apply it to the declaration."""
+    session = EditorSession.from_model(declared().fit(X, y), train_data=(X, y))
+    session.replace_with_knots(term, params)
+    edited = session.model
+    structure = Structure.from_model(edited)
+    path = tmp_path / "structure.json"
+    path.write_text(structure.to_json(), encoding="utf-8")
+    assert read_structure(path) == structure
+    applied = read_structure(path).apply(declared()).fit(X, y)
+    np.testing.assert_array_equal(_fitted_knots(applied, term), _fitted_knots(edited, term))
+    np.testing.assert_array_equal(applied.predict(X), edited.predict(X))
+    return structure
+
+
+def test_a_model_fitted_from_code_exports_no_knots(tmp_path):
+    X, y = _knot_frame()
+    model = _knot_declared().fit(X, y)
+    text = Structure.from_model(model).to_json()
+    assert "knots" not in text
+    features = json.loads(text)["features"]
+    assert set(features["age"]) == {"kind", "ranges"}
+    assert set(features["band"]) == {"groups", "kind", "levels", "ranges", "reference", "unseen"}
+
+
+def test_editor_explicit_knots_on_a_numeric_spline_round_trip_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    positions = [30.0, 45.0, 60.0]
+    structure = _knots_round_trip(tmp_path, _knot_declared, "age", {"positions": positions}, X, y)
+    knots = structure.features["age"].knots
+    assert knots["strategy"] == "explicit"
+    assert knots["positions"] == positions
+    assert knots["n_knots"] == len(positions)
+
+
+def test_editor_rule_knots_on_a_ps_spline_round_trip_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    structure = _knots_round_trip(
+        tmp_path,
+        lambda: _knot_declared(kind="ps"),
+        "age",
+        {"count": 8, "strategy": "quantile_rows"},
+        X,
+        y,
+    )
+    knots = structure.features["age"].knots
+    assert knots["strategy"] == "quantile_rows"
+    assert knots["n_knots"] == 8
+    assert len(knots["positions"]) == 8
+
+
+def test_editor_explicit_knots_on_an_ordered_spline_basis_round_trip_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    # A display position between levels 2 and 3 of the ordered term.
+    structure = _knots_round_trip(tmp_path, _knot_declared, "band", {"positions": [2.5]}, X, y)
+    knots = structure.features["band"].knots
+    assert knots["strategy"] == "explicit"
+    assert knots["n_knots"] == 1
+    assert len(knots["positions"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("build", "sentence"),
+    [
+        (
+            lambda: _declared({"age": Spline(kind="cr", n_knots=6)}),
+            "Structure.from_model needs a fitted model; fit the model first.",
+        ),
+        (
+            _knot_declared,
+            "Structure.from_model needs a fitted model: 'band' has no fitted levels yet; "
+            "fit the model first.",
+        ),
+    ],
+    ids=["spline only", "spline and ordered"],
+)
+def test_an_unfitted_model_with_editor_knots_has_no_structure_to_export(build, sentence):
+    X, y = _knot_frame()
+    session = EditorSession.from_model(build().fit(X, y), train_data=(X, y))
+    session.replace_with_knots("age", {"count": 8, "strategy": "quantile_rows"})
+    applied = Structure.from_model(session.model).apply(build())
+    with pytest.raises(StructureError) as refused:
+        Structure.from_model(applied)
+    assert str(refused.value) == sentence
+
+
+def _knots(**changes):
+    knots = {
+        "knot_alpha": 0.2,
+        "n_knots": 2,
+        "positions": [30.0, 45.0],
+        "strategy": "explicit",
+    }
+    knots.update(changes)
+    return knots
+
+
+KNOTS_MALFORMED = {
+    "a missing field": {k: v for k, v in _knots().items() if k != "knot_alpha"},
+    "an extra field": {**_knots(), "extra": 1},
+    "a bool count": _knots(n_knots=True),
+    "a float count": _knots(n_knots=2.0),
+    "a zero count": _knots(n_knots=0),
+    "alpha above 1": _knots(knot_alpha=1.5),
+    "alpha below 0": _knots(knot_alpha=-0.1),
+    "alpha as text": _knots(knot_alpha="0.2"),
+    "an unknown strategy": _knots(strategy="bogus"),
+    "no positions": _knots(positions=[], n_knots=1),
+    "positions not a list": _knots(positions="30,45"),
+    "a non-finite position": _knots(positions=[30.0, float("inf")]),
+    "positions not increasing": _knots(positions=[45.0, 30.0]),
+    "a repeated position": _knots(positions=[30.0, 30.0]),
+    "explicit count differs from positions": _knots(n_knots=3),
+}
+
+
+@pytest.mark.parametrize("knots", list(KNOTS_MALFORMED.values()), ids=list(KNOTS_MALFORMED))
+def test_a_malformed_knots_object_is_refused_by_read_structure(knots):
+    sentence = "The structure entry for 'age' has a malformed 'knots'; export the structure again."
+    # The well-formed object reads, so each refusal is about its one change.
+    read_structure(_payload(age={"kind": "spline", "knots": _knots()}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(age={"kind": "spline", "knots": knots}))
+    assert str(refused.value) == sentence
+
+
+def test_a_knots_object_that_is_not_a_mapping_is_refused_by_read_structure():
+    sentence = "The structure entry for 'age' has a malformed 'knots'; export the structure again."
+    read_structure(_payload(age={"kind": "spline", "knots": _knots()}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(age={"kind": "spline", "knots": 3}))
+    assert str(refused.value) == sentence
+
+
+def test_knots_on_a_categorical_entry_are_refused_by_read_structure():
+    sentence = "The structure entry for 'area' has a malformed 'knots'; export the structure again."
+    # The same knots on a spline read, so the refusal is the categorical kind's alone.
+    read_structure(_payload(age={"kind": "spline", "knots": _knots()}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(area=_categorical(knots=_knots())))
+    assert str(refused.value) == sentence
+
+
+def test_stated_knots_outside_a_declared_boundary_are_refused_on_apply():
+    X, y = _knot_frame()
+    structure = read_structure(
+        _payload(age={"kind": "spline", "knots": _knots(positions=[10.0, 45.0])})
+    )
+    declared = _knot_declared(boundary=(18.0, 80.0))
+    with pytest.raises(StructureError) as refused:
+        structure.apply(declared)
+    assert str(refused.value) == (
+        "The knots recorded for 'age' do not fit its declared spline; "
+        "export the structure from a model with the same declaration."
+    )
+
+
+# -- A basis chosen in the editor -----------------------------------------------
+
+
+def _basis_round_trip(tmp_path, declared, term, params, X, y):
+    """Change ``term``'s basis in the editor, export, read the file back and apply it."""
+    session = EditorSession.from_model(declared().fit(X, y), train_data=(X, y))
+    session.replace_with_basis(term, params)
+    edited = session.model
+    structure = Structure.from_model(edited)
+    path = tmp_path / "structure.json"
+    path.write_text(structure.to_json(), encoding="utf-8")
+    assert read_structure(path) == structure
+    applied = read_structure(path).apply(declared()).fit(X, y)
+    np.testing.assert_array_equal(applied.predict(X), edited.predict(X))
+    return structure
+
+
+def test_only_a_basis_chosen_in_the_editor_is_recorded():
+    X, y = _knot_frame()
+    model = _knot_declared().fit(X, y)
+    assert "basis" not in Structure.from_model(model).to_json()
+    session = EditorSession.from_model(model, train_data=(X, y))
+    session.replace_with_basis("band", {"kind": "cr"})
+    features = json.loads(Structure.from_model(session.model).to_json())["features"]
+    assert "basis" not in features["age"]
+    assert features["band"]["basis"] == {"kind": "cr", "select": False}
+
+
+def test_an_editor_kind_on_a_numeric_spline_round_trips_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    structure = _basis_round_trip(tmp_path, _knot_declared, "age", {"kind": "ns"}, X, y)
+    assert structure.features["age"].basis == {"kind": "ns", "select": False}
+    assert json.loads(structure.to_json())["features"]["age"]["basis"] == {
+        "kind": "ns",
+        "select": False,
+    }
+
+
+def test_editor_shrinkage_on_an_ordered_spline_basis_round_trips_through_a_file(tmp_path):
+    X, y = _knot_frame()
+    structure = _basis_round_trip(tmp_path, _knot_declared, "band", {"select": True}, X, y)
+    assert structure.features["band"].basis == {"kind": "bs", "select": True}
+
+
+BASIS_MALFORMED = {
+    "a missing field": {"kind": "ps"},
+    "an extra field": {"kind": "ps", "select": False, "degree": 3},
+    "an unknown kind": {"kind": "tp", "select": False},
+    "select as text": {"kind": "ps", "select": "false"},
+    "select as a number": {"kind": "ps", "select": 0},
+    "not a mapping": ["ps", False],
+}
+
+
+@pytest.mark.parametrize("basis", list(BASIS_MALFORMED.values()), ids=list(BASIS_MALFORMED))
+def test_a_malformed_basis_object_is_refused_by_read_structure(basis):
+    sentence = "The structure entry for 'age' has a malformed 'basis'; export the structure again."
+    # The well-formed object reads, so each refusal is about its one change.
+    read_structure(_payload(age={"kind": "spline", "basis": {"kind": "ps", "select": False}}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(age={"kind": "spline", "basis": basis}))
+    assert str(refused.value) == sentence
+
+
+def test_a_basis_on_a_categorical_entry_is_refused_by_read_structure():
+    sentence = "The structure entry for 'area' has a malformed 'basis'; export the structure again."
+    # The same basis on a spline reads, so the refusal is the categorical kind's alone.
+    read_structure(_payload(age={"kind": "spline", "basis": {"kind": "ps", "select": False}}))
+    with pytest.raises(StructureError) as refused:
+        read_structure(_payload(area=_categorical(basis={"kind": "ps", "select": False})))
+    assert str(refused.value) == sentence
+
+
+def test_a_basis_the_declared_spline_cannot_take_is_refused_on_apply():
+    structure = read_structure(
+        _payload(age={"kind": "spline", "basis": {"kind": "ns", "select": False}})
+    )
+    declared = _declared(
+        {"age": Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing)}
+    )
+    with pytest.raises(StructureError) as refused:
+        structure.apply(declared)
+    assert str(refused.value) == (
+        "The basis recorded for 'age' does not fit its declared spline; "
+        "export the structure from a model with the same declaration."
     )

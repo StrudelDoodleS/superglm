@@ -97,14 +97,19 @@ def _fit(kind, smoothing=False, discrete=False, transform="original", shared=Fal
         )
     else:
         names = ("location", "scale") if kind == "gaussian" else ("mean", "scale")
-        lambdas = {f"{name}:{key}#wiggle": 1.0 for name in names for key in ("x", "z")}
+        # One on the curvature over [0, 1], the model this test was validated on: the
+        # penalty in knot intervals is h**3 that, h = 1 / (n_knots + 1) on this data.
+        # At one in knot intervals the gamma fit is penalised 343 times less and stops
+        # at its resolution on Haswell kernels.
+        per_knot = float((4 if shared else 6) + 1) ** 3
+        lambdas = {f"{name}:{key}#wiggle": per_knot for name in names for key in ("x", "z")}
         if shared:
             for name in names:
                 lambdas[f"{name}:x:z#margin_x"] = 0.7
                 lambdas[f"{name}:x:z#margin_z"] = 1.3
-        if transform == "feature_units":
-            lambdas = {name: value * 1000.0 for name, value in lambdas.items()}
-        elif transform == "response_units" and kind == "gaussian":
+        # The penalties are measured in knot intervals, so the feature's units
+        # leave the smoothing parameters as they are.
+        if transform == "response_units" and kind == "gaussian":
             lambdas = {
                 name: value / 100.0 if name.startswith("location:") else value
                 for name, value in lambdas.items()
@@ -486,11 +491,7 @@ def test_varying_scale_fit_is_invariant_to_units_rows_and_execution(kind, smooth
     if smoothing:
         starts = [case[0]._require_fitted().smoothing.initial_lambdas for case in (base, changed)]
         mapping = {
-            name: 1000.0
-            if transform == "feature_units"
-            else 0.01
-            if transform == "response_units" and name.startswith("location:")
-            else 1.0
+            name: 0.01 if transform == "response_units" and name.startswith("location:") else 1.0
             for name in starts[0]
         }
         # The start is compared before terminal smoothing/prediction output.
