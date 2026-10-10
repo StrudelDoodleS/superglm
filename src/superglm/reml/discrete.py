@@ -108,10 +108,11 @@ def _profiled_formation_error(
     gamma_{n+2} sqrt(M_i M_j)`` (Higham 2002, eq. 3.13, and Cauchy-Schwarz),
     ``M_i`` the second moment about the centre used.  A raw-moment rung then
     subtracts ``a a' / s``, ``a = X'W1``, whose formed ``a`` and ``s`` add
-    ``2 gamma_{n+1} + gamma_{n-1}`` of ``|a_i a_j| / s <= sqrt(R_ii R_jj)``,
-    ``R_ii = sum_r W_r x_ri^2``; it admits a column only when ``s mean_i^2 <=
-    C_ii`` (``_raw_centering_admitted``), so there ``M_i = R_ii <= 2 C_ii``,
-    and on a centred route ``M_i`` is ``C_ii`` to within rounding.  Hence
+    ``2 gamma_{n+1} + gamma_{n-1}`` of ``t_i t_j / s <= sqrt(R_ii R_jj)``,
+    ``t = |X|'W1``, ``R_ii = sum_r W_r x_ri^2``.  It admits a column only
+    when ``s mean_i^2 <= C_ii`` (``_raw_centering_admitted``), so there ``M_i
+    = R_ii <= 2 C_ii``; on a centred route ``M_i`` is ``C_ii`` to within
+    rounding.  Hence
     ``|dG_ij| <= 5 gamma_{n+4} sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``:
     four for the first-order terms, the fifth holding the subtraction's, the
     symmetrisation's and the second-order terms while ``n u < 1/5``.  A
