@@ -54,19 +54,25 @@ whatever its knots.
   nothing changes.
 - **`bs` and `cr` splines**: the general penalty does not change them, because
   their penalties already handle uneven knots. On strongly skewed knots, see the
-  next three bullets.
-- **Explicit `cr` or `bs` on strongly skewed knots** (quantile knots on a
-  long-tailed column, for example): under `fit_reml`, REML counts one more
-  penalised direction, so the smoothing parameter, the effective degrees of
-  freedom and the curve can all move.
-- **Explicit `cr` or `bs` with `select=True` and `discrete=True` on strongly
-  skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
-- **Explicit `cr` or `bs` with `select=True` on an extremely long tail**
-  (quantile knots on, for example, a sum insured or a mileage): when double
-  precision cannot hold the penalty on the widest knot interval beside the
-  narrowest, a fit that 0.39 fitted now stops with an error that names
-  `kind="ps"`. On lognormal data with 20 quantile knots this starts near a
-  log-scale spread of 2.5; shorter tails fit.
+  bullets below.
+- **Explicit `cr`, `bs` or `cr_cardinal` on strongly skewed knots** (quantile
+  knots on a long-tailed column, for example): under `fit_reml`, REML counts
+  more penalised directions, so the smoothing parameter, the effective degrees
+  of freedom and the curve can all move.
+- **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` and `discrete=True`
+  on strongly skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
+- **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` on an extremely long
+  tail** (quantile knots on a heavy-tailed column): when double precision cannot
+  hold the penalty on the widest knot interval beside the narrowest, a fit that
+  0.39 fitted now stops with an error that names `kind="ps"`. On lognormal data
+  with quantile knots, `cr` and `bs` start refusing at a log-scale spread of
+  about 2 to 2.75, depending on the sample and the number of knots. In our
+  checks, every fit that 0.39 fitted and 0.40 stops used 20 quantile knots.
+- **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` on a column with
+  large or small units** (a sum insured or a mileage, or a column in
+  hundredths): 0.39 refused some of these fits with "requires exactly 2 null
+  eigenvalues". 0.40 fits them, unless the knots are too uneven for double
+  precision (the bullet above).
 - **`ns` splines**: nothing changes. They keep the standard penalty.
 
 ## What to do
