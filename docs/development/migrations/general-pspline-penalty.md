@@ -30,6 +30,10 @@ largest and smallest stiffnesses then differ by more than a factor of
 freMTPL2's `Density`, and on knots crowded into a small part of the axis. For
 those the penalty is the standard one with the polynomials of degree below `m`
 taken out of it. A heavily smoothed term is still a straight line.
+The switch between the two is a step, not a gradual change: a knot more or
+fewer, or a refit on new data, can move a term across the limit and change its
+fit by more than the knots alone explain; `diagnostics()` and `knot_summary()`
+name the penalty each term took as `difference_penalty`.
 
 ## Why
 

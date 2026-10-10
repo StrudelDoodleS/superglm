@@ -9,6 +9,7 @@ import {
   DEFAULT_ALPHA,
   knotAxis,
   knotChip,
+  knotPenaltyTitle,
   ruleParams,
   shownKnots,
   stepRule,
@@ -262,7 +263,8 @@ function alphaValue(input, term) {
 
 /**
  * The context chip naming the term's knots, in every mode: "10 knots · even
- * spacing", tinted while a knot change waits for Refit.
+ * spacing", tinted while a knot change waits for Refit. Its hover text names
+ * the smoothing penalty when it is not the standard one.
  * @param {HTMLElement} node @param {TermPayload|null} term
  */
 export function renderKnotChip(node, term) {
@@ -270,6 +272,8 @@ export function renderKnotChip(node, term) {
   node.hidden = chip === null;
   node.textContent = chip ? chip.text : "";
   node.dataset.waiting = String(Boolean(chip?.waiting));
+  // An empty title shows no hover text.
+  node.title = (term && chip ? knotPenaltyTitle(term) : null) ?? "";
 }
 
 /**

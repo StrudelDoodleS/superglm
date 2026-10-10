@@ -298,6 +298,9 @@ test("the chip names the knots in every mode and takes the waiting tint", () => 
   const chip = new FakeNode();
   renderKnotChip(chip, orderedTerm());
   assert.deepEqual([chip.hidden, chip.textContent, chip.dataset.waiting], [false, "1 knot · even spacing", "false"]);
+  assert.equal(chip.title, "");
+  renderKnotChip(chip, orderedTerm({ difference_penalty: "general" }));
+  assert.equal(chip.title, "Smoothing penalty: general, for unevenly spaced knots.");
   renderKnotChip(chip, orderedTerm({}, {
     knots: { positions: [1, 2.5], count: 2, strategy: "explicit", alpha: 0.2, from_editor: true },
   }));

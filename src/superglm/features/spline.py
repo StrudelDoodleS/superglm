@@ -154,6 +154,7 @@ class _SplineBase:
     _named_knots: list[Any] | None
     _explicit_boundary: tuple[float, float] | None
     _knot_strategy_actual: str
+    _difference_penalty: dict[int, str]
     _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None
     _lo: float
     _hi: float
