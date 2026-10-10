@@ -828,8 +828,18 @@ _MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
 def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> bool:
     """Screen cancellation in the two raw-moment projection products.
 
-    With unit roundoff u=eps/2, the two products' componentwise error scale
-    is gamma_(2*k) |R|' |G| |R|, where gamma_m=m*u/(1-m*u).
+    With unit roundoff u=eps/2, diagonal c of R' G R carries at most
+    gamma_(2*m_c) (|R|' |G| |R|)_cc, where gamma_m=m*u/(1-m*u) and m_c counts
+    the nonzeros of column c of R. Each of that diagonal's two inner
+    products sums m_c terms: a zero entry of R makes an exact zero product,
+    and adding a zero is exact in any summation order, so it rounds nothing
+    (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., 2002,
+    section 3.1; the sparse matrix-vector bound of Graillat, Jezequel, Mary
+    and Molina, SIAM J. Sci. Comput. 46(1), 2024, counts nonzeros per row
+    the same way). Charging all k = R.shape[0] rows made the bound exceed
+    the budget below with no cancellation at all once k reached
+    max(100, p): an identity R, whose products are exact, screened as
+    cancelling.
     If even a diagonal exceeds a dimension/epsilon resolution budget, form
     projected rows instead. This is an arithmetic dispatch screen, not a
     rank certificate; the solver's existing rank checks remain authoritative.
@@ -838,7 +848,7 @@ def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> 
     envelope = np.sum((absolute.T @ np.abs(raw)) * absolute.T, axis=1)
     eps = np.finfo(float).eps
     unit = eps / 2
-    count_u = 2 * transform.shape[0] * unit
+    count_u = 2 * np.count_nonzero(transform, axis=0) * unit
     gamma = count_u / (1 - count_u)
     return bool(np.any(gamma * envelope > max(100, gram.shape[0]) * eps * np.abs(np.diag(gram))))
 

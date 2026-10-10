@@ -2343,3 +2343,75 @@ def test_tensor_by_wide_spline_cat_cross_gram_without_a_joint_histogram(monkeypa
     actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+# ── budget against the basis a decline keeps ──────────────────────
+#
+# On the full freMTPL2 book the exact-path Density x DrivAge tensor had 63,422
+# distinct rows of 144 (73 MB) against the 64 MiB budget, so the gate kept its
+# 1.17 GB CSR basis instead and every Gram, cross and matvec ran over 678k rows
+# rather than 63k.  A budget that keeps the larger representation bounds nothing.
+
+
+def test_support_over_the_budget_compresses_when_the_kept_csr_is_larger(monkeypatch):
+    from superglm import dm_builder
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(5)
+    n, n_support, p_b = 20_000, 400, 36
+    base = gen.uniform(0.1, 1.0, size=(n_support, p_b))  # saturated, like a cr tensor
+    basis = sp.csr_matrix(base[gen.permutation(np.arange(n) % n_support)])
+    budget = n_support * p_b * 8 - 1
+    monkeypatch.setattr(_group_matrix_support, "DEFAULT_MAX_SUPPORT_BYTES", budget)
+
+    assert detect_row_support(basis) is None  # over the budget, nothing replaced
+    group = dm_builder._build_ssp_group(basis, np.eye(p_b))
+    assert type(group) is SupportCompressedSSPGroupMatrix
+    np.testing.assert_array_equal(group.B_unique[group.bin_idx], basis.toarray())
+
+
+def test_budget_declines_a_compressed_group_the_kept_csr_cannot_hold():
+    from superglm._group_matrix._group_matrix_support import _passes_support_gates
+
+    n, n_support, p_b = 20_000, 400, 36
+    support = n_support * p_b * 8
+    # The block, its projection and weighted copy, and the row index.
+    compressed = 3 * support + n * np.dtype(np.intp).itemsize
+    over_budget = (n, n_support, p_b, n * p_b, 1.5, support - 1)
+
+    assert _passes_support_gates(*over_budget, replaced_bytes=compressed)
+    assert not _passes_support_gates(*over_budget, replaced_bytes=compressed - 1)
+    assert not _passes_support_gates(*over_budget)
+    assert _passes_support_gates(n, n_support, p_b, n * p_b, 1.5, support)
+
+
+def test_exact_tensor_keeps_its_support_when_its_csr_basis_is_larger(monkeypatch):
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(9)
+    n = 8000
+    frame = pd.DataFrame(
+        {"a": gen.integers(0, 60, n).astype(float), "b": gen.integers(0, 25, n).astype(float)}
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=False,
+        features={"a": Spline(kind="cr", n_knots=8), "b": Spline(kind="cr", n_knots=5)},
+        interactions=[("a", "b")],
+    )
+    # Every support is now over the budget; each is smaller than its CSR.
+    monkeypatch.setattr(_group_matrix_support, "DEFAULT_MAX_SUPPORT_BYTES", 1)
+    model._build_design_matrix(frame, gen.poisson(1.0, n).astype(float), np.ones(n), None)
+
+    kinds = [type(group) for group in model._dm.group_matrices]
+    assert kinds.count(SupportCompressedSSPGroupMatrix) == 3, kinds
