@@ -536,7 +536,7 @@ class _IntegratedPenaltySpline(_SplineBase):
         """
         excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
         omega = _spline_penalties.build_integrated_derivative_penalty(
-            self._knots, self.degree, order, excluded=excluded
+            self._knots, self.degree, order, excluded=excluded, intervals=self._penalty_intervals()
         )
         if self._polynomial_ranges:
             structural = self._structural_penalty_for_order(order)
@@ -547,8 +547,19 @@ class _IntegratedPenaltySpline(_SplineBase):
         """Each unpinned knot interval's block at unit norm (``structural_derivative_penalty``)."""
         excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
         return _spline_penalties.structural_derivative_penalty(
-            self._knots, self.degree, order, excluded=excluded
+            self._knots, self.degree, order, excluded=excluded, intervals=self._penalty_intervals()
         )
+
+    def _penalty_intervals(self) -> int | None:
+        """The base layout's knot intervals, which the penalty's ``hbar`` divides the domain into.
+
+        A polynomial range swaps the knots inside it for its edges; counting
+        the merged knots would rescale the penalty everywhere else when a range
+        is drawn, at a fixed ``spline_penalty``.
+        """
+        if not self._polynomial_ranges or self._base_interior_knots is None:
+            return None
+        return int(np.unique(self._base_interior_knots).size) + 1
 
 
 class PSpline(_BSplineBase):

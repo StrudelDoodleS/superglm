@@ -204,6 +204,7 @@ def build_integrated_derivative_penalty(
     degree: int,
     order: int,
     excluded: Sequence[tuple[float, float]] = (),
+    intervals: int | None = None,
 ) -> NDArray:
     """Integrated squared derivative penalty via Gauss-Legendre quadrature, in knot-interval units.
 
@@ -225,7 +226,9 @@ def build_integrated_derivative_penalty(
     ``smooth.spline`` documentation); the knot interval rather than the range
     is what keeps the scale independent of the number of knots. Forming the
     integral on the mapped knots, rather than scaling the one over ``x``,
-    keeps every intermediate near one whatever the units.
+    keeps every intermediate near one whatever the units. ``intervals``, when
+    given, is the number of knot intervals ``hbar`` divides the domain into
+    (``_unit_knots``).
     """
     if order > degree:
         raise ValueError(
@@ -233,7 +236,7 @@ def build_integrated_derivative_penalty(
             "Integrated-derivative penalty requires order <= degree."
         )
     K = len(knots) - degree - 1
-    knots, bounds = _unit_knots(knots, degree, excluded)
+    knots, bounds = _unit_knots(knots, degree, excluded, intervals)
     return sum(_interval_blocks(knots, degree, order, bounds), np.zeros((K, K)))
 
 
@@ -250,18 +253,27 @@ def mean_knot_interval(breaks: NDArray) -> float:
 
 
 def _unit_knots(
-    knots: NDArray, degree: int, excluded: Sequence[tuple[float, float]]
+    knots: NDArray,
+    degree: int,
+    excluded: Sequence[tuple[float, float]],
+    intervals: int | None = None,
 ) -> tuple[NDArray, NDArray]:
     """``knots`` and the ``excluded`` bounds mapped to ``(x - t[degree]) / hbar``.
 
     ``hbar`` is the mean knot interval on the basis's domain
-    ``[t[degree], t[n_basis]]``. Both go through the same monotone map, so a
-    bound equal to a knot stays equal to it and the pinned intervals are the
-    same ones.
+    ``[t[degree], t[n_basis]]``: its width over ``intervals``, or over the
+    number of intervals between the distinct knots when that is not given. A
+    spline with polynomial ranges passes its base layout's count, so a range's
+    edge knots do not rescale the penalty on the rest of the curve. Both go
+    through the same monotone map, so a bound equal to a knot stays equal to
+    it and the pinned intervals are the same ones.
     """
     t = np.asarray(knots, dtype=np.float64)
     origin = t[degree]
-    hbar = mean_knot_interval(t[degree : t.size - degree])
+    if intervals is None:
+        hbar = mean_knot_interval(t[degree : t.size - degree])
+    else:
+        hbar = float((t[t.size - degree - 1] - origin) / intervals)
     bounds = np.asarray(excluded, dtype=np.float64).reshape(-1, 2)
     return (t - origin) / hbar, (bounds - origin) / hbar
 
@@ -271,6 +283,7 @@ def structural_derivative_penalty(
     degree: int,
     order: int,
     excluded: Sequence[tuple[float, float]] = (),
+    intervals: int | None = None,
 ) -> NDArray:
     """The same penalty with each interval's block scaled to unit norm.
 
@@ -279,7 +292,7 @@ def structural_derivative_penalty(
     ``width**-3`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
-    knots, bounds = _unit_knots(knots, degree, excluded)
+    knots, bounds = _unit_knots(knots, degree, excluded, intervals)
     blocks = _interval_blocks(knots, degree, order, bounds)
     return sum((block / np.linalg.norm(block) for block in blocks), np.zeros((K, K)))
 

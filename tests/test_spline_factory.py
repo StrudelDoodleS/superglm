@@ -496,6 +496,45 @@ class TestPenaltyUnits:
 
         np.testing.assert_array_equal(fitted(2.0**10), fitted(1.0))
 
+    def test_reml_bounds_a_near_linear_term_in_knot_intervals(self):
+        """REML clips lambda to [1e-6, 1e10]. A near-linear term's lambda runs to that
+        cap; in 0.39 the cap applied in the column's units, so the same term in
+        2**20 times larger units stopped at a cap 2**60 times weaker in knot
+        intervals and fitted differently. Scaling by a power of two is exact, so
+        the two fits agree bitwise."""
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(11)
+        x = rng.uniform(0.0, 10.0, 4_000)
+        y = rng.poisson(np.exp(0.2 + 0.08 * x)).astype(float)
+
+        def fitted(scale):
+            frame = pd.DataFrame({"x": scale * x})
+            model = SuperGLM(family="poisson", features={"x": Spline(n_knots=8)})
+            return model.fit_reml(frame, y).predict(frame)
+
+        np.testing.assert_array_equal(fitted(2.0**20), fitted(1.0))
+
+    @pytest.mark.parametrize("kind", ["bs", "cr"])
+    def test_a_range_leaves_the_penalty_away_from_it_unchanged(self, kind):
+        """hbar counted a range's edges: PolynomialRange(3, 6) on eight knots over
+        [0, 10] turns nine knot intervals into eight, which scaled the rest of the
+        curve's penalty by (9/8)**3 at a fixed spline_penalty. The last three basis
+        functions' support, from the knot at 6.67, is clear of the range, so their
+        block is the same with the range as without it."""
+        from superglm import PolynomialRange
+
+        x = np.random.default_rng(4).uniform(0.0, 10.0, 2_000)
+
+        def block(ranges):
+            spec = Spline(kind=kind, n_knots=8, polynomial_ranges=ranges)
+            spec.build(x)
+            return spec._build_penalty_for_order(2)[-3:, -3:]
+
+        np.testing.assert_array_equal(block([PolynomialRange(3.0, 6.0, 1)]), block([]))
+
     def test_on_even_knots_the_curvature_penalty_is_a_sandwiched_difference_penalty(self):
         """``hbar**3 integral f''**2 = (D2 beta)' G (D2 beta)`` on evenly spaced
         knots (Li and Cao, arXiv:2201.06808, section 2.4), ``G`` the Gram of the
