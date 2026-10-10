@@ -42,9 +42,12 @@ Four changes follow from it:
   freedom and the curve can all move.
 - **Explicit `cr` or `bs` with `select=True` and `discrete=True` on strongly
   skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
-- **Explicit `cr` or `bs` with `select=True` on a very long tail** (quantile
-  knots on, for example, a sum insured or a mileage): a fit that 0.39 fitted
-  now stops with an error that names `kind="ps"`.
+- **Explicit `cr` or `bs` with `select=True` on an extremely long tail**
+  (quantile knots on, for example, a sum insured or a mileage): when double
+  precision cannot hold the penalty on the widest knot interval beside the
+  narrowest, a fit that 0.39 fitted now stops with an error that names
+  `kind="ps"`. On lognormal data with 20 quantile knots this starts near a
+  log-scale spread of 2.5; shorter tails fit.
 - **`Spline(...)` or `s(...)` with no kind**: a refit can change.
 - **`OrderedCategorical` with no `basis`**: a refit can change.
 - **Interactions of splines with no kind**: a refit can change. A tensor

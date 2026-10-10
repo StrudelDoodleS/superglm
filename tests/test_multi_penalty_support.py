@@ -1311,3 +1311,26 @@ def test_direct_sum_summary_takes_the_affine_identity_where_the_geometry_refuses
     monkeypatch.setattr(module, "_direct_sum_summary", lambda *args: None)
     with pytest.raises(module.PenaltyNumericalError, match="accuracy contract"):
         module._evaluate_penalty_summary(support, weights)
+
+
+@pytest.mark.parametrize(
+    ("matrix", "radius", "certified"),
+    [
+        (np.diag([1.0, 1e-13]), 0.0, True),
+        (np.diag([1.0, 1e-17]), 0.0, False),
+        (np.diag([1.0, -1e-15]), 0.0, False),
+        (np.diag([1.0, 1e-13]), 1e-12, False),
+        (np.array([[1.0, 1.0], [1.0, 1.0 + 1e-13]]), 0.0, True),
+        (np.array([[1.0, 1.0], [1.0, 1.0 + 1e-17]]), 0.0, False),
+    ],
+)
+def test_rump_certificate_admits_only_what_its_shift_leaves_definite(matrix, radius, certified):
+    """Rump (BIT 46, 2006), Corollary 2.7 with bound I: Cholesky of the matrix less
+    ``gamma_3 / (1 - gamma_3) tr + r`` (about 3.3e-16 here, plus the radius) completes
+    exactly when the smallest eigenvalue clears that shift. 1e-13 does, 1e-17 and a
+    negative eigenvalue do not, and a radius of 1e-12 swamps 1e-13. The coupled pairs
+    have eigenvalues near 2 and 5e-14 or 5e-18."""
+    from superglm.reml.multi_penalty import _certifies_positive_definite
+
+    radii = np.full(matrix.shape, radius)
+    assert _certifies_positive_definite(matrix, radii) is certified
