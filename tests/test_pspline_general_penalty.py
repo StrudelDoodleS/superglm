@@ -438,27 +438,48 @@ def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
         assert geometry.raw_family is None and geometry.raw_refusal is None
 
 
+@pytest.mark.parametrize("fit", ["fit", "fit_reml"])
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize(
     ("kind", "sigma", "n_knots", "nullity"),
     [("bs", 2.0, 20, 2), ("bs", 2.25, 20, 2), ("cr", 2.5, 10, 4)],
 )
-def test_select_splits_a_long_tail_binary64_still_resolves(kind, sigma, n_knots, nullity):
+def test_select_splits_a_long_tail_binary64_still_resolves(
+    kind, sigma, n_knots, nullity, discrete, fit
+):
     """These tails sit at 1.5e-13, 6.8e-15 and 6.3e-15 of the largest curvature. The
     split refused anything under 32 times the eigensolver's ``p(n) eps`` (1.7e-13 here),
     30 times above that resolution for bs on lognormal(0, 2); 0.39 fitted them. It now
     refuses only where Rump's test cannot certify the range penalty positive definite
-    within its formation enclosure, and REML ranks the wiggle penalty at its structure."""
+    within its formation enclosure, and REML ranks the wiggle penalty at its structure,
+    binned (the path whose stored derivative factor once failed its certificate) or not,
+    and at a fixed penalty. The null directions come from the structural penalty while
+    the fit applies the real one, so each is held to the Davis-Kahan bound against the
+    real penalty, as in the lognormal(0, 2) test above."""
     from superglm.reml.multi_penalty import _certified_congruence, _certifies_positive_definite
 
     x, rng = _skewed(sigma, 10_000, 0)
     y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
     spline = Spline(kind=kind, n_knots=n_knots, knot_strategy="quantile_rows", select=True)
-    model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
+    model = SuperGLM(family="poisson", discrete=discrete, n_bins=256, features={"x": spline})
+    getattr(model, fit)(pd.DataFrame({"x": x}), y)
     spec = model._specs["x"]
-    assert _reml_ranks(model)["x:wiggle"] == spec._n_basis - nullity
-    product, radius = _certified_congruence(spec._U_range, spec._build_penalty())
+    assert spec._knot_strategy_actual == "quantile_rows"
+    if fit == "fit_reml":
+        assert _reml_ranks(model)["x:wiggle"] == spec._n_basis - nullity
+    penalty = spec._build_penalty()
+    product, radius = _certified_congruence(spec._U_range, penalty)
     assert _certifies_positive_definite(product, radius)
     assert np.all(np.diag(spec._omega_range) > 0)
+    assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x}))))
+    structural = np.linalg.eigvalsh(spec._structural_penalty_for_order(2))
+    n, q = spec._n_basis, spec._U_null.shape[1]
+    delta = n * 2 * u * structural[-1] / structural[q]
+    for null in spec._U_null.T:
+        bound = delta**2 * np.linalg.norm(penalty, 2) + 4 * n * u * (
+            np.abs(null) @ np.abs(penalty) @ np.abs(null)
+        )
+        assert null @ penalty @ null <= 2 * bound
 
 
 def test_select_names_the_knot_spread_binary64_cannot_hold():
