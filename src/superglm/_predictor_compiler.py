@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import (
@@ -400,6 +401,7 @@ def compile_predictor_design(
                         raw_to_solver_map=raw_to_solver_map,
                     ),
                 ]
+                infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
             else:
                 infos = [
                     GroupInfo(
@@ -414,6 +416,7 @@ def compile_predictor_design(
                         raw_to_solver_map=raw_to_solver_map,
                     )
                 ]
+                infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
         else:
             try:
                 # Capture build-time warnings so they can be re-emitted with

@@ -882,6 +882,9 @@ def _process_info(
         else:
             gm = DenseGroupMatrix(info.columns)
 
+    if info.structural_ranks is not None and hasattr(gm, "structural_ranks"):
+        gm.structural_ranks = info.structural_ranks
+
     # ── Compose constraints into solver coordinates ──
     # Constraints from build() are in post-identifiability space (after projection).
     # R_inv_local maps projected -> solver coords (SSP transform only).
@@ -1175,6 +1178,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         elif isinstance(gm, SplineCategoricalGroupMatrix) and _group_has_lambda(gm, g, lambdas):
@@ -1195,6 +1199,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
@@ -1238,6 +1243,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
@@ -1279,6 +1285,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
@@ -1300,6 +1307,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)

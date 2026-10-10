@@ -228,6 +228,7 @@ class FactorSmoothGroupMatrix:
         "omega",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "projection",
         "structured_kind",
         "factor_basis",
@@ -283,6 +284,7 @@ class FactorSmoothGroupMatrix:
         self.omega = None
         self.omega_components = None
         self.component_types = None
+        self.structural_ranks = None
         self.projection = None
         self.structured_kind = "factor_smooth"
         self._structured_feasibility_key = None
@@ -682,6 +684,7 @@ class SparseSSPGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
     )
 
@@ -695,6 +698,7 @@ class SparseSSPGroupMatrix:
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
+        self.structural_ranks = None
         self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
 
     @property
@@ -798,6 +802,7 @@ class SparseSSPGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         return sub
 
 
@@ -939,6 +944,7 @@ class SplineCategoricalGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
@@ -981,6 +987,7 @@ class SplineCategoricalGroupMatrix:
         self.projection = None
         self.omega_components = None
         self.component_types = None
+        self.structural_ranks = None
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
@@ -1076,6 +1083,7 @@ class SplineCategoricalGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         sub.lambda_policies = self.lambda_policies
         sub.spline_cat_level = self.spline_cat_level
         sub.spline_cat_feature = self.spline_cat_feature

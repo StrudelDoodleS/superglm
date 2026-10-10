@@ -12,6 +12,7 @@ from superglm.features._spline_identifiability import (
     build_identifiability_projection_for_spec,
 )
 from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import GroupInfo, LambdaPolicy
 
 
@@ -21,6 +22,7 @@ def eigendecompose_select(
     *,
     n_basis: int,
     spline_kind: str,
+    structural: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, NDArray]:
     """Eigendecompose the constrained penalty for select=True splitting.
 
@@ -30,20 +32,37 @@ def eigendecompose_select(
     feature's units (a cubic regression spline's with the inverse cube of its
     range), and it sits far above the eigensolver's resolution of ``n * eps``
     of the largest eigenvalue (*LAPACK Users' Guide*, 3rd ed., section 4.7).
+
+    A relative cut fixes units but not the spread within a penalty: an
+    integrated derivative penalty (``cr``, ``bs``) gives a direction confined
+    to a knot interval of width ``w`` an eigenvalue of order ``w**-3``, so
+    quantile knots on a heavy-tailed column put the tail interval's direction
+    under the cut. For those kinds ``structural``, the constrained penalty with
+    each interval's block at unit norm, decides the split: a positive
+    reweighting of positive semidefinite blocks has their null space (the
+    polynomials of degree below ``m``) without the spread. That is Wood, Pya
+    and Saefken's balanced penalty (JASA 111, 2016, section 3.1.1), whose
+    penalised and unpenalised spaces are those of the penalty it balances. Where the real penalty's spectrum shows the same
+    nullity at the cut, its own eigenvectors are kept, so those fits are
+    unchanged; otherwise the null space is the structural one and the range is
+    the real penalty restricted to the structural range and diagonalised there,
+    which ``_certified_range`` refuses when the penalty no longer resolves a
+    range direction above round-off.
     """
     eigvals, eigvecs = np.linalg.eigh(omega_c)
-    null_mask = eigvals <= _REML_RANK_THRESHOLD * max(eigvals[-1], 0.0)
-    n_null = int(np.sum(null_mask))
-    if n_null != 2:
-        raise ValueError(
-            f"select=True requires exactly 2 null eigenvalues in the "
-            f"constrained penalty, got {n_null}. "
-            f"Spline kind {spline_kind} may not support select=True."
-        )
-
-    U_null_raw = eigvecs[:, null_mask]
-    U_range = eigvecs[:, ~null_mask]
-    omega_range = np.diag(eigvals[~null_mask])
+    null_mask = _null_mask(eigvals)
+    if structural is not None:
+        structural_values, structural_vectors = np.linalg.eigh(structural)
+        structural_null = _null_mask(structural_values)
+        _require_two_null(structural_null, spline_kind)
+    if structural is None or np.sum(null_mask) == np.sum(structural_null):
+        _require_two_null(null_mask, spline_kind)
+        U_null_raw = eigvecs[:, null_mask]
+        U_range = eigvecs[:, ~null_mask]
+        omega_range = np.diag(eigvals[~null_mask])
+    else:
+        U_null_raw = structural_vectors[:, structural_null]
+        U_range, omega_range = _certified_range(omega_c, structural_vectors[:, ~structural_null])
 
     ones_c = (Z.T @ np.ones(n_basis)) if Z is not None else np.ones(omega_c.shape[0])
     ones_in_null = U_null_raw.T @ ones_c
@@ -55,6 +74,48 @@ def eigendecompose_select(
     U_null = Z @ U_null_1d if Z is not None else U_null_1d
     U_range = Z @ U_range if Z is not None else U_range
     return U_null, U_range, omega_range
+
+
+def _null_mask(eigvals: NDArray) -> NDArray:
+    return eigvals <= _REML_RANK_THRESHOLD * max(eigvals[-1], 0.0)
+
+
+def _require_two_null(null_mask: NDArray, spline_kind: str) -> None:
+    n_null = int(np.sum(null_mask))
+    if n_null != 2:
+        raise ValueError(
+            f"select=True requires exactly 2 null eigenvalues in the "
+            f"constrained penalty, got {n_null}. "
+            f"Spline kind {spline_kind} may not support select=True."
+        )
+
+
+def _certified_range(omega_c: NDArray, basis: NDArray) -> tuple[NDArray, NDArray]:
+    """The penalty on the structural range, diagonalised, once round-off cannot hide a direction.
+
+    In exact arithmetic ``basis' omega_c basis`` is positive definite, since
+    ``basis`` spans the complement of the penalty's null space. Its computed
+    eigenvalues are within ``p(n) eps ||omega_c||_2`` of the exact ones
+    (*LAPACK Users' Guide*, 3rd ed., section 4.7; ``_eigensolver_relative_bar``),
+    a bar that also covers forming the product. The smallest must clear it by
+    the shared policy's ``certification_band``, else the tail direction's
+    curvature is below what binary64 holds beside the bulk's and no rank
+    decision can recover it.
+    """
+    values, vectors = np.linalg.eigh(basis.T @ omega_c @ basis)
+    resolution = _eigensolver_relative_bar(omega_c.shape[0]) * max(values[-1], 0.0)
+    if not values[0] > SHARED_RANK_POLICY.certification_band * resolution:
+        ratio = max(values[0], 0.0) / values[-1]
+        raise ValueError(
+            "select=True cannot split this penalty: its knot intervals differ so much in "
+            f"width that the curvature it puts on the widest is {ratio:.1e} "
+            "of the curvature on the narrowest, which double precision cannot hold beside "
+            "it. The widest interval is usually the tail of a heavy-tailed column under "
+            'quantile knots. Pass kind="ps", whose penalty does not depend on the knot '
+            "spacing, transform the column (for example, take its logarithm), or place "
+            "the knots yourself."
+        )
+    return basis @ vectors, np.diag(values)
 
 
 def resolve_lambda_policies(

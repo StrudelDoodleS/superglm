@@ -117,6 +117,7 @@ class DiscretizedSSPGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
     )
 
@@ -130,6 +131,7 @@ class DiscretizedSSPGroupMatrix:
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
+        self.structural_ranks = None
         self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
 
     def matvec(self, v: NDArray) -> NDArray:
@@ -243,6 +245,7 @@ class DiscretizedSSPGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         return sub
 
 
@@ -322,6 +325,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "projection",
         "omega_components",
         "component_types",
+        "structural_ranks",
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
@@ -363,6 +367,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.projection = None
         self.omega_components = None
         self.component_types = None
+        self.structural_ranks = None
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
@@ -483,6 +488,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         sub.lambda_policies = self.lambda_policies
         sub.spline_cat_level = self.spline_cat_level
         sub.spline_cat_feature = self.spline_cat_feature
@@ -723,6 +729,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         sub.projection = self.projection
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
+        sub.structural_ranks = getattr(self, "structural_ranks", None)
         return sub
 
 

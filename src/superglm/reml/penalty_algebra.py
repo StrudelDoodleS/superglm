@@ -1579,6 +1579,24 @@ def _extract_tensor_marginal_eigvals(
     return None, None
 
 
+def _resolves(eigenvalues: NDArray, rank: int) -> bool:
+    """Whether the ``rank`` largest computed eigenvalues all clear the eigensolver's round-off.
+
+    Computed eigenvalues of a symmetric matrix are within ``p(n) eps
+    ||A||_2`` of the exact ones (*LAPACK Users' Guide*, 3rd ed., section 4.7;
+    ``_eigensolver_relative_bar``); the ``rank``-th largest must clear that by
+    the shared policy's ``certification_band``, so that it is positive and its
+    sign is no artefact of the build's BLAS.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
+
+    values = np.sort(np.asarray(eigenvalues, dtype=np.float64))[::-1]
+    if not 0 < rank <= values.size:
+        return False
+    bar = _eigensolver_relative_bar(values.size) * max(float(values[0]), 0.0)
+    return bool(values[rank - 1] > SHARED_RANK_POLICY.certification_band * bar)
+
+
 def _tensor_marginal_rank_logdet(
     gm: GroupMatrix,
     omega_raw: NDArray,
@@ -2042,6 +2060,7 @@ def build_penalty_components(
         omega_ssp: NDArray,
         *,
         force_solver_rank: bool = False,
+        structural_rank: int | None = None,
     ) -> tuple[float, float, NDArray, NDArray]:
         """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
 
@@ -2059,6 +2078,14 @@ def build_penalty_components(
         objective as ``log|S|₊ - log|H|``, where ``log|H|`` is also in SSP
         coordinates. The ``2*log|R_inv|`` factors cancel only when both terms
         use the same basis.
+
+        ``structural_rank``, the rank the penalty's construction gives it
+        (``GroupInfo.structural_ranks``), replaces a smaller threshold rank:
+        the relative cut fixes units but not the spread within a penalty, and
+        an integrated derivative penalty on uneven knots spreads past it. It
+        is taken only where both computed spectra resolve that many positive
+        eigenvalues (``_resolves``), since a direction below the eigensolver's
+        round-off is not penalised in binary64 whatever the construction says.
         """
         # Rank from raw penalty (basis-invariant)
         raw_eigvals = np.linalg.eigvalsh(omega_raw)
@@ -2070,6 +2097,14 @@ def build_penalty_components(
         ssp_thresh = eps_thresh * max(ssp_eigvals.max(), 1e-12)
         ssp_rank = float(np.sum(ssp_eigvals > ssp_thresh))
         rank = ssp_rank if force_solver_rank or raw_rank > omega_ssp.shape[0] else raw_rank
+        if (
+            structural_rank is not None
+            and not force_solver_rank
+            and rank < structural_rank <= omega_ssp.shape[0]
+            and _resolves(raw_eigvals, structural_rank)
+            and _resolves(ssp_eigvals, structural_rank)
+        ):
+            rank = float(structural_rank)
 
         # Use the effective rank to select the top eigenvalues from SSP.
         n_pos = int(rank)
@@ -2104,6 +2139,7 @@ def build_penalty_components(
             continue
 
         group_components: list[PenaltyComponent] = []
+        structural_ranks = getattr(gm, "structural_ranks", None) or {}
         raw_support = None
         raw_coordinate_map = None
         raw_family = reused_geometry = raw_volume = raw_refusal = None
@@ -2265,6 +2301,7 @@ def build_penalty_components(
                         omega_j,
                         omega_ssp_j,
                         force_solver_rank=force_solver_rank,
+                        structural_rank=structural_ranks.get(suffix),
                     )
                 group_components.append(
                     PenaltyComponent(
@@ -2293,6 +2330,7 @@ def build_penalty_components(
                 gm.omega,
                 omega_ssp,
                 force_solver_rank=force_solver_rank,
+                structural_rank=structural_ranks.get(""),
             )
             group_components.append(
                 PenaltyComponent(

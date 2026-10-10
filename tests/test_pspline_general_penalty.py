@@ -304,6 +304,80 @@ def test_reml_ranks_skewed_quantile_knots_at_the_penalty_true_rank(select):
 
 
 @pytest.mark.parametrize("fit", ["fit", "fit_reml"])
+@pytest.mark.parametrize("kind", [None, "cr"], ids=["kindless", "cr"])
+def test_select_splits_a_skewed_integrated_penalty_at_its_structural_null_space(kind, fit):
+    """quantile_rows on lognormal(0, 2): the cr penalty's tail direction sits at 4e-12 of
+    its largest eigenvalue, under the eps**(2/3) cut, so the split counted three null
+    eigenvalues and refused the kind. 0.39's kindless P-spline fitted it.
+
+    The split now reads the null space from the structural penalty (unit-norm interval
+    blocks), which the real penalty must annihilate. By Davis and Kahan's sin-theta
+    theorem the computed null direction is within ``delta = n eps ||S|| / lambda_3(S)``
+    of the exact one, 1e-12 here (``lambda_3`` is 2.8e-3 of the structural penalty's
+    largest eigenvalue). So ``null' P null`` is under ``delta**2 ||P||`` plus the quadratic
+    form's rounding, ``gamma_{2n} |null|' |P| |null|`` (Higham 2002, section 3.5), doubled
+    for ``gamma_k <= 2 k u``.
+    """
+    x, rng = _skewed(2.0, 10_000, 0)
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
+    kinds = {} if kind is None else {"kind": kind}
+    spline = Spline(n_knots=10, knot_strategy="quantile_rows", select=True, **kinds)
+    model = SuperGLM(family="poisson", features={"x": spline})
+    getattr(model, fit)(pd.DataFrame({"x": x}), y)
+    spec = model._specs["x"]
+    penalty = spec._build_penalty()
+    null = spec._U_null[:, 0]
+    n = spec._n_basis
+    structural = np.linalg.eigvalsh(spec._structural_penalty_for_order(2))
+    delta = n * 2 * u * structural[-1] / structural[2]
+    bound = delta**2 * np.linalg.norm(penalty, 2) + 4 * n * u * (
+        np.abs(null) @ np.abs(penalty) @ np.abs(null)
+    )
+    assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x}))))
+    assert null @ penalty @ null <= 2 * bound
+
+
+@pytest.mark.parametrize("select", [False, True], ids=["plain", "select"])
+@pytest.mark.parametrize(
+    ("kind", "sigma", "n_knots", "nullity"),
+    [(None, 2.0, 10, 4), ("bs", 1.5, 20, 2)],
+    ids=["kindless_cr", "bs"],
+)
+def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
+    kind, sigma, n_knots, nullity, select
+):
+    """REML ranked a cr or bs penalty at eps**(2/3) of its largest eigenvalue, and on
+    these knots the tail direction (4e-12 for cr, 2e-11 for bs) fell under it: the fit
+    penalised a direction that log|S|+ counted as unpenalised. The rank is the
+    structure's: ``n_basis`` less the lines, and for cr less its two natural boundary
+    conditions as well.
+    """
+    x, rng = _skewed(sigma, 10_000, 0)
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
+    kinds = {} if kind is None else {"kind": kind}
+    spline = Spline(n_knots=n_knots, knot_strategy="quantile_rows", select=select, **kinds)
+    model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
+    ranks = _reml_ranks(model)
+    wiggle = ranks["x:wiggle"] if select else ranks["x"]
+    assert wiggle == model._specs["x"]._n_basis - nullity
+
+
+def test_select_names_the_knot_spread_binary64_cannot_hold():
+    """On lognormal(0, 3) quantile knots the cr penalty's tail curvature is below 1e-15 of
+    its largest, under the eigensolver's resolution: no split can recover it. The refusal
+    blamed the kind ("may not support select=True"); it names the spread and what to do.
+    """
+    x, rng = _skewed(3.0, 10_000, 0)
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
+    spline = Spline(n_knots=10, knot_strategy="quantile_rows", select=True)
+    model = SuperGLM(family="poisson", features={"x": spline})
+    with pytest.raises(ValueError, match="differ so much in width") as raised:
+        model.fit(pd.DataFrame({"x": x}), y)
+    assert "may not support" not in str(raised.value)
+    assert 'kind="ps"' in str(raised.value)
+
+
+@pytest.mark.parametrize("fit", ["fit", "fit_reml"])
 def test_a_third_order_penalty_fits_on_lognormal_quantile_knots(fit):
     """m = 3 on lognormal(0, 2) quantile knots spans (hbar/span)**6, past float64;
     the Cholesky factor of the reparametrisation raised LinAlgError."""
