@@ -436,13 +436,21 @@ export function knotChip(term) {
 
 /**
  * The context chip's hover text: the smoothing penalty in force, named only
- * when it is not the standard one, and not while a knot change waits, whose
- * penalty the refit decides. Null otherwise.
+ * when it is not the standard one, and not while a waiting change to the
+ * knots, the basis or the levels is pending, since the refit decides the
+ * penalty then. Null otherwise.
  * @param {TermPayload} term @returns {string|null}
  */
 export function knotPenaltyTitle(term) {
   const penalty = term.knots?.difference_penalty ?? null;
-  if (penalty === null || penalty === "standard" || shownKnots(term)?.waiting) return null;
+  // A waiting knot change is what shownKnots reports as waiting. A kind or Shrink change,
+  // and a shaped range on a P-spline, which makes it a B-spline, are in pending.basis.
+  // Collapse, ungroup, special and on-curve changes are in pending.groups or
+  // pending.specials: they move the levels the knots sit on, so the refit places them again.
+  const pending = term.pending;
+  const penaltyWaits = shownKnots(term)?.waiting || pending?.basis
+    || pending?.groups || pending?.specials;
+  if (penalty === null || penalty === "standard" || penaltyWaits) return null;
   return `Smoothing penalty: ${PENALTY_TEXT[penalty] ?? penalty}.`;
 }
 
