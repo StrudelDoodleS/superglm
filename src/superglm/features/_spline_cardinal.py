@@ -7,16 +7,39 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 
-def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
-    """Build the cardinal CR second-derivative map and penalty matrix."""
+def _second_differences(knots: NDArray) -> NDArray:
+    """The ``(K - 2, K)`` second divided differences at the knots."""
     K = len(knots)
     h = np.diff(knots)
-
     B_d = np.zeros((K - 2, K))
     for i in range(K - 2):
         B_d[i, i] = 1.0 / h[i]
         B_d[i, i + 1] = -1.0 / h[i] - 1.0 / h[i + 1]
         B_d[i, i + 2] = 1.0 / h[i + 1]
+    return B_d
+
+
+def structural_cr_penalty(knots: NDArray) -> NDArray:
+    """The cardinal penalty's null space without its knot-spacing spread.
+
+    The penalty is ``B_d' D^{-1} B_d`` with ``D`` positive definite, so its
+    null space is that of ``B_d``: the lines through the knot values. Each
+    row of ``B_d`` scaled to unit norm keeps that null space (a positive
+    reweighting of the rank-one blocks ``b_i b_i'``) and drops the ``h**-3``
+    spread, as Wood, Pya and Saefken's balanced penalty does (JASA 111, 2016,
+    section 3.1.1).
+    """
+    B_d = _second_differences(knots)
+    unit = B_d / np.linalg.norm(B_d, axis=1)[:, None]
+    return unit.T @ unit
+
+
+def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
+    """Build the cardinal CR second-derivative map and penalty matrix."""
+    K = len(knots)
+    h = np.diff(knots)
+
+    B_d = _second_differences(knots)
 
     D = np.zeros((K - 2, K - 2))
     for i in range(K - 2):

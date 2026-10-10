@@ -413,6 +413,9 @@ class TensorMarginalInfo:
     degree: int  # B-spline degree (for basis eval at new points)
     raw_basis_eval: Callable[[NDArray], NDArray]  # parent-spec raw basis evaluator
     normalize_penalty: bool = False  # rescale before tensor kron assembly
+    # (K_eff, K_eff) penalty with ``penalty``'s null space and no knot-spacing
+    # spread, when the spec knows one (``_structural_penalty_for_order``)
+    structural_penalty: NDArray | None = None
 
 
 # ── Tensor raw band ────────────────────────────────────────────

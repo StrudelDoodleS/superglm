@@ -50,6 +50,11 @@ def build_cr_matrices(spec: Any) -> None:
     spec._cr_M, spec._cr_S = _spline_cardinal.build_cr_penalty_matrices(spec._cr_knots)
 
 
+def structural_penalty(spec: Any) -> NDArray:
+    """The cardinal penalty's null space without its knot-spacing spread."""
+    return _spline_cardinal.structural_cr_penalty(spec._cr_knots)
+
+
 def cardinal_boundary_slopes(spec: Any) -> tuple[NDArray, NDArray, NDArray, NDArray]:
     """Return basis value and slope at the boundary knots for linear extrapolation."""
     return cast(

@@ -317,6 +317,7 @@ def tensor_marginal_info(
         projection = projection_constraints @ projection_ident
     else:
         projection = projection_ident
+    structural = spec._structural_penalty_for_order(spec._m_orders[0])
 
     return TensorMarginalInfo(
         basis=basis,
@@ -329,4 +330,5 @@ def tensor_marginal_info(
         degree=spec.degree,
         raw_basis_eval=spec._raw_basis_matrix,
         normalize_penalty=False,
+        structural_penalty=None if structural is None else projection.T @ structural @ projection,
     )
