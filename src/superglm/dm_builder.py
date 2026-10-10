@@ -425,19 +425,28 @@ _INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
 }
 
 
+def _stored_csr_bytes(B_csr) -> int:
+    """Bytes of the arrays a CSR basis keeps; zero for any other storage."""
+    if getattr(B_csr, "format", None) != "csr":
+        return 0
+    return int(B_csr.data.nbytes + B_csr.indices.nbytes + B_csr.indptr.nbytes)
+
+
 def _build_ssp_group(B_csr, R_inv):
     """Cheapest exact representation of a factored SSP block.
 
     Compression is lossless deduplication of repeated rows; it never bins and is
     independent of ``discrete=True``.  Declines whenever the measured cost model
-    says the current CSR path is cheaper.
+    says the current CSR path is cheaper.  The support byte budget does not
+    decline a support whose compressed group fits in the bytes of the CSR
+    basis that a decline keeps instead.
     """
     from superglm._group_matrix._group_matrix_discretized import (
         SupportCompressedSSPGroupMatrix,
     )
     from superglm._group_matrix._group_matrix_support import detect_row_support
 
-    detected = detect_row_support(B_csr)
+    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
     if detected is None:
         return SparseSSPGroupMatrix(B_csr, R_inv)
     B_unique_rows, row_index = detected
@@ -468,7 +477,7 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     )
     from superglm._group_matrix._group_matrix_support import detect_row_support
 
-    detected = detect_row_support(B_csr)
+    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
     if detected is None:
         return SparseGroupMatrix(B_csr)
     B_unique_rows, row_index = detected
