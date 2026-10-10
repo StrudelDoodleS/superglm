@@ -204,8 +204,9 @@ def _record(model: SuperLSS) -> dict[str, object]:
 # A lambda at or above this floor has saturated: the REML objective is flat in
 # it, so its recorded value is a property of where the outer loop stopped on
 # that ridge rather than of the data.  The record's largest unsaturated lambda
-# is 4.25e5 and its two saturated ones are 7.95e7, so the floor separates them
-# by a factor of 187 either way.
+# is 4.25e5 and its four saturated ones are gaussian's 7.96e7 and lognormal's
+# 1.09e7 (``scale:z#wiggle``, each twice), a gap of 25.7: the floor sits 2.35
+# times above the first and 10.9 times below the second.
 #
 # A saturated lambda is held only to staying saturated. Fellner-Schall advances
 # a lambda on that ridge by a constant additive step, so |dlog lambda| decays as
@@ -278,9 +279,14 @@ def _assert_close(
             if value >= _SATURATED_LAMBDA:
                 assert other >= _SATURATED_LAMBDA, f"{name}: lambda {key} left saturation"
                 continue
-            assert other < _SATURATED_LAMBDA, f"{name}: lambda {key} saturated"
             if key in drifting:
+                # Held by direction: one more step on its ridge would carry it
+                # past the floor (4.25e5 times e**1.327), with the fit unchanged.
+                assert other >= value * math.exp(-_DRIFTING_LOG_STEP), (
+                    f"{name}: drifting lambda {key} turned back"
+                )
                 continue
+            assert other < _SATURATED_LAMBDA, f"{name}: lambda {key} saturated"
             assert abs(math.log(other / value)) <= _LOG_LAMBDA_TOLERANCE, (
                 f"{name}: lambda {key} moved"
             )
@@ -362,29 +368,22 @@ def test_outputs_reproduce_the_golden_record_within_tolerance(request) -> None:
         _assert_close(name, computed[name], recorded[name], drifting.get(name, frozenset()))
 
 
-# The value ``gaussian:reml`` and ``gaussian:reml+newton`` carried for
-# ``scale:z#wiggle`` on the stack that recorded the original byte-identical
-# record (0x1.2f6f026a3e63dp+26), against the 79541630.3960821 the tolerance
-# form first recorded. That is |log(new/old)| = 2.1e-5 on a lambda the REML
-# objective is flat in: every objective in the record agrees to 4.1e-14 and
-# every lambda below the saturation floor to 1.2e-8. The drift is applied to
-# the value recorded now.
-_SATURATED_DRIFT_BETWEEN_STACKS = float.fromhex("0x1.2f6f026a3e63dp+26") / float.fromhex(
-    "0x1.2f6d5f995968cp+26"
-)
-
-
 def _recorded_entry(name: str) -> dict[str, object]:
     return json.loads(json.dumps(json.loads(GOLDEN.read_text())[name]))
 
 
-@pytest.mark.parametrize("name", ["gaussian:reml", "gaussian:reml+newton"])
-def test_a_saturated_lambda_tolerates_the_drift_measured_between_stacks(name: str) -> None:
-    recorded = _recorded_entry(name)
-    assert recorded["lambdas"]["scale:z#wiggle"] >= _SATURATED_LAMBDA
-    computed = _recorded_entry(name)
-    computed["lambdas"]["scale:z#wiggle"] *= _SATURATED_DRIFT_BETWEEN_STACKS
-    _assert_close(name, computed, recorded)
+def test_a_drifting_lambda_may_take_another_step_on_its_ridge() -> None:
+    """One more outer step carries ``nb2:reml``'s ``theta:z#wiggle`` past the floor."""
+    recorded = _recorded_entry("nb2:reml")
+    computed = _recorded_entry("nb2:reml")
+    computed["lambdas"]["theta:z#wiggle"] *= math.exp(1.327)
+    assert computed["lambdas"]["theta:z#wiggle"] >= _SATURATED_LAMBDA
+    _assert_close("nb2:reml", computed, recorded, frozenset({"theta:z#wiggle"}))
+    with pytest.raises(AssertionError, match="theta:z#wiggle"):
+        _assert_close("nb2:reml", computed, recorded)
+    computed["lambdas"]["theta:z#wiggle"] = recorded["lambdas"]["theta:z#wiggle"] / 2.0
+    with pytest.raises(AssertionError, match="turned back"):
+        _assert_close("nb2:reml", computed, recorded, frozenset({"theta:z#wiggle"}))
 
 
 def test_a_lambda_that_leaves_saturation_is_still_caught() -> None:
