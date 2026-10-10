@@ -68,7 +68,9 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
   /** @type {string|null} */
   let message = null;
   // The change being staged, the latest gesture's change waiting to follow it,
-  // and the selection before the first of them, given back if one is not staged.
+  // and the selection that matches the knots Python holds: the one before the
+  // first of them, or the one the last staged change left. It is given back if
+  // a change is not staged.
   let staging = false;
   /** @type {{params:KnotParams, select:number|null}|null} */
   let queued = null;
@@ -132,6 +134,8 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       const next = queued;
       queued = null;
       if (staged && next) {
+        // This change is staged: a follower refused from here gives back the selection it left.
+        before = select;
         send(next.params, next.select);
         return;
       }

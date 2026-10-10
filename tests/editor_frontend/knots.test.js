@@ -635,6 +635,28 @@ test("a change that is not staged drops the one waiting to follow it and gives t
   assert.deepEqual(drawnKnots(harness), [2, 4, 6, 8]);
 });
 
+test("a refused follower keeps the selection on the knot the staged change left", async () => {
+  const stage = slowStage();
+  const harness = gestureHarness(numericTerm(), { onChange: stage.onChange });
+  const { pointer, key, px, changes, gestures } = harness;
+  pointer("pointerdown", px(4), 300);
+  pointer("pointerup", px(4), 300);
+  key("ArrowRight");
+  key("ArrowRight");
+  assert.deepEqual(changes, [{ positions: [2, 4.1, 6, 8] }]);
+  // The first change is staged and moves the knot to 4.1; the second follows it.
+  await stage.answer(harness, true, [2, 4.1, 6, 8]);
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.2, 6, 8] });
+  // The second is refused: the knot stays at 4.1, so the selection stays on it.
+  await stage.answer(harness, false);
+  assert.equal(changes.length, 2);
+  assert.equal(gestures.ui().selected, 4.1);
+  assert.deepEqual(drawnKnots(harness), [2, 4.1, 6, 8]);
+  key("ArrowRight");
+  assert.equal(changes.length, 3);
+  assert.deepEqual(changes.at(-1), { positions: [2, 4.2, 6, 8] });
+});
+
 test("while a kind change waits, the frame carries the basis it puts in force", () => {
   const inForce = { degree: 2, ends: "open", boundary: [0, 10], level_values: null };
   const waiting = { degree: 3, ends: "clamped", boundary: [0, 10], level_values: null };
