@@ -82,6 +82,7 @@ from superglm.distributional.kernels.two_piece import (
     log_mean_loading as two_piece_log_mean_loading,
 )
 from superglm.distributional.kernels.two_piece import two_piece_quantile
+from superglm.distributional.result import DistributionalEFSConfig
 from superglm.features import Categorical, CubicRegressionSpline, Spline
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -226,6 +227,7 @@ _LOG_LAMBDA_TOLERANCE = 1.0e-6
 # are 0.45 to 2.5 in log and every other lambda's at most 6.5e-2; this bar sits
 # in that gap. Such a lambda is held only to its side of the saturation floor.
 _DRIFTING_LOG_STEP = 0.25
+_OBJECTIVE_RESOLUTION = DistributionalEFSConfig().objective_tolerance
 
 
 def _drifting(model: SuperLSS) -> frozenset[str]:
@@ -261,7 +263,12 @@ def _assert_close(
             f"{name}: {field} moved"
         )
     if "objective" in recorded:
-        assert abs(computed["objective"] - recorded["objective"]) <= 1e-10 * (
+        # The outer loop accepts a step whose objective rises by up to
+        # ``objective_tolerance * (1 + |V|)``, so it resolves where it stops only
+        # to that band, and a step it rejects there is a rounding decision: ARM64
+        # stopped ``twopiece:reml+newton`` 2.1e-10 of |V| from x86. The 1e-10 this
+        # replaces was a measured spread (4.1e-14) widened, below that resolution.
+        assert abs(computed["objective"] - recorded["objective"]) <= _OBJECTIVE_RESOLUTION * (
             1.0 + abs(recorded["objective"])
         ), f"{name}: objective moved"
         assert set(computed["lambdas"]) == set(recorded["lambdas"]), f"{name}: lambda keys differ"
