@@ -531,7 +531,15 @@ class TestPenaltyUnits:
         [0, 10] turns nine knot intervals into eight, which scaled the rest of the
         curve's penalty by (9/8)**3 at a fixed spline_penalty. The last three basis
         functions' support, from the knot at 6.67, is clear of the range, so their
-        block is the same with the range as without it."""
+        block is the same with the range as without it, to rounding.
+
+        The two knot vectors evaluate the same local polynomials by different index
+        paths (ARM64 rounded one entry an ulp apart). Each entry sums 9 terms
+        ``w d_i d_j`` (3 intervals, 3 Gauss points); a second derivative from the
+        degree-3 recursion carries about 3 roundings per level, ``gamma_9``, so a
+        term carries ``gamma_20`` and the sum ``gamma_29`` of ``sum |w d_i d_j|``,
+        which Cauchy-Schwarz bounds by ``sqrt(P_ii P_jj)``. The unfixed hbar moves
+        the block by (9/8)**3, 42%."""
         from superglm import PolynomialRange
 
         x = np.random.default_rng(4).uniform(0.0, 10.0, 2_000)
@@ -541,7 +549,11 @@ class TestPenaltyUnits:
             spec.build(x)
             return spec._build_penalty_for_order(2)[-3:, -3:]
 
-        np.testing.assert_array_equal(block([PolynomialRange(3.0, 6.0, 1)]), block([]))
+        ranged, plain = block([PolynomialRange(3.0, 6.0, 1)]), block([])
+        u = np.finfo(np.float64).eps / 2
+        gamma = 29 * u / (1 - 29 * u)
+        scale = np.sqrt(np.outer(np.diag(plain), np.diag(plain)))
+        assert np.all(np.abs(ranged - plain) <= 2 * gamma * scale)
 
     def test_on_even_knots_the_curvature_penalty_is_a_sandwiched_difference_penalty(self):
         """``hbar**3 integral f''**2 = (D2 beta)' G (D2 beta)`` on evenly spaced
