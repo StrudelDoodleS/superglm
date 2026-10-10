@@ -69,10 +69,11 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
   let message = null;
   // The change being staged, the latest gesture's change waiting to follow it,
   // and the selection that matches the knots Python holds: the one before the
-  // first of them, or the one the last staged change left. It is given back if
-  // a change is not staged.
+  // first of them, or the one before the first gesture that queued behind a
+  // staged change (a click may have moved it to another knot). It is given back
+  // if a change is not staged.
   let staging = false;
-  /** @type {{params:KnotParams, select:number|null}|null} */
+  /** @type {{params:KnotParams, select:number|null, before:number|null}|null} */
   let queued = null;
   /** @type {number|null} */
   let before = null;
@@ -113,15 +114,17 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       say(outcome.refusal);
       return;
     }
-    if (!staging) before = ui.selected;
+    const prior = ui.selected;
+    if (!staging) before = prior;
     ui.selected = outcome.select;
     // Drawn where the gesture left them until the change is answered, so a
     // dropped knot does not flash back to its old place on the way.
     const positions = "positions" in outcome.params ? outcome.params.positions : null;
     ui.pending = positions ? [...positions].sort((a, b) => a - b) : null;
     draw();
-    if (staging) queued = { params: outcome.params, select: outcome.select };
-    else send(outcome.params, outcome.select);
+    if (staging) {
+      queued = { params: outcome.params, select: outcome.select, before: queued ? queued.before : prior };
+    } else send(outcome.params, outcome.select);
   }
 
   /** @param {KnotParams} params @param {number|null} select */
@@ -134,8 +137,9 @@ export function bindKnotGestures({ svg, active, onChange, onStatus, redraw }) {
       const next = queued;
       queued = null;
       if (staged && next) {
-        // This change is staged: a follower refused from here gives back the selection it left.
-        before = select;
+        // This change is staged: a follower refused from here gives back the
+        // selection from before the first gesture that queued behind it.
+        before = next.before;
         send(next.params, next.select);
         return;
       }
