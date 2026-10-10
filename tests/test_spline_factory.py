@@ -374,6 +374,41 @@ class TestDefaultKindIsCr:
             s("age", n_knots=8, degree=2)
         assert Spline(kind="ps", n_knots=8, degree=2).degree == 2
 
+    @pytest.mark.parametrize("m", [4, (2, 4)], ids=["int", "tuple"])
+    def test_default_kind_refuses_a_penalty_order_above_its_maximum(self, m):
+        """``Spline(m=4)`` was a valid P-spline in 0.39. The default now names itself,
+        its maximum and the remedy, not the class the caller never wrote."""
+        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3") as excinfo:
+            Spline(m=m)
+        message = str(excinfo.value)
+        assert "so m=4 cannot apply" in message
+        assert "Pass kind='ps' for a penalty of order 4" in message
+        assert "CubicRegressionSpline" not in message
+
+    def test_s_default_refuses_a_penalty_order_above_its_maximum(self):
+        from superglm.terms import s
+
+        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3"):
+            s("age", m=4)
+
+    @pytest.mark.parametrize("kind, cap", [("cr", 3), ("cr_cardinal", 2)])
+    def test_cubic_regression_kinds_refuse_a_penalty_order_above_their_maximum(self, kind, cap):
+        with pytest.raises(ValueError, match="takes penalty orders up to") as excinfo:
+            Spline(kind=kind, n_knots=8, m=cap + 1)
+        message = str(excinfo.value)
+        assert f"up to {cap}, so m={cap + 1} cannot apply" in message
+        assert f"Pass kind='ps' for a penalty of order {cap + 1}" in message
+
+    def test_penalty_order_maximum_is_read_from_the_class(self, monkeypatch):
+        """The refusal takes its cap from ``CubicRegressionSpline._max_penalty_order``,
+        so raising that cap admits m=4; a hard-coded 3 in the factory would not."""
+        monkeypatch.setattr(CubicRegressionSpline, "_max_penalty_order", 5)
+        assert isinstance(Spline(m=4), CubicRegressionSpline)
+
+    def test_penalty_order_at_the_maximum_builds_and_the_remedy_is_a_p_spline(self):
+        assert isinstance(Spline(m=3), CubicRegressionSpline)
+        assert isinstance(Spline(kind="ps", m=4), PSpline)
+
 
 # ── kind="bs" is real BSplineSmooth ─────────────────────────────
 

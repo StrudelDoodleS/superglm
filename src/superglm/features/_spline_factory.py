@@ -104,6 +104,18 @@ def Spline(
             f"degree-{degree} spline."
         )
 
+    if kind in ("cr", "cr_cardinal"):
+        # The cap is the class's own, so the refusal moves with it.
+        cap = kind_map[kind]._max_penalty_order
+        orders = (m,) if isinstance(m, int) else tuple(m)
+        worst = max((order for order in orders if isinstance(order, int)), default=0)
+        if worst > cap:
+            raise ValueError(
+                f"A cubic regression spline (kind={kind!r}; 'cr' is the default) takes penalty "
+                f"orders up to {cap}, so m={worst} cannot apply. Pass kind='ps' for a penalty "
+                f"of order {worst}."
+            )
+
     if constraint is not None and kind == "ns":
         raise NotImplementedError(
             "constraint is not supported for kind='ns'. "
