@@ -2128,7 +2128,8 @@ def build_penalty_components(
         is taken only where both penalties certifiably have that many positive
         eigenvalues (``_certifies_rank_at_least``, Rump's test on the leading
         eigenvectors), since a direction binary64 cannot certify positive is
-        not penalised whatever the construction says.
+        not penalised whatever the construction says. It also caps a larger
+        solver-space count, where the raw count agrees with it.
         """
         from superglm.reml.multi_penalty import _certifies_rank_at_least
 
@@ -2142,6 +2143,15 @@ def build_penalty_components(
         ssp_thresh = eps_thresh * max(ssp_eigvals.max(), 1e-12)
         ssp_rank = float(np.sum(ssp_eigvals > ssp_thresh))
         rank = ssp_rank if force_solver_rank or raw_rank > omega_ssp.shape[0] else raw_rank
+        if structural_rank is not None and raw_rank <= structural_rank < rank:
+            # A congruence cannot raise a rank, rank(R' Ω R) <= rank(Ω), and the
+            # construction gives Ω the structural rank. But it can compress the
+            # spectrum by cond(R)**2 (Ostrowski; Horn and Johnson, Theorem
+            # 4.5.9), past the relative cut, so round-off on a null direction
+            # can count in SSP: 56 for 55 on ARM64 for a decomposed tensor's
+            # margin, whose R_inv has cond(R)**2 = 3.8e10. The raw penalty,
+            # counted without the congruence, must agree.
+            rank = float(structural_rank)
         if (
             structural_rank is not None
             and rank < structural_rank <= omega_ssp.shape[0]

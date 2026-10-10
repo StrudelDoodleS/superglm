@@ -646,7 +646,19 @@ def test_cr_cardinal_reml_ranks_a_skewed_penalty_at_its_structural_rank(select):
 def test_a_kindless_decomposed_tensor_fits_by_reml_at_its_structural_ranks():
     """The model path: kindless margins, decompose=True, discrete, fit_reml. The split
     takes the bilinear direction from the structural margins and REML ranks each
-    wiggly component at ``rank(A) q``: one centred line per margin is unpenalised."""
+    wiggly component at ``rank(A) q``: one centred line per margin is unpenalised.
+
+    The wiggly group's SSP map has cond(R)**2 = 3.8e10, past 1/eps**(2/3), so
+    round-off on a margin's null direction can clear REML's relative cut in SSP:
+    ARM64 counted 56 for the z margin's 55. A congruence cannot raise a rank, so the
+    count stays structural when ``4 n u ||Omega||``, the size of the penalty's own
+    formation round-off and far under its raw cut, sits on the null direction the
+    map stretches most."""
+    import copy
+
+    from superglm.model.reml_setup import collect_reml_groups
+    from superglm.reml.penalty_algebra import build_penalty_components
+
     x, rng = _skewed(2.0, 6_000, 3)
     z = rng.uniform(0.0, 1.0, x.size)
     y = rng.poisson(np.exp(-1.0 + 0.2 * np.tanh(np.log(x)) * (1 + z)))
@@ -666,6 +678,22 @@ def test_a_kindless_decomposed_tensor_fits_by_reml_at_its_structural_ranks():
     p1, p2 = 11, 6  # ten and five interior knots: two more cardinal values, less centring
     assert ranks == {"x:z:wiggly:margin_x": (p1 - 1) * p2, "x:z:wiggly:margin_z": p1 * (p2 - 1)}
     assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x, "z": z}))))
+
+    matrices = list(model._dm.group_matrices)
+    groups = collect_reml_groups(model._groups, matrices)
+    index = next(i for i, g in groups if g.name == "x:z:wiggly")
+    gm = copy.copy(matrices[index])
+    components = dict(gm.omega_components)
+    omega = components["margin_z"]
+    values, vectors = np.linalg.eigh(omega)
+    null = vectors[:, : omega.shape[0] - p1 * (p2 - 1)]
+    direction = null @ np.linalg.svd(gm.R_inv.T @ null)[2][0]
+    n = omega.shape[0]
+    components["margin_z"] = omega + 4 * n * u * values[-1] * np.outer(direction, direction)
+    gm.omega_components = list(components.items())
+    matrices[index] = gm
+    perturbed = {c.name: c.rank for c in build_penalty_components(matrices, groups)}
+    assert perturbed["x:z:wiggly:margin_z"] == p1 * (p2 - 1)
 
 
 def test_a_decomposed_tensor_on_a_column_in_large_units_splits_as_in_unit_ones():
