@@ -416,6 +416,21 @@ def test_a_decomposed_tensor_with_a_skewed_quantile_margin_splits_off_the_biline
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
 
 
+def _assert_names_the_tensor_and_its_spread_margin(message, tensor, margin):
+    """The refusal names the term and margin, offers decompose=False first, and states its number.
+
+    It named neither, left out decompose=False, and printed the tensor's spectrum
+    on its structural range as the widest interval over the narrowest.
+    """
+    from superglm.features.interaction import _range_spread
+
+    assert message.startswith("TensorInteraction('a', 'b', decompose=True) cannot split")
+    assert f"On the {margin!r} margin" in message
+    assert message.index("decompose=False") < message.index('kind="ps"')
+    marginal = tensor._marginal1 if margin == "a" else tensor._marginal2
+    assert f"is {_range_spread(marginal):.1e} of the penalty" in message
+
+
 @pytest.mark.parametrize("kind", ["cr", "bs"])
 def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind):
     """The split counted the eigenvalues under eps**(2/3) of the largest: a skewed cr
@@ -433,8 +448,9 @@ def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_m
     margin_2.build(x2)
     tensor = TensorInteraction("a", "b", decompose=True)
     if kind == "bs":
-        with pytest.raises(ValueError, match="decompose=True cannot split this penalty"):
+        with pytest.raises(ValueError) as refusal:
             tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256))
+        _assert_names_the_tensor_and_its_spread_margin(str(refusal.value), tensor, "a")
         return
     infos = tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256)).infos
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
@@ -451,6 +467,67 @@ def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_m
     unit = np.finfo(float).eps / 2
     residual = np.linalg.norm(structural @ bilinear)
     assert residual <= 8 * omega.shape[0] * unit * np.linalg.norm(structural, 2)
+
+
+def test_a_decomposed_tensor_on_a_column_in_large_units_splits_as_in_unit_ones():
+    """On d4e8b4c9 it refused: the kindless margin's cardinal penalty scaled as
+    the knot gap to the -3, under the 1e-12 floor _normalize_tensor_penalty left
+    unscaled once the gaps passed about 3.6e4, so the margin sat near 1e-17 beside
+    the other's 1. A power-of-two change of units is exact, so the split is too."""
+    from superglm.features.interaction import TensorInteraction
+
+    rng = np.random.default_rng(12)
+    x1, x2 = rng.uniform(0.0, 1.0, 3_000), rng.uniform(0.0, 1.0, 3_000)
+
+    def split(scale):
+        margin_1, margin_2 = Spline(n_knots=8), Spline(n_knots=8)
+        margin_1.build(scale * x1)
+        margin_2.build(x2)
+        return TensorInteraction("a", "b", decompose=True).build(
+            scale * x1, x2, {"a": margin_1, "b": margin_2}
+        )
+
+    large, unit = split(2.0**20), split(1.0)
+    assert [info.subgroup_name for info in large] == ["bilinear", "wiggly"]
+    np.testing.assert_array_equal(large[0].projection, unit[0].projection)
+    np.testing.assert_array_equal(large[1].penalty_matrix, unit[1].penalty_matrix)
+
+
+def test_a_tensor_margin_penalty_is_scaled_however_small():
+    """The floor was an absolute 1e-12 on the largest eigenvalue; it is relative
+    now, so only a zero penalty, or one as indefinite as round-off of zero, is
+    left as it is."""
+    from superglm.features.interaction import _normalize_tensor_penalty
+
+    D = np.diff(np.eye(6), n=2, axis=0)
+    S = D.T @ D
+    unit = _normalize_tensor_penalty(S)
+    assert np.linalg.eigvalsh(unit)[-1] == pytest.approx(1.0, rel=8 * 6 * np.finfo(float).eps)
+    # A power-of-two scale is exact, so the normalised penalty is bitwise the same.
+    np.testing.assert_array_equal(_normalize_tensor_penalty(S * 2.0**-60), unit)
+    zero = np.zeros((6, 6))
+    assert _normalize_tensor_penalty(zero) is zero
+    noise = np.diag([1e-17, -1e-17, 0.0, 0.0, 0.0, 0.0])
+    assert _normalize_tensor_penalty(noise) is noise
+
+
+def test_a_fixed_penalty_tensor_of_bs_margins_ignores_the_columns_units():
+    """A ``bs`` margin's penalty is not rescaled before the tensor is assembled,
+    so on d4e8b4c9 its weight beside the other margin's moved with the units."""
+    rng = np.random.default_rng(13)
+    x1, x2 = rng.uniform(0.0, 1.0, 3_000), rng.uniform(0.0, 1.0, 3_000)
+    y = rng.poisson(np.exp(0.2 + 0.4 * np.sin(3.0 * x1) * np.cos(2.0 * x2))).astype(float)
+
+    def fitted(scale):
+        model = SuperGLM(
+            family="poisson",
+            features={"a": Spline(kind="bs", n_knots=5), "b": Spline(kind="bs", n_knots=5)},
+            interactions=[("a", "b")],
+        )
+        frame = pd.DataFrame({"a": scale * x1, "b": x2})
+        return model.fit(frame, y).predict(frame)
+
+    np.testing.assert_array_equal(fitted(2.0**10), fitted(1.0))
 
 
 @pytest.mark.slow

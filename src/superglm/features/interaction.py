@@ -32,6 +32,7 @@ from superglm.features.categorical import (
     _warn_unseen_routed,
 )
 from superglm.group_matrix import _discretize_column
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import (
     DiscreteTensorBuildResult,
     GroupInfo,
@@ -1399,12 +1400,43 @@ def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     mgcv rescales marginal penalties before constructing tensor penalties.
     Matching that convention keeps different
     margins on comparable penalty scales.
+
+    A penalty is left as it is when its largest eigenvalue is not positive and
+    finite, or when its spectrum is not positive semidefinite to the
+    eigensolver's resolution: a computed eigenvalue of a semidefinite matrix
+    is at least ``-p(n) eps`` times the largest (``_eigensolver_relative_bar``,
+    widened by the shared rank policy's ``certification_band``), and one
+    further below is round-off of a zero penalty, not a penalty. Both tests
+    are relative, so a margin's units cannot trip them: the absolute floor of
+    1e-12 they replace left a margin whose knots were 3.6e4 apart unscaled
+    beside a unit one, and ``decompose=True`` then refused the tensor.
     """
     eigvals = np.linalg.eigvalsh(S)
-    max_eig = float(np.max(eigvals)) if eigvals.size else 0.0
-    if max_eig <= 1e-12:
+    if not eigvals.size:
+        return S
+    max_eig = float(eigvals[-1])
+    if not (np.isfinite(max_eig) and max_eig > 0.0):
+        return S
+    resolution = SHARED_RANK_POLICY.certification_band * _eigensolver_relative_bar(S.shape[0])
+    if -float(eigvals[0]) > resolution * max_eig:
         return S
     return S / max_eig
+
+
+def _range_spread(margin: TensorMarginalInfo) -> float:
+    """A margin's least penalised direction's eigenvalue over its most penalised's, on its range.
+
+    The range is the structural penalty's (``TensorMarginalInfo.structural_penalty``),
+    so a direction the real penalty puts under round-off still counts; 1.0 for a
+    margin without a structural penalty, whose spectrum the split does not read
+    against one.
+    """
+    if margin.structural_penalty is None:
+        return 1.0
+    values, vectors = np.linalg.eigh(_normalize_tensor_penalty(margin.structural_penalty))
+    basis = vectors[:, ~_null_mask(values)]
+    restricted = np.linalg.eigvalsh(basis.T @ margin.penalty @ basis)
+    return max(float(restricted[0]), 0.0) / float(restricted[-1])
 
 
 _TENSOR_SCORE_CHUNK_SIZE = 8192
@@ -1738,6 +1770,28 @@ class TensorInteraction:
         )
         return np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
 
+    def _split_refusal(self) -> str:
+        """Why ``decompose=True`` cannot split this tensor, naming it and its spread margin."""
+        spreads = {
+            name: _range_spread(margin)
+            for name, margin in (
+                (self.feat1_name, self._marginal1),
+                (self.feat2_name, self._marginal2),
+            )
+        }
+        margin = min(spreads, key=spreads.__getitem__)
+        return (
+            f"TensorInteraction({self.feat1_name!r}, {self.feat2_name!r}, decompose=True) cannot "
+            "split its penalty into a bilinear part and the rest. On the "
+            f"{margin!r} margin the penalty on the least penalised curve shape is "
+            f"{spreads[margin]:.1e} of the penalty on the most penalised one, too small for "
+            "double precision to hold beside it; that comes from knot intervals that differ "
+            "greatly in width, usually the tail of a heavy-tailed column under quantile knots. "
+            f"Pass decompose=False, which needs no split. To keep the split, give {margin!r} "
+            'kind="ps", transform it (for example, take its logarithm), or place its knots '
+            "yourself."
+        )
+
     def _build_group_infos(
         self,
         omega_1: NDArray,
@@ -1766,9 +1820,12 @@ class TensorInteraction:
                 U_range = eigvecs[:, ~null_mask]
             else:
                 U_null = structural_vectors[:, structural_null]
-                U_range, _ = _certified_range(
-                    omega, structural_vectors[:, ~structural_null], subject="decompose=True"
-                )
+                try:
+                    U_range, _ = _certified_range(
+                        omega, structural_vectors[:, ~structural_null], subject="decompose=True"
+                    )
+                except ValueError as err:
+                    raise ValueError(self._split_refusal()) from err
             omega_1_range = U_range.T @ omega_1 @ U_range
             omega_2_range = U_range.T @ omega_2 @ U_range
             omega_range = 0.5 * (
