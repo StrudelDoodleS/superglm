@@ -273,6 +273,29 @@ test("the chip's hover text names a penalty other than the standard one, for the
   assert.equal(knotPenaltyTitle(waiting), null);
 });
 
+test("the chip's hover text hides the penalty while a kind, shape or level change waits too", () => {
+  const general = { difference_penalty: "general" };
+  const shown = "Smoothing penalty: general, for unevenly spaced knots.";
+  // The payload's pending record when nothing waits: every field null or empty.
+  const nothing = {
+    groups: null, ranges: [], reference: null, specials: null, knots: null, basis: null,
+  };
+  assert.equal(knotPenaltyTitle(numericTerm({ knots: general, pending: nothing })), shown);
+  const kind = { ...nothing, basis: { kind: "cr", select: false } };
+  assert.equal(knotPenaltyTitle(numericTerm({ knots: general, pending: kind })), null);
+  const shaped = {
+    ...nothing,
+    ranges: [{ lo: 2, hi: 6, degree: 1, join: "tangent", label: "Line" }],
+    basis: { kind: "bs", select: false },
+  };
+  assert.equal(knotPenaltyTitle(numericTerm({ knots: general, pending: shaped })), null);
+  const collapsed = { ...nothing, groups: { "18-34": ["18-24", "25-34"] } };
+  assert.equal(knotPenaltyTitle({ ...orderedTerm({ knots: general }), pending: collapsed }), null);
+  const special = { ...nothing, specials: ["65+"] };
+  assert.equal(knotPenaltyTitle({ ...orderedTerm({ knots: general }), pending: special }), null);
+  assert.equal(knotPenaltyTitle({ ...orderedTerm({ knots: general }), pending: nothing }), shown);
+});
+
 test("a waiting reset reads as listed in code, a waiting hand move as placed by hand", () => {
   const reset = numericTerm({
     knots: { positions: [2, 5, 6, 8], strategy: "explicit", from_editor: true },
