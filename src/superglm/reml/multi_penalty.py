@@ -89,6 +89,14 @@ class _DualityEvidence:
 
 
 @dataclass(frozen=True)
+class _StoredFactorEvidence:
+    """The QR factor and old-action bounds behind one set of stored factors."""
+
+    upper: NDArray
+    action_bounds: tuple[NDArray, ...]
+
+
+@dataclass(frozen=True)
 class _BasisGramEvidence:
     owner: int
     basis: NDArray
@@ -684,8 +692,9 @@ def _reference_correct_once(
     _evidence: list | None = None,
     _refine: bool = True,
 ) -> tuple[NDArray, NDArray, float, tuple[NDArray, ...]]:
-    actions, _ = _reference_root_actions(roots, lambdas, J, _refine=_refine)
-    upper = scipy.linalg.qr(np.vstack(actions), mode="r", check_finite=False)[0][: J.shape[1]]
+    actions, action_bounds = _reference_root_actions(roots, lambdas, J, _refine=_refine)
+    stacked = np.vstack(actions)
+    upper = scipy.linalg.qr(stacked, mode="r", check_finite=False)[0][: J.shape[1]]
     if upper.shape != (J.shape[1], J.shape[1]) or np.any(np.diag(upper) == 0):
         raise PenaltyNumericalError("reference QR cannot retain the fixed support")
     product_evidence = [] if _evidence is not None else None
@@ -694,10 +703,11 @@ def _reference_correct_once(
     _finite_double(new_J, "corrected inverse root")
     terms = [2 * math.log(abs(v)) for v in np.diag(upper)]
     new_logdet = math.fsum([logdet, *terms])
-    factors = tuple(
-        scipy.linalg.solve_triangular(upper.T, action.T, lower=True, check_finite=False).T
-        for action in actions
-    )
+    # The same substitution as new_J, so Higham's Theorem 8.5 bounds both
+    # residuals in _stored_factor_bound.
+    solved = _triangular_solve(upper.T, stacked.T).T
+    offsets = np.cumsum([len(action) for action in actions])[:-1]
+    factors = tuple(np.split(solved, offsets))
     if _evidence is not None:
         duality_evidence = []
         materialization = _materialization_logdet_bound(
@@ -715,9 +725,70 @@ def _reference_correct_once(
                 _gamma(4 * len(terms) + 2) * (abs(logdet) + math.fsum(map(abs, terms))),
                 materialization,
                 duality_evidence[0],
+                _StoredFactorEvidence(upper, action_bounds),
             )
         )
     return new_E, new_J, new_logdet, factors
+
+
+def _stored_factor_bound(
+    roots: Sequence[NDArray],
+    lambdas: NDArray,
+    inverse_root: NDArray,
+    factors: Sequence[NDArray],
+    evidence: _StoredFactorEvidence,
+) -> float:
+    """Bound ``||H_k J - F_k||_F`` summed over components, or 0 when unresolved.
+
+    ``H_k = sqrt(lambda_k) R_k`` is a weighted root. The correction formed
+    ``A_k``, within ``B_k`` of ``H_k J_old``, its QR factor ``U``, and by
+    substitution the stored factors ``F_k U = A_k`` and the inverse root
+    ``J U = J_old``. With the residuals ``P = J_old - J U`` and
+    ``Q_k = A_k - F_k U``, exactly
+
+        H_k J - F_k = ((H_k J_old - A_k) - H_k P + Q_k) U^{-1}.
+
+    Higham (2002), Theorem 8.5, applied row by row, gives ``|P| <= gamma_r
+    |J| |U|`` and ``|Q_k| <= gamma_r |F_k| |U|`` for rank ``r``, plus one
+    half subnormal per product and per quotient under gradual underflow.
+    ``H_k P`` is the representation error of the rounded ``J``: a reference
+    action of ``J`` meets it in full however accurate its own dot products
+    are, and it is large when ``|H_k| |J|`` far exceeds ``|H_k J|``. With
+    ``D = sign(diag U)``, ``||U^{-1}||_2 <= 1 / (1 - ||I - D U||_F)``
+    (Golub and Van Loan, 4th ed., Lemma 2.3.3). Without that bound the
+    function charges nothing, so the caller's comparison stays strict.
+    """
+    upper = evidence.upper
+    rank = len(upper)
+    signs = np.sign(np.diag(upper))
+    defect = _upper(_norm_upper(signs[:, None] * upper - np.eye(rank)) / (1 - _gamma(1)))
+    if not defect < 1:
+        return 0.0
+    inverse_norm = float(_upper(1 / (1 - defect) / (1 - _gamma(3))))
+    absolute_upper = np.abs(upper)
+    underflow = (rank + 1 + float(np.max(np.abs(np.diag(upper))))) * _SMALLEST_SUBNORMAL
+    solve = _gamma(rank)
+
+    def residual(solution: NDArray) -> NDArray:
+        magnitude = _positive_product(np.abs(solution), absolute_upper)
+        return _upper((solve * magnitude + underflow) / (1 - _gamma(3)))
+
+    representation = residual(inverse_root)
+    terms = [
+        _norm_upper(bound)
+        + _norm_upper(
+            _positive_product(
+                _upper((np.sqrt(weight) * np.abs(root) + _SMALLEST_SUBNORMAL) / (1 - _gamma(3))),
+                representation,
+            )
+        )
+        + _norm_upper(residual(factor))
+        for root, weight, factor, bound in zip(
+            roots, lambdas, factors, evidence.action_bounds, strict=True
+        )
+        if len(root)
+    ]
+    return float(_upper(inverse_norm * math.fsum(terms) / (1 - _gamma(len(terms) + 2))))
 
 
 def _triangular_solve(matrix: NDArray, rhs: NDArray) -> NDArray:
@@ -1057,9 +1128,87 @@ def _evaluate_penalty_summary(
             # Every factor, correction and error ledger below starts again
             # from the original proposal. No failed candidate state transfers.
             object.__setattr__(support, "_basis_gram_evidence", previous_basis)
-    return cast(
-        _PenaltySummary,
-        _evaluate_penalty_geometry(support, values, eps_rank, summary_only=True),
+    try:
+        return cast(
+            _PenaltySummary,
+            _evaluate_penalty_geometry(support, values, eps_rank, summary_only=True),
+        )
+    except PenaltyNumericalError:
+        direct_sum = _direct_sum_summary(support, values, eps_rank)
+        if direct_sum is None:
+            raise
+        return direct_sum
+
+
+def _direct_sum_summary(
+    support: _PenaltySupport, values: NDArray, eps_rank: float | None
+) -> _PenaltySummary | None:
+    """The affine log-lambda identity for components whose ranges form a direct sum.
+
+    When the component roots ``R_k`` (``r_k`` independent rows each) stack to
+    exactly the support rank ``r``, ``R Q`` is square for the support basis
+    ``Q``, and with ``Lambda = diag(lambda_k I_{r_k})``
+
+        log|Q' S(lambda) Q| = log|det(Lambda)| + log|det(R Q)|**2
+                            = sum_k r_k log(lambda_k) + log|Q' S(1) Q|,
+
+    by multiplicativity of the determinant. The derivatives in
+    ``log(lambda)`` are ``r_k`` with a zero Hessian, as ``tr(S^- S_k) =
+    rank(S_k) / lambda_k`` for non-overlapping penalties (Wood and Fasiolo,
+    2017, section 2), and the root-error term is the unit-weight one, because
+    exact roots obeying the same rank pattern satisfy the same identity. A
+    ``select=True`` pair (Marra and Wood, 2011) is the standard case. The
+    general evaluation at a large weight ratio represents ``S(lambda)`` by a
+    root whose condition is the square root of that ratio times the roots'
+    own, and can then legitimately miss its accuracy contract; the unit-weight
+    evaluation carries no ratio. ``None`` when the identity does not apply,
+    or at unit weights, where it would repeat the refused evaluation.
+    """
+    roots = support.component_roots
+    if (
+        not np.all(values > 0)
+        or np.all(values == 1)
+        or any(len(root) == 0 for root in roots)
+        or sum(len(root) for root in roots) != support.rank
+    ):
+        return None
+    try:
+        unit = cast(
+            _PenaltySummary,
+            _evaluate_penalty_geometry(support, np.ones(len(roots)), eps_rank, summary_only=True),
+        )
+    except PenaltyNumericalError:
+        return None
+    ranks = np.array([len(root) for root in roots], dtype=np.float64)
+    terms = [unit.logdet_s_plus, *(float(rank * math.log(v)) for rank, v in zip(ranks, values))]
+    logdet = math.fsum(terms)
+    # Each log carries at most one ulp (2u), its integer multiple one more
+    # rounding, and the correctly rounded fsum one; gamma(4) covers them.
+    logdet_error = float(
+        _upper(
+            unit._certificate.logdet_error
+            + _gamma(4) * math.fsum(abs(term) for term in terms)
+            + _UNIT_ROUNDOFF * abs(logdet)
+        )
+    )
+    count = len(roots)
+    gradient, hessian = _readonly(ranks), _readonly(np.zeros((count, count)))
+    return _PenaltySummary(
+        logdet,
+        support.rank,
+        gradient,
+        hessian,
+        unit._support,
+        _PenaltySummaryCertificate(
+            unit._certificate.whitening_error,
+            unit._certificate.duality_error,
+            logdet_error,
+            _readonly(np.zeros(count)),
+            _readonly(np.zeros((count, count))),
+            unit._certificate.resolution_limited,
+        ),
+        _readonly(values),
+        unit._correction_count,
     )
 
 
@@ -1217,11 +1366,21 @@ def _evaluate_penalty_geometry(
             )
             cache_allowance = target * rank + math.fsum(_norm_upper(b) for b in bounds)
             if discrepancy > cache_allowance:
-                if correction_index > 0:
+                # A first-pass disagreement only asks for a refined second
+                # correction. Refusing after it must also charge the stored
+                # factors' own arithmetic and the rounded J's representation.
+                if correction_index == 0:
+                    break
+                stored = evidence[0][5] if len(evidence[0]) > 5 else None
+                charged = (
+                    0.0
+                    if stored is None
+                    else _stored_factor_bound(support.component_roots, values, J, cached, stored)
+                )
+                if discrepancy > float(_upper(cache_allowance + charged)):
                     raise PenaltyNumericalError(
                         "stored derivative factor disagrees with reference action accuracy certificate"
                     )
-                break
             gradient, hessian, g_error, h_error = _derivative_values(action, bounds, eta)
             log_error = (
                 factor_log_error + _logdet_defect_bound(*whitening_evidence[0]) + dual_log_error

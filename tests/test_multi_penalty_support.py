@@ -1218,3 +1218,96 @@ def test_corrected_dual_product_is_reused_only_for_unchanged_operands(monkeypatc
         with pytest.raises(module.PenaltyNumericalError):
             module._evaluate_penalty_summary(support, np.array([3.0, 4.0]))
         assert repeated
+
+
+def _graded_roots_support(roots):
+    from superglm.reml.penalty_support import _penalty_support_from_roots
+
+    return _penalty_support_from_roots(
+        roots,
+        resolution_limited=[False] * len(roots),
+        input_error_bounds=[np.zeros_like(root) for root in roots],
+    )
+
+
+def _exact_direct_sum_logdet(roots, weights) -> Decimal:
+    """``log pdet(sum_k w_k R_k' R_k) = sum_k r_k log w_k + log det(R R')`` for a
+    stacked ``R`` of full row rank, in exact rationals and 60-digit logarithms."""
+    stacked = [[Fraction(float(v)) for v in row] for row in np.vstack(roots)]
+    gram = [[sum(a * b for a, b in zip(r, s, strict=True)) for s in stacked] for r in stacked]
+    determinant = Fraction(1)
+    for i in range(len(gram)):
+        pivot = next(j for j in range(i, len(gram)) if gram[j][i] != 0)
+        if pivot != i:
+            gram[i], gram[pivot] = gram[pivot], gram[i]
+            determinant = -determinant
+        determinant *= gram[i][i]
+        for j in range(i + 1, len(gram)):
+            factor = gram[j][i] / gram[i][i]
+            gram[j] = [a - factor * b for a, b in zip(gram[j], gram[i], strict=True)]
+    with localcontext() as context:
+        context.prec = 60
+        log_gram = (Decimal(determinant.numerator) / Decimal(determinant.denominator)).ln()
+        return log_gram + sum(
+            len(root) * Decimal.from_float(float(w)).ln()
+            for root, w in zip(roots, weights, strict=True)
+        )
+
+
+def test_stored_factor_check_charges_the_rounded_inverse_root(monkeypatch):
+    """The stored factors are the actions of J_old U^-1, the fresh actions those of the
+    rounded J: H (J - J_old U^-1) is O(u |H| |J|), which the old allowance omitted, so
+    it refused this geometry, whose determinant meets its own certificate."""
+    from superglm.reml import multi_penalty as module
+
+    rng = np.random.default_rng(45)
+    roots = []
+    for rank in (2, 3):
+        grade = 10.0 ** rng.uniform(-6, 0, size=rank)
+        rows = grade[:, None] * rng.standard_normal((rank, 10))
+        roots.append(rows * 10.0 ** rng.uniform(-3, 3, 10))
+    weights = np.array([1e8, 1e-3])
+    support = _graded_roots_support(roots)
+
+    result = module._evaluate_penalty_geometry(support, weights, None, summary_only=False)
+    exact = _exact_direct_sum_logdet(support.component_roots, weights)
+    assert abs(Decimal.from_float(result.logdet_s_plus) - exact) <= Decimal.from_float(
+        result._certificate.logdet_error
+    )
+
+    monkeypatch.setattr(module, "_stored_factor_bound", lambda *args, **kwargs: 0.0)
+    with pytest.raises(module.PenaltyNumericalError, match="stored derivative factor"):
+        module._evaluate_penalty_geometry(support, weights, None, summary_only=False)
+
+
+def test_direct_sum_summary_takes_the_affine_identity_where_the_geometry_refuses(monkeypatch):
+    """A select pair at the discrete start: the null weight at its cap, the wiggle root
+    graded over 1e7. The weighted root's condition is near 1e12, the general summary
+    misses its accuracy contract, and the ranks summing to the support make the
+    determinant affine in log(lambda) about the unit-weight one."""
+    from superglm.reml import multi_penalty as module
+
+    rng = np.random.default_rng(0)
+    null = rng.standard_normal((1, 11))
+    wiggle = (10.0 ** np.linspace(0, -7, 10))[:, None] * rng.standard_normal((10, 11))
+    support = _graded_roots_support([null, wiggle])
+    weights = np.array([1e10, 1e-3])
+    with pytest.raises(module.PenaltyNumericalError, match="accuracy contract"):
+        module._evaluate_penalty_geometry(support, weights, None, summary_only=True)
+
+    summary = module._evaluate_penalty_summary(support, weights)
+    exact = _exact_direct_sum_logdet(support.component_roots, weights)
+    assert abs(Decimal.from_float(summary.logdet_s_plus) - exact) <= Decimal.from_float(
+        summary._certificate.logdet_error
+    )
+    assert summary.rank == 11
+    np.testing.assert_array_equal(summary.gradient, [1.0, 10.0])
+    np.testing.assert_array_equal(summary.hessian, np.zeros((2, 2)))
+
+    # Overlapping ranges (rows exceed the support rank) take no identity.
+    overlapping = _graded_roots_support([null, wiggle, wiggle[:2]])
+    assert module._direct_sum_summary(overlapping, np.array([1e10, 1e-3, 1.0]), None) is None
+
+    monkeypatch.setattr(module, "_direct_sum_summary", lambda *args: None)
+    with pytest.raises(module.PenaltyNumericalError, match="accuracy contract"):
+        module._evaluate_penalty_summary(support, weights)
