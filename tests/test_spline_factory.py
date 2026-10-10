@@ -533,13 +533,18 @@ class TestPenaltyUnits:
         functions' support, from the knot at 6.67, is clear of the range, so their
         block is the same with the range as without it, to rounding.
 
-        The two knot vectors evaluate the same local polynomials by different index
-        paths (ARM64 rounded one entry an ulp apart). Each entry sums 9 terms
-        ``w d_i d_j`` (3 intervals, 3 Gauss points); a second derivative from the
-        degree-3 recursion carries about 3 roundings per level, ``gamma_9``, so a
-        term carries ``gamma_20`` and the sum ``gamma_29`` of ``sum |w d_i d_j|``,
-        which Cauchy-Schwarz bounds by ``sqrt(P_ii P_jj)``. The unfixed hbar moves
-        the block by (9/8)**3, 42%."""
+        Both builds map those knots to the same u (the same t[3], and hbar is
+        (t[n_basis] - t[3]) / 9 by the same two operations), take the same Gauss
+        points, and scipy's de Boor recursion reads only the local knots, so the
+        derivative values are the same bits. The blocks differ only in assembly:
+        one rounding for ``Dm_q * w_q``, three for each 3-term sum of products
+        (whose BLAS kernel depends on the matrix width: ARM64 rounded one entry an
+        ulp apart), and five for the sum over at most six interval blocks (for bs,
+        the three intervals past the open knot vector's end, where scipy extends
+        the last piece, are integrated too). So each entry is within ``gamma_9`` of
+        ``sum |w d_i d_j|``, which Cauchy-Schwarz bounds by
+        ``sqrt(P_ii P_jj) / (1 - gamma_9)``. The unfixed hbar moves the block by
+        (9/8)**3, 42%."""
         from superglm import PolynomialRange
 
         x = np.random.default_rng(4).uniform(0.0, 10.0, 2_000)
@@ -551,8 +556,8 @@ class TestPenaltyUnits:
 
         ranged, plain = block([PolynomialRange(3.0, 6.0, 1)]), block([])
         u = np.finfo(np.float64).eps / 2
-        gamma = 29 * u / (1 - 29 * u)
-        scale = np.sqrt(np.outer(np.diag(plain), np.diag(plain)))
+        gamma = 9 * u / (1 - 9 * u)
+        scale = np.sqrt(np.outer(np.diag(plain), np.diag(plain))) / (1 - gamma)
         assert np.all(np.abs(ranged - plain) <= 2 * gamma * scale)
 
     def test_on_even_knots_the_curvature_penalty_is_a_sandwiched_difference_penalty(self):
