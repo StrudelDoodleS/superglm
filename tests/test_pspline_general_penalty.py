@@ -400,6 +400,7 @@ def test_select_splits_a_skewed_integrated_penalty_at_its_structural_null_space(
     assert null @ penalty @ null <= 2 * bound
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("select", [False, True], ids=["plain", "select"])
 @pytest.mark.parametrize(
     ("kind", "sigma", "n_knots", "nullity"),
@@ -407,13 +408,14 @@ def test_select_splits_a_skewed_integrated_penalty_at_its_structural_null_space(
     ids=["kindless_cr", "bs"],
 )
 def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
-    kind, sigma, n_knots, nullity, select
+    kind, sigma, n_knots, nullity, select, discrete
 ):
     """REML ranked a cr or bs penalty at eps**(2/3) of its largest eigenvalue, and on
     these knots the tail direction (4e-12 for cr, 2e-11 for bs) fell under it: the fit
     penalised a direction that log|S|+ counted as unpenalised. The rank is the
     structure's: ``n_basis`` less the lines, and for cr less its two natural boundary
-    conditions as well.
+    conditions as well. The discrete build declares it separately; 256 bins still
+    place the knots on the column's quantiles.
 
     A lifted plain term takes the solver-space support without a raw attempt, which
     could not admit it (``_single_penalty_raw_family``).
@@ -424,7 +426,9 @@ def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
     y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
     kinds = {} if kind is None else {"kind": kind}
     spline = Spline(n_knots=n_knots, knot_strategy="quantile_rows", select=select, **kinds)
-    model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
+    model = SuperGLM(family="poisson", discrete=discrete, n_bins=256, features={"x": spline})
+    model.fit_reml(pd.DataFrame({"x": x}), y)
+    assert model._specs["x"]._knot_strategy_actual == "quantile_rows"
     components = {component.name: component for component in _reml_components(model)}
     wiggle = components["x:wiggle"] if select else components["x"]
     assert wiggle.rank == model._specs["x"]._n_basis - nullity
