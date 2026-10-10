@@ -42,6 +42,7 @@
     ],
     "covariance_frobenius": 0.011059149918310206,
     "covariance_trace": 0.024561466830210814,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.12247706806042509,
       "scale:z#wiggle": 497.5430547531401
@@ -70,6 +71,9 @@
     ],
     "covariance_frobenius": 0.011058723182048808,
     "covariance_trace": 0.024504394947463704,
+    "drifting": {
+      "scale:z#wiggle": 1.0
+    },
     "lambdas": {
       "mean:x#wiggle": 0.12249818190885432,
       "scale:z#wiggle": 1500.6108942252463
@@ -120,6 +124,9 @@
     ],
     "covariance_frobenius": 0.012439941907566698,
     "covariance_trace": 0.029058314625789068,
+    "drifting": {
+      "scale:z#wiggle": 1.0
+    },
     "lambdas": {
       "location:x#wiggle": 0.1566115325909426,
       "scale:z#wiggle": 79593039.87879092
@@ -148,6 +155,7 @@
     ],
     "covariance_frobenius": 0.012438208226925243,
     "covariance_trace": 0.02905539199295113,
+    "drifting": {},
     "lambdas": {
       "location:x#wiggle": 0.1566634272623431,
       "scale:z#wiggle": 79593039.8787909
@@ -200,6 +208,7 @@
     ],
     "covariance_frobenius": 0.01449792730679002,
     "covariance_trace": 0.03725819554594208,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.14361124504914044,
       "scale:z#wiggle": 24.355071428550236
@@ -229,6 +238,7 @@
     ],
     "covariance_frobenius": 0.014493748613939804,
     "covariance_trace": 0.03725157446942265,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.1437514254132702,
       "scale:z#wiggle": 24.321536451976392
@@ -269,6 +279,7 @@
     ],
     "covariance_frobenius": 0.056068614622832275,
     "covariance_trace": 0.12815180727429068,
+    "drifting": {},
     "lambdas": {
       "scale:x#wiggle": 0.11679920729852099
     },
@@ -291,6 +302,7 @@
     ],
     "covariance_frobenius": 0.056053993831389044,
     "covariance_trace": 0.12809526084764866,
+    "drifting": {},
     "lambdas": {
       "scale:x#wiggle": 0.11700176713450232
     },
@@ -340,6 +352,9 @@
     ],
     "covariance_frobenius": 0.012532850644863116,
     "covariance_trace": 0.029211631624367684,
+    "drifting": {
+      "scale:z#wiggle": 1.0
+    },
     "lambdas": {
       "mean:x#wiggle": 0.1550653099082039,
       "scale:z#wiggle": 10933717.630539954
@@ -368,6 +383,7 @@
     ],
     "covariance_frobenius": 0.012530996801765554,
     "covariance_trace": 0.029208507264553575,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.1551199577031875,
       "scale:z#wiggle": 10933717.630539956
@@ -418,6 +434,9 @@
     ],
     "covariance_frobenius": 0.039686324773477805,
     "covariance_trace": 0.10751954282286556,
+    "drifting": {
+      "theta:z#wiggle": 1.0
+    },
     "lambdas": {
       "mean:x#wiggle": 0.07910861533281312,
       "theta:z#wiggle": 425372.6527605636
@@ -446,6 +465,9 @@
     ],
     "covariance_frobenius": 0.03971749940930515,
     "covariance_trace": 0.10759282470731237,
+    "drifting": {
+      "theta:z#wiggle": 1.0
+    },
     "lambdas": {
       "mean:x#wiggle": 0.07889741581597533,
       "theta:z#wiggle": 21605.792680868253
@@ -498,6 +520,7 @@
     ],
     "covariance_frobenius": 0.024340222212692903,
     "covariance_trace": 0.07165673701355035,
+    "drifting": {},
     "lambdas": {
       "dispersion:z#wiggle": 2.109020814210136,
       "mean:x#wiggle": 0.10322554847543569
@@ -527,6 +550,7 @@
     ],
     "covariance_frobenius": 0.02430794499493817,
     "covariance_trace": 0.07145130573606846,
+    "drifting": {},
     "lambdas": {
       "dispersion:z#wiggle": 2.1642259031737163,
       "mean:x#wiggle": 0.10339261371453504
@@ -579,6 +603,7 @@
     ],
     "covariance_frobenius": 0.021477597198019293,
     "covariance_trace": 0.04354636033784773,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.16557650393876683,
       "scale:z#wiggle": 23.31931073184867
@@ -608,6 +633,7 @@
     ],
     "covariance_frobenius": 0.021493887919972414,
     "covariance_trace": 0.043609285688386915,
+    "drifting": {},
     "lambdas": {
       "mean:x#wiggle": 0.16478586687480085,
       "scale:z#wiggle": 22.613157560358562

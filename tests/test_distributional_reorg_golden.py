@@ -13,8 +13,9 @@ times 1 + |V|), and the convergence reason exactly.  Lambdas are compared on
 the log scale, because a smoothing parameter is a positive quantity and the
 record spans 0.079 to 7.9e7: |log(new/old)| <= 1e-6 below the saturation floor,
 and such a lambda may not cross that floor. A saturated lambda is held only to
-staying above it, and one the loop was still moving when it stopped only to its
-direction (``_SATURATED_LAMBDA``, ``_DRIFTING_LOG_STEP``).
+staying above it, and one the loop was still moving when it stopped only to
+drifting the same way as in the record (``_SATURATED_LAMBDA``,
+``_DRIFTING_LOG_STEP``).
 
 Re-recording the 12 pre-existing entries in tolerance form did move two
 numbers, and only two.  Decoding the byte-identical record against this one,
@@ -61,9 +62,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
 from pathlib import Path
-from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -202,6 +201,7 @@ def _record(model: SuperLSS) -> dict[str, object]:
         payload["objective"] = float(smoothing.objective)
         payload["lambdas"] = {k: float(v) for k, v in smoothing.lambdas.items()}
         payload["reason"] = smoothing.convergence_reason
+        payload["drifting"] = _drifting(model)
     return payload
 
 
@@ -231,8 +231,8 @@ _LOG_LAMBDA_TOLERANCE = 1.0e-6
 # ``+newton`` twin stops at 2.16e4 with the same fit), so its value is where the
 # loop stopped. Measured on this record, the ridge lambdas' last accepted steps
 # are 0.45 to 2.5 in log and every other lambda's at most 6.5e-2; this bar sits
-# in that gap. Such a lambda is held only to the direction it was moving, on
-# either side of the floor.
+# in that gap. The record stores which way each such lambda was moving; the
+# computed run must drift the same way, and its value is not held.
 _DRIFTING_LOG_STEP = 0.25
 _OBJECTIVE_RESOLUTION = DistributionalEFSConfig().objective_tolerance
 
@@ -255,12 +255,7 @@ def _drifting(model: SuperLSS) -> dict[str, float]:
     }
 
 
-def _assert_close(
-    name: str,
-    computed: dict[str, object],
-    recorded: dict[str, object],
-    drifting: Mapping[str, float] = MappingProxyType({}),
-) -> None:
+def _assert_close(name: str, computed: dict[str, object], recorded: dict[str, object]) -> None:
     assert set(computed) == set(recorded), f"{name}: recorded fields differ"
     # Scale near-zero coefficients like the rest instead of imposing a tighter floor.
     computed_coefficients = np.asarray(computed["coefficients"])
@@ -284,18 +279,19 @@ def _assert_close(
             1.0 + abs(recorded["objective"])
         ), f"{name}: objective moved"
         assert set(computed["lambdas"]) == set(recorded["lambdas"]), f"{name}: lambda keys differ"
+        # A drifting lambda must drift the same way as in the recording run; its
+        # value is where the loop stopped, a step either side of the record's.
+        drifting = recorded["drifting"]
+        assert computed["drifting"] == drifting, (
+            f"{name}: drifting lambdas {computed['drifting']} against recorded {drifting}"
+        )
         for key, value in recorded["lambdas"].items():
             other = computed["lambdas"][key]
             assert value > 0.0 and other > 0.0, f"{name}: lambda {key} is not positive"
+            if key in drifting:
+                continue
             if value >= _SATURATED_LAMBDA:
                 assert other >= _SATURATED_LAMBDA, f"{name}: lambda {key} left saturation"
-                continue
-            if key in drifting:
-                # Held by direction: one more step on its ridge would carry it
-                # past the floor (4.25e5 times e**1.327), with the fit unchanged.
-                assert drifting[key] * math.log(other / value) >= -_DRIFTING_LOG_STEP, (
-                    f"{name}: drifting lambda {key} turned back"
-                )
                 continue
             assert other < _SATURATED_LAMBDA, f"{name}: lambda {key} saturated"
             assert abs(math.log(other / value)) <= _LOG_LAMBDA_TOLERANCE, (
@@ -338,10 +334,9 @@ def _in_recorded_units(record: dict[str, object], per_knot: dict[str, float]):
     return record
 
 
-def _compute() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, float]]]:
+def _compute() -> dict[str, dict[str, object]]:
     cases, frame = _cases()
     out = {}
-    drifting = {}
     for name, (family, predictors, y) in cases.items():
         per_knot = _per_knot(frame, predictors)
         fixed = model_from_templates(family=family, predictors=predictors).fit(
@@ -355,17 +350,15 @@ def _compute() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, float]
             frame, y, outer="efs", initial_lambda=0.1, lambdas=starts
         )
         out[f"{name}:reml"] = _in_recorded_units(_record(reml), per_knot)
-        drifting[f"{name}:reml"] = _drifting(reml)
         newton = model_from_templates(family=family, predictors=predictors).fit_reml(
             frame, y, outer="efs+newton", initial_lambda=0.1, lambdas=starts
         )
         out[f"{name}:reml+newton"] = _in_recorded_units(_record(newton), per_knot)
-        drifting[f"{name}:reml+newton"] = _drifting(newton)
-    return out, drifting
+    return out
 
 
 def test_outputs_reproduce_the_golden_record_within_tolerance(request) -> None:
-    computed, drifting = _compute()
+    computed = _compute()
     if request.config.getoption("--regenerate-golden", default=False):
         GOLDEN.write_text(json.dumps(computed, indent=2, sort_keys=True))
         pytest.skip("golden record regenerated")
@@ -373,38 +366,42 @@ def test_outputs_reproduce_the_golden_record_within_tolerance(request) -> None:
     assert set(computed) == set(recorded)
     # Only the record's flat scale directions drift; the location and mean
     # lambdas, which every case identifies, stay held to the tight bound.
-    assert "theta:z#wiggle" in drifting["nb2:reml"]
-    assert all(key.endswith("z#wiggle") for keys in drifting.values() for key in keys)
+    drifting = [entry.get("drifting", {}) for entry in recorded.values()]
+    assert all(key.endswith("z#wiggle") for keys in drifting for key in keys)
     for name in recorded:
-        _assert_close(name, computed[name], recorded[name], drifting.get(name, {}))
+        _assert_close(name, computed[name], recorded[name])
 
 
 def _recorded_entry(name: str) -> dict[str, object]:
     return json.loads(json.dumps(json.loads(GOLDEN.read_text())[name]))
 
 
-def test_a_drifting_lambda_may_take_another_step_on_its_ridge() -> None:
-    """One more outer step carries ``nb2:reml``'s ``theta:z#wiggle`` past the floor."""
+def test_a_drifting_lambda_is_held_to_its_recorded_direction_not_its_value() -> None:
+    """``nb2:reml``'s ``theta:z#wiggle`` climbs 1.327 in log per step on its ridge: a run
+    that stops a step later (past the floor) or a step earlier passes, and one that
+    drifts the other way, or stops drifting, fails."""
     recorded = _recorded_entry("nb2:reml")
-    computed = _recorded_entry("nb2:reml")
-    computed["lambdas"]["theta:z#wiggle"] *= math.exp(1.327)
-    assert computed["lambdas"]["theta:z#wiggle"] >= _SATURATED_LAMBDA
-    _assert_close("nb2:reml", computed, recorded, {"theta:z#wiggle": 1.0})
-    with pytest.raises(AssertionError, match="theta:z#wiggle"):
+    assert recorded["drifting"] == {"theta:z#wiggle": 1.0}
+    for factor in (math.exp(1.327), math.exp(-1.327)):
+        computed = _recorded_entry("nb2:reml")
+        computed["lambdas"]["theta:z#wiggle"] *= factor
         _assert_close("nb2:reml", computed, recorded)
-    computed["lambdas"]["theta:z#wiggle"] = recorded["lambdas"]["theta:z#wiggle"] / 2.0
-    with pytest.raises(AssertionError, match="turned back"):
-        _assert_close("nb2:reml", computed, recorded, {"theta:z#wiggle": 1.0})
-    # A lambda drifting down its ridge is held to its own direction.
-    _assert_close("nb2:reml", computed, recorded, {"theta:z#wiggle": -1.0})
+    for drift in ({"theta:z#wiggle": -1.0}, {}):
+        computed = _recorded_entry("nb2:reml")
+        computed["drifting"] = drift
+        with pytest.raises(AssertionError, match="drifting"):
+            _assert_close("nb2:reml", computed, recorded)
 
 
 def test_a_lambda_that_leaves_saturation_is_still_caught() -> None:
-    recorded = _recorded_entry("gaussian:reml")
-    computed = _recorded_entry("gaussian:reml")
+    # The Newton endgame stops this saturated lambda without drifting (the plain
+    # EFS run's twin is still climbing, and is held only to that).
+    recorded = _recorded_entry("gaussian:reml+newton")
+    assert recorded["drifting"] == {}
+    computed = _recorded_entry("gaussian:reml+newton")
     computed["lambdas"]["scale:z#wiggle"] = 1.0e3
     with pytest.raises(AssertionError, match="scale:z#wiggle"):
-        _assert_close("gaussian:reml", computed, recorded)
+        _assert_close("gaussian:reml+newton", computed, recorded)
 
 
 def test_an_unsaturated_lambda_is_still_held_to_the_tight_bound() -> None:
