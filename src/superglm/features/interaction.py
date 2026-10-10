@@ -22,6 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
@@ -427,7 +428,7 @@ class SplineCategorical:
                         **shared,
                     )
                 )
-        return groups
+        return _with_structural_ranks(spline_spec, groups)
 
     def build_discrete(
         self,
@@ -501,7 +502,7 @@ class SplineCategorical:
                     spline_cat_feature=self.cat_name,
                 )
             )
-        return groups
+        return _with_structural_ranks(spline_spec, groups)
 
     def set_reparametrisation(self, R_inv_dict: dict[str, NDArray] | NDArray) -> None:
         if isinstance(R_inv_dict, dict):
@@ -1387,6 +1388,19 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
     return np.einsum("ij,ik->ijk", B1, B2).reshape(B1.shape[0], B1.shape[1] * B2.shape[1])
 
 
+def _with_structural_ranks(spline_spec, groups: list[GroupInfo]) -> list[GroupInfo]:
+    """Declare each level's penalty rank from the margin's structural penalty.
+
+    Every level shares one projected penalty, so one declaration serves them
+    all; REML then ranks a skewed cr margin's tail direction as the main
+    effect does (``structural_penalty_ranks``), not at its spread.
+    """
+    ranks = structural_penalty_ranks(spline_spec, groups[0]) if groups else None
+    for info in groups:
+        info.structural_ranks = ranks
+    return groups
+
+
 def _require_one_tensor_null(null_mask: NDArray) -> None:
     n_null = int(np.sum(null_mask))
     if n_null != 1:
@@ -1738,6 +1752,25 @@ class TensorInteraction:
         )
         return np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
 
+    def _structural_margin_ranks(self) -> dict[str, int] | None:
+        """Each margin component's rank from its margin's structural penalty.
+
+        ``rank(A (x) I_q) = rank(A) q``, and restricting it to the complement
+        of the tensor null space (``decompose=True``) keeps that rank, since
+        the tensor null space lies in the component's own.
+        """
+        ranks = {}
+        for name, margin, repeat in (
+            (self.feat1_name, self._marginal1, self._p2),
+            (self.feat2_name, self._marginal2, self._p1),
+        ):
+            if margin.structural_penalty is None:
+                continue
+            rank = _gapped_rank(np.linalg.eigvalsh(margin.structural_penalty))
+            if rank is not None:
+                ranks[f"margin_{name}"] = rank * repeat
+        return ranks or None
+
     def _build_group_infos(
         self,
         omega_1: NDArray,
@@ -1795,6 +1828,7 @@ class TensorInteraction:
                         (f"margin_{self.feat1_name}", omega_1_range),
                         (f"margin_{self.feat2_name}", omega_2_range),
                     ],
+                    structural_ranks=self._structural_margin_ranks(),
                 ),
             ]
 
@@ -1810,6 +1844,7 @@ class TensorInteraction:
                 (f"margin_{self.feat1_name}", omega_1),
                 (f"margin_{self.feat2_name}", omega_2),
             ],
+            structural_ranks=self._structural_margin_ranks(),
         )
 
     def build(

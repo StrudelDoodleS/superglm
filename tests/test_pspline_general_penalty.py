@@ -276,13 +276,76 @@ def _skewed(sigma: float, n: int, seed: int):
     return x, rng
 
 
-def _reml_ranks(model) -> dict[str, float]:
+def _reml_components(model):
     from superglm.model.reml_setup import collect_reml_groups
     from superglm.reml.penalty_algebra import build_penalty_components
 
     matrices = model._dm.group_matrices
-    components = build_penalty_components(matrices, collect_reml_groups(model._groups, matrices))
-    return {component.name: component.rank for component in components}
+    return build_penalty_components(matrices, collect_reml_groups(model._groups, matrices))
+
+
+def _reml_ranks(model) -> dict[str, float]:
+    return {component.name: component.rank for component in _reml_components(model)}
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+@pytest.mark.parametrize("knot_strategy", ["quantile_rows", "uniform"])
+def test_spline_by_factor_ranks_a_skewed_kindless_margin_at_its_structural_rank(
+    knot_strategy, discrete
+):
+    """A kindless (cr) parent's interaction margin is a cardinal spline on the column's
+    quantiles, whatever the parent's knots, so on lognormal(0, 2) its tail direction
+    sat under REML's eps**(2/3) cut, one short per non-base level. Each level's
+    penalty is the centred cardinal penalty, whose null space is the centred line."""
+    from superglm.features.categorical import Categorical
+
+    x, rng = _skewed(2.0, 10_000, 0)
+    level = rng.choice(["a", "b", "c"], x.size)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * np.tanh(np.log(x)) * (level == "b")))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=discrete,
+        features={"x": Spline(n_knots=15, knot_strategy=knot_strategy), "f": Categorical()},
+        interactions=[("x", "f")],
+    ).fit(pd.DataFrame({"x": x, "f": level}), y)
+    levels = [c for c in _reml_components(model) if c.name.startswith("x:f[")]
+    assert len(levels) == 2
+    for component in levels:
+        assert component.rank == component.group_sl.stop - component.group_sl.start - 1
+
+
+def test_a_discrete_tensor_ranks_a_skewed_kindless_margin_at_its_structural_rank():
+    """The discrete tensor ranked each margin's spectrum at eps**(2/3): a skewed cardinal
+    margin lost its tail direction once per column of the other margin, in the
+    component ranks and in the closed-form pair determinant alike. ``A (x) I + I (x) B``
+    has null space ``null(A) (x) null(B)``: one direction for two centred margins."""
+    from superglm.reml.penalty_algebra import (
+        build_tensor_pair_logdet_summaries,
+        evaluate_tensor_pair_logdet_summaries,
+    )
+
+    x, rng = _skewed(2.0, 10_000, 0)
+    z = rng.uniform(0.0, 1.0, x.size)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * np.tanh(np.log(x)) * (1 + z)))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        features={"x": Spline(n_knots=15, knot_strategy="quantile_rows"), "z": Spline(n_knots=5)},
+        interactions=[("x", "z")],
+    ).fit(pd.DataFrame({"x": x, "z": z}), y)
+    components = [c for c in _reml_components(model) if c.group_name == "x:z"]
+    ranks = {c.name: c.rank for c in components}
+    width = components[0].group_sl.stop - components[0].group_sl.start
+    p2 = 6  # five interior knots: seven cardinal values, less the centring
+    p1 = width // p2
+    assert ranks == {"x:z:margin_x": (p1 - 1) * p2, "x:z:margin_z": p1 * (p2 - 1)}
+    summaries = build_tensor_pair_logdet_summaries(model._dm.group_matrices, components)
+    evaluation = evaluate_tensor_pair_logdet_summaries(
+        summaries, {"x:z:margin_x": 1.0, "x:z:margin_z": 1.0}
+    )["x:z"]
+    assert evaluation.rank == width - 1
 
 
 @pytest.mark.parametrize("select", [False, True], ids=["plain", "select"])
