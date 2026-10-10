@@ -8,9 +8,11 @@ import pytest
 
 from superglm import Spline, SuperGLM
 from superglm.features._spline_penalties import (
+    _polynomial_coefficients,
     build_difference_penalty,
     build_general_difference_penalty,
 )
+from superglm.solvers.rank import SHARED_RANK_POLICY
 
 UNEVEN = [0.5, 0.8, 1.1, 1.4, 1.7, 2.0, 5.0, 8.0]
 u = np.finfo(np.float64).eps / 2
@@ -23,7 +25,7 @@ def _built(**kwargs):
 
 
 def _null_bound(spline, penalty, line) -> float:
-    """Round-off bound on ``line' P line`` for a line ``P`` annihilates in exact arithmetic.
+    """Round-off bound on ``line' P line`` for a line Li and Cao's penalty annihilates.
 
     Building ``D`` costs ``gamma_{2m}`` per entry (m differences, m scalings),
     forming ``D'D`` ``gamma_n``, a final scale factor one rounding, and the
@@ -41,6 +43,67 @@ def _greville(spline) -> np.ndarray:
     """The coefficients of f(x) = x in the spline's B-spline basis."""
     t, d = spline._knots, spline.degree + 1
     return np.array([t[j + 1 : j + d].mean() for j in range(spline._n_basis)])
+
+
+def _assert_the_projected_factor_keeps_the_line(spline, penalty, line):
+    """The penalty is the Gram of ``F = Delta_2 (I - Q Q')`` and ``F`` sends the line to round-off.
+
+    ``P = fl(F'F)`` is within ``gamma_{n-2} |F|'|F|`` of ``F'F`` (Higham 2002,
+    section 3.5); two such Grams differ by twice that, which Li and Cao's rows or
+    the unprojected ``Delta_2`` miss by orders of magnitude. So ``line' P line``
+    is ``|F line|**2`` plus that Gram's rounding, and ``F line`` is bounded here.
+
+    Exactly, ``line = C a`` with ``C`` Marsden's coefficients of ``1, s`` and
+    ``a = ((lo + hi) / 2, (hi - lo) / 2)``. The computed ``line`` is off by
+    ``p u mean|t|`` per entry (p - 1 sums and a division over ``p = degree``
+    knots), and ``C``'s ``s`` column by ``(p + 4) u (mean|s| + |lo + hi| / (hi -
+    lo))`` (four roundings map a knot to ``s``, p to average them). Instead of
+    Householder's backward error with its unstated constant (Higham, theorem
+    19.4), the computed ``Q``, ``R`` give theirs a posteriori: ``O = Q'Q - I``
+    to ``(n + 1) u |Q|'|Q|`` and ``C - QR`` to ``(m + 1) u (|C| + |Q||R|)``. As
+    ``(I - QQ') Q R a = -Q O R a``, and ``||Q|| <= sqrt(2)``, ``||I - QQ'|| <= 1``
+    once ``||O|| <= 1``,
+    ``||(I - QQ') line|| <= ||Q|| ||O|| ||R a|| + ||C - QR|| ||a|| + |a_1|
+    ||C_1 error|| + ||line error||``. Forming ``F`` costs ``(n + m + 1) u (|Delta|
+    + |Delta||Q||Q'|)`` and ``F @ line`` ``n u |F||line|``; ``||Delta_2|| <= 4``.
+    Doubling covers ``gamma_k <= 2 k u``, the second-order terms and the
+    bound's own rounding, all of relative size ``n u``.
+    """
+    t, p, m, n = spline._knots, spline.degree, 2, spline._n_basis
+    coefficients = _polynomial_coefficients(t, p, m)
+    Q, R = np.linalg.qr(coefficients)
+    delta = np.diff(np.eye(n), n=m, axis=0)
+    factor = delta - (delta @ Q) @ Q.T
+    # Each Gram costs gamma_{n-2} of |F|'|F|; doubled as above.
+    gram = np.abs(factor).T @ np.abs(factor)
+    assert np.all(np.abs(penalty - factor.T @ factor) <= 4 * n * u * gram)
+
+    lo, hi = t[p], t[n]
+    a = np.array([(lo + hi) / 2, (hi - lo) / 2])
+    s = (2.0 * t - (lo + hi)) / (hi - lo)
+    windows = np.lib.stride_tricks.sliding_window_view
+    mean_s = windows(np.abs(s[1 : n + p]), p).mean(axis=1)
+    mean_t = windows(np.abs(t[1 : n + p]), p).mean(axis=1)
+    orthogonality = np.linalg.norm(Q.T @ Q - np.eye(m)) + (n + 1) * u * np.linalg.norm(
+        np.abs(Q).T @ np.abs(Q)
+    )
+    assert orthogonality <= 1
+    residual = np.linalg.norm(coefficients - Q @ R) + (m + 1) * u * np.linalg.norm(
+        np.abs(coefficients) + np.abs(Q) @ np.abs(R)
+    )
+    projection = (
+        2 * orthogonality * np.linalg.norm(R) * np.linalg.norm(a)
+        + residual * np.linalg.norm(a)
+        + (p + 4) * u * a[1] * np.linalg.norm(mean_s + abs(lo + hi) / (hi - lo))
+        + p * u * np.linalg.norm(mean_t)
+    )
+    rounding = np.abs(delta) + np.abs(delta) @ np.abs(Q) @ np.abs(Q).T
+    bound = 2 * (
+        4 * projection
+        + (n + m + 1) * u * np.linalg.norm(rounding @ np.abs(line))
+        + n * u * np.linalg.norm(np.abs(factor) @ np.abs(line))
+    )
+    assert np.linalg.norm(factor @ line) <= bound
 
 
 @pytest.mark.parametrize(
@@ -125,14 +188,13 @@ def test_knots_clustered_past_float64_keep_the_null_space_and_the_rank():
     """Li and Cao's rows reach (hbar/h)**4 = 2e16 here, and their Gram's null
     direction rounded to -5 (the correctly rounded exact Gram's to -3).
 
-    The equilibrated rows keep the line unpenalised and REML's rank rule
-    finds the penalty's true rank of n_basis - 2.
+    The projected standard factor keeps the line unpenalised and REML's rank
+    rule finds the penalty's true rank of n_basis - 2.
     """
     spline = Spline(kind="ps", knots=CLUSTER_KNOTS)
     spline.build(CLUSTER_X)
     penalty = spline._build_penalty_for_order(2)
-    line = _greville(spline)
-    assert abs(line @ penalty @ line) <= _null_bound(spline, penalty, line)
+    _assert_the_projected_factor_keeps_the_line(spline, penalty, _greville(spline))
     eigenvalues = np.linalg.eigvalsh(penalty)
     ranked = np.count_nonzero(eigenvalues > np.finfo(np.float64).eps ** (2 / 3) * eigenvalues[-1])
     assert ranked == spline._n_basis - 2
@@ -145,8 +207,15 @@ def test_a_fit_on_clustered_stated_knots_is_the_line(fit):
 
     The line lies in the penalty's null space and the basis's span, so the
     penalised fit is the line; the standard penalty bends it by 0.27 of its
-    range at lambda = 100. The normal equations lose at most half the digits,
-    so the fit is the line to sqrt(u) of its range.
+    range at lambda = 100. The fit solves ``H beta = X'y`` for the penalised
+    Gram ``H = X'X + S`` by Cholesky; forming ``H`` costs ``gamma_N |X|'|X|``
+    (N rows) and the solve ``gamma_{3k+1} |R'||R|`` (Higham 2002, section 3.5
+    and theorem 10.4), each at most ``k`` times its bound in 2-norm for ``k``
+    coefficients, and ``X'y`` costs ``gamma_N |X|'|y|``. As ``||X H^(-1/2)|| <=
+    1`` and ``beta' H beta = ||y||**2`` (``S beta = 0``), the fitted values move
+    by at most ``k (2N + 3k + 1) u cond(H) ||y||``, doubled for ``gamma``. The
+    shared rank policy accepts a Gram without a factor certificate only below
+    ``warning_condition = 1/sqrt(eps)``, and the fit's ``H`` is under it.
     """
     y = 2.0 * CLUSTER_X
     frame = pd.DataFrame({"x": CLUSTER_X})
@@ -157,7 +226,12 @@ def test_a_fit_on_clustered_stated_knots_is_the_line(fit):
         **({"spline_penalty": 100.0} if fit == "fit" else {}),
     )
     getattr(model, fit)(frame, y)
-    assert np.abs(model.predict(frame) - y).max() <= np.sqrt(u) * np.ptp(y)
+    inverse = model._fit_active_info[3]  # (X'WX + S)^-1 with the intercept
+    condition = np.linalg.cond(inverse)
+    assert condition <= SHARED_RANK_POLICY.warning_condition
+    k, rows = inverse.shape[0], y.size
+    bound = 2 * k * (2 * rows + 3 * k + 1) * u * condition * np.linalg.norm(y)
+    assert np.abs(model.predict(frame) - y).max() <= bound
 
 
 def _skewed(sigma: float, n: int, seed: int):
@@ -252,8 +326,7 @@ def test_knots_too_close_for_float64_get_a_finite_penalty():
     spline.build(x)
     penalty = spline._build_penalty_for_order(2)
     assert np.isfinite(penalty).all()
-    line = _greville(spline)
-    assert abs(line @ penalty @ line) <= _null_bound(spline, penalty, line)
+    _assert_the_projected_factor_keeps_the_line(spline, penalty, _greville(spline))
     frame = pd.DataFrame({"x": x})
     model = SuperGLM(
         family="gaussian", selection_penalty=0.0, features={"x": Spline(kind="ps", knots=knots)}
