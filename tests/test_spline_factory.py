@@ -497,11 +497,12 @@ class TestPenaltyUnits:
         np.testing.assert_array_equal(fitted(2.0**10), fitted(1.0))
 
     def test_reml_bounds_a_near_linear_term_in_knot_intervals(self):
-        """REML clips lambda to [1e-6, 1e10]. A near-linear term's lambda runs to that
-        cap; in 0.39 the cap applied in the column's units, so the same term in
-        2**20 times larger units stopped at a cap 2**60 times weaker in knot
-        intervals and fitted differently. Scaling by a power of two is exact, so
-        the two fits agree bitwise."""
+        """REML clips lambda to [1e-6, 1e10]. In 0.39 the bounds applied in the
+        column's units: at 2**20 times larger units the cap, 1e10, is about 7e-9 in
+        knot intervals, far under this term's optimum of 1.5e4, so the scaled fit
+        stopped there and differed by up to 6.8%. The bounds now apply in knot
+        intervals: the optimum is the same at both scales and well inside them,
+        and since scaling by a power of two is exact, the fits agree bitwise."""
         import pandas as pd
 
         from superglm import SuperGLM
@@ -513,9 +514,13 @@ class TestPenaltyUnits:
         def fitted(scale):
             frame = pd.DataFrame({"x": scale * x})
             model = SuperGLM(family="poisson", features={"x": Spline(n_knots=8)})
-            return model.fit_reml(frame, y).predict(frame)
+            model.fit_reml(frame, y)
+            return model._reml_lambdas["x"], model.predict(frame)
 
-        np.testing.assert_array_equal(fitted(2.0**20), fitted(1.0))
+        (large, scaled), (unit, plain) = fitted(2.0**20), fitted(1.0)
+        assert large == unit
+        assert 1e-6 * 1e2 < unit < 1e10 / 1e2
+        np.testing.assert_array_equal(scaled, plain)
 
     @pytest.mark.parametrize("kind", ["bs", "cr"])
     def test_a_range_leaves_the_penalty_away_from_it_unchanged(self, kind):
