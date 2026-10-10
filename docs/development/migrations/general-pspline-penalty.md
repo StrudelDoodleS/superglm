@@ -56,9 +56,10 @@ whatever its knots.
   their penalties already handle uneven knots. On strongly skewed knots, and for
   their units, see the bullets below.
 - **Explicit `cr`, `bs` or `cr_cardinal` on strongly skewed knots** (quantile
-  knots on a long-tailed column, for example): under `fit_reml`, REML counts
-  more penalised directions, so the smoothing parameter, the effective degrees
-  of freedom and the curve can all move.
+  knots on a long-tailed column, for example), **and an explicit `cr` term used
+  in an interaction on a long-tailed column, whatever its own knots**: under
+  `fit_reml`, REML counts more penalised directions, so the smoothing
+  parameter, the effective degrees of freedom and the curve can all move.
 - **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` and `discrete=True`
   on strongly skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
 - **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` on an extremely long

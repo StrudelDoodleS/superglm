@@ -38,9 +38,10 @@ Four changes follow from it:
   `cr_cardinal` with a degree other than 3, which now raises, and the explicit
   `cr`, `bs` and `cr_cardinal` cases below.
 - **Explicit `cr`, `bs` or `cr_cardinal` on strongly skewed knots** (quantile
-  knots on a long-tailed column, for example): under `fit_reml`, REML counts
-  more penalised directions, so the smoothing parameter, the effective degrees
-  of freedom and the curve can all move.
+  knots on a long-tailed column, for example), **and an explicit `cr` term used
+  in an interaction on a long-tailed column, whatever its own knots**: under
+  `fit_reml`, REML counts more penalised directions, so the smoothing
+  parameter, the effective degrees of freedom and the curve can all move.
 - **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` and `discrete=True`
   on strongly skewed knots**: under `fit_reml`, a fit that 0.39 refused now runs.
 - **Explicit `cr`, `bs` or `cr_cardinal` with `select=True` on an extremely long
@@ -81,7 +82,8 @@ Four changes follow from it:
 - **`OrderedCategorical` with no `basis`**: a refit can change.
 - **Interactions of splines with no kind**: a refit can change. A tensor
   interaction or a spline-by-factor interaction takes its margins from its
-  parents' kind.
+  parents' kind. A `cr` parent's margin is a cardinal cubic regression
+  spline placed on the column's quantiles, whatever the parent's knots.
 - **A spline with no kind on a column with one distinct value**: the fit now
   stops with an error naming the feature and saying to pass `kind="ps"`. A
   P-spline fitted it.
