@@ -270,3 +270,35 @@ def test_stated_knots_at_the_uniform_rule_positions_reproduce_the_uniform_fit():
     stated = Spline(kind="ps", knots=placed.fitted_knots, boundary=placed.fitted_boundary)
     stated.build(x)
     np.testing.assert_array_equal(stated._build_penalty(), placed._build_penalty())
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "n_knots"),
+    [(0.0, 10.0, 8)] + [(1e3, 1e3 + 7.0, n_knots) for n_knots in range(1, 6)],
+)
+def test_refit_from_fitted_knots_reproduces_the_uniform_fit_on_any_domain(lo, hi, n_knots):
+    """A refit from ``fitted_knots`` states the uniform rule's own ``linspace`` knots, which
+    must reproduce the uniform penalty however few knots there are and however far the
+    domain sits from 0."""
+    x = np.random.default_rng(0).uniform(lo, hi, 2_000)
+    placed = Spline(kind="ps", n_knots=n_knots, boundary=(lo, hi))
+    placed.build(x)
+    stated = Spline(kind="ps", knots=placed.fitted_knots, boundary=placed.fitted_boundary)
+    stated.build(x)
+    np.testing.assert_array_equal(stated._build_penalty(), placed._build_penalty())
+
+
+@pytest.mark.parametrize("n_knots", range(1, 6))
+def test_typed_knots_within_the_uniform_rounding_keep_the_standard_penalty(n_knots):
+    """A knot 15 u max(|lo|, |hi|) off the uniform grid spreads the gaps by about 30 of
+    that unit, which ``_evenly_spaced`` accepts (32). Its old tolerance, 4 (n_knots + 2)
+    units, was below 30 for n_knots <= 5, so these knots took the general penalty."""
+    lo, hi = 50.0, 60.0
+    typed = np.linspace(lo, hi, n_knots + 2)[1:-1]
+    typed[n_knots // 2] += 15 * u * max(abs(lo), abs(hi))
+    x = np.random.default_rng(0).uniform(lo, hi, 2_000)
+    spline = Spline(kind="ps", knots=typed, boundary=(lo, hi))
+    spline.build(x)
+    np.testing.assert_array_equal(
+        spline._build_penalty_for_order(2), build_difference_penalty(spline._n_basis, 2)
+    )

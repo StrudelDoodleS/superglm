@@ -131,14 +131,26 @@ def difference_penalty_for(spec, order: int) -> NDArray:
 def _evenly_spaced(spec) -> bool:
     """Whether the interior knots split ``[lo, hi]`` into equal intervals, to rounding.
 
-    ``np.linspace`` rounds each of the ``k + 2`` points to within
-    ``(k + 2) u max(|lo|, |hi|)``, so an interval's error is at most twice that.
+    Knots bitwise equal to the uniform rule's own construction,
+    ``np.linspace(lo, hi, k + 2)[1:-1]`` for ``k`` interior knots, are evenly
+    spaced; a refit from ``fitted_knots`` states exactly those. Other knots must
+    spread their gaps by no more than that construction's rounding can leave.
+    With ``M = max(|lo|, |hi|)``, each point of ``np.linspace`` is four roundings
+    (the difference, the quotient by ``k + 1``, the product with ``i``, the sum
+    with ``lo``): the first three act on quantities of at most ``2M``, the last
+    on one of at most ``M``, so a point lies within ``7 u M`` of its place for
+    any ``k``. A gap is then within ``14 u M`` of the even gap, two gaps spread
+    by ``28 u M``, and rounding each gap adds ``u M`` to its deviation, ``2 u M``
+    in all: ``30 u M`` to first order. The tolerance is ``32 u M``, its last two
+    units covering the second order.
     """
     interior = spec._knots[spec.degree + 1 : -(spec.degree + 1)]
+    if np.array_equal(interior, np.linspace(spec._lo, spec._hi, interior.size + 2)[1:-1]):
+        return True
     points = np.r_[spec._lo, interior, spec._hi]
     gaps = np.diff(points)
     u = np.finfo(np.float64).eps / 2
-    return bool(np.ptp(gaps) <= 4 * points.size * u * np.abs(points).max())
+    return bool(np.ptp(gaps) <= 32 * u * np.abs(points).max())
 
 
 def build_integrated_derivative_penalty(
