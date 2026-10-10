@@ -409,6 +409,43 @@ def test_a_decomposed_tensor_with_a_skewed_quantile_margin_splits_off_the_biline
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
 
 
+@pytest.mark.parametrize("kind", ["cr", "bs"])
+def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind):
+    """The split counted the eigenvalues under eps**(2/3) of the largest: a skewed cr
+    margin's spread put a range direction there (2 null eigenvalues, not 1), and the
+    kindless default is cr. The structural margins give the bilinear direction; a bs
+    margin's tail curvature (2.5e-15 of the largest) is refused by name instead."""
+    from superglm.features._spline_select import _null_mask
+    from superglm.features.interaction import TensorInteraction, _normalize_tensor_penalty
+
+    x1, rng = _skewed(2.0, 6_000, 3)
+    x2 = rng.uniform(0.0, 1.0, x1.size)
+    margin_1 = Spline(kind=kind, n_knots=10, knot_strategy="quantile_rows")
+    margin_2 = Spline(kind=kind, n_knots=5)
+    margin_1.build(x1)
+    margin_2.build(x2)
+    tensor = TensorInteraction("a", "b", decompose=True)
+    if kind == "bs":
+        with pytest.raises(ValueError, match="decompose=True cannot split this penalty"):
+            tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256))
+        return
+    infos = tensor.build_discrete(x1, x2, {"a": margin_1, "b": margin_2}, n_bins=(256, 256)).infos
+    assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
+    m1, m2 = tensor._marginal1, tensor._marginal2
+    omega = np.kron(_normalize_tensor_penalty(m1.penalty), np.eye(tensor._p2)) + np.kron(
+        np.eye(tensor._p1), _normalize_tensor_penalty(m2.penalty)
+    )
+    # The real penalty alone puts a second direction under the cut.
+    assert np.sum(_null_mask(np.linalg.eigvalsh(omega))) == 2
+    # The bilinear direction is the product of the margins' centred lines: the
+    # structural tensor penalty annihilates it to round-off of its own norm.
+    bilinear = infos[0].projection
+    structural = tensor._structural_tensor_penalty()
+    unit = np.finfo(float).eps / 2
+    residual = np.linalg.norm(structural @ bilinear)
+    assert residual <= 8 * omega.shape[0] * unit * np.linalg.norm(structural, 2)
+
+
 @pytest.mark.slow
 def test_a_tensor_with_a_skewed_quantile_margin_fits_by_reml():
     """It raised PenaltyNumericalError: the reference root could not meet its accuracy contract."""

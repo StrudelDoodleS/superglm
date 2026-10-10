@@ -22,7 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
+from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
     _codes_against,
@@ -1387,6 +1387,12 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
     return np.einsum("ij,ik->ijk", B1, B2).reshape(B1.shape[0], B1.shape[1] * B2.shape[1])
 
 
+def _require_one_tensor_null(null_mask: NDArray) -> None:
+    n_null = int(np.sum(null_mask))
+    if n_null != 1:
+        raise ValueError(f"Expected 1 null eigenvalue for centered tensor penalty, got {n_null}.")
+
+
 def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     """Scale a marginal tensor penalty to unit leading eigenvalue.
 
@@ -1712,6 +1718,26 @@ class TensorInteraction:
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
         return B1, B2, S1, S2
 
+    def _structural_tensor_penalty(self) -> NDArray | None:
+        """The tensor penalty built from margins without knot-spacing spread, if any margin has one.
+
+        ``A (x) I + I (x) B`` with ``A`` and ``B`` positive semidefinite has null
+        space ``null(A) (x) null(B)``, so margins with the real penalties' null
+        spaces (``TensorMarginalInfo.structural_penalty``) give the real
+        tensor penalty's null space without the spread a skewed ``cr`` or
+        ``bs`` margin carries. A margin without one keeps its own penalty.
+        """
+        m1, m2 = self._marginal1, self._marginal2
+        if m1.structural_penalty is None and m2.structural_penalty is None:
+            return None
+        S1, S2 = (
+            _normalize_tensor_penalty(
+                m.penalty if m.structural_penalty is None else m.structural_penalty
+            )
+            for m in (m1, m2)
+        )
+        return np.kron(S1, np.eye(self._p2)) + np.kron(np.eye(self._p1), S2)
+
     def _build_group_infos(
         self,
         omega_1: NDArray,
@@ -1724,14 +1750,25 @@ class TensorInteraction:
             eigvals, eigvecs = np.linalg.eigh(omega)
             # REML's rank rule, as select=True splits a spline: a margin's
             # general penalty spans more of float64 than a fixed 1e-8 allows.
-            null_mask = eigvals <= _REML_RANK_THRESHOLD * max(eigvals[-1], 0.0)
-            n_null = int(np.sum(null_mask))
-            if n_null != 1:
-                raise ValueError(
-                    f"Expected 1 null eigenvalue for centered tensor penalty, got {n_null}."
+            null_mask = _null_mask(eigvals)
+            # As select=True does (eigendecompose_select), a skewed cr or bs
+            # margin's spread can put range directions under that cut, so the
+            # structural penalty decides the nullity. Where the real spectrum
+            # agrees its eigenvectors are kept, and those fits are unchanged.
+            structural = self._structural_tensor_penalty()
+            if structural is not None:
+                structural_values, structural_vectors = np.linalg.eigh(structural)
+                structural_null = _null_mask(structural_values)
+                _require_one_tensor_null(structural_null)
+            if structural is None or np.sum(null_mask) == np.sum(structural_null):
+                _require_one_tensor_null(null_mask)
+                U_null = eigvecs[:, null_mask]
+                U_range = eigvecs[:, ~null_mask]
+            else:
+                U_null = structural_vectors[:, structural_null]
+                U_range, _ = _certified_range(
+                    omega, structural_vectors[:, ~structural_null], subject="decompose=True"
                 )
-            U_null = eigvecs[:, null_mask]
-            U_range = eigvecs[:, ~null_mask]
             omega_1_range = U_range.T @ omega_1 @ U_range
             omega_2_range = U_range.T @ omega_2 @ U_range
             omega_range = 0.5 * (

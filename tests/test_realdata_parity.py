@@ -541,3 +541,20 @@ def test_select_on_the_books_quantile_rows_knots_fits(column, n_knots):
     frame = df[[column]].astype(float)
     model = SuperGLM(family="poisson", features={column: spline}).fit_reml(frame, y, offset=offset)
     assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+
+
+@NB2_SKIP
+@pytest.mark.parametrize("kind", [None, "bs"])
+def test_discrete_select_reml_on_the_books_density_quantile_rows_knots_fits(kind):
+    """kind=None is cr since 0.39 and raised PenaltyNumericalError here, at the
+    discrete start (null penalty at its cap beside a small wiggle weight); 0.39's
+    kindless P-spline fitted it."""
+    df, y, offset = _load_nb2_data()
+    kw = {} if kind is None else {"kind": kind}
+    spline = Spline(n_knots=10, knot_strategy="quantile_rows", select=True, **kw)
+    frame = df[["Density"]].astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0, discrete=True, features={"Density": spline}
+    ).fit_reml(frame, y, offset=offset)
+    assert set(model._reml_lambdas) == {"Density:null", "Density:wiggle"}
+    assert np.all(np.isfinite(model.predict(frame, offset=offset)))

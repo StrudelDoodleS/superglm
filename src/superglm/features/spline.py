@@ -1068,6 +1068,11 @@ class CardinalCRSpline(_SplineBase):
     def _build_penalty(self) -> NDArray:
         return self._cr_S
 
+    def _structural_penalty_for_order(self, order: int) -> NDArray:
+        """The fixed penalty's null space without its spread (``structural_cr_penalty``)."""
+        del order
+        return _spline_cardinal_spec.structural_penalty(self)
+
     def _basis_matrix(self, x: NDArray):
         """Evaluate the cardinal CR basis at data points."""
         return _spline_cardinal_spec.basis_matrix(self, x)

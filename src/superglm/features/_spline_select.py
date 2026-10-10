@@ -90,7 +90,9 @@ def _require_two_null(null_mask: NDArray, spline_kind: str) -> None:
         )
 
 
-def _certified_range(omega_c: NDArray, basis: NDArray) -> tuple[NDArray, NDArray]:
+def _certified_range(
+    omega_c: NDArray, basis: NDArray, *, subject: str = "select=True"
+) -> tuple[NDArray, NDArray]:
     """The penalty on the structural range, diagonalised, once round-off cannot hide a direction.
 
     In exact arithmetic ``basis' omega_c basis`` is positive definite, since
@@ -107,7 +109,7 @@ def _certified_range(omega_c: NDArray, basis: NDArray) -> tuple[NDArray, NDArray
     if not values[0] > SHARED_RANK_POLICY.certification_band * resolution:
         ratio = max(values[0], 0.0) / values[-1]
         raise ValueError(
-            "select=True cannot split this penalty: its knot intervals differ so much in "
+            f"{subject} cannot split this penalty: its knot intervals differ so much in "
             f"width that the curvature it puts on the widest is {ratio:.1e} "
             "of the curvature on the narrowest, which double precision cannot hold beside "
             "it. The widest interval is usually the tail of a heavy-tailed column under "
