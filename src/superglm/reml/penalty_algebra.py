@@ -2389,9 +2389,21 @@ def build_penalty_components(
                     lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
+            # A structural lift takes the solver-space support; see
+            # _single_penalty_raw_family for why the raw route cannot admit it.
+            structural = structural_ranks.get("")
+            lifted = (
+                structural is not None
+                and rank == structural
+                and np.sum(
+                    (raw_values := np.linalg.eigvalsh(gm.omega))
+                    > eps_thresh * max(float(raw_values.max()), 1e-12)
+                )
+                < structural
+            )
             raw = (
                 None
-                if force_solver_rank
+                if force_solver_rank or lifted
                 else _single_penalty_raw_family(
                     gm, group_components, rank, _reuse_raw_from, rank_rcond=eps_thresh
                 )
@@ -2809,6 +2821,16 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond
     resolution floor instead, the formation round-off in a constrained
     penalty's exact null space (cr: about 0.1 of the floor on x86-64) could
     add a direction on another BLAS build and refuse the raw path there.
+    A structural rank above that threshold's count (``_rank_and_logdet``)
+    is not set by any threshold, and the caller does not come here: the raw
+    route cannot admit it. The lifted direction's raw eigenvalue is below
+    ``eps**(2/3)`` of the largest by definition, while the raw root and its
+    transport carry absolute errors of order ``u ||Omega||``, so the
+    agreement ratio ``x`` of ``_solver_penalty_agreement`` is of order
+    ``u / eps**(2/3)``, about ``3e-6`` (lognormal(0, 1.5) bs with 20
+    quantile_rows knots: ``x = 1.0e-6``), against its admission bar
+    ``sqrt(eps)``, ``1.5e-8``. The solver-space support evaluates the same
+    penalty in SSP coordinates, where that direction is 9e-5 of the largest.
 
     Returns ``None`` when the cheap map checks decline (non-float64 inputs,
     inconsistent shapes, a non-finite map, or ``np.eye``, which is either the

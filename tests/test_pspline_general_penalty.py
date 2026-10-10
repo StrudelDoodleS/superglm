@@ -414,15 +414,24 @@ def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
     penalised a direction that log|S|+ counted as unpenalised. The rank is the
     structure's: ``n_basis`` less the lines, and for cr less its two natural boundary
     conditions as well.
+
+    A lifted plain term takes the solver-space support without a raw attempt, which
+    could not admit it (``_single_penalty_raw_family``).
     """
+    from superglm.reml.penalty_algebra import _context_geometry
+
     x, rng = _skewed(sigma, 10_000, 0)
     y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
     kinds = {} if kind is None else {"kind": kind}
     spline = Spline(n_knots=n_knots, knot_strategy="quantile_rows", select=select, **kinds)
     model = SuperGLM(family="poisson", features={"x": spline}).fit_reml(pd.DataFrame({"x": x}), y)
-    ranks = _reml_ranks(model)
-    wiggle = ranks["x:wiggle"] if select else ranks["x"]
-    assert wiggle == model._specs["x"]._n_basis - nullity
+    components = {component.name: component for component in _reml_components(model)}
+    wiggle = components["x:wiggle"] if select else components["x"]
+    assert wiggle.rank == model._specs["x"]._n_basis - nullity
+    if not select:
+        geometry = _context_geometry([wiggle])
+        assert geometry is not None
+        assert geometry.raw_family is None and geometry.raw_refusal is None
 
 
 def test_select_names_the_knot_spread_binary64_cannot_hold():
