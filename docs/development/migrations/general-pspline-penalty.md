@@ -109,9 +109,11 @@ penalty.
 
 | Build | Wall time (s) | Peak RSS (MiB) | Deviance | EDF | REML iterations | Density lambda |
 |---|---|---|---|---|---|---|
-| 0.39.0 (standard penalty) | 37.38 | 838 | 211895.68 | 37.68 | 8 | 13550 |
-| Unscaled general penalty | 35.86, 32.62 | 835, 823 | 211899.95 | 40.37 | 8 | 6.088 |
-| Scaled, with the fallback | 40.02, 38.37 | 812, 817 | 211888.12 | 40.38 | 10 | 907.5 |
+| 0.39.0 (standard penalty) | 36.55, 32.68 | 841, 821 | 211895.68 | 37.68 | 8 | 13550 |
+| Scaled, with the fallback | 39.30, 38.34 | 824, 809 | 211888.12 | 40.38 | 10 | 907.5 |
+| Unscaled general penalty (earlier session) | 35.86, 32.62 | 835, 823 | 211899.95 | 40.37 | 8 | 6.088 |
 
-The fallback changes `Density`'s penalty, and REML takes two more iterations
-to settle it; the time per iteration is unchanged.
+The first two rows are one A-B-B-A session. Against 0.39 the fit is about
+12% slower on this set: REML takes two more iterations to settle
+`Density`'s penalty, and each iteration is about 10% cheaper. The deviance
+is 7.6 lower, and peak memory is unchanged.
