@@ -497,12 +497,15 @@ class TestPenaltyUnits:
         np.testing.assert_array_equal(fitted(2.0**10), fitted(1.0))
 
     def test_reml_bounds_a_near_linear_term_in_knot_intervals(self):
-        """REML clips lambda to [1e-6, 1e10]. In 0.39 the bounds applied in the
-        column's units: at 2**20 times larger units the cap, 1e10, is about 7e-9 in
-        knot intervals, far under this term's optimum of 1.5e4, so the scaled fit
-        stopped there and differed by up to 6.8%. The bounds now apply in knot
-        intervals: the optimum is the same at both scales and well inside them,
-        and since scaling by a power of two is exact, the fits agree bitwise."""
+        """REML clips lambda to [1e-6, 1e10]. While the curvature penalty was built
+        in the column's units (an explicit kind="cr" in 0.39; this kindless cr term
+        on de584236), the bounds applied in those units: at 2**20 times larger
+        units the cap, 1e10, is about 7e-9 in knot intervals, far under this term's
+        optimum of 1.5e4, so the scaled fit stopped there and differed by up to
+        6.8%. The bounds now apply in knot intervals: the optimum is the same at
+        both scales and well inside them, and since scaling by a power of two is
+        exact, the fits agree bitwise. (0.39's kindless P-spline passes too: its
+        difference penalty never saw the units.)"""
         import pandas as pd
 
         from superglm import SuperGLM
