@@ -2222,45 +2222,76 @@ def test_categorical_by_spline_cat_expands_rows_in_chunks(monkeypatch):
     assert sum(seen) == rows.size
 
 
-def test_categorical_by_own_spline_cat_scales_the_levels_binned_weight():
-    """The spline's own factor: the cross is the level's binned weight times the support.
+def test_a_one_bin_levels_blocks_form_one_weight_sum_bit_for_bit():
+    """Every block that carries a one-bin level forms the same weight sum, to the bit.
 
-    Every row of a spline_cat block is one level of its own factor, so the
-    cross with that factor is ``sum_b w_b B_b R`` with ``w_b`` the binned
-    weight sums the block's own Gram and ``X'W`` form.  Summing each row's
-    ``W_r B_k`` instead rounds apart from them: 5.5e4 u over 103,957 rows on
-    freMTPL2, where a level in one bin makes its dummy an exact alias of its
-    smooth and that residue landed past the eigensolver's bar.  Here 200,000
-    rows of weight 0.1 sit in one bin: the cross must be ``w (B_b R)`` within
-    the products' rounding, ``2 gamma_{K+2} w (|B_b| |R|)``.  Mutation: the
-    chunked row sum (6eb42f3f) misses by about ``n u``.
+    A level whose rows all sit in one support bin makes its dummy an exact
+    alias of its spline_cat smooth, and the alias cancels in the formed Gram
+    only if every block forms the level's weight sum identically: the
+    categorical diagonal and ``X'W`` (``_bincount_levels`` over all rows),
+    the categorical x spline_cat cross, and the spline's own Gram and ``X'W``
+    (``gram_rmatvec`` over ``row_idx``).  Summed apart, the residue is the
+    difference: 5.5e4 u over 103,957 rows on freMTPL2, -1.8e-12 against the
+    eigensolver's bar of 2.4e-13.
+
+    The bin's support row is ``1.0`` in one column and ``1.1`` in another,
+    with an identity transform.  Through the ``1.0`` column every product is
+    exact, so each block's entry IS the sum it formed, and all must be one
+    number, whichever sign a difference would round to.  Through the ``1.1``
+    column the cross must be that sum times ``1.1``, one rounding, not a sum
+    of per-row products.  Read through the assembly a fit runs (the
+    execution plan's moments, block queue included) and through each block's
+    own method.  Mutations: the chunked row-product cross (6eb42f3f), the
+    spline's rows or the categorical's levels summed in another order.
     """
-    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_algebra import _BlockWeightCache, _cross_gram
     from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
     from superglm._group_matrix._group_matrix_discretized import (
         DiscretizedSplineCategoricalGroupMatrix,
     )
+    from superglm.group_matrix import DesignMatrix
 
     gen = np.random.default_rng(91)
-    n, p_b, p_g = 200_000, 6, 4
-    codes = np.ones(n, dtype=np.int32)
+    n, n_bins, level, one_bin = 200_000, 6, 1, 4
+    codes = gen.integers(0, 3, n)
     gm_cat = CategoricalGroupMatrix(codes, 3)
-    rows = np.arange(n, dtype=np.intp)
-    support = gen.normal(size=(8, p_b))
-    transform = gen.normal(size=(p_b, p_g))
+    rows = np.flatnonzero(gm_cat.codes == level)
+    support = np.eye(n_bins)
+    support[one_bin] = 0.0
+    support[one_bin, :2] = (1.0, 1.1)
     spline_cat = DiscretizedSplineCategoricalGroupMatrix(
-        support, transform, np.full(n, 5, dtype=np.intp), rows
+        support, np.eye(n_bins), np.full(n, one_bin, dtype=np.intp), rows
     )
-    weights = np.full(n, 0.1)
+    weights = gen.uniform(0.05, 0.15, n)
+    weighted_z = weights * gen.normal(size=n)
+    exact, scaled = 3, 4
 
-    cross = algebra._cross_gram_categorical_spline_categorical(gm_cat, spline_cat, weights)
-
-    binned = np.bincount(spline_cat.bin_idx_level, weights=weights[rows])[5]
-    u = np.finfo(float).eps / 2
-    gamma = (p_b + 2) * u / (1 - (p_b + 2) * u)
-    bound = 2 * gamma * binned * (np.abs(support[5]) @ np.abs(transform))
-    assert np.all(cross[[0, 2]] == 0.0)
-    assert np.all(np.abs(cross[1] - binned * (support[5] @ transform)) <= bound)
+    plan = DesignMatrix([gm_cat, spline_cat], n=n, p=3 + n_bins).execution_plan
+    moments = plan._moments_prevalidated(
+        weights, rhs=(weighted_z,), include_xtw=True, _cache=_BlockWeightCache()
+    )
+    own_gram, own_xtw, _ = spline_cat.gram_rmatvec(weights, weighted_z)
+    cross = _cross_gram(gm_cat, spline_cat, weights)
+    sums = {
+        "assembled categorical diagonal": moments.gram[level, level],
+        "assembled categorical X'W": moments.xtw[level],
+        "assembled cross": moments.gram[level, exact],
+        "assembled spline Gram": moments.gram[exact, exact],
+        "assembled spline X'W": moments.xtw[exact],
+        "categorical gram()": gm_cat.gram(weights)[level, level],
+        "categorical rmatvec()": gm_cat.rmatvec(weights)[level],
+        "cross": cross[level, 0],
+        "spline gram_rmatvec() Gram": own_gram[0, 0],
+        "spline gram_rmatvec() X'W": own_xtw[0],
+    }
+    level_sum = sums["assembled categorical diagonal"]
+    assert all(value == level_sum for value in sums.values()), sums
+    scaled_sum = 1.1 * level_sum
+    assert moments.gram[level, scaled] == cross[level, 1] == scaled_sum
+    assert moments.xtw[scaled] == own_xtw[1] == scaled_sum
+    assert moments.gram[scaled, scaled] == own_gram[1, 1] == 1.1 * scaled_sum
+    # the fixture sees order: the same rows summed backwards differ
+    assert np.cumsum(weights[rows][::-1])[-1] != level_sum
 
 
 def test_row_chunking_below_the_threshold_is_bit_identical():
