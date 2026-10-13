@@ -21,6 +21,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
@@ -32,6 +33,7 @@ from superglm.reml.convergence import (
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
+    newton_predicted_decrease,
     project_reml_gradient,
     trial_counts_as_precision_evidence,
 )
@@ -1386,7 +1388,7 @@ def optimize_discrete_reml_cached_w(
                 link,
             )
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
-            dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
+            dev_trial = weighted_row_sum(sample_weight, distribution.deviance_unit, y, mu_trial)
             trial_pirls = PIRLSResult(
                 beta=beta_trial,
                 intercept=intercept_trial,
@@ -1505,9 +1507,11 @@ def optimize_discrete_reml_cached_w(
             # the set this dead step actually moved -- is classified by
             # classify_dead_feasible_exit, which grants converged_at_precision
             # only when every active gradient is under the precision asked
-            # for AND a true objective was evaluated and rejected, and
-            # names an honest line_search_failed otherwise. Two things
-            # differ from the exact engine, both because this engine's
+            # for, or (within a decade of that bar) the undamped Newton step
+            # predicts a decrease below the stop resolution, AND a true
+            # objective was evaluated and rejected, and names an honest
+            # line_search_failed otherwise. Two things differ from the
+            # exact engine, both because this engine's
             # candidate is ONE working-model update rather than a converged
             # PIRLS. First, the break waits for candidate_mode_stationary:
             # a dead search at an unsettled working model is not evidence
@@ -1536,11 +1540,23 @@ def optimize_discrete_reml_cached_w(
                 evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
                     candidate_mode_stationary, obj
                 )
+                # The decrement arm, as on the exact engine: the undamped
+                # Newton step's predicted decrease, withheld when the trust
+                # region damped the step (mu > 0) or the Hessian needed
+                # modification.
+                predicted_decrease = (
+                    None
+                    if trust_mu > 0.0
+                    else newton_predicted_decrease(
+                        grad_sub_d, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor_d
+                    )
+                )
                 termination_reason = classify_dead_feasible_exit(
                     active_grad_norm,
                     objective=obj,
                     tolerance=_tol,
                     evaluated_trial=evidence,
+                    predicted_decrease=predicted_decrease,
                 )
                 converged = termination_reason == "converged_at_precision"
                 if profile is not None:
@@ -1548,6 +1564,8 @@ def optimize_discrete_reml_cached_w(
                         "iter": poi_iter + 1,
                         "active_gradient_norm": active_grad_norm,
                         "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale_d),
+                        "predicted_decrease": predicted_decrease,
+                        "decrease_bar": float(_tol * score_scale_d),
                         "evaluated_trial": bool(evidence),
                         "candidate_mode_stationary": bool(candidate_mode_stationary),
                         "termination_reason": termination_reason,

@@ -51,7 +51,7 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
     unicode_full = "Family👨‍👩‍👧‍👦DriverCaféCategory"
 
     # At the default 1180px the 694px chart draws all ten labels, angled and
-    # truncated; a 600px chart at 1086px keeps nine of them.
+    # truncated; at a 640px viewport the chart labels every other level.
     with open_editor_page(selected_term="long_category") as (page, session):
         original_levels = list(session.terms["long_category"].levels)
         assert full in original_levels
@@ -109,14 +109,35 @@ def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page,
         )
         page.locator("#chart .x-tick-label").first.wait_for()
 
-        initial_calls = page.evaluate("window.__axisMeasurementCalls")
-        assert initial_calls > 0
+        assert page.evaluate("window.__axisMeasurementCalls") > 0
 
-        page.get_by_role("button", name="Reference CI").click()
-        page.wait_for_function(
-            "() => document.querySelector('#ciToggle')?.getAttribute('aria-pressed') === 'true'"
+        # The CI band moves the y-axis labels and so the plot's width, which can
+        # change which levels have room for a label: labels new to the chart are
+        # measured. Back to the first layout, every label was measured before,
+        # so the redraw measures nothing.
+        ci = page.get_by_role("button", name="Reference CI")
+        ci.click()
+        page.locator("#chart .ci-whisker").first.wait_for(state="attached")
+        with_band = page.evaluate("window.__axisMeasurementCalls")
+        ci.click()
+        page.locator("#chart .ci-whisker").first.wait_for(state="detached")
+        assert page.evaluate("window.__axisMeasurementCalls") == with_band
+
+
+def test_a_narrow_chart_labels_and_measures_levels_one_whole_step_apart(open_editor_page):
+    # At 640px the chart has room for nine of long_category's ten labels: it
+    # labels every other level and measures only those, where rounding nine
+    # picks measured all ten and labelled neighbours.
+    with open_editor_page(
+        selected_term="long_category", viewport={"width": 640, "height": 720}
+    ) as (page, session):
+        page.locator("#chart .x-tick-label").first.wait_for()
+        levels = list(session.terms["long_category"].levels)
+        labels = page.locator("#chart .x-tick-label").evaluate_all(
+            "ticks => ticks.map(tick => tick.getAttribute('data-full-label'))"
         )
-        assert page.evaluate("window.__axisMeasurementCalls") == initial_calls
+        assert labels == [levels[i] for i in (0, 2, 4, 6, 9)]
+        assert page.locator("#chart").get_attribute("data-axis-measurement-count") == "5"
 
 
 def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor_page):

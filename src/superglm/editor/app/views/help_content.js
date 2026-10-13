@@ -100,6 +100,14 @@ export const OPERATION_HELP = Object.freeze({
     title: "Ungroup",
     body: `Separate the selected grouped levels. ${WAITS} ${KEEPS_REFERENCE}, and a reference group follows the levels that stay in it.`,
   }),
+  make_special: Object.freeze({
+    title: "Make special",
+    body: `Take the selected levels of an ordered term off its curve, each with an estimate of its own, as specials= declares. ${WAITS} The reference stays on the curve. Export a structure to make the same levels special in code.`,
+  }),
+  return_to_curve: Object.freeze({
+    title: "Back on the curve",
+    body: `Put the selected special levels back on the curve, in their place. ${WAITS} A level declared special in the term's code has no place on the curve; change the declaration instead.`,
+  }),
   set_reference: Object.freeze({
     title: "Set reference",
     body:

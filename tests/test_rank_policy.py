@@ -1165,23 +1165,15 @@ def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
     W[3] = 0.0
     z = np.sin(np.arange(len(bin_idx), dtype=float))
 
-    def centered_rows(support: np.ndarray, codes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def centered_rows(support: np.ndarray, codes: np.ndarray) -> np.ndarray:
         mass = np.bincount(codes, weights=W, minlength=len(support))
-        anchor = int(np.argmax(mass))
-        differences = support - support[anchor]
-        mean_difference = mass @ differences / np.sum(W)
-        return differences[codes] - mean_difference, support[anchor] + mean_difference
+        differences = support - support[int(np.argmax(mass))]
+        return differences[codes] - mass @ differences / np.sum(W)
 
-    discrete_centered_raw, discrete_mean_raw = centered_rows(B_unique, bin_idx)
-    discrete_centered = discrete_centered_raw @ R_inv
-    discrete_mean = discrete_mean_raw @ R_inv
+    discrete_centered = centered_rows(B_unique, bin_idx) @ R_inv
     categorical_support = np.vstack((np.eye(2), np.zeros((1, 2))))
-    categorical_centered, categorical_mean = centered_rows(
-        categorical_support,
-        categorical.codes,
-    )
+    categorical_centered = centered_rows(categorical_support, categorical.codes)
     X_centered = np.column_stack((discrete_centered, categorical_centered))
-    mean_x = np.concatenate((discrete_mean, categorical_mean))
     mean_z = float(np.dot(W, z) / np.sum(W))
     z_centered = z - mean_z
     expected_gram = X_centered.T @ (W[:, None] * X_centered)
@@ -1210,7 +1202,26 @@ def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
         penalty=np.zeros((4, 4)),
     )
 
-    np.testing.assert_allclose(system.mean_x, mean_x, rtol=0.0, atol=1e-12)
+    # The centre is v_h R_inv + shift R_inv, the shift a weighted mean of
+    # support differences: each term meets at most 2n + m roundings in the
+    # weights' and the masses' sums, a product and a division, and the
+    # projection and final sum add three. |v_h| + |shift| <= max|v| + ptp(v).
+    exact_rows = [
+        [
+            sum(Fraction(b) * Fraction(t) for b, t in zip(B_unique[b_row], column))
+            for column in R_inv.T
+        ]
+        + [Fraction(int(code == level)) for level in range(2)]
+        for b_row, code in zip(bin_idx, categorical.codes, strict=True)
+    ]
+    weights = [Fraction(w) for w in W]
+    k = 2 * len(bin_idx) + len(B_unique) + 5
+    gamma = k * Fraction(2) ** -53 / (1 - k * Fraction(2) ** -53)
+    spread = [Fraction(np.max(np.abs(c))) + Fraction(np.ptp(c)) for c in B_unique.T]
+    majorants = [sum(a * Fraction(abs(t)) for a, t in zip(spread, column)) for column in R_inv.T]
+    for j, majorant in enumerate([*majorants, Fraction(2), Fraction(2)]):
+        exact = sum(w * row[j] for w, row in zip(weights, exact_rows)) / sum(weights)
+        assert abs(Fraction(system.mean_x[j]) - exact) <= gamma * majorant, j
     np.testing.assert_allclose(system.data_gram, expected_gram, rtol=1e-12, atol=1e-10)
     np.testing.assert_allclose(system.rhs, expected_rhs, rtol=1e-12, atol=1e-10)
 

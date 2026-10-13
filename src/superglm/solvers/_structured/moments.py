@@ -1204,8 +1204,8 @@ def build_structured_system(
 
 # Retired by the one engine (design §3.12): the systems of the retired
 # block-Schur, range-space sz and scalar factors, importable at their pickled
-# path as inert stand-ins so that models saved by v0.35.0 load; release 0.37.0
-# may drop them.
+# path as inert stand-ins so that models saved by v0.35.0 load; a later minor
+# release may drop them.
 __getattr__ = module_getattr(
     __name__,
     frozenset(

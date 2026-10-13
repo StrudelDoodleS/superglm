@@ -4542,14 +4542,19 @@ def test_load_rejects_same_shape_artifact_from_different_baseline(
 
 
 def test_widget_import_is_lazy():
+    # A fresh interpreter: other tests in this process may import anywidget.
+    import subprocess
     import sys
 
-    import superglm.editor
-
-    assert "anywidget" not in sys.modules
-    assert "ipympl" not in sys.modules
-    assert "ipywidgets" not in sys.modules
-    assert hasattr(superglm.editor, "EditorSession")
+    probe = (
+        "import sys, superglm.editor, superglm.editor.widget\n"
+        "assert hasattr(superglm.editor, 'EditorSession')\n"
+        "print(sorted({'anywidget', 'ipympl', 'ipywidgets'} & set(sys.modules)))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120
+    )
+    assert result.stdout.strip() == "[]"
 
 
 def test_editor_asset_reader_rejects_path_traversal(monkeypatch):

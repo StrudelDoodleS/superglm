@@ -147,6 +147,84 @@ def test_a_fit_without_rare_rows_flags_nothing():
     assert not [w for w in caught if issubclass(w.category, WeakIdentificationWarning)]
 
 
+@pytest.mark.parametrize("family", ["poisson", "gaussian"])
+def test_a_far_zero_weight_row_leaves_the_weak_column_weak(family):
+    """Issue #369: a zero-weight row adds exactly 0 to the weak test's centred sums.
+
+    ``xt``'s curvature and mass, ``sum w (x - c)^2`` and ``sum_{w>0} (x - c)^2``,
+    ran over every row, so one zero-weight row at ``xt = 1e300`` made both NaN,
+    ``mass > 0`` failed and ``xt`` left the weak set: Poisson's lambda_u moved
+    from 10.5 to 30.0 and its fitted means 147x, with ``converged=True``, on
+    0.37.1 as well.  Mutation: the zero-weight mask removed from the dense
+    branch of ``laplace_excluded_coefficients`` (``reml/identified.py``) or of
+    ``weakly_identified_mask`` (``solvers/mode_score.py``).
+    """
+    frame, y, weight, levels = _rare_column(0.0, family)
+    far = frame.copy()
+    far.loc[int(np.flatnonzero(weight == 0.0)[0]), "xt"] = 1e300
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", WeakIdentificationWarning)
+        control = _fit_recording(frame, y, weight, family, ["x1", "xt"], levels)
+        model = _fit_recording(far, y, weight, family, ["x1", "xt"], levels)
+    xt = next(group for group in model._groups if group.name == "xt").start
+    assert xt in control._reml_profile["reml_weakly_identified"]
+    for key in ("reml_weakly_identified", "reml_laplace_excluded"):
+        assert model._reml_profile[key] == control._reml_profile[key]
+    assert model._reml_lambdas == control._reml_lambdas
+    np.testing.assert_array_equal(model.predict(frame), control.predict(frame))
+
+
+def test_the_mode_weak_tests_skip_a_far_zero_weight_row():
+    """Issue #369, the centred sums behind the mode's weak tests, at the function level.
+
+    ``weakly_identified_mask`` (the final-mode test), the score certificate's
+    ``column_sums`` and ``weighted_column_centring``'s diagonal each formed
+    ``(x - c)^2`` on every row, so a zero-weight row at 1e300 made the weak
+    column's curvature, mass or diagonal NaN.  The fit above hides it only
+    because the Laplace test flags the same column.  Mutation: the zero-weight
+    mask removed from any one of the three (``solvers/mode_score.py``).
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.mode_score import (
+        column_sums,
+        weakly_identified_mask,
+        weighted_column_centring,
+    )
+
+    rng = np.random.default_rng(369)
+    n = 400
+    weight = np.ones(n)
+    weight[:2] = 1e-15
+    weight[-1] = 0.0
+    positive = weight > 0.0
+    xt = np.full(n, 5.0)
+    xt[:2] = [6.0, 7.0]
+    design = np.column_stack([rng.uniform(0.0, 10.0, n), xt])
+
+    def weak_tests(last_row):
+        rows = design.copy()
+        rows[-1] = last_row
+        dm = DesignMatrix([DenseGroupMatrix(rows)], n=n, p=2)
+        mean_x, _, diagonal = weighted_column_centring(dm, weight, positive)
+        zeros = np.zeros(n)
+        sums = column_sums(dm, np.arange(2), mean_x, (zeros, zeros, weight), positive)
+        weak = weakly_identified_mask(
+            dm=dm,
+            fisher_weights=weight,
+            positive_prior=positive,
+            mean_x=mean_x,
+            penalty_diagonal=np.zeros(2),
+            unpenalized=np.ones(2, dtype=bool),
+        )
+        return mean_x, diagonal, sums, weak
+
+    control = weak_tests(design[-1])
+    far = weak_tests(1e300)
+    assert control[3].tolist() == [False, True]
+    for got, expected in zip(far, control, strict=True):
+        np.testing.assert_array_equal(got, expected)
+
+
 def test_the_score_stop_publishes_the_criterion_at_the_mode():
     """Section 3.8 for canonical links; T3 row "deviance stop for Fisher REML fits".
 

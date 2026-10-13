@@ -169,17 +169,20 @@ def _pending_term_payload(session, name: str) -> dict[str, Any]:
     ``groups`` is the draft's whole grouping once a waiting collapse or
     ungroup touches the term; ``ranges`` are the shaped ranges the draft adds
     or changes; ``reference`` is the level or group the draft pins in place of
-    the fitted reference.
+    the fitted reference; ``specials`` are the draft's special levels once a
+    waiting step takes levels off the curve or puts them back.
     """
     waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
     if not waiting:
-        return {"groups": None, "ranges": [], "reference": None}
+        return {"groups": None, "ranges": [], "reference": None, "specials": None}
     draft, fitted = waiting[-1].draft_spec, session.model._specs[name]
     regrouped = any(step.operation in {"collapse", "ungroup"} for step in waiting)
+    respecified = any(step.operation in {"special", "on_curve"} for step in waiting)
     return {
         "groups": _draft_groups(draft) if regrouped else None,
         "ranges": waiting_ranges(draft, fitted),
         "reference": _waiting_reference(draft, fitted),
+        "specials": [str(level) for level in draft._special_display] if respecified else None,
     }
 
 

@@ -44,10 +44,22 @@ async function responseError(response) {
   return new EditorAPIError(errorMessage(payload, response), response.status, payload);
 }
 
+/**
+ * The page's fetch: the notebook host's when the editor runs inside a
+ * notebook cell, which carries requests over widget messages, else the
+ * browser's, to the local server.
+ * @returns {FetchImpl}
+ */
+function hostFetch() {
+  const host = /** @type {{superglmEditorHost?: {fetch?: FetchImpl}}} */ (globalThis)
+    .superglmEditorHost;
+  return host?.fetch ?? globalThis.fetch;
+}
+
 /** @param {EditorClientOptions} [options] */
 export function createEditorClient({
   token = tokenFromLocation(),
-  fetchImpl = globalThis.fetch
+  fetchImpl = hostFetch()
 } = {}) {
   /** @param {RequestInit} options */
   function withEditorToken(options) {
@@ -89,6 +101,11 @@ export function createEditorClient({
     return postJSON("/rating_table", { term });
   }
 
+  /** @param {string} term an ordered term, refitted with its levels free @returns {Promise<unknown>} */
+  function freeLevels(term) {
+    return postJSON("/free_levels", { term });
+  }
+
   /** @param {string} kind "cv" or "final_fit" */
   function jobStart(kind) {
     return postJSON("/job_start", { kind });
@@ -104,7 +121,9 @@ export function createEditorClient({
     return postJSON("/job_cancel", { job_id: jobId });
   }
 
-  return { requestJSON, postJSON, requestBlob, getState, ratingTable, jobStart, jobStatus, jobCancel };
+  return {
+    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, jobStart, jobStatus, jobCancel
+  };
 }
 
 export const editorClient = createEditorClient();

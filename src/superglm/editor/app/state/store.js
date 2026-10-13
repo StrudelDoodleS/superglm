@@ -19,6 +19,7 @@ export function createInitialEditorState(snapshot = null) {
       termView: "chart",
       showCi: false,
       showContrib: false,
+      freeLevels: null,
       summaryLevelDisplay: "expanded",
       zoomByTerm: {},
       groupModeByTerm: {},

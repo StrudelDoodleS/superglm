@@ -31,6 +31,8 @@ const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
  * @property {number} baseLeft Symmetric left/right edge inset used for label budgeting.
  * @property {number} baseBottom
  * @property {number} [titleHeight]
+ * @property {readonly [number, number]} [domain] the x range the plot maps onto
+ *   `availableWidth`, padding included; by default the labelled ticks span it
  */
 
 /**
@@ -72,23 +74,44 @@ export function splitLabelGraphemes(label) {
 }
 
 /**
- * Return at most `maximum` stable indices, retaining both edges whenever possible.
+ * At most `maximum` indices one whole step apart, keeping both edges.
+ *
+ * A labelled axis takes these rather than a rounded fractional step: 24
+ * levels into 14 labels steps 1.77, which puts some labels on neighbouring
+ * levels while the rest skip one, and the neighbours collide.
+ * Here every gap is the step, except the last, which is wider: the last
+ * multiple of the step gives way to the last index.
  *
  * @param {number} count
  * @param {number} maximum
  * @returns {number[]}
  */
-export function evenlySpacedIndices(count, maximum) {
+export function strideIndices(count, maximum) {
   assertNonnegativeInteger("count", count);
   assertNonnegativeInteger("maximum", maximum);
   if (count === 0 || maximum === 0) return [];
   if (count <= maximum) return Array.from({ length: count }, (_, index) => index);
   if (maximum === 1) return [0];
+  const step = Math.ceil((count - 1) / (maximum - 1));
   const indices = [];
-  for (let position = 0; position < maximum; position += 1) {
-    indices.push(Math.round(position * (count - 1) / (maximum - 1)));
-  }
-  return Array.from(new Set(indices)).sort((left, right) => left - right);
+  for (let index = 0; index < count; index += step) indices.push(index);
+  indices[indices.length - 1] = count - 1;
+  return indices;
+}
+
+/**
+ * The levels a categorical axis labels, out of `count` in `availableWidth`:
+ * one whole step apart, as many as the width and MAX_TICKS allow. The chart
+ * measures only these, and planCategoricalAxis labels every one it is given.
+ *
+ * @param {number} count
+ * @param {number} availableWidth
+ * @returns {number[]}
+ */
+export function categoricalTickIndices(count, availableWidth) {
+  assertPositiveFinite("availableWidth", availableWidth);
+  const densityLimit = Math.max(2, Math.floor(availableWidth / MIN_ANGLED_SLOT) + 1);
+  return strideIndices(count, Math.min(MAX_TICKS, densityLimit));
 }
 
 /** The drawing size for a chart that has no layout box: hidden, or a DOM without layout. */
@@ -166,6 +189,7 @@ export function planCategoricalAxis({
   baseLeft,
   baseBottom,
   titleHeight = 14,
+  domain = undefined,
 }) {
   if (values.length !== labels.length || labels.length !== measurements.length) {
     throw new RangeError("values, labels, and measurements must have the same length");
@@ -182,9 +206,8 @@ export function planCategoricalAxis({
     validateMeasurement(labels[index], measurement);
   });
 
-  const densityLimit = Math.max(2, Math.floor(availableWidth / MIN_ANGLED_SLOT) + 1);
-  const indices = evenlySpacedIndices(labels.length, Math.min(MAX_TICKS, densityLimit));
-  const slot = availableWidth / Math.max(indices.length - 1, 1);
+  const indices = categoricalTickIndices(labels.length, availableWidth);
+  const slot = narrowestSlot(values, indices, availableWidth, domain);
   const horizontalBudget = Math.max(0, slot - 10);
   const maxMeasuredHeight = Math.max(0, ...indices.map((index) => measurements[index].height));
   const rotate = indices.some((index) => measurements[index].fullWidth > horizontalBudget);
@@ -247,6 +270,32 @@ export function planCategoricalAxis({
     labelsBottom: axisY + TICK_OFFSET + maxLabelHeight,
     labelBudget,
   };
+}
+
+/**
+ * The width between the two closest labelled ticks, which every label must
+ * fit. `domain` is the x range the plot maps onto `availableWidth`, padding
+ * included; without one, or when the values are not all numbers (placed
+ * evenly by index), the labelled ticks span `availableWidth`.
+ * @param {readonly unknown[]} values
+ * @param {readonly number[]} indices
+ * @param {number} availableWidth
+ * @param {readonly [number, number]} [domain]
+ * @returns {number}
+ */
+function narrowestSlot(values, indices, availableWidth, domain) {
+  if (indices.length < 2) return availableWidth;
+  const numeric = indices.every((index) => typeof values[index] === "number"
+    && Number.isFinite(values[index]));
+  const position = (/** @type {number} */ k) =>
+    numeric ? /** @type {number} */ (values[indices[k]]) : indices[k];
+  const ticksSpan = position(indices.length - 1) - position(0);
+  if (!(ticksSpan > 0)) return availableWidth / (indices.length - 1);
+  const domainSpan = numeric && domain ? domain[1] - domain[0] : Number.NaN;
+  const span = domainSpan > 0 ? domainSpan : ticksSpan;
+  let gap = ticksSpan;
+  for (let k = 1; k < indices.length; k += 1) gap = Math.min(gap, position(k) - position(k - 1));
+  return availableWidth * gap / span;
 }
 
 /**

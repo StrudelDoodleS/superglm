@@ -1275,3 +1275,205 @@ class TestPublicationREMLBudget:
             model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=0)
         with pytest.raises(ValueError, match=r"max_reml_iter.*>= 1"):
             model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=-3)
+
+
+def _panel_459(ordering: int | None, *, xshift: float):
+    """#439's review panel book (Poisson, 4000 rows, exposure offset).
+
+    ``x`` sits at ``xshift`` plus noise, so with ``xshift=1e4`` the centred
+    columns of ``s2`` and ``x:s2`` correlate at 0.99999998. Rows are permuted
+    by ``default_rng(ordering).permutation``; None keeps the drawn order.
+    """
+    rng = np.random.default_rng(4242)
+    n = 4000
+    s1 = rng.uniform(18, 80, n)
+    s2 = rng.gamma(2.0, 3.0, n)
+    s3 = rng.uniform(0, 1, n)
+    c1 = rng.integers(0, 4, n)
+    c2 = rng.integers(0, 3, n)
+    make = rng.integers(0, 20, n)
+    model_code = make * 8 + rng.integers(0, 8, n)
+    region = rng.integers(0, 50, n)
+    z = rng.normal(0.0, 1.0, n)
+    effects = np.random.default_rng(4242 + 17)
+    make_effect = effects.normal(0, 0.25, 20)
+    model_effect = effects.normal(0, 0.15, 160)
+    region_effect = effects.normal(0, 0.1, 50)
+    eta = (
+        -1.0
+        + 0.4 * np.sin((s1 - 18) / 20)
+        + 0.05 * np.log1p(s2)
+        + 0.3 * (s3 - 0.5) ** 2
+        + 0.1 * c1
+        - 0.1 * c2
+        + make_effect[make]
+        + model_effect[model_code]
+        + region_effect[region]
+        + 0.15 * z
+    )
+    offset = np.log(rng.uniform(0.1, 1.0, n))
+    y = rng.poisson(np.exp(eta + 0.8 + offset)).astype(float)
+    frame = pd.DataFrame(
+        {
+            "s1": s1,
+            "s2": s2,
+            "c1": np.array([f"a{v}" for v in c1], dtype=object),
+            "make": np.array([f"m{v:02d}" for v in make], dtype=object),
+            "x": xshift + z,
+        }
+    )
+    order = np.arange(n) if ordering is None else np.random.default_rng(ordering).permutation(n)
+    return frame.iloc[order].reset_index(drop=True), y[order], offset[order]
+
+
+class TestDeadSearchNewtonDecrement:
+    """#459: a dead line search whose Newton model predicts a decrease below
+    the stop resolution is a resolved optimum, not a failure."""
+
+    @pytest.mark.parametrize("ordering", [None, 9, 20])
+    def test_a_negligible_predicted_decrease_converges_with_unchanged_numbers(
+        self, monkeypatch, ordering
+    ):
+        """Fails unfixed: on 0.37.1 these row orders of the panel model end
+        ``line_search_failed`` with ``converged=False`` and a
+        ConvergenceWarning (measured on Linux x86-64 OpenBLAS, identical at 1
+        and 4 threads; 6 of 22 orders), while the other orders converge to the
+        same answer. At iteration 6-8 the active gradient sits 1.009 to 2.03
+        times its bar, but the Newton model predicts a decrease of at most
+        1.2e-8 against a resolution of 2.06e-6 and evaluation noise of
+        4.2e-7, so rounding decides whether the full step is accepted.
+        Mutation: dropping the ``predicted_decrease`` arm from
+        ``classify_dead_feasible_exit`` fails the same way.
+
+        The second fit runs the 0.37.1 rule in place of the classifier: every
+        published number must match bitwise, since the rule only names the
+        exit. Where rounding takes another platform's fit through the compound
+        criterion instead, both fits converge, the comparison still holds,
+        and the test skips: the arm was not exercised there.
+        """
+        import warnings
+
+        import superglm.reml.direct as direct
+        from superglm import Categorical, ConvergenceWarning, Numeric, RandomEffect
+
+        X, y, offset = _panel_459(ordering, xshift=1e4)
+        real = direct.classify_dead_feasible_exit
+
+        def gradient_rule_only(*args, **kwargs):
+            kwargs.pop("predicted_decrease", None)
+            return real(*args, **kwargs)
+
+        def fit():
+            model = SuperGLM(
+                family="poisson",
+                features={
+                    "x": Numeric(),
+                    "s2": Numeric(),
+                    "c1": Categorical(),
+                    "s1": Spline(kind="ps", k=8),
+                    "make": RandomEffect(),
+                },
+                interactions=[("x", "s2"), ("x", "c1")],
+                discrete=False,
+                selection_penalty=0,
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.fit_reml(X, y, offset=offset)
+            return model, [w for w in caught if issubclass(w.category, ConvergenceWarning)]
+
+        fixed, convergence_warnings = fit()
+        with monkeypatch.context() as patch:
+            patch.setattr(direct, "classify_dead_feasible_exit", gradient_rule_only)
+            reference, _ = fit()
+
+        assert fixed._reml_result.converged, fixed._reml_result.termination_reason
+        assert fixed.reml_diagnostics()["converged"]
+        assert not convergence_warnings
+        assert fixed._reml_result.lambdas == reference._reml_result.lambdas
+        assert fixed._reml_result.objective == reference._reml_result.objective
+        np.testing.assert_array_equal(fixed.result.beta, reference.result.beta)
+        np.testing.assert_array_equal(
+            fixed.predict(X, offset=offset), reference.predict(X, offset=offset)
+        )
+        if reference._reml_result.termination_reason != "line_search_failed":
+            pytest.skip(
+                "the gradient-only rule ended this row order "
+                f"{reference._reml_result.termination_reason!r} here, not at a dead line "
+                "search, so the decrement arm was not exercised"
+            )
+        assert fixed._reml_result.termination_reason == "converged_at_precision"
+
+    def test_a_capped_newton_step_withholds_the_decrement(self, monkeypatch):
+        """The decrement is the quadratic model's prediction for the Newton
+        step; a step longer than the solver's cap of 5 log-lambda units
+        extrapolates the model past where the solver trusts it, so the arm is
+        withheld (``predicted_decrease=None``).
+
+        Every lambda move is rejected by a stand-in objective, from
+        ``lambda=1e-3`` where the first Newton step is capped: the first
+        trial sits exactly 5 units from the candidate (measured; the
+        uncapped step from ``lambda=0.1`` is 0.48). The search evaluates and
+        rejects its trials, so the cap guard alone withholds the decrement.
+        Mutation: dropping the ``max_delta > max_newton_step`` guard passes
+        the decrement of the capped step instead of None.
+        """
+        import superglm.reml.direct as direct
+        from superglm import ConvergenceWarning
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        evaluated: list[dict[str, float]] = []
+        classified: list[dict] = []
+        real = direct.classify_dead_feasible_exit
+
+        def reject_every_move(*args, **kwargs):
+            evaluated.append(dict(args[6]))
+            return 0.0 if evaluated[-1] == evaluated[0] else 1.0
+
+        def spy(*args, **kwargs):
+            classified.append(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(direct, "reml_laml_objective", reject_every_move)
+        monkeypatch.setattr(direct, "classify_dead_feasible_exit", spy)
+        model = SuperGLM(family="poisson", features={"x": Spline(k=7)}, selection_penalty=0)
+        with pytest.warns(ConvergenceWarning, match="no smoothing step improved"):
+            model.fit_reml(
+                pd.DataFrame({"x": x}),
+                y,
+                lambda2_init={"x": 1e-3},
+                max_reml_iter=5,
+                runtime_validation="skip",
+            )
+
+        first_trial = max(abs(np.log(evaluated[1][k] / evaluated[0][k])) for k in evaluated[0])
+        assert first_trial == pytest.approx(5.0, rel=1e-9)
+        assert len(classified) == 1
+        assert classified[0]["evaluated_trial"] is True
+        assert classified[0]["predicted_decrease"] is None
+        assert model._reml_result.termination_reason == "line_search_failed"
+
+    def test_an_undetermined_dead_search_still_reports_not_converged(self):
+        """#439's documented undetermined model: the panel book under a
+        noncanonical sqrt link. Its search dies at the first iteration with
+        the active gradient at 9.5 against a bar of 3.3e-4, the Newton step
+        over the step cap and no trial objective evaluated (measured), so
+        neither arm of the classifier has anything to grant: it stays
+        ``line_search_failed`` with ``converged=False`` and warns."""
+        from superglm import ConvergenceWarning, Numeric, RandomEffect
+
+        X, y, offset = _panel_459(None, xshift=0.0)
+        model = SuperGLM(
+            family="poisson",
+            link="sqrt",
+            features={"x": Numeric(), "s1": Spline(kind="ps", k=8), "make": RandomEffect()},
+            selection_penalty=0,
+        )
+        with pytest.warns(ConvergenceWarning, match="no smoothing step improved"):
+            model.fit_reml(X, y, offset=offset)
+
+        assert model._reml_result.termination_reason == "line_search_failed"
+        assert not model._reml_result.converged
+        assert not model.reml_diagnostics()["converged"]

@@ -1649,7 +1649,8 @@ test("action module exposes only the controller factory, paint helper, and exact
     "refreshFromPythonWhenIdle",
     "retryEvidence",
     "retryMutation",
-    "schedulePanelEvidence"
+    "schedulePanelEvidence",
+    "showNotice"
   ]);
 });
 

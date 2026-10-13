@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm._utils import weighted_row_sum
 from superglm.group_matrix import GroupMatrix
 from superglm.model.fit_state import (
     FittedStateRevision,
@@ -276,10 +277,6 @@ def _profile_repaired_intercept(
         eta_safe = stabilize_eta(eta_base + shift, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
-            deviance_units = np.asarray(
-                model._distribution.deviance_unit(y_arr, mu),
-                dtype=np.float64,
-            )
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
                 _VARIANCE_FLOOR,
@@ -295,7 +292,7 @@ def _profile_repaired_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
-            deviance = float(np.sum(weights_arr * deviance_units, dtype=np.float64))
+            deviance = weighted_row_sum(weights_arr, model._distribution.deviance_unit, y_arr, mu)
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))
         if not (
@@ -386,12 +383,13 @@ def _shape_candidate_objective(
         eta_safe = stabilize_eta(eta, model._link)
         mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
         deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
-    if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units)):
+    carried = np.asarray(weights, dtype=np.float64) != 0.0
+    if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: invalid link-domain predictions"
         )
 
-    deviance = float(np.sum(weights * deviance_units))
+    deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
     smooth_value = _smooth_penalty_value(beta_arr, smooth_penalty_terms)
     selection_value = 2.0 * float(selection_penalty.eval(beta_arr, model._groups))
     merit = deviance + smooth_value + selection_value
@@ -725,7 +723,11 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
         )
     else:
         variance = np.maximum(model._distribution.variance(mu), _VARIANCE_FLOOR)
-        pearson = float(np.sum(weights * (y - mu) ** 2 / variance))
+        # a zero-weight row holds an exact 0, as in ``weighted_row_sum`` (#369)
+        carried = weights != 0.0
+        terms = np.zeros_like(weights)
+        terms[carried] = weights[carried] * (y[carried] - mu[carried]) ** 2 / variance[carried]
+        pearson = float(np.sum(terms))
         residual_df = pearson_residual_degrees_of_freedom(
             weights,
             model._solver_result.effective_df,

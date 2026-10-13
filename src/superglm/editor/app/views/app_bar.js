@@ -3,7 +3,7 @@
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 
 const NOTHING_WAITING =
-  "Nothing is waiting. Collapse, Ungroup, Set reference and the shapes wait here for one refit.";
+  "Nothing is waiting. Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes wait here for one refit.";
 
 /**
  * @param {object} options

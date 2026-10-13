@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from tests.editor._chart_layout import wait_for_chart_to_fit
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -12,6 +13,8 @@ def select_chart_tool(page, name: str) -> None:
     page.get_by_role("radiogroup", name="Chart tools").get_by_role(
         "radio", name=name, exact=True
     ).click()
+    # Handles' controls can wrap the toolbar, and the chart redraws at its new size.
+    wait_for_chart_to_fit(page)
 
 
 def remember_selection_dom(page) -> None:
@@ -1449,7 +1452,10 @@ def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
         ) as edit_response:
             increase.click()
         assert edit_response.value.status == 200
-        assert edit_response.value.request.post_data_json == {"operation": "shift_up"}
+        assert edit_response.value.request.post_data_json == {
+            "operation": "shift_up",
+            "term": "curve",
+        }
 
         undo = page.get_by_role("button", name="Undo edit")
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
@@ -2166,6 +2172,11 @@ def test_same_term_control_loss_falls_back_to_select_before_drawing(open_editor_
             )
         ):
             page.locator('button[data-op="reset"]').click()
+        # The page applies the response after it arrives: let the tool rail settle.
+        page.wait_for_function(
+            "() => document.querySelector('[data-tool=\"select\"]')"
+            "?.getAttribute('aria-checked') === 'true'"
+        )
 
         actual = {
             "select_checked": select.get_attribute("aria-checked"),
@@ -2208,7 +2219,7 @@ def test_existing_svg_selection_operation_posts_linearise_unchanged(open_editor_
 
         response = operation_response.value
         assert response.status == 200
-        assert response.request.post_data_json == {"operation": "linearise"}
+        assert response.request.post_data_json == {"operation": "linearise", "term": "curve"}
         assert session.history[-1].operation == "linear_interpolate"
 
 

@@ -46,10 +46,13 @@ import {
   runOffsetRefit,
   revertTransition,
   stageCollapse,
+  stageOnCurve,
   stageReference,
   stageShapeRange,
+  stageSpecial,
   stageUngroup
 } from "./summary.js";
+import { freeLevelsShown, specialActions } from "./specials.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import {
@@ -180,6 +183,9 @@ const exportPendingNote = document.getElementById("exportPendingNote");
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
+const makeSpecial = document.getElementById("makeSpecial");
+const returnToCurve = document.getElementById("returnToCurve");
+const freeLevelsToggle = document.getElementById("freeLevelsToggle");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
 const shapeJoin = document.getElementById("shapeJoin");
 const shapeJoinSeparator = document.getElementById("shapeJoinSeparator");
@@ -338,6 +344,7 @@ const chartContext = {
   selectedTerm,
   visualMode,
   showCi: () => store.getState().view.showCi,
+  freeLevels: () => shownFreeLevels(),
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode(),
@@ -686,6 +693,31 @@ if (
 ) {
   throw new Error("Editor export dialog is incomplete");
 }
+// Inside a notebook cell the kernel runs on another machine, so its file
+// manager would open there: the dialog saves to a kernel path and stops.
+const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
+if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
+// One editor can show in several notebook outputs. When another output
+// changes the session, this one re-reads it, once for a burst of changes.
+if (notebookHost) {
+  let refreshing = false;
+  let again = false;
+  globalThis.superglmEditorHost.onRemoteChange = async () => {
+    if (refreshing) {
+      again = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        again = false;
+        await actions.refreshFromPythonWhenIdle();
+      } while (again);
+    } finally {
+      refreshing = false;
+    }
+  };
+}
 bindExportDialog({
   client: editorClient,
   nodes: {
@@ -697,7 +729,7 @@ bindExportDialog({
     directory: exportDirectory,
     download: exportDownload,
     saveToKernel: exportSave,
-    openDirectory: exportOpenDirectory instanceof HTMLButtonElement
+    openDirectory: !notebookHost && exportOpenDirectory instanceof HTMLButtonElement
       ? exportOpenDirectory
       : null,
     status: exportStatus,
@@ -998,6 +1030,7 @@ function renderChartWorkspace() {
   if (!snapshot) return;
   const view = editorState.view;
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
+  renderFreeLevelsToggle(snapshot);
   const selected = selectedTerm();
   const term = currentTerm();
   if (!term) return;
@@ -1149,6 +1182,7 @@ function selectChartRenderState(state) {
     termView: view.termView,
     showCi: view.showCi,
     showContrib: view.showContrib,
+    freeLevels: view.freeLevels,
     zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
@@ -1164,6 +1198,7 @@ function sameChartRenderState(next, previous) {
     next.termView === previous.termView &&
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
+    next.freeLevels === previous.freeLevels &&
     next.zoom === previous.zoom &&
     next.groupMode === previous.groupMode;
 }
@@ -1514,6 +1549,55 @@ function updateCollapseAction(term, selection) {
     const label = isLevelTerm ? selectedLevelLabel(term, selection) : null;
     setReference.hidden = label === null || label === term.reference?.level;
   }
+  const special = specialActions(term, isLevelTerm ? selectedLevels(term, selection) : []);
+  renderSpecialAction(makeSpecial, special.make);
+  renderSpecialAction(returnToCurve, special.back);
+}
+
+// Make special and Back on the curve show their state; a disabled one says
+// why in its popover.
+function renderSpecialAction(button, state) {
+  if (!button) return;
+  button.hidden = !state.visible;
+  button.setAttribute("aria-disabled", String(!state.enabled));
+  renderShapeReason(button, state.reason);
+}
+
+// The free-level comparison in view: the last one fitted, while its term and
+// the fit in force are the ones shown.
+function shownFreeLevels() {
+  const state = store.getState();
+  const free = state.view.freeLevels;
+  return freeLevelsShown(free, selectedTerm(), state.remote.snapshot?.fit_token) ? free : null;
+}
+
+// Free levels refits the model with the term's levels free, as Refit does a
+// structural change, and draws them until the term or the model changes.
+async function toggleFreeLevels() {
+  if (shownFreeLevels()) {
+    actions.patchView({ freeLevels: null });
+    return;
+  }
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") return;
+  const term = selectedTerm();
+  stopContributionBuild();
+  setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
+  try {
+    const free = await editorClient.freeLevels(term);
+    actions.patchView({ freeLevels: free });
+    if (free.notice) actions.showNotice(free.notice);
+  } catch (error) {
+    actions.showNotice(error instanceof Error ? error.message : String(error));
+  } finally {
+    setAppBusy(false);
+  }
+}
+
+function renderFreeLevelsToggle(snapshot) {
+  if (!freeLevelsToggle) return;
+  const term = snapshot.terms?.[selectedTerm()];
+  freeLevelsToggle.hidden = (term?.term_type || term?.kind) !== "ordered categorical";
+  freeLevelsToggle.setAttribute("aria-pressed", String(shownFreeLevels() !== null));
 }
 
 // The four shape icons share one state per selection, except that the bands
@@ -1533,7 +1617,8 @@ function updateShapeActions(term, selection) {
   renderShapeJoin(term);
   shapeJoinSeparator.hidden = !shapesVisible;
   const refitVisible = shapesVisible ||
-    [collapseLevels, ungroupLevels, setReference].some((button) => button && !button.hidden);
+    [collapseLevels, ungroupLevels, setReference, makeSpecial, returnToCurve]
+      .some((button) => button && !button.hidden);
   selectionRefitBreak.hidden = !refitVisible;
   selectionRefitLabel.hidden = !refitVisible;
 }
@@ -1868,7 +1953,10 @@ for (const button of document.querySelectorAll("button[data-op]")) {
       return;
     }
     stopContributionBuild();
-    await executeStateMutation("/op", { operation });
+    // Each operation names the term this page shows: Python's selected term
+    // is shared, and another page of the same session may have moved it.
+    const term = selectedTerm();
+    await executeStateMutation("/op", term ? { operation, term } : { operation });
   });
 }
 
@@ -1941,6 +2029,15 @@ if (setReference) {
     await runStructuralChange(stageReference(selectedTerm(), label));
   });
 }
+for (const [button, stage] of [[makeSpecial, stageSpecial], [returnToCurve, stageOnCurve]]) {
+  if (!button) continue;
+  button.addEventListener("click", async () => {
+    const term = currentTerm();
+    if (!term || button.getAttribute("aria-disabled") === "true") return;
+    await runStructuralChange(stage(selectedTerm(), selectedLevels(term, currentSelection())));
+  });
+}
+if (freeLevelsToggle) freeLevelsToggle.addEventListener("click", toggleFreeLevels);
 for (const button of shapeButtons) {
   button.addEventListener("click", async () => {
     const term = currentTerm();

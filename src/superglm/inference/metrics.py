@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+from superglm._utils import weighted_row_sum
 from superglm.distributions import weighted_log_likelihood
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import (
@@ -546,7 +547,7 @@ class ModelMetrics:
     @cached_property
     def deviance(self) -> float:
         """Weighted residual deviance on this object's evaluation rows."""
-        return float(np.sum(self._weights * self._family.deviance_unit(self._y, self._mu)))
+        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._mu)
 
     @cached_property
     def log_likelihood(self) -> float:
@@ -589,7 +590,7 @@ class ModelMetrics:
 
     @cached_property
     def null_deviance(self) -> float:
-        return float(np.sum(self._weights * self._family.deviance_unit(self._y, self._null_mu)))
+        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._null_mu)
 
     @cached_property
     def explained_deviance(self) -> float:

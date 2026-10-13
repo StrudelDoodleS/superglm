@@ -78,7 +78,7 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     if refit_reason == "constraint_kkt_incomplete":
         refit = (
             "the final coefficient fit at the selected smoothing parameters keeps every "
-            "shape constraint but could not certify that its coefficients are the "
+            "shape constraint, yet could not certify that its coefficients are the "
             "constrained optimum: the inner quadratic program did not complete its KKT "
             f"certificate (termination_reason={refit_reason!r})"
         )
@@ -86,8 +86,8 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
             f"{n_iter} iterations (termination_reason={reason!r}), but {refit}. The model "
-            "is returned, but its coefficients, effective degrees of freedom and standard "
-            "errors are those of that fit's last iterate."
+            "is returned with the coefficients, effective degrees of freedom and standard "
+            "errors of that fit's last iterate."
         )
     else:
         why = _REML_REASON_TEXT.get(str(reason), f"termination_reason={reason!r}")

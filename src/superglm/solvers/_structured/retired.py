@@ -18,8 +18,8 @@ saturated-density memo, which ``SuperGLM.__setstate__`` drops
 search state of ``estimate_p``, whose result restates itself in the current
 layout (``TweedieProfileResult.__setstate__``).
 
-The retired names are kept so that models saved by v0.35.0 load; release
-0.37.0 may drop them.
+The retired names are kept so that models saved by v0.35.0 load; a later
+minor release may drop them.
 """
 
 from __future__ import annotations

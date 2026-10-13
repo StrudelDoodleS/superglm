@@ -18,8 +18,10 @@ const {
   revertTransition,
   runOffsetRefit,
   stageCollapse,
+  stageOnCurve,
   stageReference,
   stageShapeRange,
+  stageSpecial,
   stageUngroup
 } = await import(summaryModulePath);
 
@@ -245,6 +247,16 @@ test("with Refit after every change on, a change goes to its operation's own rou
     name: "make a Flat range",
     path: "/shape_range",
     payload: { term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageSpecial("band", ["B3"])), {
+    name: "make levels special",
+    path: "/special_levels",
+    payload: { term: "band", levels: ["B3"], special: true, method: "auto" }
+  });
+  assert.deepEqual(refitAtOnceTransition(stageOnCurve("band", ["B3"])), {
+    name: "put levels back on the curve",
+    path: "/special_levels",
+    payload: { term: "band", levels: ["B3"], special: false, method: "auto" }
   });
 });
 

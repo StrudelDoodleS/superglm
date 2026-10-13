@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -44,6 +46,28 @@ def _validate_strict_prior_weights(weights, n: int) -> NDArray:
     if not np.all(np.isfinite(validated)) or np.any(validated <= 0.0):
         raise ValueError(message)
     return validated
+
+
+def weighted_row_sum(weights, row_term: Callable[..., NDArray], *rows) -> float:
+    """Return ``sum(w * row_term(*rows))`` with each row of weight exactly 0 an exact 0.
+
+    A zero-weight row is not in the fit, so its term is never evaluated: a
+    Gaussian identity mean or response past ``sqrt(DBL_MAX)`` there made its
+    unit deviance ``inf``, and ``0 * inf`` turned the whole sum into NaN, which
+    rejected every trial step (issue #369).  With no zero weight this is the
+    unchanged expression.  With one, every other row keeps its product in its
+    position and the zero rows hold ``+0.0``, which is what ``0 * t`` gave for a
+    finite ``t >= 0``, so the sum differs from the old one only where that was NaN.
+    """
+    mass = np.asarray(weights, dtype=np.float64)
+    carried = mass != 0.0
+    if carried.all():
+        return float(np.sum(weights * row_term(*rows)))
+    terms = np.zeros_like(mass)
+    terms[carried] = mass[carried] * row_term(
+        *(np.asarray(row, dtype=np.float64)[carried] for row in rows)
+    )
+    return float(np.sum(terms))
 
 
 def _ulp_size(values: NDArray) -> NDArray:

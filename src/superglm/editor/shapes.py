@@ -50,8 +50,12 @@ _LINEAR_TANGENT = "A degree-1 spline cannot join a range along its tangent; choo
 def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
     """The palette's state for one term: availability, the ranges in force, ``support``.
 
-    ``specials`` names an ordered term's special levels as the axis shows them.
+    ``specials`` names an ordered term's special levels as the axis shows them,
+    and ``returnable`` those of them that can go back on the curve: the ones a
+    structural step took off it, not the ones the declaration makes special.
     """
+    from superglm.editor.specials import returnable_levels
+
     spec = model._specs[name]
     available, reason = shape_availability(model, name)
     ranges = [
@@ -66,6 +70,7 @@ def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dic
         "ranges": ranges,
         "support": support,
         "specials": [str(level) for level in specials],
+        "returnable": returnable_levels(spec),
         "joins": ["kink"] if linear else list(EDITOR_JOINS),
         "join_reason": _LINEAR_TANGENT if linear else None,
     }

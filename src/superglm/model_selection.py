@@ -17,6 +17,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Tweedie, weighted_log_likelihood
 
 # The full-frame binding pass lives in a neutral module so the public
@@ -435,9 +436,8 @@ def _scoring_weights(model, sample_weight, n_rows: int) -> tuple[NDArray, float]
 def _score_deviance(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean unit deviance under the family's sample-weight contract."""
     mu = model.predict(X_val, offset=offset)
-    dev = model._distribution.deviance_unit(y_val, mu)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    return float(np.sum(weights * dev) / denominator)
+    return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu) / denominator
 
 
 def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
@@ -475,9 +475,8 @@ def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
 def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled deviance aggregation."""
     mu = model.predict(X_val, offset=offset)
-    dev = model._distribution.deviance_unit(y_val, mu)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    return float(np.sum(weights * dev)), denominator
+    return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu), denominator
 
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):

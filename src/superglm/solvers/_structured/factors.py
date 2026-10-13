@@ -83,7 +83,8 @@ def _block_derivative_cross_traces(
 # §3.12): the block-Schur pair (stage 2) and the scalar pair (stage 4), whose
 # random effects every fit now factors as a nested chain (a lone level is a
 # chain of one).  The names stay importable at their pickled paths as inert
-# stand-ins so that models saved by v0.35.0 load; release 0.37.0 may drop them.
+# stand-ins so that models saved by v0.35.0 load; a later minor release may
+# drop them.
 __getattr__ = module_getattr(
     __name__,
     frozenset(

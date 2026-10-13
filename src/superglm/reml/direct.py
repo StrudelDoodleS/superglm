@@ -27,6 +27,7 @@ from superglm.reml.convergence import (
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
+    newton_predicted_decrease,
     project_reml_gradient,
     trial_counts_as_precision_evidence,
 )
@@ -1578,7 +1579,14 @@ def optimize_direct_reml(
             # just crossed the freeze bar, and a dead feasible search
             # already states that no further objective progress exists. A
             # genuinely undetermined stall keeps its active gradient orders
-            # above the bar and stays an honest failure.
+            # above the bar and stays an honest failure. The same holds in
+            # objective units: when the Newton model of the active set
+            # predicts a decrease below the stop resolution (half the
+            # squared decrement of the uncapped step just tried, its
+            # Hessian unmodified), the optimum is resolved with the gradient
+            # above its bar but within a decade of it -- #459 measured that
+            # decrease at 1.2e-8 against evaluation noise of 4.2e-7, so
+            # rounding alone decided whether the full step was accepted.
             active_grad_norm = (
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )
@@ -1588,6 +1596,13 @@ def optimize_direct_reml(
                 tolerance=_tol,
                 evaluated_trial=evaluated_feasible_trial
                 and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
+                predicted_decrease=(
+                    None
+                    if max_delta > max_newton_step
+                    else newton_predicted_decrease(
+                        grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
+                    )
+                ),
             )
             converged = termination_reason == "converged_at_precision"
             break

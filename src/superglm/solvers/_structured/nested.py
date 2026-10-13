@@ -95,8 +95,8 @@ _ONE_HOT_TYPES = (CategoricalGroupMatrix,)
 # factor pickled by another build (master 94359786, the uncommitted speed
 # build) holds another set of derived attributes but always the inputs it
 # factored: it is rebuilt from those by the current engine on first use, with
-# a notice, and a state written by this format is restored as is.  Release
-# 0.37.0 may drop the foreign-state rebuild.
+# a notice, and a state written by this format is restored as is.  A later
+# minor release may drop the foreign-state rebuild.
 _NESTED_STATE_FORMAT = 1
 _REBUILT_NOTICE = (
     "This model was saved by an earlier superglm build: its nested random-effect "

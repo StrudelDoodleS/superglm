@@ -136,7 +136,7 @@ redraw the chart.
 
 ## Waiting Changes, Refit and Notes
 
-Collapse, Ungroup, Set reference and the shapes are staged, not fitted. Each one is a
+Collapse, Ungroup, Set reference, Make special, Back on the curve and the shapes are staged, not fitted. Each one is a
 `PendingStep` in `session.pending` holding its labels-only `params` and the draft spec it leaves;
 a term's draft is the last waiting step's spec for it, else the in-force fitted spec, so staged
 changes on one term compose. One Refit fits every draft in a single clone, records one

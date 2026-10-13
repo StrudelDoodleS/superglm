@@ -3,6 +3,7 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 import pytest
+from tests.editor._chart_layout import wait_for_chart_to_fit
 
 from superglm.editor.controls import ORDERED_SPLINE_GRID_STEPS, ORDERED_SPLINE_SHAPED
 
@@ -32,6 +33,13 @@ def _handles_tool(page):
     )
 
 
+def _choose_handles(page) -> None:
+    """Choose Handles, then wait for the redraw its toolbar controls can cause."""
+    _handles_tool(page).click()
+    page.locator("#chart .control-handle").first.wait_for()
+    wait_for_chart_to_fit(page)
+
+
 def test_an_ordered_spline_is_drawn_as_its_spline_with_handles_contrib_and_build(
     open_editor_page,
 ):
@@ -41,9 +49,8 @@ def test_an_ordered_spline_is_drawn_as_its_spline_with_handles_contrib_and_build
         assert _path_points(page, "#chart path.edited") == grid_points
         assert _path_points(page, "#chart path.original") == grid_points
 
-        _handles_tool(page).click()
+        _choose_handles(page)
         handles = page.locator("#chart .control-handle")
-        handles.first.wait_for()
         live = session.ordered_spline("age_band").live.size
         assert handles.count() == live
         # Handles turn Contrib on; each contribution runs over the same grid.
@@ -165,9 +172,8 @@ def test_handles_draw_the_level_dots_on_the_spline_and_carry_them_through_a_drag
     # drawing them at the fitted values rather than the drag preview's leaves
     # them 17 px off the dragged curve.
     with open_editor_page(selected_term="age_band") as (page, _session):
-        _handles_tool(page).click()
+        _choose_handles(page)
         handles = page.locator("#chart .control-handle")
-        handles.first.wait_for()
 
         def dots_on_curve():
             dots = page.evaluate(_DOTS_ON_CURVE, ORDERED_SPLINE_GRID_STEPS)

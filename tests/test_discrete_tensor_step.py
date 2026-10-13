@@ -192,8 +192,11 @@ def _assert_additive_reference(model, X, objective, predictions):
     )
 
 
-def _reject_every_move():
-    """A ``reml_laml_objective`` stand-in that rejects every lambda move."""
+def _reject_every_move(rel=1e-6):
+    """A ``reml_laml_objective`` stand-in that rejects every lambda move.
+
+    Lambdas within ``rel`` of the first evaluated ones count as unmoved.
+    """
     evaluated: dict[str, float] = {}
 
     def reject(*args, **kwargs):
@@ -202,7 +205,7 @@ def _reject_every_move():
             evaluated.update(candidate)
             return 0.0
         unchanged = all(
-            candidate[name] == pytest.approx(value) for name, value in evaluated.items()
+            candidate[name] == pytest.approx(value, rel=rel) for name, value in evaluated.items()
         )
         return 0.0 if unchanged else 1.0
 
@@ -302,6 +305,86 @@ class TestDiscreteTensorStepIsADescentDirection:
         assert record["candidate_mode_stationary"] is True
         assert record["evaluated_trial"] is True
         assert record["active_gradient_norm"] > record["bar"]
+        # Its branch (#459): the trust region damps the dead step (measured
+        # mu 15.4, undamped step 7.5 against a cap of 1), so the decrement
+        # arm is withheld, and the gradient sits orders above the ceiling.
+        stats = model.reml_diagnostics()["profile"]["reml_outer_step_stats"]
+        assert stats[-1]["dead_search"] and stats[-1]["trust_mu"] > 0.0
+        assert record["predicted_decrease"] is None
+        assert record["decrease_bar"] > 0.0
+        assert record["active_gradient_norm"] > 10 * record["bar"]
+
+    @staticmethod
+    def _near_optimum_dead_search(monkeypatch, *, damp: bool):
+        """The mild fixture, every lambda 1% off its optimum, every move rejected.
+
+        The stand-in scores the start 0 and any other lambdas 1, so every
+        trial is rejected by more than the stop resolution and nothing
+        depends on rounding. At this start the undamped Newton step is
+        0.010 in log-lambda, the active gradient 0.0228 and half the
+        squared decrement 3.7e-4 (measured). ``reml_tol=8e-3`` puts that
+        gradient at 2.85 bars, inside the ceiling of 10, and the decrement
+        at 0.046 of the resolution. ``damp`` shrinks the trust region a
+        thousandfold so it binds at the same point (measured mu 20.5).
+        """
+        start = {name: value * float(np.exp(0.01)) for name, value in UNFIXED_MILD_LAMBDAS.items()}
+        reject, _ = _reject_every_move(rel=1e-12)
+        monkeypatch.setattr(discrete_reml, "reml_laml_objective", reject)
+        if damp:
+            real = discrete_reml._damped_tensor_newton_step
+
+            def tight_trust_region(*args):
+                *rest, base_cap, cap_v = args
+                return real(*rest, base_cap * 1e-3, cap_v * 1e-3)
+
+            monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", tight_trust_region)
+        X, y = _mild_frame()
+        model = _tensor_model()
+        model.fit_reml(
+            X, y, lambda2_init=start, reml_tol=8e-3, max_reml_iter=12, runtime_validation="skip"
+        )
+        profile = model.reml_diagnostics()["profile"]
+        return (
+            model._reml_result,
+            profile["reml_dead_line_search"],
+            profile["reml_outer_step_stats"],
+        )
+
+    def test_a_settled_dead_tensor_search_with_a_negligible_decrement_converges(self, monkeypatch):
+        """#459's decrement arm on the discrete engine: a settled dead search
+        whose gradient is above the bar but within the ceiling, with an
+        undamped Newton step predicting a decrease below the resolution, is
+        ``converged_at_precision``.
+
+        Mutation: passing ``predicted_decrease=None`` to the classifier
+        (the arm deleted) ends ``line_search_failed``."""
+        result, record, stats = self._near_optimum_dead_search(monkeypatch, damp=False)
+
+        assert result.termination_reason == "converged_at_precision"
+        assert result.converged
+        assert stats[-1]["dead_search"] and stats[-1]["trust_mu"] == 0.0
+        assert record["candidate_mode_stationary"] is True
+        assert record["evaluated_trial"] is True
+        assert record["bar"] < record["active_gradient_norm"] < 10 * record["bar"]
+        assert record["predicted_decrease"] < record["decrease_bar"]
+
+    def test_the_decrement_arm_is_withheld_when_the_trust_region_binds(self, monkeypatch):
+        """The same point with the trust region binding: the damped step is
+        not the Newton step, so its model's decrease is not evidence. The
+        record carries ``predicted_decrease=None`` and the search stays
+        ``line_search_failed``.
+
+        Mutation: dropping the ``trust_mu > 0`` guard computes the decrement
+        (3.7e-4 against a resolution of 8e-3) and grants
+        ``converged_at_precision``."""
+        result, record, stats = self._near_optimum_dead_search(monkeypatch, damp=True)
+
+        assert result.termination_reason == "line_search_failed"
+        assert not result.converged
+        assert stats[-1]["dead_search"] and stats[-1]["trust_mu"] > 0.0
+        assert record["predicted_decrease"] is None
+        assert record["decrease_bar"] == record["bar"]
+        assert record["bar"] < record["active_gradient_norm"] < 10 * record["bar"]
 
     def test_true_objective_backtrack_accepts_below_one_thirty_second(self, monkeypatch):
         """A legitimate damped direction still needs true-objective backtracking.

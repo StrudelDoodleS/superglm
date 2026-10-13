@@ -310,6 +310,10 @@
 .cv-range { stroke: var(--grey); stroke-width: 1.5; stroke-opacity: 0.6; }
 .cv-fold-dot,
 .cv-card-dot { fill-opacity: 0.95; stroke-width: 0.9; }
+/* A far-off fold, pinned at the strip's end: an open ring in its colour. */
+.cv-card-dot.is-off { fill-opacity: 0; stroke-width: 1.6; }
+/* A mean off the strip, pinned at its end: dashed. */
+.cv-mean.is-off { stroke-dasharray: 2 2; }
 .cv-fit,
 .cv-fit-line { fill: none; stroke: var(--blue); stroke-width: 1.95; }
 .cv-edited,

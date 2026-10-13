@@ -176,6 +176,10 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/free_levels")
+    def free_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._free_level_comparison(str(_required(payload, "term"))))
+
     @app.post("/rating_table")
     def rating_table(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._rating_table(str(_required(payload, "term"))))
@@ -309,6 +313,18 @@ def create_editor_app(widget: Any) -> FastAPI:
                 str(_required(payload, "term")),
                 str(_required(payload, "level")),
                 str(payload.get("method", "auto")),
+                level_display=_level_display(payload),
+            )
+        )
+
+    @app.post("/special_levels")
+    def special_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._special_levels(
+                str(_required(payload, "term")),
+                _stage_params({"params": {"levels": _required(payload, "levels")}})["levels"],
+                special=_special_flag(payload),
+                method=str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
             )
         )
@@ -574,6 +590,13 @@ def _keep_reference(payload: dict[str, Any]) -> bool:
     value = payload.get("keep_reference", True)
     if not isinstance(value, bool):
         raise EditorValueError("keep_reference must be true or false.")
+    return value
+
+
+def _special_flag(payload: dict[str, Any]) -> bool:
+    value = payload.get("special", True)
+    if not isinstance(value, bool):
+        raise EditorValueError("special must be true or false.")
     return value
 
 

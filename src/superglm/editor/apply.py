@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._utils import weighted_row_sum
 from superglm.editor.errors import EditorValueError
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
@@ -765,7 +766,7 @@ def _refresh_fit_statistics(
         model._link,
         weight_semantics=model_weight_semantics(model),
     )
-    deviance = float(np.sum(weights * model._distribution.deviance_unit(y_arr, mu)))
+    deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
     model._fit_stats = _compute_fit_stats(
         y_arr,
         mu,

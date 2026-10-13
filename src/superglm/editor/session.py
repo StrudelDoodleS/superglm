@@ -850,13 +850,20 @@ class EditorSession:
         *,
         keep_reference: bool = True,
         X=None,
+        sample_weight=None,
     ) -> PendingStep:
         """Stage one structural change to wait for a Refit.
 
         See ``superglm.editor.staging.stage_structural``.
         """
         return staging.stage_structural(
-            self, operation, term, params, keep_reference=keep_reference, X=X
+            self,
+            operation,
+            term,
+            params,
+            keep_reference=keep_reference,
+            X=X,
+            sample_weight=sample_weight,
         )
 
     def refit_pending(self, *, method: str = "auto", **refit_kwargs: Any) -> StructuralStep:
@@ -1327,6 +1334,20 @@ class EditorSession:
             self, "set_reference", term, {"level": level}, **refit_kwargs
         )
 
+    def replace_with_special_levels(
+        self, term: str, levels: list[str], *, special: bool = True, **refit_kwargs: Any
+    ):
+        """Take ``levels`` off ``term``'s curve (or, ``special=False``, put them back) and refit.
+
+        One structural step, which one Undo takes back. ``levels`` are display
+        labels of an ordered term; a level taken off is fitted with a free
+        estimate of its own, as ``specials=`` declares.
+        """
+        operation = "special" if special else "on_curve"
+        return staging.stage_and_refit(
+            self, operation, term, {"levels": list(levels)}, **refit_kwargs
+        )
+
     def replace_with_shaped_range(
         self, term: str, *, lo, hi, degree: int, join: str = "tangent", **refit_kwargs: Any
     ):
@@ -1576,11 +1597,20 @@ class EditorSession:
         """
         return persistence.load_session(cls, path, model=model)
 
-    def widget(self):
-        """Return an optional notebook widget for this session."""
+    def widget(self, mode: str | None = None):
+        """Return the editor app for this session, to display in a notebook.
+
+        ``mode="server"`` serves the app from a local server, which the
+        browser must be able to reach, as it can when it runs on the
+        kernel's machine. ``mode="notebook"`` runs it inside the notebook
+        cell over widget messages, for hosted notebooks such as Databricks,
+        and needs ``pip install 'superglm[notebook]'``. ``None`` picks
+        notebook on Databricks and server elsewhere; on Databricks without
+        anywidget it keeps server and warns with the install line.
+        """
         from superglm.editor.widget import EditorWidget
 
-        return EditorWidget(self)
+        return EditorWidget(self, mode=mode)
 
     # Private guards keep public operations concise and ensure every history
     # record mutates exactly one term through the same commit path.

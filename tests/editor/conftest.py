@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 import numpy as np
 import pandas as pd
 import pytest
+from tests.editor._chart_layout import wait_for_chart_to_fit
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm.editor import EditorSession
@@ -155,14 +156,7 @@ def open_editor_page(chromium_browser, editor_browser_model):
                 page.locator("#chart path.edited").first.wait_for()
             # The chart is drawn at its panel's size, and the panel settles a
             # frame after the feature list toggles or the metrics render.
-            page.wait_for_function(
-                """() => {
-                    const svg = document.querySelector('#chart');
-                    const viewBox = svg.viewBox.baseVal;
-                    return viewBox.width === svg.clientWidth
-                        && viewBox.height === svg.clientHeight;
-                }"""
-            )
+            wait_for_chart_to_fit(page)
             yield page, session
         finally:
             if resources in opened:
