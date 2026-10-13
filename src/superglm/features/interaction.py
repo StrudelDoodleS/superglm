@@ -331,9 +331,10 @@ def _support_flags(
     idx: NDArray, rows: NDArray, n_support: int, rows_by_kind: tuple[NDArray, NDArray, NDArray]
 ) -> tuple[NDArray, NDArray, NDArray]:
     """Which support points hold a level's rows on the lower boundary, the upper one, or between."""
-    return tuple(  # type: ignore[return-value]
+    lower, upper, inside = (
         np.bincount(idx[kind[rows]], minlength=n_support) > 0 for kind in rows_by_kind
     )
+    return lower, upper, inside
 
 
 def _separated_points(support: NDArray, scan_map: NDArray, flags: tuple, scan) -> tuple | None:

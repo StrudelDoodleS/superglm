@@ -136,3 +136,55 @@ def test_a_fit_without_separation_is_unchanged():
     assert curve == []
     np.testing.assert_array_equal(scanned.result.beta, plain.result.beta)
     np.testing.assert_array_equal(scanned.predict(X), plain.predict(X))
+
+
+def test_a_separated_range_between_nonzero_responses_is_interpolated():
+    """Level C has responses on [0, 10] and [30, 40] and only zeros between."""
+    rng = np.random.default_rng(5)
+    x = rng.integers(0, 41, size=9000).astype(float)
+    f = rng.choice(["A", "B"], size=9000, p=[0.6, 0.4])
+    x_c = np.concatenate([rng.integers(0, 11, size=1500), rng.integers(30, 41, size=1500)])
+    x_gap = np.repeat(np.arange(14.0, 27.0, 2.0), 3)
+    X = pd.DataFrame(
+        {
+            "x": np.concatenate([x, x_c.astype(float), x_gap]),
+            "f": pd.Categorical(np.concatenate([f, ["C"] * (len(x_c) + len(x_gap))])),
+        }
+    )
+    w = rng.uniform(0.5, 1.0, size=len(X))
+    counts = rng.poisson(w * np.exp(0.3 + 0.01 * X["x"].to_numpy())).astype(float)
+    counts[-len(x_gap) :] = 0.0
+    model, curve = fit(X, counts / w, w, discrete=True)
+
+    assert len(curve) == 1
+    line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
+    assert "x 14 to 26 (21 rows" in line
+    assert "held at the smooth interpolation of the curve on either side" in line
+    widths = {g.name: g.size for g in model._groups}
+    assert widths["x:f[C]"] < widths["x:f[B]"], "the directions only the gap sees are held"
+
+
+def test_continuation_basis_holds_the_free_directions_at_minimum_penalty():
+    from superglm.diagnostics.separation import continuation_basis
+
+    rng = np.random.default_rng(0)
+    k_raw = 9
+    difference = np.diff(np.eye(k_raw), 2, axis=0)
+    omega = difference.T @ difference  # null space: constants and lines
+    projection = np.linalg.svd(rng.uniform(0.5, 1.5, (1, k_raw)))[2][1:].T  # centring
+    omega_null = np.linalg.eigh(omega)[1][:, :2]
+    projected_null = np.linalg.eigh(projection.T @ omega @ projection)[1][:, :1]
+    bound = 64 * k_raw * U * np.linalg.norm(omega, 2)
+
+    free = np.linalg.qr(rng.normal(size=(k_raw, 3)))[0]
+    basis = continuation_basis(free, omega, omega_null, projection, projected_null)
+    assert basis.shape == (k_raw - 1, k_raw - 1 - 3)
+    np.testing.assert_allclose(basis.T @ basis, np.eye(basis.shape[1]), atol=64 * k_raw * U)
+    np.testing.assert_allclose(free.T @ omega @ projection @ basis, 0.0, atol=bound)
+
+    # A free straight line has no continuation: the block's own line is held at zero.
+    line = np.arange(k_raw, dtype=np.float64) - (k_raw - 1) / 2
+    free = np.linalg.qr(np.column_stack([line, rng.normal(size=k_raw)]))[0]
+    basis = continuation_basis(free, omega, omega_null, projection, projected_null)
+    assert basis.shape == (k_raw - 1, k_raw - 1 - 2)
+    np.testing.assert_allclose(projected_null.T @ basis, 0.0, atol=64 * k_raw * U)
