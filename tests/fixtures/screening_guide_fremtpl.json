@@ -46,7 +46,7 @@
   ],
   "confirmatory_refits": [
     {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "deviance_gain": 41.68950016569579},
-    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "deviance_gain": 72.4919929133248}
+    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "deviance_gain": 68.974473846396}
   ],
   "ti_null_floor_max_z": 9.48
 }

@@ -220,10 +220,10 @@ Confirming each by refit — the gate, not the score:
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
 | `VehAge x BonusMalus` | `ti` | 2.66 | 2 | 41.7 |
-| `BonusMalus x VehBrand` | `spline_cat` | 0.54 | 10 | 72.5 |
+| `BonusMalus x VehBrand` | `spline_cat` | 0.54 | 10 | 69.0 |
 
 The second pair buys *more* deviance and ranks *below* the first: 41.7 on 2 df
-is 20.8 per df against 7.2 for the second pair. The current `z` adjusts the
+is 20.8 per df against 6.9 for the second pair. The current `z` adjusts the
 local score for probe complexity; it does not rank by total refit gain or
 directly by gain per df.
 These two gains are measured on the training data. They show that complexity
