@@ -188,3 +188,46 @@ def test_continuation_basis_holds_the_free_directions_at_minimum_penalty():
     basis = continuation_basis(free, omega, omega_null, projection, projected_null)
     assert basis.shape == (k_raw - 1, k_raw - 1 - 2)
     np.testing.assert_allclose(projected_null.T @ basis, 0.0, atol=64 * k_raw * U)
+
+
+def test_a_range_the_free_directions_see_faintly_is_found_as_one_program_per_value_finds_it():
+    """The freMTPL2 guide's VehAge x Region level R73 at 256 bins, rebuilt from its knots.
+
+    Its responses are 0 at 16, 21 to 29, 31 and 36 to 42, nonzero elsewhere up
+    to 30.  The curve directions the nonzero values leave free see x = 23 at
+    1.8e-7 of its row's length, and a linear program with unbounded
+    coefficients failed there (HiGHS status 4) and found nothing.  The scan
+    must agree with one program per value (Geyer 2009, section 3.12), each
+    with bounded coefficients: 36 to 42 separate, and the values the nonzero
+    responses pin do not.
+    """
+    from scipy.optimize import linprog
+
+    from superglm.diagnostics.separation import _unseen_directions, separated_curve_support
+    from superglm.features.interaction import _varying_coefficient_spline_spec
+
+    interior = [5.692, 11.385, 17.077, 22.769, 28.462, 34.154, 39.846, 45.538, 51.231]
+    interior += [61.846, 68.615, 80.308]
+    spec = _varying_coefficient_spline_spec(
+        Spline(knots=interior, boundary=(0.0, 100.0)), np.arange(0.0, 101.0)
+    )
+    values = np.array([*range(32), *range(36, 43)], dtype=np.float64)
+    raw = np.asarray(spec._raw_basis_matrix(values), dtype=np.float64)
+    inside = np.isin(values, [*range(16), 17, 18, 19, 20, 30])
+    found = separated_curve_support(
+        raw, np.eye(raw.shape[1]), ~inside, np.zeros_like(inside), inside
+    )
+    assert found is not None
+    np.testing.assert_array_equal(values[found[0]], np.arange(36.0, 43.0))
+
+    free = _unseen_directions(raw[inside])
+    edge = -(raw[~inside] @ free)
+    alone = []
+    for j in range(len(edge)):
+        others = np.delete(edge, j, axis=0)
+        program = linprog(
+            -edge[j], A_ub=-others, b_ub=np.zeros(len(others)), bounds=[(-1, 1)] * free.shape[1]
+        )
+        if program.status == 0 and -program.fun > 1e-9 * np.linalg.norm(raw[~inside][j]):
+            alone.append(values[~inside][j])
+    assert alone == list(np.arange(36.0, 43.0))

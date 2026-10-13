@@ -600,48 +600,55 @@ def _unseen_directions(rows: NDArray) -> NDArray:
     return vt[int(np.count_nonzero(sigma > cut)) :].T
 
 
+#: How far a linear program must move a row, of unit length, for it to count as
+#: moved: a hundred times HiGHS's default primal feasibility tolerance (1e-7),
+#: so a solver residual never reads as a held row.  Rows a direction does hold
+#: move by a property of the cone's geometry, measured at 0.018 and above on
+#: the freMTPL2 guide model's levels.
+_PROGRAM_TOL = 1e-5
+
+
 def _held_rows(D: NDArray) -> NDArray:
     """The rows some direction ``a`` moves strictly the right way, ``D a > 0``, with the others unmoved.
 
-    The linear program maximises how many rows a direction holds, ``sum t``
-    under ``D a >= t``, ``0 <= t <= 1``, ``a`` free.  Such directions form a
-    cone closed under sums and positive scaling, so the optimum sets ``t = 1``
-    on the largest set any direction holds: the complement of the linearity
-    in Geyer (2009, sections 3.12-3.13), which he finds with one linear
-    program per row and a generic direction of recession with one more; the
-    slack per row finds both in one program.  A least-squares
-    direction onto ``D a = 1`` settles it first when it already holds every
-    row.  A row counts as held only where the direction moves it by more than
-    ``factor_rcond`` of its largest move, the rule ``_unseen_directions``
-    applies to the rows that pin the curve.
+    Such directions form a cone, and the rows it moves are the complement of
+    the linearity in Geyer (2009, section 3.12), which he finds with one
+    linear program per row.  One program first maximises how many rows a
+    direction moves, ``sum t`` under ``D a >= t``, ``0 <= t <= 1``, with
+    ``|a| <= 1``; a row the cone moves only together with a larger cost to
+    the others can be left at ``t = 0`` there, so each row it leaves gets its
+    own program, maximising ``D_j a`` under ``D a >= 0``.  Each row is scaled
+    to unit length first, which leaves its sign, and so the cone, unchanged
+    and keeps a row the free directions see only faintly within the
+    solver's tolerances; the box keeps the programs bounded, as HiGHS fails
+    on the free ones once rows differ in scale.  The rows passed in are ones
+    the free directions see by more than the rank cut
+    (``separated_curve_support``).
     """
     from scipy import sparse
     from scipy.optimize import linprog
 
-    from superglm.solvers.rank import SHARED_RANK_POLICY
-
+    D = D / np.linalg.norm(D, axis=1, keepdims=True)
     n_rows, width = D.shape
-
-    def held_by(a: NDArray) -> NDArray:
-        g = D @ a
-        top = float(np.max(np.abs(g))) if g.size else 0.0
-        return g > SHARED_RANK_POLICY.factor_rcond * top if top > 0.0 else np.zeros(n_rows, bool)
-
-    held = held_by(np.linalg.lstsq(D, np.ones(n_rows), rcond=None)[0])
-    if held.all():
-        return held
+    box = [(-1.0, 1.0)] * width
     program = linprog(
         np.concatenate([np.zeros(width), -np.ones(n_rows)]),
         A_ub=sparse.hstack(
             [sparse.csr_matrix(-D), sparse.identity(n_rows, format="csr")], format="csr"
         ),
         b_ub=np.zeros(n_rows),
-        bounds=[(None, None)] * width + [(0.0, 1.0)] * n_rows,
+        bounds=box + [(0.0, 1.0)] * n_rows,
         method="highs",
     )
-    if program.status != 0:
-        return np.zeros(n_rows, dtype=bool)
-    return held_by(np.asarray(program.x[:width], dtype=np.float64))
+    held = (
+        np.asarray(program.x[width:]) > _PROGRAM_TOL
+        if program.status == 0
+        else np.zeros(n_rows, dtype=bool)
+    )
+    for row in np.flatnonzero(~held):
+        single = linprog(-D[row], A_ub=-D, b_ub=np.zeros(n_rows), bounds=box, method="highs")
+        held[row] = single.status == 0 and -float(single.fun) > _PROGRAM_TOL
+    return held
 
 
 def separated_curve_support(
@@ -687,11 +694,13 @@ def separated_curve_support(
     free = _unseen_directions(rows[anchor])
     if not free.shape[1]:
         return None
-    # A point the free directions do not see cannot be held; leaving it out
-    # keeps the program to the ranges the anchors leave open, which is what
-    # bounds its size on a covariate with many distinct values.
-    reach = np.max(np.abs(rows @ free), axis=1)
-    separated = edge & (reach > SHARED_RANK_POLICY.factor_rcond * float(np.max(reach[edge])))
+    # A point the free directions do not see -- its row within the rank
+    # cut's angle of the anchors' span -- cannot be held; leaving it out keeps
+    # the program to the ranges the anchors leave open, which is what bounds
+    # its size on a covariate with many distinct values.
+    norms = np.linalg.norm(rows, axis=1)
+    reach = np.linalg.norm(rows @ free, axis=1)
+    separated = edge & (reach > SHARED_RANK_POLICY.factor_rcond * norms)
     while free.shape[1] and separated.any():
         points = np.flatnonzero(separated)
         held = _held_rows(sign[points, None] * (rows[points] @ free))
