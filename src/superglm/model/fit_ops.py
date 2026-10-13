@@ -1823,20 +1823,34 @@ def _fit_path_in_workspace(
     return path_result
 
 
-def _warn_slow_exact_reml(model, *, n_smoothing: int) -> None:
+def _warn_slow_exact_reml(model, lambdas) -> None:
     """Warn before an exact smoothing search that will be slow (``SlowFitWarning``)."""
     from superglm.diagnostics.fit_cost import SlowFitWarning, exact_reml_cost_message
+    from superglm.solvers._structured.selection import resolve_structured_backend
 
+    dm = model._dm
     message = exact_reml_cost_message(
-        n_rows=int(model._dm.n),
-        n_smoothing=n_smoothing,
-        n_coef=int(model._dm.p),
+        n_rows=int(dm.n),
+        n_coef=int(dm.p),
         distribution=model._distribution,
         link=model._link,
     )
-    if message is not None:
-        # helper -> _fit_reml_in_workspace -> fit_ops.fit_reml -> SuperGLM.fit_reml -> caller
-        warnings.warn(message, SlowFitWarning, stacklevel=5)
+    if message is None:
+        return
+    # A structured fit eliminates its random-effect or factor-smooth block and
+    # never forms the full p x p product the rule counts. The decision reads
+    # only the terms, so it is the one the direct engine takes next.
+    if resolve_structured_backend(
+        list(dm.group_matrices),
+        model._groups,
+        direct_solve=getattr(model, "_direct_solve", "auto"),
+        coefficient_width=dm.p,
+        lambda2=lambdas,
+        nesting_cache=getattr(dm, "_structured_layout_cache", None),
+    ).use_structured:
+        return
+    # helper -> _fit_reml_in_workspace -> fit_ops.fit_reml -> SuperGLM.fit_reml -> caller
+    warnings.warn(message, SlowFitWarning, stacklevel=5)
 
 
 def fit_reml(
@@ -2289,7 +2303,7 @@ def _fit_reml_in_workspace(
             return debug_recorder
 
         if use_direct and estimated_names and not model._discrete:
-            _warn_slow_exact_reml(model, n_smoothing=len(reml_penalties))
+            _warn_slow_exact_reml(model, lambdas)
         best = optimize_reml_best(
             model,
             use_direct=use_direct,
