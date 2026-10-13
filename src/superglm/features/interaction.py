@@ -304,6 +304,98 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
     return b_unique, row_index
 
 
+def _penalty_null_space(omega: NDArray, info: GroupInfo) -> NDArray:
+    """Orthonormal null space of a level's penalty, sized by its declared structural rank."""
+    values, vectors = np.linalg.eigh(omega)
+    ranks = info.structural_ranks or {}
+    rank = ranks.get("")
+    if rank is None:
+        top = max(float(values[-1]), 0.0)
+        rank = int(np.count_nonzero(values > SHARED_RANK_POLICY.factor_rcond * top))
+    return vectors[:, : omega.shape[0] - int(rank)]
+
+
+def _raw_penalty_null(omega_raw: NDArray, projection: NDArray, projected_null: NDArray) -> NDArray:
+    """Orthonormal null space of the raw penalty.
+
+    Centring removes the constant, which a derivative penalty never sees, so
+    the raw penalty has the block's rank and its null space is one wider for
+    each direction centring removed: the smallest eigenvectors, as many as
+    the raw width less that rank.
+    """
+    rank = projection.shape[1] - projected_null.shape[1]
+    return np.linalg.eigh(omega_raw)[1][:, : omega_raw.shape[0] - rank]
+
+
+def _support_flags(
+    idx: NDArray, rows: NDArray, n_support: int, rows_by_kind: tuple[NDArray, NDArray, NDArray]
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Which support points hold a level's rows on the lower boundary, the upper one, or between."""
+    return tuple(  # type: ignore[return-value]
+        np.bincount(idx[kind[rows]], minlength=n_support) > 0 for kind in rows_by_kind
+    )
+
+
+def _separated_points(support: NDArray, scan_map: NDArray, flags: tuple, scan) -> tuple | None:
+    """``scan`` over the support points a level's rows use; separated points as support indices."""
+    lower, upper, inside = flags
+    used = np.flatnonzero(lower | upper | inside)
+    result = scan(support[used], scan_map, lower[used], upper[used], inside[used])
+    return None if result is None else (used[result[0]], result[1])
+
+
+def _separated_ranges(
+    separated: NDArray,
+    flags: tuple,
+    idx: NDArray,
+    x: NDArray,
+    weights: NDArray,
+    anchors: tuple[int, int],
+    clip: tuple[float, float],
+    n_held: int,
+) -> tuple:
+    """A level's held covariate values, as runs of adjacent support points it uses.
+
+    ``idx``, ``x`` and ``weights`` are the level's rows and ``anchors`` its
+    first and last support points with a response off the boundary.  Past a
+    clipped anchor every point is held at ``clip`` -- the separated ones and
+    any the spline pins to them -- so that side is one run; between the
+    anchors each run of separated points is held at the interpolation of its
+    neighbours when ``n_held``.
+    """
+    from superglm.diagnostics.separation import SeparatedRange
+
+    lower, upper, inside = flags
+    used = np.flatnonzero(lower | upper | inside)
+    first, last = anchors
+    marked = np.isin(used, separated)
+    if np.isfinite(clip[0]):
+        marked |= used < first
+    if np.isfinite(clip[1]):
+        marked |= used > last
+    starts = np.flatnonzero(marked & ~np.concatenate([[False], marked[:-1]]))
+    stops = np.flatnonzero(marked & ~np.concatenate([marked[1:], [False]]))
+    ranges = []
+    for start, stop in zip(starts, stops, strict=True):
+        points = used[start : stop + 1]
+        in_run = np.isin(idx, points) & (weights > 0.0)
+        values = x[in_run]
+        on_lower, on_upper = bool(np.any(lower[points])), bool(np.any(upper[points]))
+        held_at = clip[0] if points[-1] < first else (clip[1] if points[0] > last else None)
+        ranges.append(
+            SeparatedRange(
+                low=float(values.min()),
+                high=float(values.max()),
+                n_rows=int(in_run.sum()),
+                weight=float(weights[in_run].sum()),
+                boundary="mixed" if on_lower and on_upper else ("zero" if on_lower else "one"),
+                held_at=held_at,
+                interpolated=held_at is None and n_held > 0,
+            )
+        )
+    return tuple(ranges)
+
+
 # ── SplineCategorical ──────────────────────────────────────────
 
 
@@ -331,6 +423,10 @@ class SplineCategorical:
         self._cat_grouping = None
         self._cat_levels: list = []
         self._cat_unseen: str = "error"
+        self._separated_curves: tuple = ()
+        # level -> (low, high): covariate bounds a level's curve is held at
+        # past a separated range (``_hold_separated_levels``).
+        self._level_clip: dict = {}
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -342,6 +438,7 @@ class SplineCategorical:
         x_cat: NDArray,
         parent_specs: dict,
         sample_weight: NDArray | None = None,
+        separation: tuple | None = None,
     ) -> list[GroupInfo]:
         from superglm.features.categorical import Categorical
         from superglm.features.spline import _SplineBase
@@ -429,7 +526,12 @@ class SplineCategorical:
                         **shared,
                     )
                 )
-        return _with_structural_ranks(spline_spec, groups)
+        groups = _with_structural_ranks(spline_spec, groups)
+        self._separated_curves = ()
+        self._level_clip = {}
+        if separation is None or not separation[2]:
+            return groups
+        return self._hold_separated_levels(groups, x_cat, x_spline, separation)
 
     def build_discrete(
         self,
@@ -438,6 +540,7 @@ class SplineCategorical:
         parent_specs: dict,
         n_bins: int,
         sample_weight: NDArray | None = None,
+        separation: tuple | None = None,
     ) -> list[GroupInfo]:
         """Build spline-by-category groups from compressed spline support."""
         from superglm.features.categorical import Categorical
@@ -503,7 +606,168 @@ class SplineCategorical:
                     spline_cat_feature=self.cat_name,
                 )
             )
-        return _with_structural_ranks(spline_spec, groups)
+        groups = _with_structural_ranks(spline_spec, groups)
+        self._separated_curves = ()
+        self._level_clip = {}
+        if separation is None or not separation[2]:
+            return groups
+        return self._hold_separated_levels(
+            groups, x_cat, x_spline, separation, binned=(B_unique, np.asarray(bin_idx, np.intp))
+        )
+
+    def _hold_separated_levels(
+        self,
+        groups: list[GroupInfo],
+        x_cat: NDArray,
+        x_spline: NDArray,
+        separation: tuple,
+        binned: tuple[NDArray, NDArray] | None = None,
+    ) -> list[GroupInfo]:
+        """Hold each level's curve where its responses all sit on a boundary.
+
+        ``separation`` is ``(response, prior weights, boundaries, level
+        effect)``, the last saying whether the factor's main effect gives each
+        level its own constant.  A level whose responses all sit on a boundary
+        over some covariate range, with curve directions only that range sees,
+        has a likelihood that keeps rising as its curve walks there toward a
+        zero (or certain) mean (``diagnostics.separation.separated_curve_support``).
+        Only the level's smoothing penalty bounds the walk, and the rest of
+        the curve chooses that penalty: a sharp feature elsewhere sets it
+        small, and the curve beyond the level's last nonzero response then
+        follows its own extrapolation down to the predictor's floor.
+
+        Beyond the first and last covariate values where the level's
+        responses vary (its anchors), a separated range is outside what its
+        responses identify, and the curve is held at its value there -- the
+        rule a spline follows beyond its training range
+        (``extrapolation="clip"``): the level's rows past the anchor take the
+        anchor's basis row, here and at prediction (``_level_clip``).  A
+        separated range between anchors keeps its rows; the curve directions
+        only that range sees are held at the minimum-penalty interpolation of
+        the rest (``continuation_basis``), as the penalty sets a curve over a
+        range with no rows.  The group keeps its name and smoothing
+        parameter; its support, ``projection`` and ``penalty_matrix`` carry
+        the change, so the design, its REML rebuilds and prediction all read
+        it from the group.  Findings are kept on ``_separated_curves``.
+        """
+        from superglm.diagnostics.separation import (
+            SeparatedCurve,
+            continuation_basis,
+            separated_curve_support,
+        )
+
+        response, prior_weights, boundaries, level_effect = separation
+        y = np.asarray(response, dtype=np.float64)
+        weights = (
+            np.ones(len(y)) if prior_weights is None else np.asarray(prior_weights, np.float64)
+        )
+        positive = weights > 0.0
+        none = np.zeros(len(y), dtype=bool)
+        lower_rows = positive & (y <= 0.0) if "zero" in boundaries else none
+        upper_rows = positive & (y >= 1.0) if "one" in boundaries else none
+        rows_by_kind = (lower_rows, upper_rows, positive & ~lower_rows & ~upper_rows)
+        projection = np.eye(self._n_basis) if self._projection is None else self._projection
+        # With the factor's main effect in the model the level's own constant
+        # joins its curve, so the curve separates in the raw (uncentred)
+        # basis; without it, only through the block's centred coefficients.
+        scan_map = np.eye(projection.shape[0]) if level_effect else projection
+        held_groups: list[GroupInfo] = []
+        found: list[SeparatedCurve] = []
+        for level, info in zip(self._non_base, groups, strict=True):
+            rows = np.flatnonzero(x_cat == level)
+            if info.penalty_matrix is None or not positive[rows].any():
+                held_groups.append(info)
+                continue
+            if binned is None:
+                values, idx = np.unique(x_spline[rows], return_inverse=True)
+                idx = np.ravel(idx).astype(np.intp)
+                support = np.asarray(self._spline_spec._raw_basis_matrix(values), np.float64)
+            else:
+                support, idx = binned[0], binned[1][rows]
+            flags = _support_flags(idx, rows, len(support), rows_by_kind)
+            result = _separated_points(support, scan_map, flags, separated_curve_support)
+            anchors = np.flatnonzero(flags[2] | (flags[0] & flags[1]))
+            if result is None or not anchors.size:
+                held_groups.append(info)
+                continue
+            separated = result[0]
+            unclipped = idx
+            first, last = int(anchors[0]), int(anchors[-1])
+            low = separated[separated < first]
+            high = separated[separated > last]
+            held = info
+            clip = (-np.inf, np.inf)
+            if low.size or high.size:
+                x_rows = x_spline[rows][positive[rows]]
+                idx_rows = idx[positive[rows]]
+                clip = (
+                    float(x_rows[idx_rows == first].min()) if low.size else -np.inf,
+                    float(x_rows[idx_rows == last].max()) if high.size else np.inf,
+                )
+                idx = np.clip(idx, first if low.size else 0, last if high.size else len(support))
+                held = replace(
+                    info,
+                    spline_cat_basis=None,
+                    spline_cat_basis_unique=support,
+                    spline_cat_bin_idx=idx,
+                    spline_cat_bin_idx_is_level=True,
+                    spline_cat_support_lossless=binned is None,
+                )
+                self._level_clip[level] = clip
+            n_held = 0
+            if np.any((separated > first) & (separated < last)):
+                inner = _separated_points(
+                    support,
+                    scan_map,
+                    _support_flags(idx, rows, len(support), rows_by_kind),
+                    separated_curve_support,
+                )
+                omega = np.asarray(info.penalty_matrix, dtype=np.float64)
+                omega_raw = np.asarray(self._spline_spec._build_penalty(), dtype=np.float64)
+                projected_null = _penalty_null_space(omega, info)
+                basis = (
+                    None
+                    if inner is None
+                    else continuation_basis(
+                        np.linalg.qr(scan_map @ inner[1])[0],
+                        omega_raw,
+                        _raw_penalty_null(omega_raw, projection, projected_null),
+                        projection,
+                        projected_null,
+                    )
+                )
+                if basis is not None:
+                    n_held = int(omega.shape[0] - basis.shape[1])
+                    held = replace(
+                        held,
+                        n_cols=basis.shape[1],
+                        penalty_matrix=basis.T @ omega @ basis,
+                        projection=projection @ basis,
+                    )
+                    held.structural_ranks = structural_penalty_ranks(self._spline_spec, held)
+            if held is info:
+                held_groups.append(info)
+                continue
+            held_groups.append(held)
+            found.append(
+                SeparatedCurve(
+                    term=f"{self.spline_name}:{self.cat_name}",
+                    covariate=str(self.spline_name),
+                    level=level,
+                    ranges=_separated_ranges(
+                        separated,
+                        flags,
+                        unclipped,
+                        x_spline[rows],
+                        weights[rows],
+                        (first, last),
+                        clip,
+                        n_held,
+                    ),
+                )
+            )
+        self._separated_curves = tuple(found)
+        return held_groups
 
     def set_reparametrisation(self, R_inv_dict: dict[str, NDArray] | NDArray) -> None:
         if isinstance(R_inv_dict, dict):
@@ -533,11 +797,17 @@ class SplineCategorical:
             context=self.cat_name,
         )
         B = self._spline_spec._raw_basis_matrix(x_spline)
+        clips = getattr(self, "_level_clip", {})
 
         blocks = []
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             B_level = B * indicator[:, None]
+            if level in clips:
+                mask = indicator > 0.0
+                B_level[mask] = self._spline_spec._raw_basis_matrix(
+                    np.clip(x_spline[mask], *clips[level])
+                )
             R_inv = self._R_inv_dict.get(level)
             if R_inv is not None:
                 # R_inv already includes projection (P @ R_inv_local)
@@ -585,8 +855,17 @@ class SplineCategorical:
             offset += n_cols
 
             mask = x_cat == level
-            if np.any(mask):
-                out[mask] = np.asarray(B[mask] @ beta_raw, dtype=np.float64).ravel()
+            if not np.any(mask):
+                continue
+            clip = getattr(self, "_level_clip", {}).get(level)
+            # A level held past a separated range reads its curve at the
+            # clipped covariate there, as its rows did when it was fitted.
+            rows_basis = (
+                B[mask]
+                if clip is None
+                else self._spline_spec._raw_basis_matrix(np.clip(x_spline[mask], *clip))
+            )
+            out[mask] = np.asarray(rows_basis @ beta_raw, dtype=np.float64).ravel()
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:

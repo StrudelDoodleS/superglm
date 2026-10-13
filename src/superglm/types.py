@@ -191,6 +191,10 @@ class GroupInfo:
     # centres, so ``bin_idx`` introduces no discretisation error.  Set only by
     # the exact path; ``discrete=True`` leaves it False.
     spline_cat_support_lossless: bool = False
+    # True when ``spline_cat_bin_idx`` is indexed by the level's own rows
+    # (``np.flatnonzero(spline_cat_mask)``) rather than by every row: a level
+    # whose curve is held past a separated range carries its own support map.
+    spline_cat_bin_idx_is_level: bool = False
     spline_cat_level: str | None = None
     spline_cat_feature: str | None = None
     # Structured terms retain compact geometry for specialized solvers.

@@ -4143,6 +4143,7 @@ def _fit_irls_direct_once(
             STAGNANT_DEVIANCE_DELTA,
             SeparationError,
             SeparationWarning,
+            drifting_groups,
             format_runtime_message,
         )
 
@@ -4169,12 +4170,7 @@ def _fit_irls_direct_once(
                 and deviance_relative_change < STAGNANT_DEVIANCE_DELTA
             )
             if pinned or exhausted_stagnant:
-                max_abs = float(np.max(np.abs(beta))) if beta.size else 0.0
-                drifting = [
-                    g.name
-                    for g in groups
-                    if beta[g.sl].size and float(np.max(np.abs(beta[g.sl]))) >= max_abs - 2.0
-                ][:5]
+                drifting = drifting_groups(dm, groups, beta, eta, eta_unclipped, weights)
                 message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)

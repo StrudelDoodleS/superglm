@@ -698,7 +698,9 @@ def _process_info(
                 info.spline_cat_basis_unique,
                 dtype=np.float64,
             )
-            bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)[row_idx]
+            bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)
+            if not info.spline_cat_bin_idx_is_level:
+                bin_idx_level = bin_idx_level[row_idx]
             level_weight = np.bincount(
                 bin_idx_level,
                 weights=sample_weight[row_idx],
@@ -745,12 +747,22 @@ def _process_info(
                 if info.spline_cat_support_lossless
                 else DiscretizedSplineCategoricalGroupMatrix
             )
-            gm = spline_cat_cls(
-                B_support,
-                R_inv,
-                info.spline_cat_bin_idx,
-                row_idx,
-            )
+            if info.spline_cat_bin_idx_is_level:
+                gm = spline_cat_cls(
+                    B_support,
+                    R_inv,
+                    bin_idx_level,
+                    row_idx,
+                    n_rows=len(mask),
+                    bin_idx_is_level=True,
+                )
+            else:
+                gm = spline_cat_cls(
+                    B_support,
+                    R_inv,
+                    info.spline_cat_bin_idx,
+                    row_idx,
+                )
         else:
             gm = SplineCategoricalGroupMatrix(B_full, R_inv, row_idx)
         gm.spline_cat_level = info.spline_cat_level
@@ -1083,10 +1095,12 @@ def build_design_matrix(
         group_pricing=group_pricing,
         alias_prune=alias_prune,
         own_specs=False,
+        separation_response=y,
     )
     separation_records = compiled.separation_records
     if separation_records:
         from superglm.diagnostics.separation import (
+            emit_curve_separation,
             emit_separation_findings,
             scan_categorical_term,
             scan_interaction_term,
@@ -1094,8 +1108,15 @@ def build_design_matrix(
         from superglm.penalties.base import penalty_targets_group
 
         findings = []
+        curves = []
         for record in separation_records:
             term_name = record[1]
+            if record[0] == "curve":
+                # Already acted on while the term was built (its separated
+                # directions are held), so a selection penalty exempts
+                # nothing here: it is reported whatever bounds the term.
+                curves.extend(record[2])
+                continue
             if selection_penalty is not None and any(
                 penalty_targets_group(selection_penalty, g)
                 for g in compiled.groups
@@ -1129,6 +1150,7 @@ def build_design_matrix(
                     )
                 )
         emit_separation_findings(findings, separation)
+        emit_curve_separation(curves, separation, distribution)
 
     return BuildResult(
         dm=compiled.design,

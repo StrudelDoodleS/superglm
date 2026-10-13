@@ -253,6 +253,38 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     assert "'z'" in message  # the drifting group is named
 
 
+def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows():
+    """A coefficient's size is no guide across groups; what it moves on the stopped rows is.
+
+    ``x`` is a real effect on a column of scale 1e-3, so its coefficient
+    (about 260) dwarfs the separated ``z`` (pinned near -80).  Naming the
+    largest coefficient named ``x``; the rows the guard stopped are moved by
+    ``z``.  On the freMTPL2 guide model the same rule named a tensor term for
+    a brand's spline-by-factor curve.
+    """
+    df, y, w = separated_numeric_design()
+    rng = np.random.default_rng(11)
+    df = df.assign(x=rng.normal(size=len(df)) * 1e-3)
+    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(300.0 * df["x"].to_numpy()))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric(), "x": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w)
+    beta = dict(zip(["z", "x"], model.result.beta, strict=True))
+    assert abs(beta["x"]) > abs(beta["z"]) + 2.0, (
+        "fixture must make the bystander's coefficient larger"
+    )
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    assert "group(s): ['z']" in message
+
+
 def test_runtime_backstop_reports_the_expected_curvature_ratio():
     """Tweedie/log rows are observed-Newton; the gate compares the Fisher ratio.
 
