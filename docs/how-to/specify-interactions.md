@@ -342,6 +342,31 @@ real iteration budget: a deviance-converged stop at moderate drift, and
 binomial-logit numeric indicators generally (the logit eta clip keeps the
 working-weight range below the trigger), still return quietly.
 
+### A level's curve over a range where every response is 0
+
+A spline-by-factor term fits one curve per level. When every response of a
+level is 0 over part of the covariate's range, for example a brand with no
+claims past vehicle age 22, the data there say the level's mean is low but not
+how low. Only the curve's smoothing parameter holds the curve back, and that
+parameter is chosen for the whole curve: a sharp feature elsewhere can make it
+small, and the curve then falls toward a zero mean on those rows.
+
+The build finds such ranges, with or without `discrete=True` and at any
+`n_bins`, and holds the curve there:
+
+- Past the last covariate value where the level has a nonzero response, the
+  curve keeps its value at that point, in the fit and in `predict()`. A spline
+  does the same past its training range (`extrapolation="clip"`).
+- Between two values with nonzero responses, the curve takes the smoothest path
+  that joins its two sides.
+
+A `SeparationWarning` names the term, the level and the range, for example
+`'VehAge:VehBrand', level 'B12': VehAge 23 to 48 (21 rows, total weight 15.04,
+every response 0): held at its value at VehAge 22`. `separation="ignore"`
+leaves these curves free, as earlier versions did, and `separation="error"`
+refuses the design. To let the data shape these ranges, merge the level into a
+similar one or drop the interaction.
+
 ## Hierarchical make/model/trim data
 
 Sparse nested vehicle levels can be represented with explicit composite IDs,

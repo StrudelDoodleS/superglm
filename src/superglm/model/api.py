@@ -200,6 +200,13 @@ class SuperGLM:
             governs the in-solver backstop that fires when an exhausted,
             stagnant IRLS run shows the extreme-working-weight signature of
             separation the build scan cannot see.
+            A spline-by-factor level whose responses all sit on the boundary
+            over a covariate range is held there before fitting: past its
+            first or last response off the boundary its curve keeps its value
+            at that point, in the fit and in ``predict``, and between two such
+            responses it takes the smoothest path joining them.  ``"warn"``
+            names the term, the level and the range, ``"error"`` refuses, and
+            ``"ignore"`` leaves those curves free.
             A ``FactorSmooth(basis="sz")`` level whose unpenalized line
             separates the response is named in a ``SeparationWarning`` at fit
             under ``"warn"`` and ``"error"`` alike (never refused) and left

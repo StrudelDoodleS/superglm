@@ -606,9 +606,10 @@ def _held_rows(D: NDArray) -> NDArray:
     The linear program maximises how many rows a direction holds, ``sum t``
     under ``D a >= t``, ``0 <= t <= 1``, ``a`` free.  Such directions form a
     cone closed under sums and positive scaling, so the optimum sets ``t = 1``
-    on the largest set any direction holds -- the support of the cone's
-    relative interior, which Geyer (2009, section 3.3) computes the same way
-    to find the linearity of a direction of recession.  A least-squares
+    on the largest set any direction holds: the complement of the linearity
+    in Geyer (2009, sections 3.12-3.13), which he finds with one linear
+    program per row and a generic direction of recession with one more; the
+    slack per row finds both in one program.  A least-squares
     direction onto ``D a = 1`` settles it first when it already holds every
     row.  A row counts as held only where the direction moves it by more than
     ``factor_rcond`` of its largest move, the rule ``_unseen_directions``
