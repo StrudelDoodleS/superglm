@@ -103,10 +103,10 @@ def _factor_penalties(
             f"requires only {expected_kind!r} REML components."
         )
     suffixes = {_component_suffix(group.name, component.name) for component in matching}
-    if spec.basis == "sz" and suffixes != {"wiggle"}:
+    if spec.basis == "sz" and suffixes not in ({"wiggle"}, {"wiggle", "null"}):
         raise RuntimeError(
-            f"FactorSmooth term {group.name!r} with basis='sz' requires exactly "
-            "one shared 'wiggle' REML component."
+            f"FactorSmooth term {group.name!r} with basis='sz' requires a shared 'wiggle' "
+            "REML component, optionally with its level lines' 'null' component."
         )
     return matching
 
@@ -198,7 +198,9 @@ def _population_deviations(
     weightless = set(spec._weightless_levels)
     for level, directions in zip(spec._unidentified_levels, spec._free_directions, strict=True):
         free_part = np.asarray(directions, dtype=np.float64)
-        keep[level] = 0.0 if level in weightless else np.eye(k) - free_part @ free_part.T
+        keep[level] = np.eye(k) - free_part @ free_part.T
+    for level in weightless:
+        keep[level] = 0.0
     covariances = keep @ covariances @ np.transpose(keep, (0, 2, 1))
     return deviations, 0.5 * (covariances + np.transpose(covariances, (0, 2, 1)))
 

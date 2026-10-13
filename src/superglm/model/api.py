@@ -204,7 +204,9 @@ class SuperGLM:
             separates the response is named in a ``SeparationWarning`` at fit
             under ``"warn"`` and ``"error"`` alike (never refused) and left
             out of the term's population curve; ``"ignore"`` silences the
-            warning only.
+            warning only. The warning names the term's remedy,
+            ``FactorSmooth(..., select=True)``, which penalizes the levels'
+            lines so that none separates.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the
