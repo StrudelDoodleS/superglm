@@ -680,11 +680,19 @@ def separated_curve_support(
     edge = ~anchor & (lower | upper)
     if not np.any(edge):
         return None
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
     rows = raw @ projection
     sign = np.where(lower, -1.0, 1.0)
-    separated = edge.copy()
     free = _unseen_directions(rows[anchor])
-    while free.shape[1]:
+    if not free.shape[1]:
+        return None
+    # A point the free directions do not see cannot be held; leaving it out
+    # keeps the program to the ranges the anchors leave open, which is what
+    # bounds its size on a covariate with many distinct values.
+    reach = np.max(np.abs(rows @ free), axis=1)
+    separated = edge & (reach > SHARED_RANK_POLICY.factor_rcond * float(np.max(reach[edge])))
+    while free.shape[1] and separated.any():
         points = np.flatnonzero(separated)
         held = _held_rows(sign[points, None] * (rows[points] @ free))
         if held.all():
