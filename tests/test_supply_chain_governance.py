@@ -175,8 +175,8 @@ def test_release_workflow_uses_trusted_publishing_and_least_privilege():
 def test_release_workflow_uses_node24_artifact_actions():
     workflow = _read(".github/workflows/release.yml")
 
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
-    assert workflow.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") == 2
+    assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in workflow
+    assert workflow.count("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333") == 2
 
 
 def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
@@ -300,7 +300,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
 
     assert "if: github.event_name == 'push'" in coverage_job
     assert "needs: test-compatibility" in coverage_job
-    assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in coverage_job
+    assert "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" in coverage_job
     assert "pattern: coverage-Linux-py312-*" in coverage_job
     assert "uv sync --locked --python 3.12 --extra dev" in coverage_job
     assert "merge-multiple: true" in coverage_job
