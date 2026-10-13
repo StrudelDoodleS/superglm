@@ -22,6 +22,7 @@ from superglm.editor._types import (
     SessionState,
     StructuralStep,
 )
+from superglm.editor.basis import basis_feature_spec
 from superglm.editor.carry import carried_curve
 from superglm.editor.collapse import (
     collapsed_feature_spec,
@@ -33,6 +34,13 @@ from superglm.editor.errors import (
     EditorKeyError,
     EditorTypeError,
     EditorValueError,
+)
+from superglm.editor.knots import (
+    LEVEL_OPERATIONS,
+    knots_feature_spec,
+    pending_knots,
+    probe_build,
+    stated_knots_refusal,
 )
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.specials import special_feature_spec
@@ -53,8 +61,9 @@ _SHAPE_REFUSED = (
     "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
 )
 _CONSTANT_REFUSED = (
-    "A Flat range over the whole axis leaves the term one constant, which the intercept "
-    "already carries. Choose a Line, or leave part of the axis free."
+    "A Flat range over the whole axis would set this term to 1 at every value: the intercept "
+    "already carries any constant, so the term would have no effect left. To take the term "
+    "out of the model, remove it in code; here, leave part of the axis free or choose a Line."
 )
 _STRETCH_REFUSED = (
     "That range leaves too few values beside it to fit the rest of the curve. "
@@ -116,7 +125,18 @@ _REFIT_AT_ONCE = {
     "shape": "shape_range",
     "special": "special_levels",
     "on_curve": "on_curve_levels",
+    "knots": "set_knots",
+    "basis": "set_basis",
 }
+_CANNOT_FIT = (
+    "{change} cannot be fitted on the data the refit reads. Undo the change it builds on, "
+    "or choose another."
+)
+_CANNOT_FIT_SHAPE = (
+    "{change} cannot be fitted on the data the refit reads. Choose another range or shape, "
+    "or undo the change it builds on."
+)
+_REFIT_NAMED = "The refit was refused: {sentence} Undo that change and try again."
 _UNKNOWN_ENTRY = "Unknown history entry."
 _NOTE_LIMIT = 2000
 _REFIT_REFUSED = "The refit was refused. Undo the last waiting change and try again."
@@ -169,8 +189,11 @@ def stage_structural(
     ``operation`` is ``"collapse"`` (``levels``, optional ``group_label``),
     ``"ungroup"`` (``levels``), ``"set_reference"`` (``level``),
     ``"shape"`` (``lo``, ``hi``, ``degree``, optional ``join``), ``"special"``
-    (``levels``, taken off an ordered term's curve) or ``"on_curve"``
-    (``levels``, put back on it); levels are display labels. A change its builder refuses is refused now, with
+    (``levels``, taken off an ordered term's curve), ``"on_curve"``
+    (``levels``, put back on it), ``"knots"`` (``count`` and ``strategy``
+    with an optional ``alpha``, ``positions`` in chart coordinates, or
+    ``reset``) or ``"basis"`` (``kind``, or ``select``); levels are display
+    labels. A change its builder refuses is refused now, with
     today's sentence. Nothing is fitted: the model, the curves and the model
     revision stay as they are. ``X`` and ``sample_weight`` are the frame and
     weights the refit will read (default: the session's refit data).
@@ -203,6 +226,7 @@ def stage_structural(
             raise
         raise EditorValueError(sentence) from exc
     require_group_kept(term, replacement)
+    _require_fits(session, operation, term, replacement, metadata, X_ref, weights)
     step = PendingStep(
         operation=operation,
         term=term,
@@ -235,7 +259,7 @@ def refit_pending(
     except EditorClientError:
         raise
     except ValueError as exc:
-        raise EditorValueError(_REFIT_REFUSED) from exc
+        raise EditorValueError(_refit_refusal(session, refit_kwargs) or _REFIT_REFUSED) from exc
 
 
 def stage_and_refit(
@@ -492,6 +516,50 @@ def _carry_edits(
     session._advance_model_revision()
 
 
+def _require_fits(session, operation, term, replacement, metadata, X, sample_weight) -> None:
+    """Refuse now, in its sentence, a change whose draft the fit would refuse at Refit.
+
+    The fit's first step places the term's knots and certifies its shaped
+    ranges on the refit's data; doing that here moves the refusal from the
+    Refit, where it could only say the refit was refused, to the change.
+    """
+    if operation in LEVEL_OPERATIONS:
+        refusal = stated_knots_refusal(term, replacement)
+        if refusal is not None:
+            raise EditorValueError(refusal)
+    try:
+        probe_build(session.model, term, replacement, X, sample_weight)
+    except EditorClientError:
+        raise
+    except ValueError as exc:
+        sentence = _range_refusal(exc, _STAGED_SENTENCES.get(operation, ())) or _range_refusal(
+            exc, _SHAPE_SENTENCES
+        )
+        change = str(metadata["label"])
+        generic = _CANNOT_FIT_SHAPE if operation == "shape" else _CANNOT_FIT
+        raise EditorValueError(
+            sentence or generic.format(change=change[:1].upper() + change[1:])
+        ) from exc
+
+
+def _refit_refusal(session: EditorSession, refit_kwargs: dict[str, Any]) -> str | None:
+    """The refusal of the first waiting change whose draft the fit refuses, named, or None."""
+    X, _y, weights, _offset = session._resolve_refit_data(
+        refit_kwargs.get("X"),
+        refit_kwargs.get("y"),
+        refit_kwargs.get("sample_weight"),
+        refit_kwargs.get("offset"),
+    )
+    for step in session.pending:
+        try:
+            _require_fits(
+                session, step.operation, step.term, step.draft_spec, step.metadata, X, weights
+            )
+        except EditorValueError as exc:
+            return _REFIT_NAMED.format(sentence=str(exc))
+    return None
+
+
 def _waiting_draft(session: EditorSession, term: str):
     """The last waiting change's draft for ``term``, or None when none waits."""
     return next((step.draft_spec for step in reversed(session.pending) if step.term == term), None)
@@ -531,6 +599,30 @@ def _draft_for(
     if operation == "set_reference":
         level = str(_param(params, "level"))
         return reference_feature_spec(session.model, editable, level, X=X, draft_spec=draft)
+    if operation == "knots":
+        waiting = [step.operation for step in session.pending if step.term == editable.name]
+        return knots_feature_spec(
+            session.model,
+            editable,
+            params,
+            X=X,
+            sample_weight=sample_weight,
+            draft_spec=draft,
+            reference_model=session.reference_model,
+            levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
+            waiting_positions=(pending_knots(session, editable.name) or {}).get("positions", ()),
+        )
+    if operation == "basis":
+        waiting = [step.operation for step in session.pending if step.term == editable.name]
+        return basis_feature_spec(
+            session.model,
+            editable,
+            params,
+            X=X,
+            draft_spec=draft,
+            reference_model=session.reference_model,
+            levels_waiting=bool(LEVEL_OPERATIONS.intersection(waiting)),
+        )
     if operation in {"special", "on_curve"}:
         levels = _param(params, "levels")
         if not isinstance(levels, list | tuple):
@@ -552,6 +644,7 @@ def _draft_for(
         degree=_param(params, "degree"),
         join=params.get("join", "tangent"),
         X=X,
+        sample_weight=sample_weight,
         draft_spec=draft,
     )
 
@@ -583,6 +676,15 @@ def _label_params(operation: str, metadata: dict[str, Any]) -> dict[str, Any]:
         return {"levels": list(metadata["levels"])}
     if operation == "set_reference":
         return {"level": metadata["level"]}
+    if operation == "knots":
+        return {
+            "count": metadata["count"],
+            "strategy": metadata["strategy"],
+            "alpha": metadata["alpha"],
+            "positions": list(metadata["chart_positions"]),
+        }
+    if operation == "basis":
+        return {"kind": metadata["kind"], "select": metadata["select"]}
     return {name: metadata[name] for name in ("lo", "hi", "degree", "join")}
 
 

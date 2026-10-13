@@ -1,0 +1,794 @@
+"""The editor's knot adjuster: a count and rule, positions, or reset, as a waiting structural change."""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, read_structure
+from superglm.editor import EditorSession
+from superglm.editor.errors import EditorValueError
+from superglm.editor.knots import decade_step
+from superglm.editor.payloads import session_payload
+from tests.test_editor import _post_json
+
+BANDS = [f"B{i}" for i in range(8)]
+AGE_KNOTS = [20.0, 22.0, 24.0, 26.0, 35.0, 50.0, 70.0]
+
+
+def _book(seed: int = 20261009, n: int = 8000):
+    """A Poisson book whose age effect falls steeply in the young ages, where most rows are."""
+    rng = np.random.default_rng(seed)
+    age = 18.0 + np.minimum(rng.gamma(3.0, 7.0, n), 72.0)
+    band = rng.choice(BANDS, n)
+    area = rng.choice(["A", "B", "C"], n)
+    exposure = rng.uniform(0.2, 1.0, n)
+    index = np.array([BANDS.index(b) for b in band])
+    eta = -1.6 + 0.8 * np.exp(-(age - 18.0) / 6.0) + 0.04 * index + 0.2 * (area == "B")
+    y = rng.poisson(exposure * np.exp(eta)) / exposure
+    return pd.DataFrame({"age": age, "band": band, "area": area}), y, exposure
+
+
+def _declared(age=None, band=None) -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        features={
+            "age": Spline(kind="cr", n_knots=6) if age is None else age,
+            "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=3))
+            if band is None
+            else band,
+            "area": Categorical(),
+        },
+        spline_penalty=10.0,
+    )
+
+
+@pytest.fixture(scope="module")
+def book():
+    X, y, w = _book()
+    return _declared().fit(X, y, sample_weight=w), X, y, w
+
+
+def _session(book) -> EditorSession:
+    model, X, y, w = book
+    return EditorSession.from_model(model, train_data=(X, y, w))
+
+
+def _knots(model, term: str) -> np.ndarray:
+    spec = model._specs[term]
+    inner = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    return np.asarray(inner.fitted_base_knots)
+
+
+def test_a_knot_change_waits_refits_undoes_and_puts_back_the_original_fit(book):
+    model, X, *_ = book
+    session = _session(book)
+    before = session_payload(session)["age"]["knots"]
+    assert (before["count"], before["strategy"], before["from_editor"]) == (6, "uniform", False)
+    assert not before["resettable"]
+
+    step = session.stage_structural("knots", "age", {"positions": AGE_KNOTS[::-1]})
+    assert step.label == "knots placed by hand in age"
+    assert session_payload(session)["age"]["pending"]["knots"] == {
+        "positions": AGE_KNOTS,
+        "count": 7,
+        "strategy": "explicit",
+        "alpha": 0.2,
+        "from_editor": True,
+    }
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+
+    session.refit_pending()
+    np.testing.assert_array_equal(_knots(session.model, "age"), AGE_KNOTS)
+    after = session_payload(session)["age"]["knots"]
+    assert (after["positions"], after["strategy"], after["from_editor"]) == (
+        AGE_KNOTS,
+        "explicit",
+        True,
+    )
+    assert after["resettable"]
+
+    session.undo()
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+    assert [step.operation for step in session.pending] == ["knots"]
+    session.redo()
+    np.testing.assert_array_equal(_knots(session.model, "age"), AGE_KNOTS)
+
+
+@pytest.mark.parametrize(
+    ("term", "params", "strategy"),
+    [
+        ("age", {"positions": AGE_KNOTS}, "explicit"),
+        ("age", {"count": 9, "strategy": "quantile_rows"}, "quantile_rows"),
+        ("band", {"positions": [1.5, 2.0, 4.3]}, "explicit"),
+        ("band", {"count": 5, "strategy": "uniform"}, "uniform"),
+    ],
+)
+def test_the_structure_export_records_the_knots_and_applies_them_to_the_declaration(
+    book, term, params, strategy
+):
+    model, X, y, w = book
+    session = _session(book)
+    session.replace_with_knots(term, params)
+    exported = json.loads(session.export_structure())
+    entry = exported["features"][term]["knots"]
+    assert entry["strategy"] == strategy
+    assert entry["positions"] == _knots(session.model, term).tolist()
+    applied = read_structure(exported).apply(_declared()).fit(X, y, sample_weight=w)
+    np.testing.assert_array_equal(_knots(applied, term), _knots(session.model, term))
+    np.testing.assert_array_equal(applied.predict(X), session.model.predict(X))
+    # The code's own knots are not recorded.
+    assert "knots" not in json.loads(_session(book).export_structure())["features"][term]
+
+
+def test_the_payload_names_the_difference_penalty_in_force(book):
+    """A cubic regression spline has none; a P-spline's is standard on even knots, general on uneven."""
+    model, X, y, w = book
+    payload = session_payload(_session(book))
+    assert payload["age"]["knots"]["difference_penalty"] is None
+    assert payload["band"]["knots"]["difference_penalty"] == "standard"
+    uneven = _declared(age=Spline(kind="ps", knots=AGE_KNOTS)).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(uneven, train_data=(X, y, w))
+    assert session_payload(session)["age"]["knots"]["difference_penalty"] == "general"
+
+
+def test_a_term_a_refit_left_alone_still_takes_a_knot_change(book):
+    """After a refit for another term, this term's declaration holds the fit's state."""
+    model, X, *_ = book
+    session = _session(book)
+    session.replace_with_knots("band", {"count": 5, "strategy": "uniform"})
+    session.stage_structural("knots", "age", {"count": 8, "strategy": "quantile_rows"})
+    session.refit_pending()
+    assert _knots(session.model, "age").size == 8
+    session.undo()
+    session.undo()
+    session.undo()
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+
+
+@pytest.mark.parametrize("term", ["age", "band"])
+def test_the_waiting_knots_are_the_ones_the_refit_places(book, term):
+    """Under prior weights the fit places knots on the rows, not on the exposure."""
+    session = _session(book)
+    step = session.stage_structural("knots", term, {"count": 5, "strategy": "quantile_rows"})
+    session.refit_pending()
+    np.testing.assert_array_equal(_knots(session.model, term), step.metadata["positions"])
+    assert step.metadata["strategy"] == "quantile_rows"
+
+
+@pytest.mark.parametrize(
+    ("operation", "params"),
+    [("knots", {"count": 8, "strategy": "quantile_rows"}), ("basis", {"kind": "bs"})],
+)
+def test_a_range_drawn_while_a_knot_or_kind_change_waits_keeps_the_knots_it_places(
+    book, operation, params
+):
+    """The waiting draft states only how to place its knots, so the range places them first."""
+    alone = _session(book)
+    alone.stage_structural(operation, "age", params)
+    alone.refit_pending()
+    session = _session(book)
+    session.stage_structural(operation, "age", params)
+    session.stage_structural("shape", "age", {"lo": 40.0, "hi": 60.0, "degree": 1})
+    session.refit_pending()
+    spec = session.model._specs["age"]
+    assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(40.0, 60.0, 1)]
+    np.testing.assert_array_equal(_knots(session.model, "age"), _knots(alone.model, "age"))
+    assert spec.fitted_boundary == alone.model._specs["age"].fitted_boundary
+
+
+def test_a_rule_that_would_fall_back_to_even_spacing_is_refused_with_a_count_that_works():
+    """Most rows at one value put several quantile knots there; the fit would space them evenly."""
+    X, y, w = _book(n=4000)
+    X = X.assign(age=np.where(np.arange(len(X)) % 10 < 6, 18.0, X["age"]))
+    model = _declared().fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "age", {"count": 10, "strategy": "quantile_rows"})
+    sentence = str(refused.value)
+    most = int(sentence.split("Choose ")[1].split(" knots")[0])
+    assert sentence == (
+        "Quantiles of rows put several of the 10 knots of 'age' on one value (60% of its rows "
+        f"are at 18), so the fit would fall back to even spacing. Choose {most} knots or "
+        "fewer, or another rule."
+    )
+    step = session.stage_structural("knots", "age", {"count": most, "strategy": "quantile_rows"})
+    session.refit_pending()
+    assert session.model._specs["age"]._knot_strategy_actual == "quantile_rows"
+    assert _knots(session.model, "age").size == most == step.metadata["count"]
+
+
+def test_an_ordered_term_takes_at_most_one_knot_fewer_than_its_levels(book):
+    """The constructor clamps a larger count; the editor refuses it and names the maximum."""
+    session = _session(book)
+    assert session_payload(session)["band"]["knots"]["max_count"] == 7
+    sentence = "'band' has 8 levels on its curve, so it takes at most 7 knots."
+    for params in (
+        {"count": 8, "strategy": "uniform"},
+        {"positions": [0.5 + 0.8 * i for i in range(8)]},
+    ):
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("knots", "band", params)
+        assert str(refused.value) == sentence
+    assert (
+        session.stage_structural("knots", "band", {"count": 7, "strategy": "uniform"}).metadata[
+            "count"
+        ]
+        == 7
+    )
+
+
+@pytest.mark.parametrize("levels", [["B6", "B7"], ["B2", "B3"]])
+def test_a_collapsed_ordered_term_keeps_its_knots_on_the_expanded_level_axis(book, levels):
+    """The chart draws each original band at its own place, and the knots sit on those places."""
+    session = _session(book)
+    session.stage_structural("collapse", "band", {"levels": levels})
+    session.refit_pending()
+    knots = session_payload(session)["band"]["knots"]
+    assert (knots["available"], knots["reason"]) == (True, None)
+    # Seven levels on the curve, one of them a group.
+    assert knots["max_count"] == 6
+    original = session.model._specs["band"]._original_level_to_value
+    values = [original[band] for band in BANDS]
+    np.testing.assert_allclose(
+        np.interp(knots["positions"], np.arange(len(BANDS)), values),
+        _knots(session.model, "band"),
+        rtol=0,
+        atol=1e-12,
+    )
+    session.stage_structural("knots", "band", {"positions": [1.5, 4.0, 5.5]})
+    session.refit_pending()
+    np.testing.assert_allclose(
+        session_payload(session)["band"]["knots"]["positions"], [1.5, 4.0, 5.5], rtol=0, atol=1e-12
+    )
+
+
+def test_a_level_change_under_knots_at_fixed_positions_names_the_knots_it_strands(book):
+    """Stated knots stay put while a level change moves the curve's levels under them."""
+    session = _session(book)
+    session.stage_structural("knots", "band", {"positions": [0.5 + i for i in range(7)]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B3"]})
+    assert str(refused.value) == (
+        "That change leaves 7 levels on the curve of 'band', which take at most 6 knots, and it "
+        "has 7 at fixed positions. Remove knots, or place them by a rule, before this change."
+    )
+    session.stage_structural("knots", "band", {"positions": [0.5, 3.5, 6.8]})
+    session.refit_pending()
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("special", "band", {"levels": ["B7"]})
+    assert str(refused.value) == (
+        "That change leaves the curve of 'band' running from B0 to B6, and 1 of its knots at "
+        "fixed positions lies outside it. Move or remove it, or place the knots by a rule, "
+        "before this change."
+    )
+    assert session.pending == []
+    # Knots placed by a rule are placed again on the new levels.
+    session.stage_structural("knots", "band", {"count": 7, "strategy": "uniform"})
+    session.refit_pending()
+    session.stage_structural("special", "band", {"levels": ["B7"]})
+    session.refit_pending()
+    assert session_payload(session)["band"]["knots"]["count"] == 6
+
+
+def test_a_change_the_fit_would_refuse_is_refused_when_staged(book, monkeypatch):
+    """The stage builds the term as the fit does, penalty included, not only its knots."""
+    from superglm.features.spline import BSplineSmooth
+
+    def refuse(self):
+        raise ValueError("no penalty for this term")
+
+    monkeypatch.setattr(BSplineSmooth, "_build_penalty", refuse)
+    session = _session(book)
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("basis", "age", {"kind": "bs"})
+    assert str(refused.value) == (
+        "Kind bs in age cannot be fitted on the data the refit reads. Undo the change it builds "
+        "on, or choose another."
+    )
+    assert session.pending == []
+
+
+def test_a_knot_between_two_levels_sits_between_their_values_on_the_axis():
+    """Chart positions run 0..L-1 over the smooth levels; the spline's own axis is their values."""
+    values = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
+    X, y, w = _book(n=4000)
+    X = X.assign(band=X["band"].map(lambda b: f"B{int(b[1:]) % 6}"))
+    band = OrderedCategorical(values=values, basis=Spline(kind="cr", n_knots=2))
+    model = _declared(band=band).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    step = session.stage_structural("knots", "band", {"positions": [1.5, 3.25]})
+    assert step.metadata["positions"] == [2.5, 6.0]
+    session.refit_pending()
+    np.testing.assert_array_equal(_knots(session.model, "band"), [2.5, 6.0])
+    assert session_payload(session)["band"]["knots"]["positions"] == [1.5, 3.25]
+
+
+def test_knot_changes_refuse_in_fixed_sentences(book):
+    session = _session(book)
+    rule = (
+        "Choose how the knots are placed: even spacing, quantiles of values, quantiles of rows "
+        "or tempered quantiles."
+    )
+    count = "The knot count must be a whole number of at least 1."
+    positions = "Knot positions must be numbers inside the range of 'age'."
+    # The knots either side of 30 are 12 apart, so it keeps two significant figures of that.
+    crowded = (
+        "The knot at 30 sits closer than 1 to the knot or end beside it on 'age'; "
+        "move it further from them."
+    )
+    forms = "Give a knot count and placement rule, a list of positions, or reset."
+    refusals = [
+        (
+            "area",
+            {"count": 3, "strategy": "uniform"},
+            "Knots are for spline terms and ordered terms with a spline basis.",
+        ),
+        ("age", {"count": 0, "strategy": "uniform"}, count),
+        ("age", {"count": 2.5, "strategy": "uniform"}, count),
+        ("age", {"count": True, "strategy": "uniform"}, count),
+        ("age", {"count": 4, "strategy": "random"}, rule),
+        (
+            "age",
+            {"count": 4, "strategy": "quantile_tempered", "alpha": 1.5},
+            "Tempered quantiles take an alpha from 0 to 1.",
+        ),
+        ("age", {"positions": [10.0, 30.0]}, positions),
+        ("age", {"positions": [30.0, 30.05]}, crowded),
+        ("age", {"positions": ["30"]}, positions),
+        ("age", {"positions": [30.0, float("nan")]}, positions),
+        ("age", {"count": 4}, forms),
+        ("age", {"reset": False}, forms),
+        ("age", {"count": 4, "strategy": "uniform", "positions": [30.0]}, forms),
+    ]
+    for term, params, sentence in refusals:
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("knots", term, params)
+        assert str(refused.value) == sentence
+    assert session.pending == []
+
+
+def _axis_session(lo: float, hi: float) -> EditorSession:
+    """A Poisson spline whose training range is exactly ``lo`` to ``hi``."""
+    rng = np.random.default_rng(20261010)
+    X = pd.DataFrame({"x": rng.uniform(lo, hi, 400)})
+    y = rng.poisson(1.0, 400).astype(float)
+    w = np.ones(400)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="cr", n_knots=4, boundary=(lo, hi))},
+        spline_penalty=10.0,
+    ).fit(X, y, sample_weight=w)
+    return EditorSession.from_model(model, train_data=(X, y, w))
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "positions", "accepted"),
+    [
+        # Each knot's step is two figures of the space between its neighbours: 0.1 for the
+        # first, 1 for the second. 1e7 + 0.1 reads 0.1 - 3.7e-10 from 1e7, which a 1e-9 relative
+        # slack refused.
+        (1e7, 1e7 + 50.0, [1e7 + 0.1, 1e7 + 1.1], True),
+        # Outside the round-off at that magnitude (5.6e-9): 1e-8 short of the step.
+        (1e7, 1e7 + 50.0, [1e7 + 0.1 - 1e-8, 1e7 + 1.1], False),
+        (0.0, 50.0, [0.1, 1.1], True),
+        # Near zero, 5e-11 short is outside the round-off, though a 1e-9 slack took it.
+        (0.0, 50.0, [0.1 - 5e-11, 1.1], False),
+        # Where five roundings reach the step (0.1 on a span of 2 at 1e15), float64 cannot tell
+        # a knot from its end.
+        (1e15, 1e15 + 2.0, [1e15 + 1.0], False),
+    ],
+)
+def test_a_knots_room_is_held_to_the_round_off_of_the_values(lo, hi, positions, accepted):
+    session = _axis_session(lo, hi)
+    if accepted:
+        step = session.stage_structural("knots", "x", {"positions": positions})
+        assert step.metadata["positions"] == positions
+        return
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "x", {"positions": positions})
+    assert str(refused.value).startswith("The knot at ")
+    assert "sits closer than" in str(refused.value)
+    assert session.pending == []
+
+
+@pytest.mark.parametrize(
+    ("term", "params"),
+    [
+        ("age", {"count": 8, "strategy": "quantile_rows"}),
+        ("band", {"count": 5, "strategy": "uniform"}),
+    ],
+)
+def test_knot_weights_of_the_wrong_shape_are_refused_before_the_probe_indexes_them(
+    book, term, params
+):
+    """The probe indexes the weights row by row, so it refuses a mismatch as the fit does."""
+    model, X, y, w = book
+    session = _session(book)
+    refusals = [
+        (w[:-1], f"sample_weight must have length {len(X)}, got {len(X) - 1}."),
+        (w.reshape(-1, 1), "sample_weight must be one-dimensional."),
+    ]
+    for weights, sentence in refusals:
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("knots", term, params, X=X, sample_weight=weights)
+        assert str(refused.value) == sentence
+    assert session.pending == []
+
+
+def test_a_refit_with_weights_of_the_wrong_length_refuses_and_keeps_the_waiting_knots(book):
+    model, X, y, w = book
+    session = _session(book)
+    session.stage_structural("knots", "age", {"count": 8, "strategy": "quantile_rows"})
+    with pytest.raises(EditorValueError) as refused:
+        session.refit_pending(X=X, y=y, sample_weight=w[:-1])
+    fit_sentence = f"sample_weight must have length {len(X)}, got {len(X) - 1}"
+    assert str(refused.value.__cause__) == fit_sentence
+    assert str(refused.value).startswith(f"The refit was refused: {fit_sentence}.")
+    assert [step.operation for step in session.pending] == ["knots"]
+
+
+def test_a_level_change_waiting_on_an_ordered_term_holds_its_knots(book):
+    session = _session(book)
+    session.stage_structural("collapse", "band", {"levels": ["B6", "B7"]})
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "band", {"count": 2, "strategy": "uniform"})
+    assert str(refused.value) == (
+        "A waiting change on 'band' changes its levels; refit it before changing the knots."
+    )
+
+
+@pytest.mark.parametrize(
+    ("age", "sentence"),
+    [
+        (
+            Spline(kind="ns", n_knots=5),
+            "'age' is a natural spline (kind=\"ns\"), whose penalty needs evenly spaced knots; "
+            'change its count here, or declare it with kind="cr" or kind="ps" to place its '
+            "knots freely.",
+        ),
+        (
+            Spline(kind="ps", n_knots=5, m=4),
+            "The penalty order of 'age' is above its degree, which needs evenly spaced knots; "
+            "change its count here, or lower m in code to place its knots freely.",
+        ),
+    ],
+)
+def test_a_spline_whose_penalty_needs_even_knots_takes_only_a_count(age, sentence):
+    X, y, w = _book(n=3000)
+    model = _declared(age=age).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    assert session_payload(session)["age"]["knots"]["even_only"] == sentence
+    assert session_payload(session)["band"]["knots"]["even_only"] is None
+    for params in ({"positions": AGE_KNOTS}, {"count": 6, "strategy": "quantile"}):
+        with pytest.raises(EditorValueError) as refused:
+            session.stage_structural("knots", "age", params)
+        assert str(refused.value) == sentence
+    session.stage_structural("knots", "age", {"count": 7, "strategy": "uniform"})
+    session.refit_pending()
+    assert _knots(session.model, "age").size == 7
+
+
+def test_a_term_used_by_an_interaction_keeps_its_knots():
+    X, y, w = _book(n=3000)
+    model = SuperGLM(
+        family="poisson",
+        features={"age": Spline(kind="cr", n_knots=5), "area": Categorical()},
+        interactions=[("age", "area")],
+        spline_penalty=10.0,
+    ).fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+    knots = session_payload(session)["age"]["knots"]
+    assert (knots["available"], knots["reason"]) == (
+        False,
+        "A term used by an interaction keeps its knots.",
+    )
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("knots", "age", {"count": 4, "strategy": "uniform"})
+    assert str(refused.value).startswith(
+        "Cannot change the knots for term 'age' because it is used by interaction(s): "
+    )
+
+
+def test_reset_puts_back_the_declared_knots_and_the_export_drops_them(book):
+    model, X, *_ = book
+    session = _session(book)
+    session.replace_with_knots("age", {"count": 9, "strategy": "quantile"})
+    assert session_payload(session)["age"]["knots"]["resettable"]
+    session.stage_structural("knots", "age", {"reset": True})
+    assert session_payload(session)["age"]["knots"]["resettable"] is False
+    session.refit_pending()
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+    assert "knots" not in json.loads(session.export_structure())["features"]["age"]
+
+
+@pytest.mark.parametrize(
+    ("term", "moved"),
+    [("age", AGE_KNOTS[:-1] + [60.0]), ("band", [1.5, 2.0, 4.5])],
+)
+def test_a_waiting_reset_is_not_a_hand_placement(term, moved):
+    """A waiting change says whether it places the knots by hand, as the refitted term will.
+
+    The age term is declared with knots of its own, so its reset is listed in code. The band
+    term is declared by a rule, so its reset only clears the flag.
+    """
+    X, y, w = _book()
+    declared = _declared(age=Spline(knots=AGE_KNOTS)) if term == "age" else _declared()
+    model = declared.fit(X, y, sample_weight=w)
+    session = EditorSession.from_model(model, train_data=(X, y, w))
+
+    session.stage_structural("knots", term, {"positions": moved})
+    assert session_payload(session)[term]["pending"]["knots"]["from_editor"] is True
+    session.refit_pending()
+    session.stage_structural("knots", term, {"reset": True})
+    waiting = session_payload(session)[term]["pending"]["knots"]
+    assert waiting["from_editor"] is False
+    session.refit_pending()
+    assert session_payload(session)[term]["knots"]["from_editor"] is False
+    np.testing.assert_array_equal(session.model.predict(X), model.predict(X))
+
+
+def test_a_shaped_range_and_a_knot_change_compose_in_either_order(book):
+    """Knots keep a range in force, and a range keeps knots chosen by hand and their record."""
+    model, X, y, w = book
+    session = _session(book)
+    session.stage_structural("shape", "age", {"lo": 40.0, "hi": 60.0, "degree": 1})
+    session.stage_structural("knots", "age", {"positions": [20.0, 25.0, 30.0, 70.0]})
+    session.refit_pending()
+    spec = session.model._specs["age"]
+    assert [(r.lo, r.hi, r.degree) for r in spec.polynomial_ranges] == [(40.0, 60.0, 1)]
+    np.testing.assert_array_equal(spec.fitted_base_knots, [20.0, 25.0, 30.0, 70.0])
+    session.replace_with_shaped_range("age", lo=75.0, hi=85.0, degree=0)
+    exported = json.loads(session.export_structure())
+    assert exported["features"]["age"]["knots"]["positions"] == [20.0, 25.0, 30.0, 70.0]
+    assert len(exported["features"]["age"]["ranges"]) == 2
+    applied = read_structure(exported).apply(_declared()).fit(X, y, sample_weight=w)
+    np.testing.assert_array_equal(applied.predict(X), session.model.predict(X))
+
+
+def test_a_shape_alone_leaves_the_knots_on_their_rule_with_nothing_to_reset(book):
+    """A shape keeps the knots a rule placed: the toolbar names the rule and offers no reset."""
+    session = _session(book)
+    before = session_payload(session)["age"]["knots"]
+    session.replace_with_shaped_range("age", lo=50.0, hi=70.0, degree=1)
+    shaped = session_payload(session)["age"]["knots"]
+    assert shaped["positions"] == before["positions"]
+    assert (shaped["strategy"], shaped["from_editor"], shaped["resettable"]) == (
+        "uniform",
+        False,
+        False,
+    )
+    # Knots placed by hand after the shape are hand-placed, and reset.
+    session.replace_with_knots("age", {"positions": [20.0, 25.0, 30.0, 40.0]})
+    by_hand = session_payload(session)["age"]["knots"]
+    assert (by_hand["strategy"], by_hand["from_editor"], by_hand["resettable"]) == (
+        "explicit",
+        True,
+        True,
+    )
+
+
+def test_the_widget_stages_knots_and_refits_them_at_once(book):
+    session = _session(book)
+    widget = session.widget()
+    try:
+        staged = _post_json(
+            f"{widget.url}/stage",
+            {"operation": "knots", "term": "age", "params": {"count": 8, "strategy": "quantile"}},
+        )
+        assert staged["state"]["terms"]["age"]["pending"]["knots"]["count"] == 8
+        session.pending.clear()
+        _post_json(f"{widget.url}/knots", {"term": "band", "params": {"positions": [2.5]}})
+        # Halfway between the third and fourth levels, at 2/7 and 3/7: a few roundings.
+        u = np.finfo(np.float64).eps / 2
+        np.testing.assert_allclose(_knots(session.model, "band"), [2.5 / 7], rtol=4 * u, atol=0)
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            _post_json(
+                f"{widget.url}/knots",
+                {"term": "age", "params": {"count": 0, "strategy": "uniform"}},
+            )
+        assert json.loads(refused.value.read().decode("utf-8"))["error"] == (
+            "The knot count must be a whole number of at least 1."
+        )
+    finally:
+        widget.close()
+    session.undo()
+    assert _knots(session.model, "band").size == 3
+
+
+KNOT_BASIS_FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "knot_basis.json"
+ORDERED_VALUES = {"B0": 0.0, "B1": 1.0, "B2": 4.0, "B3": 5.0, "B4": 9.0, "B5": 10.0}
+
+
+def _ordered_band_fit():
+    """Six levels on uneven values, banded by a two-knot cubic regression spline on their axis."""
+    X, y, w = _book(n=4000)
+    X = X.assign(band=X["band"].map(lambda b: f"B{int(b[1:]) % 6}"))
+    band = OrderedCategorical(values=ORDERED_VALUES, basis=Spline(kind="cr", n_knots=2))
+    return _declared(band=band).fit(X, y, sample_weight=w), X, y, w
+
+
+def _knot_basis_fixture() -> dict[str, dict]:
+    """The payload's basis and positions, and the fitted knots, for each case the browser checks.
+
+    tests/editor_frontend/fixtures/knot_basis.json holds this, written by
+    ``uv run python -m tests.test_editor_knots``. knot_basis.test.js requires the browser's
+    ``knotVector``, built from ``basis`` and ``positions``, to reproduce ``knots`` (``spec._knots``).
+    """
+    cases = {}
+    X, y, w = _book(n=3000)
+    for name, spline in [
+        ("p_spline", Spline(kind="ps", n_knots=5)),
+        ("b_spline", Spline(kind="bs", n_knots=5)),
+        ("cubic_regression", Spline(kind="cr", n_knots=5)),
+    ]:
+        model = _declared(age=spline).fit(X, y, sample_weight=w)
+        payload = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))
+        knots = payload["age"]["knots"]
+        cases[name] = {
+            "basis": knots["basis"],
+            "positions": knots["positions"],
+            "knots": model._specs["age"]._knots.tolist(),
+        }
+    model, X, y, w = _ordered_band_fit()
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
+    cases["ordered_cubic_regression"] = {
+        "basis": knots["basis"],
+        "positions": knots["positions"],
+        "knots": model._specs["band"]._basis_spline._knots.tolist(),
+    }
+    return cases
+
+
+@pytest.mark.parametrize("kind", ["ps", "bs", "cr", "ns"])
+def test_the_payload_describes_the_spline_it_was_built_from(kind):
+    X, y, w = _book(n=3000)
+    model = _declared(age=Spline(kind=kind, n_knots=5)).fit(X, y, sample_weight=w)
+    spec = model._specs["age"]
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
+    assert knots["basis"]["degree"] == spec.degree
+    assert knots["basis"]["ends"] == ("open" if kind in ("ps", "bs") else "clamped")
+    np.testing.assert_array_equal(knots["positions"], spec.fitted_base_knots)
+    np.testing.assert_array_equal(knots["basis"]["boundary"], spec.fitted_boundary)
+
+
+def test_the_knot_basis_fixture_is_current():
+    stored = json.loads(KNOT_BASIS_FIXTURE.read_text(encoding="utf-8"))
+    fresh = _knot_basis_fixture()
+    assert stored.keys() == fresh.keys()
+    u = np.finfo(np.float64).eps / 2
+    for name, case in fresh.items():
+        old = stored[name]
+        assert old["basis"]["degree"] == case["basis"]["degree"], name
+        assert old["basis"]["ends"] == case["basis"]["ends"], name
+        assert old["basis"]["level_values"] == case["basis"]["level_values"], name
+        # Within 64 u M, M the largest magnitude involved. A fused multiply-add can round numpy's
+        # interpolation of an ordered term's positions differently on another platform, so the
+        # file is held to the rounding rather than to its bytes. The browser test holds the tight
+        # count, and a change to the construction moves a knot far beyond this.
+        magnitudes = [old["knots"], old["positions"], old["basis"]["boundary"]]
+        scale = np.max(np.abs(np.concatenate(magnitudes)))
+        for key, got, want in [
+            ("knots", case["knots"], old["knots"]),
+            ("positions", case["positions"], old["positions"]),
+            ("boundary", case["basis"]["boundary"], old["basis"]["boundary"]),
+        ]:
+            np.testing.assert_allclose(
+                got, want, rtol=0, atol=64 * u * scale, err_msg=f"{name} {key}"
+            )
+
+
+@pytest.mark.parametrize(
+    ("term", "kind", "ends"), [("age", "ps", "open"), ("band", "cr", "clamped")]
+)
+def test_a_waiting_kind_change_sends_the_basis_it_puts_in_force(book, term, kind, ends):
+    """age is a cubic regression spline, band's basis a P-spline: the browser draws the waiting
+    kind's functions while it waits."""
+    session = _session(book)
+    assert session_payload(session)[term]["knots"]["waiting_basis"] is None
+    session.stage_structural("basis", term, {"kind": kind})
+    knots = session_payload(session)[term]["knots"]
+    assert knots["basis"]["ends"] != ends
+    assert knots["waiting_basis"] == {**knots["basis"], "ends": ends}
+    session.refit_pending()
+    knots = session_payload(session)[term]["knots"]
+    assert (knots["basis"]["ends"], knots["waiting_basis"]) == (ends, None)
+
+
+def test_an_ordered_terms_basis_is_built_on_its_level_values():
+    model, X, y, w = _ordered_band_fit()
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["band"]["knots"]
+    assert knots["basis"]["level_values"] == list(ORDERED_VALUES.values())
+
+
+def test_a_cardinal_spline_has_no_basis_to_draw():
+    X, y, w = _book(n=3000)
+    model = _declared(age=Spline(kind="cr_cardinal", n_knots=5)).fit(X, y, sample_weight=w)
+    knots = session_payload(EditorSession.from_model(model, train_data=(X, y, w)))["age"]["knots"]
+    assert knots["available"] and knots["basis"] is None
+
+
+def test_a_term_whose_column_holds_one_value_opens_with_its_knots_unavailable():
+    """A P-spline fitted on one value has a zero-width domain, with no knot step to snap to."""
+    X = pd.DataFrame({"x": np.full(100, 5.0)})
+    y = np.arange(100) / 100
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ps")},
+        selection_penalty=0,
+        retain_fit_state=False,
+    ).fit(X, y)
+    session = EditorSession.from_model(model)
+    knots = session_payload(session)["x"]["knots"]
+    assert (knots["available"], knots["reason"]) == (
+        False,
+        "Every value of this term's column is the same, so it has no range to place knots on.",
+    )
+    session.widget().close()
+
+
+def test_a_term_whose_column_holds_one_value_opens_with_its_data_kept():
+    """With the training data the editor also counts a term's values for shaped ranges; a term
+    with no range has none to count, and says so."""
+    X = pd.DataFrame({"x": np.full(100, 5.0)})
+    y = np.arange(100) / 100
+    model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps")}, selection_penalty=0).fit(
+        X, y
+    )
+    session = EditorSession.from_model(model, train_data=(X, y))
+    payload = session_payload(session)["x"]
+    assert (payload["shape"]["available"], payload["shape"]["reason"]) == (
+        False,
+        "Every value of this term's column is the same, so it has no range to shape.",
+    )
+    assert payload["shape"]["support"] is None
+    assert payload["knots"]["available"] is False
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural("shape", "x", {"lo": 4.0, "hi": 6.0, "degree": 1})
+    assert str(refused.value) == payload["shape"]["reason"]
+
+
+def test_quantile_knots_crowded_where_the_data_is_dense_still_move_by_hand():
+    """A knot keeps the step of its own neighbourhood; the knots a change keeps are not checked."""
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"value": np.exp(rng.normal(9.5, 1.6, 4000))})
+    y = rng.poisson(np.exp(0.1 * np.log(X["value"].to_numpy()) - 0.8)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        spline_penalty=0.1,
+        selection_penalty=0.0,
+        features={"value": Spline(kind="ps", n_knots=20, knot_strategy="quantile")},
+    ).fit(X, y)
+    session = EditorSession.from_model(model, train_data=(X, y))
+    knots = session_payload(session)["value"]["knots"]
+    positions, lo, hi = knots["positions"], knots["lo"], knots["hi"]
+    assert knots["min_gap"] is None
+    # Most of the rule's knots sit closer together than three figures of the whole span.
+    assert np.count_nonzero(np.diff(positions) < 10.0 ** (np.floor(np.log10(hi - lo)) - 2)) > 10
+    last = positions[-1] + decade_step(hi - positions[-2])
+    session.stage_structural("knots", "value", {"positions": [*positions[:-1], last]})
+    first = positions[0] - decade_step(positions[1] - lo)
+    step = session.stage_structural(
+        "knots", "value", {"positions": [first, *positions[1:-1], last]}
+    )
+    assert step.metadata["chart_positions"] == [first, *positions[1:-1], last]
+    # A knot added inside the cluster keeps the cluster's own step from its neighbours.
+    a, b = positions[2], positions[3]
+    with pytest.raises(EditorValueError) as refused:
+        session.stage_structural(
+            "knots", "value", {"positions": sorted([*positions, a + decade_step(b - a) / 2])}
+        )
+    assert str(refused.value).startswith(f"The knot at {a + decade_step(b - a) / 2:g} sits closer")
+
+
+if __name__ == "__main__":
+    KNOT_BASIS_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+    KNOT_BASIS_FIXTURE.write_text(
+        json.dumps(_knot_basis_fixture(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )

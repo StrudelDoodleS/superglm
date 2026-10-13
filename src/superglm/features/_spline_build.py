@@ -12,6 +12,7 @@ from superglm.features._spline_identifiability import (
     build_identifiability_projection_for_spec,
 )
 from superglm.features._spline_multi_penalty import build_multi_m_components
+from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.types import GroupInfo, TensorMarginalInfo
 
@@ -88,7 +89,9 @@ def build_group_info(
     basis = spec._basis_matrix(x).tocsr()
 
     if spec.select:
-        return build_select(spec, x, basis, sample_weight)
+        info = build_select(spec, x, basis, sample_weight)
+        info.structural_ranks = structural_penalty_ranks(spec, info)
+        return info
 
     omega = spec._build_penalty()
     if _uses_fit_time_scop_constraints(spec):
@@ -179,6 +182,7 @@ def build_group_info(
         info.penalty_components = [("wiggle", info.penalty_matrix)]
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
+    info.structural_ranks = structural_penalty_ranks(spec, info)
     return info
 
 
@@ -313,6 +317,7 @@ def tensor_marginal_info(
         projection = projection_constraints @ projection_ident
     else:
         projection = projection_ident
+    structural = spec._structural_penalty_for_order(spec._m_orders[0])
 
     return TensorMarginalInfo(
         basis=basis,
@@ -325,4 +330,5 @@ def tensor_marginal_info(
         degree=spec.degree,
         raw_basis_eval=spec._raw_basis_matrix,
         normalize_penalty=False,
+        structural_penalty=None if structural is None else projection.T @ structural @ projection,
     )

@@ -162,6 +162,11 @@ class GroupInfo:
     # Optional mapping suffix → component_type for penalty_components.
     # E.g. {"null": "selection"} marks null-space penalty as selection penalty.
     component_types: dict[str, str] | None = None
+    # Optional rank of each penalty decided from its structure rather than its
+    # spectrum, keyed by penalty_components suffix ("" for penalty_matrix when
+    # there are no components). REML takes it where the computed spectrum
+    # resolves it (``penalty_algebra._rank_and_logdet``).
+    structural_ranks: dict[str, int] | None = None
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
     # Monotone constraint metadata (Phase 2 QP engine).
@@ -408,6 +413,9 @@ class TensorMarginalInfo:
     degree: int  # B-spline degree (for basis eval at new points)
     raw_basis_eval: Callable[[NDArray], NDArray]  # parent-spec raw basis evaluator
     normalize_penalty: bool = False  # rescale before tensor kron assembly
+    # (K_eff, K_eff) penalty with ``penalty``'s null space and no knot-spacing
+    # spread, when the spec knows one (``_structural_penalty_for_order``)
+    structural_penalty: NDArray | None = None
 
 
 # ── Tensor raw band ────────────────────────────────────────────

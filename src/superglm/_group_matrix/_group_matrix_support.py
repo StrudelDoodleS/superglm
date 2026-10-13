@@ -61,6 +61,10 @@ _BLAS_ADVANTAGE = 6.0
 # in this package.
 DEFAULT_MAX_SUPPORT_BYTES = 64 << 20
 
+# Support-sized arrays live during a compressed Gram: the stored block, the
+# projected support ``B_unique @ R_inv`` and its weighted copy.
+_COMPRESSED_GRAM_BLOCKS = 3
+
 # Floor below which the speedup model is not applied: the calibration was
 # measured on large blocks, and a gram over fewer rows than this is negligible
 # whichever path it takes.
@@ -209,8 +213,15 @@ def _passes_support_gates(
     min_speedup: float,
     max_support_bytes: int,
     gram_repeats: int = 1,
+    replaced_bytes: int = 0,
 ) -> bool:
-    """Cheap accept/decline gates, evaluated before anything is densified."""
+    """Cheap accept/decline gates, evaluated before anything is densified.
+
+    ``replaced_bytes`` is what the caller stores instead when this declines:
+    the CSR basis a factored SSP group would keep. A support block above
+    ``max_support_bytes`` is still accepted when the compressed group's
+    memory fits in those bytes: declining it would keep the larger basis.
+    """
     # Strict inequality: equal counts mean no row actually repeats, so there is
     # nothing to deduplicate and the compressed form is pure overhead.
     if n_support <= 0 or n_support >= n_rows:
@@ -220,8 +231,17 @@ def _passes_support_gates(
     if n_rows < _MIN_CALIBRATED_ROWS:
         return False
     # One shared support block is stored however many grams read it, so the
-    # byte budget is not scaled by ``gram_repeats``.
-    if n_support * p_b * 8 > max_support_bytes:
+    # byte budget is not scaled by ``gram_repeats``. The budget bounds what
+    # compression adds; it bounds nothing by keeping a basis larger than the
+    # compressed group, which is what a saturated tensor basis is (12 bytes
+    # per stored entry on every row, against 8 per distinct row). That group
+    # holds the block and a row index, and its Gram forms two more products
+    # no wider than the block: the projected support and its weighted copy.
+    support_bytes = n_support * p_b * 8
+    if support_bytes > max_support_bytes and (
+        _COMPRESSED_GRAM_BLOCKS * support_bytes + n_rows * np.dtype(np.intp).itemsize
+        > replaced_bytes
+    ):
         return False
     return _estimated_speedup(n_rows, n_support, p_b, nnz, gram_repeats) >= min_speedup
 
@@ -233,6 +253,7 @@ def plan_row_support(
     min_speedup: float | None = None,
     max_support_bytes: int | None = None,
     gram_repeats: int = 1,
+    replaced_bytes: int = 0,
 ) -> tuple[NDArray, NDArray] | None:
     """Return ``(B_unique, row_index)`` when compression pays, else ``None``.
 
@@ -257,7 +278,14 @@ def plan_row_support(
         return None
     n_support = int(row_index.max()) + 1
     if not _passes_support_gates(
-        n_rows, n_support, p_b, int(B_csr.nnz), min_speedup, max_support_bytes, gram_repeats
+        n_rows,
+        n_support,
+        p_b,
+        int(B_csr.nnz),
+        min_speedup,
+        max_support_bytes,
+        gram_repeats,
+        replaced_bytes,
     ):
         return None
 
@@ -329,6 +357,7 @@ def detect_row_support(
     min_speedup: float | None = None,
     max_support_bytes: int | None = None,
     gram_repeats: int = 1,
+    replaced_bytes: int = 0,
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
 
@@ -373,6 +402,7 @@ def detect_row_support(
         min_speedup,
         max_support_bytes,
         gram_repeats,
+        replaced_bytes,
     ):
         return None
     representatives = _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows)
@@ -385,5 +415,6 @@ def detect_row_support(
             min_speedup=min_speedup,
             max_support_bytes=max_support_bytes,
             gram_repeats=gram_repeats,
+            replaced_bytes=replaced_bytes,
         )
     return representatives, row_index

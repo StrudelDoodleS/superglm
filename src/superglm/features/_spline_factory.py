@@ -42,7 +42,7 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "ps",
+    kind: str = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -96,6 +96,25 @@ def Spline(
         )
     # Only the two supporting classes take the keyword; the others never see it.
     range_kwargs = {"polynomial_ranges": polynomial_ranges} if polynomial_ranges else {}
+
+    if kind in ("cr", "cr_cardinal") and degree != 3:
+        raise ValueError(
+            f"A cubic regression spline (kind={kind!r}; 'cr' is the default) is always cubic, "
+            f"so degree={degree} cannot apply. Pass kind='ps' or kind='bs' for a "
+            f"degree-{degree} spline."
+        )
+
+    if kind in ("cr", "cr_cardinal"):
+        # The cap is the class's own, so the refusal moves with it.
+        cap = kind_map[kind]._max_penalty_order
+        orders = (m,) if isinstance(m, int) else tuple(m)
+        worst = max((order for order in orders if isinstance(order, int)), default=0)
+        if worst > cap:
+            raise ValueError(
+                f"A cubic regression spline (kind={kind!r}; 'cr' is the default) takes penalty "
+                f"orders up to {cap}, so m={worst} cannot apply. Pass kind='ps' for a penalty "
+                f"of order {worst}."
+            )
 
     if constraint is not None and kind == "ns":
         raise NotImplementedError(

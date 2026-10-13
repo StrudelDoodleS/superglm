@@ -5,6 +5,8 @@ import {
   placeAnchorMarks,
   spanRange
 } from "./chart/anchor_marks.js";
+import { drawKnotBasis } from "./chart/basis_overlay.js";
+import { NO_KNOT_GESTURE, drawKnotLayer, knotFrame } from "./chart/knot_marks.js";
 import { drawShapeOverlay } from "./chart/shape_overlay.js";
 import {
   WAITING_BRACKET_ROW,
@@ -22,7 +24,8 @@ import {
 } from "./chart/geometry.js";
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
 import { el, line, text } from "./chart/svg.js";
-import { freeLevelMarks, waitingSpecials } from "./specials.js";
+import { freeLevelLine, freeLevelMarks, waitingSpecials } from "./specials.js";
+import { unsmoothedRange, unsmoothedRuns, unsmoothedSeries } from "./unsmoothed.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 // A curve drawn with more points than this hides them until they are
@@ -31,6 +34,10 @@ const DENSE_POINT_COUNT = 40;
 const LENS_HALF_WIDTH = 26;
 // The x-axis title's own row, as planCategoricalAxis reserves it by default.
 const AXIS_TITLE_HEIGHT = 14;
+// Free levels' series, its diamonds, intervals and line, steps this far
+// right of each level, in svg px, so its intervals stand beside the curve's
+// rather than on them, each through its own marker.
+const DODGE = 6;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
   "font-family",
   "font-size",
@@ -80,6 +87,7 @@ export function drawChart(term, selection, context) {
   const visualMode = context.visualMode();
   svg.innerHTML = "";
   svg._anchorMarks = null;
+  svg._knotFrame = null;
   // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
   // its nominal size and the plot fills its panel. A hidden chart, or a DOM
   // without layout, draws at the fallback size.
@@ -150,7 +158,7 @@ export function drawChart(term, selection, context) {
   // A grouped display never carries a spline: the tools are off for groups.
   const spline = view.displayIsCollapsed ? null : splineCurves(term);
   const splineValues = spline ? [...(spline.y || []), ...(spline.originalY || [])] : [];
-  const yMinRaw = Math.min(
+  const curveMin = Math.min(
     ...y,
     ...original,
     ...previousValues,
@@ -159,7 +167,7 @@ export function drawChart(term, selection, context) {
     ...buildValues,
     ...splineValues
   );
-  const yMaxRaw = Math.max(
+  const curveMax = Math.max(
     ...y,
     ...original,
     ...previousValues,
@@ -168,6 +176,13 @@ export function drawChart(term, selection, context) {
     ...buildValues,
     ...splineValues
   );
+  // The Unsmoothed line takes part in the range like any series, up to a
+  // reach that keeps the curve readable; past it the line runs off the plot.
+  const unsmoothedLine = buildActive ? null : (context.unsmoothed?.() ?? null);
+  const unsmoothed = unsmoothedSeries(unsmoothedLine);
+  const [yMinRaw, yMaxRaw] = unsmoothed
+    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
+    : [curveMin, curveMax];
   const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
   const baseYMin = yMinRaw - yPad;
   const baseYMax = yMaxRaw + yPad;
@@ -232,7 +247,12 @@ export function drawChart(term, selection, context) {
   // shows the basis alone.
   if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
   if (!buildActive) drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH });
+  // The basis a knot change reshapes goes here, beneath the curves; the knot
+  // layer's frame and gesture fill it once they are known.
+  svg.appendChild(el("g", { class: "knot-basis-layer", "clip-path": "url(#plotClip)" }));
 
+  const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
+  const freeMarks = freeLevelMarks(freeLevels, view);
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
       errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
@@ -253,12 +273,19 @@ export function drawChart(term, selection, context) {
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
-  const freeMarks = buildActive ? [] : freeLevelMarks(context.freeLevels?.() ?? null, view);
-  if (freeMarks.length) drawFreeLevels(svg, freeMarks, { sx, sy, yMin, yMax });
+  if (freeMarks.length) {
+    drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), {
+      sx, sy, yMin, yMax, intervals: context.showCi()
+    });
+  }
   if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
+  if (unsmoothed && unsmoothedLine) drawUnsmoothed(svg, unsmoothed, unsmoothedLine, sx, sy);
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
+  // Knots mode keeps the points and the selection, but the knots take the
+  // gestures, so the selection palette stays away.
+  const paletteOff = Boolean(handlesMode) || visualMode === "knots";
   const plot = { top: margin.top, height: innerH };
   if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds, plot);
   if (!handlesMode) {
@@ -284,7 +311,9 @@ export function drawChart(term, selection, context) {
   if (!handlesMode) {
     pointLayer = el("g", {
       class: "point-layer",
-      "data-dense": String(basePoints.size > DENSE_POINT_COUNT)
+      "data-dense": String(basePoints.size > DENSE_POINT_COUNT),
+      // In Knots mode the points are marks only, and a dense curve's stay hidden.
+      "data-knots": String(visualMode === "knots")
     });
     svg.appendChild(pointLayer);
     for (const i of visiblePoints) {
@@ -311,11 +340,27 @@ export function drawChart(term, selection, context) {
     sx, sy, x, y, xMin, xMax, margin, innerW, innerH
   });
   applyPlotClip(svg);
+  // The knots: ticks under the axis in every mode, handles in Knots mode. A
+  // collapsed display's axis is not the one they sit on.
+  svg._knotFrame = view.displayIsCollapsed || buildActive
+    ? null
+    : knotFrame(term, {
+        xMin, xMax,
+        left: margin.left,
+        right: margin.left + innerW,
+        top: margin.top,
+        axisY: margin.top + innerH,
+        bottom: height
+      }, visualMode === "knots");
+  const knotUi = context.knotUi ? context.knotUi() : NO_KNOT_GESTURE;
+  drawKnotLayer(svg, svg._knotFrame, knotUi);
+  drawKnotBasis(svg, svg._knotFrame, knotUi);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
   legend(legendLayer, width - 10, 13, {
     originalProjected: view.displayIsCollapsed,
     hasPrevious: Boolean(previous),
+    unsmoothed: Boolean(unsmoothed),
     freeLevels: freeMarks.length > 0
       ? (context.freeLevels?.()?.shrunk ? "fitted free, shrunk by the penalty" : "fitted free")
       : null,
@@ -331,8 +376,8 @@ export function drawChart(term, selection, context) {
     displayToSourceIndices: view.displayToSourceIndices,
     displayIsCollapsed: view.displayIsCollapsed
   };
-  svg._selectionView = { term, view, handlesMode, pointLayer };
-  positionSelectionMenu(svg, context.selectionMenu, handlesMode ? null : selectedBounds);
+  svg._selectionView = { term, view, handlesMode, paletteOff, pointLayer };
+  positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : selectedBounds);
 }
 
 export function updateChartSelection(term, selection, context) {
@@ -342,7 +387,7 @@ export function updateChartSelection(term, selection, context) {
   if (!scale || !selectionView) return;
   selectionView.term = term;
 
-  const { view, handlesMode, pointLayer } = selectionView;
+  const { view, handlesMode, paletteOff, pointLayer } = selectionView;
   const displaySelected = displaySelection(view, selection);
   const basePoints = new Set(basePointIndices(view));
   const showSupplementalPoints = displaySelected.size <= basePoints.size;
@@ -406,7 +451,7 @@ export function updateChartSelection(term, selection, context) {
         scale.innerH
       );
   updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
-  positionSelectionMenu(svg, context.selectionMenu, bounds);
+  positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : bounds);
   placeChartAnchorMarks(svg, view, selection, context, scale);
 }
 
@@ -547,9 +592,11 @@ function applyPlotClip(svg) {
     ".level-group-marker",
     ".pending-group-ring",
     ".pending-special-ring",
+    ".free-line",
     ".free-whisker",
     ".free-level",
-    ".free-curve-tick",
+    ".unsmoothed",
+    ".unsmoothed-dot",
     ".point",
     ".spline-level-dot",
     ".control-stem",
@@ -1355,30 +1402,61 @@ function band(svg, x, lower, upper, sx, sy, cls) {
   svg.appendChild(el("path", { d: `${top} ${bottom} Z`, class: cls }));
 }
 
-// Each level fitted free, behind the curve: its interval and an open
-// diamond, filled where the interval misses the curve. The comparison never
-// rescales the chart; a level off it sits at its edge.
-function drawFreeLevels(svg, marks, { sx, sy, yMin, yMax }) {
+// Each level fitted free, behind the curve, as its relativity to the
+// reference: a line joining them, broken at a level with no free value, and
+// on it an open diamond, filled where the smoothing overrides the level. Each
+// level's interval against the reference shows with Reference CI. The whole
+// series steps DODGE right of the levels, beside the curve's own intervals.
+// The comparison never rescales the chart; a level off it sits at its edge.
+function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
   // The overlay never rescales the chart: what lies past it is drawn at its edge.
-  const inside = (/** @type {number} */ value) => sy(Math.min(Math.max(value, yMin), yMax));
+  const clamp = (/** @type {number} */ value) => Math.min(Math.max(value, yMin), yMax);
+  const inside = (/** @type {number} */ value) => sy(clamp(value));
+  const dodged = (/** @type {number} */ value) => sx(value) + DODGE;
+  for (const run of joined ? unsmoothedRuns(joined) : []) {
+    if (run.x.length > 1) path(layer, run.x, run.y.map(clamp), dodged, sy, "free-line");
+  }
   for (const mark of marks) {
-    const px = sx(mark.x);
+    const px = dodged(mark.x);
     const flagged = mark.flagged ? " is-flagged" : "";
-    line(layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`);
-    // The fitted curve the flag is judged against, which hand edits leave
-    // behind the drawn line.
-    line(layer, px - 5, inside(mark.curve), px + 5, inside(mark.curve), "free-curve-tick");
+    if (intervals) {
+      const whisker = line(
+        layer, px, inside(mark.upper), px, inside(mark.lower), `free-whisker${flagged}`
+      );
+      const said = el("title", {});
+      said.textContent = `${mark.level} fitted free: 95% interval against the reference, `
+        + `${fmt(mark.lower)} to ${fmt(mark.upper)}`;
+      whisker.appendChild(said);
+    }
     const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
     node.setAttribute("data-level", mark.level);
     const title = el("title", {});
     title.textContent = `${mark.level} fitted free: ${fmt(mark.y)} (${fmt(mark.lower)} to `
-      + `${fmt(mark.upper)}); the fitted curve: ${fmt(mark.curve)}`
-      + `${mark.flagged ? ", outside this interval" : ""}`;
+      + `${fmt(mark.upper)})${mark.flagged ? "; the smoothing overrides it" : ""}`;
     node.appendChild(title);
     layer.appendChild(node);
+  }
+}
+
+// The spline fitted with its smoothing switched off, solid over the curve:
+// one path per run between values that are not finite, a dot for a point
+// alone. Its hover text names what it is.
+function drawUnsmoothed(svg, series, line, sx, sy) {
+  const layer = el("g", { class: "unsmoothed-layer" });
+  svg.appendChild(layer);
+  const label = `${line.term} fitted with its smoothing switched off`
+    + `${line.note ? `. ${line.note}` : ""}`;
+  for (const run of unsmoothedRuns(series)) {
+    const node = run.x.length > 1
+      ? path(layer, run.x, run.y, sx, sy, "unsmoothed")
+      : el("circle", { cx: sx(run.x[0]), cy: sy(run.y[0]), r: 2.6, class: "unsmoothed-dot" });
+    if (!node.parentNode) layer.appendChild(node);
+    const title = el("title", {});
+    title.textContent = label;
+    node.appendChild(title);
   }
 }
 
@@ -1426,10 +1504,13 @@ function errorBars(svg, x, lower, upper, sx, sy) {
 
 // One quiet row above the plot, ending at `right`: the series, then the
 // exposure strip's swatch.
-function legend(svg, right, y, { originalProjected, hasPrevious, freeLevels, exposureLabel }) {
+function legend(
+  svg, right, y, { originalProjected, hasPrevious, unsmoothed, freeLevels, exposureLabel }
+) {
   const items = [["original", originalProjected ? "original projection" : "original"]];
   if (hasPrevious) items.push(["previous-edit", "previous edit"]);
   items.push(["edited", "current edit"]);
+  if (unsmoothed) items.push(["unsmoothed", "unsmoothed"]);
   if (freeLevels) items.push(["free-level", freeLevels]);
   if (exposureLabel) items.push(["legend-swatch", exposureLabel]);
   const keyWidth = 22;
@@ -1440,6 +1521,7 @@ function legend(svg, right, y, { originalProjected, hasPrevious, freeLevels, exp
     if (cls === "legend-swatch") {
       svg.appendChild(el("rect", { x, y: y - 5, width: keyWidth, height: 10, rx: 2, ry: 2, class: cls }));
     } else if (cls === "free-level") {
+      line(svg, x, y, x + keyWidth, y, "free-line");
       svg.appendChild(el("path", { d: diamond(x + keyWidth / 2, y, 4), class: cls }));
     } else {
       line(svg, x, y, x + keyWidth, y, cls);

@@ -15,7 +15,10 @@ from scipy.interpolate import BSpline
 import superglm
 from superglm import Constraint, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.export._ppform import extract_ppform
-from superglm.features._spline_penalties import build_integrated_derivative_penalty
+from superglm.features._spline_penalties import (
+    build_integrated_derivative_penalty,
+    mean_knot_interval,
+)
 from superglm.features._spline_ranges import (
     NARROWEST_GAP,
     ConstantRangesError,
@@ -437,7 +440,9 @@ def test_restricted_penalty_is_the_curvature_integral_over_free_intervals_only()
     nodes, weights = np.polynomial.legendre.leggauss(2)
     points = 0.5 * (b - a)[:, None] * nodes + 0.5 * (a + b)[:, None]
     curvature = (derivative_design(knots, DEGREE, points.ravel(), 2) @ beta).reshape(points.shape)
-    integral = float(np.sum(0.5 * (b - a)[:, None] * weights * curvature**2))
+    # The penalty integrates over x / hbar, hbar the mean knot interval.
+    hbar = mean_knot_interval(knots[DEGREE:-DEGREE])
+    integral = float(np.sum(0.5 * (b - a)[:, None] * weights * curvature**2)) * hbar**3
     penalty = float(beta @ omega @ beta)
     # Both sides sum O(n_basis^2) products bounded by |beta|' |omega| |beta|.
     n_basis = len(beta)
@@ -450,9 +455,10 @@ def test_pinned_quadratic_is_not_shrunk_by_the_penalty(kind):
     """A quadratic bump confined to the range costs nothing under the penalty.
 
     The bump (x - 30)(45 - x) on [30, 45], zero elsewhere, lies in the ranged
-    basis (the kink edges leave it C0). Its curvature integral, 4 * 15 = 60, is
-    all inside the range, so the term's penalty must charge none of it and no
-    smoothing parameter can shrink it.
+    basis (the kink edges leave it C0). Its curvature integral, 4 * 15 = 60 in
+    the units of ``x`` (``60 * hbar**3`` over ``x / hbar``, ``hbar`` the mean knot interval, which the
+    penalty is measured in), is all inside the range, so the term's penalty must
+    charge none of it and no smoothing parameter can shrink it.
     """
     x = _book()[0]["age"].to_numpy()
     spec = Spline(kind=kind, k=12, polynomial_ranges=[PolynomialRange(30.0, 45.0, 2, "kink")])
@@ -466,7 +472,8 @@ def test_pinned_quadratic_is_not_shrunk_by_the_penalty(kind):
     unrestricted = build_integrated_derivative_penalty(spec._knots, spec.degree, 2)
     scale = float(np.abs(coefficients) @ np.abs(unrestricted) @ np.abs(coefficients))
     tolerance = spec._n_basis**2 * EPS * scale
-    assert abs(coefficients @ unrestricted @ coefficients - 60.0) <= tolerance
+    hbar = mean_knot_interval(spec._knots[spec.degree : -spec.degree])
+    assert abs(coefficients @ unrestricted @ coefficients - 60.0 * hbar**3) <= tolerance
     assert abs(coefficients @ spec._build_penalty() @ coefficients) <= tolerance
 
 

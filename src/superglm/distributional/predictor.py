@@ -345,6 +345,7 @@ def _center_selected_smooths(
         centered.projection = source.projection
         centered.omega_components = source.omega_components
         centered.component_types = source.component_types
+        centered.structural_ranks = getattr(source, "structural_ranks", None)
         centered.lambda_policies = source.lambda_policies
         matrices[group_index] = centered
         setattr(target, "_distributional_basis_mean", np.asarray(basis_mean, dtype=np.float64))

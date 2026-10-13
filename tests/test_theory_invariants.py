@@ -1846,7 +1846,7 @@ class TestPredictionTimeContracts:
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
-            features={"x": Spline(n_knots=6, penalty="ssp"), "z": Numeric()},
+            features={"x": Spline(kind="ps", n_knots=6, penalty="ssp"), "z": Numeric()},
         )
         model.fit(X, y)
 
@@ -1865,8 +1865,8 @@ class TestPredictionTimeContracts:
 
     @pytest.mark.parametrize(
         "spline_cls",
-        [Spline, NaturalSpline, CubicRegressionSpline],
-        ids=["bspline", "natural", "crs"],
+        [PSpline, NaturalSpline, CubicRegressionSpline],
+        ids=["pspline", "natural", "crs"],
     )
     def test_extrapolation_finite_all_spline_types(self, spline_cls):
         """All spline types should produce finite predictions outside training range."""

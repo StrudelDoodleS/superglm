@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   pendingGroupMarks,
+  pendingTagText,
   pendingUngroupMarks,
   waitingBracketText,
 } from "../../src/superglm/editor/app/chart/pending_overlay.js";
@@ -108,6 +109,18 @@ test("nothing is leaving while no regrouping waits, and drawn collapsed a leaver
   assert.deepEqual(pendingUngroupMarks({ levels: LEVELS, level_groups: fitted }, expanded), []);
   const collapsed = { x: [0, 1, 2, 3], displayToSourceIndices: [[0], [1, 2], [3], [4]] };
   assert.deepEqual(pendingUngroupMarks(waiting({}, fitted), collapsed)[0].display, [1]);
+});
+
+test("a waiting range's tag says it waits where its box has room, else names its shape", () => {
+  // A range a painted range splits off can be narrow, and its neighbour's tag
+  // starts at the neighbour's left edge, so a tag must end inside its box.
+  const range = { lo: 4, hi: 5, degree: 0, label: "Flat", join: "tangent" };
+  const measure = (text) => text.length * 6.5;
+  // A tag is inset 6 px and padded 8 px each side around its text.
+  assert.equal(pendingTagText(range, 6 + 24 * 6.5 + 16, measure), "Flat · waiting for refit");
+  assert.equal(pendingTagText(range, 6 + 24 * 6.5 + 15.9, measure), "Flat");
+  assert.equal(pendingTagText(range, 6 + 4 * 6.5 + 16, measure), "Flat");
+  assert.equal(pendingTagText(range, 6 + 4 * 6.5 + 15.9, measure), null);
 });
 
 test("an ungroup's bracket says the levels are ungrouped, listed with commas", () => {

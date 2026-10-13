@@ -99,7 +99,9 @@ def test_a_fixed_lambda_fit_discloses_non_convergence_without_a_warning() -> Non
     model = SuperLSS(family, family.location(s("x", kind="cr", k=6)), family.scale())
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
-        model.fit(frame, response, lambdas={"location:x#wiggle": 1.0}, max_inner_iter=1)
+        # 1.0 over x: the penalty is measured in its five knot intervals.
+        per_knot = float((np.ptp(frame["x"]) / 5) ** -3)
+        model.fit(frame, response, lambdas={"location:x#wiggle": per_knot}, max_inner_iter=1)
     assert model.result_.converged is False
     assert all("fit not converged" in note for note in model.summary()["note"])
 

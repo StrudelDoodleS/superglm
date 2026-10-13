@@ -8,7 +8,11 @@ const SHORTCUT_MODES = Object.freeze({
   m: "move",
   z: "zoom",
   h: "handles",
+  k: "knots",
 });
+
+/** The tools that can be off for a term, and the title their popover gives the reason under. */
+const EXPLAINED_TOOLS = Object.freeze({ handles: "Handles", knots: "Knots" });
 
 const ROVING_KEYS = new Set([
   "ArrowUp",
@@ -111,18 +115,27 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
 }
 
 /**
- * Handles with a ``handlesReason`` stay focusable and hoverable, marked
+ * Handles and Knots with a reason stay focusable and hoverable, marked
  * aria-disabled, so their popover can say why they are off; without one they
- * are plainly disabled.
+ * are plainly disabled. A mode whose tool is off shows as Select.
  *
  * @param {HTMLElement} root
- * @param {{mode:ToolMode, handlesAvailable:boolean, handlesReason?:string|null}} state
+ * @param {{mode:ToolMode, handlesAvailable:boolean, handlesReason?:string|null,
+ *   knotsAvailable?:boolean, knotsReason?:string|null}} state
  */
-export function renderToolRail(root, { mode, handlesAvailable, handlesReason = null }) {
-  const effectiveMode = mode === "handles" && !handlesAvailable ? "select" : mode;
+export function renderToolRail(
+  root,
+  { mode, handlesAvailable, handlesReason = null, knotsAvailable = false, knotsReason = null },
+) {
+  const available = { handles: handlesAvailable, knots: knotsAvailable };
+  const reasons = { handles: handlesReason, knots: knotsReason };
+  const effectiveMode = (mode === "handles" || mode === "knots") && !available[mode] ? "select" : mode;
   for (const element of root.querySelectorAll('[role="radio"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
-    if (element.dataset.tool === "handles") renderHandlesAvailability(element, handlesAvailable, handlesReason);
+    const tool = element.dataset.tool;
+    if (tool === "handles" || tool === "knots") {
+      renderAvailability(element, EXPLAINED_TOOLS[tool], available[tool], reasons[tool]);
+    }
     const active = element.dataset.tool === effectiveMode;
     element.setAttribute("aria-checked", String(active));
     element.tabIndex = active ? 0 : -1;
@@ -132,15 +145,16 @@ export function renderToolRail(root, { mode, handlesAvailable, handlesReason = n
 
 /**
  * @param {HTMLButtonElement} element
+ * @param {string} title
  * @param {boolean} available
  * @param {string|null} reason
  */
-function renderHandlesAvailability(element, available, reason) {
+function renderAvailability(element, title, available, reason) {
   const explained = !available && Boolean(reason);
   element.disabled = !available && !explained;
   element.setAttribute("aria-disabled", String(!available));
   if (explained && reason) {
-    element.dataset.popoverTitle = "Handles";
+    element.dataset.popoverTitle = title;
     element.dataset.popoverBody = reason;
   } else {
     delete element.dataset.popoverTitle;
@@ -155,7 +169,8 @@ function isUnavailable(element) {
 
 /** @param {string|undefined} value @returns {value is ToolMode} */
 function isToolMode(value) {
-  return value === "select" || value === "move" || value === "zoom" || value === "handles";
+  return value === "select" || value === "move" || value === "zoom" || value === "handles" ||
+    value === "knots";
 }
 
 /** @param {EventTarget|null} target */

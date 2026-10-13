@@ -137,6 +137,7 @@ def place_knots(
     spec._basis_hi = None
     spec._basis_d1_lo = None
     spec._basis_d1_hi = None
+    spec._difference_penalty = {}
 
     interior, spec._knot_strategy_actual = _spline_knots.resolve_interior_knots(
         x,

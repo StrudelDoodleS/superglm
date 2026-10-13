@@ -2264,8 +2264,8 @@ class TestProfileFitParity:
             selection_penalty=0,
             spline_penalty=2.0,
             features={
-                "x1": Spline(n_knots=5, penalty="ssp"),
-                "x2": Spline(n_knots=6, penalty="ssp"),
+                "x1": Spline(kind="ps", n_knots=5, penalty="ssp"),
+                "x2": Spline(kind="ps", n_knots=6, penalty="ssp"),
             },
         )
         model._add_interaction(
