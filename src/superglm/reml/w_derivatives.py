@@ -112,19 +112,24 @@ def _leverage_gradient_rhs(
 
 @dataclass(frozen=True)
 class _PenaltyBatch:
-    """Penalty blocks of one shape, traced together (``_leverage_cross_batches``).
+    """Adjacent penalty blocks of one shape, traced together (``_leverage_cross_batches``).
 
-    ``columns[b]`` are block ``b``'s coefficient columns and ``members[b]`` its
-    penalties, the ``dense`` matrix penalties first (``stacked[b]``, lambda-scaled
-    and side by side), then identity penalties (``identity_scales[b]``, their
-    lambdas).
+    Block ``b`` is columns ``start + b * width`` onward, ``width`` of them, and
+    ``members[b]`` are its penalties, the ``dense`` matrix penalties first
+    (``stacked[b]``, lambda-scaled and side by side), then identity penalties
+    (``identity_scales[b]``, their lambdas).
     """
 
-    columns: NDArray
+    start: int
+    width: int
     members: NDArray
     dense: int
     stacked: NDArray | None
     identity_scales: NDArray
+
+    @property
+    def stop(self) -> int:
+        return self.start + self.width * self.members.shape[0]
 
 
 def _leverage_derivative_terms(
@@ -161,7 +166,15 @@ def _leverage_derivative_terms(
     """
     m = penalty_rhs.shape[1]
     block_rhs = [
-        penalty_rhs[batch.columns[:, :, None], batch.members[:, None, :]] for batch in batches
+        np.stack(
+            [
+                penalty_rhs[batch.start + b * batch.width : batch.start + (b + 1) * batch.width][
+                    :, members
+                ]
+                for b, members in enumerate(batch.members)
+            ]
+        )
+        for batch in batches
     ]
     grad = np.zeros(m, dtype=np.float64)
     grad_compensation = np.zeros(m, dtype=np.float64)
@@ -173,20 +186,33 @@ def _leverage_derivative_terms(
         quadratic = np.empty((rows.size, m), dtype=np.float64)
         directions = np.empty((rows.size, m), dtype=np.float64)
         for batch, rhs in zip(batches, block_rhs, strict=True):
-            # (blocks, rows, width): each block's solved rows, stacked for matmul
-            solved_blocks = solved[:, batch.columns].transpose(1, 0, 2)
+            # (blocks, rows, width): a view of each block's solved rows, for matmul
+            n_blocks, width = batch.members.shape[0], batch.width
+            solved_blocks = (
+                solved[:, batch.start : batch.stop]
+                .reshape(rows.size, n_blocks, width)
+                .transpose(1, 0, 2)
+            )
             directions[:, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
-            dense = batch.members[:, : batch.dense]
+            # Row sums over a block's width as one matrix-vector product: a
+            # level is a dozen columns wide, too short for a loop per row.
+            ones = np.ones(width, dtype=np.float64)
             if batch.stacked is not None:
-                width = batch.columns.shape[1]
                 products = np.matmul(solved_blocks, batch.stacked).reshape(
-                    *solved_blocks.shape[:2], batch.dense, width
+                    n_blocks, rows.size, batch.dense, width
                 )
-                quadratic[:, dense] = np.einsum("bckw,bcw->cbk", products, solved_blocks)
+                products *= solved_blocks[:, :, None, :]
+                quadratic[:, batch.members[:, : batch.dense]] = (
+                    (products.reshape(-1, width) @ ones)
+                    .reshape(n_blocks, rows.size, batch.dense)
+                    .transpose(1, 0, 2)
+                )
             if batch.members.shape[1] > batch.dense:
-                squares = np.einsum("bcw,bcw->cb", solved_blocks, solved_blocks)
+                squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
+                    n_blocks, rows.size
+                )
                 quadratic[:, batch.members[:, batch.dense :]] = (
-                    squares[:, :, None] * batch.identity_scales[None, :, :]
+                    squares.T[:, :, None] * batch.identity_scales[None, :, :]
                 )
         weighted = row_weights[rows, None] * directions
         for total, compensation, contribution in (
@@ -209,23 +235,28 @@ def _leverage_cross_batches(
 
     Each dense member is the matrix ``reml_direct_hessian`` traces against
     (``penalty_component_dense_matrix``), so the cross term and the penalty
-    products in the outer Hessian read the same ``S_i``.  Blocks of one width
-    and one count of dense and identity penalties (a spline-by-category term's
-    levels) share a batch, so a row block costs a few products per batch, not
-    per level.
+    products in the outer Hessian read the same ``S_i``.  Adjacent blocks of
+    one width and one count of dense and identity penalties (a
+    spline-by-category term's levels) share a batch, read as one view of the
+    solved rows, so a row block costs a few products per term, not per level.
     """
     members: dict[tuple[int, int], list[int]] = {}
     for index, pc in enumerate(penalties):
         members.setdefault((pc.group_sl.start, pc.group_sl.stop), []).append(index)
-    shapes: dict[tuple[int, int, int], list[tuple[int, list[int], list[int]]]] = {}
-    for (start, stop), indices in members.items():
+    # Runs of adjacent blocks of one shape: (start, width, n_dense, n_identity) and blocks.
+    runs: list[tuple[tuple[int, int, int, int], list[tuple[list[int], list[int]]]]] = []
+    for (start, stop), indices in sorted(members.items()):
         dense = [i for i in indices if penalties[i].penalty_kind != "identity"]
         identity = [i for i in indices if penalties[i].penalty_kind == "identity"]
-        shapes.setdefault((stop - start, len(dense), len(identity)), []).append(
-            (start, dense, identity)
-        )
+        shape = (stop - start, len(dense), len(identity))
+        if runs:
+            (run_start, width, n_dense, n_identity), blocks = runs[-1]
+            if (width, n_dense, n_identity) == shape and run_start + width * len(blocks) == start:
+                blocks.append((dense, identity))
+                continue
+        runs.append(((start, *shape), [(dense, identity)]))
     batches = []
-    for (width, n_dense, _), blocks in shapes.items():
+    for (start, width, n_dense, _), blocks in runs:
         stacked = None
         if n_dense:
             stacked = np.stack(
@@ -239,23 +270,20 @@ def _leverage_cross_batches(
                             for i in dense
                         ]
                     )
-                    for _, dense, _ in blocks
+                    for dense, _ in blocks
                 ]
             )
         batches.append(
             _PenaltyBatch(
-                columns=np.array(
-                    [np.arange(start, start + width) for start, _, _ in blocks], dtype=np.intp
-                ),
-                members=np.array(
-                    [dense + identity for _, dense, identity in blocks], dtype=np.intp
-                ),
+                start=start,
+                width=width,
+                members=np.array([dense + identity for dense, identity in blocks], dtype=np.intp),
                 dense=n_dense,
                 stacked=stacked,
                 identity_scales=np.array(
                     [
                         [float(lambdas[penalties[i].name]) for i in identity]
-                        for _, _, identity in blocks
+                        for _, identity in blocks
                     ],
                     dtype=np.float64,
                 ).reshape(len(blocks), -1),
