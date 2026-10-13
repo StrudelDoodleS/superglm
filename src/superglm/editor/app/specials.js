@@ -77,11 +77,10 @@ export function waitingSpecials(term) {
  * @typedef {object} FreeLevelMark
  * @property {string} level
  * @property {number} x the displayed point's x
- * @property {number} y the free estimate, a relativity
- * @property {number} curve the fitted curve the flag is judged against, a relativity
+ * @property {number} y the free estimate, a relativity to the reference
  * @property {number} lower
  * @property {number} upper
- * @property {boolean} flagged its interval misses the curve
+ * @property {boolean} flagged the smoothing overrides the level
  */
 
 /**
@@ -96,14 +95,7 @@ export function waitingSpecials(term) {
 export function freeLevelMarks(free, view) {
   if (!free || !Array.isArray(view.levels)) return [];
   const flagged = new Set(free.flagged);
-  /** @type {Map<string, number>} */
-  const pointOf = new Map();
-  view.levels.forEach((label, index) => {
-    const members = view.displayIsCollapsed && view.displaySourceLevels?.[index]
-      ? view.displaySourceLevels[index]
-      : [label];
-    for (const member of members) pointOf.set(String(member), index);
-  });
+  const pointOf = displayPoints(view);
   const seen = new Set();
   /** @type {FreeLevelMark[]} */
   const marks = [];
@@ -115,13 +107,56 @@ export function freeLevelMarks(free, view) {
       level,
       x: view.x[index],
       y: free.y[k],
-      curve: free.curve[k],
       lower: free.lower[k],
       upper: free.upper[k],
       flagged: flagged.has(level)
     });
   });
   return marks;
+}
+
+/**
+ * The line joining the free estimates in axis order, null at a level on the
+ * curve with no free value, where it breaks. A collapsed group's members share
+ * its point; a special level keeps no place on it.
+ * @param {FreeLevels|null} free
+ * @param {{x:number[], levels?:string[]|null, displayIsCollapsed?:boolean,
+ *   displaySourceLevels?:string[][]}} view
+ * @returns {{x:number[], y:Array<number|null>}|null}
+ */
+export function freeLevelLine(free, view) {
+  if (!free || !Array.isArray(view.levels)) return null;
+  const pointOf = displayPoints(view);
+  /** @type {Map<number, number|null>} */
+  const valueAt = new Map();
+  const place = (/** @type {string} */ level, /** @type {number|null} */ value) => {
+    const index = pointOf.get(level);
+    if (index !== undefined && !valueAt.has(index)) valueAt.set(index, value);
+  };
+  free.levels.forEach((level, k) => place(level, free.y[k]));
+  free.gaps.forEach((level) => place(level, null));
+  const points = [...valueAt.keys()].sort((left, right) => left - right);
+  return {
+    x: points.map((index) => view.x[index]),
+    y: points.map((index) => valueAt.get(index) ?? null)
+  };
+}
+
+/**
+ * Each displayed level's point: a collapsed group's members all go to its one point.
+ * @param {{levels?:string[]|null, displayIsCollapsed?:boolean, displaySourceLevels?:string[][]}} view
+ * @returns {Map<string, number>}
+ */
+function displayPoints(view) {
+  /** @type {Map<string, number>} */
+  const pointOf = new Map();
+  (view.levels ?? []).forEach((label, index) => {
+    const members = view.displayIsCollapsed && view.displaySourceLevels?.[index]
+      ? view.displaySourceLevels[index]
+      : [label];
+    for (const member of members) pointOf.set(String(member), index);
+  });
+  return pointOf;
 }
 
 /**

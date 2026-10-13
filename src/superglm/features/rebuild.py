@@ -1,10 +1,11 @@
 """Rebuild a term's spec with new structural decisions.
 
 A structural decision -- how a categorical's levels are grouped, which level
-is the reference, where new levels go, the polynomial ranges of a spline --
-is built into a fresh, unfitted spec made from the term's declaration, never
-by mutating a fitted one, and the new spec goes into a clone of the model.
-The editor's collapse, ungroup, reference and shape steps and
+is the reference, where new levels go, the polynomial ranges, knots and kind
+of a spline -- is built into a fresh, unfitted spec made from the term's
+declaration, never by mutating a fitted one, and the new spec goes into a
+clone of the model.
+The editor's collapse, ungroup, reference, shape, knot and basis steps and
 :meth:`superglm.structure.Structure.apply` build terms here, so the two share
 one implementation and the library never imports the editor.
 """
@@ -16,13 +17,15 @@ import dataclasses
 import re
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
 
+from superglm.features._spline_config import configure_knots, initialize_runtime_state
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
+from superglm.features.constraint import Constraint
 from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.ordered_categorical import (
     _CLAMP_WARNING_PREFIX,
@@ -39,6 +42,20 @@ SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
 # neither, so they cannot go onto the curve. A plain dict of tuples, so a
 # pickled spec needs no class from here.
 FREED_LEVELS_ATTRIBUTE = "_freed_levels"
+# Set on a spline whose knots were chosen in the editor, read by structure.py:
+# a structure file records the knots of a spline carrying it, and no others.
+EDITOR_KNOTS_ATTRIBUTE = "_editor_chosen_knots"
+# Set on a spline whose kind or shrinkage (select=True) was chosen in the
+# editor, read by structure.py: a structure file records the basis of a spline
+# carrying it, and no others.
+EDITOR_BASIS_ATTRIBUTE = "_editor_chosen_basis"
+# Set on a spline whose knots a shape froze from a rule's placement, read by knots.py: the
+# spline states them as positions, but they are the rule's, and the value is that rule.
+SHAPE_FROZEN_ATTRIBUTE = "_editor_shape_frozen_rule"
+# The editor's marks, which a spline rebuilt from a marked one keeps.
+EDITOR_MARKS = (EDITOR_KNOTS_ATTRIBUTE, EDITOR_BASIS_ATTRIBUTE, SHAPE_FROZEN_ATTRIBUTE)
+# The kinds that are cubic whatever spline they are rebuilt from.
+CUBIC_KINDS = frozenset({"cr", "cr_cardinal", "ns"})
 
 TOO_FEW_POINTS = "Select at least two points to shape a range."
 
@@ -375,7 +392,7 @@ def pristine_basis(spec: OrderedCategorical):
     # exceed the current one when a grouping is being undone. `_spline_obj` is
     # always set on a spec this version constructed; the fallback covers a
     # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
-    # loudly instead of silently cloning it onto the default P-spline.
+    # loudly instead of silently cloning it onto the default spline.
     #
     # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
     # only reaches the fallback when the key EXISTS and is None, so a pickle
@@ -439,9 +456,13 @@ def special_labels(spec: OrderedCategorical) -> set[str]:
 # -- Polynomial ranges -----------------------------------------------------------
 
 
-def shape_unavailable_reason(model, name: str) -> str | None:
-    """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can."""
-    source = source_spline(model._specs[name])
+def shape_unavailable_reason(model, name: str, source=None) -> str | None:
+    """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can.
+
+    ``source`` is the spline to judge in place of the term's own, such as the
+    declaration rebuilt with a structure file's basis.
+    """
+    source = source_spline(model._specs[name]) if source is None else source
     if source is None:
         return "Shapes need a spline term."
     if isinstance(source, CardinalCRSpline):
@@ -518,14 +539,115 @@ def merged_ranges(
     return [*kept, new]
 
 
+class PaintedRanges(NamedTuple):
+    """The ranges once a new one is painted over those it overlaps.
+
+    ``ranges`` are in axis order. ``cut`` pairs each range the new one
+    overlapped, in axis order, with what is left of it: nothing when the new
+    range covers it, one piece when it overlaps one end, two when the new
+    range lies strictly inside it.
+    """
+
+    ranges: list[PolynomialRange]
+    cut: list[tuple[PolynomialRange, tuple[PolynomialRange, ...]]]
+
+
+def painted_ranges(
+    existing: tuple[PolynomialRange, ...],
+    new: PolynomialRange,
+    position: Callable[[Any], float],
+) -> PaintedRanges:
+    """``existing`` with ``new`` painted over it: wherever they overlap, ``new`` wins.
+
+    A range ``new`` covers is removed, the same span included. One it
+    overlaps at an end keeps the part outside ``new``, and one that holds it
+    strictly is split around it; each piece keeps its degree and join and
+    shares its edge with ``new``, as tiled ranges do. A range ``new`` only
+    touches is kept whole. The editor's shapes paint; a structure file states
+    no overlaps, and :func:`merged_ranges` applies it.
+    """
+    span = (position(new.lo), position(new.hi))
+    kept, cut = [], []
+    for current in sorted(existing, key=lambda r: position(r.lo)):
+        at = (position(current.lo), position(current.hi))
+        if at[1] <= span[0] or span[1] <= at[0]:
+            kept.append(current)
+            continue
+        left = [dataclasses.replace(current, hi=new.lo)] if at[0] < span[0] else []
+        right = [dataclasses.replace(current, lo=new.hi)] if span[1] < at[1] else []
+        kept += left + right
+        cut.append((current, (*left, *right)))
+    return PaintedRanges(sorted([*kept, new], key=lambda r: position(r.lo)), cut)
+
+
+def declared_spline(model, name: str) -> _SplineBase | None:
+    """A copy of the spline ``name`` is declared with in ``model``, unfitted, or None.
+
+    An ordered term's declared basis; a numeric term's own declaration, which
+    the model keeps unfitted in its configuration. None for a term with no
+    spline, or a model too old to keep its declarations.
+    """
+    spec = model._specs[name]
+    if isinstance(spec, OrderedCategorical):
+        return pristine_basis(spec) if source_spline(spec) is not None else None
+    declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ())).get(name)
+    return copy.deepcopy(declared) if isinstance(declared, _SplineBase) else None
+
+
+def stated_knots(spline: _SplineBase) -> Any:
+    """The knots ``spline`` states, or None where it places them by its rule.
+
+    A shape freezes a rule's knots as positions. Those stay the rule's, so
+    they are not stated.
+    """
+    if getattr(spline, SHAPE_FROZEN_ATTRIBUTE, None) is not None:
+        return None
+    return spline._named_knots or spline._explicit_knots
+
+
+def respaced_spline(
+    source: _SplineBase,
+    *,
+    knots=None,
+    n_knots: int | None = None,
+    knot_strategy: str | None = None,
+    knot_alpha: float | None = None,
+) -> _SplineBase:
+    """A copy of the spline ``source`` with new knots, every other setting kept, ready to fit.
+
+    ``knots`` states interior positions on the spline's own axis, or band
+    names on an ordered term's basis; otherwise ``n_knots`` knots are placed
+    by ``knot_strategy``. Unset arguments keep ``source``'s. The boundary,
+    shaped ranges, constraint, penalty and smoothing settings carry over.
+    ``source`` is the spline as the model declares it, which after a refit
+    holds that fit's state for a term the refit left alone; the copy's
+    build-time state is reset, and the fit places everything again.
+    """
+    spline = copy.deepcopy(source)
+    # Knots placed afresh are no longer frozen by the shape they came from.
+    spline.__dict__.pop(SHAPE_FROZEN_ATTRIBUTE, None)
+    strategy = source.knot_strategy if knot_strategy is None else knot_strategy
+    initialize_runtime_state(spline, strategy, source._lambda_policy)
+    configure_knots(
+        spline,
+        knots=knots,
+        n_knots=source.n_knots if n_knots is None else n_knots,
+        knot_strategy=strategy,
+        knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
+        boundary=source._explicit_boundary,
+    )
+    return spline
+
+
 def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBase:
     """``source``'s settings with ``ranges``; a ``ps``/``ns`` source becomes ``bs``.
 
     Range edges repeat knots, which the equal-spacing difference penalties
     cannot take; a ``bs`` with the same knots, degree and penalty order is
     the derivative-penalty spline whose penalty can skip the pinned ranges.
+    Knots and a basis chosen in the editor stay marked as such.
     """
-    return Spline(
+    shaped = Spline(
         kind="cr" if _spline_kind_name(source) == "cr" else "bs",
         n_knots=source.n_knots,
         knots=knots,
@@ -541,8 +663,66 @@ def shaped_spline(source: _SplineBase, ranges, *, knots, boundary) -> _SplineBas
         lambda_policy=source._lambda_policy,
         polynomial_ranges=ranges,
     )
+    _carry_marks(source, shaped)
+    if knots is not None and stated_knots(source) is None:
+        # Frozen knots keep their rule: the source's own if it froze them, else its placed one.
+        rule = getattr(source, SHAPE_FROZEN_ATTRIBUTE, None) or source._knot_strategy_actual
+        setattr(shaped, SHAPE_FROZEN_ATTRIBUTE, str(rule))
+    return shaped
 
 
 def edge_text(edge) -> str:
     """A range edge as a sentence names it: a band as it is, a number as ``%g``."""
     return edge if isinstance(edge, str) else f"{edge:g}"
+
+
+# -- Basis kind ------------------------------------------------------------------
+
+
+def rebased_spline(
+    source: _SplineBase, *, kind: str, select: bool, degree: int | None = None
+) -> _SplineBase:
+    """A fresh spline of ``kind``, with ``select``, every other setting of ``source`` kept.
+
+    The knots (stated, or a count and a placement rule), boundary, penalty
+    order ``m``, shape constraint, polynomial ranges, penalty,
+    extrapolation, binning and smoothing policy carry over, and so do the
+    editor's marks. A ``ps`` or ``bs`` spline takes ``degree``, by default
+    ``source``'s; the ``cr``, ``cr_cardinal`` and ``ns`` kinds are cubic.
+    The spline is built from these settings, never from a fitted copy, so the
+    fit places everything again. A combination ``kind`` cannot take, such as
+    a constraint on ``ns`` or ranges on ``ps``, is refused by the library
+    with its own error.
+    """
+    stated = source._named_knots if source._named_knots is not None else source._explicit_knots
+    constraint = None
+    if source.constraint_kind is not None:
+        constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
+    orders = tuple(source._m_orders)
+    spline = Spline(
+        kind=kind,
+        n_knots=source.n_knots,
+        knots=stated,
+        degree=3 if kind in CUBIC_KINDS else source.degree if degree is None else degree,
+        knot_strategy=source.knot_strategy,
+        knot_alpha=source.knot_alpha,
+        boundary=source._explicit_boundary,
+        penalty=source.penalty,
+        select=select,
+        discrete=source.discrete,
+        n_bins=source.n_bins,
+        extrapolation=source.extrapolation,
+        constraint=constraint,
+        m=orders[0] if len(orders) == 1 else orders,
+        lambda_policy=source._lambda_policy,
+        polynomial_ranges=source.polynomial_ranges or None,
+    )
+    _carry_marks(source, spline)
+    return spline
+
+
+def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
+    """Mark ``spline`` with the editor's marks ``source`` carries."""
+    for mark in EDITOR_MARKS:
+        if getattr(source, mark, False):
+            setattr(spline, mark, getattr(source, mark))

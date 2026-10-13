@@ -55,6 +55,9 @@ const CHANGES = Object.freeze({
   shape: "shape",
   shape_range: "shape",
 });
+// The clause a shape's label ends with when it paints over other ranges:
+// " (trims Line 97–150 to 110–150)", " (splits ...)", " (removes ...)".
+const CUT_CLAUSE = / \((?:trims|splits|removes|replaces) .*\)$/u;
 
 // The session's root, below every applied step. The state payload carries no
 // id or time for the session's start, so the root shows neither, and it takes
@@ -232,7 +235,9 @@ function entryStatus(entry) {
  * sentence for that operation. An edit on a selection names its action and
  * the stretch of axis it changed, "Smooth 62.7 – 85", or the levels it changed
  * where they are no stretch, "Decrease B1, B5"; any other edit keeps its
- * label. The labels themselves stay as they are: the Undo popover reads them.
+ * label. A shape painted over other ranges keeps the clause naming what it
+ * cuts: "Flat 85 – 110 (trims Line 97 – 150 to 110 – 150)". The labels
+ * themselves stay as they are: the Undo popover reads them.
  * @param {TimelineEntry} entry @param {"applied"|"waiting"|"edit"} status
  */
 function entryMessage(entry, status) {
@@ -240,8 +245,11 @@ function entryMessage(entry, status) {
   if (status === "edit") return editMessage(entry) ?? sentenceCase(label);
   const change = CHANGES[String(entry.operation ?? "")] ?? "";
   const term = typeof entry.term === "string" ? entry.term : "";
-  return changeMessage(change, entry.params ?? {})
-    ?? sentenceCase(spacedRange(change, withoutTerm(label, change, term)));
+  const cut = change === "shape" ? CUT_CLAUSE.exec(label)?.[0] ?? "" : "";
+  const named = label.slice(0, label.length - cut.length);
+  const message = changeMessage(change, entry.params ?? {})
+    ?? sentenceCase(spacedRange(change, withoutTerm(named, change, term)));
+  return message + cut.replace(/(\S)–(\S)/gu, "$1 – $2");
 }
 
 /**

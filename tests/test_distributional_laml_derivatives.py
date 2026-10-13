@@ -212,6 +212,14 @@ def _interior_case(kind: str, curvature: str):
         efs_config=DistributionalEFSConfig(
             max_iterations=250, practical_convergence=False, outer="efs"
         ),
+        # The stop the oracle was calibrated at: the default start of 0.1 over
+        # the covariate, 0.1 / hbar**3 in the knot intervals the penalties use.
+        lambdas={
+            f"{predictor.name}:{feature}#wiggle": 0.1
+            * float((np.ptp(frame[feature]) / (spec.n_knots + 1)) ** -3)
+            for predictor in predictors
+            for feature, spec in predictor.features.items()
+        },
         retain_rows=True,
     )
     smoothing = model.smoothing

@@ -62,7 +62,7 @@ def editor_browser_model() -> SuperGLM:
         selection_penalty=0.0,
         spline_penalty=0.1,
         features={
-            "curve": Spline(n_knots=7),
+            "curve": Spline(kind="ps", n_knots=7),
             "territory": Categorical(base="first"),
             "age_band": OrderedCategorical(
                 order=age_band_levels,

@@ -32,6 +32,8 @@ class SplineMetadata:
     degree: int
     extrapolation: str  # "clip", "extend", "error"
     knot_alpha: float | None = None  # only for "quantile_tempered"
+    # A P-spline's difference penalty: "standard", "general" or "projected"; None otherwise.
+    difference_penalty: str | None = None
 
 
 @dataclass(frozen=True)

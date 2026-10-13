@@ -1816,7 +1816,9 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
         match="exact coefficient face is numerically supported but not certified",
     ):
         smoothing.assert_matched_certified()
-    assert smoothing.lambdas["mean:x#wiggle"] < maximum_lambda / 2.0
+    # The cap is shared: the smooth stops inside it, at 5.4 in its knot
+    # intervals of 1/3 (0.2 over x).
+    assert smoothing.lambdas["mean:x#wiggle"] < maximum_lambda
     assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
     assert smoothing.unresolved_upper_bound == ()
 

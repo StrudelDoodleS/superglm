@@ -61,7 +61,7 @@ def _model(
     return SuperGLM(
         family=family,
         features={
-            "x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.3)),
+            "x": Spline(kind="ps", n_knots=5, lambda_policy=LambdaPolicy.fixed(1.3)),
             "z": Numeric(),
         },
         interactions=[factor_smooth],

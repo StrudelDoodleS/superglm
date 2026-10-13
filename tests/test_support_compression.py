@@ -2222,6 +2222,78 @@ def test_categorical_by_spline_cat_expands_rows_in_chunks(monkeypatch):
     assert sum(seen) == rows.size
 
 
+def test_a_one_bin_levels_blocks_form_one_weight_sum_bit_for_bit():
+    """Every block that carries a one-bin level forms the same weight sum, to the bit.
+
+    A level whose rows all sit in one support bin makes its dummy an exact
+    alias of its spline_cat smooth, and the alias cancels in the formed Gram
+    only if every block forms the level's weight sum identically: the
+    categorical diagonal and ``X'W`` (``_bincount_levels`` over all rows),
+    the categorical x spline_cat cross, and the spline's own Gram and ``X'W``
+    (``gram_rmatvec`` over ``row_idx``).  Summed apart, the residue is the
+    difference: 5.5e4 u over 103,957 rows on freMTPL2, -1.8e-12 against the
+    eigensolver's bar of 2.4e-13.
+
+    The bin's support row is ``1.0`` in one column and ``1.1`` in another,
+    with an identity transform.  Through the ``1.0`` column every product is
+    exact, so each block's entry IS the sum it formed, and all must be one
+    number, whichever sign a difference would round to.  Through the ``1.1``
+    column the cross must be that sum times ``1.1``, one rounding, not a sum
+    of per-row products.  Read through the assembly a fit runs (the
+    execution plan's moments, block queue included) and through each block's
+    own method.  Mutations: the chunked row-product cross (6eb42f3f), the
+    spline's rows or the categorical's levels summed in another order.
+    """
+    from superglm._group_matrix._group_matrix_algebra import _BlockWeightCache, _cross_gram
+    from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+    from superglm.group_matrix import DesignMatrix
+
+    gen = np.random.default_rng(91)
+    n, n_bins, level, one_bin = 200_000, 6, 1, 4
+    codes = gen.integers(0, 3, n)
+    gm_cat = CategoricalGroupMatrix(codes, 3)
+    rows = np.flatnonzero(gm_cat.codes == level)
+    support = np.eye(n_bins)
+    support[one_bin] = 0.0
+    support[one_bin, :2] = (1.0, 1.1)
+    spline_cat = DiscretizedSplineCategoricalGroupMatrix(
+        support, np.eye(n_bins), np.full(n, one_bin, dtype=np.intp), rows
+    )
+    weights = gen.uniform(0.05, 0.15, n)
+    weighted_z = weights * gen.normal(size=n)
+    exact, scaled = 3, 4
+
+    plan = DesignMatrix([gm_cat, spline_cat], n=n, p=3 + n_bins).execution_plan
+    moments = plan._moments_prevalidated(
+        weights, rhs=(weighted_z,), include_xtw=True, _cache=_BlockWeightCache()
+    )
+    own_gram, own_xtw, _ = spline_cat.gram_rmatvec(weights, weighted_z)
+    cross = _cross_gram(gm_cat, spline_cat, weights)
+    sums = {
+        "assembled categorical diagonal": moments.gram[level, level],
+        "assembled categorical X'W": moments.xtw[level],
+        "assembled cross": moments.gram[level, exact],
+        "assembled spline Gram": moments.gram[exact, exact],
+        "assembled spline X'W": moments.xtw[exact],
+        "categorical gram()": gm_cat.gram(weights)[level, level],
+        "categorical rmatvec()": gm_cat.rmatvec(weights)[level],
+        "cross": cross[level, 0],
+        "spline gram_rmatvec() Gram": own_gram[0, 0],
+        "spline gram_rmatvec() X'W": own_xtw[0],
+    }
+    level_sum = sums["assembled categorical diagonal"]
+    assert all(value == level_sum for value in sums.values()), sums
+    scaled_sum = 1.1 * level_sum
+    assert moments.gram[level, scaled] == cross[level, 1] == scaled_sum
+    assert moments.xtw[scaled] == own_xtw[1] == scaled_sum
+    assert moments.gram[scaled, scaled] == own_gram[1, 1] == 1.1 * scaled_sum
+    # the fixture sees order: the same rows summed backwards differ
+    assert np.cumsum(weights[rows][::-1])[-1] != level_sum
+
+
 def test_row_chunking_below_the_threshold_is_bit_identical():
     """Chunking reorders a sum, so it must not engage on ordinary fits."""
     from superglm._group_matrix import _group_matrix_algebra as algebra
@@ -2343,3 +2415,124 @@ def test_tensor_by_wide_spline_cat_cross_gram_without_a_joint_histogram(monkeypa
     actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+# ── budget against the basis a decline keeps ──────────────────────
+#
+# On the full freMTPL2 book the exact-path Density x DrivAge tensor had 63,422
+# distinct rows of 144 (73 MB) against the 64 MiB budget, so the gate kept its
+# 1.17 GB CSR basis instead and every Gram, cross and matvec ran over 678k rows
+# rather than 63k.  A budget that keeps the larger representation bounds nothing.
+
+
+def test_support_over_the_budget_compresses_when_the_kept_csr_is_larger(monkeypatch):
+    from superglm import dm_builder
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(5)
+    n, n_support, p_b = 20_000, 400, 36
+    base = gen.uniform(0.1, 1.0, size=(n_support, p_b))  # saturated, like a cr tensor
+    basis = sp.csr_matrix(base[gen.permutation(np.arange(n) % n_support)])
+    budget = n_support * p_b * 8 - 1
+    monkeypatch.setattr(_group_matrix_support, "DEFAULT_MAX_SUPPORT_BYTES", budget)
+
+    assert detect_row_support(basis) is None  # over the budget, nothing replaced
+    group = dm_builder._build_ssp_group(basis, np.eye(p_b))
+    assert type(group) is SupportCompressedSSPGroupMatrix
+    np.testing.assert_array_equal(group.B_unique[group.bin_idx], basis.toarray())
+
+
+def test_budget_declines_a_compressed_group_the_kept_csr_cannot_hold():
+    from superglm._group_matrix._group_matrix_support import _passes_support_gates
+
+    n, n_support, p_b = 20_000, 400, 36
+    support = n_support * p_b * 8
+    # The block, its projection and weighted copy, and the row index.
+    compressed = 3 * support + n * np.dtype(np.intp).itemsize
+    over_budget = (n, n_support, p_b, n * p_b, 1.5, support - 1)
+
+    assert _passes_support_gates(*over_budget, replaced_bytes=compressed)
+    assert not _passes_support_gates(*over_budget, replaced_bytes=compressed - 1)
+    assert not _passes_support_gates(*over_budget)
+    assert _passes_support_gates(n, n_support, p_b, n * p_b, 1.5, support)
+
+
+def test_exact_tensor_keeps_its_support_when_its_csr_basis_is_larger(monkeypatch):
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(9)
+    n = 8000
+    frame = pd.DataFrame(
+        {"a": gen.integers(0, 60, n).astype(float), "b": gen.integers(0, 25, n).astype(float)}
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=False,
+        features={"a": Spline(kind="cr", n_knots=8), "b": Spline(kind="cr", n_knots=5)},
+        interactions=[("a", "b")],
+    )
+    # Every support is now over the budget; each is smaller than its CSR.
+    monkeypatch.setattr(_group_matrix_support, "DEFAULT_MAX_SUPPORT_BYTES", 1)
+    model._build_design_matrix(frame, gen.poisson(1.0, n).astype(float), np.ones(n), None)
+
+    kinds = [type(group) for group in model._dm.group_matrices]
+    assert kinds.count(SupportCompressedSSPGroupMatrix) == 3, kinds
+
+
+def test_decomposed_exact_tensor_detects_and_stores_one_support(monkeypatch):
+    # A decompose=True tensor's bilinear and wiggly groups share one basis and
+    # differ only in R_inv. Detected per group, the basis was hashed and
+    # verified twice and each group kept its own rows: 2S + 16n retained,
+    # against the one CSR basis that each group's 3S + 8n charge assumed.
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(10)
+    n = 8000
+    frame = pd.DataFrame(
+        {"a": gen.integers(0, 60, n).astype(float), "b": gen.integers(0, 25, n).astype(float)}
+    )
+    widths = []
+    detect = _group_matrix_support.detect_row_support
+
+    def counted(basis, **kwargs):
+        widths.append(basis.shape[1])
+        return detect(basis, **kwargs)
+
+    monkeypatch.setattr(_group_matrix_support, "detect_row_support", counted)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=False,
+        features={"a": Spline(kind="cr", n_knots=8), "b": Spline(kind="cr", n_knots=5)},
+    )
+    model._add_interaction("a", "b", decompose=True)
+    model._build_design_matrix(frame, gen.poisson(1.0, n).astype(float), np.ones(n), None)
+
+    subgroups = {
+        group.subgroup_type: matrix
+        for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True)
+        if group.subgroup_type is not None
+    }
+    bilinear, wiggly = subgroups["bilinear"], subgroups["wiggly"]
+    assert type(bilinear) is type(wiggly) is SupportCompressedSSPGroupMatrix
+    assert bilinear.B_unique is wiggly.B_unique
+    assert bilinear.bin_idx is wiggly.bin_idx
+    assert widths.count(bilinear.B_unique.shape[1]) == 1
+    # Null plus range space: the subgroups' Gram products total one block.
+    assert bilinear.shape[1] + wiggly.shape[1] == bilinear.B_unique.shape[1]

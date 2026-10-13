@@ -299,6 +299,7 @@ def test_reference_only_ordered_group_still_expands_and_groups():
     with pytest.warns(UserWarning, match="clamped to 0"):
         spec = OrderedCategorical(
             order=levels,
+            basis=Spline(kind="ps", n_knots=5),
             base="all fitted label",
             grouping=grouping,
         )
@@ -358,6 +359,7 @@ def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
     with pytest.warns(UserWarning, match="clamped to 0"):
         spec = OrderedCategorical(
             order=levels,
+            basis=Spline(kind="ps", n_knots=5),
             base="all fitted label",
             grouping=grouping,
         )

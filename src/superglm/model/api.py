@@ -1002,9 +1002,10 @@ class SuperGLM:
         ``spline_cat`` pair it cannot is RETRIED through the arrow kernel —
         linear in the level count, with no block-dimension ceiling — rather
         than refused, at any of three exits.  First, the block over the cap
-        above: at the default a library-default ``Spline()`` margin crosses
-        it at 105 contrasts, so from ``L = 106`` UNPINNED levels (``ps(15)``
-        from 77, ``ps(20)`` from 61) — a declared ``levels=`` universe can be
+        above: at the default a library-default ``Spline()`` margin (a ``cr``
+        of 10 knots, 11 probe columns) crosses it at 124 contrasts, so from
+        ``L = 125`` UNPINNED levels (``ps(10)`` from 106, ``ps(15)`` from 77,
+        ``ps(20)`` from 61) — a declared ``levels=`` universe can be
         far larger and still route dense, since only the unpinned levels
         widen the block.  Second, the pair's dense support intermediate over
         budget where the arrow kernel's transposed one still fits, which

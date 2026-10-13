@@ -55,7 +55,7 @@ class TestSelectBuild:
     def test_select_combined_n_cols(self):
         """Combined n_cols = 1 (null) + n_range."""
         for nk in [5, 10, 20]:
-            sp = Spline(n_knots=nk, select=True)
+            sp = Spline(kind="ps", n_knots=nk, select=True)
             result = sp.build(np.linspace(0, 1, 200))
             n_basis = sp._n_basis
             n_range = n_basis - 2  # K - 2 for BS (partition of unity removes 1, null removes 1)
@@ -287,7 +287,7 @@ class TestSelectPath:
         X, y, sample_weight = simple_data
         m = SuperGLM(
             family="poisson",
-            features={"signal": Spline(n_knots=10, select=True)},
+            features={"signal": Spline(kind="ps", n_knots=10, select=True)},
             spline_penalty=1.0,
         )
         path = m.fit_path(X, y, sample_weight=sample_weight, n_lambda=10)
@@ -1044,3 +1044,51 @@ class TestNSSelectRejection:
     def test_ns_select_raises_not_implemented(self):
         with pytest.raises(NotImplementedError, match="select=True is not supported"):
             Spline(kind="ns", select=True)
+
+
+# ── Units of the feature ──────────────────────────────────────
+
+
+class TestSelectUnits:
+    """The null/range split is decided relative to the penalty's own scale."""
+
+    @pytest.mark.parametrize("scale", [1e-4, 1.0, 1e4])
+    @pytest.mark.parametrize("kind", ["cr", "cr_cardinal", "ps", "bs"])
+    def test_rescaled_feature_splits_off_the_straight_line(self, kind, scale):
+        """A cr penalty scales with the inverse cube of the range, so a cut at 1e-10
+        counted a real direction null at 1e4 and the round-off null pair real at 1e-4.
+
+        The null direction is the line in x to the eigensolver's accuracy:
+        Davis-Kahan bounds its angle by ``n u ||S|| / gap`` (LAPACK Users'
+        Guide, section 4.7, for the perturbation ``n u ||S||``), and the
+        basis maps that angle onto the curve with at most ``cond(B)``. The
+        P-spline takes quantile knots, whose general penalty's null space is
+        the line; the standard penalty's is the line only on unclamped knots.
+        """
+        kwargs = {"knot_strategy": "quantile"} if kind == "ps" else {}
+        x = np.linspace(0.0, 1.0, 500) ** 2 * scale
+        y = 0.5 + x / scale + 0.01 * np.sin(100 * x / scale)
+        frame = pd.DataFrame({"x": x})
+        spline = Spline(kind=kind, select=True, **kwargs)
+        info = spline.build(x)
+        basis = info.columns.toarray() if hasattr(info.columns, "toarray") else info.columns
+        null_curve = basis @ info.projection[:, 0]
+        line = np.column_stack([np.ones_like(x), x / scale])
+        coef = np.linalg.lstsq(line, null_curve, rcond=None)[0]
+        _, omega_c, _, _ = spline._apply_constraints(None, spline._build_penalty())
+        eig = np.linalg.eigvalsh(omega_c)
+        u = np.finfo(np.float64).eps / 2
+        angle = eig.size * u * eig[-1] / eig[2]
+        bound = angle * np.linalg.cond(basis) * np.linalg.norm(null_curve)
+        assert np.linalg.norm(null_curve - line @ coef) <= bound
+        assert info.projection.shape[1] == spline._U_range.shape[1] + 1
+
+        for fit in ("fit", "fit_reml"):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                features={"x": Spline(kind=kind, select=True, **kwargs)},
+                **({"spline_penalty": 1.0} if fit == "fit" else {}),
+            )
+            getattr(model, fit)(frame, y)
+            assert np.all(np.isfinite(model.predict(frame)))

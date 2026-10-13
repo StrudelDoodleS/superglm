@@ -10,7 +10,8 @@ in the mgcv sense; the fitted smooth then absorbs the identifiability
 constraint.
 
 ```python
-Spline(kind="ps", k=14)                   # default P-spline choice
+Spline(k=10)                              # no kind: a cubic regression spline
+Spline(kind="ps", k=14)                   # P-spline
 Spline(kind="bs", k=14)                   # integrated-derivative B-spline smooth
 Spline(kind="cr", k=10)                   # cubic regression spline
 Spline(kind="ns", k=10)                   # natural spline
@@ -18,13 +19,18 @@ Spline(kind="ps", k=14, select=True)      # REML + double-penalty shrinkage
 Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 ```
 
+`kind` defaults to `"cr"`, so `Spline(...)` and `s(...)` with no `kind` give a
+cubic regression spline. Before 0.40 they gave a P-spline; pass `kind="ps"` to
+keep that fit. See the
+[migration note](../development/migrations/default-spline-kind-cr.md).
+
 ### Which spline kind to choose
 
 | Kind | Use when | Notes |
 |------|----------|-------|
-| `"ps"` | default pricing spline | P-spline with difference penalty |
+| `"cr"` | the default; you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability; always cubic, so a `degree` other than 3 is refused, and penalty orders `m` go up to 3 |
+| `"ps"` | you want a P-spline, or a degree other than 3 | P-spline with difference penalty |
 | `"bs"` | you want a proper B-spline smooth / mgcv-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
-| `"cr"` | you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability |
 | `"ns"` | you want a natural spline with fixed natural boundaries | does not support monotone fitting |
 
 ### Knot strategies
@@ -37,6 +43,20 @@ Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 
 `quantile_tempered` with a small `knot_alpha` is often a good pricing default
 for skewed variables like Bonus-Malus.
+
+A P-spline on stated knots (`knots=[...]`) or on a quantile rule uses the general
+difference penalty when its knots are unevenly spaced. The usual difference
+penalty measures wiggliness only on evenly spaced knots. With uneven knots, its
+pull on a heavily smoothed fit points towards a shape set by where the knots
+fall. The general penalty of Li and Cao (2022), "General P-splines for
+non-uniform B-splines" (arXiv:2201.06808), pulls towards a straight line
+wherever the knots sit. Evenly spaced knots keep the usual penalty however they
+were placed, so passing `fitted_knots` back with `fitted_boundary` reproduces
+the fit. On knots too uneven for the general penalty, such as quantile knots on
+a heavily skewed column, the usual penalty is used with the straight line taken
+out of it, so a heavily smoothed fit is still a straight line.
+A fit on stated or quantile knots can change in 0.40, so refit and compare. See
+the [migration note](../development/migrations/general-pspline-penalty.md).
 
 ### `select=True`
 
@@ -522,7 +542,8 @@ OrderedCategorical(
 
 `basis=` is the only configuration channel and takes the shape itself — a
 `Spline(...)`, a `Piecewise(...)`, or a `Polynomial(...)` object; omitting
-`basis` keeps the default P-spline (`kind="ps"`, `n_knots=5`). The legacy
+`basis` gives the default cubic regression spline (`kind="cr"`, `n_knots=5`;
+a P-spline, `kind="ps"`, before 0.40). The legacy
 `basis="spline"` string, the spline shortcut arguments (`kind=`, `n_knots=`,
 `degree=`, `select=`, `penalty=`), and step smoothing with `basis="step"` were
 removed in 0.24.0 — configure the shape on `basis=`, or use `Categorical(...)`

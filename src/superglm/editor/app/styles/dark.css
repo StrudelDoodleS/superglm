@@ -50,6 +50,8 @@
   --ci-whisker: rgba(131, 168, 232, 0.6);
   --basis-contribution: rgba(168, 153, 132, 0.4);
   --build-end: #83a8e8;
+  /* gruvbox's aqua, apart from the blue edit and orange in lightness. */
+  --unsmoothed: #689d6a;
   --trace-ink: #a89984;
   --sig-strong-bg: #2b3a1f;
   --sig-strong-fg: #b8bb26;

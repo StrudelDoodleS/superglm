@@ -311,6 +311,38 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         assert 0 < rank <= width < min(tensor_widths)
 
 
+def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(monkeypatch):
+    """Reproduce the native ARM64 refusal of the cr singletons' raw support.
+
+    A cr penalty restricted by its boundary constraints carries formation
+    round-off in its four-dimensional null space at the eigensolver's floor
+    ``p(n) eps ||A||`` (up to 0.85 of it on x86-64, 0.03 for ps). Another
+    BLAS build can resolve one such direction above the floor, which made the
+    raw support one rank wider than the declared rank and refused it. Plant
+    one at ``1e-14`` relative (about 60 floors once equilibrated, 300 times
+    below the declared ``eps**(2/3)`` cut, outside the band of 32 on both
+    sides), and require the singletons to stay on their raw basis.
+    """
+    import superglm.reml.penalty_support as support_module
+
+    original = support_module.decompose_gram
+    floor_ranks = []
+
+    def planted(matrix, **kwargs):
+        matrix = np.asarray(matrix, dtype=float)
+        if matrix.shape == (9, 9):
+            values, vectors = np.linalg.eigh(matrix)
+            null = vectors[:, np.argmin(np.abs(values))]
+            matrix = matrix + 1e-14 * values.max() * np.outer(null, null)
+            floor_ranks.append(original(matrix, **kwargs).rank)
+        return original(matrix, **kwargs)
+
+    monkeypatch.setattr(support_module, "decompose_gram", planted)
+    test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch)
+    # The plant is resolved at the floor: the floor rank alone would refuse.
+    assert floor_ranks and set(floor_ranks) == {6}
+
+
 @pytest.mark.parametrize("bad", [-1.0, np.inf, np.nan])
 def test_scalar_rejects_invalid_weights(bad):
     penalty = _component("a", np.eye(2), rank=2)

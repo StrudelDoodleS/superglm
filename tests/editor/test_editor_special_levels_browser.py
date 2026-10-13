@@ -24,10 +24,35 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
         page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
         # Every level is on the curve, so every level is compared.
         assert page.locator("#chart .free-levels .free-level").count() == 6
-        # Each whisker carries a tick at the fitted curve its flag is judged against,
-        # and the marks keep to the plot, as its points do, when it is zoomed.
-        assert page.locator("#chart .free-levels .free-curve-tick").count() == 6
-        for mark in ("free-level", "free-curve-tick"):
+        # The intervals show with Reference CI, and go with it.
+        assert page.locator("#chart .free-levels .free-whisker").count() == 0
+        page.locator("#ciToggle").click()
+        page.locator("#chart .free-levels .free-whisker").first.wait_for(state="attached")
+        assert page.locator("#chart .free-levels .free-whisker").count() == 6
+        # Each interval runs through its own marker: the free series steps right
+        # of the level, the curve's bars stay on its points.
+        point_x = float(page.locator('#chart .point[data-index="2"]').get_attribute("cx"))
+        diamond_x = _diamond_centres(page)[2][0]
+        free_x = sorted(
+            float(x)
+            for x in page.locator("#chart .free-levels .free-whisker").evaluate_all(
+                "els => els.map(e => e.getAttribute('x1'))"
+            )
+        )[2]
+        curve_x = sorted(
+            {
+                float(x)
+                for x in page.locator("#chart .ci-whisker").evaluate_all(
+                    "els => els.filter(e => e.getAttribute('x1') === e.getAttribute('x2'))"
+                    ".map(e => e.getAttribute('x1'))"
+                )
+            }
+        )[2]
+        assert free_x == pytest.approx(diamond_x, abs=0.01)
+        assert diamond_x - point_x == pytest.approx(6.0, abs=0.01)
+        assert curve_x == pytest.approx(point_x, abs=0.01)
+        # The marks keep to the plot, as its points do, when it is zoomed.
+        for mark in ("free-level", "free-whisker"):
             node = page.locator(f"#chart .free-levels .{mark}").first
             assert node.get_attribute("clip-path") == "url(#plotClip)"
         assert toggle.get_attribute("aria-pressed") == "true"
@@ -62,3 +87,74 @@ def test_free_levels_then_make_special_and_back_on_the_curve(open_editor_page):
             "55-64",
             "65+",
         ]
+
+
+def _diamond_centres(page) -> list[tuple[float, float]]:
+    paths = page.locator("#chart .free-levels .free-level").evaluate_all(
+        "els => els.map(e => e.getAttribute('d'))"
+    )
+    # "M cx top L right cy L ...": the centre is the first x and the second point's y.
+    return sorted((float(d.split()[1]), float(d.split()[5])) for d in paths)
+
+
+def test_free_levels_is_one_button_for_the_diamonds_and_their_line_and_comes_back_with_no_fit(
+    open_editor_page,
+):
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        fits = []
+        page.on(
+            "request",
+            lambda request: fits.append(request.url) if "/free_levels" in request.url else None,
+        )
+        # On an ordered term the line is Free levels' own: no Unsmoothed button.
+        assert page.locator("#unsmoothedToggle").is_hidden()
+        toggle = page.locator("#freeLevelsToggle")
+        toggle.click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        diamonds = _diamond_centres(page)
+        assert len(diamonds) == 6 and len(fits) == 1
+        # One line joins the six diamonds, through each centre.
+        line = page.locator("#chart .free-levels path.free-line")
+        assert line.count() == 1
+        assert line.get_attribute("clip-path") == "url(#plotClip)"
+        corners = [
+            tuple(map(float, step.split()[1:3]))
+            for step in line.get_attribute("d").replace("L", "|L").replace("M", "|M").split("|")
+            if step.strip()
+        ]
+        assert sorted(corners) == [(round(x, 2), round(y, 2)) for x, y in diamonds]
+        assert page.locator("#chart .legend-layer line.free-line").count() == 1
+
+        toggle.click()
+        page.wait_for_function("() => !document.querySelector('#chart .free-levels')")
+        assert toggle.get_attribute("aria-pressed") == "false"
+        # On again for the same term and fit: the kept comparison, drawn with no fit.
+        toggle.click()
+        page.locator("#chart .free-levels path.free-line").wait_for(state="attached")
+        assert toggle.get_attribute("aria-pressed") == "true"
+        assert _diamond_centres(page) == diamonds
+        assert len(fits) == 1
+
+
+def test_an_error_banner_does_not_hold_the_editor(open_editor_page):
+    """A refused change leaves its banner, and the next action goes ahead without Dismiss."""
+    with open_editor_page(selected_term="age_band") as (page, _session):
+        page.route(
+            "**/stage*",
+            lambda route: route.fulfill(
+                status=400,
+                content_type="application/json",
+                body='{"error":"Refused for the browser test."}',
+            ),
+        )
+        page.get_by_role("radiogroup", name="Chart tools").get_by_role(
+            "radio", name="Knots", exact=True
+        ).click()
+        page.get_by_role("button", name="One knot more").click()
+        alert = page.locator("#appAlert")
+        alert.wait_for(state="visible")
+        assert "Refused for the browser test." in alert.inner_text()
+
+        page.locator("#freeLevelsToggle").click()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        assert alert.is_hidden()

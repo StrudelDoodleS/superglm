@@ -52,6 +52,8 @@ Specifically:
 - `PSpline(..., constraint=Constraint.fit.*)` uses SCOP
 - `BSplineSmooth(..., constraint=Constraint.fit.*)` uses QP
 - `CubicRegressionSpline(..., constraint=Constraint.fit.*)` uses QP
+- `Spline(..., constraint=Constraint.fit.*)` with no `kind` is a cubic
+  regression spline, so it uses QP. Pass `kind="ps"` for SCOP.
 
 Fit-time convexity and concavity use an exact coefficient-space curvature
 characterization only for splines of degree three or lower. Consequently,

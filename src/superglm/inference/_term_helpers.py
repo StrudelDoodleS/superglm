@@ -246,6 +246,8 @@ def _spline_se(
 
 def _build_spline_metadata(spec) -> SplineMetadata:
     """Extract spline knot/basis metadata from a fitted spline spec."""
+    from superglm.features._spline_penalties import difference_penalty_kind
+
     knot_alpha = None
     if getattr(spec, "_knot_strategy_actual", None) == "quantile_tempered":
         knot_alpha = spec.knot_alpha
@@ -259,6 +261,7 @@ def _build_spline_metadata(spec) -> SplineMetadata:
         degree=spec.degree,
         extrapolation=spec.extrapolation,
         knot_alpha=knot_alpha,
+        difference_penalty=difference_penalty_kind(spec),
     )
 
 
@@ -603,8 +606,11 @@ def spline_group_enrichment(
 
     Returns
     -------
-    dict with keys: edf, smoothing_lambda, spline_kind, knot_strategy, boundary.
+    dict with keys: edf, smoothing_lambda, spline_kind, knot_strategy, boundary,
+    difference_penalty.
     """
+    from superglm.features._spline_penalties import difference_penalty_kind
+
     edf = group_edf.get(group_name) if group_edf else None
     lam = _resolve_group_lambda(group_name, reml_lambdas, lambda2)
     return {
@@ -613,6 +619,7 @@ def spline_group_enrichment(
         "spline_kind": type(spec).__name__,
         "knot_strategy": getattr(spec, "_knot_strategy_actual", None),
         "boundary": getattr(spec, "fitted_boundary", None),
+        "difference_penalty": difference_penalty_kind(spec),
     }
 
 

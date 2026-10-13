@@ -1747,8 +1747,16 @@ def _assert_zero_centered(value: float, bound: float, *, label: str) -> None:
         )
 
 
-def _assert_canonical_row_identity(left, right) -> None:
-    """Establish exact replication/all-one premises before perturbation math."""
+def _assert_canonical_row_identity(left, right, left_layout, right_layout) -> None:
+    """Establish exact replication/all-one premises before perturbation math.
+
+    The rows are compared before a spline's SSP reparametrisation: its
+    ``R_inv`` factors ``B'WB / total + lambda Omega``, summed over the rows as
+    each fit holds them (one row of weight 2 or two of weight 1), so it agrees
+    between the fits only to round-off. It agreed bitwise while ``lambda Omega``
+    dominated the sum, which a penalty measured over ``x`` rather than its knot
+    intervals made 216-fold larger here.
+    """
 
     if len(left.response) != len(right.response):
         assert left.semantics == right.semantics == "frequency"
@@ -1761,12 +1769,24 @@ def _assert_canonical_row_identity(left, right) -> None:
         assert np.all(right.weights == 1.0)
     for left_values, right_values in (
         (left.response[take], right.response),
-        (left.location_design[take], right.location_design),
-        (left.scale_design[take], right.scale_design),
         (left.location_offset[take], right.location_offset),
         (left.scale_offset[take], right.scale_offset),
     ):
         np.testing.assert_array_equal(left_values, right_values)
+    for left_predictor, right_predictor in zip(
+        left_layout.predictors, right_layout.predictors, strict=True
+    ):
+        for left_group, right_group in zip(
+            left_predictor.design.group_matrices,
+            right_predictor.design.group_matrices,
+            strict=True,
+        ):
+            if hasattr(left_group, "R_inv"):
+                np.testing.assert_array_equal(left_group.B.toarray()[take], right_group.B.toarray())
+                np.testing.assert_array_equal(left_group.projection, right_group.projection)
+                np.testing.assert_array_equal(left_group.omega, right_group.omega)
+            else:
+                np.testing.assert_array_equal(left_group.toarray()[take], right_group.toarray())
     assert left.scale_floor == right.scale_floor == 0.0
 
 
@@ -1949,7 +1969,7 @@ def _assert_terminal_parity(
     left_oracle = left.fixed.oracle
     right_oracle = right.fixed.oracle
     width = len(left_oracle.coefficients)
-    _assert_canonical_row_identity(left_oracle, right_oracle)
+    _assert_canonical_row_identity(left_oracle, right_oracle, left_model.layout, right_model.layout)
 
     left_recovered = left.recovered_penalty
     right_recovered = right.recovered_penalty

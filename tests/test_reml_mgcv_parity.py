@@ -7,7 +7,7 @@ by scratch/r_experiments/reml_parity_reference.R using R 4.5.2 / mgcv 1.9-3.
 Basis differences:
   - mgcv bs="bs", k=10: 10 B-splines, 9 free columns after sum-to-zero
     identifiability constraint.  Penalty rank = 8.
-  - SuperGLM Spline(n_knots=6): 10 B-splines, 10 SSP-reparametrized
+  - SuperGLM Spline(kind="ps", n_knots=6): 10 B-splines, 10 SSP-reparametrized
     columns (intercept handled separately).  Penalty rank = 8.
 
 Because of the extra unpenalized dimension in SuperGLM, lambdas are NOT
@@ -61,7 +61,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="poisson",
             selection_penalty=0,
         )
@@ -84,7 +84,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="poisson",
             selection_penalty=0,
         )
@@ -101,7 +101,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="poisson",
             selection_penalty=0,
         )
@@ -124,7 +124,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="poisson",
             selection_penalty=0,
         )
@@ -138,7 +138,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="gamma",
             selection_penalty=0,
         )
@@ -156,7 +156,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="gamma",
             selection_penalty=0,
         )
@@ -173,7 +173,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="gamma",
             selection_penalty=0,
         )
@@ -190,7 +190,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="gamma",
             selection_penalty=0,
         )
@@ -213,7 +213,7 @@ class TestMgcvParity:
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
-            features={"x1": Spline(n_knots=6), "x2": Spline(n_knots=6)},
+            features={"x1": Spline(kind="ps", n_knots=6), "x2": Spline(kind="ps", n_knots=6)},
             family="poisson",
             selection_penalty=0,
         )

@@ -1,4 +1,4 @@
-import { editorClient } from "./api/client.js";
+import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
   drawChart,
@@ -8,6 +8,10 @@ import {
 } from "./chart.js";
 import { bindDragWatch } from "./chart/anchor_marks.js";
 import { chartSize } from "./chart/geometry.js";
+import { drawKnotBasis } from "./chart/basis_overlay.js";
+import { NO_KNOT_GESTURE, drawKnotLayer } from "./chart/knot_marks.js";
+import { bindKnotGestures } from "./knot_gestures.js";
+import { CHANGE_RUNNING, knotToolState } from "./knots.js";
 import { bindHistory, renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
@@ -45,7 +49,9 @@ import {
   showDistributionProfileDialog,
   runOffsetRefit,
   revertTransition,
+  stageBasis,
   stageCollapse,
+  stageKnots,
   stageOnCurve,
   stageReference,
   stageShapeRange,
@@ -53,6 +59,7 @@ import {
   stageUngroup
 } from "./summary.js";
 import { freeLevelsShown, specialActions } from "./specials.js";
+import { unsmoothedEntry, unsmoothedToggle, withUnsmoothed } from "./unsmoothed.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import {
@@ -69,6 +76,12 @@ import {
   storeFeatureListOpen
 } from "./views/feature_list.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
+import {
+  bindKnotBar,
+  renderKnotBar,
+  renderKnotChip,
+  renderKnotStatus
+} from "./views/knot_bar.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import {
   bindJoinToggle,
@@ -149,6 +162,22 @@ const termNameNode = document.getElementById("termName");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
+const termKnots = document.getElementById("termKnots");
+const knotBarNodes = Object.freeze({
+  root: document.getElementById("knotBar"),
+  fewer: document.getElementById("knotFewer"),
+  count: document.getElementById("knotCount"),
+  more: document.getElementById("knotMore"),
+  rule: document.getElementById("knotRule"),
+  hand: document.getElementById("knotRuleHand"),
+  alphaWrap: document.getElementById("knotAlphaWrap"),
+  alpha: document.getElementById("knotAlpha"),
+  reset: document.getElementById("knotReset"),
+  kind: document.getElementById("knotKind"),
+  shrink: document.getElementById("knotShrink")
+});
+// Knots mode's gesture in progress; bound once the chart's other gestures are.
+let knotGestures = null;
 const helpAction = document.getElementById("helpAction");
 const inspectorToggle = document.getElementById("inspectorToggle");
 const inspectorNode = document.getElementById("inspector");
@@ -186,6 +215,7 @@ const setReference = document.getElementById("setReference");
 const makeSpecial = document.getElementById("makeSpecial");
 const returnToCurve = document.getElementById("returnToCurve");
 const freeLevelsToggle = document.getElementById("freeLevelsToggle");
+const unsmoothedButton = document.getElementById("unsmoothedToggle");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
 const shapeJoin = document.getElementById("shapeJoin");
 const shapeJoinSeparator = document.getElementById("shapeJoinSeparator");
@@ -345,11 +375,13 @@ const chartContext = {
   visualMode,
   showCi: () => store.getState().view.showCi,
   freeLevels: () => shownFreeLevels(),
+  unsmoothed: () => shownUnsmoothed(),
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
   groupDisplayMode: () => activeGroupDisplayMode(),
   selectionAnchor: () => store.getState().view.selectionAnchor,
-  selectionSpan: () => store.getState().view.selectionSpan
+  selectionSpan: () => store.getState().view.selectionSpan,
+  knotUi: () => (knotGestures ? knotGestures.ui() : NO_KNOT_GESTURE)
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -455,6 +487,7 @@ bindToolRail({
       : mode === "handles" && canShowContributions(currentTerm());
     if (view.mode === mode && view.showContrib === showContrib) return;
     stopContributionBuild();
+    knotGestures?.reset();
     actions.patchView({ mode, showContrib });
   },
   onHelp: () => openHelp()
@@ -822,7 +855,7 @@ async function runStructuralChange(descriptor) {
       payload: { ...atOnce.payload, keep_reference: keepReference }
     });
   }
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") return null;
+  if (editorOccupied()) return null;
   stopContributionBuild();
   const result = await actions.executeStructuralMutation({
     ...descriptor,
@@ -836,6 +869,13 @@ async function runStructuralChange(descriptor) {
   return result.ok ? result.envelope : null;
 }
 
+// Whether a change is running and the editor must wait for it. An error from
+// an earlier change does not hold it: the state was read back from Python
+// when it failed, and the next change clears its banner.
+function editorOccupied() {
+  return appBusyActive || store.getState().request.mutation.status === "running";
+}
+
 // The Refit button and its R shortcut come here.
 async function refitPending() {
   const count = selectPendingSteps(store.getState()).length;
@@ -846,9 +886,7 @@ async function refitPending() {
 // A structural step loses nothing: Undo puts back the state before it, edits
 // included, so it runs without asking.
 async function runStructuralRefit(descriptor) {
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
-    return { ok: false, skipped: true };
-  }
+  if (editorOccupied()) return { ok: false, skipped: true };
   stopContributionBuild();
   summarySource.value = "selected";
   const operationStart = performance.now();
@@ -1031,12 +1069,14 @@ function renderChartWorkspace() {
   const view = editorState.view;
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
   renderFreeLevelsToggle(snapshot);
+  renderUnsmoothedToggle(snapshot);
   const selected = selectedTerm();
   const term = currentTerm();
   if (!term) return;
   if (selected !== renderedTerm) {
     renderedTerm = selected;
     stopContributionBuild();
+    knotGestures?.reset();
   }
   if (applyTermDefaults(term)) return;
   const tableView = renderTermView(view.termView);
@@ -1045,11 +1085,15 @@ function renderChartWorkspace() {
     : currentSelection();
   statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
+  const knotTool = knotToolState(term, displayCollapsed(term));
   renderToolRail(toolRail, {
     mode: view.mode,
     handlesAvailable: Boolean(term.controls),
-    handlesReason: term.spline_view?.reason ?? null
+    handlesReason: term.spline_view?.reason ?? null,
+    knotsAvailable: knotTool.available,
+    knotsReason: knotTool.reason
   });
+  renderKnotControls(term, view.mode === "knots" && knotTool.available);
   updateGroupDisplayControl(term);
   updateNewLevelsControl(term);
   updateCollapseAction(term, selection);
@@ -1074,7 +1118,61 @@ function renderChartWorkspace() {
       range: selectionSpanRange(term, selection, chartContext)
     }
   );
+  renderKnotStatusLine();
   placeTermViewToggle(contextBar, termViewToggle, contribTools);
+}
+
+// A grouped term drawn collapsed: its axis is not the one its knots sit on.
+function displayCollapsed(term) {
+  return activeGroupDisplayMode() === "collapsed" &&
+    Boolean(term.group_display && term.group_display.available && term.group_display.collapsed);
+}
+
+function knotsModeOn(term = currentTerm()) {
+  return store.getState().view.mode === "knots" && Boolean(term) &&
+    knotToolState(term, displayCollapsed(term)).available;
+}
+
+// The knots chip shows in every mode; the knot controls, and the chart's
+// focus for the arrow keys, only in Knots mode.
+function renderKnotControls(term, knotsOn) {
+  renderKnotChip(termKnots, term);
+  renderKnotBar(knotBarNodes, term, knotsOn);
+  if (knotsOn) svg.setAttribute("tabindex", "0");
+  else svg.removeAttribute("tabindex");
+}
+
+// In Knots mode the status line says what each gesture does, or why the
+// last one did nothing.
+function renderKnotStatusLine() {
+  const term = currentTerm();
+  if (!knotGestures || !knotsModeOn(term)) return;
+  renderKnotStatus(statusNode, {
+    message: knotGestures.message(),
+    evenOnly: Boolean(term.knots.even_only)
+  });
+}
+
+// One knot change, staged like every structural change; true once it is.
+async function stageKnotChange(params) {
+  if (knotChangeHeld()) return false;
+  const result = await runStructuralChange(stageKnots(selectedTerm(), params));
+  return Boolean(result && result.state);
+}
+
+// One basis change, staged like every structural change.
+async function stageBasisChange(params) {
+  if (knotChangeHeld()) return false;
+  const result = await runStructuralChange(stageBasis(selectedTerm(), params));
+  return Boolean(result && result.state);
+}
+
+// While another change runs a knot or basis change is not sent; the status
+// line says so rather than letting it vanish.
+function knotChangeHeld() {
+  const held = editorOccupied();
+  knotGestures?.say(held ? CHANGE_RUNNING : null);
+  return held;
 }
 
 // Table puts the term's rating-table block where the chart was; the chart
@@ -1183,6 +1281,9 @@ function selectChartRenderState(state) {
     showCi: view.showCi,
     showContrib: view.showContrib,
     freeLevels: view.freeLevels,
+    showFreeLevels: view.showFreeLevels,
+    showUnsmoothed: view.showUnsmoothed,
+    unsmoothed: view.unsmoothed,
     zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
@@ -1199,6 +1300,9 @@ function sameChartRenderState(next, previous) {
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.freeLevels === previous.freeLevels &&
+    next.showFreeLevels === previous.showFreeLevels &&
+    next.showUnsmoothed === previous.showUnsmoothed &&
+    next.unsmoothed === previous.unsmoothed &&
     next.zoom === previous.zoom &&
     next.groupMode === previous.groupMode;
 }
@@ -1311,6 +1415,7 @@ function renderSelectionState({ termName, indices }) {
       range: selectionSpanRange(term, selection, chartContext)
     }
   );
+  renderKnotStatusLine();
 }
 
 function selectSelectionState(state) {
@@ -1563,34 +1668,132 @@ function renderSpecialAction(button, state) {
   renderShapeReason(button, state.reason);
 }
 
-// The free-level comparison in view: the last one fitted, while its term and
-// the fit in force are the ones shown.
-function shownFreeLevels() {
+// The last free-level comparison fitted, while its term and the fit in force
+// are the ones in view, shown or not.
+function keptFreeLevels() {
   const state = store.getState();
   const free = state.view.freeLevels;
   return freeLevelsShown(free, selectedTerm(), state.remote.snapshot?.fit_token) ? free : null;
 }
 
+// The free-level comparison in view: the kept one, while Free levels is on.
+function shownFreeLevels() {
+  return store.getState().view.showFreeLevels ? keptFreeLevels() : null;
+}
+
 // Free levels refits the model with the term's levels free, as Refit does a
 // structural change, and draws them until the term or the model changes.
+// Turned off, the comparison is kept: on again for the same term and fit, it
+// is drawn at once, with no fit.
 async function toggleFreeLevels() {
   if (shownFreeLevels()) {
-    actions.patchView({ freeLevels: null });
+    actions.patchView({ showFreeLevels: false });
     return;
   }
-  if (appBusyActive || store.getState().request.mutation.status !== "idle") return;
+  if (keptFreeLevels()) {
+    actions.patchView({ showFreeLevels: true });
+    return;
+  }
+  if (editorOccupied()) return;
+  // A new action takes the place of an old error: its banner goes.
+  actions.dismissRecovery();
   const term = selectedTerm();
   stopContributionBuild();
   setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
   try {
     const free = await editorClient.freeLevels(term);
-    actions.patchView({ freeLevels: free });
+    actions.patchView({ freeLevels: free, showFreeLevels: true });
     if (free.notice) actions.showNotice(free.notice);
   } catch (error) {
     actions.showNotice(error instanceof Error ? error.message : String(error));
   } finally {
     setAppBusy(false);
   }
+}
+
+// The Unsmoothed line in view: the term's line for the fit in force, while
+// the toggle is on.
+function shownUnsmoothed() {
+  const state = store.getState();
+  if (!state.view.showUnsmoothed) return null;
+  const fitToken = state.remote.snapshot?.fit_token;
+  const entry = unsmoothedEntry(state.view.unsmoothed, selectedTerm(), fitToken);
+  return entry?.status === "ready" ? entry.line : null;
+}
+
+function patchUnsmoothed(term, entry) {
+  actions.patchView({ unsmoothed: withUnsmoothed(store.getState().view.unsmoothed, term, entry) });
+}
+
+// One fit per term and fit in force, asked for while the toggle is on. It
+// runs without holding the editor, so nothing blocks: the toggle is busy, and
+// a refusal shows Python's sentence for that fit as its hover text.
+async function fetchUnsmoothed(term, fitToken) {
+  patchUnsmoothed(term, { fit_token: fitToken, status: "running", line: null, reason: null });
+  try {
+    const line = await editorClient.unsmoothed(term);
+    patchUnsmoothed(term, { fit_token: line.fit_token, status: "ready", line, reason: null });
+  } catch (error) {
+    const refused = error instanceof EditorAPIError && error.status === 400;
+    patchUnsmoothed(term, {
+      fit_token: fitToken,
+      status: refused ? "refused" : "failed",
+      line: null,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function selectUnsmoothedNeed(state) {
+  const snapshot = state.remote.snapshot;
+  const term = selectActiveTermName(state);
+  const fitToken = snapshot?.fit_token;
+  return {
+    show: state.view.showUnsmoothed,
+    term,
+    fitToken,
+    offered: Boolean(snapshot?.terms?.[term]?.unsmoothed),
+    known: unsmoothedEntry(state.view.unsmoothed, term, fitToken) !== null
+  };
+}
+
+function sameUnsmoothedNeed(next, previous) {
+  return next.show === previous.show && next.term === previous.term &&
+    next.fitToken === previous.fitToken && next.offered === previous.offered &&
+    next.known === previous.known;
+}
+
+function requestUnsmoothed(need) {
+  if (need.show && need.offered && !need.known && need.fitToken !== undefined) {
+    void fetchUnsmoothed(need.term, need.fitToken);
+  }
+}
+
+// The choice lasts the session, across terms. Turned on again, it retries a
+// request that failed, though not a fit Python refused.
+function toggleUnsmoothed() {
+  if (!unsmoothedButton || unsmoothedButton.getAttribute("aria-disabled") === "true") return;
+  const state = store.getState();
+  const show = !state.view.showUnsmoothed;
+  const term = selectedTerm();
+  const entry = unsmoothedEntry(state.view.unsmoothed, term, state.remote.snapshot?.fit_token);
+  const unsmoothed = { ...state.view.unsmoothed };
+  if (show && entry?.status === "failed") delete unsmoothed[term];
+  actions.patchView({ showUnsmoothed: show, unsmoothed });
+}
+
+function renderUnsmoothedToggle(snapshot) {
+  if (!unsmoothedButton) return;
+  const view = store.getState().view;
+  const term = selectedTerm();
+  const entry = unsmoothedEntry(view.unsmoothed, term, snapshot.fit_token);
+  const toggle = unsmoothedToggle(view.showUnsmoothed, snapshot.terms?.[term], entry);
+  unsmoothedButton.hidden = toggle.hidden;
+  unsmoothedButton.setAttribute("aria-pressed", String(toggle.pressed));
+  unsmoothedButton.setAttribute("aria-disabled", String(toggle.disabled));
+  if (toggle.busy) unsmoothedButton.setAttribute("aria-busy", "true");
+  else unsmoothedButton.removeAttribute("aria-busy");
+  unsmoothedButton.dataset.popoverBody = toggle.body;
 }
 
 function renderFreeLevelsToggle(snapshot) {
@@ -1716,6 +1919,10 @@ function applyTermDefaults(term) {
       [selectedTerm()]: loadSettings().groupsDefault
     };
   }
+  // A term whose knots cannot change, or a display that hides them, leaves Knots for Select.
+  if (view.mode === "knots" && !knotToolState(term, displayCollapsed(term)).available) {
+    patch.mode = "select";
+  }
   if (!term.controls) {
     if (view.mode === "handles") patch.mode = "select";
     if (view.showContrib) patch.showContrib = false;
@@ -1831,6 +2038,26 @@ const interactions = bindInteractions({
   setZoom,
   clearZoom,
   actions,
+});
+knotGestures = bindKnotGestures({
+  svg,
+  active: () => knotsModeOn(),
+  onChange: stageKnotChange,
+  onStatus: renderKnotStatusLine,
+  redraw: (ui) => {
+    drawKnotLayer(svg, svg._knotFrame ?? null, ui);
+    drawKnotBasis(svg, svg._knotFrame ?? null, ui);
+  }
+});
+bindKnotBar(knotBarNodes, {
+  term: currentTerm,
+  onChange: stageKnotChange,
+  onBasis: stageBasisChange,
+  onRefuse: (message) => knotGestures.say(message),
+  onSettled: () => {
+    const term = currentTerm();
+    if (term) renderKnotBar(knotBarNodes, term, knotsModeOn(term));
+  }
 });
 bindPointLens(svg);
 // The anchor's tags step aside while the pointer drags on the chart.
@@ -2038,6 +2265,7 @@ for (const [button, stage] of [[makeSpecial, stageSpecial], [returnToCurve, stag
   });
 }
 if (freeLevelsToggle) freeLevelsToggle.addEventListener("click", toggleFreeLevels);
+if (unsmoothedButton) unsmoothedButton.addEventListener("click", toggleUnsmoothed);
 for (const button of shapeButtons) {
   button.addEventListener("click", async () => {
     const term = currentTerm();
@@ -2055,6 +2283,7 @@ for (const button of shapeButtons) {
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(selectUnsmoothedNeed, requestUnsmoothed, sameUnsmoothedNeed);
 store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
 store.subscribe(
   selectFeatureListRenderState,

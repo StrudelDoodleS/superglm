@@ -50,6 +50,10 @@ class TensorPairLogdetSummary:
     lambda_names: tuple[str, str]
     eigvals_left: NDArray
     eigvals_right: NDArray
+    # Each margin's REML rank when a structural rank was declared
+    # (``_lifted_positive``); evaluation keeps that many eigenvalues.
+    rank_left: int | None = None
+    rank_right: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1558,11 +1562,11 @@ def _extract_tensor_marginal_eigvals(
     p2: int,
     *,
     tol: float = 1e-10,
-) -> tuple[str | None, NDArray | None]:
-    """Recover marginal eigenvalues from a tensor penalty component if possible."""
+) -> tuple[str | None, NDArray | None, NDArray | None]:
+    """Recover a tensor penalty component's marginal block and its eigenvalues if possible."""
     q = p1 * p2
     if omega.shape != (q, q):
-        return None, None
+        return None, None, None
 
     norm = max(float(np.linalg.norm(omega)), 1e-300)
     omega4 = omega.reshape(p1, p2, p1, p2)
@@ -1573,10 +1577,44 @@ def _extract_tensor_marginal_eigvals(
     right_err = float(np.linalg.norm(np.kron(np.eye(p1), right) - omega) / norm)
 
     if left_err <= tol and left_err <= right_err:
-        return "left", np.clip(np.linalg.eigvalsh(left), 0.0, None)
+        return "left", np.clip(np.linalg.eigvalsh(left), 0.0, None), left
     if right_err <= tol and right_err <= left_err:
-        return "right", np.clip(np.linalg.eigvalsh(right), 0.0, None)
-    return None, None
+        return "right", np.clip(np.linalg.eigvalsh(right), 0.0, None), right
+    return None, None, None
+
+
+def _lifted_positive(
+    values: NDArray, eps_thresh: float, structural_rank: int | None, matrix: NDArray | None
+) -> NDArray:
+    """The eigenvalues REML counts positive: above its relative cut, or the structural rank's.
+
+    As ``_rank_and_logdet`` does, a declared structural rank replaces a smaller
+    threshold count only where ``matrix`` certifiably has that many positive
+    eigenvalues (``_certifies_rank_at_least``); it then keeps the
+    ``structural_rank`` largest.
+    """
+    from superglm.reml.multi_penalty import _certifies_rank_at_least
+
+    values = np.asarray(values, dtype=np.float64)
+    positive = values > eps_thresh * max(float(np.max(values, initial=0.0)), 1e-12)
+    if (
+        structural_rank is not None
+        and matrix is not None
+        and int(np.count_nonzero(positive)) < structural_rank <= values.size
+        and np.sort(values)[::-1][structural_rank - 1] > 0
+        and _certifies_rank_at_least(matrix, structural_rank)
+    ):
+        positive = np.zeros(values.shape, dtype=bool)
+        positive[np.argsort(values)[::-1][:structural_rank]] = True
+    return positive
+
+
+def _marginal_structural_rank(gm: GroupMatrix, suffix: str, repeat: int) -> int | None:
+    """A tensor margin's own structural rank from its component's (``rank(A) * repeat``)."""
+    declared = (getattr(gm, "structural_ranks", None) or {}).get(suffix)
+    if declared is None or repeat <= 0 or declared % repeat:
+        return None
+    return declared // repeat
 
 
 def _tensor_marginal_rank_logdet(
@@ -1584,6 +1622,7 @@ def _tensor_marginal_rank_logdet(
     omega_raw: NDArray,
     *,
     eps_thresh: float,
+    suffix: str | None = None,
 ) -> tuple[float, float, NDArray] | None:
     """Fast spectral summary for unprojected tensor marginal penalties."""
     if not isinstance(gm, DiscretizedTensorGroupMatrix):
@@ -1599,14 +1638,14 @@ def _tensor_marginal_rank_logdet(
 
     p1 = int(gm.B1_unique_t.shape[1])
     p2 = int(gm.B2_unique_t.shape[1])
-    side, eigvals = _extract_tensor_marginal_eigvals(omega_raw, p1, p2)
+    side, eigvals, block = _extract_tensor_marginal_eigvals(omega_raw, p1, p2)
     if side is None or eigvals is None:
         return None
 
     eigvals = np.asarray(eigvals, dtype=np.float64)
-    thresh = eps_thresh * max(float(eigvals.max()), 1e-12) if eigvals.size else 0.0
-    pos = eigvals[eigvals > thresh]
     repeat = p2 if side == "left" else p1
+    structural = None if suffix is None else _marginal_structural_rank(gm, suffix, repeat)
+    pos = eigvals[_lifted_positive(eigvals, eps_thresh, structural, block)]
     rank = float(pos.size * repeat)
     log_det = float(repeat * np.sum(np.log(np.maximum(pos, 1e-300)))) if pos.size else 0.0
     pos_eigvals = np.sort(np.repeat(pos, repeat))[::-1] if pos.size else np.array([])
@@ -1668,6 +1707,7 @@ def build_tensor_pair_logdet_summaries(
     cache: dict | None = None,
 ) -> dict[str, TensorPairLogdetSummary]:
     """Build closed-form tensor summaries for eligible shared tensor penalty pairs."""
+    eps_thresh = np.finfo(float).eps ** (2 / 3)
     summaries: dict[str, TensorPairLogdetSummary] = {}
     summary_cache = None if cache is None else cache.setdefault("tensor_pair_logdet_summaries", {})
     for group_name, indices in _group_penalties(penalties).items():
@@ -1703,30 +1743,41 @@ def build_tensor_pair_logdet_summaries(
                 summaries[group_name] = cached
             continue
 
-        extracted: dict[str, tuple[str, NDArray]] = {}
+        extracted: dict[str, tuple[str, NDArray, int | None]] = {}
         for pc in pcs:
             omega = pc.omega_ssp
             if omega is None:
                 continue
-            side, eigvals = _extract_tensor_marginal_eigvals(omega, p1, p2)
+            side, eigvals, block = _extract_tensor_marginal_eigvals(omega, p1, p2)
             if side is None or eigvals is None:
                 extracted.clear()
                 break
-            extracted[side] = (pc.name, eigvals)
+            suffix = pc.name[len(group_name) + 1 :]
+            repeat = p2 if side == "left" else p1
+            structural = _marginal_structural_rank(gm, suffix, repeat)
+            # The decision is the summary's: evaluation keeps that many.
+            decided = (
+                None
+                if structural is None
+                else int(np.count_nonzero(_lifted_positive(eigvals, eps_thresh, structural, block)))
+            )
+            extracted[side] = (pc.name, eigvals, decided)
 
         if set(extracted) != {"left", "right"}:
             if summary_cache is not None:
                 summary_cache[cache_key] = None
             continue
 
-        left_name, left_eigvals = extracted["left"]
-        right_name, right_eigvals = extracted["right"]
+        left_name, left_eigvals, left_rank = extracted["left"]
+        right_name, right_eigvals, right_rank = extracted["right"]
         summary = TensorPairLogdetSummary(
             group_name=group_name,
             tensor_id=int(tensor_id),
             lambda_names=(left_name, right_name),
             eigvals_left=left_eigvals,
             eigvals_right=right_eigvals,
+            rank_left=left_rank,
+            rank_right=right_rank,
         )
         summaries[group_name] = summary
         if summary_cache is not None:
@@ -1743,13 +1794,18 @@ def evaluate_tensor_pair_logdet_summaries(
     unit = np.finfo(float).eps / 2.0
     eps_thresh = np.finfo(float).eps ** (2 / 3)
 
-    def marginal_logs(values: NDArray, weight: float) -> tuple[NDArray, NDArray, NDArray]:
+    def marginal_logs(
+        values: NDArray, weight: float, structural_rank: int | None
+    ) -> tuple[NDArray, NDArray, NDArray]:
         values = np.asarray(values, dtype=float)
         if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0.0):
             raise ValueError("tensor marginal spectra must be finite and non-negative")
         logs = np.full(values.shape, -np.inf)
         errors = np.zeros(values.shape)
         positive = values > eps_thresh * float(np.max(values, initial=0.0))
+        if structural_rank is not None:
+            positive = np.zeros(values.shape, dtype=bool)
+            positive[np.argsort(values)[::-1][:structural_rank]] = True
         if weight > 0.0:
             # The unweighted marginal representative fixes support. No weighted
             # cutoff is allowed, including when a weighted eigenvalue overflows.
@@ -1767,8 +1823,12 @@ def evaluate_tensor_pair_logdet_summaries(
         lam_right = float(lambdas.get(right_name, 1.0))
         if any(not math.isfinite(value) or value < 0 for value in (lam_left, lam_right)):
             raise ValueError("smoothing parameters must be finite and non-negative")
-        left, left_error, left_positive = marginal_logs(summary.eigvals_left, lam_left)
-        right, right_error, right_positive = marginal_logs(summary.eigvals_right, lam_right)
+        left, left_error, left_positive = marginal_logs(
+            summary.eigvals_left, lam_left, summary.rank_left
+        )
+        right, right_error, right_positive = marginal_logs(
+            summary.eigvals_right, lam_right, summary.rank_right
+        )
         cell_log = np.logaddexp(left[:, None], right[None, :])
         active = np.isfinite(cell_log)
         left_log = np.broadcast_to(left[:, None], cell_log.shape)[active]
@@ -2042,6 +2102,7 @@ def build_penalty_components(
         omega_ssp: NDArray,
         *,
         force_solver_rank: bool = False,
+        structural_rank: int | None = None,
     ) -> tuple[float, float, NDArray, NDArray]:
         """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
 
@@ -2059,7 +2120,19 @@ def build_penalty_components(
         objective as ``log|S|₊ - log|H|``, where ``log|H|`` is also in SSP
         coordinates. The ``2*log|R_inv|`` factors cancel only when both terms
         use the same basis.
+
+        ``structural_rank``, the rank the penalty's construction gives it
+        (``GroupInfo.structural_ranks``), replaces a smaller threshold rank:
+        the relative cut fixes units but not the spread within a penalty, and
+        an integrated derivative penalty on uneven knots spreads past it. It
+        is taken only where both penalties certifiably have that many positive
+        eigenvalues (``_certifies_rank_at_least``, Rump's test on the leading
+        eigenvectors), since a direction binary64 cannot certify positive is
+        not penalised whatever the construction says. It also caps a larger
+        solver-space count, where the raw count agrees with it.
         """
+        from superglm.reml.multi_penalty import _certifies_rank_at_least
+
         # Rank from raw penalty (basis-invariant)
         raw_eigvals = np.linalg.eigvalsh(omega_raw)
         raw_thresh = eps_thresh * max(raw_eigvals.max(), 1e-12)
@@ -2070,6 +2143,23 @@ def build_penalty_components(
         ssp_thresh = eps_thresh * max(ssp_eigvals.max(), 1e-12)
         ssp_rank = float(np.sum(ssp_eigvals > ssp_thresh))
         rank = ssp_rank if force_solver_rank or raw_rank > omega_ssp.shape[0] else raw_rank
+        if structural_rank is not None and raw_rank <= structural_rank < rank:
+            # A congruence cannot raise a rank, rank(R' Ω R) <= rank(Ω), and the
+            # construction gives Ω the structural rank. But it can compress the
+            # spectrum by cond(R)**2 (Ostrowski; Horn and Johnson, Theorem
+            # 4.5.9), past the relative cut, so round-off on a null direction
+            # can count in SSP: 56 for 55 on ARM64 for a decomposed tensor's
+            # margin, whose R_inv has cond(R)**2 = 3.8e10. The raw penalty,
+            # counted without the congruence, must agree.
+            rank = float(structural_rank)
+        if (
+            structural_rank is not None
+            and rank < structural_rank <= omega_ssp.shape[0]
+            and np.sort(ssp_eigvals)[::-1][structural_rank - 1] > 0
+            and _certifies_rank_at_least(omega_raw, structural_rank)
+            and _certifies_rank_at_least(omega_ssp, structural_rank, ssp_eigvectors)
+        ):
+            rank = float(structural_rank)
 
         # Use the effective rank to select the top eigenvalues from SSP.
         n_pos = int(rank)
@@ -2104,6 +2194,7 @@ def build_penalty_components(
             continue
 
         group_components: list[PenaltyComponent] = []
+        structural_ranks = getattr(gm, "structural_ranks", None) or {}
         raw_support = None
         raw_coordinate_map = None
         raw_family = reused_geometry = raw_volume = raw_refusal = None
@@ -2235,6 +2326,7 @@ def build_penalty_components(
                     gm,
                     omega_j,
                     eps_thresh=eps_thresh,
+                    suffix=suffix,
                 )
                 if raw_support is not None:
                     # Transport one selected raw family through the common map.
@@ -2265,6 +2357,7 @@ def build_penalty_components(
                         omega_j,
                         omega_ssp_j,
                         force_solver_rank=force_solver_rank,
+                        structural_rank=structural_ranks.get(suffix),
                     )
                 group_components.append(
                     PenaltyComponent(
@@ -2293,6 +2386,7 @@ def build_penalty_components(
                 gm.omega,
                 omega_ssp,
                 force_solver_rank=force_solver_rank,
+                structural_rank=structural_ranks.get(""),
             )
             group_components.append(
                 PenaltyComponent(
@@ -2308,10 +2402,24 @@ def build_penalty_components(
                     lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
+            # A structural lift takes the solver-space support; see
+            # _single_penalty_raw_family for why the raw route cannot admit it.
+            structural = structural_ranks.get("")
+            lifted = (
+                structural is not None
+                and rank == structural
+                and np.sum(
+                    (raw_values := np.linalg.eigvalsh(gm.omega))
+                    > eps_thresh * max(float(raw_values.max()), 1e-12)
+                )
+                < structural
+            )
             raw = (
                 None
-                if force_solver_rank
-                else _single_penalty_raw_family(gm, group_components, rank, _reuse_raw_from)
+                if force_solver_rank or lifted
+                else _single_penalty_raw_family(
+                    gm, group_components, rank, _reuse_raw_from, rank_rcond=eps_thresh
+                )
             )
             if isinstance(raw, _RawPenaltyRefusalReceipt):
                 raw_refusal, raw = raw, None
@@ -2691,7 +2799,7 @@ def compute_logdet_s_derivatives(
     return evaluation.gradient, evaluation.hessian
 
 
-def _single_penalty_raw_family(gm, grouped, declared_rank, source):
+def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond=None):
     """Select one dense penalty on its raw basis, independently of the SSP map.
 
     The solver penalty is ``C.T @ Omega @ C`` for the group's SSP coordinate
@@ -2719,6 +2827,23 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
     (rank policy, unit roundoff and kernel identities). The volume, transported
     root and agreement are rebuilt for every map, so lambda, weights and basis
     never transfer.
+
+    The raw support is selected at ``rank_rcond``, the relative threshold
+    that set ``declared_rank``, and only where the raw spectrum has a gap
+    there (``penalty_support._gapped_rank_mask``). At the eigensolver's
+    resolution floor instead, the formation round-off in a constrained
+    penalty's exact null space (cr: about 0.1 of the floor on x86-64) could
+    add a direction on another BLAS build and refuse the raw path there.
+    A structural rank above that threshold's count (``_rank_and_logdet``)
+    is not set by any threshold, and the caller does not come here: the raw
+    route cannot admit it. The lifted direction's raw eigenvalue is below
+    ``eps**(2/3)`` of the largest by definition, while the raw root and its
+    transport carry absolute errors of order ``u ||Omega||``, so the
+    agreement ratio ``x`` of ``_solver_penalty_agreement`` is of order
+    ``u / eps**(2/3)``, about ``3e-6`` (lognormal(0, 1.5) bs with 20
+    quantile_rows knots: ``x = 1.0e-6``), against its admission bar
+    ``sqrt(eps)``, ``1.5e-8``. The solver-space support evaluates the same
+    penalty in SSP coordinates, where that direction is 9e-5 of the largest.
 
     Returns ``None`` when the cheap map checks decline (non-float64 inputs,
     inconsistent shapes, a non-finite map, or ``np.eye``, which is either the
@@ -2750,7 +2875,7 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source):
         if refusal is not None:
             return refusal
         try:
-            support = _penalty_support([omega])
+            support = _penalty_support([omega], rcond=rank_rcond)
         except (PenaltyNumericalError, ValueError):
             # Its ValueErrors are the raw matrix's own admissibility checks
             # (symmetry, semidefiniteness), which the solver-space path never

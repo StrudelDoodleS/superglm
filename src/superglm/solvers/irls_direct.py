@@ -4488,6 +4488,9 @@ def _fit_irls_direct_once(
             # the matrix the slope decomposition was taken of (the identified
             # part of the Laplace approximation restricts it, ``reml.identified``)
             cache_out["centered_hessian"] = centered_final.hessian
+            # the rows its Gram summed: its formation bound's length
+            # (``reml.discrete._profiled_formation_error``)
+            cache_out["n_rows"] = int(dm.n)
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
         cache_out["sum_W"] = sum_W
