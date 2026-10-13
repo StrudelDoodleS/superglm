@@ -503,9 +503,11 @@ and full-frame channels apply here too. A penalized term needs no pin: a
 declared level with no training rows shrinks all the way to the population
 value through its own penalty, exactly as an empty stretch of a numeric spline
 is bridged, so it gets a coefficient rather than a warning. `FactorSmooth`
-takes the same argument, with one exception — `basis="sz"` refuses an empty
-declared level, because its sum-to-zero contrast stops identifying the
-deviations once a level carries nothing.
+takes the same argument, with one exception: `basis="sz"` refuses an empty
+declared level unless the term has `select=True`, because its sum-to-zero
+contrast stops identifying the deviations once a level carries nothing. With
+`select=True` every level's line is penalized, and an empty level is predicted
+at the population curve.
 
 ## OrderedCategorical
 
