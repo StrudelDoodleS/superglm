@@ -74,7 +74,11 @@ from superglm.solvers.centered_system import (
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
-from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
+from superglm.solvers.structured import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+    select_structured_group,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 # The solve ceiling and the certification bar both live in observed_geometry
@@ -84,7 +88,9 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 
 # One dense leverage pass replaces one derivative Gram per penalty. Mixed
 # spline/categorical timings cross over at four penalties on the reference host;
-# below that, the specialized Gram route remains cheaper.
+# below that, the specialized Gram route remains cheaper.  The same bar admits
+# the other first-order fits to the one-pass route that also forms the outer
+# Hessian's first-order weight terms (``reml_w_correction(leverage_hessian=True)``).
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
 
 
@@ -251,6 +257,13 @@ def optimize_direct_reml(
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
+    # A model the structured solvers can also fit keeps the derivative Grams on
+    # the dense solver too: both backends then build the same outer Hessian and
+    # take the same REML path (tests/test_factor_smooth_structured_parity.py).
+    structured_alternative = (
+        select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
+        is not None
+    )
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
@@ -899,6 +912,7 @@ def optimize_direct_reml(
         # W(rho) correction
         _t0 = _time.perf_counter()
         leverage_gradient = False
+        leverage_hessian = False
         if not discrete:
             leverage_gradient = bool(
                 type(distribution) is Binomial
@@ -907,6 +921,12 @@ def optimize_direct_reml(
                 and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
                 and geometry is None
                 and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
+            )
+            leverage_hessian = bool(
+                not leverage_gradient
+                and not structured_alternative
+                and w_correction_order == 1
+                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
@@ -947,6 +967,7 @@ def optimize_direct_reml(
                     reml_penalties=penalties,
                     geometry=geometry,
                     gradient_only=leverage_gradient,
+                    leverage_hessian=leverage_hessian,
                 )
             except np.linalg.LinAlgError as error:
                 raise ObservedModeNotConvergedError(
@@ -962,12 +983,20 @@ def optimize_direct_reml(
         if profile is not None:
             correction_mode = "none"
             if w_corr is not None:
-                correction_mode = "leverage_gradient" if w_corr[1] is None else "derivative_grams"
+                if w_corr[1] is not None:
+                    correction_mode = "derivative_grams"
+                elif len(w_corr) > 2:
+                    correction_mode = "leverage_hessian"
+                else:
+                    correction_mode = "leverage_gradient"
             profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
             grad_w_correction = w_corr[0]
             dH_extra = w_corr[1]
+            # Second order: the second-derivative terms.  The leverage route:
+            # the first-order cross terms its pass formed in place of
+            # ``dH_extra``.  Either is an (m, m) term added to the Hessian.
             dH2_cross = w_corr[2] if len(w_corr) > 2 else None
             grad = grad_partial + grad_w_correction
         else:
