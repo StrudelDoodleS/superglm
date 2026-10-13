@@ -33,6 +33,7 @@ from superglm.constraints import (
 )
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.fit_cost import SlowFitWarning
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
@@ -306,6 +307,7 @@ __all__ = [
     "ConvergenceWarning",
     "SeparationError",
     "SeparationWarning",
+    "SlowFitWarning",
     "WeakIdentificationWarning",
     "StructuredSolverError",
     "ObservedModeNotCertifiedError",

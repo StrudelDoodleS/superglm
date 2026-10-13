@@ -1823,6 +1823,22 @@ def _fit_path_in_workspace(
     return path_result
 
 
+def _warn_slow_exact_reml(model, *, n_smoothing: int) -> None:
+    """Warn before an exact smoothing search that will be slow (``SlowFitWarning``)."""
+    from superglm.diagnostics.fit_cost import SlowFitWarning, exact_reml_cost_message
+
+    message = exact_reml_cost_message(
+        n_rows=int(model._dm.n),
+        n_smoothing=n_smoothing,
+        n_coef=int(model._dm.p),
+        distribution=model._distribution,
+        link=model._link,
+    )
+    if message is not None:
+        # helper -> _fit_reml_in_workspace -> fit_ops.fit_reml -> SuperGLM.fit_reml -> caller
+        warnings.warn(message, SlowFitWarning, stacklevel=5)
+
+
 def fit_reml(
     model,
     X,
@@ -2272,6 +2288,8 @@ def _fit_reml_in_workspace(
             _maybe_release_fit_state(model)
             return debug_recorder
 
+        if use_direct and estimated_names and not model._discrete:
+            _warn_slow_exact_reml(model, n_smoothing=len(reml_penalties))
         best = optimize_reml_best(
             model,
             use_direct=use_direct,

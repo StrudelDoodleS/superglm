@@ -66,6 +66,13 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
+An exact fit (`discrete=False`, the default) that will be slow says so before
+it starts, with a `SlowFitWarning`. It fires when rows x smoothing parameters x
+coefficients reaches 1e9, because choosing the smoothing exactly reads every
+row once per smoothing parameter on each step. On the 542,000-row freMTPL2
+frequency book, a model with one spline-by-brand interaction took 2.5 minutes
+exactly and 8 seconds with `discrete=True`.
+
 ## When a REML fit counts as converged
 
 A REML fit stops only when the solver can check that it has reached the best
