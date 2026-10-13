@@ -82,12 +82,32 @@ def _score_feature(spec: Any, values: NDArray, coefficients: NDArray) -> NDArray
     return np.asarray(transformed @ coefficients, dtype=np.float64)
 
 
+def warn_population_levels(named: Sequence[str]) -> None:
+    """SuperGLM's prediction warning (``model.base``) for SuperLSS, once per call, on the caller's line."""
+    if not named:
+        return
+    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION
+    from superglm.profiling._scalar import warn_caller
+
+    warn_caller(SZ_POPULATION_PREDICTION + "; ".join(named) + ".")
+
+
 def _score_interaction(
     spec: Any,
     left: NDArray,
     right: NDArray,
     coefficients: NDArray,
+    *,
+    named: list | None = None,
 ) -> NDArray:
+    """One interaction term's contribution; ``named`` collects the levels it predicts at the population."""
+    if getattr(spec, "_has_population_offset", False):
+        # An sz term with a level left out of its population (#432, #457):
+        # scored as SuperGLM predicts it.
+        values, levels = spec._score_identified(left, right, coefficients, population=False)
+        if named is not None:
+            named.extend(levels)
+        return np.asarray(values, dtype=np.float64)
     if hasattr(spec, "score"):
         return np.asarray(spec.score(left, right, coefficients), dtype=np.float64)
     transformed = spec.transform(left, right)
@@ -123,12 +143,13 @@ def _interaction_design(
     width: int,
     n_observations: int,
     term_name: str,
+    named: list | None = None,
 ) -> NDArray[np.float64]:
     identity = np.eye(width, dtype=np.float64)
     return np.column_stack(
         tuple(
             _as_contribution(
-                _score_interaction(spec, left, right, identity[:, index]),
+                _score_interaction(spec, left, right, identity[:, index], named=named),
                 n_observations=n_observations,
                 term_name=term_name,
             )
@@ -179,8 +200,13 @@ def build_joint_prediction_design(
     X: FrameLike | EagerFrame,
     compiled_predictors: Sequence[CompiledPredictor],
     layout: StackedLayout,
+    named: list[str] | None = None,
 ) -> JointPredictionDesign:
-    """Reconstruct local fitted coefficient designs without mutating term state."""
+    """Reconstruct local fitted coefficient designs without mutating term state.
+
+    ``named``, when given, collects the ``sz`` levels the design predicts at
+    the population curve, as ``"<parameter> term '<term>' levels ..."``.
+    """
 
     if not isinstance(layout, StackedLayout):
         raise TypeError("layout must be a StackedLayout")
@@ -229,6 +255,7 @@ def build_joint_prediction_design(
             slope_indices = _term_indices(predictor.compiled.groups, name)
             indices = slope_indices + intercept_width
             left_name, right_name = interaction.parent_names
+            levels: list = []
             values = _interaction_design(
                 interaction,
                 frame.column_array(left_name),
@@ -236,7 +263,11 @@ def build_joint_prediction_design(
                 width=len(slope_indices),
                 n_observations=len(frame),
                 term_name=name,
+                named=levels,
             )
+            if levels and named is not None:
+                listed = ", ".join(dict.fromkeys(map(str, levels)))
+                named.append(f"{predictor.name} term {name!r} levels {listed}")
             _assign_term(matrix, assigned, indices, values, term_name=name)
 
         if not np.all(assigned):

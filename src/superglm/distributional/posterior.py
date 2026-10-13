@@ -46,7 +46,10 @@ from superglm.distributional.family import (
 # fit and every prediction path already share; restating its rules here is how
 # an offset contract drifts between two entry points that must agree.
 from superglm.distributional.model import _prediction_offsets
-from superglm.distributional.prediction_design import build_joint_prediction_design
+from superglm.distributional.prediction_design import (
+    build_joint_prediction_design,
+    warn_population_levels,
+)
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.reml.multi_penalty import (
@@ -750,8 +753,13 @@ def posterior_parameters(
     *,
     offsets: Mapping[str, NDArray] | None = None,
     chunk_rows: int | None = None,
+    name_levels: bool = True,
 ) -> Generator[tuple[slice, NDArray[np.float64]], None, None]:
     """Yield ``(row_slice, theta)`` blocks of shape ``(draws, rows, parameters)``.
+
+    ``name_levels`` gives the prediction warning for ``sz`` levels predicted
+    at the population curve; a caller that already predicted the frame
+    through ``predict_parameters`` passes ``False``.
 
     Each predictor's local prediction design multiplies the draw matrix on the
     link scale, the predictor offset is added there, and the fitted inverse link
@@ -778,7 +786,10 @@ def posterior_parameters(
     resolved_offsets = _prediction_offsets(
         offsets, tuple(state.name for state in layout.predictors), n_observations
     )
-    design = build_joint_prediction_design(frame, fitted.compiled_predictors, layout)
+    named: list[str] = []
+    design = build_joint_prediction_design(frame, fitted.compiled_predictors, layout, named)
+    if name_levels:
+        warn_population_levels(named)
     coefficients = draws.coefficients
 
     for start in range(0, n_observations, rows_per_chunk):
@@ -984,8 +995,9 @@ def posterior_bounds(
     quantity_draws = (
         np.empty((draws.n_draws, n_observations), dtype=np.float64) if return_draws else None
     )
+    # The plug-in estimate above already named any population-predicted level.
     for rows, block in posterior_parameters(
-        fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows
+        fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=False
     ):
         width = block.shape[1]
         # ``block`` flattens draw-major, so the chunk's own weights tile in the

@@ -7,8 +7,9 @@ instead of receiving unrestricted fixed effects.
 
 `FactorSmooth(..., basis="sz")` is related but has a different interpretation:
 it estimates centered level deviations around a required global curve. Its
-wiggle is smoothed, but its polynomial null space is not fully shrunk, so its
-level table is not labelled as credibility or collapse.
+wiggle is smoothed, but its polynomial null space is not fully shrunk unless
+the term has `select=True`, and its level table is not labelled as
+credibility or collapse.
 
 | SuperGLM | mgcv analogue | What varies by level |
 |---|---|---|
@@ -19,7 +20,8 @@ level table is not labelled as credibility or collapse.
 All three use every fitted level rather than dropping a reference level. REML
 estimates their penalty strengths. For RE and FS this controls full shrinkage
 toward the population prediction; for SZ it controls wiggle around a
-sum-to-zero deviation surface.
+sum-to-zero deviation surface, and with `select=True` every level's line as
+well, so the deviations can shrink fully.
 
 ## Random intercept credibility
 
@@ -187,8 +189,12 @@ regional_deviation = model.factor_smooth("DrivAge:Region:sz", grid=80)
 Equivalent marginal coefficients across levels sum to zero, so the deviation
 curves also sum to zero pointwise. There is one shared `wiggle` lambda. The
 polynomial null space remains unpenalized: even an extremely large wiggle
-lambda can leave finite linear or low-order polynomial deviations.
-Consequently `regional_deviation.collapsed` is `None`, and its table reports
+lambda can leave finite linear or low-order polynomial deviations. With
+`select=True` (see "Penalizing SZ levels' lines: `select=True`" in the
+[interactions guide](../how-to/specify-interactions.md)), a second `null`
+lambda penalizes every level's line, and both lambdas at their upper bound
+shrink every deviation to zero. For every `sz` term, with or without
+`select`, `regional_deviation.collapsed` is `None`, and its table reports
 support, information, EDF, and coefficient norms without `credibility` or
 `shrinkage` columns.
 
@@ -271,6 +277,14 @@ which others.
   standard error of the term and of its main effect missing (NaN).
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
+- **With `select=True` the term penalizes every level's line.** No level
+  keeps an unpenalized direction, and neither solver names a thin level at
+  fit. Coefficient standard errors still follow the data rule: a direction
+  only the penalty pins, such as a thin level's line or the block of a level
+  without weight, is not estimable from the data, so those standard errors
+  can still be missing (NaN), as a random effect's are. A level without
+  weight is still predicted at the population curve, and the report's
+  `thin_levels` and `predict` name it.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ

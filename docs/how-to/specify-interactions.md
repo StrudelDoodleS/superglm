@@ -50,7 +50,7 @@ rows on the mapped scores; see [Interaction Screening](screen-interactions.md).
 |---|---|---|---|
 | Reference-coded fixed interaction | `SplineCategorical` | Model-dependent | No pooling |
 | Fully penalized random curves | `FactorSmooth(..., basis="fs")` | Optional | Wiggle and null-space directions shrink |
-| Centered deviation curves | `FactorSmooth(..., basis="sz")` | Required | Wiggle shrinks; polynomial null space remains |
+| Centered deviation curves | `FactorSmooth(..., basis="sz")` | Required | Wiggle shrinks; polynomial null space remains (shrinks with `select=True`) |
 
 Here `basis=` chooses the factor-smooth construction. `kind=` chooses the
 continuous marginal spline family; this release supports `kind="ps"` for both
@@ -107,7 +107,8 @@ model = SuperGLM(
 ).fit_reml(X, y)
 ```
 
-SZ is analogous to mgcv's `bs="sz"` with one shared smoothing parameter. At
+SZ is analogous to mgcv's `bs="sz"` with one shared smoothing parameter (two,
+`wiggle` and `null`, with `select=True`). At
 every value of `age`, the fitted regional deviations sum exactly to zero, so
 the required global `Spline` is the portfolio curve and the SZ term describes
 departures from it. Adding the global spline is therefore intended, not a
@@ -144,9 +145,11 @@ not `Categorical`-parented, and in this release only the explicit
 only. Declare its universe explicitly when folds may drop a level. With
 `basis="fs"` an empty declared level is absorbed by the penalty (its curve
 shrinks to the population); `basis="sz"` rejects empty declared levels
-outright, because a level with no rows makes the centered system numerically
-singular (measured: minimum penalized eigenvalue collapses from ~0.6 to
-~4e-10).
+unless the term has `select=True`, because a level with no rows makes the
+centered system numerically singular (measured: minimum penalized eigenvalue
+collapses from ~0.6 to ~4e-10). With `select=True` every level's line is
+penalized, so an empty declared level is allowed and predicted at the
+population curve.
 
 ## Prediction behavior
 
@@ -155,9 +158,10 @@ Known levels receive their fitted FS curve or SZ deviation. With the default
 `unseen="error"` to reject it with its label. Missing values always fail.
 `FactorSmooth(levels=...)` binds the grouping factor's universe the same way
 `Categorical` does, so folds and refreshes share one set of curves; an empty
-declared level shrinks to the population smooth under `basis="fs"`, and is
-refused under `basis="sz"`, whose sum-to-zero contrast needs every level to
-carry rows.
+declared level shrinks to the population smooth under `basis="fs"`. Under
+`basis="sz"` it is refused, because the sum-to-zero contrast needs every
+level to carry rows, unless the term has `select=True`; then it is predicted
+at the population curve.
 
 ```python
 conditional = model.predict(test)
@@ -176,6 +180,11 @@ Some SZ levels do not carry enough information for their whole curve:
 - a level whose training rows all have zero weight;
 - a level with fewer distinct values of the smooth's variable than the
   penalty leaves unpenalized (with the default `m=2`, a single distinct value).
+
+With `select=True`, only a level without weight is in this position. It is
+predicted at the population curve, which stays the main effect, and the
+report's `thin_levels` and `predict` name it; the solver does not name it at
+fit. The rest of this section describes terms without `select=True`.
 
 For such a level, part of its curve can trade places with the global curve
 without changing any fitted value, so the data do not decide that part. A
@@ -202,7 +211,8 @@ If every level is in this position, no level identifies the population curve.
 Its unpenalized part is then set by a convention: each level's unidentified
 part is zero. Away from the levels' own values, the curves still depend on
 where the fit landed along the global smooth's unpenalized curve, wherever
-that curve is not a polynomial. The fit warns.
+that curve is not a polynomial. The fit warns, and the warning names the
+remedy: `select=True` on the term, described below.
 
 To give a level its own curve, give it weighted rows at enough distinct values.
 
@@ -215,14 +225,62 @@ all sit at one value of the variable with its other rows to one side. The
 likelihood then keeps increasing along that line, so the level's fitted values
 move toward zero (or one) for as long as the fit runs.
 
-- The fit warns with a `SeparationWarning` that names these levels.
+- The fit warns with a `SeparationWarning` that names these levels and the
+  remedy, `select=True` on the term.
 - `separation="ignore"` silences the warning; `separation="error"` does not
   refuse the fit for this case.
 - The population curve leaves these levels out of its average, so it does not
   follow their lines.
 
-To give such levels finite estimates, merge them into neighbouring levels or
-model the group with a `RandomEffect`.
+To give such levels finite estimates, pass `select=True` to the term, or use
+`basis="fs"`.
+
+### Penalizing SZ levels' lines: `select=True`
+
+```python
+FactorSmooth("age", group="region", basis="sz", select=True)
+```
+
+`select=True` adds a second penalty to an SZ term. It penalizes every level's
+straight line (with `m=2`; its polynomial part in general), with a smoothing
+parameter of its own named `null` (for example `age:region:sz:null`), and REML
+estimates it as it estimates the others. This is the null-space penalty of
+mgcv's `select=TRUE` (Marra and Wood, 2011), and it treats the levels' lines as
+random effects, as `basis="fs"` does.
+
+The option belongs to the term, not to the data: a term with `select=True`
+always carries the penalty, and a term without it never does. Two fits of the
+same term on slightly different data, such as cross-validation folds, are
+therefore the same model.
+
+- Every level's curve is finite, including a level whose line separates the
+  response: a level with no claims sits below the population curve by as much
+  as its rows and the other levels support.
+- When every level is thin, the global curve is fitted through the trend
+  across the levels, and the fit is the same on every solver.
+- The population curve is the global curve, and every level with data
+  predicts its own fitted curve. A level whose rows all have zero weight, or
+  a level declared through `levels=` with no rows, is predicted at the
+  population curve, and `predict` names it.
+- No level's line is unpenalized, so the fit gives no `SeparationWarning`
+  that names this term's levels, and no warning for thin levels.
+- A fit can still report a separation warning from the solver during the
+  smoothing-parameter search, before the lines' smoothing parameter grows.
+  The final curves are bounded.
+- The penalty shrinks every level's line, not just the separated ones, so it
+  changes the other levels' curves and the term's effective degrees of
+  freedom.
+- The smoothing parameter needs enough levels to estimate. With very few
+  levels and one of them separated, REML can drive it to its lower bound and
+  report that it did not converge. The lines are still finite there.
+- A lambda policy given as one `LambdaPolicy` for the whole term applies to
+  both `wiggle` and `null`. A dict of policies can name either; a component it
+  leaves out is estimated.
+- `FactorSmooth` raises a `ValueError` for a policy that fixes `wiggle` or
+  `null` at zero, which would leave part of every level unpenalized. Use
+  `select=False` for unpenalized lines.
+- `basis="fs"` already penalizes every level's polynomial part, so
+  `select=True` applies to `basis="sz"` only.
 
 ## Separated cells: exposure without response
 

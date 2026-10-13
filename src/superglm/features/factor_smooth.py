@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 
 
 _MARGINAL_QR_CHUNK_ROWS = 65_536
+# The prediction warning's text, before the named terms and levels; SuperGLM
+# (``model.base``) and SuperLSS (``prediction_design``) give the same one.
+SZ_POPULATION_PREDICTION = (
+    "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
+    "penalty's null space keep the curve their rows identify and follow the population "
+    "curve's shape where their rows say nothing; levels without weight are predicted at "
+    "the population value: "
+)
 _MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
 
 
@@ -96,6 +104,11 @@ def _natural_parameterization_from_r(
     return natural_map, tuple(components)
 
 
+def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
+    """Whether ``policy`` fixes its smoothing parameter at zero (``LambdaPolicy.off()``)."""
+    return policy is not None and policy.mode == "fixed" and float(cast(float, policy.value)) == 0.0
+
+
 class FactorSmooth:
     """A factor-by-P-spline interaction.
 
@@ -114,8 +127,24 @@ class FactorSmooth:
     ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
     §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
     its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
-    rejects one: its sum-to-zero contrast is what identifies the deviations, and
-    an empty level makes that constraint vacuous.
+    rejects one unless the term has ``select=True``: its sum-to-zero contrast is
+    what identifies the deviations, and an empty level makes that constraint
+    vacuous.  With ``select=True`` every level's line is penalized, so the
+    empty level is proper and is predicted at the population curve.
+
+    ``basis="sz"`` leaves each level's polynomial part (its line, with
+    ``m=2``) unpenalized, as mgcv's ``sz`` does.  ``select=True`` adds a
+    second penalty component, ``"null"``, on every level's line: Marra &
+    Wood's (2011) null-space penalty (mgcv's ``select=TRUE``), with its own
+    smoothing parameter, which reads the lines as random effects shrunk
+    toward the population curve, as ``basis="fs"`` does with its ``null_j``
+    components.  It gives a level whose line separates the response, or a
+    term whose every level holds fewer distinct ``x`` values than the line
+    has coefficients, finite and unique curves (#444).  ``lambda_policy`` may
+    then name ``"null"``; one policy for the whole term applies to both
+    components.  The option is the term's, never the data's: without it the
+    lines stay unpenalized whatever the data, and such levels are named in a
+    warning at fit.
     """
 
     structured_kind = "factor_smooth"
@@ -135,6 +164,7 @@ class FactorSmooth:
         missing: Literal["error"] = "error",
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
         name: str | None = None,
+        select: bool = False,
     ):
         from superglm.features._level_source import resolve_level_source
 
@@ -162,10 +192,18 @@ class FactorSmooth:
             raise ValueError(f"missing must be 'error', got {missing!r}")
         if name is not None and (not isinstance(name, str) or not name):
             raise ValueError("name must be a non-empty string when supplied")
+        if not isinstance(select, bool):
+            raise TypeError("select must be a bool")
+        if select and basis != "sz":
+            raise ValueError(
+                "select=True applies to basis='sz'. basis='fs' already penalizes every "
+                "level's polynomial part, with one smoothing parameter per null_j component."
+            )
 
-        valid_components = (
-            {"wiggle", *(f"null_{index}" for index in range(m))} if basis == "fs" else {"wiggle"}
-        )
+        if basis == "fs":
+            valid_components = {"wiggle", *(f"null_{index}" for index in range(m))}
+        else:
+            valid_components = {"wiggle", "null"} if select else {"wiggle"}
         if isinstance(lambda_policy, dict):
             unknown = set(lambda_policy) - valid_components
             if unknown:
@@ -185,6 +223,26 @@ class FactorSmooth:
                 )
         elif lambda_policy is not None and not isinstance(lambda_policy, LambdaPolicy):
             raise TypeError("lambda_policy must be a LambdaPolicy, a component mapping, or None")
+        if select:
+            # A smoothing parameter fixed at zero leaves part of every level
+            # unpenalized: the lines themselves ("null"), or the wiggle, along
+            # which a separated level still has no finite estimate.
+            unpenalized = [
+                component
+                for component in ("wiggle", "null")
+                if _fixed_at_zero(
+                    lambda_policy
+                    if isinstance(lambda_policy, LambdaPolicy)
+                    else (lambda_policy or {}).get(component)
+                )
+            ]
+            if unpenalized:
+                raise ValueError(
+                    f"select=True penalizes every level's line beside its wiggle, but "
+                    f"lambda_policy fixes {unpenalized!r} at zero, which leaves part of every "
+                    "level unpenalized. Use select=False for unpenalized lines, or estimate "
+                    "that smoothing parameter or fix it above zero."
+                )
 
         self.variable = variable
         self.group = group
@@ -194,6 +252,7 @@ class FactorSmooth:
         self.m = m
         self.unseen = unseen
         self.missing = missing
+        self.select = select
         self._lambda_policy = lambda_policy
         self.name = name or f"{variable}:{group}:{basis}"
 
@@ -292,8 +351,12 @@ class FactorSmooth:
                 f"{sorted(set(outside.tolist()), key=str)}. Declared: "
                 f"{sorted(self._levels, key=str)}. Widen levels= or fix the column."
             )
-        if self.basis == "sz":
-            # An empty level does not shrink under sz, it breaks it: the
+        if self.basis == "sz" and not self._selects_lines:
+            # select=True penalizes every level's line beside its wiggle, so an
+            # empty block is proper there: it is recorded as weightless and
+            # predicted at the population curve (``_record_unidentified_levels``).
+            #
+            # Without it, an empty level does not shrink under sz, it breaks it: the
             # sum-to-zero constraint is what identifies these deviations
             # against the population smooth, and a level with no rows absorbs
             # any common curve, so the constraint stops binding.  Measured on
@@ -330,7 +393,8 @@ class FactorSmooth:
                     f"FactorSmooth basis='sz' cannot carry a declared group level with "
                     f"no training rows: {sorted(unobserved, key=str)}. Its sum-to-zero "
                     f"contrast stops identifying the deviations once a level is empty. "
-                    f"Use basis='fs', which penalizes every coordinate, or narrow levels=."
+                    f"Use select=True, which penalizes every level's line, basis='fs', which "
+                    f"penalizes every coordinate, or narrow levels=."
                 )
         return codes
 
@@ -493,8 +557,19 @@ class FactorSmooth:
             # so the same per-level change of basis preserves it; the wiggle
             # penalty becomes diagonal (its square root exact) and the
             # polynomial null coordinates separate.  sz penalizes the wiggle
-            # component alone, as before: the null coordinates stay unpenalized.
+            # component alone, as before: the null coordinates stay unpenalized,
+            # unless the term selects its lines (#444).  Then one ``"null"``
+            # component penalizes them all: Marra & Wood's (2011) null-space
+            # penalty, the wiggle's eigenvectors with its zero eigenvalues set
+            # to one and the rest to zero, which here is the indicator of the
+            # null coordinates, exactly (the sum of fs's ``null_j``).  Those
+            # coordinates are orthonormal over the term's weighted rows, so
+            # ``beta_l' S* beta_l`` is the mean square of level ``l``'s line
+            # over the data, whatever rotation of them the streamed QR chose.
+            lines = [component for _, component in components[1:]]
             components = components[:1]
+            if self._selects_lines:
+                components += (("null", np.sum(lines, axis=0)),)
         self._spline = spline
         self._natural_map = natural_map
         self._base_penalty_components = components
@@ -668,6 +743,12 @@ class FactorSmooth:
         boundaries reached at infinite ``eta``) has no finite line
         (``diagnostics.separation.separated_factor_smooth_levels``).  Both
         stay out of the population curve (``_population_map``).
+
+        A design whose lines carry their ``"null"`` penalty (``select=True``,
+        #444) has neither: the penalty bounds every line and identifies every
+        level, so the population curve is the main effect.  Only a level
+        without weight is recorded there; it has no data term, so it is
+        predicted at the population curve.
         """
         from superglm.diagnostics.separation import separated_factor_smooth_levels
         from superglm.solvers._structured.layout import sz_level_identification
@@ -678,6 +759,20 @@ class FactorSmooth:
         self._separated_levels = ()
         self._population_null_space = None
         if self.basis != "sz":
+            return ()
+        lines = dict(design.repeated_penalty_components).get("null")
+        if lines is not None:
+            weights = (
+                np.ones(len(design.codes))
+                if prior_weights is None
+                else np.asarray(prior_weights, dtype=np.float64)
+            )
+            held = np.bincount(
+                design.codes, weights=(weights > 0.0).astype(np.float64), minlength=design.n_levels
+            )
+            self._weightless_levels = tuple(int(level) for level in np.flatnonzero(held == 0.0))
+            if self._weightless_levels:
+                self._population_null_space = np.eye(self.k)[:, np.diag(lines) == 1.0]
             return ()
         rows = sz_level_identification(design, prior_weights)
         separated: tuple[int, ...] = ()
@@ -693,15 +788,37 @@ class FactorSmooth:
         return separated
 
     @property
+    def _selects_lines(self) -> bool:
+        """Whether the term penalizes its levels' lines (``select=True``; a model saved before has not)."""
+        return self.basis == "sz" and bool(getattr(self, "select", False))
+
+    @property
     def _unidentified_level_names(self) -> tuple:
-        """The fitted ``sz`` levels the data identify only in part (``_record_unidentified_levels``)."""
-        return tuple(self._levels[code] for code in getattr(self, "_unidentified_levels", ()))
+        """The fitted ``sz`` levels the data identify only in part (``_record_unidentified_levels``).
+
+        A weightless level is one, also beside selected lines (``select=True``),
+        where it is not in ``_unidentified_levels``.
+        """
+        thin = tuple(getattr(self, "_unidentified_levels", ()))
+        codes = thin + tuple(
+            level for level in getattr(self, "_weightless_levels", ()) if level not in thin
+        )
+        return tuple(self._levels[code] for code in codes)
 
     @property
     def _has_population_offset(self) -> bool:
-        """Whether some level stays out of the population curve, which then moves off the main effect."""
-        return bool(getattr(self, "_unidentified_levels", ())) or bool(
-            getattr(self, "_separated_levels", ())
+        """Whether some level stays out of the population curve, which then moves off the main effect.
+
+        A weightless level beside selected lines also stays out: it is
+        predicted at the population curve.  No level is unidentified there,
+        so ``c`` is the polynomial part of the mean over all ``K`` levels,
+        the weightless one included, which the sum-to-zero constraint makes
+        zero: the population is the main effect (``"main"``).
+        """
+        return (
+            bool(getattr(self, "_unidentified_levels", ()))
+            or bool(getattr(self, "_separated_levels", ()))
+            or bool(getattr(self, "_weightless_levels", ()))
         )
 
     @property
@@ -712,11 +829,13 @@ class FactorSmooth:
         constraint makes it), ``"mean"`` (the mean of the levels the data
         identify), ``"separated_mean"`` (every level the data identify
         separates: their mean, which follows how far the fit walked their
-        lines) or ``"canonical"`` (every level thin).
+        lines) or ``"canonical"`` (every level thin).  A term that selects
+        its lines (``select=True``, #444) penalizes them instead: always
+        ``"main"``.
         """
-        if not self._has_population_offset:
-            return "main"
         excluded = set(self._unidentified_levels) | set(self._separated_levels)
+        if not excluded:
+            return "main"
         if len(excluded) < len(self._levels):
             return "mean"
         if len(self._unidentified_levels) < len(self._levels):
@@ -745,7 +864,8 @@ class FactorSmooth:
 
         With every level separated or thin there is no such mean.  If some
         level is not thin (every one of those separates) the mean is over
-        them, and it follows the separated lines (a warning at fit).  If every
+        them, and it follows the separated lines (a warning at fit, which
+        names ``select=True``).  If every
         level is thin the population is the canonical point of the family,
         where each level's free part is zero, ``Pi_t (beta_t + s_t - S / K)
         = 0`` (``Pi_t`` the projector on ``_free_directions[t]``, ``S = sum_t
@@ -823,10 +943,11 @@ class FactorSmooth:
         weightless = set(getattr(self, "_weightless_levels", ()))
         for level, free in zip(self._unidentified_levels, self._free_directions, strict=True):
             if level in weightless:
-                coefficients[level] = offset
                 continue
             directions = np.asarray(free, dtype=np.float64)
             coefficients[level] -= directions @ (directions.T @ (blocks[level] - offset))
+        for level in weightless:
+            coefficients[level] = offset
         return coefficients, offset
 
     def _score_identified(
@@ -854,7 +975,8 @@ class FactorSmooth:
         coefficients = blocks[np.maximum(codes, 0)]
         coefficients[codes < 0] = offset
         result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
-        thin = np.isin(codes, np.asarray(self._unidentified_levels, dtype=np.intp))
+        unidentified = (*self._unidentified_levels, *getattr(self, "_weightless_levels", ()))
+        thin = np.isin(codes, np.asarray(unidentified, dtype=np.intp))
         named = tuple(self._levels[code] for code in np.unique(codes[thin]))
         return result, named
 
