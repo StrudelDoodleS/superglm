@@ -148,9 +148,14 @@ def _negative_binomial_case(name: str, weight_semantics: str):
     else:
         data = pd.read_csv(FIXTURES / f"{name}.csv")
         X, y = data[["x"]], data["y"].to_numpy(dtype=np.float64)
+    # The fixture was generated at the default spline_penalty of 0.1 on a
+    # penalty measured over x; the penalty is now measured in knot intervals,
+    # so the same model takes 0.1 / hbar**3.
+    hbar = float(np.ptp(X["x"])) / (NB_KNOTS[name] + 1)
     model = SuperGLM(
         features={"x": CubicRegressionSpline(n_knots=NB_KNOTS[name])},
         family=NegativeBinomial(theta=1.0),
+        spline_penalty=0.1 / hbar**3,
         weight_semantics=weight_semantics,
     )
     return model, X, y
@@ -165,7 +170,7 @@ def _book_case(name: str, weight_semantics: str):
         features = {"band": Categorical(), "level": Categorical()}
     else:
         X = pd.DataFrame({"x": x, "level": level})
-        features = {"x": Spline(n_knots=10), "level": Categorical()}
+        features = {"x": Spline(kind="ps", n_knots=10), "level": Categorical()}
     model = SuperGLM(family=Tweedie(p=1.5), features=features, weight_semantics=weight_semantics)
     return model, X, y
 

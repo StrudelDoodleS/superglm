@@ -144,7 +144,9 @@ def test_zero_frequency_uniform_outlier_matches_literal_omission(discrete):
 def test_tweedie_prior_weights_keep_physical_row_knot_geometry(strategy):
     """EDM prior weights change likelihood precision, not row geometry."""
     frame = pd.DataFrame({"x": _X})
-    y = np.exp(0.1 + 0.05 * _X)
+    # Not a log-line: the general penalty leaves lines unpenalised, so such a y
+    # is fitted exactly, its deviance is round-off and phi is not positive.
+    y = np.exp(0.1 + 0.05 * _X + 0.1 * np.sin(_X))
 
     def model() -> SuperGLM:
         return SuperGLM(

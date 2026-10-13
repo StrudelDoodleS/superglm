@@ -593,7 +593,8 @@ class TestFreezeRevalidation:
         assert r.converged
         assert model._reml_profile.get("reml_freeze_revalidated") is True
         assert int(r.n_reml_iter) <= 12
-        assert float(r.lambdas["x1"]) == pytest.approx(0.0809, rel=0.05)
+        # 0.0809 over x; the penalty is measured in knot intervals of about 1/9.
+        assert float(r.lambdas["x1"]) == pytest.approx(58.9, rel=0.05)
 
     def test_the_published_record_is_the_revalidation_itself(self, monkeypatch):
         """The revalidation is the last freeze decision made -- the one
@@ -876,7 +877,8 @@ class TestFlatDirectionFloor:
         # No march: the loose-default iteration count, not 16+.
         assert int(r.n_reml_iter) <= 12
         # The informative lambda is where every tolerance rung puts it.
-        assert float(r.lambdas["x1"]) == pytest.approx(0.0809, rel=0.05)
+        # 0.0809 over x; the penalty is measured in knot intervals of about 1/9.
+        assert float(r.lambdas["x1"]) == pytest.approx(58.9, rel=0.05)
 
     def test_the_tensor_endgame_no_longer_exhausts_the_line_search(self):
         """tensor_600 at reml_tol=1e-11 previously marched its null margins
@@ -957,8 +959,10 @@ class TestFlatDirectionFloor:
         # live in the complete-fit baseline (PR record), tested
         # separately from numerical correctness per the test policy.
         assert str(r.termination_reason) == "score_objective_tolerance"
-        assert float(r.lambdas["f6"]) == pytest.approx(16.928, rel=0.05)
-        assert float(r.lambdas["f7"]) == pytest.approx(0.47106, rel=0.05)
+        # 16.928 and 0.47106 over the level positions on [0, 1]; the penalties
+        # are measured in their knot intervals, 1/15 and 1/23.
+        assert float(r.lambdas["f6"]) == pytest.approx(16.928 * 15**3, rel=0.05)
+        assert float(r.lambdas["f7"]) == pytest.approx(0.47106 * 23**3, rel=0.05)
         assert int(r.n_reml_iter) <= 25
 
     def test_a_high_rank_random_effect_does_not_freeze_the_low_rank_spline(self):
@@ -991,7 +995,8 @@ class TestFlatDirectionFloor:
         frozen = dict(zip(freeze["names"], freeze["frozen"]))
         assert r.converged
         assert not frozen["x"]
-        assert float(r.lambdas["x"]) == pytest.approx(0.182, rel=0.25)
+        # 0.182 over x; the penalty is measured in knot intervals of about 1/6.
+        assert float(r.lambdas["x"]) == pytest.approx(39.3, rel=0.25)
 
     def test_informative_slow_directions_do_not_freeze(self):
         """The tightest informative curvature must stay active: it is exactly
@@ -1438,7 +1443,9 @@ class TestDeadSearchNewtonDecrement:
 
         monkeypatch.setattr(direct, "reml_laml_objective", reject_every_move)
         monkeypatch.setattr(direct, "classify_dead_feasible_exit", spy)
-        model = SuperGLM(family="poisson", features={"x": Spline(k=7)}, selection_penalty=0)
+        model = SuperGLM(
+            family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
+        )
         with pytest.warns(ConvergenceWarning, match="no smoothing step improved"):
             model.fit_reml(
                 pd.DataFrame({"x": x}),

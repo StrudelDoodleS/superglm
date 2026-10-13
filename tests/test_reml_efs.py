@@ -184,13 +184,17 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) ->
     assert len(set(observed_history)) == 6
     np.testing.assert_allclose(
         observed_history,
+        # Re-recorded when the penalty became the curvature integral over x in
+        # knot intervals (27 times the one over x here); the bootstrap fit's
+        # fixed 1e-4 is then a 27-fold weaker penalty, so the path is not the
+        # old one scaled, though it ends at 27 times the old 0.1101.
         [
-            0.01626419201225552,
-            0.0349510256012486,
-            0.0797665435665074,
-            0.089561137759222,
-            0.10670080294752798,
-            0.11008871008433999,
+            0.4190994113257531,
+            0.9236413733685864,
+            2.129891276016781,
+            2.400892858313464,
+            2.868818623876722,
+            2.9636128159257904,
         ],
         rtol=history_tolerance,
         atol=0.0,
@@ -203,12 +207,12 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) ->
         beta,
         np.array(
             [
-                -0.12790630403504422,
-                0.36342378567226796,
-                0.9588680925890924,
-                1.030315558978761,
-                0.1004836156927829,
-                0.06796521410878009,
+                -0.12754634358137945,
+                0.36371752921943645,
+                0.958681955619681,
+                1.0298840936189368,
+                0.10073017373512301,
+                0.0677786170161209,
             ]
         ),
         rtol=history_tolerance,
@@ -216,13 +220,13 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) ->
     )
     np.testing.assert_allclose(
         result.pirls_result.intercept,
-        0.17010863862540995,
+        0.17006861090532044,
         rtol=history_tolerance,
         atol=0.0,
     )
     np.testing.assert_allclose(
         result.objective,
-        46.435840822818534,
+        46.43593419340491,
         rtol=history_tolerance,
         atol=0.0,
     )

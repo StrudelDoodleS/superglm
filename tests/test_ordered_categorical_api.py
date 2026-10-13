@@ -4,8 +4,9 @@
 shortcuts (``kind``/``n_knots``/``degree``/``select``/``penalty``) and the
 legacy ``basis="spline"``/``basis="step"`` strings are gone; these tests pin
 that the removed surface fails loudly, that the implicit default is exactly
-the historical P-spline, and that specs restored from before the removal
-either keep working (spline mode) or refuse loudly (step mode).
+the cubic regression spline it is documented as (a P-spline before 0.40), and
+that specs restored from before the removal either keep working (spline mode)
+or refuse loudly (step mode).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import pytest
 
 from superglm import OrderedCategorical, Spline, SuperGLM
 from superglm.editor.collapse import rebuilt_ordered_spec
-from superglm.features.spline import PSpline
+from superglm.features.spline import CubicRegressionSpline, PSpline
 
 LEVELS = [f"L{i}" for i in range(8)]
 
@@ -41,13 +42,16 @@ def _fit_ordered(spec: OrderedCategorical, X: pd.DataFrame, y: np.ndarray) -> Su
     return model
 
 
-def test_omitted_basis_is_quiet_and_preserves_default_pspline() -> None:
+def test_omitted_basis_is_quiet_and_is_the_default_cubic_regression_spline() -> None:
+    """Omitting ``basis`` gives ``Spline``'s default kind, ``cr`` since 0.40
+    (it was ``ps`` before). Fails on the 0.39 default, which built a PSpline."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         spec = OrderedCategorical(order=LEVELS)
 
     assert spec.basis == "spline"
-    assert isinstance(spec._spline, PSpline)
+    assert isinstance(spec._spline, CubicRegressionSpline)
+    assert isinstance(spec._spline_obj, CubicRegressionSpline)
     assert spec._spline.n_knots == 5
     assert spec._spline.degree == 3
     assert spec._spline.select is False
@@ -68,20 +72,21 @@ def test_canonical_rewrite_shape_reproduces_the_removed_shortcut_defaults() -> N
     assert spec._spline.penalty == "ssp"
 
 
-def test_canonical_rewrite_fits_bit_identically_to_the_default_path() -> None:
+def test_omitted_basis_fits_bit_identically_to_its_stated_declaration() -> None:
     """The shape pin above compares constructor parameters only, so it cannot
-    observe a behaviour change: a rewrite that agreed on all five parameters
+    observe a behaviour change: a declaration that agreed on every parameter
     and still built a different design would pass it unchanged. Fit the same
-    data both ways -- the omitted-basis default against the explicit
-    ``Spline(kind="ps", n_knots=5)`` migration of the removed ``n_knots=5``
-    shortcut -- and require agreement to the BIT rather than to a tolerance.
-    A tolerance would absorb exactly the kind of design difference the shape
-    pin already cannot see."""
+    data both ways -- the omitted-basis default against
+    ``Spline(kind="cr", n_knots=5)``, the declaration the docs and the clamp
+    warning name for it -- and require agreement to the BIT rather than to a
+    tolerance. A tolerance would absorb exactly the kind of design difference
+    the shape pin cannot see. Fails on the 0.39 default, a P-spline, whose
+    design is two columns wider."""
     X, y = _ordered_frame()
 
     default_path = _fit_ordered(OrderedCategorical(order=LEVELS), X, y)
     rewritten = _fit_ordered(
-        OrderedCategorical(order=LEVELS, basis=Spline(kind="ps", n_knots=5)), X, y
+        OrderedCategorical(order=LEVELS, basis=Spline(kind="cr", n_knots=5)), X, y
     )
 
     beta_default = np.asarray(default_path._result.beta)
@@ -451,7 +456,10 @@ def test_default_path_clamp_warning_states_the_remedy_it_can_name() -> None:
     message = str(record[0].message)
 
     assert "No basis= was given" in message
-    assert "basis=Spline(kind='ps', n_knots=2)" in message
+    # The default's own kind: naming kind='ps' here would tell the caller to
+    # declare a different smooth from the one they are fitting.
+    assert "default Spline(kind='cr', n_knots=5)" in message
+    assert "basis=Spline(kind='cr', n_knots=2)" in message
     assert "clamped to 2" in message
 
 

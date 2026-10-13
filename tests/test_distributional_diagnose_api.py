@@ -29,6 +29,12 @@ from superglm.features import Numeric, RandomEffect, Spline
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
 
+# The face this was calibrated on, with the curvature over the covariate: the
+# penalty in knot intervals is h**3 that (h = 100, one interior knot on
+# [-100, 100]), so the cap is scaled by h**-3 (a start scaled with it would sit
+# under the fixed lower bound).
+_PER_KNOT = 100.0**-3
+
 
 @pytest.fixture(scope="module")
 def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
@@ -51,6 +57,7 @@ def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
         pd.DataFrame({"x": x, "z": z}),
         response,
         lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.3},
+        max_lambda=1.0e10 * _PER_KNOT,
         max_reml_iter=60,
         reml_tol=1.0e-8,
         inner_tol=1.0e-10,

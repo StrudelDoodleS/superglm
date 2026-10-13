@@ -407,6 +407,9 @@ def _exact_face_model():
     return model
 
 
+_PER_KNOT = 100.0**-3
+
+
 @pytest.fixture(scope="module")
 def _joint_exact_face_model():
     levels = np.array([-100.0, 0.0, 100.0])
@@ -424,12 +427,17 @@ def _joint_exact_face_model():
             Predictor("location", {"x": Spline(kind="cr", k=3)}),
             Predictor("scale", {"z": Spline(kind="cr", k=3)}),
         ),
-        lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.3},
+        # The face this test was recorded on, with the curvature over the covariate:
+        # the penalty in knot intervals is h**3 that (h = 100, one interior knot on
+        # [-100, 100]), so the start and the lambda bounds are scaled by h**-3.
+        lambdas={"location:x#wiggle": 0.3 * _PER_KNOT, "scale:z#wiggle": 0.3 * _PER_KNOT},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=200),
         efs_config=DistributionalEFSConfig(
             outer="efs",
             max_iterations=60,
             tolerance=1.0e-8,
+            minimum_lambda=1.0e-6 * _PER_KNOT,
+            maximum_lambda=1.0e10 * _PER_KNOT,
         ),
         retain_rows=True,
     )

@@ -242,7 +242,7 @@ def _partial_group_case(kind: str, *, sibling_observed: bool):
     cat.build(fitted)
 
     if kind == "spline":
-        parent = Spline(n_knots=5)
+        parent = Spline(kind="ps", n_knots=5)
         parent.build(x)
     elif kind == "polynomial":
         parent = Polynomial(degree=2)

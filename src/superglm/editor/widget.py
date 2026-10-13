@@ -176,12 +176,14 @@ class EditorWidget:
             Callable[[], tuple[Callable[[JobContext], Any], Callable[[Any], dict[str, Any]]]],
         ] = {"cv": self._cv_job, "final_fit": self._final_fit_job}
         self._rating_preview: RatingPreview | None = None
-        # Free-level comparisons by term, for the fit in force. A hand edit
-        # changes neither side of a comparison, so only a new fit, its token,
-        # puts the cache aside.
+        # Free-level comparisons and Unsmoothed lines by term, for the fit in
+        # force. A hand edit changes neither, so only a new fit, its token,
+        # puts them aside. An Unsmoothed line is its payload, or the sentence
+        # that refused it.
         self._fit_model: Any = None
         self._fit_token = 0
         self._free_levels: dict[str, dict[str, Any]] = {}
+        self._unsmoothed: dict[str, dict[str, Any] | str] = {}
         self._token = secrets.token_urlsafe(24)
         self.terms = session_payload(session, self.control_counts)
         self.selected_term = next(iter(self.terms), "")
@@ -797,12 +799,14 @@ class EditorWidget:
             self._fit_model = self.session.model
             self._fit_token += 1
             self._free_levels = {}
+            self._unsmoothed = {}
         return self._fit_token
 
     def _free_level_comparison(self, term: str) -> dict[str, Any]:
         """``term``'s curve beside its levels fitted free, refitted once per fit in force.
 
-        The refit is a full fit, like Refit, and holds the session while it runs.
+        The refit is a full fit, like Refit, and holds the session while it
+        runs.
         """
         from superglm.editor.free_levels import free_level_comparison
 
@@ -811,6 +815,32 @@ class EditorWidget:
             if term not in self._free_levels:
                 self._free_levels[term] = free_level_comparison(self.session, term)
             return {**self._free_levels[term], "fit_token": token}
+
+    def _unsmoothed_line(self, term: str) -> dict[str, Any]:
+        """``term``'s curve with its smoothing off, fitted once per fit in force.
+
+        The fit runs without the lock, on what the session held when it was
+        asked for, so the editor stays free while it runs. Its line, or the
+        sentence refusing it, is kept only while that fit is still in force.
+        """
+        from superglm.editor.unsmoothed import unsmoothed_job
+
+        with self._lock:
+            token = self._current_fit_token()
+            found = self._unsmoothed.get(term)
+            job = None if found is not None else unsmoothed_job(self.session, term)
+        if job is not None:
+            try:
+                found = job()
+            except EditorValueError as refusal:
+                found = refusal.public_message
+            with self._lock:
+                if self._current_fit_token() == token:
+                    self._unsmoothed[term] = found
+        if isinstance(found, str):
+            raise EditorValueError(found)
+        assert found is not None
+        return {**found, "fit_token": token}
 
     def _rating_table(self, term: str) -> dict[str, Any]:
         """``term``'s block of the Excel rating table, for the Table view.
@@ -1261,6 +1291,38 @@ class EditorWidget:
             lambda target: self.session.replace_with_special_levels(
                 target, levels, special=special, method=method
             ),
+            term=term,
+            level_display=level_display,
+        )
+
+    def _knots(
+        self,
+        term: str,
+        params: dict[str, Any],
+        *,
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        """Change a spline term's knots and refit at once."""
+        return self._structural_step(
+            "set_knots",
+            lambda target: self.session.replace_with_knots(target, params, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
+    def _basis(
+        self,
+        term: str,
+        params: dict[str, Any],
+        *,
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        """Change a spline term's kind or shrinkage and refit at once."""
+        return self._structural_step(
+            "set_basis",
+            lambda target: self.session.replace_with_basis(target, params, method=method),
             term=term,
             level_display=level_display,
         )

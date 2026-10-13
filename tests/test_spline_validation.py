@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
 
 
 @pytest.mark.parametrize(
@@ -36,7 +36,7 @@ def test_constrained_splines_extend_with_linear_tails(spec_cls):
 
 @pytest.mark.parametrize(
     "spec_cls",
-    [Spline, NaturalSpline, CubicRegressionSpline],
+    [PSpline, NaturalSpline, CubicRegressionSpline],
     ids=["pspline", "natural", "crs"],
 )
 def test_spline_families_recover_known_smooth_poisson_rate(spec_cls):
@@ -69,3 +69,23 @@ def test_spline_families_recover_known_smooth_poisson_rate(spec_cls):
 
     assert rmse < 0.03
     assert corr > 0.998
+
+
+@pytest.mark.parametrize("kind", ["cr", "ns"])
+def test_a_natural_spline_on_a_column_with_one_value_says_so(kind):
+    """The default ``cr`` cannot place knots on one value; it says why rather than SciPy's words."""
+    with pytest.raises(ValueError, match="every value of this column is 3, so a natural spline"):
+        Spline(kind=kind).build(np.full(300, 3.0))
+    # A P-spline fits such a column, as it did when it was the default.
+    Spline(kind="ps").build(np.full(300, 3.0))
+
+
+def test_an_ordered_term_at_one_level_names_its_basis_not_a_score():
+    """The level score (0.5 here) and ``kind=`` mean nothing on an ordered term."""
+    from superglm import OrderedCategorical
+
+    labels = np.full(300, "b")
+    with pytest.raises(ValueError, match=r"one level, .*basis=Spline\(kind='ps'\)") as caught:
+        OrderedCategorical(order=["a", "b", "c"]).build(labels)
+    assert "0.5" not in str(caught.value)
+    OrderedCategorical(order=["a", "b", "c"], basis=Spline(kind="ps", n_knots=2)).build(labels)

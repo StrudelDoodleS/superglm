@@ -115,7 +115,7 @@ def _model(
     features["cat"] = Categorical()
     features.update({name: RandomEffect() for name in random})
     features["x"] = Spline(
-        n_knots=6, lambda_policy=None if lam is None else LambdaPolicy.fixed(main_lam)
+        kind="ps", n_knots=6, lambda_policy=None if lam is None else LambdaPolicy.fixed(main_lam)
     )
     policy = None if lam is None else {"wiggle": LambdaPolicy.fixed(lam)}
     kwargs = {} if link is None else {"link": link}
@@ -795,7 +795,7 @@ def _all_thin_model(
     policy = lines if lines is not None else {"wiggle": LambdaPolicy.fixed(1.0)}
     return SuperGLM(
         family="gaussian",
-        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        features={"x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
         interactions=[
             FactorSmooth("x", group="g", basis="sz", lambda_policy=policy, select=select)
         ],
@@ -2551,7 +2551,7 @@ def _random_effect_model(direct_solve: str, lam: tuple[float, float, float]) -> 
             "x10": Numeric(),
             "cat": Categorical(),
             "h": RandomEffect(lambda_policy=LambdaPolicy.fixed(lam[0])),
-            "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(lam[1])),
+            "x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(lam[1])),
         },
         interactions=[
             FactorSmooth(

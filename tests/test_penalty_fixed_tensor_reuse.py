@@ -568,10 +568,10 @@ def test_public_fit_constructs_the_tensor_support_once(monkeypatch):
     tensor_widths = []
     original = support_module._penalty_support
 
-    def counted(matrices):
+    def counted(matrices, **kwargs):
         if len(matrices) == 2:
             tensor_widths.append(matrices[0].shape[0])
-        return original(matrices)
+        return original(matrices, **kwargs)
 
     monkeypatch.setattr(support_module, "_penalty_support", counted)
     model = _fit_tensor()

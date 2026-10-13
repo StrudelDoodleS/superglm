@@ -400,6 +400,7 @@ def build_coef_rows(
             d["spline_kind"],
             d["knot_strategy"],
             d["boundary"],
+            d["difference_penalty"],
         )
 
     def _structured_lambdas(group_name: str) -> tuple[tuple[str, float], ...]:
@@ -542,7 +543,7 @@ def build_coef_rows(
                         pass
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
-                _, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(
+                _, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
                     smooth_groups[0].name,
                     spec._basis_spline,
                 )
@@ -565,6 +566,7 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
+                        difference_penalty=s_penalty,
                         # The wrapper's own forward, not a reach past it into
                         # `_spline`. Unlike a `getattr` default, this RAISES on
                         # a step-mode pickle -- and that is safe by local
@@ -754,7 +756,9 @@ def build_coef_rows(
 
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
-                s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
+                s_edf, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
+                    g.name, spec
+                )
                 rows.append(
                     _CoefRow(
                         name=g.name,
@@ -774,13 +778,16 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
+                        difference_penalty=s_penalty,
                         monotone=_mono_dir,
                         monotone_engine=_mono_engine,
                         monotone_repaired=_mono_repaired,
                     )
                 )
             else:
-                s_edf, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(g.name, spec)
+                s_edf, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
+                    g.name, spec
+                )
                 rows.append(
                     _CoefRow(
                         name=g.name,
@@ -795,6 +802,7 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
+                        difference_penalty=s_penalty,
                         monotone=_mono_dir,
                         monotone_engine=_mono_engine,
                         monotone_repaired=_mono_repaired,

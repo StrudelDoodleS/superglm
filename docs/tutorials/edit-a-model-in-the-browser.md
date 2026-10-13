@@ -122,6 +122,26 @@ level. Special levels (`specials=`) are drawn as separate dots.
 
 When Handles is off, hover over it to see the reason.
 
+## See a Spline Without Its Smoothing
+
+The **Unsmoothed** icon in the chart's toolbar draws a spline term fitted again with its smoothing
+switched off, as a solid green line over the curve, with **unsmoothed** in the legend. On an
+ordered term, **Free levels** does this job instead: see
+[Compare with free levels](#compare-with-free-levels).
+
+- The model is fitted again with the term's smoothing at zero, on the same knots. Every other
+  term keeps the smoothing the model chose for it.
+- The line is drawn under the same centring as the curve. Each is centred on its own fit, so
+  the two need not meet.
+- The line is one fit per term. The icon is busy while it runs, and you can go on editing.
+- The choice stays on as you move between spline terms, until you turn it off.
+- Hand edits keep the line. A refit fits it again.
+- A spline needs rows under each of its basis functions to be fitted without smoothing. Across
+  a gap in the data it has none there, so no line is drawn, and the icon stays on. Hover over it
+  for the reason. Fewer knots, or knots where the rows are, fix it.
+- A line far from the curve does not squash the chart: past the curve's own range again above
+  and below, it runs off the plot.
+
 ## Curve Selection Operations
 
 The floating palette acts on the current selection:
@@ -141,8 +161,9 @@ explanations describe the action before it is run.
 
 ## Waiting Changes and Refit
 
-Collapse, Ungroup, Set reference, Make special, Back on the curve and the four shapes (Flat,
-Line, Quadratic and Cubic) change the structure of a term, so the model must be refit before they take effect. They do not refit one by
+Collapse, Ungroup, Set reference, Make special, Back on the curve, the four shapes (Flat,
+Line, Quadratic and Cubic) and knot changes change the structure of a term, so the model must be
+refit before they take effect. They do not refit one by
 one: each change waits, and **Refit** in the application bar applies every waiting change in one
 fit.
 
@@ -227,28 +248,38 @@ code.
 
 To see which levels the smoothing overrides, choose **Free levels** in the chart's toolbar. The
 model is fitted again with the term's levels all free, as a plain categorical with the same groups
-and reference, and each level's free estimate is drawn behind the curve as a diamond on its
-interval.
+and reference, and each level is drawn behind the curve as a green diamond at its relativity to the
+reference, the diamonds joined by a green line. The reference's diamond sits at 1, as in a
+categorical's output. One button turns both on and off.
 
-- A level whose interval misses the curve is filled in orange: the curve holds it away from what
-  its own data says. A short tick on each whisker marks the fitted curve it is judged against,
-  which hand edits leave behind the drawn line.
-- The intervals allow for the curve's own pull toward each level. A model fitted with
-  `retain_fit_state=False` keeps nothing to measure that pull, so each interval allows for any
-  correlation between the curve and the free estimate, which makes it wider, and a note says so.
-- The intervals are widened for the number of levels compared, so a filled diamond is rarely
+- Each diamond's 95% interval against the reference shows while **Reference CI** is on, as a green
+  whisker through the diamond. The free series sits just right of each level, so its intervals
+  stand beside the curve's own, in blue with caps through the curve's points. The reference has
+  neither: it is 1 by definition.
+- The free interval is usually the wider: each level is estimated from its own rows alone, while
+  the curve borrows strength from its neighbours, most of all beside the reference.
+- A level the smoothing overrides has its diamond filled in: the curve holds it away from what
+  its own data says. It is marked whether the intervals show or not.
+- That judgement compares the free fit with the curve after centring both on the levels'
+  exposure-weighted average, not at the reference. Otherwise a curve that misses the reference
+  itself would mark nearly every level. So a filled diamond need not have its whisker miss the
+  curve, and a whisker that misses the curve need not be filled.
+- The judgement allows for the curve's own pull toward each level. A model fitted with
+  `retain_fit_state=False` keeps nothing to measure that pull, so the judgement allows for any
+  correlation between the curve and the free estimate, which makes it stricter, and a note says
+  so.
+- The judgement is widened for the number of levels compared, so a filled diamond is rarely
   chance.
 - Each level is judged on its own. Making one level special moves the curve, and with it the other
   levels' marks.
 - A level with little exposure has a wide interval. The smoothing helps such a level, so leave it
-  on the curve. The diamonds are placed against the levels' exposure-weighted average, so such a
-  level does not move or widen the others.
+  on the curve. It does not move the other levels' marks.
 - Some levels have no free value to draw, and get no diamond; a note names them:
   - a level whose every response is 0, such as a band with exposure but no claims, or, for a
     yes/no response, every response 1;
   - a level whose rows another term covers exactly, such as a categorical with one level for just
     those rows.
-- The intervals also allow for any correlation between the two fits, and a note says why, when
+- The judgement also allows for any correlation between the two fits, and a note says why, when
   the session's training data holds the model's rows in another order or other rows, when the
   family and link leave the pull unmeasured where rows sit far from their fitted mean (a Gaussian
   response with a log link, say), when the model has a shape-constrained P-spline, when a
@@ -259,6 +290,9 @@ interval.
   draws its levels flat.
 - The comparison is one more fit, like Refit, and holds the editor while it runs.
 - It stays on the chart until you choose another term or the model changes.
+- Turned off and on again for the same term and model, it comes back at once, with no new fit.
+- A level with no free value, named in the note, leaves a gap in the line. If the reference has
+  none, the levels are drawn by their gap from the curve instead, and the note says so.
 - If the model has a selection penalty, it is lifted from this term for the comparison, so the
   free levels are not shrunk. The other terms keep theirs. A custom penalty that cannot be limited
   to some terms shrinks the free levels too, or removes them, and the legend then says so.
@@ -350,8 +384,16 @@ the shape and its edges.
   fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.
 - A term can hold several ranges, each added as its own change.
-- A new range may not overlap one already shaped. Undo the old one, or choose a range outside it.
+- A new range paints over the ranges it overlaps. A range it covers goes. A range it overlaps at
+  one end keeps the part outside the new range, and a range it falls inside is split in two around
+  it. Each part keeps its shape and join and meets the new range at its edge.
 - Choosing a new shape on exactly the same range replaces the old shape.
+- The History names what a change does to the ranges it paints over, such as
+  "Flat 85 – 110 (trims Line 97 – 150 to 110 – 150)". Until Refit, each part a waiting change
+  leaves is drawn as a dashed box too, and the range in force keeps its band.
+- Each part kept of a cut range needs as many values as any range of its shape. If one would hold
+  too few, SuperGLM refuses the new range and names the range it would cut. Cover all of that
+  range, or leave more of it outside the new one.
 - A Line needs at least two distinct values in the range, a Quadratic three and a Cubic four. On
   an ordered term each band is one value, and so is a collapsed group inside the range. When the
   selection holds too few, the icon is disabled and says so on hover.
@@ -379,6 +421,80 @@ they are disabled, with the reason on hover:
 
 The summary, the Python `summary()` and the workbook note that shaped ranges were chosen in the
 editor from this data. Tests are conditional on them, so judge them on validation deviance.
+
+## Move the Knots
+
+The knots of a spline are the points where its pieces join. The **Knots** tool moves them, adds
+them and removes them. It works on a numeric spline term, and on an ordered term with a spline
+basis.
+
+Choose **Knots** in the mode switch at the left of the chart's toolbar, or press K. The knots show as diamonds on the x-axis.
+
+- **Move:** drag a knot along the axis. A tag above it shows where it is. Knots may pass each
+  other; a knot dropped too close to another moves to the nearest free spot.
+- **Add:** click the axis where the dashed diamond shows.
+- **Remove:** drag a knot below the axis, onto **Drop here to remove the knot**. A spline keeps at
+  least one knot.
+- **Keyboard:** click a knot to select it. The arrow keys nudge it along the axis, ten steps at a
+  time with Shift. Delete removes it, and Escape clears the selection.
+
+In the Knots tool, the chart's toolbar shows the rest:
+
+- **Count** (− n +): the number of knots. Hover a greyed-out button to see why it is off.
+- **Placed by:** the rule that places them. Choose Even spacing, Quantiles of values, Quantiles of
+  rows, or Tempered quantiles with an alpha from 0 to 1. Knots placed by hand show as Hand.
+- **Reset knots:** returns the knots to the ones declared in code.
+- **Kind:** the kind of spline. Choose P-spline, B-spline, Cubic regression or Natural. The knots
+  stay where they are. A spline declared in code as a cardinal cubic regression spline
+  (`kind="cr_cardinal"`) shows as Cardinal cubic regression, which cannot be chosen.
+- **Shrink:** a second penalty, on the term's straight-line part. With it on, the fit can shrink the
+  term towards a straight line and, where the data do not support it, out of the model. In code
+  this is `select=True`. Hover a greyed-out Shrink to see why it is off.
+
+Changing the count or the rule places every knot again by that rule. This drops any knot you moved
+by hand. Undo brings them back.
+
+A P-spline penalises the differences between neighbouring coefficients. A B-spline penalises the
+curve's bending itself. A cubic regression spline and a natural spline are cubic, and are held
+straight at each end of the data. A P-spline or B-spline takes the degree declared in code.
+
+Outside the tool, the knots show as small ticks under the axis. While a knot change waits, the
+knots it places are amber. The knots it moves or removes stay as dashed grey outlines until Refit,
+and a removed one is crossed out.
+
+A knot, Kind or Shrink change waits for Refit, like the other structural changes. While a Kind or
+Shrink change waits, that control is amber, and History names the change, for example
+`kind cr in BonusMalus` or `shrinkage on in BonusMalus`. With **Refit after every
+structural change** on in Settings, it refits at once. Undo, Redo and **Revert to original model**
+cover it. The refit drops hand edits on the term, as it does for every structural change. A
+monotone or convex term keeps its constraint, and the refit chooses the smoothing again. **Run CV**
+compares the edited knots with the original model.
+
+Knot changes have these limits:
+
+- **Count:** an ordered term takes at most one knot fewer than the levels on its curve.
+- **Interactions:** a term used by an interaction keeps its knots, kind and shrinkage.
+- **Evenly spaced only:** a natural spline (`kind="ns"`), and a P-spline whose penalty order `m` is
+  above its degree, take only evenly spaced knots. The tool shows their knots but does not move,
+  add or remove them by hand, and **Placed by** offers Even spacing only. Hovering the axis says
+  why. Their count can still change, and **Reset knots** still works.
+- **Waiting level changes:** while a waiting change alters an ordered term's levels, refit before
+  you change its knots, kind or shrinkage.
+
+Kind and Shrink have these limits too:
+
+- **Shaped ranges:** a term with shaped ranges takes a B-spline or a cubic regression spline only.
+- **Shaped ranges and Shrink:** a term with shaped ranges cannot shrink.
+- **Natural splines and constraints:** a natural spline takes no shape constraint.
+- **Natural splines and Shrink:** a natural spline cannot shrink.
+- **Natural splines and knots:** a natural spline takes evenly spaced knots only. Choose Even
+  spacing under **Placed by** before you choose Natural.
+- **Penalty order:** a B-spline or a cubic regression spline needs a penalty order `m` no higher
+  than its degree.
+- **Penalty order and Shrink:** a P-spline or B-spline shrinks only with a penalty order `m` of 2
+  or less.
+- **Constraints and Shrink:** a term whose shape constraint the fit enforces (`Constraint.fit`)
+  cannot shrink. A constraint applied after the fit (`Constraint.postfit`) can.
 
 ## Rating-Table Preview
 
@@ -539,7 +655,39 @@ holds:
 - the reference level;
 - the shaped ranges, with their degree and join;
 - where new levels go;
-- which levels of an ordered term are special.
+- which levels of an ordered term are special;
+- the knots chosen with the **Knots** tool, where there are any;
+- the kind of spline and its shrinkage, where chosen with **Kind** and **Shrink**.
+
+Knots are recorded only where the editor chose them. Knots declared in code are not recorded. A
+spline with editor knots has a `knots` entry. Knots moved by hand are recorded with
+`"strategy": "explicit"` and their positions; knots placed by a rule are recorded with the rule and
+their count, and applying the file places them by that rule on the data. On an ordered term the
+positions are on the axis its spline is fitted over.
+
+```json
+"DrivAge": {
+  "kind": "spline",
+  "knots": {
+    "knot_alpha": 0.2,
+    "n_knots": 6,
+    "positions": [21.0, 26.5, 33.0, 41.0, 52.5, 68.0],
+    "strategy": "explicit"
+  },
+  "ranges": []
+}
+```
+
+A kind or shrinkage chosen in the editor is recorded in a `basis` entry, with the kind and whether
+the term shrinks. A spline whose kind and shrinkage come from code has no `basis` entry.
+
+```json
+"DrivAge": {
+  "basis": {"kind": "cr", "select": true},
+  "kind": "spline",
+  "ranges": []
+}
+```
 
 Choose **Export > Structure (JSON)**, or call `session.export_structure("structure.json")` from
 Python. The file is JSON with sorted keys, so two versions compare cleanly in a diff.
@@ -570,6 +718,14 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 - A range the spline cannot take on the new data is refused, naming the feature and the range: by
   `apply` when you pass `X=`, otherwise by the fit.
 - A P-spline or natural spline with a shaped range is rebuilt as a B-spline, as in the editor.
+- A spline whose file has a `knots` entry is rebuilt with those knots. A file without one keeps the
+  declared knots.
+- A file with a `knots` entry needs superglm 0.40 or later. Older releases refuse it.
+- A spline whose file has a `basis` entry is rebuilt as that kind, with or without shrinkage,
+  before its knots and ranges. It keeps its other declared settings.
+- A `basis` the declared spline cannot take, such as a natural spline on a term with a shape
+  constraint, is refused, naming the feature.
+- A file with a `basis` entry needs superglm 0.40 or later. Older releases refuse it.
 - A feature the model does not have is refused, by name.
 - A feature that is another kind of term in the model is refused, by name.
 - A level the file makes special is taken off the model's curve.
@@ -668,6 +824,8 @@ still works: its report is shown on the Validation tab.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
 - Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit, a waiting change or a
   step.
+- Press K to choose the Knots tool. With a knot selected, the arrow keys nudge it, ten steps at a
+  time with Shift; Delete removes it and Escape clears the selection.
 - Press R to refit the waiting changes.
 
 Pointer editing remains the primary high-density curve workflow. Full per-point keyboard editing

@@ -45,6 +45,9 @@
   --ci-whisker: rgba(36, 87, 197, 0.5);
   --basis-contribution: rgba(92, 96, 104, 0.3);
   --build-end: #0969da;
+  /* The Unsmoothed line: a teal clear of the blue edit, the amber previous
+     edit and the grey original, in lightness too, and 3.7:1 on the ground. */
+  --unsmoothed: #0d9488;
   --trace-ink: #57606a;
   /* Significance tints in the summary table: a background and its text. */
   --sig-strong-bg: #d5f2e4;

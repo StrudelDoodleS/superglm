@@ -90,7 +90,7 @@ class TestSplineCategoricalBuild:
         assert len(groups) == 2
 
     def test_group_names_and_n_cols(self):
-        spline_spec = Spline(n_knots=5)
+        spline_spec = Spline(kind="ps", n_knots=5)
         cat_spec = Categorical(base="first")
         x_spline = np.linspace(0, 100, 300)
         x_cat = np.array(["A", "B", "C"] * 100)
@@ -128,7 +128,7 @@ class TestSplineCategoricalBuild:
         np.testing.assert_array_equal(groups[0].spline_cat_mask, x_cat == "B")
 
     def test_penalty_matches_parent(self):
-        spline_spec = Spline(n_knots=8)
+        spline_spec = Spline(kind="ps", n_knots=8)
         cat_spec = Categorical(base="first")
         x = np.linspace(0, 100, 200)
         x_cat = np.array(["A", "B"] * 100)
@@ -1230,8 +1230,8 @@ class TestNoOverhead:
 
 class TestTensorInteractionBuild:
     def test_build_shape(self):
-        s1 = Spline(n_knots=5)
-        s2 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
+        s2 = Spline(kind="ps", n_knots=5)
         rng = np.random.default_rng(42)
         x1 = rng.uniform(0, 100, 500)
         x2 = rng.uniform(0, 50, 500)
@@ -1257,8 +1257,8 @@ class TestTensorInteractionBuild:
         assert np.sum(eigvals < 1e-10) == 1
 
     def test_kronecker_values(self):
-        s1 = Spline(n_knots=3)
-        s2 = Spline(n_knots=3)
+        s1 = Spline(kind="ps", n_knots=3)
+        s2 = Spline(kind="ps", n_knots=3)
         rng = np.random.default_rng(42)
         x1 = rng.uniform(0, 100, 200)
         x2 = rng.uniform(0, 50, 200)
@@ -1300,8 +1300,8 @@ class TestTensorInteractionBuild:
         assert ti.parent_names == ("age", "vehage")
 
     def test_custom_knots(self):
-        s1 = Spline(n_knots=5)
-        s2 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
+        s2 = Spline(kind="ps", n_knots=5)
         x1 = np.linspace(0, 100, 200)
         x2 = np.linspace(0, 50, 200)
         s1.build(x1)
@@ -1312,8 +1312,8 @@ class TestTensorInteractionBuild:
         assert info.n_cols == 6 * 7
 
     def test_decompose_returns_bilinear_and_wiggly_groups(self):
-        s1 = Spline(n_knots=5)
-        s2 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
+        s2 = Spline(kind="ps", n_knots=5)
         x1 = np.linspace(0, 100, 300)
         x2 = np.linspace(0, 50, 300)
         s1.build(x1)
@@ -1776,8 +1776,8 @@ class TestTensorMarginalParentGeometry:
 
     def test_bs_edge_padding_flows_through(self):
         """PSpline parent's open knot vector is used in tensor marginals."""
-        s1 = Spline(n_knots=5)
-        s2 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
+        s2 = Spline(kind="ps", n_knots=5)
         x1 = np.linspace(0, 100, 300)
         x2 = np.linspace(0, 50, 300)
         s1.build(x1)
@@ -1836,7 +1836,7 @@ class TestTensorMarginalParentGeometry:
 
     def test_mixed_bs_ns_build(self):
         """bs+ns tensor builds correctly with different marginal types."""
-        s1 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
         s2 = NaturalSpline(n_knots=5)
         x1 = np.linspace(0, 100, 300)
         x2 = np.linspace(0, 50, 300)
@@ -1854,7 +1854,7 @@ class TestTensorMarginalParentGeometry:
 
     def test_mixed_bs_cr_build(self):
         """bs+cr tensor builds correctly with different marginal types."""
-        s1 = Spline(n_knots=5)
+        s1 = Spline(kind="ps", n_knots=5)
         s2 = CubicRegressionSpline(n_knots=5)
         x1 = np.linspace(0, 100, 300)
         x2 = np.linspace(0, 50, 300)
@@ -1922,8 +1922,8 @@ class TestTensorMarginalParentGeometry:
 
     def test_n_knots_none_uses_parent_geometry(self):
         """Default n_knots=None matches parent knot count."""
-        s1 = Spline(n_knots=7)
-        s2 = Spline(n_knots=4)
+        s1 = Spline(kind="ps", n_knots=7)
+        s2 = Spline(kind="ps", n_knots=4)
         x1 = np.linspace(0, 100, 300)
         x2 = np.linspace(0, 50, 300)
         s1.build(x1)
@@ -2010,8 +2010,8 @@ class TestTensorMarginalParentGeometry:
 
     def test_n_knots_override_preserves_knot_alpha(self):
         """Overridden marginals should use the parent's knot_alpha."""
-        s1 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
-        s2 = Spline(n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        s1 = Spline(kind="ps", n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
+        s2 = Spline(kind="ps", n_knots=10, knot_strategy="quantile_tempered", knot_alpha=0.14)
         rng = np.random.default_rng(42)
         x1 = rng.exponential(50, 300)
         x2 = rng.exponential(25, 300)

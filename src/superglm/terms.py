@@ -148,7 +148,7 @@ def term(column: str, spec: FeatureSpec) -> BoundTerm:
 def s(
     column: str,
     *,
-    kind: str = "ps",
+    kind: str = "cr",
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
@@ -176,9 +176,9 @@ def s(
     ----------
     column : str
         Name of the numeric input column.
-    kind : str, default="ps"
-        Spline basis. Common choices are ``"ps"`` for P-splines and ``"cr"``
-        for cubic regression splines. See ``Spline`` for the other bases.
+    kind : str, default="cr"
+        Spline basis. Common choices are ``"cr"`` for cubic regression splines
+        and ``"ps"`` for P-splines. See ``Spline`` for the other bases.
     k : int, optional
         Public basis size. This limits flexibility; it is not the fitted
         effective degrees of freedom. Supply either ``k`` or ``n_knots``.

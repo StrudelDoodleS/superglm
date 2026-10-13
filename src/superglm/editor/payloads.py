@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from superglm.editor._types import PendingStep, StructuralStep
+from superglm.editor.basis import basis_payload, pending_basis
 from superglm.editor.collapse import KEPT_REFERENCE_ATTRIBUTE
 from superglm.editor.controls import (
     CONTROL_HANDLE_TERM_TYPES,
@@ -17,9 +18,11 @@ from superglm.editor.controls import (
     spline_fits_levels,
 )
 from superglm.editor.group_display import build_group_display
+from superglm.editor.knots import knots_payload, pending_knots
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
+from superglm.editor.unsmoothed import unsmoothed_available
 from superglm.features.categorical import Categorical
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import base_names_level
@@ -69,9 +72,13 @@ def session_payload(
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
-            "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
+            "shape": shape_payload(
+                session.model, name, term.metadata.get("shape_support"), _draft(session, name)
+            ),
+            "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
             "pending": _pending_term_payload(session, name),
             "unseen": unseen_payload(session, name),
+            "unsmoothed": unsmoothed_available(session.model._specs[name]),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,
@@ -163,6 +170,12 @@ def _timeline_entry(item, parent_hash: str | None, *, redo: bool) -> dict[str, A
     }
 
 
+def _draft(session, name: str):
+    """``name``'s spec as its waiting changes leave it, or None while none waits."""
+    waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
+    return waiting[-1].draft_spec if waiting else None
+
+
 def _pending_term_payload(session, name: str) -> dict[str, Any]:
     """What the term's waiting changes would put in force; None or empty where they change nothing.
 
@@ -170,11 +183,21 @@ def _pending_term_payload(session, name: str) -> dict[str, Any]:
     ungroup touches the term; ``ranges`` are the shaped ranges the draft adds
     or changes; ``reference`` is the level or group the draft pins in place of
     the fitted reference; ``specials`` are the draft's special levels once a
-    waiting step takes levels off the curve or puts them back.
+    waiting step takes levels off the curve or puts them back; ``knots`` are
+    the knots a waiting knot change places (``superglm.editor.knots.pending_knots``);
+    ``basis`` is the draft's ``{kind, select}`` while it differs from the one in
+    force (``superglm.editor.basis.pending_basis``).
     """
     waiting = [step for step in getattr(session, "pending", ()) if step.term == name]
     if not waiting:
-        return {"groups": None, "ranges": [], "reference": None, "specials": None}
+        return {
+            "groups": None,
+            "ranges": [],
+            "reference": None,
+            "specials": None,
+            "knots": None,
+            "basis": None,
+        }
     draft, fitted = waiting[-1].draft_spec, session.model._specs[name]
     regrouped = any(step.operation in {"collapse", "ungroup"} for step in waiting)
     respecified = any(step.operation in {"special", "on_curve"} for step in waiting)
@@ -183,6 +206,8 @@ def _pending_term_payload(session, name: str) -> dict[str, Any]:
         "ranges": waiting_ranges(draft, fitted),
         "reference": _waiting_reference(draft, fitted),
         "specials": [str(level) for level in draft._special_display] if respecified else None,
+        "knots": pending_knots(session, name),
+        "basis": pending_basis(session, name),
     }
 
 

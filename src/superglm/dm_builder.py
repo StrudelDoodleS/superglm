@@ -232,6 +232,18 @@ def resolve_discrete_n_bins(
     return n_bins
 
 
+def knot_geometry_weight(sample_weight, weight_semantics: str):
+    """The weights that place a spline's knots: the rows' own under prior weights.
+
+    Frequency weights are replicated rows and place knots as such. Prior
+    weights say how precisely a row was measured, so knots follow the physical
+    rows, less those of zero weight, which were not observed at all.
+    """
+    if sample_weight is None or weight_semantics != PRIOR_WEIGHTS:
+        return sample_weight
+    return (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
+
+
 def _discretize_spline_column(
     x: NDArray,
     n_bins: int,
@@ -300,7 +312,7 @@ def auto_detect_features(
             spec = PSpline(n_knots=nk, degree=degree, penalty="ssp")
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {str(col):<20s} → Spline(n_knots={nk}, degree={degree})")
+            lines.append(f"  {str(col):<20s} → Spline(kind='ps', n_knots={nk}, degree={degree})")
         elif kind == "categorical":
             base = categorical_base
             if base == "most_exposed" and sample_weight is None:
@@ -413,19 +425,53 @@ _INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
 }
 
 
-def _build_ssp_group(B_csr, R_inv):
+def _stored_csr_bytes(B_csr) -> int:
+    """Bytes of the arrays a CSR basis keeps; zero for any other storage."""
+    if getattr(B_csr, "format", None) != "csr":
+        return 0
+    return int(B_csr.data.nbytes + B_csr.indices.nbytes + B_csr.indptr.nbytes)
+
+
+def _shared_row_support(B_csr, supports: dict | None):
+    """``detect_row_support`` once per basis object within one build.
+
+    Groups built over one basis object -- a ``decompose=True`` tensor's
+    bilinear and wiggly subgroups, which differ only in ``R_inv`` -- then hold
+    one support block and one row index by reference.  Each entry keeps its
+    basis alive, so the ``id`` key cannot be reused while ``supports`` lives.
+    """
+    from superglm._group_matrix._group_matrix_support import detect_row_support
+
+    entry = None if supports is None else supports.get(id(B_csr))
+    if entry is not None and entry[0] is B_csr:
+        return entry[1]
+    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
+    if supports is not None:
+        supports[id(B_csr)] = (B_csr, detected)
+    return detected
+
+
+def _build_ssp_group(B_csr, R_inv, supports: dict | None = None):
     """Cheapest exact representation of a factored SSP block.
 
     Compression is lossless deduplication of repeated rows; it never bins and is
     independent of ``discrete=True``.  Declines whenever the measured cost model
-    says the current CSR path is cheaper.
+    says the current CSR path is cheaper.  The support byte budget does not
+    decline a support whose compressed group fits in the bytes of the CSR
+    basis that a decline keeps instead.
+
+    Groups sharing a basis through ``supports`` stay inside that one-group
+    charge together.  The gate charges ``S + 8n`` retained (support block,
+    row index) plus ``2 * 8 * n_support * p`` for the projected support and
+    its weighted copy a Gram forms, ``p <= p_b``.  Shared, the block and
+    index are held once, and the subgroups' widths sum to the basis width
+    (null plus range space), so their Gram products total at most ``2S``.
     """
     from superglm._group_matrix._group_matrix_discretized import (
         SupportCompressedSSPGroupMatrix,
     )
-    from superglm._group_matrix._group_matrix_support import detect_row_support
 
-    detected = detect_row_support(B_csr)
+    detected = _shared_row_support(B_csr, supports)
     if detected is None:
         return SparseSSPGroupMatrix(B_csr, R_inv)
     B_unique_rows, row_index = detected
@@ -456,7 +502,7 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     )
     from superglm._group_matrix._group_matrix_support import detect_row_support
 
-    detected = detect_row_support(B_csr)
+    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
     if detected is None:
         return SparseGroupMatrix(B_csr)
     B_unique_rows, row_index = detected
@@ -624,12 +670,14 @@ def _process_info(
     lambda2: float | dict,
     tensor_build: DiscreteTensorBuildResult | None = None,
     tensor_id: int = -1,
+    ssp_supports: dict | None = None,
 ) -> tuple[GroupMatrix, NDArray | None, int]:
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
     Returns ``(group_matrix, r_inv_or_none, n_cols)`` where *r_inv_or_none*
     is the R_inv column block (for collecting into combined R_inv) or None
-    if no reparametrization was applied.
+    if no reparametrization was applied.  ``ssp_supports`` is shared by the
+    calls of one term, so subgroups over one basis share its row support.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -751,7 +799,7 @@ def _process_info(
         elif use_discrete:
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
         elif sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv)
+            gm = _build_ssp_group(info.columns, R_inv, ssp_supports)
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
         if omega_full is not None and hasattr(gm, "omega"):
@@ -790,7 +838,7 @@ def _process_info(
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
             gm.omega = info.penalty_matrix
         elif sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv)
+            gm = _build_ssp_group(info.columns, R_inv, ssp_supports)
             gm.omega = info.penalty_matrix
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
@@ -853,7 +901,9 @@ def _process_info(
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
             if info.penalty_matrix is not None or info.penalty_components is not None:
-                gm = _build_ssp_group(info.columns, np.eye(info.n_cols, dtype=np.float64))
+                gm = _build_ssp_group(
+                    info.columns, np.eye(info.n_cols, dtype=np.float64), ssp_supports
+                )
                 if info.penalty_matrix is not None:
                     gm.omega = info.penalty_matrix
                 if info.penalty_components is not None:
@@ -869,6 +919,9 @@ def _process_info(
                 gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
         else:
             gm = DenseGroupMatrix(info.columns)
+
+    if info.structural_ranks is not None and hasattr(gm, "structural_ranks"):
+        gm.structural_ranks = info.structural_ranks
 
     # ── Compose constraints into solver coordinates ──
     # Constraints from build() are in post-identifiability space (after projection).
@@ -1007,11 +1060,7 @@ def build_design_matrix(
     # ``None``) wherever the weights are strictly positive, which is every
     # Tweedie prior fit.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
-    geometry_weight = (
-        (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
-        if physical_rows
-        else sample_weight
-    )
+    geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
 
     compiled = compile_predictor_design(
         X,
@@ -1167,6 +1216,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         elif isinstance(gm, SplineCategoricalGroupMatrix) and _group_has_lambda(gm, g, lambdas):
@@ -1187,6 +1237,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
@@ -1230,6 +1281,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
@@ -1271,6 +1323,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
@@ -1292,6 +1345,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
+            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)
