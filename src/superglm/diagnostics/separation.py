@@ -692,25 +692,22 @@ def separated_curve_support(
     rows = raw @ projection
     sign = np.where(lower, -1.0, 1.0)
     free = _unseen_directions(rows[anchor])
-    if not free.shape[1]:
-        return None
     # A point the free directions do not see -- its row within the rank
     # cut's angle of the anchors' span -- cannot be held; leaving it out keeps
     # the program to the ranges the anchors leave open, which is what bounds
     # its size on a covariate with many distinct values.
     norms = np.linalg.norm(rows, axis=1)
-    reach = np.linalg.norm(rows @ free, axis=1)
-    separated = edge & (reach > SHARED_RANK_POLICY.factor_rcond * norms)
-    while free.shape[1] and separated.any():
+    separated = edge.copy()
+    while True:
+        separated &= np.linalg.norm(rows @ free, axis=1) > SHARED_RANK_POLICY.factor_rcond * norms
+        if not free.shape[1] or not separated.any():
+            return None
         points = np.flatnonzero(separated)
         held = _held_rows(sign[points, None] * (rows[points] @ free))
         if held.all():
             return separated, free
         separated[points[~held]] = False
-        if not separated.any():
-            return None
         free = _unseen_directions(rows[~separated])
-    return None
 
 
 def continuation_basis(
