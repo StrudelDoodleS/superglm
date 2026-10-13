@@ -317,6 +317,8 @@ def test_weight_correction_makes_one_row_pass_per_reml_iteration(monkeypatch, pa
     iteration (``m`` per call), so this fails there; here the count is the
     number of iterations whatever ``m`` is.
     """
+    # A small fixture: admit it below the work bar that keeps cheap Grams.
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     counts = _count_row_passes(monkeypatch)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
     interactions = [("a", "b"), ("e", "c")][:pairs]
@@ -335,14 +337,37 @@ def test_weight_correction_makes_one_row_pass_per_reml_iteration(monkeypatch, pa
     ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
 
     assert len(model._reml_penalties) >= 4
-    assert model._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
     assert counts["calls"] >= 2
     assert counts["grams"] == 0
     assert counts["passes"] == counts["calls"]
+    assert model._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
 
 
-def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams():
+def test_a_fit_whose_grams_are_cheap_keeps_them():
+    """Below the work bar the exact first-order Hessian and its path are kept."""
+    frame, y, weights = _poisson_frame(1500, 1.0e3)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Spline(n_knots=6),
+            "b": Spline(n_knots=6),
+            "e": Spline(n_knots=5),
+            "c": Categorical(),
+            "d": Numeric(),
+        },
+        interactions=[("a", "b")],
+        weight_semantics="frequency",
+        discrete=False,
+    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+
+    m, n, p = len(model._reml_penalties), model._dm.n, model._dm.p
+    assert m >= 4 and m * n * p * p < direct._LEVERAGE_HESSIAN_MIN_GRAM_WORK
+    assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
+
+
+def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams(monkeypatch):
     """Both backends must build one outer Hessian, so the dense one keeps the Grams."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     rng = np.random.default_rng(947)
     n = 400
     frame = pd.DataFrame(
@@ -373,6 +398,7 @@ def test_leverage_fit_reaches_the_gram_route_optimum(monkeypatch):
     moves the path, not the stationary point: the objectives agree within the
     stopping rule's own tolerance.
     """
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
 
     def fit() -> SuperGLM:

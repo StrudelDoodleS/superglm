@@ -319,16 +319,11 @@ def test_one_smooth_with_many_categories_keeps_specialized_derivative_gram() -> 
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
-def test_noncanonical_binomial_keeps_its_hessian_weight_terms() -> None:
-    """The gradient-only shortcut is deliberately narrower than all Binomial fits.
-
-    A probit fit keeps the first-order weight terms of its outer Hessian: it
-    takes the one-pass leverage route, never the canonical-logit shortcut that
-    drops them.
-    """
+def test_noncanonical_binomial_keeps_full_derivative_geometry() -> None:
+    """The leverage shortcut is deliberately narrower than all Binomial fits."""
     model = _four_smooth_fit(link="probit")
 
-    assert model._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
+    assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
 def test_profile_reports_when_weight_correction_is_structurally_zero() -> None:

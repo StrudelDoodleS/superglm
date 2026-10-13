@@ -88,10 +88,19 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 
 # One dense leverage pass replaces one derivative Gram per penalty. Mixed
 # spline/categorical timings cross over at four penalties on the reference host;
-# below that, the specialized Gram route remains cheaper.  The same bar admits
-# the other first-order fits to the one-pass route that also forms the outer
-# Hessian's first-order weight terms (``reml_w_correction(leverage_hessian=True)``).
+# below that, the specialized Gram route remains cheaper.
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+# The other first-order fits keep the derivative Grams, and with them the
+# outer Hessian's weight-product term, until those Grams cost real time: one
+# ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
+# iteration against ``n p^2`` for the one-pass route that forms the gradient and
+# the first-order Hessian terms (``reml_w_correction(leverage_hessian=True)``).
+# Wood (2011, sec. 3.5.1) prices exact second derivatives at ``O(M n p^2)`` and
+# first derivatives at ``O(n p^2)``, and prefers the cheaper scheme only for
+# large ``M``.  1e11 is about two seconds a REML iteration on the reference host
+# (a freMTPL2 fit with one interaction pair is 2.7e11); below it a fit keeps the
+# exact first-order Hessian and its established path.
+_LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
@@ -927,6 +936,7 @@ def optimize_direct_reml(
                 and not structured_alternative
                 and w_correction_order == 1
                 and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
+                and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
