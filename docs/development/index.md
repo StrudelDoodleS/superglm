@@ -14,5 +14,6 @@ migrations/weight-semantics-prior
 migrations/family-bound-predictors
 migrations/general-pspline-penalty
 migrations/default-spline-kind-cr
+migrations/spline-factor-separation-hold
 internals/index
 ```
