@@ -322,6 +322,27 @@ def _tensor_trust_ratios(
     return ratios
 
 
+def _bound_shoulder_in_pair(
+    own_step: float, other_step: float, cap_v: float
+) -> tuple[float, float]:
+    """A shoulder's step inside its shared tensor pair's cap.
+
+    The pair's half-difference ``|d_own - d_other| / 2`` must stay within
+    ``cap_v``.  The shoulder's step is shortened toward its partner's when
+    that keeps its direction; returned with a scale of 1.  When the cap
+    would turn it uphill (the partner moves the other way by more than
+    ``2 cap_v``), the shoulder stays put and the whole step is scaled so the
+    partner's move fits the cap: scaling keeps the step a descent direction,
+    where shortening the partner alone would not.  Returns the shoulder's
+    step and the scale for the whole step.
+    """
+    bounded = min(max(own_step, other_step - 2.0 * cap_v), other_step + 2.0 * cap_v)
+    if bounded * own_step > 0.0:
+        return bounded, 1.0
+    half_gap = 0.5 * abs(other_step)
+    return 0.0, (cap_v / half_gap if half_gap > cap_v else 1.0)
+
+
 def _damped_tensor_newton_step(
     eigvecs: NDArray,
     eigvals_pd: NDArray,
@@ -1383,19 +1404,19 @@ def optimize_discrete_reml_cached_w(
         # A concave shoulder's trust-region step: the step bound, downhill.
         delta[shoulder_d] = -np.sign(proj_grad_d[shoulder_d]) * shoulder_step
         if use_tensor_linesearch and shoulder_d.any():
-            # A shoulder in an active shared pair shortens its own step to
-            # keep the pair's half-difference within cap_v; one the cap would
-            # turn uphill stays put this iteration, as a frozen partner does.
+            # A shoulder in an active shared pair keeps the pair's
+            # half-difference within cap_v (``_bound_shoulder_in_pair``).
             for _group_name, (i, j) in shared_tensor_pairs:
                 if frozen_d[i] or frozen_d[j]:
                     continue
                 for own, other in ((i, j), (j, i)):
                     if not shoulder_d[own]:
                         continue
-                    bounded = float(
-                        np.clip(delta[own], delta[other] - 2.0 * cap_v, delta[other] + 2.0 * cap_v)
+                    delta[own], scale = _bound_shoulder_in_pair(
+                        float(delta[own]), float(delta[other]), cap_v
                     )
-                    delta[own] = bounded if bounded * delta[own] > 0.0 else 0.0
+                    if scale < 1.0:
+                        delta *= scale
         if use_tensor_linesearch and not active_idx_d.size:
             delta_newton = delta
         # Step capping on the generic path: scale the whole vector.
@@ -1658,6 +1679,9 @@ def optimize_discrete_reml_cached_w(
                     "grad_norm": proj_grad_norm,
                     "max_delta_raw": max_delta_raw,
                     "max_delta_used": float(np.max(np.abs(delta))),
+                    # the shared-tensor box the step was held to (generic path: None)
+                    "base_cap": float(base_cap) if use_tensor_linesearch else None,
+                    "cap_v": float(cap_v) if use_tensor_linesearch else None,
                     "accepted_step": step if accepted else 0.0,
                     "halvings": halving_count,
                     "accepted": accepted,

@@ -2335,7 +2335,9 @@ class TestREMLWarmStart:
         warm_info = warm.reml_diagnostics()
 
         steps = warm_info["profile"]["reml_outer_step_stats"]
-        assert max(row["max_delta_used"] for row in steps) <= 2.5
+        # Each step against the box it was held to (1.0 while locked, 2.5 after).
+        assert all(row["max_delta_used"] <= row["base_cap"] for row in steps)
+        assert any(row["base_cap"] == 1.0 for row in steps)
         assert warm_info["converged"]
 
     @pytest.mark.parametrize("discrete", [False, True])
