@@ -1880,13 +1880,14 @@ def optimize_direct_reml(
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,
-            # its gradient under the precision floor this exit certifies, so
-            # what its model promises over the steps just rejected sits at the
-            # objective's resolution, and refusing on it decided the verdict
-            # by platform rounding (an aliased-level fixture certified on
-            # Linux and macOS and was refused on native Windows).  Coverage:
-            # test_sz_aliased_levels_converge_under_reml[one_row] on native
-            # Windows CI; test_a_dead_search_beside_a_live_shoulder_certifies
+            # its gradient under the precision floor this exit certifies, and
+            # over the shortest step just rejected (5/128 in log lambda) its
+            # model promises at most a few times the objective's resolution:
+            # a decrease the rejected trials have just failed to show is no
+            # ground to refuse a certified point.  (The native-Windows flip of
+            # test_sz_aliased_levels_converge_under_reml[one_row] first blamed
+            # on refusing here was the unsigned shoulder read the signed rule
+            # removes.)  test_a_dead_search_beside_a_live_shoulder_certifies
             # pins this exit beside a shoulder on both engines.
             converged = termination_reason == "converged_at_precision"
             break
