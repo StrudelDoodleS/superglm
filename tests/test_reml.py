@@ -2338,6 +2338,36 @@ class TestREMLWarmStart:
         assert max(row["max_delta_used"] for row in steps) <= 2.5
         assert warm_info["converged"]
 
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_stop_refused_by_a_live_shoulder_is_recorded(self, discrete, monkeypatch):
+        """The second-order check gates only the score-test exit, and a shoulder
+        is usually stepped off before the score test passes, so the refusal is
+        forced here: the first time the score test passes, x2 is reported
+        live.  The refusal is counted and recorded with the direction's
+        gradient and curvature, and the fit then stops normally (mutation
+        check: the PR #487 head kept no record)."""
+        import superglm.reml.direct as direct_module
+        import superglm.reml.discrete as discrete_module
+
+        module = discrete_module if discrete else direct_module
+        real = module.concave_live_directions
+        calls = []
+
+        def first_refuses(gradient, hessian, estimated, **kwargs):
+            live = real(gradient, hessian, estimated, **kwargs)
+            calls.append(1)
+            return np.asarray(estimated, dtype=bool) if len(calls) == 1 else live
+
+        monkeypatch.setattr(module, "concave_live_directions", first_refuses)
+        X, y = _two_smooth_poisson()
+        info = _two_smooth_model(discrete).fit_reml(X, y).reml_diagnostics()
+        profile = info["profile"]
+        assert profile["reml_n_concave_stop_refusals"] == 1
+        record = profile["reml_concave_stop_refusal"]
+        assert record["names"] == ["x1", "x2"]
+        assert len(record["gradient"]) == len(record["curvature"]) == 2
+        assert info["converged"]
+
     def test_a_scalar_keeps_the_cold_start(self):
         """A float is not a warm start: the fit is the default fit, bit for bit."""
         X, y = _two_smooth_poisson(n=1500)

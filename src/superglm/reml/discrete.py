@@ -605,6 +605,8 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
+    # score-test stops refused because a concave shoulder was live
+    _n_concave_stop_refusals = 0
     # cached trials whose Hessian was negative only within its formation
     # rounding, solved as the semidefinite matrix (``_solve_cached_profiled_system``)
     _cached_solve_disclosure: dict[str, int] = {}
@@ -1156,6 +1158,19 @@ def optimize_discrete_reml_cached_w(
                 tolerance=_tol,
                 step_bound=shoulder_step,
             )
+            if bool(np.any(concave_live_d)):
+                # The score test passed but the second-order check did not:
+                # record which shoulders refused the stop (score-test exit only).
+                _n_concave_stop_refusals += 1
+                if profile is not None:
+                    live = np.flatnonzero(concave_live_d)
+                    profile["reml_concave_stop_refusal"] = {
+                        "iter": int(poi_iter + 1),
+                        "names": [group_names[i] for i in live],
+                        "gradient": [float(abs(proj_grad_d[i])) for i in live],
+                        "curvature": [float(revalidated_hess[i, i]) for i in live],
+                        "step_bound": float(shoulder_step),
+                    }
             if not masked_live and not bool(np.any(concave_live_d)):
                 rho = rho_clipped
                 prev_obj = obj
@@ -2003,6 +2018,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_n_formation_limited_trials"] = _cached_solve_disclosure.get(
             "formation_limited", 0
         )

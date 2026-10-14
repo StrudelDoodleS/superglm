@@ -403,6 +403,8 @@ def optimize_direct_reml(
     _observed_mode_rejected_trial_count = 0
     # line-search trials whose structured factor refused (a shorter step)
     _n_refused_structured_trials = 0
+    # score-test stops refused because a concave shoulder was live
+    _n_concave_stop_refusals = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
     # Only a rejected general raw-centering route crosses coefficient fits.
@@ -1243,6 +1245,19 @@ def optimize_direct_reml(
                 tolerance=_tol,
                 step_bound=max_newton_step,
             )
+            if bool(np.any(concave_live)):
+                # The score test passed but the second-order check did not:
+                # record which shoulders refused the stop (score-test exit only).
+                _n_concave_stop_refusals += 1
+                if profile is not None:
+                    live = np.flatnonzero(concave_live)
+                    profile["reml_concave_stop_refusal"] = {
+                        "iter": int(n_iter),
+                        "names": [group_names[i] for i in live],
+                        "gradient": [float(abs(proj_grad[i])) for i in live],
+                        "curvature": [float(revalidated_hess[i, i]) for i in live],
+                        "step_bound": float(max_newton_step),
+                    }
             if not masked_live and not bool(np.any(concave_live)):
                 _t_hessian += _time.perf_counter() - _t0
                 converged = True
@@ -1835,6 +1850,7 @@ def optimize_direct_reml(
         )
         profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch
