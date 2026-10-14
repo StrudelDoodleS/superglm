@@ -188,16 +188,14 @@ def optimize_direct_reml(
     seeds the bootstrap and the first Newton iterate of every component it
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
-    ``presolve`` (exact path only) first runs the cached-W performance
+    A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
+    estimated smoothing parameters first runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
-    design until its objective settles, then starts the exact Newton loop
+    design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
     (performance-iteration steps that initialize the outer iteration), taken
     to the cached-W fixed point.  The exact loop's gradient and stopping test
-    are unchanged, so its end point is certified exactly as from a cold
-    start.  ``None`` (the default) runs it on a cold fit, one without a warm
-    start, with at least ``_PRESOLVE_MIN_ESTIMATED`` estimated smoothing
-    parameters; ``True`` / ``False`` force it on or off.
+    are unchanged.  ``presolve`` overrides the rule for tests only.
 
     Two algorithm variants depending on ``discrete``:
 

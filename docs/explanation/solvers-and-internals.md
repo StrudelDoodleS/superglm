@@ -705,6 +705,8 @@ When `selection_penalty = 0`, the inner problem is smooth. The repo uses direct 
 
 That is `optimize_direct_reml()`.
 
+A cold exact fit with at least eight estimated smoothing parameters starts from the cached-W fixed point: the discrete path's cached-weights REML loop runs first on the same exact design, and the Newton loop below starts from its smoothing parameters and coefficients instead of the bootstrap. A fit warm-started with a `lambda2_init` mapping starts from those values and skips it.
+
 ```
 # ── Direct REML: Newton on log-λ ──────────────────────────────
 # Phase 1: fixed-point warmup (3 iterations)
