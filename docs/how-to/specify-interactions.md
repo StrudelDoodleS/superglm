@@ -315,6 +315,8 @@ Remedies: collapse the affected levels into neighbours (`collapse_levels` /
 `Categorical(grouping=...)`), model the crossed factor with a `RandomEffect`
 (its ridge bounds every cell), or target the term with a selection penalty
 (penalised terms are exempt from the check because their optima are finite).
+That exemption covers these categorical cells only: the spline-by-factor hold
+described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated
 and is never flagged — thin is not separated.
 
@@ -352,17 +354,26 @@ parameter is chosen for the whole curve: a sharp feature elsewhere can make it
 small, and the curve then falls toward a zero mean on those rows.
 
 The build finds such ranges, with or without `discrete=True` and at any
-`n_bins`, and holds the curve there:
+`n_bins`, and holds the curve there. Below, a response "off the boundary" is a
+nonzero one; for a binomial response it is one strictly between 0 and 1, since
+a range where every response is 1 is held the same way.
 
-- Past the last covariate value where the level has a nonzero response, the
-  curve keeps its value at that point, in the fit and in `predict()`. A spline
-  does the same past its training range (`extrapolation="clip"`).
-- Between two values with nonzero responses, the curve takes the smoothest path
-  that joins its two sides.
+- Before the first and past the last covariate value where the level has a
+  response off the boundary, the curve keeps its value at that point, in the
+  fit and in `predict()`. A spline does the same past its training range
+  (`extrapolation="clip"`).
+- Between two values with responses off the boundary, the curve takes the
+  smoothest path that joins its two sides.
+- The factor's base level has no curve of its own: its curve is the main
+  effect's, which every level shares. Its ranges are named, as "left to the
+  smoothing penalty", but not held; to have them held, choose a base that does
+  not separate.
 
 A `SeparationWarning` names the term, the level and the range, for example
 `'VehAge:VehBrand', level 'B12': VehAge 23 to 48 (21 rows, total weight 15.04,
-every response 0): held at its value at VehAge 22`. `separation="ignore"`
+every response 0): held at its value at VehAge 22`. A range the fit cannot hold
+is named too, as "left to the smoothing penalty". The hold applies whatever
+else bounds the term, a selection penalty included. `separation="ignore"`
 leaves these curves free, as earlier versions did, and `separation="error"`
 refuses the design. To let the data shape these ranges, merge the level into a
 similar one or drop the interaction.

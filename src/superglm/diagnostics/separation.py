@@ -276,10 +276,13 @@ def drifting_groups(
     The rows are those pinned at the link's guard; with none pinned (an
     exhausted, stagnant walk) the rows whose predictor lies farthest from the
     bulk, at least half as far as the farthest.  A group is named by how far
-    its own contribution moves those rows, which compares across groups; the
-    size of its coefficients does not, since each group's coefficients are in
-    its own reparametrised scale (a tensor's can dwarf the curve that walked).
-    Groups reaching at least half the farthest are named, at most five.
+    its own contribution moves those rows from where it puts the bulk (its
+    median over the rows with weight), which compares across groups; the size
+    of its coefficients does not, since each group's coefficients are in its
+    own reparametrised scale (a tensor's can dwarf the curve that walked), and
+    nor does its raw contribution, whose constant part -- ``mean * beta`` for a
+    covariate far from zero -- the intercept cancels.  Groups reaching at least
+    half the farthest are named, at most five.
     """
     live = weights > 0
     rows = np.flatnonzero((eta != eta_unclipped) & live)
@@ -295,7 +298,8 @@ def drifting_groups(
         coefficients = beta[group.sl]
         if not coefficients.size or group.scop_reparameterization is not None:
             continue
-        moved = np.asarray(matrix.matvec(coefficients), dtype=np.float64)[rows]
+        contribution = np.asarray(matrix.matvec(coefficients), dtype=np.float64)
+        moved = contribution[rows] - np.median(contribution[live])
         reach.append((float(np.max(np.abs(moved))), group.name))
     if not reach:
         return []
@@ -355,11 +359,11 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
     warnings.warn(message, SeparationWarning, stacklevel=3)
 
 
-def emit_curve_separation(curves: list, mode: str, distribution: Any) -> None:
+def emit_curve_separation(curves: list, mode: str) -> None:
     """Warn, or refuse, for spline-by-factor curves held over a separated range."""
     if not curves or mode == "ignore":
         return
-    message = format_curve_separation(curves, distribution)
+    message = format_curve_separation(curves)
     if mode == "error":
         raise SeparationError(message)
     warnings.warn(message, SeparationWarning, stacklevel=3)
@@ -579,6 +583,7 @@ class SeparatedCurve:
     covariate: str
     level: Any
     ranges: tuple[SeparatedRange, ...]
+    note: str = ""
 
 
 def _unseen_directions(rows: NDArray) -> NDArray:
@@ -595,7 +600,10 @@ def _unseen_directions(rows: NDArray) -> NDArray:
     width = rows.shape[1]
     if rows.shape[0] == 0:
         return np.eye(width)
-    _, sigma, vt = np.linalg.svd(rows, full_matrices=True)
+    # Only the right factor is read.  A tall matrix (a level's distinct values on
+    # the exact path) already yields the full width x width one without the
+    # M x M left factor; a wide one needs full matrices for its null directions.
+    _, sigma, vt = np.linalg.svd(rows, full_matrices=rows.shape[0] < width)
     cut = SHARED_RANK_POLICY.factor_rcond * float(sigma[0]) if sigma.size else 0.0
     return vt[int(np.count_nonzero(sigma > cut)) :].T
 
@@ -754,7 +762,7 @@ def continuation_basis(
     return np.linalg.svd(np.vstack(held), full_matrices=True)[2][rank:].T
 
 
-def format_curve_separation(findings: list[SeparatedCurve], distribution: Any = None) -> str:
+def format_curve_separation(findings: list[SeparatedCurve]) -> str:
     """One plain message naming each level, the covariate range and what the fit did there."""
     words = {
         "zero": "every response 0",
@@ -776,7 +784,8 @@ def format_curve_separation(findings: list[SeparatedCurve], distribution: Any = 
                 f"{item.covariate} {where} ({r.n_rows} rows, total weight {r.weight:.4g}, "
                 f"{words[r.boundary]}): {how}"
             )
-        lines.append(f"  {item.term!r}, level {item.level!r}: " + "; ".join(spans))
+        note = f" ({item.note})" if item.note else ""
+        lines.append(f"  {item.term!r}, level {item.level!r}{note}: " + "; ".join(spans))
     if len(findings) > _MAX_LISTED_LABELS:
         lines.append(f"  ... and {len(findings) - _MAX_LISTED_LABELS} more levels")
     upper = any(r.boundary != "zero" for item in findings for r in item.ranges)

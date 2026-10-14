@@ -52,10 +52,10 @@ def separated_tail_design(seed=0, n=12000, n_tail=12):
     return X, counts / w, w
 
 
-def fit(X, y, w, **kwargs):
+def fit(X, y, w, base="most_exposed", unseen="error", **kwargs):
     model = SuperGLM(
         family="poisson",
-        features={"x": Spline(n_knots=12), "f": Categorical()},
+        features={"x": Spline(n_knots=12), "f": Categorical(base=base, unseen=unseen)},
         interactions=[("x", "f")],
         **kwargs,
     )
@@ -138,7 +138,7 @@ def test_a_fit_without_separation_is_unchanged():
     np.testing.assert_array_equal(scanned.predict(X), plain.predict(X))
 
 
-def test_a_separated_range_between_nonzero_responses_is_interpolated():
+def interior_gap_design():
     """Level C has responses on [0, 10] and [30, 40] and only zeros between."""
     rng = np.random.default_rng(5)
     x = rng.integers(0, 41, size=9000).astype(float)
@@ -154,14 +154,84 @@ def test_a_separated_range_between_nonzero_responses_is_interpolated():
     w = rng.uniform(0.5, 1.0, size=len(X))
     counts = rng.poisson(w * np.exp(0.3 + 0.01 * X["x"].to_numpy())).astype(float)
     counts[-len(x_gap) :] = 0.0
-    model, curve = fit(X, counts / w, w, discrete=True)
+    return X, counts / w, w
+
+
+def test_a_separated_range_between_nonzero_responses_is_interpolated():
+    """Over the gap the fitted curve is the minimum-penalty join of its two sides.
+
+    The directions only the gap's values move, ``free``, are held where the
+    penalty alone puts them: ``free' Omega f = 0`` for level C's fitted raw
+    curve ``f``.  The free fit (``separation="ignore"``) is not there.
+    """
+    from superglm.diagnostics.separation import separated_curve_support
+
+    X, y, w = interior_gap_design()
+    model, curve = fit(X, y, w, discrete=True)
 
     assert len(curve) == 1
     line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
     assert "x 14 to 26 (21 rows" in line
     assert "held at the smooth interpolation of the curve on either side" in line
-    widths = {g.name: g.size for g in model._groups}
-    assert widths["x:f[C]"] < widths["x:f[B]"], "the directions only the gap sees are held"
+
+    level = (X["f"] == "C").to_numpy()
+    values, idx = np.unique(X["x"].to_numpy()[level], return_inverse=True)
+    lower = np.bincount(idx, weights=(y[level] <= 0.0), minlength=len(values)) > 0
+    inside = np.bincount(idx, weights=(y[level] > 0.0), minlength=len(values)) > 0
+
+    def penalty_gradient(fitted):
+        spec = fitted._interaction_specs["x:f"]
+        raw = np.asarray(spec._spline_spec._raw_basis_matrix(values), dtype=np.float64)
+        separated, free = separated_curve_support(
+            raw, np.eye(raw.shape[1]), lower & ~inside, np.zeros_like(inside), inside
+        )
+        np.testing.assert_array_equal(values[separated], np.arange(14.0, 27.0, 2.0))
+        group = next(g for g in fitted._groups if g.name == "x:f[C]")
+        r_inv = spec._R_inv_dict["C"]
+        coefficients = fitted.result.beta[group.start : group.end]
+        omega = np.asarray(spec._spline_spec._build_penalty(), dtype=np.float64)
+        gradient = free.T @ omega @ (r_inv @ coefficients)
+        # Rounding of the products that form it: a few dozen per entry, each
+        # relative to the norms involved.
+        bound = 64 * omega.shape[0] * U * np.linalg.norm(omega, 2)
+        bound *= np.linalg.norm(r_inv, 2) * np.linalg.norm(coefficients)
+        return np.max(np.abs(gradient)), bound
+
+    held, bound = penalty_gradient(model)
+    assert held <= bound
+    free_fit, _ = fit(X, y, w, discrete=True, separation="ignore")
+    loose, loose_bound = penalty_gradient(free_fit)
+    assert loose > 1e6 * loose_bound, "the free fit is not at the minimum-penalty join"
+
+
+def test_a_found_separation_is_reported_when_nothing_can_hold_it(monkeypatch):
+    """When the held directions would fill the block, the range is still named."""
+    import superglm.diagnostics.separation as separation
+
+    monkeypatch.setattr(separation, "continuation_basis", lambda *args, **kwargs: None)
+    X, y, w = interior_gap_design()
+    model, curve = fit(X, y, w, discrete=True)
+    assert len(curve) == 1
+    line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
+    assert "x 14 to 26 (21 rows" in line
+    assert "left to the smoothing penalty" in line
+
+
+def test_a_separated_base_level_is_named():
+    """The base level's curve is the main effect's, so it had no group and went unscanned.
+
+    With level C as the factor's base its tail is now named, as the factor's
+    base, and left to the smoothing penalty.
+    """
+    X, y, w = separated_tail_design()
+    _, curve = fit(X, y, w, base="C", discrete=True)
+
+    assert len(curve) == 1
+    line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
+    assert "the factor's base" in line
+    tail_x = X["x"].to_numpy()[-12:]
+    assert f"x {tail_x.min():g} to {tail_x.max():g} (12 rows" in line
+    assert "left to the smoothing penalty" in line
 
 
 def test_continuation_basis_holds_the_free_directions_at_minimum_penalty():
@@ -231,3 +301,28 @@ def test_a_range_the_free_directions_see_faintly_is_found_as_one_program_per_val
         if program.status == 0 and -program.fun > 1e-9 * np.linalg.norm(raw[~inside][j]):
             alone.append(values[~inside][j])
     assert alone == list(np.arange(36.0, 43.0))
+
+
+def test_unseen_directions_does_not_form_the_left_factor_of_a_tall_matrix():
+    """On the exact path the rows are a level's distinct covariate values, tens of thousands.
+
+    A full SVD builds the M x M left factor: 288 MB here, 20 GB at 50,000 rows,
+    for directions only the right factor holds.
+    """
+    import tracemalloc
+
+    from superglm.diagnostics.separation import _unseen_directions
+
+    rng = np.random.default_rng(0)
+    rows = rng.normal(size=(6000, 12))
+    rows[:, -2:] = rows[:, :2]  # two directions no row sees
+    tracemalloc.start()
+    try:
+        free = _unseen_directions(rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert free.shape == (12, 2)
+    np.testing.assert_allclose(rows @ free, 0.0, atol=64 * 12 * U * np.linalg.norm(rows, 2))
+    # The left factor alone would be 500 times the input.
+    assert peak < 64 * rows.nbytes

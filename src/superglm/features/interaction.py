@@ -382,7 +382,12 @@ def _separated_ranges(
         in_run = np.isin(idx, points) & (weights > 0.0)
         values = x[in_run]
         on_lower, on_upper = bool(np.any(lower[points])), bool(np.any(upper[points]))
-        held_at = clip[0] if points[-1] < first else (clip[1] if points[0] > last else None)
+        if np.isfinite(clip[0]) and points[-1] < first:
+            held_at: float | None = clip[0]
+        elif np.isfinite(clip[1]) and points[0] > last:
+            held_at = clip[1]
+        else:
+            held_at = None
         ranges.append(
             SeparatedRange(
                 low=float(values.min()),
@@ -649,7 +654,12 @@ class SplineCategorical:
         range with no rows.  The group keeps its name and smoothing
         parameter; its support, ``projection`` and ``penalty_matrix`` carry
         the change, so the design, its REML rebuilds and prediction all read
-        it from the group.  Findings are kept on ``_separated_curves``.
+        it from the group.  Findings are kept on ``_separated_curves``, every
+        one found, held or not.
+
+        The factor's base level has no group: its curve is the main effect's,
+        which every level shares, so it is scanned and its ranges named, not
+        held.
         """
         from superglm.diagnostics.separation import (
             SeparatedCurve,
@@ -672,13 +682,11 @@ class SplineCategorical:
         # joins its curve, so the curve separates in the raw (uncentred)
         # basis; without it, only through the block's centred coefficients.
         scan_map = np.eye(projection.shape[0]) if level_effect else projection
-        held_groups: list[GroupInfo] = []
-        found: list[SeparatedCurve] = []
-        for level, info in zip(self._non_base, groups, strict=True):
+
+        def scan(level):
             rows = np.flatnonzero(x_cat == level)
-            if info.penalty_matrix is None or not positive[rows].any():
-                held_groups.append(info)
-                continue
+            if not positive[rows].any():
+                return None
             if binned is None:
                 values, idx = np.unique(x_spline[rows], return_inverse=True)
                 idx = np.ravel(idx).astype(np.intp)
@@ -687,15 +695,48 @@ class SplineCategorical:
                 support, idx = binned[0], binned[1][rows]
             flags = _support_flags(idx, rows, len(support), rows_by_kind)
             result = _separated_points(support, scan_map, flags, separated_curve_support)
-            anchors = np.flatnonzero(flags[2] | (flags[0] & flags[1]))
-            if result is None or not anchors.size:
+            separated = None if result is None else result[0]
+            return rows, support, idx, flags, separated
+
+        scans = {level: scan(level) for level in self._non_base}
+        base = self._base_level
+        scans[base] = scan(base) if groups else None
+        held_groups: list[GroupInfo] = []
+        found: list[SeparatedCurve] = []
+        term = f"{self.spline_name}:{self.cat_name}"
+        if scans.get(base) is not None and scans[base][4] is not None:
+            rows, support, idx, flags, separated = scans[base]
+            found.append(
+                SeparatedCurve(
+                    term=term,
+                    covariate=str(self.spline_name),
+                    level=base,
+                    ranges=_separated_ranges(
+                        separated,
+                        flags,
+                        idx,
+                        x_spline[rows],
+                        weights[rows],
+                        (len(support), -1),
+                        (-np.inf, np.inf),
+                        0,
+                    ),
+                    note="the factor's base, whose curve is the main effect's",
+                )
+            )
+        for level, info in zip(self._non_base, groups, strict=True):
+            scanned = scans.get(level)
+            if info.penalty_matrix is None or scanned is None or scanned[4] is None:
                 held_groups.append(info)
                 continue
-            separated = result[0]
+            rows, support, idx, flags, separated = scanned
+            anchors = np.flatnonzero(flags[2] | (flags[0] & flags[1]))
             unclipped = idx
-            first, last = int(anchors[0]), int(anchors[-1])
-            low = separated[separated < first]
-            high = separated[separated > last]
+            first, last = (
+                (int(anchors[0]), int(anchors[-1])) if anchors.size else (len(support), -1)
+            )
+            low = separated[separated < first] if anchors.size else separated[:0]
+            high = separated[separated > last] if anchors.size else separated[:0]
             held = info
             clip = (-np.inf, np.inf)
             if low.size or high.size:
@@ -716,7 +757,7 @@ class SplineCategorical:
                 )
                 self._level_clip[level] = clip
             n_held = 0
-            if np.any((separated > first) & (separated < last)):
+            if anchors.size and np.any((separated > first) & (separated < last)):
                 inner = _separated_points(
                     support,
                     scan_map,
@@ -746,13 +787,10 @@ class SplineCategorical:
                         projection=projection @ basis,
                     )
                     held.structural_ranks = structural_penalty_ranks(self._spline_spec, held)
-            if held is info:
-                held_groups.append(info)
-                continue
             held_groups.append(held)
             found.append(
                 SeparatedCurve(
-                    term=f"{self.spline_name}:{self.cat_name}",
+                    term=term,
                     covariate=str(self.spline_name),
                     level=level,
                     ranges=_separated_ranges(

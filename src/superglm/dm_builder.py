@@ -1150,7 +1150,7 @@ def build_design_matrix(
                     )
                 )
         emit_separation_findings(findings, separation)
-        emit_curve_separation(curves, separation, distribution)
+        emit_curve_separation(curves, separation)
 
     return BuildResult(
         dm=compiled.design,
