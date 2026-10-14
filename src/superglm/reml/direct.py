@@ -109,6 +109,15 @@ _PRESOLVE_REML_TOL = 1e-9
 # single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
 # with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
 _PRESOLVE_MIN_ESTIMATED = 8
+# It also runs only where it was measured (Poisson with the log link on the
+# dense solver): a canonical link, whose Fisher curvature is the observed one
+# the exact loop uses, and no RandomEffect or FactorSmooth term the structured
+# solvers could take.  Elsewhere it would choose its start on curvature the
+# exact loop does not use (observed-curvature families), carry a boundary
+# coefficient into the exact fit without the mean-space restoration
+# (binomial with the log link), or take a backend route whose parity with the
+# dense one is untested past a few smoothing parameters.  A Tweedie power
+# search turns it off itself: a changed start moves the selected power.
 # The other first-order fits keep the derivative Grams, and with them the
 # outer Hessian's weight-product term, until those Grams cost real time: one
 # ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
@@ -189,7 +198,8 @@ def optimize_direct_reml(
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters first runs the cached-W performance
+    estimated smoothing parameters, a canonical link and no structured-solver
+    term first runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
     design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
@@ -403,7 +413,10 @@ def optimize_direct_reml(
     presolve_centred: tuple[float, NDArray] | None = None
     if presolve is None:
         presolve = (
-            not warm_lambdas and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            not warm_lambdas
+            and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            and not use_observed_geometry
+            and not structured_alternative
         )
     if presolve and not all_lambdas_fixed:
         presolve_profile: dict = {}

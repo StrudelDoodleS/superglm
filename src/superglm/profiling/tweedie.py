@@ -225,6 +225,9 @@ class _PowerProfile:
         # Each candidate's REML convergence is recorded in the search result
         # (``reml_converged``), so a candidate does not warn on its own.
         clone._suppress_convergence_warning = True
+        # Nor does it take the exact path's cached-W pre-solve: a changed start
+        # would move the selected power, unmeasured against ``xatol``.
+        clone._in_power_search = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False

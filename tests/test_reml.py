@@ -2796,3 +2796,115 @@ class TestExactPresolve:
         X, y = _two_smooth_poisson()
         info = _two_smooth_model(False).fit_reml(X, y).reml_diagnostics()
         assert "reml_presolve_n_iter" not in info["profile"]
+
+
+def _ten_penalty_frame(n=3000, seed=1):
+    rng = np.random.default_rng(seed)
+    x1, x2, x3 = rng.uniform(0, 1, n), rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    g = rng.integers(0, 8, n)
+    eta = (
+        0.6 * np.sin(2 * np.pi * x1)
+        + 0.3 * x2**2
+        + 0.2 * (g % 3)
+        + 0.15 * np.sin(4 * x3) * (g == 2)
+    )
+    h = rng.integers(0, 30, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3, "g": g.astype(str), "h": h.astype(str)})
+    return X, eta, rng
+
+
+def _ten_penalty_features(random_effect: bool) -> dict:
+    from superglm import RandomEffect
+
+    features = {
+        "x1": Spline(n_knots=10),
+        "x2": Spline(n_knots=8),
+        "x3": Spline(n_knots=8),
+        "g": Categorical(),
+    }
+    if random_effect:
+        features["h"] = RandomEffect()
+    return features
+
+
+class TestExactPresolveScope:
+    """The automatic pre-solve runs only where it was measured.
+
+    That is Poisson with the log link on the dense solver.  A non-canonical
+    link (whose exact loop uses observed curvature, or, binomial with the log
+    link, a boundary restoration the cached-W engine lacks), a model the
+    structured solvers can take, and a Tweedie power search's candidates keep
+    the plain cold start, bit for bit.  Mutation check: on the PR #487 head
+    (eeea40f5) the three model cases pre-solved.
+    """
+
+    @pytest.mark.parametrize("case", ["binomial_log", "gamma_log", "structured"])
+    def test_an_excluded_fit_keeps_the_plain_cold_start(self, case, monkeypatch):
+        import superglm.model.reml_ops as reml_ops_module
+        import superglm.reml.direct as direct_module
+
+        X, eta, rng = _ten_penalty_frame()
+        if case == "binomial_log":
+            y = rng.binomial(1, np.exp(eta - 2.5)).astype(float)
+            kwargs = {"family": "binomial", "link": "log"}
+        elif case == "gamma_log":
+            y = rng.gamma(4.0, np.exp(eta) / 4.0)
+            kwargs = {"family": "gamma", "link": "log"}
+        else:
+            y = rng.poisson(np.exp(eta - 1.0)).astype(float)
+            kwargs = {"family": "poisson"}
+
+        def model():
+            return SuperGLM(
+                discrete=False,
+                features=_ten_penalty_features(case == "structured"),
+                interactions=[("x3", "g")],
+                **kwargs,
+            )
+
+        presolves = []
+        real_presolve = direct_module.optimize_discrete_reml_cached_w
+
+        def counted(*args, **kw):
+            presolves.append(1)
+            return real_presolve(*args, **kw)
+
+        monkeypatch.setattr(direct_module, "optimize_discrete_reml_cached_w", counted)
+        fitted = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert len(fitted["lambdas"]) >= 8
+        assert presolves == []
+
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def without_presolve(*args, **kw):
+            kw["presolve"] = False
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", without_presolve)
+        plain = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert fitted["lambdas"] == plain["lambdas"]
+        assert fitted["objective"] == plain["objective"]
+
+    def test_a_power_search_candidate_keeps_the_plain_cold_start(self, monkeypatch):
+        import superglm.model.reml_ops as reml_ops_module
+
+        X, eta, rng = _ten_penalty_frame(n=1500)
+        y = rng.poisson(np.exp(eta - 1.0)) * rng.gamma(2.0, 0.5, len(eta))
+        calls = []
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def recorded(*args, **kw):
+            calls.append(kw.get("presolve"))
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", recorded)
+        from superglm import families
+
+        model = SuperGLM(
+            family=families.tweedie(p=1.5),
+            discrete=False,
+            features=_ten_penalty_features(False),
+            interactions=[("x3", "g")],
+        )
+        model.estimate_p(X, y, fit_mode="reml", p_bounds=(1.3, 1.7), xatol=0.05)
+        assert calls and all(presolve is False for presolve in calls[:-1])
