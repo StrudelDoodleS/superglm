@@ -836,6 +836,14 @@ def optimize_discrete_reml_cached_w(
     stop_criterion_frozen_d = None
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
+        # The shared-tensor path's trust region: every log-lambda coordinate
+        # within base_cap and each shared pair's half-difference within cap_v,
+        # widened after one accepted full step.  A concave shoulder's step
+        # and the step bound its stopping test reads are that box's edge, so
+        # the shoulder stays inside the region the rest of the step uses.
+        base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
+        cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
+        shoulder_step = base_cap if use_tensor_linesearch else max_newton_step
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
             cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
@@ -1145,7 +1153,7 @@ def optimize_discrete_reml_cached_w(
                 estimated_mask,
                 objective=obj,
                 tolerance=_tol,
-                step_bound=max_newton_step,
+                step_bound=shoulder_step,
             )
             if not masked_live and not bool(np.any(concave_live_d)):
                 rho = rho_clipped
@@ -1161,7 +1169,7 @@ def optimize_discrete_reml_cached_w(
                 estimated_mask,
                 objective=obj,
                 tolerance=_tol,
-                step_bound=max_newton_step,
+                step_bound=shoulder_step,
             )
             if profile is not None:
                 profile["reml_freeze_revalidated"] = True
@@ -1235,7 +1243,7 @@ def optimize_discrete_reml_cached_w(
             estimated_mask,
             objective=obj,
             tolerance=_tol,
-            step_bound=max_newton_step,
+            step_bound=shoulder_step,
         )
         frozen_d = freeze_decision.frozen
         # Concave shoulders take the trust-region boundary step below, not
@@ -1312,8 +1320,6 @@ def optimize_discrete_reml_cached_w(
             # each pair's mean. Widen after one accepted full step so a
             # finite margin can move when its partner approaches infinity.
             # Frozen coordinates stay outside the active subspace.
-            base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
-            cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
             delta_newton = delta
             delta, trust_mu, trust_binding = _damped_tensor_newton_step(
                 eigvecs_h,
@@ -1357,7 +1363,21 @@ def optimize_discrete_reml_cached_w(
                 break
 
         # A concave shoulder's trust-region step: the step bound, downhill.
-        delta[shoulder_d] = -np.sign(proj_grad_d[shoulder_d]) * max_newton_step
+        delta[shoulder_d] = -np.sign(proj_grad_d[shoulder_d]) * shoulder_step
+        if use_tensor_linesearch and shoulder_d.any():
+            # A shoulder in an active shared pair shortens its own step to
+            # keep the pair's half-difference within cap_v; one the cap would
+            # turn uphill stays put this iteration, as a frozen partner does.
+            for _group_name, (i, j) in shared_tensor_pairs:
+                if frozen_d[i] or frozen_d[j]:
+                    continue
+                for own, other in ((i, j), (j, i)):
+                    if not shoulder_d[own]:
+                        continue
+                    bounded = float(
+                        np.clip(delta[own], delta[other] - 2.0 * cap_v, delta[other] + 2.0 * cap_v)
+                    )
+                    delta[own] = bounded if bounded * delta[own] > 0.0 else 0.0
         if use_tensor_linesearch and not active_idx_d.size:
             delta_newton = delta
         # Step capping on the generic path: scale the whole vector.

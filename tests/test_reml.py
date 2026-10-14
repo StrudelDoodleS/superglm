@@ -2290,6 +2290,43 @@ class TestREMLWarmStart:
         assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
         assert abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) < 0.01
 
+    def test_a_tensor_shoulder_steps_inside_the_tensor_trust_region(self):
+        """A shoulder on the discrete path's shared-tensor search keeps its box.
+
+        That search bounds every log-lambda step by base_cap (1.0, 2.5 once a
+        full step was accepted) and each shared pair's half-difference by
+        cap_v.  Started at 1e8, this ti pair's margins sit on a shoulder; the
+        shoulder step was the generic path's 5.0, set after the damping, so
+        it left the box (mutation check: the PR #487 head recorded steps of
+        5.0).  It now steps to the box's edge, and the fit converges (to the
+        cold fit's objective within 5.3e-6, 1.2 times the twice-tolerance
+        band: the discrete stop is a working-model fixed point).
+        """
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = (
+            0.3
+            + 0.8 * np.sin(2 * np.pi * x1)
+            + 0.3 * np.cos(3 * x2)
+            + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        cold_info = _two_smooth_model(True, interaction=True).fit_reml(X, y).reml_diagnostics()
+        assert cold_info["converged"]
+        start = {
+            name: (1e8 if ":" in name else value) for name, value in cold_info["lambdas"].items()
+        }
+        warm = _two_smooth_model(True, interaction=True).fit_reml(X, y, lambda2_init=start)
+        warm_info = warm.reml_diagnostics()
+
+        steps = warm_info["profile"]["reml_outer_step_stats"]
+        assert max(row["max_delta_used"] for row in steps) <= 2.5
+        assert warm_info["converged"]
+
     def test_a_scalar_keeps_the_cold_start(self):
         """A float is not a warm start: the fit is the default fit, bit for bit."""
         X, y = _two_smooth_poisson(n=1500)
