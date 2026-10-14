@@ -99,10 +99,11 @@ _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
 # without moving the exact loop's iteration count; at 1e-6 it stopped early
 # enough on 3 pairs to cost three more exact iterations.
 _PRESOLVE_OBJECTIVE_TOL = 1e-7
-# The pre-solve's own stopping tolerance, whatever the caller's: its freeze
-# and stop bars scale with it, and a loose caller tolerance (1e-5) took the
-# cached-W loop 20 updates where 1e-9 took 16 on freMTPL2 (3 pairs), for a
-# start the exact loop then corrects anyway.
+# The pre-solve's stopping tolerance is never looser than this (a tighter
+# caller tolerance passes through): its freeze and stop bars scale with it,
+# and a loose caller tolerance (1e-5) took the cached-W loop 20 updates where
+# 1e-9 took 16 on freMTPL2 (3 pairs), for a start the exact loop then
+# corrects anyway.
 _PRESOLVE_REML_TOL = 1e-9
 # The automatic pre-solve (``presolve=None``) runs on a cold exact fit with at
 # least this many estimated smoothing parameters.  Each exact iteration pays

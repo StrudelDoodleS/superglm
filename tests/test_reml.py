@@ -2918,7 +2918,7 @@ class TestExactPresolve:
         """Its freeze and stop bars scale with the tolerance: under the caller's
         reml_tol = 1e-5 it stopped after 8 updates instead of 11, and the exact
         loop, stopping on that loose bar, published an objective 5.1e-3 higher.
-        It runs at its own 1e-9 whatever the caller asks."""
+        Its tolerance is never looser than 1e-9 (a tighter one passes through)."""
         updates = []
         for tol in (None, 1e-5):
             model, X, y = _ten_penalty_poisson()
