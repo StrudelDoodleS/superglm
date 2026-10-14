@@ -74,9 +74,9 @@ takes dozens of them. A fit that uses the structured solver for a random
 effect or factor smooth does not warn, since it never forms that product.
 
 On the 542,000-row freMTPL2 frequency book, a model with three interaction
-pairs (about 480 coefficients) took 1.6 minutes exactly and 19 seconds with
-`discrete=True`. With one pair (about 190 coefficients) it took 27 seconds and
-does not warn.
+pairs (about 480 coefficients) took 1.4 minutes exactly and 20 seconds with
+`discrete=True`. With one pair (about 190 coefficients) it took 27 to 40
+seconds and does not warn.
 
 ## When a REML fit counts as converged
 

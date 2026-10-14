@@ -11,15 +11,15 @@ import pytest
 from superglm import Categorical, RandomEffect, SlowFitWarning, Spline, SuperGLM
 from superglm.diagnostics import fit_cost
 from superglm.diagnostics.fit_cost import exact_reml_cost_message
-from superglm.distributions import Binomial, Gaussian, Poisson
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogitLink, LogLink
 
-# freMTPL2 (542,410 training rows), exact fit times after the one-pass
-# weight-derivative correction: mains only, then mains + 1, 3 and 10 pairs.
-BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 7-12 s
-BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 27 s, 9 s binned
-BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 95 s, 19 s binned
-BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_565)  # 405 s, 90 s binned
+# freMTPL2 (542,410 training rows): mains only, then mains + 1, 3 and 10 pairs;
+# exact and binned times from the session recorded in diagnostics/fit_cost.py.
+BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 8-9 s, 3 s binned
+BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 40 s, 9 s binned
+BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 86 s, 20 s binned
+BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_540)  # 422 s, 84 s binned
 
 
 @pytest.mark.parametrize("book", [BOOK_THREE_PAIRS, BOOK_TEN_PAIRS])
@@ -43,6 +43,11 @@ def test_rule_skips_gaussian_identity_and_covers_other_families():
     )
     assert (
         exact_reml_cost_message(**BOOK_THREE_PAIRS, distribution=Binomial(), link=LogitLink())
+        is not None
+    )
+    # Gamma-log reuses its Fisher data Gram but still took 119 s on this design
+    assert (
+        exact_reml_cost_message(**BOOK_THREE_PAIRS, distribution=Gamma(), link=LogLink())
         is not None
     )
 
