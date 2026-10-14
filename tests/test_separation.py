@@ -224,9 +224,9 @@ def test_an_unpenalised_refit_keeps_the_models_separation_mode():
 # ── #341: runtime backstop for separation the build scan cannot see ──
 
 
-def separated_numeric_design(seed=7, n=3000):
+def separated_numeric_design(seed=7, n=3000, share=0.25):
     rng = np.random.default_rng(seed)
-    z = (rng.uniform(size=n) < 0.25).astype(float)
+    z = (rng.uniform(size=n) < share).astype(float)
     y = _tweedie_response(rng, n, rate=0.5)
     y = np.where(z == 1.0, 0.0, y)
     return pd.DataFrame({"z": z}), y, np.ones(n)
@@ -253,16 +253,20 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     assert "'z'" in message  # the drifting group is named
 
 
-def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows():
+@pytest.mark.parametrize("share", [0.25, 0.6])
+def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
     """A coefficient's size is no guide across groups; what it moves on the stopped rows is.
 
     ``x`` is a real effect on a column of scale 1e-3, so its coefficient
     (about 260) dwarfs the separated ``z`` (pinned near -80).  Naming the
     largest coefficient named ``x``; the rows the guard stopped are moved by
     ``z``.  On the freMTPL2 guide model the same rule named a tensor term for
-    a brand's spline-by-factor curve.
+    a brand's spline-by-factor curve.  At ``share=0.6`` the stopped rows are
+    most of the rows, so a median over every row sits on them and ``z``
+    moved nothing from it; the move is measured from the rows that did not
+    stop.
     """
-    df, y, w = separated_numeric_design()
+    df, y, w = separated_numeric_design(share=share)
     rng = np.random.default_rng(11)
     df = df.assign(x=rng.normal(size=len(df)) * 1e-3)
     y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(300.0 * df["x"].to_numpy()))

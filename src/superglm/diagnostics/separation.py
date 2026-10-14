@@ -277,7 +277,9 @@ def drifting_groups(
     exhausted, stagnant walk) the rows whose predictor lies farthest from the
     bulk, at least half as far as the farthest.  A group is named by how far
     its own contribution moves those rows from where it puts the bulk (its
-    median over the rows with weight), which compares across groups; the size
+    median over the rows with weight that did not stop, so a group carrying
+    every stopped row still reads as moving them when they are most of the
+    rows), which compares across groups; the size
     of its coefficients does not, since each group's coefficients are in its
     own reparametrised scale (a tensor's can dwarf the curve that walked), and
     nor does its raw contribution, whose constant part -- ``mean * beta`` for a
@@ -293,17 +295,21 @@ def drifting_groups(
         rows = np.flatnonzero(spread >= 0.5 * top) if top > 0.0 else rows
     if not rows.size:
         return []
+    rest = live.copy()
+    rest[rows] = False
+    bulk = rest if rest.any() else live
     reach = []
     for group, matrix in zip(groups, design.group_matrices, strict=True):
         coefficients = beta[group.sl]
         if not coefficients.size or group.scop_reparameterization is not None:
             continue
         contribution = np.asarray(matrix.matvec(coefficients), dtype=np.float64)
-        moved = contribution[rows] - np.median(contribution[live])
+        moved = contribution[rows] - np.median(contribution[bulk])
         reach.append((float(np.max(np.abs(moved))), group.name))
-    if not reach:
+    farthest = max((value for value, _ in reach), default=0.0)
+    if farthest <= 0.0:
+        # No group moves the stopped rows from the rest: none is named.
         return []
-    farthest = max(value for value, _ in reach)
     ranked = sorted(reach, key=lambda item: -item[0])
     return [name for value, name in ranked if value >= 0.5 * farthest][:5]
 
