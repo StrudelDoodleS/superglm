@@ -1765,7 +1765,10 @@ def optimize_discrete_reml_cached_w(
                     evaluated_trial=evidence,
                     predicted_decrease=predicted_decrease,
                 )
-                # Second order gates the score-test exit only (exact engine).
+                # Second order gates the score-test exit only (exact engine;
+                # coverage: test_sz_aliased_levels_converge_under_reml[one_row]
+                # on native Windows CI, and
+                # test_a_dead_search_beside_a_live_shoulder_certifies).
                 converged = termination_reason == "converged_at_precision"
                 if profile is not None:
                     profile["reml_dead_line_search"] = {
