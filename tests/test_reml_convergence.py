@@ -149,7 +149,7 @@ def test_concave_live_needs_a_decrease_the_stop_rule_can_resolve() -> None:
     )
     # The last two columns are off the shoulder signature: curvature 125
     # times the gradient (above the band; roughness, not a shoulder) and 0.3
-    # times it (below the band) -- both with a model decrease, 0.07 and
+    # times it (below the band) -- both with a model decrease, 0.031 and
     # 0.018, far above the 8.5e-5 resolution, so only the band excludes them.
     np.testing.assert_array_equal(live, [False, True, False, False, False])
 
