@@ -286,6 +286,7 @@ def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
         "fixture must make the bystander's coefficient larger"
     )
     message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    assert "overflow guard" in message, "the regression needs the pinned branch"
     assert "group(s): ['z']" in message
 
 
