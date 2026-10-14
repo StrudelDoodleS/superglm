@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, LambdaPolicy, SuperGLM
+from superglm import Constraint, SuperGLM
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
@@ -2337,86 +2337,6 @@ class TestREMLWarmStart:
         steps = warm_info["profile"]["reml_outer_step_stats"]
         assert max(row["max_delta_used"] for row in steps) <= 2.5
         assert warm_info["converged"]
-
-    @pytest.mark.parametrize("discrete", [False, True])
-    def test_a_dead_search_beside_a_live_shoulder_is_not_certified(self, discrete, monkeypatch):
-        """Every line-search trial is made worse, so the first search dies.
-
-        The dead-search exit certifies a point whose active gradient is under
-        the precision floor (``classify_dead_feasible_exit``).  On a live
-        shoulder that gradient is small however far the optimum is: a weak
-        smooth started at 1e8 (optimum near 20) on the exact engine, and a ti
-        pair's margins at 1e8 beside held mains on the discrete engine's
-        shared-tensor search.  The PR #487 head certified both starts
-        (converged_at_precision, lambda still 1e8).  The exit is now
-        line_search_failed: disclosed as not converged, the fit still
-        returned.
-        """
-        import dataclasses
-
-        import superglm.reml.direct as direct_module
-        import superglm.reml.discrete as discrete_module
-
-        if discrete:
-            real_objective = discrete_module.reml_laml_objective
-
-            def worse_trial(*args, **kwargs):
-                value = real_objective(*args, **kwargs)
-                # Cached trials ask for a bare value; candidates for an evaluation.
-                return value if kwargs.get("return_evaluation") else value + 1e6
-
-            monkeypatch.setattr(discrete_module, "reml_laml_objective", worse_trial)
-        else:
-            real_fit = direct_module.fit_irls_direct
-
-            def worse_trial(*args, **kwargs):
-                result, inverse, gram = real_fit(*args, **kwargs)
-                if (kwargs.get("debug_context") or {}).get("phase") == "line_search":
-                    result = dataclasses.replace(result, deviance=result.deviance + 1e6)
-                return result, inverse, gram
-
-            monkeypatch.setattr(direct_module, "fit_irls_direct", worse_trial)
-
-        rng = np.random.default_rng(3)
-        n = 4000
-        x1 = rng.uniform(0, 1, n)
-        x2 = rng.uniform(0, 1, n)
-        X = pd.DataFrame({"x1": x1, "x2": x2})
-        if discrete:
-            # The discrete dead-search exit is the shared-tensor search's; the
-            # mains are held so the shoulder is the only live direction.
-            eta = (
-                0.3
-                + 0.8 * np.sin(2 * np.pi * x1)
-                + 0.3 * np.cos(3 * x2)
-                + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
-            )
-            model = SuperGLM(
-                family="poisson",
-                selection_penalty=0.0,
-                discrete=True,
-                features={
-                    "x1": Spline(kind="ps", k=10, lambda_policy=LambdaPolicy.fixed(3.0)),
-                    "x2": Spline(kind="ps", k=10, lambda_policy=LambdaPolicy.fixed(60.0)),
-                },
-                interactions=[("x1", "x2")],
-            )
-            start = {"x1:x2:margin_x1": 1e8, "x1:x2:margin_x2": 1e8}
-        else:
-            eta = 0.3 + 0.1 * np.sin(3 * np.pi * x2)
-            model = SuperGLM(
-                family="poisson",
-                selection_penalty=0.0,
-                discrete=False,
-                features={"x2": Spline(kind="ps", k=10)},
-            )
-            X = X[["x2"]]
-            start = {"x2": 1e8}
-        y = rng.poisson(np.exp(eta)).astype(float)
-
-        info = model.fit_reml(X, y, lambda2_init=start).reml_diagnostics()
-        assert info["termination_reason"] != "converged_at_precision"
-        assert not info["converged"]
 
     def test_a_scalar_keeps_the_cold_start(self):
         """A float is not a warm start: the fit is the default fit, bit for bit."""

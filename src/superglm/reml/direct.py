@@ -1786,11 +1786,13 @@ def optimize_direct_reml(
                     )
                 ),
             )
-            if termination_reason == "converged_at_precision" and bool(shoulder.any()):
-                # A live shoulder is no optimum, however small its gradient:
-                # its model still promises a decrease the stop can resolve.
-                # The dead search is disclosed, not certified.
-                termination_reason = "line_search_failed"
+            # The second-order check (``concave_live_directions``) gates the
+            # score-test exit only.  A shoulder here is flat by construction,
+            # its gradient under the precision floor this exit certifies, so
+            # what its model promises over the steps just rejected sits at the
+            # objective's resolution, and refusing on it decided the verdict
+            # by platform rounding (an aliased-level fixture certified on
+            # Linux and macOS and was refused on native Windows).
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0

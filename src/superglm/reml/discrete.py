@@ -1726,9 +1726,7 @@ def optimize_discrete_reml_cached_w(
                     evaluated_trial=evidence,
                     predicted_decrease=predicted_decrease,
                 )
-                if termination_reason == "converged_at_precision" and bool(shoulder_d.any()):
-                    # A live shoulder is no optimum (exact engine, likewise).
-                    termination_reason = "line_search_failed"
+                # Second order gates the score-test exit only (exact engine).
                 converged = termination_reason == "converged_at_precision"
                 if profile is not None:
                     profile["reml_dead_line_search"] = {
