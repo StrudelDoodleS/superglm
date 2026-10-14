@@ -301,6 +301,7 @@ def test_a_base_level_finding_does_not_refuse_the_design():
     assert len(curve) == 1
     line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
     assert "the factor's base" in line and "approximate" in line
+    assert curve[0].splitlines()[-1].endswith("which it names and does not refuse.")
 
 
 def test_continuation_basis_holds_the_free_directions_at_minimum_penalty():

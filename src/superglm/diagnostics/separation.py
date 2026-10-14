@@ -807,6 +807,11 @@ def format_curve_separation(findings: list[SeparatedCurve]) -> str:
         "(extrapolation='clip'), in the fit and in predict(). To let the data shape these "
         "ranges, merge the level into a similar one (Categorical(grouping=...)) or drop the "
         "interaction. separation='ignore' leaves the curves free there, as earlier versions "
-        "did; separation='error' refuses the design."
+        "did; separation='error' refuses the design"
+        + (
+            "."
+            if any(item.refusable for item in findings)
+            else ", except on a factor base's range, which it names and does not refuse."
+        )
     )
     return "\n".join([head, *lines, tail])
