@@ -610,11 +610,17 @@ def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty,
 def test_brand_b12_past_vehicle_age_22_is_held_not_priced_at_the_floor():
     """The screening guide's VehAge x VehBrand curve for B12 on its 80% training split.
 
-    B12 has no claims past VehAge 22 (21 training rows, 23 to 48).  Its curve
-    took a smoothing parameter near 1e-3 from the jump at VehAge 0, and past 22
-    it fell to the log link's floor: those rows were priced at ``exp(-80)``,
-    and the runtime warning named ``VehAge:BonusMalus``.  The curve is now held
-    at its value at 22, so each such row prices as the same policy at 22.
+    A regression anchor on the book's uncorrected claim counts (a fixed input,
+    deliberately not the corrected book of ``examples/fremtpl2_data.py``).
+    B12 has no claims past VehAge 22 (21 training rows, 23 to 48).  On these
+    counts its curve took a smoothing parameter near 1e-3 from a jump at
+    VehAge 0 that is an artefact of the corrupted block (``IDpol <= 24500``),
+    and past 22 it fell to the log link's floor: those rows were priced at
+    ``exp(-80)``, and the runtime warning named ``VehAge:BonusMalus``.  The
+    curve is now held at its value at 22, so each such row prices as the same
+    policy at 22.  On the corrected counts the jump is gone (B12's smoothing
+    parameter is near 7), and the tail is still held: VehAge 23 to 49, 24
+    training rows.
     """
     import warnings
 
