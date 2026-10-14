@@ -1,4 +1,4 @@
-"""Advance notice for exact REML fits that will take minutes.
+"""Advance notice for exact REML fits that will be slow.
 
 On the exact path (``discrete=False``) every coefficient update, every
 line-search refit and the one-pass weight-derivative correction (Wood 2011,
@@ -19,7 +19,7 @@ from superglm.links import IdentityLink
 
 
 class SlowFitWarning(UserWarning):
-    """An exact REML fit is large enough that it will take minutes.
+    """An exact REML fit is large enough to be slow: most of a minute or more.
 
     ``SuperGLM.fit_reml`` warns before the smoothing search starts when the
     model is fitted with ``discrete=False`` and rows x coefficients squared
@@ -57,6 +57,14 @@ class SlowFitWarning(UserWarning):
 # at 1.2e11 takes 48 s.  Exact wall time grows about as (n p^2)^0.64 between
 # the 3- and 10-pair rows, which puts a minute near 1.8e11.
 #
+# Binned against exact fitted values, the same models (Poisson, exposure
+# weights, 542,410 training rows), measured at 092df0d5: |mu_binned /
+# mu_exact - 1| over the training rows.
+#
+#   model        99th percentile   maximum   median
+#   + 3 pairs    0.46%             28.1%     0.023%
+#   + 10 pairs   0.99%             39.8%     0.070%
+#
 # Gamma with the log link reuses its constant Fisher data Gram across the
 # coefficient fits but is not exempt: the observed-curvature geometry, the
 # weight-derivative pass and the line search still cross every row, and in
@@ -91,8 +99,9 @@ def exact_reml_cost_message(
         "and 76 s. It groups each spline's values into n_bins equal-width "
         "bins, which changes nothing for a column with no more distinct values "
         "than n_bins, and it chooses the smoothing on the working model, as "
-        "mgcv's bam does. Its fitted values there differed from the exact fit's "
-        "by at most 1.1% on 99% of rows."
+        "mgcv's bam does. Its fitted values there were within 0.5% and 1.0% of "
+        "the exact fit's on 99% of rows, though up to 28% and 40% apart on the "
+        "single worst row."
     )
 
 

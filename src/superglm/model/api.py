@@ -756,7 +756,11 @@ class SuperGLM:
             iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
             returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
-            summary says why.
+            summary says why. A cold exact fit with at least eight smoothing
+            parameters and a cap of at least 10 can first run up to this
+            many cached-W updates (a pre-solve) before the exact loop;
+            ``reml_diagnostics()["n_reml_iter"]`` counts the exact loop and
+            ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
             it resolves per engine: 1e-9 for the Newton engines (exact and
@@ -776,7 +780,12 @@ class SuperGLM:
             and the objective change both fall below
             ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
             directions: inferentially flat directions are frozen where they
-            stand rather than marched toward the lambda cap. A direction
+            stand rather than marched toward the lambda cap. One on a concave
+            shoulder of a flat region (negative curvature about equal to its
+            gradient, whose model still promises a decrease this tolerance
+            resolves) refuses the stop and keeps stepping; the last such
+            refusal is recorded under
+            ``profile["reml_concave_stop_refusal"]``. A direction
             freezes when its gradient falls below
             ``max(0.1 * reml_tol, 1e-7) * (1 + |objective|)`` -- a loose
             tolerance widens that arm; tightening stops at the 1e-7 floor

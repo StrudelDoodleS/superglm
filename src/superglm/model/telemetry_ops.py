@@ -102,6 +102,9 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "lambdas": getattr(reml, "lambdas", None) or lambdas,
             "lambda_history": getattr(reml, "lambda_history", None) or [],
             "n_reml_iter": getattr(reml, "n_reml_iter", None),
+            # Cached-W updates of the exact path's pre-solve, run before the
+            # exact loop that n_reml_iter counts (0 when it did not run).
+            "n_presolve_iter": int((profile or {}).get("reml_presolve_n_iter", 0)),
             "converged": getattr(reml, "converged", None),
             "termination_reason": getattr(reml, "termination_reason", None),
             "convergence_note": reml_nonconvergence_message(reml),

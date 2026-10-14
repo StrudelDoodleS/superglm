@@ -109,6 +109,21 @@ _PRESOLVE_REML_TOL = 1e-9
 # single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
 # with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
 _PRESOLVE_MIN_ESTIMATED = 8
+# Nor under a short iteration cap: the pre-solve takes up to the fit's own
+# ``max_reml_iter`` cached-W updates before the exact loop (7 to 16 measured
+# on freMTPL2 and the test fixtures), so a caller capping the search below
+# this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
+# would get up to twice the work it budgeted for.
+_PRESOLVE_MIN_REML_ITER = 10
+# It also runs only where it was measured (Poisson with the log link on the
+# dense solver): a canonical link, whose Fisher curvature is the observed one
+# the exact loop uses, and no RandomEffect or FactorSmooth term the structured
+# solvers could take.  Elsewhere it would choose its start on curvature the
+# exact loop does not use (observed-curvature families), carry a boundary
+# coefficient into the exact fit without the mean-space restoration
+# (binomial with the log link), or take a backend route whose parity with the
+# dense one is untested past a few smoothing parameters.  A Tweedie power
+# search turns it off itself: a changed start moves the selected power.
 # The other first-order fits keep the derivative Grams, and with them the
 # outer Hessian's weight-product term, until those Grams cost real time: one
 # ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
@@ -189,7 +204,9 @@ def optimize_direct_reml(
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters first runs the cached-W performance
+    estimated smoothing parameters, a canonical link, no structured-solver
+    term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
+    runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
     design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
@@ -386,6 +403,8 @@ def optimize_direct_reml(
     _observed_mode_rejected_trial_count = 0
     # line-search trials whose structured factor refused (a shorter step)
     _n_refused_structured_trials = 0
+    # score-test stops refused because a concave shoulder was live
+    _n_concave_stop_refusals = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
     # Only a rejected general raw-centering route crosses coefficient fits.
@@ -403,7 +422,11 @@ def optimize_direct_reml(
     presolve_centred: tuple[float, NDArray] | None = None
     if presolve is None:
         presolve = (
-            not warm_lambdas and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            not warm_lambdas
+            and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            and not use_observed_geometry
+            and not structured_alternative
+            and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
         )
     if presolve and not all_lambdas_fixed:
         presolve_profile: dict = {}
@@ -447,8 +470,27 @@ def optimize_direct_reml(
         presolve_beta = presolve_start["beta"]
         presolve_intercept = presolve_start["intercept"]
         presolve_centred = presolve_start["centred"]
+        presolve_wall = _time.perf_counter() - _t0
+        if trace_run is not None and trace_run.enabled:
+            # The pre-solve runs untraced; one summary event stands for it, and
+            # the stream's REML evaluations start after it.
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "direct_reml",
+                    "phase": "presolve",
+                    "updates": int(pre.n_reml_iter),
+                    "objective": float(pre.objective) if pre.objective is not None else None,
+                    "lambdas": dict(pre.lambdas),
+                    "wall_s": float(presolve_wall),
+                    "termination_reason": pre.termination_reason,
+                },
+                channel="reml",
+                purpose="reml_presolve",
+                authoritative=False,
+            )
         if profile is not None:
-            profile["reml_presolve_s"] = _time.perf_counter() - _t0
+            profile["reml_presolve_s"] = presolve_wall
             profile["reml_presolve_n_iter"] = int(pre.n_reml_iter)
             profile["reml_presolve_converged"] = bool(pre.converged)
             profile["reml_presolve_termination_reason"] = pre.termination_reason
@@ -495,9 +537,6 @@ def optimize_direct_reml(
             groups=groups,
             lambda2=boot_lambdas,
             offset=offset_arr,
-            beta_init=presolve_beta,
-            intercept_init=presolve_intercept,
-            _centred_init=presolve_centred,
             max_iter=max_pirls_iter,
             tol=pirls_tol,
             return_xtwx=True,
@@ -1222,6 +1261,19 @@ def optimize_direct_reml(
                 tolerance=_tol,
                 step_bound=max_newton_step,
             )
+            if bool(np.any(concave_live)):
+                # The score test passed but the second-order check did not:
+                # record which shoulders refused the stop (score-test exit only).
+                _n_concave_stop_refusals += 1
+                if profile is not None:
+                    live = np.flatnonzero(concave_live)
+                    profile["reml_concave_stop_refusal"] = {
+                        "iter": int(n_iter),
+                        "names": [group_names[i] for i in live],
+                        "gradient": [float(abs(proj_grad[i])) for i in live],
+                        "curvature": [float(revalidated_hess[i, i]) for i in live],
+                        "step_bound": float(max_newton_step),
+                    }
             if not masked_live and not bool(np.any(concave_live)):
                 _t_hessian += _time.perf_counter() - _t0
                 converged = True
@@ -1792,7 +1844,10 @@ def optimize_direct_reml(
             # what its model promises over the steps just rejected sits at the
             # objective's resolution, and refusing on it decided the verdict
             # by platform rounding (an aliased-level fixture certified on
-            # Linux and macOS and was refused on native Windows).
+            # Linux and macOS and was refused on native Windows).  Coverage:
+            # test_sz_aliased_levels_converge_under_reml[one_row] on native
+            # Windows CI; test_a_dead_search_beside_a_live_shoulder_certifies
+            # pins this exit beside a shoulder on both engines.
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0
@@ -1814,6 +1869,7 @@ def optimize_direct_reml(
         )
         profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch

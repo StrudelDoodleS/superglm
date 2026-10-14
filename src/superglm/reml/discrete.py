@@ -322,6 +322,27 @@ def _tensor_trust_ratios(
     return ratios
 
 
+def _bound_shoulder_in_pair(
+    own_step: float, other_step: float, cap_v: float
+) -> tuple[float, float]:
+    """A shoulder's step inside its shared tensor pair's cap.
+
+    The pair's half-difference ``|d_own - d_other| / 2`` must stay within
+    ``cap_v``.  The shoulder's step is shortened toward its partner's when
+    that keeps its direction; returned with a scale of 1.  When the cap
+    would turn it uphill (the partner moves the other way by more than
+    ``2 cap_v``), the shoulder stays put and the whole step is scaled so the
+    partner's move fits the cap: scaling keeps the step a descent direction,
+    where shortening the partner alone would not.  Returns the shoulder's
+    step and the scale for the whole step.
+    """
+    bounded = min(max(own_step, other_step - 2.0 * cap_v), other_step + 2.0 * cap_v)
+    if bounded * own_step > 0.0:
+        return bounded, 1.0
+    half_gap = 0.5 * abs(other_step)
+    return 0.0, (cap_v / half_gap if half_gap > cap_v else 1.0)
+
+
 def _damped_tensor_newton_step(
     eigvecs: NDArray,
     eigvals_pd: NDArray,
@@ -605,6 +626,8 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
+    # score-test stops refused because a concave shoulder was live
+    _n_concave_stop_refusals = 0
     # cached trials whose Hessian was negative only within its formation
     # rounding, solved as the semidefinite matrix (``_solve_cached_profiled_system``)
     _cached_solve_disclosure: dict[str, int] = {}
@@ -1156,6 +1179,19 @@ def optimize_discrete_reml_cached_w(
                 tolerance=_tol,
                 step_bound=shoulder_step,
             )
+            if bool(np.any(concave_live_d)):
+                # The score test passed but the second-order check did not:
+                # record which shoulders refused the stop (score-test exit only).
+                _n_concave_stop_refusals += 1
+                if profile is not None:
+                    live = np.flatnonzero(concave_live_d)
+                    profile["reml_concave_stop_refusal"] = {
+                        "iter": int(poi_iter + 1),
+                        "names": [group_names[i] for i in live],
+                        "gradient": [float(abs(proj_grad_d[i])) for i in live],
+                        "curvature": [float(revalidated_hess[i, i]) for i in live],
+                        "step_bound": float(shoulder_step),
+                    }
             if not masked_live and not bool(np.any(concave_live_d)):
                 rho = rho_clipped
                 prev_obj = obj
@@ -1368,19 +1404,19 @@ def optimize_discrete_reml_cached_w(
         # A concave shoulder's trust-region step: the step bound, downhill.
         delta[shoulder_d] = -np.sign(proj_grad_d[shoulder_d]) * shoulder_step
         if use_tensor_linesearch and shoulder_d.any():
-            # A shoulder in an active shared pair shortens its own step to
-            # keep the pair's half-difference within cap_v; one the cap would
-            # turn uphill stays put this iteration, as a frozen partner does.
+            # A shoulder in an active shared pair keeps the pair's
+            # half-difference within cap_v (``_bound_shoulder_in_pair``).
             for _group_name, (i, j) in shared_tensor_pairs:
                 if frozen_d[i] or frozen_d[j]:
                     continue
                 for own, other in ((i, j), (j, i)):
                     if not shoulder_d[own]:
                         continue
-                    bounded = float(
-                        np.clip(delta[own], delta[other] - 2.0 * cap_v, delta[other] + 2.0 * cap_v)
+                    delta[own], scale = _bound_shoulder_in_pair(
+                        float(delta[own]), float(delta[other]), cap_v
                     )
-                    delta[own] = bounded if bounded * delta[own] > 0.0 else 0.0
+                    if scale < 1.0:
+                        delta *= scale
         if use_tensor_linesearch and not active_idx_d.size:
             delta_newton = delta
         # Step capping on the generic path: scale the whole vector.
@@ -1643,6 +1679,9 @@ def optimize_discrete_reml_cached_w(
                     "grad_norm": proj_grad_norm,
                     "max_delta_raw": max_delta_raw,
                     "max_delta_used": float(np.max(np.abs(delta))),
+                    # the shared-tensor box the step was held to (generic path: None)
+                    "base_cap": float(base_cap) if use_tensor_linesearch else None,
+                    "cap_v": float(cap_v) if use_tensor_linesearch else None,
                     "accepted_step": step if accepted else 0.0,
                     "halvings": halving_count,
                     "accepted": accepted,
@@ -1726,7 +1765,10 @@ def optimize_discrete_reml_cached_w(
                     evaluated_trial=evidence,
                     predicted_decrease=predicted_decrease,
                 )
-                # Second order gates the score-test exit only (exact engine).
+                # Second order gates the score-test exit only (exact engine;
+                # coverage: test_sz_aliased_levels_converge_under_reml[one_row]
+                # on native Windows CI, and
+                # test_a_dead_search_beside_a_live_shoulder_certifies).
                 converged = termination_reason == "converged_at_precision"
                 if profile is not None:
                     profile["reml_dead_line_search"] = {
@@ -2003,6 +2045,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_n_formation_limited_trials"] = _cached_solve_disclosure.get(
             "formation_limited", 0
         )

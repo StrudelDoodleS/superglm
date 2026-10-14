@@ -1,4 +1,4 @@
-"""SlowFitWarning: an exact REML fit says in advance when it will take minutes."""
+"""SlowFitWarning: an exact REML fit says in advance when it will be slow."""
 
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ from superglm.distributions import Binomial, Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogitLink, LogLink
 
 # freMTPL2 (542,410 training rows): mains only, then mains + 1, 3 and 10 pairs;
-# exact and binned times from the session recorded in diagnostics/fit_cost.py.
-BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 8-9 s, 3 s binned
-BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 40 s, 9 s binned
-BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 86 s, 20 s binned
-BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_540)  # 422 s, 84 s binned
+# exact and binned times from the quiet session recorded in diagnostics/fit_cost.py.
+BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 7.0 s, 2.5 s binned
+BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 15 s, 9.1 s binned
+BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 48 s, 17 s binned
+BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_540)  # 214 s, 76 s binned
 
 
 @pytest.mark.parametrize("book", [BOOK_THREE_PAIRS, BOOK_TEN_PAIRS])
-def test_rule_fires_on_the_book_fits_that_take_minutes(book):
+def test_rule_fires_on_the_book_fits_that_take_most_of_a_minute_or_more(book):
     message = exact_reml_cost_message(**book, distribution=Poisson(), link=LogLink())
     assert message is not None
     assert "542,410 rows" in message and f"{book['n_coef']} coefficients" in message
