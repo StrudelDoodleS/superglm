@@ -9,8 +9,15 @@ In a spline-by-factor interaction (`interactions=[("x", "level")]` with a spline
 all zero over a range of `x`, and only that level's curve can lower the fitted
 rate there, nothing in the data stops the curve from falling. A level that
 REML smooths lightly can then extrapolate to the predictor's floor: on the
-freMTPL2 frequency book, brand B12's vehicles older than 22 years (21 rows, no
-claims) were priced at a log rate of -80, a premium of essentially zero.
+freMTPL2 frequency book's uncorrected claim counts, brand B12's vehicles older
+than 22 years (21 rows, no claims) were priced at a log rate of -80, a premium
+of essentially zero. On those counts B12's curve was lightly smoothed because
+of a spike in claims at vehicle age 0, and that spike is an artefact: the
+book's `ClaimNb` is wrong for policies with `IDpol` up to 24,500 (Wüthrich &
+Merz, *Statistical Foundations of Actuarial Learning*, Section 13.1). With the
+counts taken from the severity file (`examples/fremtpl2_data.py`) there is no
+spike and B12 is smoothed far more, but its tail still has no claims (VehAge 23
+to 49, 24 training rows) and is still held, as are ten other levels.
 
 The build now finds those ranges and holds the curve there. A response "off
 the boundary" is a nonzero one, or for a binomial response one strictly
@@ -63,7 +70,8 @@ literature:
   pseudo-claims on 15 units of exposure, roughly four times the rate of the
   neighbouring ages.
 - **Penalising the smoothing parameter** (Sterzinger & Kosmidis): the tail is
-  not what drives the small smoothing parameter, so it does not help.
+  not what drives the small smoothing parameter (on the uncorrected counts
+  the age-0 artefact did), so it does not help.
 - **One smoothing parameter for all levels** (mgcv's `id=`): treats the cause,
   a lightly smoothed level, but changes every spline-by-factor fit.
 
@@ -72,9 +80,11 @@ likelihood estimate exists (Geyer 2009, Theorem 4; Konis 2007).
 
 ## Measured
 
-The freMTPL2 frequency book (542,410 training rows), Poisson with exposure,
-`discrete=True` at 256 bins, the screening guide's main effects and ten
-screened pairs:
+The freMTPL2 frequency book on its uncorrected claim counts (542,410 training
+rows), Poisson with exposure, `discrete=True` at 256 bins, the screening
+guide's main effects and ten screened pairs. This compares two versions of the
+code on one fixed input, and the corrected counts give different numbers
+(not re-measured here):
 
 | | 0.39 rule | 0.40 |
 |---|---|---|

@@ -163,9 +163,16 @@ cannot re-screen a term already in the model.
 A mixed sweep comes back as one sorted table. The example below screens an
 80,000-row sample of the freMTPL2 frequency book under
 `weight_semantics="frequency"` (`y` the claim *rate* `ClaimNb / Exposure`,
-`sample_weight` the exposure, `phi` estimated at 4.81). Every number here is
+`sample_weight` the exposure, `phi` estimated at 2.85). Every number here is
 therefore on the replication contract's `sum(sample_weight) - edf` scale, not
 the default prior one.
+
+The claim counts are the corrected ones. The book's `ClaimNb` is wrong for
+policies with `IDpol` up to 24,500, so, following Wüthrich & Merz
+(*Statistical Foundations of Actuarial Learning*, Section 13.1), each policy's
+count is taken from the severity file `freMTPL2sev`, policies with more than
+five claims are dropped and exposure is capped at one year
+(`examples/fremtpl2_data.py`). The sample is drawn from that 678,007-row book.
 
 The specification is spelled out rather than assumed, because the screen is
 defined *against the fitted mains*. A margin mis-specified there does not
@@ -183,9 +190,9 @@ features = {
     "BonusMalus": Spline(kind="ps", n_knots=12,
                          knot_strategy="quantile_tempered", knot_alpha=0.2),
     # log1p(Density) is the one margin here that genuinely is linear: give
-    # it a spline and the smooth collapses to edf 1.4 of rank 11, buying
-    # 1.0 deviance. Raw Density is not linear at all -- straightening it
-    # is what the log is for.
+    # it a spline and the smooth collapses to a straight line (edf 1.0),
+    # buying 0.02 deviance. Raw Density is not linear at all -- straightening
+    # it is what the log is for.
     "LogDensity": Numeric(),
     "VehBrand":   Categorical(),
     "Region":     Categorical(),
@@ -196,18 +203,18 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti   6.173586  2.657017   2.000000 2.136412e+02     5244   False
-# BonusMalus   VehBrand  spline_cat  12.415513  0.540125  10.000000 1.724599e+10     1012   False
-#    DrivAge BonusMalus          ti   1.325982 -0.413100   2.000000 1.256993e+03     7360   False
-#     VehAge   VehBrand  spline_cat   7.844563 -0.481896   9.999576 3.781106e+09      627   False
-#    DrivAge     VehAge          ti   0.551591 -0.923205   2.000000 5.047925e+01     4560   False
-#    DrivAge   VehBrand  spline_cat   1.974106 -1.794641   9.999927 1.301108e+10      880   False
-# LogDensity   VehBrand numeric_cat   1.098423 -1.990453  10.000000 0.000000e+00       11   False
-# BonusMalus     Region  spline_cat   7.159724 -2.135602  21.000000 9.263282e+09     2024   False
-#    DrivAge     Region  spline_cat   6.724113 -2.202810  20.999860 6.858572e+09     1760   False
-# LogDensity     Region numeric_cat   5.250606 -2.430184  21.000000 0.000000e+00       22   False
-#     VehAge     Region  spline_cat   2.008774 -2.930391  20.998739 2.449505e+09     1254   False
-#   VehBrand     Region     cat_cat  39.936018 -8.240015 208.000000 0.000000e+00      242   False
+#     VehAge BonusMalus          ti   7.869834  3.759400   2.000000 1.908607e+02     5220   False
+#    DrivAge BonusMalus          ti  15.025011  2.245878   8.000000 3.161582e+01     7200   False
+# BonusMalus   VehBrand  spline_cat  22.106513  1.216701  16.000000 4.542683e+03      990   False
+#    DrivAge     VehAge          ti   1.155967 -0.538605   1.999999 3.420509e+01     4640   False
+# BonusMalus     Region  spline_cat  16.813307 -0.646021  20.999995 7.594828e+09     1980   False
+#    DrivAge   VehBrand  spline_cat   5.821906 -0.934241   9.999931 9.847305e+09      880   False
+# LogDensity   VehBrand numeric_cat   3.902437 -1.363456  10.000000 0.000000e+00       11   False
+#     VehAge   VehBrand  spline_cat   2.264075 -1.729759   9.999084 2.958023e+09      638   False
+#     VehAge     Region  spline_cat   7.177188 -2.132613  20.994454 1.813179e+09     1276   False
+#    DrivAge     Region  spline_cat   6.265124 -2.273626  20.999673 5.161319e+09     1760   False
+# LogDensity     Region numeric_cat   5.959582 -2.320787  21.000000 0.000000e+00       22   False
+#   VehBrand     Region     cat_cat  59.946820 -7.258904 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
@@ -219,11 +226,11 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 2.66 | 2 | 41.7 |
-| `BonusMalus x VehBrand` | `spline_cat` | 0.54 | 10 | 69.0 |
+| `VehAge x BonusMalus` | `ti` | 3.76 | 2 | 32.3 |
+| `DrivAge x BonusMalus` | `ti` | 2.25 | 8 | 68.6 |
 
-The second pair buys *more* deviance and ranks *below* the first: 41.7 on 2 df
-is 20.8 per df against 6.9 for the second pair. The current `z` adjusts the
+The second pair buys *more* deviance and ranks *below* the first: 32.3 on 2 df
+is 16.2 per df against 8.6 for the second pair. The current `z` adjusts the
 local score for probe complexity; it does not rank by total refit gain or
 directly by gain per df.
 These two gains are measured on the training data. They show that complexity
@@ -233,19 +240,19 @@ costs. A holdout study of this ranking, against confirmatory refits on a
 200,000-row split, is in
 [Screening Evaluation](../explanation/what-screening-does.md).
 
-`statistic` is not comparable down that column: the `cat_cat` row's 39.9 is a
-208-dimensional block and the `numeric_cat` row's 1.1 a 10-dimensional one. The
+`statistic` is not comparable down that column: the `cat_cat` row's 59.9 is a
+208-dimensional block and the `numeric_cat` row's 3.9 a 10-dimensional one. The
 large `lambda0` values are bracket edges at clamped rungs, not fitted smoothing
-parameters. Ten of the twelve rows carry a negative `z`, which is ordinary: a
+parameters. Nine of the twelve rows carry a negative `z`, which is ordinary: a
 statistic can land below its rung's noise floor, and on this book most pairs
-do. The `cat_cat` row's -8.24 is the extreme case — a 208-df block whose
-statistic, scaled by the *whole model's* dispersion, lands at 39.9, so the
+do. The `cat_cat` row's -7.26 is the extreme case — a 208-df block whose
+statistic, scaled by the *whole model's* dispersion, lands at 59.9, so the
 global `phi` is conservative for that block. A large negative `z` only pushes
 a pair down the queue; it never promotes one. Nothing here was binned or
 refused (`approx` is False throughout, no NaN rows).
 
 Read the top row against its own kind's measured noise maximum below (9.48 for
-`ti`): 2.66 does not clear it — and the refit bought 41.7 deviance anyway. That
+`ti`): 3.76 does not clear it — and the refit bought 32.3 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.
@@ -641,11 +648,11 @@ factor-based assembly. Quantized screens are identified by `approx`.
 This combination explains the design; establishing its originality requires
 a more complete literature comparison.
 
-The [FAST comparison](../explanation/what-screening-does.md) used the earlier normalization,
-refits every candidate, and measures held-out gain. In its two specifications,
-that PSST ranking agrees more
-closely with held-out refit gain; FAST is faster and agrees more closely with
-training gain. These are descriptive results from 8 and 10 pairs on one
-book, not evidence of a universal ranking advantage. Wider candidate sets and
-replicated data or splits are needed, with the dependence between overlapping
+The [FAST comparison](../explanation/what-screening-does.md) refits every
+candidate on the corrected claim counts and measures held-out gain. In both
+its specifications, on two splits and on the full book, the PSST ranking
+agrees more closely with held-out refit gain; FAST is faster and agrees more
+closely with training gain. These are descriptive results from 8 and 10 pairs
+on one book, not evidence of a universal ranking advantage. Wider candidate
+sets and replicated data are needed, with the dependence between overlapping
 pairs accounted for.

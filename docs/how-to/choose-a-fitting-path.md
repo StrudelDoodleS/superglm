@@ -135,9 +135,11 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
 - **A heavily smoothed term can come back down.** Earlier releases could not
   lower a large smoothing parameter, whatever the data said, and still
   reported the fit as converged. A smoothing parameter is now held only where
-  the REML objective is flat in the direction of its step. On the cleaned
-  freMTPL2 counts this moved VehAge's smoothing parameter from 468 to 371 and
-  its effective degrees of freedom from 3.57 to 3.74. Predictions moved by at
+  the REML objective is flat in the direction of its step. On freMTPL2
+  with the Wüthrich & Merz cleaning, whose claim counts come from the
+  severity file (`examples/fremtpl2_data.py`), this moved VehAge's smoothing
+  parameter from 468 to 371 and its effective degrees of freedom from 3.57 to
+  3.74. Predictions moved by at
   most 0.04 standard errors on the full book and 0.27 out of fold.
 - **A term smoothed to its limit stops near the limit.** Once such a term has
   under 0.05 effective degrees of freedom left, the search stops it, and

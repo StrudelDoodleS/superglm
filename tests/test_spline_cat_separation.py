@@ -1,10 +1,13 @@
 """A spline-by-factor level whose far rows all have response 0.
 
 On the freMTPL2 screening-guide model, brand B12 has no claims past vehicle age
-22.  Its VehAge curve took a smoothing parameter near 1e-3 from a sharp feature
-at age 0, and past 22 nothing in the data stopped it: the curve fell until the
-predictor hit the log link's floor, pricing real policies at ``exp(-80)``, and
-the runtime warning named another term.  The build now finds the separated
+22.  On the book's uncorrected claim counts its VehAge curve took a smoothing
+parameter near 1e-3, driven by a spike at age 0 that the corrupted block of
+counts (``IDpol <= 24500``, see ``examples/fremtpl2_data.py``) puts there; on
+the corrected counts there is no spike and the parameter is near 7.  Either
+way, past 22 nothing in the data stops the curve: on the uncorrected counts it
+fell until the predictor hit the log link's floor, pricing real policies at
+``exp(-80)``, and the runtime warning named another term.  The build now finds the separated
 range (``diagnostics.separation.separated_curve_support``) and holds the curve
 at its value at the level's last nonzero response, in the fit and in
 ``predict()``, naming the term, the level and the range.

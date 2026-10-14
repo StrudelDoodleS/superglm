@@ -302,6 +302,15 @@ and follows the caps used by
 Each row is a French motor third-party-liability policy with claim count,
 exposure, driver, vehicle, and geographic attributes.
 
+The claim counts come from the companion severity file,
+[`freMTPL2sev`](https://www.openml.org/d/41215), one record per claim, rather
+than from the frequency file's `ClaimNb` column. That column is wrong for the
+policies numbered up to 24,500: almost none of their claims appear in the
+severity file. Recounting every policy from the severity file and dropping the
+six policies with more than five claims follows Wüthrich and Merz,
+*Statistical Foundations of Actuarial Learning and its Applications*
+(Springer, 2023), Section 13.1. It leaves 678,007 policies and 26,383 claims.
+
 Run the deterministic 30,000-policy comparison:
 
 ```bash
@@ -312,35 +321,36 @@ uv run python examples/fremtpl2_credibility.py \
 
 The common baseline uses smooth driver age, vehicle age, and Bonus-Malus plus
 the remaining tariff controls. All challengers use Poisson claim counts with
-`log(Exposure)` as an offset. The test split contains 7,500 policies and 401
+`log(Exposure)` as an offset. The test split contains 7,500 policies and 289
 observed claims.
 
-The table below is a 24 July 2026 snapshot generated with seed `20260724`
+The table below is a 14 October 2026 snapshot generated with seed `20260724`
 against the OpenML and preprocessing versions available on that date. It is
 not a CI-pinned data or performance contract. Regenerate it when the upstream
-data set, preprocessing, solver, or material dependencies change.
+data set, preprocessing, solver, or material dependencies change. Every fit
+reached a REML optimum within the script's default limit of 50 iterations.
 
-| Challenger | Credibility addition | Held-out deviance | Change vs baseline | Fit time |
+| Challenger | Credibility addition | Held-out deviance | Change vs baseline | REML iterations |
 |---|---|---:|---:|---:|
-| baseline | none | 0.588680 | — | 2.50 s |
-| brand fixed | unrestricted vehicle-brand factor | 0.590677 | -0.339% | 2.58 s |
-| `re` | vehicle-brand random effect | 0.589453 | -0.131% | 1.58 s |
-| `fs` | driver-age deviations by region | 0.587040 | +0.279% | 3.81 s |
-| `re + fs` | both terms | 0.587985 | +0.118% | 7.00 s |
+| baseline | none | 0.444025 | — | 12 |
+| brand fixed | unrestricted vehicle-brand factor | 0.443880 | +0.032% | 12 |
+| `re` | vehicle-brand random effect | 0.443369 | +0.148% | 16 |
+| `fs` | driver-age deviations by region | 0.445542 | -0.342% | 13 |
+| `re + fs` | both terms | 0.444744 | -0.162% | 24 |
 
 These are one seeded demonstration, not a universal ranking. They make the
 modeling distinction visible:
 
-- unrestricted brand coefficients overfit this split;
-- brand credibility partially pools those estimates and removes most of the
-  held-out damage;
-- regional factor smooths capture useful shape variation rather than only a
-  level shift;
+- unrestricted brand coefficients gain little on this split;
+- brand credibility pools those estimates and gives the best holdout score,
+  about four times the gain of the unrestricted factor;
+- regional driver-age deviations do not carry over to the holdout here: the
+  `fs` challenger is the worst of the five;
 - combining plausible terms does not guarantee the best holdout score.
 
-Vehicle-brand credibility ranged from `0.054` to `0.749`; the thinnest brand
+Vehicle-brand credibility ranged from `0.110` to `0.850`; the thinnest brand
 effects were pulled hardest toward zero. Regional factor-smooth credibility
-ranged from `0.0069` to `0.262`, reflecting the greater information required
+ranged from `0.0020` to `0.127`, reflecting the greater information required
 to estimate a complete curve rather than one intercept.
 
 The script writes held-out metrics, the random-effect table, factor-smooth
