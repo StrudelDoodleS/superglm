@@ -22,6 +22,7 @@ from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink, LogLink
 from superglm.reml.convergence import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
     concave_live_directions,
     direction_penalty_ranks,
@@ -1407,6 +1408,19 @@ def optimize_direct_reml(
                 "frozen": [bool(v) for v in frozen],
                 "shoulder": [bool(v) for v in shoulder],
             }
+            if shoulder.any():
+                # Every iteration that steps a shoulder, with its signed
+                # gradient and curvature: the last freeze decision alone
+                # forgets a shoulder read earlier in the fit.
+                idx = np.flatnonzero(shoulder)
+                profile.setdefault("reml_shoulder_reads", []).append(
+                    {
+                        "iter": int(n_iter),
+                        "names": [group_names[i] for i in idx],
+                        "gradient": [float(proj_grad[i]) for i in idx],
+                        "curvature": [float(hess[i, i]) for i in idx],
+                    }
+                )
 
         if active_idx.size == 0:
             rho = rho_clipped
@@ -1828,20 +1842,36 @@ def optimize_direct_reml(
             active_grad_norm = (
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )
+            dead_evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
+                candidate_mode_stationary, obj
+            )
+            dead_predicted_decrease = (
+                None
+                if max_delta > max_newton_step or bool(shoulder.any())
+                else newton_predicted_decrease(
+                    grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
+                )
+            )
             termination_reason = classify_dead_feasible_exit(
                 active_grad_norm,
                 objective=obj,
                 tolerance=_tol,
-                evaluated_trial=evaluated_feasible_trial
-                and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
-                predicted_decrease=(
-                    None
-                    if max_delta > max_newton_step or bool(shoulder.any())
-                    else newton_predicted_decrease(
-                        grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
-                    )
-                ),
+                evaluated_trial=dead_evidence,
+                predicted_decrease=dead_predicted_decrease,
             )
+            if profile is not None:
+                # The dead-search exit's evidence, as the discrete engine
+                # records it.
+                profile["reml_dead_line_search"] = {
+                    "iter": int(n_iter),
+                    "active_gradient_norm": active_grad_norm,
+                    "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale),
+                    "predicted_decrease": dead_predicted_decrease,
+                    "decrease_bar": float(_tol * score_scale),
+                    "evaluated_trial": bool(dead_evidence),
+                    "candidate_mode_stationary": bool(candidate_mode_stationary),
+                    "termination_reason": termination_reason,
+                }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,
             # its gradient under the precision floor this exit certifies, so
