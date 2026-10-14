@@ -188,16 +188,14 @@ def optimize_direct_reml(
     seeds the bootstrap and the first Newton iterate of every component it
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
-    ``presolve`` (exact path only) first runs the cached-W performance
+    A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
+    estimated smoothing parameters first runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
-    design until its objective settles, then starts the exact Newton loop
+    design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
     (performance-iteration steps that initialize the outer iteration), taken
     to the cached-W fixed point.  The exact loop's gradient and stopping test
-    are unchanged, so its end point is certified exactly as from a cold
-    start.  ``None`` (the default) runs it on a cold fit, one without a warm
-    start, with at least ``_PRESOLVE_MIN_ESTIMATED`` estimated smoothing
-    parameters; ``True`` / ``False`` force it on or off.
+    are unchanged.  ``presolve`` overrides the rule for tests only.
 
     Two algorithm variants depending on ``discrete``:
 
@@ -465,58 +463,70 @@ def optimize_direct_reml(
     # interaction penalty components from a materially stronger seed. A warm
     # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
     boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
-    S_boot = (
-        None
-        if use_structured
-        else build_penalty_matrix(
-            dm.group_matrices,
-            groups,
-            boot_lambdas,
-            dm.p,
-            reml_penalties=penalties,
+    # After the pre-solve every estimated component starts warm, so the
+    # bootstrap would fit the mode the first candidate fits again at the same
+    # lambdas: the candidate starts from the pre-solve's mode instead.
+    skip_bootstrap = presolve_beta is not None
+    if skip_bootstrap:
+        S_boot = None
+        boot_result = boot_inv = None
+        warm_beta = np.array(presolve_beta, dtype=np.float64, copy=True)
+        warm_intercept = presolve_intercept
+        warm_centred = presolve_centred
+    else:
+        S_boot = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                boot_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
         )
-    )
-    _t0 = _time.perf_counter()
-    boot_result, boot_inv, boot_xtwx = fit_irls_direct(
-        X=dm,
-        y=y,
-        weights=sample_weight,
-        family=distribution,
-        link=link,
-        groups=groups,
-        lambda2=boot_lambdas,
-        offset=offset_arr,
-        beta_init=presolve_beta,
-        intercept_init=presolve_intercept,
-        _centred_init=presolve_centred,
-        max_iter=max_pirls_iter,
-        tol=pirls_tol,
-        return_xtwx=True,
-        profile=profile,
-        direct_solve=direct_solve,
-        S_override=S_boot,
-        reml_penalties=penalties,
-        debug_recorder=debug_recorder,
-        # Nothing reads the bootstrap's rank metadata, and its data rank can
-        # take an O(n p^2) factor: a traced fit records it, as for candidates.
-        compute_rank_info=loop_fit_statistics,
-        debug_context={"phase": "bootstrap", "reml_iteration": 0},
-        trace_run=trace_run,
-        trace_purpose="reml_bootstrap",
-        _compensate_centred_intercept=False,
-        weight_semantics=weight_semantics,
-        _raw_moment_policy=raw_moment_policy,
-        _fisher_data_reuse=fisher_data_reuse,
-        _mode_bar=mode_bar,
-    )
-    _t_pirls += _time.perf_counter() - _t0
-    warm_beta = boot_result.beta.copy()
-    warm_intercept = float(boot_result.intercept)
-    warm_centred = centred_warm_start(boot_result)
+        _t0 = _time.perf_counter()
+        boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=boot_lambdas,
+            offset=offset_arr,
+            beta_init=presolve_beta,
+            intercept_init=presolve_intercept,
+            _centred_init=presolve_centred,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            return_xtwx=True,
+            profile=profile,
+            direct_solve=direct_solve,
+            S_override=S_boot,
+            reml_penalties=penalties,
+            debug_recorder=debug_recorder,
+            # Nothing reads the bootstrap's rank metadata, and its data rank can
+            # take an O(n p^2) factor: a traced fit records it, as for candidates.
+            compute_rank_info=loop_fit_statistics,
+            debug_context={"phase": "bootstrap", "reml_iteration": 0},
+            trace_run=trace_run,
+            trace_purpose="reml_bootstrap",
+            _compensate_centred_intercept=False,
+            weight_semantics=weight_semantics,
+            _raw_moment_policy=raw_moment_policy,
+            _fisher_data_reuse=fisher_data_reuse,
+            _mode_bar=mode_bar,
+        )
+        _t_pirls += _time.perf_counter() - _t0
+        warm_beta = boot_result.beta.copy()
+        warm_intercept = float(boot_result.intercept)
+        warm_centred = centred_warm_start(boot_result)
 
     boot_phi = 1.0
     boot_inv_phi = 1.0
-    if not scale_known:
+    if not scale_known and not skip_bootstrap:
+        assert boot_result is not None
         pq_boot = total_penalty_quadratic(
             boot_result.beta,
             boot_lambdas,
@@ -587,6 +597,8 @@ def optimize_direct_reml(
             # The warm start is the iterate; no Fellner-Schall step from it.
             rho[i] = np.clip(np.log(boot_lambdas[pc.name]), log_lo, log_hi)
             continue
+        # Reached only cold: after the pre-solve every component is warm.
+        assert boot_result is not None and boot_inv is not None
         gm = dm.group_matrices[pc.group_index]
         beta_g = boot_result.beta[pc.group_sl]
         quad = penalty_component_quadratic(pc, beta_g, gm)
@@ -1000,6 +1012,7 @@ def optimize_direct_reml(
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
+                    "shoulder": [False] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -1239,6 +1252,7 @@ def optimize_direct_reml(
                     "score_scale": float(score_scale),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
+                    "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
                 }
             _t_hessian += _time.perf_counter() - _t0
             reactivated = concave_live | (
@@ -1335,6 +1349,7 @@ def optimize_direct_reml(
                 "score_scale": float(score_scale),
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen],
+                "shoulder": [bool(v) for v in shoulder],
             }
 
         if active_idx.size == 0:
@@ -1771,6 +1786,11 @@ def optimize_direct_reml(
                     )
                 ),
             )
+            if termination_reason == "converged_at_precision" and bool(shoulder.any()):
+                # A live shoulder is no optimum, however small its gradient:
+                # its model still promises a decrease the stop can resolve.
+                # The dead search is disclosed, not certified.
+                termination_reason = "line_search_failed"
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0

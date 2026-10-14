@@ -542,6 +542,7 @@ class TestFreezeDiagnostics:
             "score_scale",
             "estimated",
             "frozen",
+            "shoulder",
         }
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
         assert len(freeze["frozen"]) == len(freeze["names"])
@@ -830,6 +831,7 @@ class TestAllFixedLambdaDiagnostics:
             "score_scale",
             "estimated",
             "frozen",
+            "shoulder",
         }
         assert freeze["frozen"] == [True] * len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0
