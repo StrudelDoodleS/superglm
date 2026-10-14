@@ -231,3 +231,28 @@ def test_a_range_the_free_directions_see_faintly_is_found_as_one_program_per_val
         if program.status == 0 and -program.fun > 1e-9 * np.linalg.norm(raw[~inside][j]):
             alone.append(values[~inside][j])
     assert alone == list(np.arange(36.0, 43.0))
+
+
+def test_unseen_directions_does_not_form_the_left_factor_of_a_tall_matrix():
+    """On the exact path the rows are a level's distinct covariate values, tens of thousands.
+
+    A full SVD builds the M x M left factor: 288 MB here, 20 GB at 50,000 rows,
+    for directions only the right factor holds.
+    """
+    import tracemalloc
+
+    from superglm.diagnostics.separation import _unseen_directions
+
+    rng = np.random.default_rng(0)
+    rows = rng.normal(size=(6000, 12))
+    rows[:, -2:] = rows[:, :2]  # two directions no row sees
+    tracemalloc.start()
+    try:
+        free = _unseen_directions(rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert free.shape == (12, 2)
+    np.testing.assert_allclose(rows @ free, 0.0, atol=64 * 12 * U * np.linalg.norm(rows, 2))
+    # The left factor alone would be 500 times the input.
+    assert peak < 64 * rows.nbytes

@@ -595,7 +595,10 @@ def _unseen_directions(rows: NDArray) -> NDArray:
     width = rows.shape[1]
     if rows.shape[0] == 0:
         return np.eye(width)
-    _, sigma, vt = np.linalg.svd(rows, full_matrices=True)
+    # Only the right factor is read.  A tall matrix (a level's distinct values on
+    # the exact path) already yields the full width x width one without the
+    # M x M left factor; a wide one needs full matrices for its null directions.
+    _, sigma, vt = np.linalg.svd(rows, full_matrices=rows.shape[0] < width)
     cut = SHARED_RANK_POLICY.factor_rcond * float(sigma[0]) if sigma.size else 0.0
     return vt[int(np.count_nonzero(sigma > cut)) :].T
 
