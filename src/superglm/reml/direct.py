@@ -1771,6 +1771,11 @@ def optimize_direct_reml(
                     )
                 ),
             )
+            if termination_reason == "converged_at_precision" and bool(shoulder.any()):
+                # A live shoulder is no optimum, however small its gradient:
+                # its model still promises a decrease the stop can resolve.
+                # The dead search is disclosed, not certified.
+                termination_reason = "line_search_failed"
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0
