@@ -482,9 +482,11 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
         objective = float(result.objective_history[-1])
         scale = _score_scale(objective)
         frozen = np.asarray(model._reml_profile["reml_freeze_decision"]["frozen"])
-        # Interior smoothing parameters: the bound projection is the identity.
+        # Interior smoothing parameters, clear of both bounds REML clips log
+        # lambda to (1e-6 and 1e10, ``reml/direct.py``): there the bound
+        # projection is the identity, so the projected score is the score.
         rho = np.log(np.array([model._reml_lambdas[pc.name] for pc in model._reml_penalties]))
-        assert np.all(np.abs(rho) < np.log(1e10) - 0.01)
+        assert np.all((rho > np.log(1e-6) + 0.01) & (rho < np.log(1e10) - 0.01))
 
         def stop_norm(
             weight_gradient: np.ndarray, *, exit: str = result.termination_reason
