@@ -583,6 +583,7 @@ class SeparatedCurve:
     covariate: str
     level: Any
     ranges: tuple[SeparatedRange, ...]
+    note: str = ""
 
 
 def _unseen_directions(rows: NDArray) -> NDArray:
@@ -783,7 +784,8 @@ def format_curve_separation(findings: list[SeparatedCurve]) -> str:
                 f"{item.covariate} {where} ({r.n_rows} rows, total weight {r.weight:.4g}, "
                 f"{words[r.boundary]}): {how}"
             )
-        lines.append(f"  {item.term!r}, level {item.level!r}: " + "; ".join(spans))
+        note = f" ({item.note})" if item.note else ""
+        lines.append(f"  {item.term!r}, level {item.level!r}{note}: " + "; ".join(spans))
     if len(findings) > _MAX_LISTED_LABELS:
         lines.append(f"  ... and {len(findings) - _MAX_LISTED_LABELS} more levels")
     upper = any(r.boundary != "zero" for item in findings for r in item.ranges)

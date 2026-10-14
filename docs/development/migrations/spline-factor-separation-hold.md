@@ -12,13 +12,20 @@ REML smooths lightly can then extrapolate to the predictor's floor: on the
 freMTPL2 frequency book, brand B12's vehicles older than 22 years (21 rows, no
 claims) were priced at a log rate of -80, a premium of essentially zero.
 
-The build now finds those ranges and holds the curve there:
+The build now finds those ranges and holds the curve there. A response "off
+the boundary" is a nonzero one, or for a binomial response one strictly
+between 0 and 1 (a range of all-1 responses is held the same way):
 
-- Past the last value where the level has a nonzero response, the curve keeps
-  its value at that point, in the fit and in `predict()`. A spline does the
-  same past its training range (`extrapolation="clip"`).
-- Between two values with nonzero responses, the curve takes the smoothest
-  path that joins its two sides.
+- Before the first and past the last value where the level has a response off
+  the boundary, the curve keeps its value at that point, in the fit and in
+  `predict()`. A spline does the same past its training range
+  (`extrapolation="clip"`).
+- Between two values with responses off the boundary, the curve takes the
+  smoothest path that joins its two sides.
+- The factor's base level has no curve of its own (its curve is the main
+  effect's, which every level shares), so its ranges are named but not held.
+- A range the fit cannot hold is still named, as "left to the smoothing
+  penalty".
 
 A `SeparationWarning` names the term, the level and the range, for example
 `'VehAge:VehBrand', level 'B12': VehAge 23 to 48 (21 rows, total weight 15.04,
@@ -30,7 +37,9 @@ name the term with the largest coefficient.
 
 - **Spline-by-factor terms where a level's responses are all zero over a
   range of the spline**: the fit changes there, and the rest of the fit moves
-  slightly with it. Terms without such a range are bitwise unchanged.
+  slightly with it. Terms without such a range are bitwise unchanged. The
+  hold applies whatever penalty bounds the term; a selection penalty exempts
+  only the categorical cells it targets.
 - **Every other term**: nothing changes. Main-effect splines, tensor (`ti`)
   interactions, `FactorSmooth` terms and `SuperLSS` are not scanned.
 
