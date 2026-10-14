@@ -2288,7 +2288,18 @@ class TestREMLWarmStart:
         assert warm_info["converged"]
         bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
         assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
-        assert abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) < 0.01
+        # Both fits stop on the score test, |g_x2| < tol * (1 + |V|); near the
+        # optimum a gradient g sits g / H_x2x2 from it in log-lambda, so the
+        # two stops agree to bar / H_x2x2 (x2's own curvature, read from the
+        # cold fit's freeze record; its coupling to x1 is left out).
+        # Measured: 1.8e-7 exact, 9.0e-9 discrete, against a bound of 4.0e-6.
+        assert cold_info["termination_reason"] == "score_objective_tolerance"
+        assert warm_info["termination_reason"] == "score_objective_tolerance"
+        freeze = cold_info["profile"]["reml_freeze_decision"]
+        curvature = freeze["hess_diag"][freeze["names"].index("x2")]
+        assert (
+            abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) <= bar / curvature
+        )
 
     def test_a_tensor_shoulder_steps_inside_the_tensor_trust_region(self):
         """A shoulder on the discrete path's shared-tensor search keeps its box.
