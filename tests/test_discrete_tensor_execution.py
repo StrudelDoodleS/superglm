@@ -1146,10 +1146,22 @@ def test_raw_channel_admission_counts_simultaneous_workspace(
     band, right.raw_channels = right.raw_channels, None
     algebra._cross_gram(left, right, weights)  # Compile the dense fallback too.
     right.raw_channels = band
-    if cold:
-        left._cell_csr = None
     monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
     monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget // 8)
+    # The first raw-band call under this budget compiles kernels the calls
+    # above do not reach, about 2 MB of llvmlite IR the traced peak would
+    # count unless an earlier test in the worker compiled them.  Compile them
+    # on a twin pair, so the measured pair's retained state is untouched; the
+    # twin's second call finds its cell order as the measured call will.
+    twin_left, twin_right, _ = _tensor_pair(n, (bins, bins, 3, 3, 6), (bins, bins, 3, 3, 6))
+    for _ in range(2):
+        if cold:
+            twin_left._cell_csr = None
+        twin_cache = algebra._BlockWeightCache() if cached else None
+        algebra._cross_gram(twin_left, twin_right, weights, cache=twin_cache)
+    del twin_left, twin_right, twin_cache
+    if cold:
+        left._cell_csr = None
     tracemalloc.start()
     try:
         cache = algebra._BlockWeightCache() if cached else None
