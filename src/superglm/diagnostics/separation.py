@@ -364,7 +364,7 @@ def emit_curve_separation(curves: list, mode: str) -> None:
     if not curves or mode == "ignore":
         return
     message = format_curve_separation(curves)
-    if mode == "error":
+    if mode == "error" and any(curve.refusable for curve in curves):
         raise SeparationError(message)
     warnings.warn(message, SeparationWarning, stacklevel=3)
 
@@ -584,6 +584,9 @@ class SeparatedCurve:
     level: Any
     ranges: tuple[SeparatedRange, ...]
     note: str = ""
+    # Whether ``separation="error"`` refuses on this finding; a factor base's
+    # range, found on the main effect alone, is reported only.
+    refusable: bool = True
 
 
 def _unseen_directions(rows: NDArray) -> NDArray:
@@ -796,7 +799,7 @@ def format_curve_separation(findings: list[SeparatedCurve]) -> str:
         f"{edge} but not how near (its maximum-likelihood value is {edge} itself), so nothing "
         "in the data stops the level's curve heading to that limit on those rows; only its "
         "smoothing penalty does, and the rest of the curve can set that penalty weak. The "
-        "fit holds the curve over each such range instead:"
+        "fit holds the curve over each such range it can, as each line says:"
     )
     tail = (
         "Past the first or last value where a level's responses vary, its curve keeps its "

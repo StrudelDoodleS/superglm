@@ -237,6 +237,72 @@ def test_a_separated_base_level_is_named():
     assert "left to the smoothing penalty" in line
 
 
+def main_and_curve_bases_disagree():
+    """The base level A has responses off zero below x = 45 and none from 45 to 50.
+
+    Most rows sit in [40, 50], so the interaction's quantile knots crowd
+    there (one at 45.2) while the main effect's uniform knots leave a single
+    segment from 42.9 to 50.  In the interaction's basis a curve can fall past
+    45.2 and stay zero below it; the main effect's last segment is a cubic
+    pinned by A's responses on [42.9, 45], so A's curve -- the main effect's
+    -- cannot.
+    """
+    rng = np.random.default_rng(0)
+    n = 20000
+    dense = rng.uniform(size=n) < 0.6
+    x = np.where(dense, rng.uniform(40.0, 50.0, size=n), rng.uniform(0.0, 40.0, size=n))
+    f = rng.choice(["A", "B", "C"], size=n, p=[0.5, 0.3, 0.2])
+    w = rng.uniform(0.5, 1.0, size=n)
+    counts = rng.poisson(w * 4.0).astype(float)
+    counts[(f == "A") & (x >= 45.0)] = 0.0
+    return pd.DataFrame({"x": x, "f": pd.Categorical(f)}), counts / w, w
+
+
+def test_the_base_level_is_scanned_in_the_main_effects_basis():
+    """A range the interaction's basis could separate but the main effect's cannot is not named.
+
+    Scanned in the interaction's basis, A's range from 45.3 to 50 was named,
+    and ``separation="error"`` refused the design though nothing could fall.
+    """
+    X, y, w = main_and_curve_bases_disagree()
+
+    def model(separation):
+        return SuperGLM(
+            family="poisson",
+            features={"x": Spline(n_knots=6), "f": Categorical(base="A")},
+            interactions=[("x", "f")],
+            discrete=True,
+            separation=separation,
+        )
+
+    warned = model("warn")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warned.fit_reml(X, y, sample_weight=w)
+    main_knots, curve_knots = warned._specs["x"]._knots, warned._interaction_specs["x:f"]._knots
+    assert main_knots[-5] < 43.0 and 45.0 < curve_knots[-3] < 45.5
+    named = [
+        line
+        for c in caught
+        if issubclass(c.category, SeparationWarning)
+        for line in str(c.message).splitlines()
+        if "level 'A'" in line
+    ]
+    assert named == []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model("error").fit_reml(X, y, sample_weight=w)
+
+
+def test_a_base_level_finding_does_not_refuse_the_design():
+    """The base's range is found on the main effect alone, so it is reported, never refused."""
+    X, y, w = separated_tail_design()
+    _, curve = fit(X, y, w, base="C", discrete=True, separation="error")
+    assert len(curve) == 1
+    line = next(row for row in curve[0].splitlines() if "level 'C'" in row)
+    assert "the factor's base" in line and "approximate" in line
+
+
 def test_continuation_basis_holds_the_free_directions_at_minimum_penalty():
     from superglm.diagnostics.separation import continuation_basis
 
