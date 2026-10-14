@@ -137,19 +137,21 @@ def test_concave_live_needs_a_decrease_the_stop_rule_can_resolve() -> None:
     resolution over the whole step and leaves the first-order verdict
     alone; a zero projected gradient (a bound holding the direction) is
     never live."""
-    hess = np.diag([-1e-12, -2e-3, -2e-3, -2.5e-3])
-    gradient = np.array([1e-12, 2e-3, 0.0, 2e-5])
+    hess = np.diag([-1e-12, -2e-3, -2e-3, -2.5e-3, -6e-4])
+    gradient = np.array([1e-12, 2e-3, 0.0, 2e-5, 2e-3])
     live = concave_live_directions(
         gradient,
         hess,
-        np.ones(4, dtype=bool),
+        np.ones(5, dtype=bool),
         objective=8.5e4,
         tolerance=1e-9,
         step_bound=5.0,
     )
-    # The last column is off the shoulder signature (curvature 125 times the
-    # gradient): roughness, not a shoulder.
-    np.testing.assert_array_equal(live, [False, True, False, False])
+    # The last two columns are off the shoulder signature: curvature 125
+    # times the gradient (above the band; roughness, not a shoulder) and 0.3
+    # times it (below the band) -- both with a model decrease, 0.07 and
+    # 0.018, far above the 8.5e-5 resolution, so only the band excludes them.
+    np.testing.assert_array_equal(live, [False, True, False, False, False])
 
 
 def test_freeze_normalizes_curvature_by_penalty_rank() -> None:

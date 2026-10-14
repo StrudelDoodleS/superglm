@@ -148,7 +148,10 @@ def concave_live_directions(
     (measured -0.0025 .. -0.016 against a gradient of 2e-5 on a
     spline-by-factor fit with aliased levels, whose steps from there ended
     line_search_failed on OpenBLAS Haswell and Zen kernels), and stays with
-    the first-order hold.
+    the first-order hold.  The lower edge has no derivation: the model
+    allows any k > 0, and 0.5 only brackets the measured k from below as 2
+    does from above.  A shoulder with k under 0.5 keeps the first-order
+    hold, so a start on one can still stop there.
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
     diagonal = np.diagonal(np.asarray(hessian, dtype=np.float64))
