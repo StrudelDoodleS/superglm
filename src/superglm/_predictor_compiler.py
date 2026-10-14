@@ -564,6 +564,9 @@ def compile_predictor_design(
                 sample_weight,
                 separation_boundaries,
                 isinstance(specs.get(ispec.cat_name), Categorical),
+                specs.get(ispec.spline_name)
+                if isinstance(specs.get(ispec.spline_name), _SplineBase)
+                else None,
             )
             if scan_curves and isinstance(ispec, SplineCategorical)
             else None

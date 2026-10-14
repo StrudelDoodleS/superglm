@@ -206,9 +206,10 @@ class SuperGLM:
             its value at that point, in the fit and in ``predict``, and
             between two such responses it takes the smoothest path joining
             them; the factor's base, whose curve is the main effect's, is
-            named but not held.  ``"warn"`` names the term, the level and the
-            range, ``"error"`` refuses, and ``"ignore"`` leaves those curves
-            free.
+            scanned on the main effect alone and named as approximate, not
+            held.  ``"warn"`` names the term, the level and the range,
+            ``"error"`` refuses (never on a base's range alone), and
+            ``"ignore"`` leaves those curves free.
             A ``FactorSmooth(basis="sz")`` level whose unpenalized line
             separates the response is named in a ``SeparationWarning`` at fit
             under ``"warn"`` and ``"error"`` alike (never refused) and left

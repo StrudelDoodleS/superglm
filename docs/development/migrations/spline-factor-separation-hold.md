@@ -30,7 +30,9 @@ between 0 and 1 (a range of all-1 responses is held the same way):
 - Between two values with responses off the boundary, the curve takes the
   smoothest path that joins its two sides.
 - The factor's base level has no curve of its own (its curve is the main
-  effect's, which every level shares), so its ranges are named but not held.
+  effect's, which every level shares), so its ranges are found on the main
+  effect alone and named as approximate, not held; `separation="error"` does
+  not refuse on them.
 - A range the fit cannot hold is still named, as "left to the smoothing
   penalty".
 

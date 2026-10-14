@@ -365,9 +365,10 @@ a range where every response is 1 is held the same way.
 - Between two values with responses off the boundary, the curve takes the
   smoothest path that joins its two sides.
 - The factor's base level has no curve of its own: its curve is the main
-  effect's, which every level shares. Its ranges are named, as "left to the
-  smoothing penalty", but not held; to have them held, choose a base that does
-  not separate.
+  effect's, which every level shares. Its ranges are found on the main effect
+  alone and named as approximate, "left to the smoothing penalty", but not
+  held, and `separation="error"` does not refuse on them. To have them held,
+  choose a base that does not separate.
 
 A `SeparationWarning` names the term, the level and the range, for example
 `'VehAge:VehBrand', level 'B12': VehAge 23 to 48 (21 rows, total weight 15.04,

@@ -618,7 +618,11 @@ class SplineCategorical:
         if separation is None or not separation[2]:
             return groups
         return self._hold_separated_levels(
-            groups, x_cat, x_spline, separation, binned=(B_unique, np.asarray(bin_idx, np.intp))
+            groups,
+            x_cat,
+            x_spline,
+            separation,
+            binned=(B_unique, np.asarray(bin_idx, np.intp), np.asarray(support, np.float64)),
         )
 
     def _hold_separated_levels(
@@ -627,13 +631,15 @@ class SplineCategorical:
         x_cat: NDArray,
         x_spline: NDArray,
         separation: tuple,
-        binned: tuple[NDArray, NDArray] | None = None,
+        binned: tuple[NDArray, NDArray, NDArray] | None = None,
     ) -> list[GroupInfo]:
         """Hold each level's curve where its responses all sit on a boundary.
 
         ``separation`` is ``(response, prior weights, boundaries, level
-        effect)``, the last saying whether the factor's main effect gives each
-        level its own constant.  A level whose responses all sit on a boundary
+        effect, main curve)``: whether the factor's main effect gives each
+        level its own constant, and the spline's main-effect spec, whose curve
+        is the factor base's (``None`` without one).  ``binned`` is the
+        discrete path's ``(support basis, bin index, bin values)``.  A level whose responses all sit on a boundary
         over some covariate range, with curve directions only that range sees,
         has a likelihood that keeps rising as its curve walks there toward a
         zero (or certain) mean (``diagnostics.separation.separated_curve_support``).
@@ -658,8 +664,11 @@ class SplineCategorical:
         one found, held or not.
 
         The factor's base level has no group: its curve is the main effect's,
-        which every level shares, so it is scanned and its ranges named, not
-        held.
+        which every level shares, so it is scanned in the main effect's own
+        basis and its ranges named, not held.  That scan moves the main effect
+        alone; whether the other levels' curves could take up the move on
+        their rows is not checked, so a base range is reported as approximate
+        and never refuses the design.
         """
         from superglm.diagnostics.separation import (
             SeparatedCurve,
@@ -667,7 +676,7 @@ class SplineCategorical:
             separated_curve_support,
         )
 
-        response, prior_weights, boundaries, level_effect = separation
+        response, prior_weights, boundaries, level_effect, main_curve = separation
         y = np.asarray(response, dtype=np.float64)
         weights = (
             np.ones(len(y)) if prior_weights is None else np.asarray(prior_weights, np.float64)
@@ -698,9 +707,32 @@ class SplineCategorical:
             separated = None if result is None else result[0]
             return rows, support, idx, flags, separated
 
+        def scan_base(level):
+            # The base's curve is the main effect's: its raw basis on its own
+            # knots, through its own projection, plus the constant the
+            # factor's main effect moves.
+            main_projection = getattr(main_curve, "_interaction_projection", None)
+            rows = np.flatnonzero(x_cat == level)
+            if main_projection is None or not positive[rows].any():
+                return None
+            if binned is None:
+                values, idx = np.unique(x_spline[rows], return_inverse=True)
+                idx = np.ravel(idx).astype(np.intp)
+            else:
+                values, idx = binned[2], binned[1][rows]
+            support = np.asarray(main_curve._raw_basis_matrix(values), np.float64)
+            base_map = np.asarray(main_projection, dtype=np.float64)
+            if level_effect:
+                constant = np.linalg.lstsq(support, np.ones(len(support)), rcond=None)[0]
+                base_map = np.column_stack([base_map, constant])
+            flags = _support_flags(idx, rows, len(support), rows_by_kind)
+            result = _separated_points(support, base_map, flags, separated_curve_support)
+            separated = None if result is None else result[0]
+            return rows, support, idx, flags, separated
+
         scans = {level: scan(level) for level in self._non_base}
         base = self._base_level
-        scans[base] = scan(base) if groups else None
+        scans[base] = scan_base(base) if groups else None
         held_groups: list[GroupInfo] = []
         found: list[SeparatedCurve] = []
         term = f"{self.spline_name}:{self.cat_name}"
@@ -721,7 +753,11 @@ class SplineCategorical:
                         (-np.inf, np.inf),
                         0,
                     ),
-                    note="the factor's base, whose curve is the main effect's",
+                    note=(
+                        "the factor's base, whose curve is the main effect's: found on the "
+                        "main effect alone, so approximate"
+                    ),
+                    refusable=False,
                 )
             )
         for level, info in zip(self._non_base, groups, strict=True):
