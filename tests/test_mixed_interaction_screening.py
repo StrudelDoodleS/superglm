@@ -602,22 +602,26 @@ def test_mixed_null_z_stays_bounded_dispersed_gaussian(seed):
 
 
 _FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
+_SEV_SKIP_REASON = _datasets.skip_reason("freMTPL2sev.parquet")
 
+# The frame is the corrected book, whose claim counts come from the severity
+# file, so the test needs both files.
 FREQ_SKIP = pytest.mark.skipif(
-    _FREQ_SKIP_REASON is not None,
-    reason=_FREQ_SKIP_REASON or "",
+    _FREQ_SKIP_REASON is not None or _SEV_SKIP_REASON is not None,
+    reason=_FREQ_SKIP_REASON or _SEV_SKIP_REASON or "",
 )
 
 
 def _fremtpl_features():
     # This mirrors the worked example's specification in
     # docs/how-to/screen-interactions.md, and the specification is deliberate.
-    # BonusMalus is strongly curved on this book (splined it reports edf 7.5
-    # of rank 11), so specifying it as a Numeric would both mis-fit the margin
+    # BonusMalus is strongly curved on this book (splined under the guide's
+    # frequency contract it reports edf 8.6; linearising it costs 132
+    # deviance), so specifying it as a Numeric would both mis-fit the margin
     # and demote every BonusMalus pair to the deferred spline x numeric kind --
     # the sweep would then screen fewer kinds than it can.  LogDensity is the
-    # honest linear margin: give it a spline and the smooth collapses to edf
-    # 1.4 of rank 11.
+    # honest linear margin: give it a spline and the smooth collapses to a
+    # straight line (edf 1.0).
     return {
         "DrivAge": Spline(kind="ps", n_knots=8),
         "VehAge": Spline(kind="ps", n_knots=12),
@@ -634,7 +638,10 @@ def _fremtpl_features():
 
 
 def _fremtpl_frame(n_rows=80_000):
-    df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
+    # Claim counts recounted from freMTPL2sev (Wüthrich & Merz 2023, Section
+    # 13.1; examples/fremtpl2_data.py): the raw ClaimNb is wrong for
+    # IDpol <= 24,500.  The same sample as the guide's worked example.
+    df = _datasets.load_freq_corrected().sample(n_rows, random_state=0).reset_index(drop=True)
     # The response is the claim rate and exposure is its weight.  The models
     # fitted on this frame leave weight_semantics at its default, "prior",
     # which reads exposure as an EDM prior weight, Var(y) = phi * V(mu) / w.

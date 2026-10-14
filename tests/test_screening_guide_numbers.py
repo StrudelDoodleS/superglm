@@ -155,18 +155,17 @@ def test_screening_guide_quotes_the_measured_dispersion(guide, measured) -> None
     # denominator would understate it by roughly a factor of two.
     assert measured["sum_sample_weight"] < 0.6 * measured["n_rows"]
 
-    # The retired publication reconciles exactly, which is what makes this a
-    # regeneration rather than a re-measurement of something else: the same
-    # Pearson sum over the *retired* count_nonzero(w) - edf denominator is
-    # 2.55, the number this guide printed at 37a1c18 and earlier.  If the
-    # fixture had been produced from a different sample, a different mains
-    # model or a different response encoding, this identity would not close.
+    # The same Pearson sum over the *retired* count_nonzero(w) - edf
+    # denominator reconciles exactly with the recorded value, so the fixture's
+    # phi and its retired reading come from one sample, one mains model and
+    # one response encoding.  (On the uncorrected counts the retired reading
+    # was 2.55, the number this guide printed at 37a1c18 and earlier.)
     pearson = measured["phi"] * (measured["sum_sample_weight"] - measured["mains_edf"])
     retired = pearson / (measured["n_rows"] - measured["mains_edf"])
     assert retired == pytest.approx(measured["retired_phi_n_minus_edf"], rel=1e-6)
-    assert retired == pytest.approx(2.55, abs=5e-3)
-    # ... and the guide must no longer publish it as a number of its own.
-    assert re.search(r"(?<![0-9.])2\.55(?![0-9])", guide) is None
+    # ... and the guide must not publish it as a number of its own.
+    printed = f"{retired:.2f}".replace(".", r"\.")
+    assert re.search(rf"(?<![0-9.]){printed}(?![0-9])", guide) is None
 
 
 def test_screening_guide_confirmatory_refit_table_matches_the_measured_gains(
@@ -315,10 +314,13 @@ def test_screening_guide_null_floors_match_the_remeasured_battery(guide) -> None
 
 
 _FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
+_SEV_SKIP_REASON = _datasets.skip_reason("freMTPL2sev.parquet")
 
+# The guide's sample is drawn from the corrected book, whose claim counts come
+# from the severity file, so the anchor needs both files.
 FREQ_SKIP = pytest.mark.skipif(
-    _FREQ_SKIP_REASON is not None,
-    reason=_FREQ_SKIP_REASON or "",
+    _FREQ_SKIP_REASON is not None or _SEV_SKIP_REASON is not None,
+    reason=_FREQ_SKIP_REASON or _SEV_SKIP_REASON or "",
 )
 
 
@@ -340,7 +342,10 @@ def _guide_features() -> dict:
 
 
 def _guide_frame(n_rows: int):
-    df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
+    # freMTPL2freq's ClaimNb is wrong for IDpol <= 24,500, so the sample is
+    # drawn from the corrected book: counts recounted from freMTPL2sev
+    # (Wüthrich & Merz 2023, Section 13.1; examples/fremtpl2_data.py).
+    df = _datasets.load_freq_corrected().sample(n_rows, random_state=0).reset_index(drop=True)
     df["Exposure"] = df["Exposure"].clip(lower=0.01)
     df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
     exposure = df["Exposure"].to_numpy(dtype=np.float64)
@@ -357,8 +362,9 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     this a reproducible measurement rather than a fixture back-filled from a
     failing assertion.  In particular, the scalar ``TensorInteraction`` refit
     must center and place every inner spline with frequency mass: substituting
-    unit/physical-row geometry moves the ``VehAge x BonusMalus`` gain from the
-    measured value back to 43.908 and fails this anchor.  The spline-factor
+    unit/physical-row geometry moved the ``VehAge x BonusMalus`` gain from
+    41.690 to 43.908 when this anchor was taken on the uncorrected counts, and
+    failed it.  The spline-factor
     confirmatory row likewise certifies its interacting-spline geometry.
 
     This is also the fixture's only tie to reality.  The five
