@@ -648,11 +648,11 @@ factor-based assembly. Quantized screens are identified by `approx`.
 This combination explains the design; establishing its originality requires
 a more complete literature comparison.
 
-The [FAST comparison](../explanation/what-screening-does.md) used the earlier normalization,
-refits every candidate, and measures held-out gain. In its two specifications,
-that PSST ranking agrees more
-closely with held-out refit gain; FAST is faster and agrees more closely with
-training gain. These are descriptive results from 8 and 10 pairs on one
-book, not evidence of a universal ranking advantage. Wider candidate sets and
-replicated data or splits are needed, with the dependence between overlapping
+The [FAST comparison](../explanation/what-screening-does.md) refits every
+candidate on the corrected claim counts and measures held-out gain. In both
+its specifications, on two splits and on the full book, the PSST ranking
+agrees more closely with held-out refit gain; FAST is faster and agrees more
+closely with training gain. These are descriptive results from 8 and 10 pairs
+on one book, not evidence of a universal ranking advantage. Wider candidate
+sets and replicated data are needed, with the dependence between overlapping
 pairs accounted for.
