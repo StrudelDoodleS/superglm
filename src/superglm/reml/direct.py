@@ -470,8 +470,27 @@ def optimize_direct_reml(
         presolve_beta = presolve_start["beta"]
         presolve_intercept = presolve_start["intercept"]
         presolve_centred = presolve_start["centred"]
+        presolve_wall = _time.perf_counter() - _t0
+        if trace_run is not None and trace_run.enabled:
+            # The pre-solve runs untraced; one summary event stands for it, and
+            # the stream's REML evaluations start after it.
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "direct_reml",
+                    "phase": "presolve",
+                    "updates": int(pre.n_reml_iter),
+                    "objective": float(pre.objective) if pre.objective is not None else None,
+                    "lambdas": dict(pre.lambdas),
+                    "wall_s": float(presolve_wall),
+                    "termination_reason": pre.termination_reason,
+                },
+                channel="reml",
+                purpose="reml_presolve",
+                authoritative=False,
+            )
         if profile is not None:
-            profile["reml_presolve_s"] = _time.perf_counter() - _t0
+            profile["reml_presolve_s"] = presolve_wall
             profile["reml_presolve_n_iter"] = int(pre.n_reml_iter)
             profile["reml_presolve_converged"] = bool(pre.converged)
             profile["reml_presolve_termination_reason"] = pre.termination_reason

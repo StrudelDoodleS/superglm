@@ -1,4 +1,12 @@
-"""Optional REML iteration tracing written to a debug directory."""
+"""Optional REML iteration tracing written to a debug directory.
+
+An exact fit that starts from the cached-weights pre-solve runs that
+pre-solve untraced: the stream carries one ``step_decision`` event for it
+(channel ``reml``, purpose ``reml_presolve``: updates, objective, lambdas,
+wall time), and its REML evaluations start after it.  Such a fit has no
+bootstrap state in the stream either; its first candidate starts from the
+pre-solve's mode.
+"""
 
 from __future__ import annotations
 
