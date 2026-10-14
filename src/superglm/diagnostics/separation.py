@@ -276,10 +276,13 @@ def drifting_groups(
     The rows are those pinned at the link's guard; with none pinned (an
     exhausted, stagnant walk) the rows whose predictor lies farthest from the
     bulk, at least half as far as the farthest.  A group is named by how far
-    its own contribution moves those rows, which compares across groups; the
-    size of its coefficients does not, since each group's coefficients are in
-    its own reparametrised scale (a tensor's can dwarf the curve that walked).
-    Groups reaching at least half the farthest are named, at most five.
+    its own contribution moves those rows from where it puts the bulk (its
+    median over the rows with weight), which compares across groups; the size
+    of its coefficients does not, since each group's coefficients are in its
+    own reparametrised scale (a tensor's can dwarf the curve that walked), and
+    nor does its raw contribution, whose constant part -- ``mean * beta`` for a
+    covariate far from zero -- the intercept cancels.  Groups reaching at least
+    half the farthest are named, at most five.
     """
     live = weights > 0
     rows = np.flatnonzero((eta != eta_unclipped) & live)
@@ -295,7 +298,8 @@ def drifting_groups(
         coefficients = beta[group.sl]
         if not coefficients.size or group.scop_reparameterization is not None:
             continue
-        moved = np.asarray(matrix.matvec(coefficients), dtype=np.float64)[rows]
+        contribution = np.asarray(matrix.matvec(coefficients), dtype=np.float64)
+        moved = contribution[rows] - np.median(contribution[live])
         reach.append((float(np.max(np.abs(moved))), group.name))
     if not reach:
         return []

@@ -285,6 +285,34 @@ def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows():
     assert "group(s): ['z']" in message
 
 
+def test_runtime_backstop_measures_a_group_from_its_bulk_not_from_zero():
+    """A covariate far from zero carries a large constant the intercept cancels.
+
+    ``year`` sits near 2015 with a coefficient of 0.1, so its raw contribution
+    is about 212 on every row, beyond the separated ``z`` (pinned near -80).
+    What it moves the stopped rows away from the bulk is under 1.
+    """
+    df, y, w = separated_numeric_design()
+    year = 2015.0 + np.random.default_rng(11).integers(-5, 6, size=len(df)).astype(float)
+    df = df.assign(year=year)
+    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(0.1 * (year - 2015.0)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric(), "year": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w)
+    beta = dict(zip(["z", "year"], model.result.beta, strict=True))
+    assert abs(beta["year"]) * 2010 > abs(beta["z"]), "fixture must make the raw offset larger"
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    assert "group(s): ['z']" in message
+
+
 def test_runtime_backstop_reports_the_expected_curvature_ratio():
     """Tweedie/log rows are observed-Newton; the gate compares the Fisher ratio.
 
