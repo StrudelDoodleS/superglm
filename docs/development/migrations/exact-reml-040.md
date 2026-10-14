@@ -95,7 +95,10 @@ Pass `lambda2_init` as a mapping (for example a previous fit's
 Far up the flat end of a smooth that the data do need, the criterion still
 falls toward the smooth's optimum, with negative curvature. The search used
 to hold such a direction as flat and report convergence there. It now steps
-off it, and does not stop while one is left.
+off it, and the tolerance stop is refused while one is left. Two stops can
+still happen beside one: a line search that rejects every trial certifies on
+its first-order precision floor, as before, and a direction whose negative
+curvature is under half or over twice its gradient keeps the old hold.
 
 ### Who is affected
 
