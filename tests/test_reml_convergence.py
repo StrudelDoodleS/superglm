@@ -155,6 +155,36 @@ def test_concave_live_needs_a_decrease_the_stop_rule_can_resolve() -> None:
     np.testing.assert_array_equal(live, [False, True, False, False, False])
 
 
+def test_negative_curvature_on_a_tail_falling_into_the_plateau_is_not_a_shoulder() -> None:
+    """At the lambda -> infinity end the criterion is ``V_inf + c exp(-j rho)``,
+    so ``H_ii = -j g_i``: a shoulder (``H_ii < 0``) has ``g_i > 0``.  A
+    negative diagonal beside a negative gradient, which descends into the
+    plateau, is an error in that entry, and the hold stands at any ratio.
+    Measured: the aliased-level fixture's frozen ``x`` direction read at
+    g = -2.66e-4, H = -1.41e-4 (ratio 0.53, inside the band; objective 3714.8,
+    resolution 3.7e-6), which the unsigned ratio took for a shoulder.  The
+    mirrored read (g = +2.66e-4) is one.
+    """
+    gradient = np.array([-2.66e-4, 2.66e-4])
+    hess = np.diag([-1.41e-4, -1.41e-4])
+    estimated = np.ones(2, dtype=bool)
+    live = concave_live_directions(
+        gradient, hess, estimated, objective=3714.8, tolerance=1e-9, step_bound=5.0
+    )
+    np.testing.assert_array_equal(live, [False, True])
+    decision = freeze_flat_directions(
+        gradient,
+        hess,
+        np.array([4.0, 4.0]),
+        estimated,
+        objective=3714.8,
+        tolerance=1e-9,
+        step_bound=5.0,
+    )
+    np.testing.assert_array_equal(decision.frozen, [True, False])
+    np.testing.assert_array_equal(decision.shoulder, [False, True])
+
+
 def test_freeze_normalizes_curvature_by_penalty_rank() -> None:
     """Row curvature scales with penalty rank: a 600-level random effect
     measures ~255 while an informative low-rank spline measures ~2.5, and
