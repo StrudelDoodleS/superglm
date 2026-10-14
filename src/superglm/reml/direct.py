@@ -1058,6 +1058,7 @@ def optimize_direct_reml(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
                     "shoulder": [False] * m,
+                    "proj_grad_signed": [0.0] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -1311,6 +1312,8 @@ def optimize_direct_reml(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
                     "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
+                    # The shoulder arm reads the sign (``concave_live_directions``).
+                    "proj_grad_signed": [float(v) for v in proj_grad],
                 }
             _t_hessian += _time.perf_counter() - _t0
             reactivated = concave_live | (
@@ -1408,6 +1411,8 @@ def optimize_direct_reml(
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen],
                 "shoulder": [bool(v) for v in shoulder],
+                # The shoulder arm reads the sign (``concave_live_directions``).
+                "proj_grad_signed": [float(v) for v in proj_grad],
             }
             if shoulder.any():
                 # Every iteration that steps a shoulder, with its signed

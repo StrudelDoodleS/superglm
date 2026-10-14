@@ -549,8 +549,8 @@ def test_sz_negative_curvature_read_on_the_frozen_tail_keeps_the_hold(monkeypatc
 
 def _reml_stops(model: SuperGLM) -> str:
     """The search's stop, the terminal refit's disclosure and its own stop, the
-    lambdas, and why: the last freeze decision (gradients unsigned, as
-    judged), every shoulder read with its signed gradient and curvature, a
+    lambdas, and why: the last freeze decision (gradients unsigned against
+    the bars, with the signed gradient the shoulder arm reads), every shoulder read with its signed gradient and curvature, a
     score-test stop a shoulder refused, and the dead-search exit's evidence."""
     result = model._reml_result
     profile = model._reml_profile
@@ -558,7 +558,15 @@ def _reml_stops(model: SuperGLM) -> str:
     if freeze is not None:
         freeze = {
             key: freeze[key]
-            for key in ("names", "proj_grad", "hess_diag", "frozen", "shoulder", "score_scale")
+            for key in (
+                "names",
+                "proj_grad",
+                "proj_grad_signed",
+                "hess_diag",
+                "frozen",
+                "shoulder",
+                "score_scale",
+            )
         }
     return (
         f"search stop {result.termination_reason!r}, terminal refit "

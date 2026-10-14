@@ -782,8 +782,9 @@ class SuperGLM:
             ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
             directions: inferentially flat directions are frozen where they
             stand rather than marched toward the lambda cap. One on a concave
-            shoulder of a flat region (negative curvature about equal to its
-            gradient, whose model still promises a decrease this tolerance
+            shoulder of a flat region (a positive gradient, the criterion
+            still falling toward the optimum, with negative curvature about
+            equal to it, whose model still promises a decrease this tolerance
             resolves) refuses the stop and keeps stepping; the last such
             refusal is recorded under
             ``profile["reml_concave_stop_refusal"]``. A direction

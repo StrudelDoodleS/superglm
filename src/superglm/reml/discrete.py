@@ -1082,6 +1082,7 @@ def optimize_discrete_reml_cached_w(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
                     "shoulder": [False] * m,
+                    "proj_grad_signed": [0.0] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -1225,6 +1226,8 @@ def optimize_discrete_reml_cached_w(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
                     "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
+                    # The shoulder arm reads the sign (``concave_live_directions``).
+                    "proj_grad_signed": [float(v) for v in proj_grad_d],
                 }
             reactivated = concave_live_d | (
                 ~np.asarray(revalidation.frozen)
@@ -1308,6 +1311,8 @@ def optimize_discrete_reml_cached_w(
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen_d],
                 "shoulder": [bool(v) for v in shoulder_d],
+                # The shoulder arm reads the sign (``concave_live_directions``).
+                "proj_grad_signed": [float(v) for v in proj_grad_d],
             }
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues

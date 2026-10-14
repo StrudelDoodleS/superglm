@@ -543,8 +543,10 @@ class TestFreezeDiagnostics:
             "estimated",
             "frozen",
             "shoulder",
+            "proj_grad_signed",
         }
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
+        assert [abs(v) for v in freeze["proj_grad_signed"]] == freeze["proj_grad"]
         assert len(freeze["frozen"]) == len(freeze["names"])
         assert len(freeze["row_curvature"]) == len(freeze["penalty_rank"]) == len(freeze["names"])
         assert len(freeze["normalized_curvature"]) == len(freeze["names"])
@@ -832,6 +834,7 @@ class TestAllFixedLambdaDiagnostics:
             "estimated",
             "frozen",
             "shoulder",
+            "proj_grad_signed",
         }
         assert freeze["frozen"] == [True] * len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0
