@@ -2835,6 +2835,29 @@ class TestExactPresolve:
         assert info["converged"]
         assert info["n_reml_iter"] <= 6
 
+    def test_the_presolve_replaces_the_bootstrap_fit(self, monkeypatch):
+        """After the pre-solve every estimated component starts warm, so the
+        bootstrap PIRLS fitted the mode the first candidate fits again, at the
+        same lambdas.  The candidate now starts from the pre-solve's mode:
+        one PIRLS call and one row pass fewer, the same fit (mutation check:
+        the PR #487 head ran a bootstrap phase; 5 PIRLS calls and 6 PIRLS
+        iterations against 4 and 5 now, the objective equal to 1e-15)."""
+        import superglm.reml.direct as direct_module
+
+        phases = []
+        real_fit = direct_module.fit_irls_direct
+
+        def recorded(*args, **kwargs):
+            phases.append((kwargs.get("debug_context") or {}).get("phase"))
+            return real_fit(*args, **kwargs)
+
+        monkeypatch.setattr(direct_module, "fit_irls_direct", recorded)
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert info["profile"]["reml_presolve_n_iter"] > 0
+        assert "bootstrap" not in phases
+        assert "candidate" in phases
+
     def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self):
         """Its freeze and stop bars scale with the tolerance: under the caller's
         reml_tol = 1e-5 it stopped after 8 updates instead of 11, and the exact
