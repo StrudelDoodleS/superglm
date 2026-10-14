@@ -495,13 +495,9 @@ def test_debug_trace_summarises_the_presolve_before_the_reml_events(tmp_path: Pa
     stands for it ahead of every REML evaluation (mutation check: the PR #487
     head emitted none, and since the pre-solve replaced the bootstrap the
     stream had no trace of the start at all)."""
-    import sys
-
     from superglm._debug import set_debug_level
     from superglm.model.reml_debug import load_reml_debug_run
-
-    sys.path.insert(0, str(Path(__file__).parent))
-    from test_reml import _ten_penalty_poisson
+    from tests.test_reml import _ten_penalty_poisson
 
     monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
     set_debug_level(2)

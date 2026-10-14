@@ -18,9 +18,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Binomial, Gamma, Gaussian, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
-from superglm.links import LogitLink
+from superglm.links import LogitLink, LogLink
 from superglm.reml.convergence import (
     classify_dead_feasible_exit,
     concave_live_directions,
@@ -115,14 +115,16 @@ _PRESOLVE_MIN_ESTIMATED = 8
 # this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
 # would get up to twice the work it budgeted for.
 _PRESOLVE_MIN_REML_ITER = 10
-# It also runs only where it was measured (Poisson with the log link on the
-# dense solver): a canonical link, whose Fisher curvature is the observed one
-# the exact loop uses, and no RandomEffect or FactorSmooth term the structured
-# solvers could take.  Elsewhere it would choose its start on curvature the
-# exact loop does not use (observed-curvature families), carry a boundary
-# coefficient into the exact fit without the mean-space restoration
-# (binomial with the log link), or take a backend route whose parity with the
-# dense one is untested past a few smoothing parameters.  A Tweedie power
+# It also runs only where it was measured: Poisson with the log link, with
+# no RandomEffect or FactorSmooth term the structured solvers could take.
+# Elsewhere it would choose its start on curvature the exact loop does not
+# use (observed-curvature families), carry a boundary coefficient into the
+# exact fit without the mean-space restoration (binomial with the log link),
+# take a backend route whose parity with the dense one is untested past a few
+# smoothing parameters, or rest on an unmeasured cost: binomial with the logit
+# link takes its own leverage-gradient route, and a constant-weight Gaussian
+# identity fit's cached-W criterion is already the exact one.  Each of those
+# keeps the plain cold start until it is measured.  A Tweedie power
 # search turns it off itself: a changed start moves the selected power.
 # The other first-order fits keep the derivative Grams, and with them the
 # outer Hessian's weight-product term, until those Grams cost real time: one
@@ -204,8 +206,8 @@ def optimize_direct_reml(
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters, a canonical link, no structured-solver
-    term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
+    estimated smoothing parameters, Poisson with the log link, no
+    structured-solver term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
     runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
     design until its objective settles, and the exact Newton loop starts
@@ -424,6 +426,8 @@ def optimize_direct_reml(
         presolve = (
             not warm_lambdas
             and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            and type(distribution) is Poisson
+            and type(link) is LogLink
             and not use_observed_geometry
             and not structured_alternative
             and max_reml_iter >= _PRESOLVE_MIN_REML_ITER

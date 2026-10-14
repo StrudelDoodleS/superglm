@@ -54,8 +54,8 @@ The fit must have all of these:
 
 - no warm start (`lambda2_init` is not a mapping);
 - at least eight smoothing parameters to estimate;
-- a canonical link: Poisson with log, binomial with logit, Gaussian with
-  identity, Gamma with inverse;
+- Poisson with the log link, the only family measured so far (others keep
+  the plain start until they are measured);
 - no `RandomEffect` or `FactorSmooth` term;
 - `max_reml_iter` of at least 10 (so not `interaction_mode="fast_candidate"`).
 
@@ -79,8 +79,9 @@ thread):
   the flat region, which depends on the start. The objective moves by about
   0.01.
 - **Iterations**: `reml_diagnostics()["n_reml_iter"]` counts the Newton
-  search only (6 instead of 12 and 14 above). `["n_presolve_iter"]` counts
-  the cached-weights updates before it.
+  search only: 6 on both models above, against 12 (4 gated pairs) and 14
+  (10 pairs) before. `["n_presolve_iter"]` counts the cached-weights updates
+  before it (9 and 12).
 
 ### Getting the old behaviour back
 

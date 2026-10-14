@@ -2968,13 +2968,17 @@ class TestExactPresolveScope:
 
     That is Poisson with the log link on the dense solver.  A non-canonical
     link (whose exact loop uses observed curvature, or, binomial with the log
-    link, a boundary restoration the cached-W engine lacks), a model the
-    structured solvers can take, and a Tweedie power search's candidates keep
-    the plain cold start, bit for bit.  Mutation check: on the PR #487 head
-    (eeea40f5) the three model cases pre-solved.
+    link, a boundary restoration the cached-W engine lacks), an unmeasured
+    canonical one (binomial with the logit link, Gaussian with the identity),
+    a model the structured solvers can take, and a Tweedie power search's
+    candidates keep the plain cold start, bit for bit.  Mutation check: on the
+    PR #487 head eeea40f5 the binomial/log, Gamma/log and structured cases
+    pre-solved, and on fa839a72 the binomial/logit and Gaussian cases did.
     """
 
-    @pytest.mark.parametrize("case", ["binomial_log", "gamma_log", "structured"])
+    @pytest.mark.parametrize(
+        "case", ["binomial_log", "gamma_log", "binomial_logit", "gaussian", "structured"]
+    )
     def test_an_excluded_fit_keeps_the_plain_cold_start(self, case, monkeypatch):
         import superglm.model.reml_ops as reml_ops_module
         import superglm.reml.direct as direct_module
@@ -2986,6 +2990,12 @@ class TestExactPresolveScope:
         elif case == "gamma_log":
             y = rng.gamma(4.0, np.exp(eta) / 4.0)
             kwargs = {"family": "gamma", "link": "log"}
+        elif case == "binomial_logit":
+            y = rng.binomial(1, 1.0 / (1.0 + np.exp(1.0 - eta))).astype(float)
+            kwargs = {"family": "binomial"}
+        elif case == "gaussian":
+            y = eta + rng.normal(size=len(eta))
+            kwargs = {"family": "gaussian"}
         else:
             y = rng.poisson(np.exp(eta - 1.0)).astype(float)
             kwargs = {"family": "poisson"}
