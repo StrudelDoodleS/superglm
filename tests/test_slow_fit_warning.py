@@ -11,15 +11,15 @@ import pytest
 from superglm import Categorical, RandomEffect, SlowFitWarning, Spline, SuperGLM
 from superglm.diagnostics import fit_cost
 from superglm.diagnostics.fit_cost import exact_reml_cost_message
-from superglm.distributions import Binomial, Gaussian, Poisson
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogitLink, LogLink
 
-# freMTPL2 (542,410 training rows), exact fit times after the one-pass
-# weight-derivative correction: mains only, then mains + 1, 3 and 10 pairs.
-BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 7-12 s
-BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 27 s, 9 s binned
-BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 95 s, 19 s binned
-BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_565)  # 405 s, 90 s binned
+# freMTPL2 (542,410 training rows): mains only, then mains + 1, 3 and 10 pairs;
+# exact and binned times from the session recorded in diagnostics/fit_cost.py.
+BOOK_MAINS = dict(n_rows=542_410, n_coef=67)  # 8-9 s, 3 s binned
+BOOK_ONE_PAIR = dict(n_rows=542_410, n_coef=192)  # 40 s, 9 s binned
+BOOK_THREE_PAIRS = dict(n_rows=542_410, n_coef=478)  # 86 s, 20 s binned
+BOOK_TEN_PAIRS = dict(n_rows=542_410, n_coef=1_540)  # 422 s, 84 s binned
 
 
 @pytest.mark.parametrize("book", [BOOK_THREE_PAIRS, BOOK_TEN_PAIRS])
@@ -43,6 +43,11 @@ def test_rule_skips_gaussian_identity_and_covers_other_families():
     )
     assert (
         exact_reml_cost_message(**BOOK_THREE_PAIRS, distribution=Binomial(), link=LogitLink())
+        is not None
+    )
+    # Gamma-log reuses its Fisher data Gram but still took 119 s on this design
+    assert (
+        exact_reml_cost_message(**BOOK_THREE_PAIRS, distribution=Gamma(), link=LogLink())
         is not None
     )
 
@@ -108,3 +113,23 @@ def test_structured_fit_is_silent(monkeypatch):
     )
     assert _slow_fit_warnings(model, df, y) == []
     assert model._reml_profile["structured_chain"] == ("re",)
+
+
+def test_warning_points_at_the_caller_on_internal_refits(monkeypatch):
+    # theta="auto" refits through _refine_nb_theta_to_reml_fixed_point, one
+    # frame deeper than fit_reml's own call: a fixed stacklevel lands in the
+    # library there instead of on this line.
+    from superglm.distributions import NegativeBinomial
+
+    monkeypatch.setattr(fit_cost, "EXACT_REML_WORK_WARN", 1.0)
+    df, y = _small_book()
+    # gamma-mixed (negative binomial) counts, so theta moves after the first fit
+    rng = np.random.default_rng(1)
+    y = rng.poisson((y + 1.0) * rng.gamma(2.0, 0.5, len(y))).astype(float)
+    model = SuperGLM(
+        family=NegativeBinomial(theta="auto"),
+        features={"x": Spline(n_knots=8), "z": Spline(n_knots=8), "g": Categorical()},
+    )
+    caught = _slow_fit_warnings(model, df, y)
+    assert len(caught) >= 2  # the first fit and at least one theta refit
+    assert {w.filename for w in caught} == {__file__}
