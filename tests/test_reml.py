@@ -2752,6 +2752,7 @@ class TestExactPresolve:
         model, X, y = _ten_penalty_poisson()
         info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
         assert info["profile"]["reml_presolve_n_iter"] > 0
+        assert info["n_presolve_iter"] == info["profile"]["reml_presolve_n_iter"]
         assert info["converged"]
         assert info["n_reml_iter"] <= 6
 
@@ -2777,6 +2778,22 @@ class TestExactPresolve:
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert "bootstrap" not in phases
         assert "candidate" in phases
+
+    @pytest.mark.parametrize("cap", ["fast_candidate", "max_reml_iter_5"])
+    def test_a_short_iteration_cap_skips_the_presolve(self, cap):
+        """The pre-solve takes up to the fit's own max_reml_iter cached-W
+        updates, so under a cap of 5 (interaction_mode="fast_candidate", or an
+        explicit one) a fit could run 10.  Below 10 it does not run (mutation
+        check: the PR #487 head pre-solved both)."""
+        model, X, y = _ten_penalty_poisson()
+        kwargs = (
+            {"interaction_mode": "fast_candidate"}
+            if cap == "fast_candidate"
+            else {"max_reml_iter": 5}
+        )
+        info = model.fit_reml(X, y, runtime_validation="skip", **kwargs).reml_diagnostics()
+        assert "reml_presolve_n_iter" not in info["profile"]
+        assert info["n_presolve_iter"] == 0
 
     def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self):
         """Its freeze and stop bars scale with the tolerance: under the caller's

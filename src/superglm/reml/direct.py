@@ -109,6 +109,12 @@ _PRESOLVE_REML_TOL = 1e-9
 # single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
 # with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
 _PRESOLVE_MIN_ESTIMATED = 8
+# Nor under a short iteration cap: the pre-solve takes up to the fit's own
+# ``max_reml_iter`` cached-W updates before the exact loop (7 to 16 measured
+# on freMTPL2 and the test fixtures), so a caller capping the search below
+# this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
+# would get up to twice the work it budgeted for.
+_PRESOLVE_MIN_REML_ITER = 10
 # It also runs only where it was measured (Poisson with the log link on the
 # dense solver): a canonical link, whose Fisher curvature is the observed one
 # the exact loop uses, and no RandomEffect or FactorSmooth term the structured
@@ -198,8 +204,9 @@ def optimize_direct_reml(
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters, a canonical link and no structured-solver
-    term first runs the cached-W performance
+    estimated smoothing parameters, a canonical link, no structured-solver
+    term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
+    runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
     design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
@@ -417,6 +424,7 @@ def optimize_direct_reml(
             and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
             and not use_observed_geometry
             and not structured_alternative
+            and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
         )
     if presolve and not all_lambdas_fixed:
         presolve_profile: dict = {}
