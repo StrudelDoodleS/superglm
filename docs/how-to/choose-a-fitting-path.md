@@ -78,9 +78,10 @@ not warn either: its smoothing is chosen by a different method, whose run time
 has not been measured.
 
 On the 542,000-row freMTPL2 frequency book, a model with three interaction
-pairs (about 480 coefficients) took 1.4 minutes exactly and 20 seconds with
-`discrete=True`. With one pair (about 190 coefficients) it took 27 to 40
-seconds and does not warn.
+pairs (about 480 coefficients) took 48 seconds exactly and 17 seconds with
+`discrete=True`; with ten pairs (about 1,540 coefficients) it took 3.6 minutes
+and 76 seconds. With one pair (about 190 coefficients) it took 15 seconds and
+does not warn.
 
 ## When a REML fit counts as converged
 
