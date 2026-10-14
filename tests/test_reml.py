@@ -2258,6 +2258,38 @@ class TestREMLWarmStart:
         bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
         assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
 
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_start_on_a_plateau_shoulder_returns_to_the_optimum(self, discrete):
+        """A start far up the flat end of a needed smooth is not converged.
+
+        x2 carries a weak real effect (optimum lambda about 22); started at
+        1e8 its direction sits on a concave shoulder: gradient small, and
+        curvature negative.  The freeze held it there as flat and the fit
+        reported convergence 5.3 worse than the cold fit, lambda still 1e8
+        (mutation check: the PR #487 head, both engines).  A concave
+        direction is not held while its trust-region model promises a
+        decrease the stopping rule can resolve, and steps to the step bound,
+        so the fit returns to the cold optimum, within twice the stop bar.
+        """
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.3 + 0.8 * np.sin(2 * np.pi * x1) + 0.1 * np.sin(3 * np.pi * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        cold_info = _two_smooth_model(discrete).fit_reml(X, y).reml_diagnostics()
+        start = {"x1": cold_info["lambdas"]["x1"], "x2": 1e8}
+        warm_info = (
+            _two_smooth_model(discrete).fit_reml(X, y, lambda2_init=start).reml_diagnostics()
+        )
+
+        assert warm_info["converged"]
+        bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
+        assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
+        assert abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) < 0.01
+
     def test_a_scalar_keeps_the_cold_start(self):
         """A float is not a warm start: the fit is the default fit, bit for bit."""
         X, y = _two_smooth_poisson(n=1500)

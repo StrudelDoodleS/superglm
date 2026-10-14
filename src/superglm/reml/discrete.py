@@ -29,6 +29,7 @@ from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
+    concave_live_directions,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
@@ -1097,13 +1098,9 @@ def optimize_discrete_reml_cached_w(
                     & (np.abs(proj_grad_d) >= _tol * score_scale_d)
                 )
             )
-            if not masked_live:
-                rho = rho_clipped
-                prev_obj = obj
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                _t_newton += _time.perf_counter() - _t0
-                break
+            # The compound test is first order; the point must also pass
+            # the second-order necessary condition to the precision asked
+            # for (``concave_live_directions``), as on the exact engine.
             revalidated_hess = reml_direct_hessian(
                 dm.group_matrices,
                 distribution,
@@ -1120,6 +1117,21 @@ def optimize_discrete_reml_cached_w(
                 reml_penalties=penalties,
                 tensor_pair_evaluations=cand_tensor_pair_evals,
             )
+            concave_live_d = concave_live_directions(
+                proj_grad_d,
+                revalidated_hess,
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+                step_bound=max_newton_step,
+            )
+            if not masked_live and not bool(np.any(concave_live_d)):
+                rho = rho_clipped
+                prev_obj = obj
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                _t_newton += _time.perf_counter() - _t0
+                break
             revalidation = freeze_flat_directions(
                 proj_grad_d,
                 revalidated_hess,
@@ -1127,6 +1139,7 @@ def optimize_discrete_reml_cached_w(
                 estimated_mask,
                 objective=obj,
                 tolerance=_tol,
+                step_bound=max_newton_step,
             )
             if profile is not None:
                 profile["reml_freeze_revalidated"] = True
@@ -1145,9 +1158,13 @@ def optimize_discrete_reml_cached_w(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
                 }
-            reactivated = (
+            reactivated = concave_live_d | (
                 ~np.asarray(revalidation.frozen)
-                & np.asarray(stop_criterion_frozen_d)
+                & (
+                    np.asarray(stop_criterion_frozen_d)
+                    if stop_criterion_frozen_d is not None
+                    else np.zeros(m, dtype=bool)
+                )
                 & (np.abs(proj_grad_d) >= _tol * score_scale_d)
             )
             if not bool(np.any(reactivated)):
@@ -1196,9 +1213,13 @@ def optimize_discrete_reml_cached_w(
             estimated_mask,
             objective=obj,
             tolerance=_tol,
+            step_bound=max_newton_step,
         )
         frozen_d = freeze_decision.frozen
-        active_idx_d = np.where(~frozen_d)[0]
+        # Concave shoulders take the trust-region boundary step below, not
+        # the flipped-curvature Newton step (``freeze_flat_directions``).
+        shoulder_d = np.asarray(freeze_decision.shoulder, dtype=bool)
+        active_idx_d = np.where(~frozen_d & ~shoulder_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
             # The freeze decision separates informative directions from
@@ -1221,7 +1242,7 @@ def optimize_discrete_reml_cached_w(
             }
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
-        if active_idx_d.size == 0:
+        if active_idx_d.size == 0 and not shoulder_d.any():
             rho = rho_clipped
             _t_newton += _time.perf_counter() - _t0
             if poi_iter == 0:
@@ -1242,27 +1263,28 @@ def optimize_discrete_reml_cached_w(
             termination_reason = "active_set_stationary"
             break
 
-        if active_idx_d.size < m:
-            hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
-            grad_sub_d = grad[active_idx_d]
-        else:
-            hess_sub_d = hess
-            grad_sub_d = grad
-
-        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
-        max_eig_d = max(abs(eigvals_h).max(), 1e-12)
-        eig_floor_d = max_eig_d * _eps**0.7
-        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
-        delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
         delta = np.zeros(m)
-        delta[active_idx_d] = delta_sub_d
+        if active_idx_d.size:
+            if active_idx_d.size < m:
+                hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
+                grad_sub_d = grad[active_idx_d]
+            else:
+                hess_sub_d = hess
+                grad_sub_d = grad
+
+            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
+            max_eig_d = max(abs(eigvals_h).max(), 1e-12)
+            eig_floor_d = max_eig_d * _eps**0.7
+            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
+            delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
+            delta[active_idx_d] = delta_sub_d
 
         tensor_step_diag = None
         trust_mu = 0.0
         trust_binding: list[str] = []
         gdot_newton = float(grad @ delta)
         gdot_damped = gdot_newton
-        if use_tensor_linesearch:
+        if use_tensor_linesearch and active_idx_d.size:
             # Bound log-lambda coordinates and each shared pair's difference
             # by damping the whole step. The coordinate bound also bounds
             # each pair's mean. Widen after one accepted full step so a
@@ -1279,7 +1301,7 @@ def optimize_discrete_reml_cached_w(
                 m,
                 group_names,
                 shared_tensor_pairs,
-                frozen_d,
+                frozen_d | shoulder_d,
                 base_cap,
                 cap_v,
             )
@@ -1312,6 +1334,10 @@ def optimize_discrete_reml_cached_w(
                 }
                 break
 
+        # A concave shoulder's trust-region step: the step bound, downhill.
+        delta[shoulder_d] = -np.sign(proj_grad_d[shoulder_d]) * max_newton_step
+        if use_tensor_linesearch and not active_idx_d.size:
+            delta_newton = delta
         # Step capping on the generic path: scale the whole vector.
         if not use_tensor_linesearch:
             local_max_newton_step = max_newton_step
@@ -1643,7 +1669,7 @@ def optimize_discrete_reml_cached_w(
                 # modification.
                 predicted_decrease = (
                     None
-                    if trust_mu > 0.0
+                    if trust_mu > 0.0 or bool(shoulder_d.any())
                     else newton_predicted_decrease(
                         grad_sub_d, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor_d
                     )

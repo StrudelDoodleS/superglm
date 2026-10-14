@@ -23,6 +23,7 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink
 from superglm.reml.convergence import (
     classify_dead_feasible_exit,
+    concave_live_directions,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
@@ -1079,10 +1080,10 @@ def optimize_direct_reml(
                     np.asarray(stop_criterion_frozen) & (np.abs(proj_grad) >= _tol * score_scale)
                 )
             )
-            if not masked_live:
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                break
+            # The compound test is first order.  A point it accepts must also
+            # pass the second-order necessary condition to the precision asked
+            # for (``concave_live_directions``): on a concave shoulder of a
+            # plateau the gradient is small however far the optimum is.
             _t0 = _time.perf_counter()
             revalidated_hess = reml_direct_hessian(
                 dm.group_matrices,
@@ -1101,6 +1102,19 @@ def optimize_direct_reml(
                 dH2_cross=dH2_cross,
                 reml_penalties=penalties,
             )
+            concave_live = concave_live_directions(
+                proj_grad,
+                revalidated_hess,
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+                step_bound=max_newton_step,
+            )
+            if not masked_live and not bool(np.any(concave_live)):
+                _t_hessian += _time.perf_counter() - _t0
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                break
             revalidation = freeze_flat_directions(
                 proj_grad,
                 revalidated_hess,
@@ -1108,6 +1122,7 @@ def optimize_direct_reml(
                 estimated_mask,
                 objective=obj,
                 tolerance=_tol,
+                step_bound=max_newton_step,
             )
             if profile is not None:
                 profile["reml_freeze_revalidated"] = True
@@ -1127,9 +1142,13 @@ def optimize_direct_reml(
                     "frozen": [bool(v) for v in revalidation.frozen],
                 }
             _t_hessian += _time.perf_counter() - _t0
-            reactivated = (
+            reactivated = concave_live | (
                 ~np.asarray(revalidation.frozen)
-                & np.asarray(stop_criterion_frozen)
+                & (
+                    np.asarray(stop_criterion_frozen)
+                    if stop_criterion_frozen is not None
+                    else np.zeros(m, dtype=bool)
+                )
                 & (np.abs(proj_grad) >= _tol * score_scale)
             )
             if not bool(np.any(reactivated)):
@@ -1193,8 +1212,10 @@ def optimize_direct_reml(
             estimated_mask,
             objective=obj,
             tolerance=_tol,
+            step_bound=max_newton_step,
         )
         frozen = freeze_decision.frozen
+        shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
@@ -1248,25 +1269,33 @@ def optimize_direct_reml(
             termination_reason = "active_set_stationary"
             break
 
-        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
-        if active_idx.size < m:
-            hess_sub = hess[np.ix_(active_idx, active_idx)]
-            grad_sub = grad[active_idx]
-        else:
-            hess_sub = hess
-            grad_sub = grad
-
-        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
-        max_eig = max(abs(eigvals_h).max(), 1e-12)
-        eig_floor = max_eig * _eps**0.7
-        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
-
-        hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
-        delta_sub = -np.linalg.solve(hess_pd, grad_sub)
-
-        # Scatter back to full delta
+        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues.
+        # A concave shoulder takes its trust-region step instead: the model
+        # decreases without bound along negative curvature, so the step lies
+        # on the region's boundary (More & Sorensen 1979), here the step cap,
+        # in the descent direction.  A flipped-curvature Newton step on an
+        # exponential shoulder moves one e-fold per iteration.
+        newton_idx = np.where(~frozen & ~shoulder)[0] if shoulder.any() else active_idx
         delta = np.zeros(m)
-        delta[active_idx] = delta_sub
+        if newton_idx.size:
+            if newton_idx.size < m:
+                hess_sub = hess[np.ix_(newton_idx, newton_idx)]
+                grad_sub = grad[newton_idx]
+            else:
+                hess_sub = hess
+                grad_sub = grad
+
+            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
+            max_eig = max(abs(eigvals_h).max(), 1e-12)
+            eig_floor = max_eig * _eps**0.7
+            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
+
+            hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
+            delta_sub = -np.linalg.solve(hess_pd, grad_sub)
+
+            # Scatter back to full delta
+            delta[newton_idx] = delta_sub
+        delta[shoulder] = -np.sign(proj_grad[shoulder]) * max_newton_step
 
         # Proportional step cap: scale entire vector if any component > max_step
         max_delta = float(np.max(np.abs(delta)))
@@ -1637,7 +1666,7 @@ def optimize_direct_reml(
                 and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
                 predicted_decrease=(
                     None
-                    if max_delta > max_newton_step
+                    if max_delta > max_newton_step or bool(shoulder.any())
                     else newton_predicted_decrease(
                         grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
                     )

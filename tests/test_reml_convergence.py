@@ -11,6 +11,7 @@ from superglm.reml.convergence import (
     FLAT_DIRECTION_CURVATURE_REL,
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
+    concave_live_directions,
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
@@ -98,6 +99,57 @@ def test_freeze_judges_curvature_relative_to_the_strongest_direction() -> None:
         tiny, hess, np.ones(3), estimated, objective=1e3, tolerance=1e-6
     )
     np.testing.assert_array_equal(decision.frozen, small_objective.frozen)
+
+
+def test_freeze_holds_a_convex_tail_but_not_a_concave_shoulder() -> None:
+    """A flat direction is held as at a virtual bound (Wood's working
+    infinity), which projected Newton allows only when descent leads into
+    that bound.  Both directions below are flat by the gradient and
+    curvature bars (objective 8.5e4, freeze bar 8.5e-3): the convex tail
+    (g = -6e-3, H = +6e-3, a 1/lambda tail toward infinity) is held; the
+    concave shoulder (g = +1.8e-3, H = -1.9e-3: the measured freMTPL2
+    VehAge x VehBrand[B4] state at lambda = 1e4, optimum near 7.8) is not,
+    because its trust-region model promises 5 * 1.8e-3 + 12.5 * 1.9e-3
+    against a resolution of 8.5e-5.  Without a step bound the hold is the
+    first-order one it always was (mutation check: the PR #487 head held
+    both)."""
+    gradient = np.array([-6e-3, 1.8e-3, 40.0])
+    hess = np.diag([6e-3, -1.9e-3, 3.0])
+    ranks = np.array([10.0, 10.0, 10.0])
+    estimated = np.ones(3, dtype=bool)
+
+    decision = freeze_flat_directions(
+        gradient, hess, ranks, estimated, objective=8.5e4, tolerance=1e-9, step_bound=5.0
+    )
+    np.testing.assert_array_equal(decision.frozen, [True, False, False])
+    np.testing.assert_array_equal(decision.shoulder, [False, True, False])
+
+    first_order = freeze_flat_directions(
+        gradient, hess, ranks, estimated, objective=8.5e4, tolerance=1e-9
+    )
+    np.testing.assert_array_equal(first_order.frozen, [True, True, False])
+    assert not first_order.shoulder.any()
+
+
+def test_concave_live_needs_a_decrease_the_stop_rule_can_resolve() -> None:
+    """Negative curvature alone is no evidence: a rounding-level negative
+    diagonal on a flat direction promises less than the stopping
+    resolution over the whole step and leaves the first-order verdict
+    alone; a zero projected gradient (a bound holding the direction) is
+    never live."""
+    hess = np.diag([-1e-12, -2e-3, -2e-3, -2.5e-3])
+    gradient = np.array([1e-12, 2e-3, 0.0, 2e-5])
+    live = concave_live_directions(
+        gradient,
+        hess,
+        np.ones(4, dtype=bool),
+        objective=8.5e4,
+        tolerance=1e-9,
+        step_bound=5.0,
+    )
+    # The last column is off the shoulder signature (curvature 125 times the
+    # gradient): roughness, not a shoulder.
+    np.testing.assert_array_equal(live, [False, True, False, False])
 
 
 def test_freeze_normalizes_curvature_by_penalty_rank() -> None:
