@@ -2659,3 +2659,69 @@ class TestREMLNonConvergenceDisclosure:
         assert scop.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
         explicit = _two_smooth_model(True).fit_reml(X, y, max_reml_iter=50)
         assert explicit.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 50
+
+
+def _ten_penalty_poisson(n=3000, seed=1):
+    """Three smooths, a factor and a spline-by-factor: ten estimated smoothing parameters."""
+    rng = np.random.default_rng(seed)
+    x1, x2, x3 = rng.uniform(0, 1, n), rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    g = rng.integers(0, 8, n)
+    eta = (
+        -1.0
+        + 0.6 * np.sin(2 * np.pi * x1)
+        + 0.3 * x2**2
+        + 0.2 * (g % 3)
+        + 0.15 * np.sin(4 * x3) * (g == 2)
+    )
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3, "g": g.astype(str)})
+    model = SuperGLM(
+        family="poisson",
+        discrete=False,
+        features={
+            "x1": Spline(n_knots=10),
+            "x2": Spline(n_knots=8),
+            "x3": Spline(n_knots=8),
+            "g": Categorical(),
+        },
+        interactions=[("x3", "g")],
+    )
+    return model, X, rng.poisson(np.exp(eta)).astype(float)
+
+
+class TestExactPresolve:
+    """A cold exact fit with many smoothing parameters starts from the cached-W fixed point.
+
+    The cached-W (performance) iteration, mgcv's ``outerPIsteps`` taken to its
+    fixed point, runs on the same lossless design and hands the exact Newton
+    loop its smoothing parameters and coefficients; the exact loop's gradient
+    and stopping rule are unchanged.
+    """
+
+    def test_a_cold_ten_parameter_fit_converges_from_the_presolve(self):
+        """Mutation check: on the PR #487 head (no pre-solve) the exact loop took
+        14 iterations; from the pre-solve's 11 cached-W updates it converges in
+        4, to an objective 1.8e-5 lower (both stops within reml_tol)."""
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert info["profile"]["reml_presolve_n_iter"] > 0
+        assert info["converged"]
+        assert info["n_reml_iter"] <= 6
+
+    def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self):
+        """Its freeze and stop bars scale with the tolerance: under the caller's
+        reml_tol = 1e-5 it stopped after 8 updates instead of 11, and the exact
+        loop, stopping on that loose bar, published an objective 5.1e-3 higher.
+        It runs at its own 1e-9 whatever the caller asks."""
+        updates = []
+        for tol in (None, 1e-5):
+            model, X, y = _ten_penalty_poisson()
+            info = model.fit_reml(X, y, runtime_validation="skip", reml_tol=tol)
+            updates.append(info.reml_diagnostics()["profile"]["reml_presolve_n_iter"])
+        assert updates[0] == updates[1]
+
+    def test_two_parameters_keep_the_cold_newton_start(self):
+        """Below eight estimated smoothing parameters the pre-solve did not pay
+        (off/on wall 0.75 .. 0.96 with two), so the fit is the plain cold one."""
+        X, y = _two_smooth_poisson()
+        info = _two_smooth_model(False).fit_reml(X, y).reml_diagnostics()
+        assert "reml_presolve_n_iter" not in info["profile"]

@@ -191,6 +191,7 @@ def model_optimize_direct_reml(
         debug_recorder=debug_recorder,
         trace_run=trace_run,
         warm_lambdas=warm_lambdas,
+        presolve=getattr(model, "_reml_presolve", None),
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas

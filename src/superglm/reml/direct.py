@@ -91,6 +91,24 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 # spline/categorical timings cross over at four penalties on the reference host;
 # below that, the specialized Gram route remains cheaper.
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+# The pre-solve (``presolve``) hands the exact loop a start, not a result: it
+# stops once a working-model update moves the objective by less than this
+# fraction of its scale.  On freMTPL2 (1 to 10 interaction pairs) the cached-W
+# objective then oscillates at 1e-9 of its scale for several more updates
+# without moving the exact loop's iteration count; at 1e-6 it stopped early
+# enough on 3 pairs to cost three more exact iterations.
+_PRESOLVE_OBJECTIVE_TOL = 1e-7
+# The pre-solve's own stopping tolerance, whatever the caller's: its freeze
+# and stop bars scale with it, and a loose caller tolerance (1e-5) took the
+# cached-W loop 20 updates where 1e-9 took 16 on freMTPL2 (3 pairs), for a
+# start the exact loop then corrects anyway.
+_PRESOLVE_REML_TOL = 1e-9
+# The automatic pre-solve (``presolve=None``) runs on a cold exact fit with at
+# least this many estimated smoothing parameters.  Each exact iteration pays
+# a weight-correction pass whose cost grows with that count; measured
+# single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
+# with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
+_PRESOLVE_MIN_ESTIMATED = 8
 # The other first-order fits keep the derivative Grams, and with them the
 # outer Hessian's weight-product term, until those Grams cost real time: one
 # ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
@@ -162,12 +180,24 @@ def optimize_direct_reml(
     debug_recorder=None,
     trace_run: TraceRun | None = None,
     warm_lambdas: Mapping[str, float] | None = None,
+    presolve: bool | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
     ``warm_lambdas`` (a previous fit's estimates, keyed by component name)
     seeds the bootstrap and the first Newton iterate of every component it
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
+
+    ``presolve`` (exact path only) first runs the cached-W performance
+    iteration (``optimize_discrete_reml_cached_w``) on this same lossless
+    design until its objective settles, then starts the exact Newton loop
+    from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
+    (performance-iteration steps that initialize the outer iteration), taken
+    to the cached-W fixed point.  The exact loop's gradient and stopping test
+    are unchanged, so its end point is certified exactly as from a cold
+    start.  ``None`` (the default) runs it on a cold fit, one without a warm
+    start, with at least ``_PRESOLVE_MIN_ESTIMATED`` estimated smoothing
+    parameters; ``True`` / ``False`` force it on or off.
 
     Two algorithm variants depending on ``discrete``:
 
@@ -351,6 +381,7 @@ def optimize_direct_reml(
     _t_gradient = 0.0
     _t_hessian = 0.0
     _t_w_correction = 0.0
+    _n_w_correction = 0
     _t_observed_geometry = 0.0
     _accepted_observed_mode_residual_max = 0.0
     _rejected_trial_observed_mode_residual_max = 0.0
@@ -363,6 +394,70 @@ def optimize_direct_reml(
     # This owner dies with the optimizer; outside/finalization fits stay fresh.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
+
+    # === Pre-solve: cached-W performance iteration on this same design ===
+    # The cached-W loop (no dW/drho term) is cheap per iteration and covers
+    # the far-from-optimum phase in which exact Newton spends most of its
+    # iterations.  Its fixed point is a start, never a result: the exact loop
+    # below evaluates, steps and stops on the exact criterion from there.
+    presolve_beta: NDArray | None = None
+    presolve_intercept: float | None = None
+    presolve_centred: tuple[float, NDArray] | None = None
+    if presolve is None:
+        presolve = (
+            not warm_lambdas and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+        )
+    if presolve and not all_lambdas_fixed:
+        presolve_profile: dict = {}
+        presolve_start: dict = {}
+        _t0 = _time.perf_counter()
+        pre = optimize_discrete_reml_cached_w(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            sample_weight,
+            offset_arr,
+            reml_groups,
+            penalty_ranks,
+            lambdas,
+            weight_semantics=weight_semantics,
+            max_reml_iter=max_reml_iter,
+            reml_tol=min(reml_tol, _PRESOLVE_REML_TOL),
+            verbose=verbose,
+            penalty_caches=penalty_caches,
+            profile=presolve_profile,
+            select_snap=select_snap,
+            direct_solve=direct_solve,
+            reml_penalties=penalties,
+            estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            warm_lambdas=warm_lambdas,
+            start_out=presolve_start,
+            start_objective_tol=_PRESOLVE_OBJECTIVE_TOL,
+        )
+        warm_lambdas = {
+            **(warm_lambdas or {}),
+            **{
+                pc.name: float(pre.lambdas[pc.name])
+                for pc, free in zip(penalties, estimated_mask, strict=True)
+                if free
+            },
+        }
+        presolve_beta = presolve_start["beta"]
+        presolve_intercept = presolve_start["intercept"]
+        presolve_centred = presolve_start["centred"]
+        if profile is not None:
+            profile["reml_presolve_s"] = _time.perf_counter() - _t0
+            profile["reml_presolve_n_iter"] = int(pre.n_reml_iter)
+            profile["reml_presolve_converged"] = bool(pre.converged)
+            profile["reml_presolve_termination_reason"] = pre.termination_reason
+            profile["reml_presolve_objective"] = pre.objective
+            for key, value in presolve_profile.items():
+                if key.startswith(("irls_", "reml_", "dm_")) and isinstance(value, int | float):
+                    profile[f"presolve_{key}"] = value
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
@@ -391,6 +486,9 @@ def optimize_direct_reml(
         groups=groups,
         lambda2=boot_lambdas,
         offset=offset_arr,
+        beta_init=presolve_beta,
+        intercept_init=presolve_intercept,
+        _centred_init=presolve_centred,
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         return_xtwx=True,
@@ -1003,6 +1101,7 @@ def optimize_direct_reml(
             profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
+            _n_w_correction += 1
             grad_w_correction = w_corr[0]
             dH_extra = w_corr[1]
             # Second order: the second-derivative terms.  The leverage route:
@@ -1685,6 +1784,7 @@ def optimize_direct_reml(
         profile["reml_objective_s"] = _t_objective
         profile["reml_gradient_s"] = _t_gradient
         profile["reml_w_correction_s"] = _t_w_correction
+        profile["reml_n_w_correction"] = _n_w_correction
         profile["reml_observed_geometry_s"] = _t_observed_geometry
         profile["reml_observed_mode_residual_accepted_max"] = _accepted_observed_mode_residual_max
         profile["reml_observed_mode_residual_rejected_trial_max"] = (

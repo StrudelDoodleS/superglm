@@ -456,8 +456,19 @@ def optimize_discrete_reml_cached_w(
     debug_recorder=None,
     trace_run: TraceRun | None = None,
     warm_lambdas: Mapping[str, float] | None = None,
+    start_out: dict | None = None,
+    start_objective_tol: float | None = None,
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
+
+    ``start_out`` makes this run a start for another engine (the exact
+    path's ``presolve``): the final full refit is skipped, and the last
+    working-model mode is written into ``start_out`` as ``beta``,
+    ``intercept`` and ``centred``, read in the coordinates of the ``dm``
+    passed in.  The returned result then carries that last candidate, not a
+    converged refit.  ``start_objective_tol`` (with ``start_out``) also ends
+    the run once one working-model update moves the objective by less than
+    that fraction of its scale.
 
     Performance Oriented Iteration (mgcv bam-style): interleaves one
     PIRLS step (W update) with one Newton lambda step on the working
@@ -494,6 +505,7 @@ def optimize_discrete_reml_cached_w(
             )
         return _contract_size_cache[0]
 
+    input_group_matrices = dm.group_matrices
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -881,6 +893,7 @@ def optimize_discrete_reml_cached_w(
         # iteration would recompute the same gradient, Hessian and step --
         # the discrete analogue of the exact engine's stationary mode.
         candidate_mode_stationary = bool(pirls_result.converged)
+        candidate_group_matrices = dm.group_matrices
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
         warm_centred = centred_warm_start(pirls_result)
@@ -1077,6 +1090,15 @@ def optimize_discrete_reml_cached_w(
         score_scale_d = candidate_convergence.score_scale
         proj_grad_norm = candidate_convergence.projected_gradient_norm
         obj_change = candidate_convergence.objective_change
+        if (
+            start_out is not None
+            and start_objective_tol is not None
+            and poi_iter > 0
+            and obj_change < start_objective_tol * score_scale_d
+        ):
+            rho = rho_clipped
+            termination_reason = "start_objective_tolerance"
+            break
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
             print(
@@ -1751,6 +1773,34 @@ def optimize_discrete_reml_cached_w(
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
         final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
     final_lambdas.update(fixed_lambdas)
+    if start_out is not None:
+        # A start, not a result: the caller's own engine refits and certifies.
+        start_out["beta"] = _map_beta_between_bases(
+            pirls_result.beta, list(candidate_group_matrices), list(input_group_matrices), groups
+        )
+        start_out["centred"] = _map_centred_state_between_bases(
+            centred_warm_start(pirls_result),
+            pirls_result.beta,
+            candidate_group_matrices,
+            input_group_matrices,
+            groups,
+        )
+        start_out["intercept"] = float(pirls_result.intercept)
+        if profile is not None:
+            profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
+            profile["reml_n_outer_iter"] = poi_iter + 1
+        return REMLResult(
+            lambdas=final_lambdas,
+            pirls_result=pirls_result,
+            n_reml_iter=poi_iter + 1,
+            converged=converged,
+            lambda_history=lambda_history,
+            objective=float(obj),
+            curvature_source="fisher",
+            termination_reason=termination_reason,
+            reml_penalties=penalties,
+        )
+
     old_gms_final = dm.group_matrices
     _t0 = _time.perf_counter()
     dm = rebuild_design_matrix_with_lambdas(
