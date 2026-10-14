@@ -506,6 +506,47 @@ def test_sz_aliased_levels_converge_under_reml(variant) -> None:
     assert model._reml_result.termination_reason != "line_search_failed", stops
 
 
+def test_sz_negative_curvature_read_on_the_frozen_tail_keeps_the_hold(monkeypatch) -> None:
+    """The intermittent native Windows failure of the test above, made
+    deterministic.  There the frozen ``x`` direction (``one_row``), whose
+    criterion falls into its lambda -> infinity plateau (g = -2.9e-4 ..
+    -3.3e-4), read a negative diagonal once inside the shoulder band; the
+    shoulder step took ``lambda_x`` from about 7e6 to 1.32e9, where the
+    search ended ``line_search_failed``.  The diagonal is set here, once, to
+    the band-interior read the default OpenBLAS kernels give ``same_x``
+    (``H = 0.53 g``).  A shoulder needs ``g > 0`` (``H_ii = -j g_i`` on the
+    plateau's flank), so the hold stands.  Mutation: the unsigned ratio
+    -|H| / |g| flags it and steps ``lambda_x`` to about 1e9.
+    """
+    from superglm.reml import direct
+
+    real = direct.freeze_flat_directions
+    reads = []
+
+    def misread(gradient, hessian, *args, objective, tolerance, **kwargs):
+        g = float(np.asarray(gradient)[0])
+        scale = 1.0 + abs(objective)
+        if not reads and g < 0.0 and tolerance * scale < -g < 1e-7 * scale:
+            hessian = np.array(hessian, dtype=np.float64, copy=True)
+            hessian[0, 0] = 0.53 * g
+            decision = real(
+                gradient, hessian, *args, objective=objective, tolerance=tolerance, **kwargs
+            )
+            reads.append(decision)
+            return decision
+        return real(gradient, hessian, *args, objective=objective, tolerance=tolerance, **kwargs)
+
+    monkeypatch.setattr(direct, "freeze_flat_directions", misread)
+    frame, y, weight = _signed_aliased_frame("one_row")
+    model = _fit(_model("gaussian_log", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    stops = _reml_stops(model)
+    assert len(reads) == 1, stops
+    assert not bool(reads[0].shoulder[0]), stops
+    assert bool(reads[0].frozen[0]), stops
+    assert bool(model._reml_result.converged), stops
+    assert model._reml_result.termination_reason != "line_search_failed", stops
+
+
 def _reml_stops(model: SuperGLM) -> str:
     """The search's stop, the terminal refit's disclosure and its own stop, and the lambdas."""
     result = model._reml_result

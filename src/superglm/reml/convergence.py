@@ -139,28 +139,45 @@ def concave_live_directions(
     holding the direction (``project_reml_gradient``) or exact
     stationarity, and is left to the first-order test.
 
-    Only the shoulder's own signature is read.  Approaching a plateau from
-    below the criterion is ``V_inf - a exp(-k rho)`` (the penalized part of
-    a term shrinks like 1/lambda), so ``H_ii = -k |g_i|``: measured k = 0.66
-    .. 1.72 on freMTPL2 fits started at lambda = 1e4.  A negative diagonal
-    hundreds of times the gradient is the roughness the rank decisions of a
-    strongly penalized system can give the criterion near the lambda cap
-    (measured -0.0025 .. -0.016 against a gradient of 2e-5 on a
-    spline-by-factor fit with aliased levels, whose steps from there ended
-    line_search_failed on OpenBLAS Haswell and Zen kernels), and stays with
-    the first-order hold.  The lower edge has no derivation: the model
-    allows any k > 0, and 0.5 only brackets the measured k from below as 2
-    does from above.  A shoulder with k under 0.5 keeps the first-order
-    hold, so a start on one can still stop there.
+    Only the shoulder's own signature is read, its sign included.  A flat
+    direction sits at the lambda -> infinity end (towards lambda -> 0 an
+    identified term's log-penalty slope, -r/2, is not flat), where the
+    criterion expands in powers of 1/lambda, ``V_inf + c exp(-j rho) + ...``
+    with j >= 1 the leading power (the penalized part of a term shrinks
+    like 1/lambda), so ``g_i = -j c exp(-j rho)`` and ``H_ii = -j g_i``.  A
+    shoulder approaches the plateau from below (c < 0): ``g_i > 0`` and
+    ``H_ii < 0``, and descent leads away from the plateau, into the
+    interior.  A direction with ``g_i < 0`` decreases into the plateau, the
+    projected-Newton hold applies (Bertsekas 1982), and its true curvature
+    is positive: a negative diagonal read there is an error in that entry,
+    not a shoulder, at any ratio.  (Measured on a spline-by-factor fit with
+    aliased levels: every negative diagonal read on its frozen ``x``
+    direction, -7.3e-5 to -1.4e-4, came with g = -2.7e-4 to -3.3e-4, while
+    differences of the criterion along ``x`` gave curvature +9.4e-4 against
+    slope -9.4e-4, j = 1.  Read inside the band once on native Windows, it
+    stepped ``x`` from 7e6 to 1.3e9, where the search ended
+    line_search_failed; default OpenBLAS kernels read it there on another
+    variant.)  The band brackets j: measured k = 0.66 .. 1.72 on freMTPL2
+    fits started at lambda = 1e4.  A negative diagonal hundreds of times the
+    gradient is the roughness the rank decisions of a strongly penalized
+    system can give the criterion near the lambda cap (measured -0.0025 ..
+    -0.016 against a gradient of 2e-5 on a spline-by-factor fit with aliased
+    levels, whose steps from there ended line_search_failed on OpenBLAS
+    Haswell and Zen kernels), and stays with the first-order hold.  The lower
+    edge has no derivation: off the asymptote k need not be the integer j,
+    and 0.5 only brackets the measured k from below as 2 does from above.  A
+    shoulder with k under 0.5 keeps the first-order hold, so a start on one
+    can still stop there.
     """
-    gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
+    signed_gradient = np.asarray(projected_gradient, dtype=np.float64)
+    gradient = np.abs(signed_gradient)
     diagonal = np.diagonal(np.asarray(hessian, dtype=np.float64))
     model_decrease = step_bound * gradient + 0.5 * step_bound**2 * np.abs(diagonal)
     with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(gradient > 0.0, -diagonal / gradient, 0.0)
+        ratio = np.where(signed_gradient > 0.0, -diagonal / signed_gradient, 0.0)
     return (
         np.asarray(estimated_mask, dtype=bool)
-        & (gradient > 0.0)
+        & (signed_gradient > 0.0)
         & (diagonal < 0.0)
         & (ratio >= SHOULDER_CURVATURE_RATIO_LOW)
         & (ratio <= SHOULDER_CURVATURE_RATIO_HIGH)
