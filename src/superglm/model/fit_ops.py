@@ -1849,8 +1849,12 @@ def _warn_slow_exact_reml(model, lambdas) -> None:
         nesting_cache=getattr(dm, "_structured_layout_cache", None),
     ).use_structured:
         return
-    # helper -> _fit_reml_in_workspace -> fit_ops.fit_reml -> SuperGLM.fit_reml -> caller
-    warnings.warn(message, SlowFitWarning, stacklevel=5)
+    from superglm.profiling._scalar import warn_caller
+
+    # Attributed to the first frame outside superglm on every path that reaches
+    # here (fit_reml, the NB theta refits, profiling refits); one caller line
+    # then warns once under the default filter however many refits it runs.
+    warn_caller(message, SlowFitWarning)
 
 
 def fit_reml(

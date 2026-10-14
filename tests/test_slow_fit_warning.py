@@ -108,3 +108,23 @@ def test_structured_fit_is_silent(monkeypatch):
     )
     assert _slow_fit_warnings(model, df, y) == []
     assert model._reml_profile["structured_chain"] == ("re",)
+
+
+def test_warning_points_at_the_caller_on_internal_refits(monkeypatch):
+    # theta="auto" refits through _refine_nb_theta_to_reml_fixed_point, one
+    # frame deeper than fit_reml's own call: a fixed stacklevel lands in the
+    # library there instead of on this line.
+    from superglm.distributions import NegativeBinomial
+
+    monkeypatch.setattr(fit_cost, "EXACT_REML_WORK_WARN", 1.0)
+    df, y = _small_book()
+    # gamma-mixed (negative binomial) counts, so theta moves after the first fit
+    rng = np.random.default_rng(1)
+    y = rng.poisson((y + 1.0) * rng.gamma(2.0, 0.5, len(y))).astype(float)
+    model = SuperGLM(
+        family=NegativeBinomial(theta="auto"),
+        features={"x": Spline(n_knots=8), "z": Spline(n_knots=8), "g": Categorical()},
+    )
+    caught = _slow_fit_warnings(model, df, y)
+    assert len(caught) >= 2  # the first fit and at least one theta refit
+    assert {w.filename for w in caught} == {__file__}
