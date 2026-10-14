@@ -107,8 +107,9 @@ def test_freeze_holds_a_convex_tail_but_not_a_concave_shoulder() -> None:
     that bound.  Both directions below are flat by the gradient and
     curvature bars (objective 8.5e4, freeze bar 8.5e-3): the convex tail
     (g = -6e-3, H = +6e-3, a 1/lambda tail toward infinity) is held; the
-    concave shoulder (g = +1.8e-3, H = -1.9e-3: the measured freMTPL2
-    VehAge x VehBrand[B4] state at lambda = 1e4, optimum near 7.8) is not,
+    concave shoulder (g = +1.8e-3, H = -1.9e-3: the measured VehAge x
+    VehBrand[B4] state at lambda = 1e4 on freMTPL2 as published, mains and
+    10 pairs, optimum near 7.8) is not,
     because its trust-region model promises 5 * 1.8e-3 + 12.5 * 1.9e-3
     against a resolution of 8.5e-5.  Without a step bound the hold is the
     first-order one it always was (mutation check: the PR #487 head held

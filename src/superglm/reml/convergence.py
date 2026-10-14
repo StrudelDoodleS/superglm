@@ -216,9 +216,12 @@ def freeze_flat_directions(
     stopping rule can resolve (``concave_live_directions``).  Such a
     direction the flat test alone would have held is reported in
     ``shoulder``; a caller without a trust-region step (``step_bound``
-    None) keeps the first-order hold.  (Measured: a start at lambda = 1e4 on freMTPL2 held such
-    a direction at 1e4 against an optimum near 7.8, gradient 1.8e-3 and
-    curvature -1.9e-3, and reported a fit 8.8 worse as converged.)
+    None) keeps the first-order hold.  (Measured on freMTPL2 as published,
+    before the claim recount, with the mains and 10 pairs: a start at
+    lambda = 1e4 held VehAge x VehBrand[B4] at 1e4 against an optimum near
+    7.8, gradient 1.8e-3 and curvature -1.9e-3, and reported a fit 8.8 worse
+    as converged.  On the recounted book with 4 gated pairs the same start
+    reported 1.89 worse.)
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
     hess = np.abs(np.asarray(hessian, dtype=np.float64))
