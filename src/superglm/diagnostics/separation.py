@@ -359,11 +359,11 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
     warnings.warn(message, SeparationWarning, stacklevel=3)
 
 
-def emit_curve_separation(curves: list, mode: str, distribution: Any) -> None:
+def emit_curve_separation(curves: list, mode: str) -> None:
     """Warn, or refuse, for spline-by-factor curves held over a separated range."""
     if not curves or mode == "ignore":
         return
-    message = format_curve_separation(curves, distribution)
+    message = format_curve_separation(curves)
     if mode == "error":
         raise SeparationError(message)
     warnings.warn(message, SeparationWarning, stacklevel=3)
@@ -761,7 +761,7 @@ def continuation_basis(
     return np.linalg.svd(np.vstack(held), full_matrices=True)[2][rank:].T
 
 
-def format_curve_separation(findings: list[SeparatedCurve], distribution: Any = None) -> str:
+def format_curve_separation(findings: list[SeparatedCurve]) -> str:
     """One plain message naming each level, the covariate range and what the fit did there."""
     words = {
         "zero": "every response 0",
