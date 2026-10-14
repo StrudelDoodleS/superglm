@@ -27,7 +27,9 @@ class SlowFitWarning(UserWarning):
     (every family except Gaussian with the identity link, whose weighted
     cross-product is formed once and reused). A fit on the structured solver
     for a random effect or factor smooth does not warn: it never forms the
-    full cross-product. The fit still runs and its result is unaffected. Pass ``discrete=True`` to the constructor for the
+    full cross-product. Nor does a model with a monotone (shape-constrained)
+    term: its smoothing is chosen by a different engine, whose cost has not
+    been measured. The fit still runs and its result is unaffected. Pass ``discrete=True`` to the constructor for the
     fast path, or silence the warning with
     ``warnings.filterwarnings("ignore", category=SlowFitWarning)``.
     """

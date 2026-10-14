@@ -73,7 +73,9 @@ coefficients-by-coefficients product over all rows, and choosing the smoothing
 takes dozens of them. A Gaussian fit with the identity link does not warn,
 since its weights never change and the product is formed once. Nor does a fit
 that uses the structured solver for a random effect or factor smooth, since it
-never forms that product.
+never forms that product. A model with a monotone (shape-constrained) term does
+not warn either: its smoothing is chosen by a different method, whose run time
+has not been measured.
 
 On the 542,000-row freMTPL2 frequency book, a model with three interaction
 pairs (about 480 coefficients) took 1.4 minutes exactly and 20 seconds with
