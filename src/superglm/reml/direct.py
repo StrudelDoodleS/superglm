@@ -1000,6 +1000,7 @@ def optimize_direct_reml(
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
+                    "shoulder": [False] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -1239,6 +1240,7 @@ def optimize_direct_reml(
                     "score_scale": float(score_scale),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
+                    "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
                 }
             _t_hessian += _time.perf_counter() - _t0
             reactivated = concave_live | (
@@ -1335,6 +1337,7 @@ def optimize_direct_reml(
                 "score_scale": float(score_scale),
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen],
+                "shoulder": [bool(v) for v in shoulder],
             }
 
         if active_idx.size == 0:

@@ -1058,6 +1058,7 @@ def optimize_discrete_reml_cached_w(
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
+                    "shoulder": [False] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -1187,6 +1188,7 @@ def optimize_discrete_reml_cached_w(
                     "score_scale": float(score_scale_d),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
+                    "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
                 }
             reactivated = concave_live_d | (
                 ~np.asarray(revalidation.frozen)
@@ -1269,6 +1271,7 @@ def optimize_discrete_reml_cached_w(
                 "score_scale": float(score_scale_d),
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen_d],
+                "shoulder": [bool(v) for v in shoulder_d],
             }
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
