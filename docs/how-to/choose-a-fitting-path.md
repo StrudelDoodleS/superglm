@@ -70,8 +70,10 @@ An exact fit (`discrete=False`, the default) that will take minutes says so
 before it starts, with a `SlowFitWarning`. It fires when rows x coefficients
 squared reaches 1e11, because every coefficient update forms a weighted
 coefficients-by-coefficients product over all rows, and choosing the smoothing
-takes dozens of them. A fit that uses the structured solver for a random
-effect or factor smooth does not warn, since it never forms that product.
+takes dozens of them. A Gaussian fit with the identity link does not warn,
+since its weights never change and the product is formed once. Nor does a fit
+that uses the structured solver for a random effect or factor smooth, since it
+never forms that product.
 
 On the 542,000-row freMTPL2 frequency book, a model with three interaction
 pairs (about 480 coefficients) took 1.4 minutes exactly and 20 seconds with
