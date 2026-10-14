@@ -66,7 +66,7 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
-An exact fit (`discrete=False`, the default) that will take minutes says so
+An exact fit (`discrete=False`, the default) that will be slow says so
 before it starts, with a `SlowFitWarning`. It fires when rows x coefficients
 squared reaches 1e11, because every coefficient update forms a weighted
 coefficients-by-coefficients product over all rows, and choosing the smoothing

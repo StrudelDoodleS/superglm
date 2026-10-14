@@ -1,4 +1,4 @@
-"""Advance notice for exact REML fits that will take minutes.
+"""Advance notice for exact REML fits that will be slow.
 
 On the exact path (``discrete=False``) every coefficient update, every
 line-search refit and the one-pass weight-derivative correction (Wood 2011,
@@ -19,7 +19,7 @@ from superglm.links import IdentityLink
 
 
 class SlowFitWarning(UserWarning):
-    """An exact REML fit is large enough that it will take minutes.
+    """An exact REML fit is large enough to be slow: most of a minute or more.
 
     ``SuperGLM.fit_reml`` warns before the smoothing search starts when the
     model is fitted with ``discrete=False`` and rows x coefficients squared
