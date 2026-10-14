@@ -11,6 +11,8 @@ whatever the number of smoothing parameters.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -391,18 +393,66 @@ def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams(monkey
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
-def test_leverage_fit_reaches_the_gram_route_optimum(monkeypatch):
-    """The gradient is the same exact quantity, so both routes stop at one optimum.
+_REML_TOL = 1e-9  # NEWTON_REML_TOL_DEFAULT, passed explicitly so the bound below is its own
 
-    Only the outer Hessian's ``tr(H^-1 C_i H^-1 C_j)`` term is left out, which
-    moves the path, not the stationary point: the objectives agree within the
-    stopping rule's own tolerance.
+
+def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
+    """Both routes stop at one stationary point, judged by the stopping rule itself.
+
+    The exact REML engine has two certified exits, each a bar on the
+    projected gradient with the directions it froze as flat zeroed:
+
+    - ``score_objective_tolerance`` (``convergence.evaluate_reml_candidate``):
+      below ``reml_tol * (1 + |V|)``, frozen directions masked by
+      ``mask_frozen_stop_gradient``;
+    - ``converged_at_precision`` (``convergence.classify_dead_feasible_exit``,
+      a line search that rejected every trial): below ``max(1e-7, reml_tol) *
+      (1 + |V|)``, or ``DECREMENT_GRADIENT_CEILING`` times that when the Newton
+      decrement left is below the objective's resolution.
+
+    Which exit a fit takes can turn on rounding in its last line search (it
+    differs between OpenBLAS kernels), so the test reads the exit the fit took
+    and applies that exit's bar.  The objective is no measure here: along a
+    frozen direction it may still fall by up to the freeze bar, ``1e-7 * (1 +
+    |V|)``, per unit of log-lambda.
+
+    The leverage route leaves only a Hessian term out, so its gradient is the
+    Gram route's.  Each fit's terminal candidate is therefore re-scored with
+    the *other* route's weight correction, on the same PIRLS state, inverse
+    and frozen set, and must pass the same bar.  Rounding between the routes
+    is ``O(u)`` of the gradient terms (``test_leverage_terms_match_*``),
+    orders below either bar.  A gradient that is wrong on either route moves
+    that route's stationary point, and the other route's gradient there then
+    misses the bar: halving the leverage route's gradient correction fails
+    this test (the mutation run is recorded on PR #487).
     """
+    from superglm.reml.convergence import (
+        DECREMENT_GRADIENT_CEILING,
+        FLAT_DIRECTION_FREEZE_FLOOR,
+        _score_scale,
+        mask_frozen_stop_gradient,
+    )
+
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
+    correction = direct.reml_w_correction
+    partial = direct.reml_direct_gradient
 
-    def fit() -> SuperGLM:
-        return SuperGLM(
+    def fit(leverage: bool) -> tuple[SuperGLM, dict]:
+        last: dict = {}
+
+        def recorded_correction(*args, **kwargs):
+            kwargs["leverage_hessian"] = leverage and kwargs.get("leverage_hessian", False)
+            last["correction"] = (args, dict(kwargs), correction(*args, **kwargs))
+            return last["correction"][2]
+
+        def recorded_partial(*args, **kwargs):
+            last["partial"] = partial(*args, **kwargs)
+            return last["partial"]
+
+        monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
+        monkeypatch.setattr(direct, "reml_direct_gradient", recorded_partial)
+        model = SuperGLM(
             family="poisson",
             features={
                 "a": Spline(n_knots=6),
@@ -414,21 +464,46 @@ def test_leverage_fit_reaches_the_gram_route_optimum(monkeypatch):
             interactions=[("a", "b"), ("e", "c")],
             weight_semantics="frequency",
             discrete=False,
-        ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL, runtime_validation="skip")
+        return model, last
 
-    leverage = fit()
-    correction = direct.reml_w_correction
+    for leverage in (True, False):
+        model, last = fit(leverage)
+        result = model._reml_result
+        assert result.converged
+        assert model._reml_profile["reml_w_correction_mode"] == (
+            "leverage_hessian" if leverage else "derivative_grams"
+        )
+        args, kwargs, own = last["correction"]
+        swapped: dict[str, Any] = dict(kwargs)
+        swapped["leverage_hessian"] = not leverage
+        other = correction(*args, **swapped)
+        assert own is not None and other is not None
+        objective = float(result.objective_history[-1])
+        scale = _score_scale(objective)
+        frozen = np.asarray(model._reml_profile["reml_freeze_decision"]["frozen"])
+        # Interior smoothing parameters: the bound projection is the identity.
+        rho = np.log(np.array([model._reml_lambdas[pc.name] for pc in model._reml_penalties]))
+        assert np.all(np.abs(rho) < np.log(1e10) - 0.01)
 
-    def gram_route(*args, **kwargs):
-        kwargs["leverage_hessian"] = False
-        return correction(*args, **kwargs)
+        def stop_norm(
+            weight_gradient: np.ndarray, *, exit: str = result.termination_reason
+        ) -> float:
+            gradient = last["partial"] + weight_gradient
+            if exit == "score_objective_tolerance":
+                stop = mask_frozen_stop_gradient(
+                    gradient, frozen, objective=objective, tolerance=_REML_TOL
+                )
+            else:
+                stop = np.where(frozen, 0.0, gradient)
+            return float(np.max(np.abs(stop)))
 
-    monkeypatch.setattr(direct, "reml_w_correction", gram_route)
-    grams = fit()
-
-    assert leverage._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
-    assert grams._reml_profile["reml_w_correction_mode"] == "derivative_grams"
-    assert leverage._reml_result.converged and grams._reml_result.converged
-    objective = grams._reml_result.objective
-    tolerance = 1e-6 * max(1.0 + abs(objective), 1.0)
-    assert abs(leverage._reml_result.objective - objective) <= 2.0 * tolerance
+        if result.termination_reason == "score_objective_tolerance":
+            bar = _REML_TOL * scale
+        else:
+            assert result.termination_reason == "converged_at_precision"
+            bar = max(FLAT_DIRECTION_FREEZE_FLOOR, _REML_TOL) * scale
+            if stop_norm(own[0]) >= bar:  # the Newton-decrement arm
+                bar *= DECREMENT_GRADIENT_CEILING
+        assert stop_norm(own[0]) < bar
+        assert stop_norm(other[0]) < bar
