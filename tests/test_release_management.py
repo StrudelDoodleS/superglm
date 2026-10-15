@@ -169,7 +169,17 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "SINGLE RELEASE INSTRUCTION",
     ):
         assert marker in policy
-    assert "An instruction that names no version grants nothing" in " ".join(policy.split())
+    flat = " ".join(policy.split())
+    for clause in (
+        'uses the word "release" with an exact version',
+        '"Ship", "deploy" or "finish" with a version do not qualify',
+        "If the assessment recommends a different version, or needs-human-decision, stop and report",
+        "the Assessment ID of the assessment run under it when that assessment recommends exactly the named version",
+        "naming the exact v0.x.y tag, or the single release instruction naming that version",
+        "Verify the merged bump-only pull request has no unresolved review threads",
+        "An instruction that names no version grants nothing",
+    ):
+        assert clause in flat
 
 
 def test_release_manager_prepares_a_bump_only_pull_request() -> None:
@@ -234,7 +244,11 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     # One instruction naming the version and saying to release grants all
     # three steps; one naming no version grants nothing.
     flat = " ".join(agents.split())
-    assert "names the version and says to release it" in flat
+    assert 'names the version and says to release it, with the word "release"' in flat
+    assert '"Ship", "deploy" or "finish" with a version do not qualify' in flat
+    assert "the assessment must recommend the named version, and preparation uses its ID" in flat
+    assert "only once it is green and every review thread on it is resolved" in flat
+    assert "naming the exact tag, or the single instruction below" in flat
     assert "An instruction that names no version authorizes nothing" in flat
 
 
@@ -306,4 +320,7 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     assert "one deliberate act" in documentation
     assert "never minting phantom versions" in documentation
     assert "Trusted Publishing" in documentation
+    flat = " ".join(documentation.split())
+    assert 'One instruction that uses the word "release" with an exact version' in flat
+    assert "the assessment must recommend the named version" in flat
     assert "releases" in development_toctree

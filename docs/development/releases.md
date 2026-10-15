@@ -76,10 +76,14 @@ tag; the numbers themselves are skipped, exactly as `0.16.2` was.
 The release specialist is a spawned Codex subagent. It does not replace the
 current agent and never starts automatically.
 
-One instruction that names the version and says to release it ("release
+One instruction that uses the word "release" with an exact version ("release
 0.40") authorizes all three steps below for exactly that version, in order;
-each step still runs its own checks. The three separate instructions remain
-for a release taken one step at a time. An instruction that names no
+"ship", "deploy" or "finish" with a version do not. Each step still runs its
+own checks: the assessment must recommend the named version and preparation
+uses its ID; the root agent rebase-merges the bump-only pull request only once
+it is green and every review thread on it is resolved; and the tag, Release
+and PyPI version must not already exist. The three separate instructions
+remain for a release taken one step at a time. An instruction that names no
 version authorizes nothing.
 
 Assessment of the unreleased changes on master is read-only:
@@ -90,7 +94,8 @@ Use the release_manager agent to assess the unreleased changes as a release cand
 
 The assessment is bound to the latest published release and the exact
 `origin/master` head SHA; its authoritative diff is release-tag to master
-head. After approving the exact version and that SHA-bound assessment:
+head. After approving the exact version and that SHA-bound assessment (under
+the single instruction, the assessment it produced):
 
 ```text
 Use the release_manager agent to prepare the approved 0.x.y.
@@ -102,7 +107,8 @@ changelog, and opens the bump-only pull request. It merges nothing and holds
 no tag or publication authority.
 
 After the bump-only pull request is reviewed, rebase-merged, and green,
-publication requires a new exact instruction:
+publication requires a new exact instruction, or the single instruction
+above:
 
 ```text
 Use the release_manager agent to publish v0.x.y and monitor PyPI deployment.

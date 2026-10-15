@@ -222,28 +222,36 @@ Only an explicit user request to assess, prepare or publish a release may
 invoke the project-scoped `release_manager` specialist defined in
 `.codex/agents/release_manager.toml`. Proactive delegation and ordinary words
 such as "finish", "merge", "ship" or "deploy" do not authorize publication.
-The three gates are separate requests, and each does only its own step:
+The three gates are separate requests, unless one instruction grants all three
+(below), and each does only its own step:
 
 1. "Use the release_manager agent to assess the unreleased changes as a
    release candidate." Assessment is read-only and bound to the exact base
    and head SHAs.
 2. "Use the release_manager agent to prepare the approved 0.x.y." Preparation
-   requires the exact approved version and assessment ID. It writes the
+   requires the exact approved version and assessment ID (under the single
+   instruction below, the ID of the assessment it just produced). It writes the
    single bump commit via a bump-only pull request, rebase-merged under the
    linear-history rule so the release tag binds to the rebased commit on
    master. Preparation does not authorize publication.
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
-   new explicit instruction naming the exact tag.
+   new explicit instruction naming the exact tag, or the single instruction
+   below.
 
 One instruction can also grant all three. A user instruction that names the
-version and says to release it ("release 0.40", "release 0.40.1") authorizes
-assessing, preparing and publishing exactly that version, in that order,
-without asking again for the phrases above. A version given as 0.x means
-0.x.0. Each step still runs its own checks and stops on any failure: the
-assessment must recommend the named version, the bump pull request must be
-reviewed, rebase-merged and green, and the tag, GitHub Release and PyPI
-version must not already exist. An instruction that names no version
-authorizes nothing.
+version and says to release it, with the word "release" ("release 0.40",
+"release 0.40.1"), authorizes assessing, preparing and publishing exactly that
+version, in that order, without asking again for the phrases above. "Ship",
+"deploy" or "finish" with a version do not qualify. A version given as 0.x
+means 0.x.0. Each step still runs its own checks and stops on any failure:
+- the assessment must recommend the named version, and preparation uses its
+  ID;
+- the root agent, never the specialist, rebase-merges the bump-only pull
+  request, and only once it is green and every review thread on it is
+  resolved;
+- the tag, GitHub Release and PyPI version must not already exist.
+
+An instruction that names no version authorizes nothing.
 
 The specialist never merges feature pull requests, uploads distributions
 directly, moves an existing tag, or bypasses `.github/workflows/release.yml`
