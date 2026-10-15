@@ -420,9 +420,60 @@ def evaluate_tweedie_rows(
     )
 
 
+def tweedie_hessian_direction(
+    y: NDArray[np.float64],
+    mean: NDArray[np.float64],
+    dispersion: NDArray[np.float64],
+    power: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    semantics: WeightSemantics,
+    direction: NDArray[np.float64],
+    *,
+    max_terms: int = _DEFAULT_MAX_TERMS,
+    log_cutoff: float = _DEFAULT_LOG_CUTOFF,
+) -> NDArray[np.float64]:
+    """Packed derivative of the natural ``(mu, phi, p)`` Hessian along ``direction``.
+
+    The positive-row series contributes the joint cumulants of its term
+    derivatives over the Hessian's own window (two passes: means, then
+    central moments about them); the zero row and the canonical part are
+    closed forms.  Rows the Hessian would refuse are refused here too.
+    """
+    arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
+        y,
+        mean,
+        dispersion,
+        power,
+        weight,
+        semantics,
+        derivative_order=2,
+        max_terms=max_terms,
+        log_cutoff=log_cutoff,
+    )
+    natural = np.require(np.asarray(direction, dtype=np.float64), requirements=("C", "A"))
+    if natural.shape != (len(arrays[0]), 3) or not np.all(np.isfinite(natural)):
+        raise ValueError("Tweedie natural direction must be a finite n-by-3 array")
+    normalized = tuple(
+        np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
+    )
+    result, status, failing_row = _compiled._tweedie_hessian_direction_core(
+        *normalized,
+        0 if semantics == "prior" else 1,
+        natural,
+        min(row_max_terms, _MAX_SAFE_MODE + 1),
+        cutoff,
+    )
+    if status != _compiled.KERNEL_OK:
+        _raise_compiled_refusal(
+            status=int(status), failing_row=int(failing_row), max_terms=row_max_terms
+        )
+    return result
+
+
 __all__ = [
     "TweedieNumericalRefusal",
     "TweediePointEvaluation",
     "initialize_tweedie",
     "evaluate_tweedie_rows",
+    "tweedie_hessian_direction",
 ]

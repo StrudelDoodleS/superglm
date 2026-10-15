@@ -267,3 +267,54 @@ def test_shape_term_derivative_is_continuous_across_its_series_switch() -> None:
         / q**3
     )
     np.testing.assert_allclose(shape_term_d1(q), expected, rtol=1e-11)
+
+
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_tweedie_direction_agrees_with_the_published_curvature(semantics: str) -> None:
+    """Zero rows (closed form) and positive rows (series cumulants) across the power range."""
+    from superglm.distributional.families import TweedieLSS
+
+    family = TweedieLSS()
+    rng = np.random.default_rng(10)
+    n_rows = 2000
+    exposure = rng.uniform(0.1, 1.0, n_rows)
+    claims = rng.poisson(0.3 * exposure)
+    y = np.where(claims > 0, rng.gamma(2.0, 800.0, n_rows) * claims / exposure, 0.0)
+    weights = exposure if semantics == "prior" else rng.integers(1, 4, n_rows).astype(np.float64)
+    eta = np.column_stack(
+        (
+            np.log(250.0) + rng.normal(0.0, 0.4, n_rows),
+            rng.normal(6.0, 0.8, n_rows),
+            rng.uniform(-2.5, 2.5, n_rows),
+        )
+    )
+    direction = rng.normal(size=eta.shape)
+    plan = _plan(family, y, weights, semantics)
+    links = _links(family)
+    analytic = family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+    numeric = finite_difference_curvature_direction(
+        family, y, eta, direction, links, plan, step=10.0 * DEFAULT_STEP
+    )
+    scale = np.max(np.abs(analytic), axis=1, keepdims=True) + 1.0e-300
+    relative = np.abs(numeric.values - analytic) / scale
+    # Near the lower power wall the Richardson difference itself is off by up
+    # to 4e-6 of the row scale; at those rows 40-digit mpmath puts the
+    # analytic direction within 1e-13 and the difference at its 4e-6.
+    assert np.quantile(relative, 0.99) < 1.0e-7
+    assert np.max(relative) < 1.0e-5
+    assert np.median(relative) < 1.0e-10
+
+
+def test_bounded_power_link_third_derivative() -> None:
+    from superglm.distributional.families.tweedie import BoundedPowerLink
+
+    link = BoundedPowerLink()
+    eta = np.linspace(-30.0, 30.0, 121)
+    with localcontext() as context:
+        context.prec = 60
+        for value, computed in zip(eta, link.deriv3_inverse(eta), strict=True):
+            e = Decimal(float(value))
+            p = 1 / (1 + (-e).exp())
+            q = 1 - p
+            exact = Decimal(link.upper - link.lower) * p * q * (1 - 6 * p * q)
+            assert abs(Decimal(float(computed)) - exact) <= Decimal(16 * _U) * abs(exact) * 7
