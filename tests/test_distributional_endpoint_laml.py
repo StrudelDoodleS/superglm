@@ -6546,3 +6546,98 @@ def test_projected_penalty_result_is_immutable_and_refuses_malformed_values() ->
         ProjectedPenaltyLogDet(component_names=("retained",), rank=0, log_pdet=1.0)
     with pytest.raises((TypeError, ValueError)):
         ProjectedPenaltyLogDet(component_names=("retained",), rank=1, log_pdet=np.nan)
+
+
+class _CertifiedCrossChannel:
+    """GaussianLS whose analytic direction carries a certificate on the cross channel."""
+
+    def __init__(self, bound: float) -> None:
+        self.base = GaussianLS()
+        self.bound = bound
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def certified_predictor_curvature_directional_derivative(self, y, eta, direction, links, plan):
+        values = self.base.predictor_curvature_directional_derivative(
+            y, eta, direction, links, plan
+        )
+        certificate = np.zeros_like(values)
+        certificate[:, 1] = self.bound
+        return values, certificate
+
+
+def test_endpoint_certificate_is_contracted_row_by_row() -> None:
+    """Mixed-sign design rows cannot cancel each other's certified error.
+
+    The drift term is ``sum_i <D_i, G_i>_w`` with ``G_i = X_i B R^-1 B' X_i'``,
+    so a certificate ``c`` on the cross channel admits an error of
+    ``c sum_i 2 |G_i[0, 1]|``, half of it in the derivative.  At 9f1495ef the
+    certificate was assembled into ``sum_i X_i' C_i X_i`` first, where rows whose
+    location and scale design entries differ in sign cancel, and the endpoint
+    error fell below that worst case.  The worst case here is formed directly
+    from the dense design.
+    """
+    from superglm.distributional.solver.solver import _DenseObservedReuseSession
+
+    rng = np.random.default_rng(23)
+    n_rows = 300
+    x = rng.uniform(-1.0, 1.0, n_rows)
+    z = rng.uniform(-1.0, 1.0, n_rows)
+    response = np.sin(np.pi * x) + np.exp(-0.5 + 0.3 * z) * rng.normal(size=n_rows)
+    weights = resolved_prior(np.ones(n_rows))
+    family = GaussianLS()
+    frame = as_eager_frame(pd.DataFrame({"x": x, "z": z}))
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"x": Spline(kind="cr", n_knots=6)}),
+                Predictor("scale", {"z": Spline(kind="cr", n_knots=5)}),
+            ),
+        )
+    )
+    capped, finite = layout.penalty_names
+    face = build_penalty_face(layout, (capped,))
+    lambdas = {capped: 0.0, finite: 1.0}
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    endpoint_fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        layout.penalty_matrix(lambdas),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        coefficient_face=face,
+    )
+    bound = 1.0e-3
+
+    def derivative(of):
+        return evaluate_endpoint_laplace_derivative(
+            of,
+            layout,
+            response,
+            plan,
+            lambdas=lambdas,
+            component_name=capped,
+            finite_face=None,
+            endpoint_face=face,
+            endpoint_fit=endpoint_fit,
+        )
+
+    plain = derivative(family)
+    certified = derivative(_CertifiedCrossChannel(bound))
+    assert certified.derivative == plain.derivative
+
+    dense = _DenseObservedReuseSession().dense_matrices(layout)
+    basis = face.null_basis
+    rank = endpoint_fit.terminal_reduced_rank
+    assert rank is not None
+    projector = basis @ rank.pseudo_inverse() @ basis.T
+    left, right = (state.coefficient_slice for state in layout.predictors)
+    cross = np.einsum("ij,ij->i", dense[0] @ projector[left, right], dense[1])
+    assert np.any(cross > 0.0) and np.any(cross < 0.0)
+    worst = 0.5 * bound * float(np.sum(2.0 * np.abs(cross)))
+    assert certified.numerical_error - plain.numerical_error >= (1.0 - 1e-12) * worst
