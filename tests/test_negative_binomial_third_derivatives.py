@@ -323,3 +323,47 @@ def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
     assert len(calls) == 2 and evaluations == 0
     np.testing.assert_array_equal(first[0], analytic.axes[0][0])
     np.testing.assert_array_equal(certificate[0], analytic.axes[0][1])
+
+
+class _CertifiedOnlyNegativeBinomial:
+    """NB2 exposing only the certified direction, not the plain protocol method."""
+
+    def __init__(self) -> None:
+        self.base = NegativeBinomialLS()
+
+    def __getattr__(self, name):
+        if name == "predictor_curvature_directional_derivative":
+            raise AttributeError(name)
+        return getattr(self.base, name)
+
+    def certified_predictor_curvature_directional_derivative(self, *args):
+        return self.base.certified_predictor_curvature_directional_derivative(*args)
+
+
+def test_laml_admits_a_certified_only_family() -> None:
+    """A family with only the certified protocol takes the analytic path with its certificate.
+
+    At 9f1495ef the LAML guard admitted only the plain protocol, so such a
+    family fell back to the stencil while the endpoint evaluator took it
+    analytically.
+    """
+    from superglm.distributional.family import (
+        CertifiedCurvatureDirectionalFamily,
+        PredictorCurvatureDirectionalFamily,
+    )
+    from superglm.distributional.smoothing.derivatives import _analytic_first_derivative
+
+    response = np.array([0.0, 1.0, 2.0, 0.0, 5.0])
+    plan = _plan(response, None, "prior")
+    eta = np.column_stack((np.full(5, 0.1), np.full(5, 12.0)))
+    family = _CertifiedOnlyNegativeBinomial()
+    assert isinstance(family, CertifiedCurvatureDirectionalFamily)
+    assert not isinstance(family, PredictorCurvatureDirectionalFamily)
+    analytic = _analytic_first_derivative(family, response, eta, (LogLink(), LogLink()), plan, 5, 2)
+    assert analytic is not None
+    expected = NegativeBinomialLS().certified_predictor_curvature_directional_derivative(
+        response, eta, np.tile([0.0, 1.0], (5, 1)), (LogLink(), LogLink()), plan
+    )
+    np.testing.assert_array_equal(analytic.axes[1][0], expected[0])
+    np.testing.assert_array_equal(analytic.axes[1][1], expected[1])
+    assert np.all(analytic.axes[1][1][:, 2] > 0.0)

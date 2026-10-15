@@ -31,6 +31,7 @@ from superglm.distributional._row_design import (
     matrix_row_chunk,
 )
 from superglm.distributional.family import (
+    CertifiedCurvatureDirectionalFamily,
     DistributionalFamily,
     FamilyLikelihoodPlan,
     PredictorCurvatureDirectionalFamily,
@@ -440,7 +441,9 @@ def _analytic_first_derivative(
     links (NB2 and GammaLS accept only their log links) or refuses a row on any
     axis (a two-piece row on its join); the caller then differences.
     """
-    if not isinstance(family, PredictorCurvatureDirectionalFamily):
+    if not isinstance(
+        family, (PredictorCurvatureDirectionalFamily, CertifiedCurvatureDirectionalFamily)
+    ):
         return None
     expected = (n_observations, k_parameters * (k_parameters + 1) // 2)
 
