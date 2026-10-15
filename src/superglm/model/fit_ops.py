@@ -1410,6 +1410,30 @@ def _refine_nb_theta_to_reml_fixed_point(
     return debug_recorder
 
 
+def _install_deferred_rank_info(model) -> None:
+    """Compute the published fit's deferred rank metadata and attach it to its results.
+
+    ``finalize_reml_fit`` leaves the computation with the model when
+    ``_defer_rank_info`` is set; it is a pure function of that fit's final
+    state, so the metadata is what the fit would have attached inline. The
+    solver, public and REML results share the one ``RankInfo``, as they do
+    when it is computed inline. Neither attribute reaches the public model.
+    """
+    model.__dict__.pop("_defer_rank_info", None)
+    deferred = model.__dict__.pop("_deferred_rank_info", None)
+    if deferred is None:
+        return
+    rank_info = deferred()
+    results = (
+        model._result,
+        model._solver_result,
+        getattr(getattr(model, "_reml_result", None), "pirls_result", None),
+    )
+    for result in results:
+        if result is not None:
+            result.rank_info = rank_info
+
+
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
     """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
     # The constrained QP solver path ignores lambda1 — reject explicitly.
@@ -1453,12 +1477,14 @@ def _solve_coefficients(
     beta_init=None,
     intercept_init=None,
     reml_penalties=None,
+    compute_rank_info=True,
 ):
     """Apply the ordinary fit policy for selecting the coefficient solver.
 
     ``reml_penalties`` carries the penalty components of structured terms
     (RandomEffect, FactorSmooth) to the direct solver, whose penalty-matrix
-    fallback omits them.
+    fallback omits them. ``compute_rank_info=False`` skips the direct
+    solver's retained-fit rank metadata, for a fit that is never published.
     """
     if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
@@ -1480,6 +1506,7 @@ def _solve_coefficients(
             separation=getattr(model, "_separation", "warn"),
             weight_semantics=model_weight_semantics(model),
             reml_penalties=reml_penalties,
+            compute_rank_info=compute_rank_info,
         )
         return result
 
@@ -1921,6 +1948,11 @@ def fit_reml(
         verbose=verbose,
         w_correction_order=w_correction_order,
     )
+    if nb_auto:
+        # Each REML fit of the theta alternation defers its rank metadata:
+        # whether a later refit replaces it is known only after its theta
+        # solve, and only the published fit's is computed (below).
+        workspace.model._defer_rank_info = True
     debug_recorder = _fit_reml_in_workspace(
         workspace.model,
         X,
@@ -1950,6 +1982,7 @@ def fit_reml(
             debug_recorder=debug_recorder,
             refit_kwargs=attempt_kwargs,
         )
+        _install_deferred_rank_info(workspace.model)
         if not durable_retain:
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)
@@ -2047,6 +2080,7 @@ def _fit_reml_in_workspace(
     _clear_profile_results(model)
     model._reml_result = None
     model._reml_profile = None
+    model.__dict__.pop("_deferred_rank_info", None)
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
     _reject_structured_fit_constraints(model)

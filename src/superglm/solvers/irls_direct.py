@@ -993,6 +993,7 @@ def fit_irls_direct(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
+    _defer_rank_info: list[Callable[[], RankInfo]] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (see ``_fit_irls_direct_once``).
 
@@ -1051,6 +1052,7 @@ def fit_irls_direct(
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
             _centred_init=_centred_init,
+            _defer_rank_info=_defer_rank_info,
         )
         return result
     finally:
@@ -1105,6 +1107,7 @@ def _fit_irls_direct_once(
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
+    _defer_rank_info: list[Callable[[], RankInfo]] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -1153,6 +1156,12 @@ def _fit_irls_direct_once(
         If False, skip data-subspace metadata used only by retained-fit
         inference. Intermediate REML fits still compute the coefficient and
         augmented decompositions needed for their objective and EDF.
+    _defer_rank_info : list, optional
+        With ``compute_rank_info=False``, a list to which a dense fit with
+        statistics appends a zero-argument callable returning the
+        ``RankInfo`` it skipped, bit-for-bit what ``compute_rank_info=True``
+        attaches. For a caller that learns only after the fit whether it is
+        the one published (NB2 auto-theta REML refits).
     _return_working_system : bool
         Internal fREML performance-iteration mode. Return the centered system
         used for the last coefficient update instead of rebuilding it at the
@@ -2039,6 +2048,8 @@ def _fit_irls_direct_once(
         from superglm.reml.observed_geometry import classify_scop_reml_curvature
 
         _scop_curvature = classify_scop_reml_curvature(family, link)
+    if compute_rank_info and _defer_rank_info is not None:
+        raise ValueError("deferred rank metadata requires compute_rank_info=False")
     if (not _compute_fit_statistics and compute_rank_info) or (
         _return_working_system and (compute_rank_info or has_constraints or _has_scop)
     ):
@@ -4612,57 +4623,10 @@ def _fit_irls_direct_once(
             reml_hessian_rank = None
         retained_reml_decomposition = reml_slope_rank if _retain_reml_decomposition else None
 
-        coefficient_rank = None
-        if _compute_fit_statistics and compute_rank_info:
-            M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
-                centered_final.mean_x, centered_final.mean_x
-            )
-            coefficient_rank = decompose_gram_if_authoritative(M_beta)
-            if coefficient_rank is None:
-                certification = certify_centered_factor(centered_final, W)
-                raw_factor = np.vstack(
-                    (
-                        certification.factor,
-                        np.sqrt(centered_final.sum_w) * centered_final.mean_x,
-                    )
-                )
-                coefficient_rank = decompose_factor(raw_factor)
         if _compute_fit_statistics:
             if reml_slope_rank is None:  # pragma: no cover - validated above
                 raise RuntimeError("fit statistics require generic REML geometry")
-            if _use_qr:
-                sqrtW = np.sqrt(W)
-                A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
-                data_rank = decompose_factor(A_data_final) if compute_rank_info else None
-                augmented_rank = reml_slope_rank
-            else:
-                # The export rows are Fisher (``prefer_observed=False``), whose
-                # weights are nonnegative: the data Gram is PSD by construction,
-                # so a negative eigenvalue at its null is formation rounding and
-                # sends the rank to the factor below instead of raising.
-                data_rank = (
-                    decompose_gram_if_authoritative(
-                        centered_final.data_gram,
-                        psd_by_construction=not _return_working_system,
-                    )
-                    if compute_rank_info
-                    else None
-                )
-                if compute_rank_info and data_rank is None:
-                    if not np.any(centered_final.penalty):
-                        certification = certify_centered_factor(centered_final, W)
-                        data_rank = certification.decomposition
-                    else:
-                        final_centre, final_centre_lo = centered_final.centre_pair()
-                        data_rank = decompose_factor(
-                            grouped_weighted_factor(
-                                dm,
-                                W,
-                                center=final_centre,
-                                center_lo=final_centre_lo,
-                            )
-                        )
-                augmented_rank = reml_slope_rank
+            augmented_rank = reml_slope_rank
             final_system = centered_final
             feature_edf = _feature_edf(
                 centered_final,
@@ -4676,16 +4640,65 @@ def _fit_irls_direct_once(
             )
             feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
             p_eff = 1.0 + float(np.sum(feature_edf))
-            if compute_rank_info:
-                if data_rank is None:
-                    raise RuntimeError("data-rank metadata was not computed")
+
+            def retained_rank_info(
+                centered_final=centered_final,
+                W=W,
+                augmented_rank=augmented_rank,
+                feature_edf=feature_edf,
+            ) -> RankInfo:
+                """The data-subspace metadata only retained-fit inference reads.
+
+                A pure function of this fit's final centred system and
+                weights, so it is the same whether it runs here or, for a
+                caller that does not yet know whether this fit is the one it
+                publishes (``_defer_rank_info``), after the solve returns.
+                """
+                M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
+                    centered_final.mean_x, centered_final.mean_x
+                )
+                coefficient_rank = decompose_gram_if_authoritative(M_beta)
                 if coefficient_rank is None:
-                    raise RuntimeError("coefficient-rank metadata was not computed")
+                    certification = certify_centered_factor(centered_final, W)
+                    raw_factor = np.vstack(
+                        (
+                            certification.factor,
+                            np.sqrt(centered_final.sum_w) * centered_final.mean_x,
+                        )
+                    )
+                    coefficient_rank = decompose_factor(raw_factor)
+                if _use_qr:
+                    sqrtW = np.sqrt(W)
+                    A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
+                    data_rank = decompose_factor(A_data_final)
+                else:
+                    # The export rows are Fisher (``prefer_observed=False``), whose
+                    # weights are nonnegative: the data Gram is PSD by construction,
+                    # so a negative eigenvalue at its null is formation rounding and
+                    # sends the rank to the factor below instead of raising.
+                    data_rank = decompose_gram_if_authoritative(
+                        centered_final.data_gram,
+                        psd_by_construction=not _return_working_system,
+                    )
+                    if data_rank is None:
+                        if not np.any(centered_final.penalty):
+                            certification = certify_centered_factor(centered_final, W)
+                            data_rank = certification.decomposition
+                        else:
+                            final_centre, final_centre_lo = centered_final.centre_pair()
+                            data_rank = decompose_factor(
+                                grouped_weighted_factor(
+                                    dm,
+                                    W,
+                                    center=final_centre,
+                                    center_lo=final_centre_lo,
+                                )
+                            )
                 group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
                 selected_columns = np.arange(p, dtype=int)
                 selected_columns.setflags(write=False)
                 feature_edf.setflags(write=False)
-                rank_info = RankInfo(
+                return RankInfo(
                     policy_version=SHARED_RANK_POLICY.version,
                     coordinate_space="solver",
                     selected_columns=selected_columns,
@@ -4700,8 +4713,13 @@ def _fit_irls_direct_once(
                     group_edf=group_edf,
                     objective_loss=None,
                 )
+
+            if compute_rank_info:
+                rank_info = retained_rank_info()
             else:
                 rank_info = None
+                if _defer_rank_info is not None:
+                    _defer_rank_info.append(retained_rank_info)
         else:
             p_eff = 0.0
             rank_info = None
