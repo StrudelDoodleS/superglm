@@ -378,3 +378,4 @@ def test_single_release_instruction_reads_the_same_everywhere(path) -> None:
     assert SINGLE_RELEASE_EXCLUSION in flat
     assert SINGLE_RELEASE_MERGE in flat
     assert SINGLE_RELEASE_RESTART in flat
+    assert 'An instruction to release that names no version ("release it", "cut a release")' in flat

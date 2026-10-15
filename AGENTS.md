@@ -238,7 +238,9 @@ The three gates are separate requests, unless one instruction grants all three
    commit (after a push, ask Codex again with "@codex review"), every review
    thread on it is resolved and every finding without a thread has its reply.
    If master has moved, the pull request is closed and the release starts again
-   from a fresh assessment, which needs its own approval.
+   from a fresh assessment, which needs its own approval (under the single
+   instruction below, the run restarts from the assessment under the same
+   instruction).
    Preparation does not authorize publication.
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
    new explicit instruction naming the exact tag, or the single instruction
