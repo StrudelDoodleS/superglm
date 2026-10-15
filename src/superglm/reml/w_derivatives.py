@@ -528,6 +528,7 @@ def reml_w_correction(
     geometry: ObservedREMLGeometry | None = None,
     gradient_only: bool = False,
     leverage_hessian: bool = False,
+    lookup_tables: bool = True,
 ) -> (
     tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
     | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None, NDArray | None]
@@ -603,8 +604,10 @@ def reml_w_correction(
     the leverages are read back from term-pair tables and no row is solved:
     the result is ``(grad_correction, None, None)``, the same exact gradient
     and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
-    (4 and 10 interaction pairs) leaving it out cost one outer iteration of
-    six.
+    (4 and 10 interaction pairs) leaving it out of the Newton model cost one
+    outer iteration of six.  ``lookup_tables=False`` turns that route off: a
+    caller that needs ``w_cross`` at one point (the REML stop's second-order
+    check, ``reml/direct.py``) gets the solved-row result.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if gradient_only and w_correction_order != 1:
@@ -832,7 +835,7 @@ def reml_w_correction(
                 pirls_result.beta[pc.group_sl],
                 gms[pc.group_index],
             )
-        plan = lookup_plan(dm)
+        plan = lookup_plan(dm) if lookup_tables else None
         if plan is not None:
             # Every group a lookup or a dense column: leverages read back from
             # term-pair tables, the gradient exact, no per-row cross terms.

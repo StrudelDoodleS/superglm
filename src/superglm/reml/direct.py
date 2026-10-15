@@ -141,6 +141,21 @@ _PRESOLVE_MIN_REML_ITER = 10
 _LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
+def _usable_w_correction(correction, args: tuple, kwargs: dict, distribution):
+    """``correction(*args, **kwargs)``; a ``LinAlgError`` out of it is no usable curvature here."""
+    try:
+        return correction(*args, **kwargs)
+    except np.linalg.LinAlgError as error:
+        raise ObservedModeNotConvergedError(
+            f"REML W(rho) correction has no usable curvature at this point: {error}",
+            hint=mode_certification_hint(distribution),
+            # PIRLS reached a mode here; the correction built from it
+            # is what failed, so the published wording must not assert
+            # a PIRLS failure.
+            infeasible_detail="the W(rho) correction has no usable curvature",
+        ) from error
+
+
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
     """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
 
@@ -409,6 +424,8 @@ def optimize_direct_reml(
     _n_refused_structured_trials = 0
     # score-test stops refused because a concave shoulder was live
     _n_concave_stop_refusals = 0
+    # solved-row passes forming the W(rho) cross terms at candidate stops (table route)
+    _n_stop_cross_passes = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
     # Only a rejected general raw-centering route crosses coefficient fits.
@@ -1080,6 +1097,8 @@ def optimize_direct_reml(
         _t0 = _time.perf_counter()
         leverage_gradient = False
         leverage_hessian = False
+        w_correction_args: tuple = ()
+        w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
             leverage_gradient = bool(
                 type(distribution) is Binomial
@@ -1119,33 +1138,21 @@ def optimize_direct_reml(
             # bound would kill the search before it evaluated anything. The
             # message stays curvature-neutral for the same reason: it is
             # reached with `geometry is None`.
-            try:
-                w_corr = reml_w_correction(
-                    dm,
-                    link,
-                    groups,
-                    pirls_result,
-                    reml_inverse,
-                    cand_lambdas,
-                    penalty_caches=penalty_caches,
-                    sample_weight=sample_weight,
-                    offset_arr=offset_arr,
-                    distribution=distribution,
-                    w_correction_order=w_correction_order,
-                    reml_penalties=penalties,
-                    geometry=geometry,
-                    gradient_only=leverage_gradient,
-                    leverage_hessian=leverage_hessian,
-                )
-            except np.linalg.LinAlgError as error:
-                raise ObservedModeNotConvergedError(
-                    f"REML W(rho) correction has no usable curvature at this point: {error}",
-                    hint=mode_certification_hint(distribution),
-                    # PIRLS reached a mode here; the correction built from it
-                    # is what failed, so the published wording must not assert
-                    # a PIRLS failure.
-                    infeasible_detail="the W(rho) correction has no usable curvature",
-                ) from error
+            w_correction_args = (dm, link, groups, pirls_result, reml_inverse, cand_lambdas)
+            w_correction_kwargs = {
+                "penalty_caches": penalty_caches,
+                "sample_weight": sample_weight,
+                "offset_arr": offset_arr,
+                "distribution": distribution,
+                "w_correction_order": w_correction_order,
+                "reml_penalties": penalties,
+                "geometry": geometry,
+                "gradient_only": leverage_gradient,
+                "leverage_hessian": leverage_hessian,
+            }
+            w_corr = _usable_w_correction(
+                reml_w_correction, w_correction_args, w_correction_kwargs, distribution
+            )
         else:
             w_corr = None
         if profile is not None:
@@ -1176,6 +1183,15 @@ def optimize_direct_reml(
             grad = grad_partial.copy()
             dH_extra = None
             dH2_cross = None
+        # The leverage route read back from term-pair tables: an exact gradient
+        # and no W(rho) cross terms (``reml_w_correction``).
+        table_route = (
+            leverage_hessian
+            and w_corr is not None
+            and len(w_corr) > 2
+            and w_corr[1] is None
+            and w_corr[2] is None
+        )
 
         if obj < best_obj:
             best_obj = obj
@@ -1216,6 +1232,7 @@ def optimize_direct_reml(
         prev_obj = obj
 
         revalidated_hess = None
+        revalidated_model_hess = None
         # A loose reml_tol can be satisfied by an iteration whose starved
         # candidate PIRLS never certified: the compound criterion's
         # objective and gradient were then measured at a nonstationary
@@ -1246,8 +1263,26 @@ def optimize_direct_reml(
             # pass the second-order necessary condition to the precision asked
             # for (``concave_live_directions``): on a concave shoulder of a
             # plateau the gradient is small however far the optimum is.
+            #
+            # On the table route the Newton model leaves out the W(rho) cross
+            # terms -(P + P')/2, P_ij = tr(H^-1 S_i H^-1 C_j), whose diagonal
+            # -P_ii has no fixed sign.  The stop's second-order check and its
+            # freeze decision read the v0.40.0 leverage route's Hessian
+            # instead: one solved-row pass forms the cross terms here, at the
+            # candidate stop only.
+            stop_cross = None
+            if table_route:
+                _t0 = _time.perf_counter()
+                stop_cross = _usable_w_correction(
+                    reml_w_correction,
+                    w_correction_args,
+                    {**w_correction_kwargs, "lookup_tables": False},
+                    distribution,
+                )[2]
+                _n_stop_cross_passes += 1
+                _t_w_correction += _time.perf_counter() - _t0
             _t0 = _time.perf_counter()
-            revalidated_hess = reml_direct_hessian(
+            revalidated_model_hess = reml_direct_hessian(
                 dm.group_matrices,
                 distribution,
                 reml_inverse,
@@ -1263,6 +1298,11 @@ def optimize_direct_reml(
                 dH_extra=dH_extra,
                 dH2_cross=dH2_cross,
                 reml_penalties=penalties,
+            )
+            revalidated_hess = (
+                revalidated_model_hess
+                if stop_cross is None
+                else revalidated_model_hess + stop_cross
             )
             concave_live = concave_live_directions(
                 proj_grad,
@@ -1335,7 +1375,8 @@ def optimize_direct_reml(
                 break
             # A re-activated direction with a live gradient: not converged.
             # Fall through into this iteration's Newton step, reusing the
-            # Hessian just computed.
+            # Hessian just computed (the Newton model's, without the stop's
+            # cross terms on the table route).
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
         # includes the exact available second curvature derivatives; the
@@ -1347,8 +1388,8 @@ def optimize_direct_reml(
         # first-order W correction twice on the diagonal.
         _t0 = _time.perf_counter()
         hess = (
-            revalidated_hess
-            if revalidated_hess is not None
+            revalidated_model_hess
+            if revalidated_model_hess is not None
             else reml_direct_hessian(
                 dm.group_matrices,
                 distribution,
@@ -1917,6 +1958,7 @@ def optimize_direct_reml(
         profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
         profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
+        profile["reml_n_stop_cross_passes"] = _n_stop_cross_passes
         profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch

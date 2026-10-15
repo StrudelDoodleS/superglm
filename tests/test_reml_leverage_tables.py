@@ -6,8 +6,8 @@ gradient's leverages ``h_r = x_r' H^-1 x_r`` from per-pair tables instead of
 solving a row per data row.  These tests pin the leverages against the dense
 design within the bound the module derives in ``u``, the gradient against the
 derivative-Gram route, bitwise determinism across worker counts, the dispatch
-(no solved-row pass on a lookup design), and that a design of no lookups keeps
-the solved-row route.
+(solved rows only at a candidate stop, whose second-order check reads v0.40.0's
+Hessian), and that a design of no lookups keeps the solved-row route.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pytest
 import superglm._group_matrix._lookup_tables as leverage_tables
 import superglm.reml.direct as direct
 import superglm.reml.w_derivatives as w_derivatives
-from superglm import Numeric, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 from superglm._parallel import parallel_config
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -166,25 +166,166 @@ def test_table_leverages_are_bitwise_identical_for_any_worker_count(monkeypatch)
     assert len(set(results.values())) == 1
 
 
-def test_a_lookup_design_makes_no_solved_row_pass(monkeypatch):
-    """The dispatch: every iteration reads the tables, none solves a row (v0.40.0 solved one per iteration)."""
+def test_a_lookup_design_solves_rows_only_at_a_candidate_stop(monkeypatch):
+    """The dispatch: every iteration reads the tables; one solved-row pass per candidate stop.
+
+    The stop's second-order check reads the W(rho) cross terms the tables do
+    not form, so each candidate stop (one ``concave_live_directions`` read)
+    makes exactly one solved-row pass and no other point makes any.  v0.40.0
+    solved one row pass per iteration and read no table; the PR head made
+    none at the stop.
+    """
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     counts = _count_row_passes(monkeypatch)
     tables = {"passes": 0}
+    stops = []
     read_back = w_derivatives.table_leverages
+    concave = direct.concave_live_directions
 
     def counted(*args, **kwargs):
         tables["passes"] += 1
         return read_back(*args, **kwargs)
 
+    def stop(*args, **kwargs):
+        stops.append(counts["passes"])
+        return concave(*args, **kwargs)
+
     monkeypatch.setattr(w_derivatives, "table_leverages", counted)
+    monkeypatch.setattr(direct, "concave_live_directions", stop)
     model = _poisson_model(1.0e3)
 
-    assert counts["calls"] >= 2
+    assert stops and tables["passes"] >= 2
     assert counts["grams"] == 0
-    assert counts["passes"] == 0
-    assert tables["passes"] == counts["calls"]
+    # one pass made just before each stop's read, none elsewhere
+    assert stops == list(range(1, len(stops) + 1))
+    assert counts["passes"] == len(stops)
+    assert tables["passes"] == counts["calls"] - len(stops)
+    assert model._reml_profile["reml_n_stop_cross_passes"] == len(stops)
     assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+
+
+def _record_stops(monkeypatch) -> tuple[list[dict], list]:
+    """At each candidate stop: the Hessian its checks read, and v0.40.0's at the same point.
+
+    v0.40.0's leverage route formed the same Hessian with its own ``w_cross``
+    (``reml_w_correction(leverage_hessian=True)`` on the solved rows), recomputed
+    here from the iteration's own correction inputs with the table route off.
+    """
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    corrections, hessians, reads, ranks = [], [], [], []
+    correction, hessian = direct.reml_w_correction, direct.reml_direct_hessian
+    concave, rank_of = direct.concave_live_directions, direct.direction_penalty_ranks
+
+    def recorded_correction(*args, **kwargs):
+        if kwargs.get("lookup_tables", True):
+            corrections.append((args, kwargs))
+        return correction(*args, **kwargs)
+
+    def recorded_hessian(*args, **kwargs):
+        hessians.append((args, kwargs))
+        return hessian(*args, **kwargs)
+
+    def recorded_ranks(*args, **kwargs):
+        ranks.append(rank_of(*args, **kwargs))
+        return ranks[-1]
+
+    def read(gradient, hess, estimated, **kwargs):
+        args, correction_kwargs = corrections[-1]
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(w_derivatives, "lookup_plan", lambda *a, **k: None)
+            cross = w_derivatives.reml_w_correction(*args, **correction_kwargs)[2]
+        hessian_args, hessian_kwargs = hessians[-1]
+        reference = hessian(*hessian_args, **{**hessian_kwargs, "dH2_cross": cross})
+        reads.append(
+            {
+                "gradient": np.array(gradient, copy=True),
+                "hessian": np.array(hess, copy=True),
+                "reference": reference,
+                "cross": cross,
+                "estimated": np.array(estimated, copy=True),
+                "kwargs": kwargs,
+            }
+        )
+        return concave(gradient, hess, estimated, **kwargs)
+
+    monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
+    monkeypatch.setattr(direct, "reml_direct_hessian", recorded_hessian)
+    monkeypatch.setattr(direct, "concave_live_directions", read)
+    monkeypatch.setattr(direct, "direction_penalty_ranks", recorded_ranks)
+    return reads, ranks
+
+
+def test_the_stop_reads_the_leverage_routes_hessian(monkeypatch):
+    """At a candidate stop the table route's Hessian is v0.40.0's leverage route's, bit for bit.
+
+    Both add the same solved-row ``w_cross`` to the same fixed-W Hessian:
+    the same float64 operations on the same operands, so the derived bound
+    is zero.  On the PR head the stop read the Hessian without ``w_cross``,
+    whose diagonal ``-P_ii`` moved entries by up to 8% on this fixture.
+    """
+    reads, _ = _record_stops(monkeypatch)
+    model = _poisson_model(1.0e3)
+
+    assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    assert reads
+    for read in reads:
+        assert np.any(read["cross"] != 0.0)
+        assert np.array_equal(read["hessian"], read["reference"])
+
+
+def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkeypatch):
+    """The shoulder fixture: spline-by-category levels aliased with their factor level.
+
+    Levels 0 and 1 of ``c`` see a single ``e`` each, so their ``e:c``
+    smooths are aliased with the level's constant (the spline-by-factor case
+    of ``reml/convergence.py``): their directions sit on the lambda ->
+    infinity plateau and read the shoulder's signature, ``g > 0`` and
+    ``H_ii < 0``.  At every candidate stop the concavity and freeze decisions
+    are the ones v0.40.0's leverage-route Hessian gives at that point.
+    """
+    from superglm.reml.convergence import concave_live_directions, freeze_flat_directions
+
+    reads, ranks = _record_stops(monkeypatch)
+    frame, y, weights = _poisson_frame(1500, 1.0e3)
+    frame.loc[frame.c == "0", "e"] = 1.3
+    frame.loc[frame.c == "1", "e"] = 0.4
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Spline(n_knots=6),
+            "b": Spline(n_knots=6),
+            "e": Spline(n_knots=5),
+            "c": Categorical(),
+            "d": Numeric(),
+        },
+        interactions=[("a", "b"), ("e", "c")],
+        weight_semantics="frequency",
+        discrete=False,
+    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+
+    assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    assert model._reml_result.converged and reads and ranks
+    names = list(model._reml_lambdas)
+    signatures = []
+    for read in reads:
+        gradient, estimated, kwargs = read["gradient"], read["estimated"], read["kwargs"]
+        signatures += [
+            names[i]
+            for i in range(len(names))
+            if gradient[i] > 0.0 and read["hessian"][i, i] < 0.0 and names[i].startswith("e:c")
+        ]
+        decisions = []
+        for hess in (read["hessian"], read["reference"]):
+            freeze = freeze_flat_directions(gradient, hess, ranks[-1], estimated, **kwargs)
+            decisions.append(
+                (
+                    concave_live_directions(gradient, hess, estimated, **kwargs).tolist(),
+                    np.asarray(freeze.frozen).tolist(),
+                    np.asarray(freeze.shoulder).tolist(),
+                )
+            )
+        assert decisions[0] == decisions[1]
+    assert signatures
 
 
 def _continuous_model() -> SuperGLM:
