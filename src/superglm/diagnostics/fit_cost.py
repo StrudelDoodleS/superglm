@@ -39,8 +39,10 @@ class SlowFitWarning(UserWarning):
 # At 1e11 one product costs seconds on one thread and a search forms dozens;
 # block-sparse designs cost less than the dense count, dense ones more.
 #
-# Evidence: the 542,410-row freMTPL2 frequency book (Poisson, exposure
-# weights), one quiet benchboard run-timed session on PR #487 after the
+# Evidence: the 542,410-row freMTPL2 frequency book as published (ClaimNb not
+# recounted; the corrected counts give other numbers, not re-measured here;
+# Poisson, exposure weights), one quiet benchboard run-timed session on PR #487
+# after the
 # cached-W pre-solve (round-2 head), one pinned thread.  "Coefficients" is the
 # design width ``dm.p``, intercept excluded, after the spline-by-factor
 # separation hold.  In brackets, the earlier f71dc03b session (before the

@@ -26,6 +26,9 @@ the same optimum.
 
 ### What moves
 
+Measured on the freMTPL2 frequency book as published (uncorrected claim
+counts, 542,410 training rows), before the spline-by-factor separation hold:
+
 - **Iteration counts**: the outer Hessian leaves out one second-order term, so
   a fit can take a different number of iterations (3 pairs on the freMTPL2
   book: 12 before, 14 after).
