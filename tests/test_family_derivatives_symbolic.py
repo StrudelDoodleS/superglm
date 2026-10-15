@@ -246,6 +246,9 @@ _LSS_CASES = {
             (3.0, (0.7, 0.4, 0.17)),
             (0.5, (0.2, 1.1, 1.3)),
             (8.0, (1.5, 0.5, -0.3)),
+            # Either side of the shape term's k = 30 switch (Q = 0.18257...).
+            (3.0, (0.7, 0.4, 0.1820)),
+            (3.0, (0.7, 0.4, 0.1830)),
         ],
     ),
     "gengamma_mean": (
@@ -255,6 +258,13 @@ _LSS_CASES = {
             (3.0, (2.0, 0.4, 0.17)),
             (0.5, (1.5, 1.1, 1.3)),
             (8.0, (5.0, 0.5, -0.3)),
+            # The loading's series needs k >= 30 and x = (1 + sigma Q)/Q^2 >= 30:
+            # either side of k = 30 (x = 32.4 at both), then of x = 30 at Q < 0
+            # (k = 34.6 at both).
+            (3.0, (2.0, 0.4, 0.1820)),
+            (3.0, (2.0, 0.4, 0.1830)),
+            (3.0, (2.0, 0.6, -0.17)),
+            (3.0, (2.0, 0.8, -0.17)),
         ],
     ),
 }
@@ -268,7 +278,8 @@ _MEASURED = {
     "gamma": (1.9, 2.2, 4.4),
     "gaussian": (2.8, 3.2, 2.0),
     "gengamma_location": (7.8, 9.4, 25.1),
-    "gengamma_mean": (7.1, 4.4, 156.0),
+    # The k = 30 and x = 30 switch rows set the score and Hessian values.
+    "gengamma_mean": (12.8, 18.5, 156.0),
     "gp": (1.8, 4.8, 20.2),
     "lognormal_location": (6.4, 7.0, 5.5),
     "lognormal_mean": (4.2, 4.2, 85.4),

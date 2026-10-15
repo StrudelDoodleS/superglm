@@ -86,16 +86,46 @@ def test_direction_agrees_with_the_published_curvature(name: str) -> None:
     plan = _plan(family, y)
     links = _links(family)
     analytic = family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+    step = 10.0 * DEFAULT_STEP
     numeric = finite_difference_curvature_direction(
-        family, y, eta, direction, links, plan, step=10.0 * DEFAULT_STEP
+        family, y, eta, direction, links, plan, step=step
     )
     scale = np.max(np.abs(analytic), axis=1, keepdims=True) + 1.0e-300
-    relative = np.abs(numeric.values - analytic) / scale
-    # Two-piece rows within a step of the piece boundary see the Hessian's
-    # jump; generalized gamma rows with large |Q w| sit at the difference's
-    # floor, which is why the median is a decade above the other families'.
-    assert np.quantile(relative, 0.99) < 1.0e-7
-    assert np.median(relative) < 1.0e-9
+    gap = np.abs(numeric.values - analytic)
+    # A two-piece row whose stencil puts the residual on both sides of the join
+    # differences the Hessian's jump; those rows are found exactly, from the
+    # sign of z at every stencil point, and left out.
+    smooth = np.ones(len(y), dtype=bool)
+    if not isinstance(family, GeneralizedGammaLSS):
+        smooth = _same_piece_at_every_stencil_point(family, y, eta, direction, links, step)
+        assert 0 < np.count_nonzero(~smooth) < len(y) // 50
+        assert np.max(gap[smooth] / scale[smooth]) < 1.0e-8
+    # Every other row agrees within the stencil's Richardson estimate and the
+    # difference's 1e-9 resolution; generalized gamma rows with large |Q w|
+    # sit at that resolution, so their estimate, not a fixed threshold, binds.
+    assert np.all(gap[smooth] <= 4.0 * numeric.certificate[smooth] + 1.0e-9 * scale[smooth])
+    assert np.median(gap / scale) < 1.0e-9
+
+
+def _same_piece_at_every_stencil_point(family, y, eta, direction, links, step):
+    """Rows whose residual keeps its sign at ``eta +- step u`` and ``eta +- step/2 u``."""
+    from superglm.distributional.kernels.two_piece import location_of_mean
+
+    variate = y if isinstance(family, TwoPieceNormalLSS) else np.log(y)
+    unit = direction / np.linalg.norm(direction, axis=1, keepdims=True)
+
+    def left(values):
+        theta = np.column_stack([links[k].inverse(values[:, k]) for k in range(3)])
+        location = theta[:, 0]
+        if getattr(family, "parametrisation", "location") == "mean":
+            location = location_of_mean(*theta.T)
+        return (variate - location) / theta[:, 1] < 0.0
+
+    centre = left(eta)
+    same = np.ones(len(y), dtype=bool)
+    for offset in (step, -step, step / 2, -step / 2):
+        same &= left(eta + offset * unit) == centre
+    return same
 
 
 def test_generalized_pareto_direction_agrees_with_the_published_curvature() -> None:
@@ -235,6 +265,67 @@ def test_generalized_pareto_hessian_direction_matches_the_decimal_oracle() -> No
     term_scale = np.where(z < 0.5, 1.5 * t**4, tail) + 2.0 * v**3
     _assert_natural_oracle(
         lambda v: scale_hessian_direction(y, theta[:, 0], theta[:, 1], v, np.ones(n_rows)),
+        log_likelihood,
+        theta,
+        64,
+        term_scale,
+    )
+
+
+def test_generalized_gamma_location_direction_matches_the_decimal_oracle() -> None:
+    """The ten location-form third derivatives against the 160-digit difference.
+
+    The row needs ``lgamma(1/Q^2)``, which ``Decimal`` lacks, so the log density
+    is evaluated in mpmath at 170 digits and handed to the oracle as a
+    ``Decimal``.  Shapes run from the series side of ``f'(Q)`` (``Q = 0.02``)
+    through either side of its ``k = 30`` switch to ``Q = 1.3`` and negative
+    ``Q``, with ``|Q w|`` up to about 2.
+    """
+    mp = pytest.importorskip("mpmath")
+    from superglm.distributional.kernels.generalized_gamma import location_hessian_direction
+
+    rng = np.random.default_rng(12)
+    shapes = np.array([0.02, 0.17, 0.1820, 0.1830, 0.4, 0.9, 1.3, -0.3, -0.6, 0.05])
+    n_rows = len(shapes)
+    sigma = np.exp(rng.uniform(-1.0, 0.3, n_rows))
+    location = rng.normal(1.0, 0.5, n_rows)
+    y = np.exp(location + sigma * rng.uniform(-1.5, 1.5, n_rows))
+    theta = np.column_stack((location, sigma, shapes))
+
+    def log_likelihood(row, point):
+        with mp.workdps(170):
+            mu, s, q = (mp.mpf(str(value)) for value in point)
+            k = 1 / q**2
+            w = (mp.log(mp.mpf(float(y[row]))) - mu) / s
+            value = (
+                mp.log(q * q) / 2
+                - mp.log(s)
+                + k * mp.log(k)
+                + k * (q * w - mp.exp(q * w))
+                - mp.loggamma(k)
+            )
+            return Decimal(mp.nstr(value, 165, strip_zeros=False))
+
+    # T_QQQ holds f'(Q), whose direct form (k < 30) cancels its terms
+    # 2 (18 k^2 S2 + 4 k^3 S3 + 12 k S1)/Q^3 by up to k^2; its rounding is
+    # relative to those terms.
+    from superglm.distributional.kernels.generalized_gamma import stirling_remainder_d1
+
+    k = 1.0 / shapes**2
+    direct_terms = (
+        2.0
+        * (
+            18.0 * k * k * np.abs(stirling_remainder_d2(k))
+            + 4.0 * k**3 * np.abs(stirling_remainder_d3(k))
+            + 12.0 * k * np.abs(stirling_remainder_d1(k))
+        )
+        / np.abs(shapes) ** 3
+    )
+    term_scale = np.where(k < 30.0, direct_terms, 0.0)
+    _assert_natural_oracle(
+        lambda v: location_hessian_direction(
+            y, theta[:, 0], theta[:, 1], theta[:, 2], v, np.ones(n_rows)
+        ),
         log_likelihood,
         theta,
         64,
