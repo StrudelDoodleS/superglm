@@ -28,7 +28,6 @@ from superglm.distributional.family import (
     PredictorCurvatureDirectionalFamily,
 )
 from superglm.distributional.kernels.generalized_gamma import (
-    shape_term_d1,
     stirling_remainder_d2,
     stirling_remainder_d3,
 )
@@ -333,31 +332,98 @@ def test_generalized_gamma_location_direction_matches_the_decimal_oracle() -> No
     )
 
 
-def test_shape_term_derivative_is_continuous_across_its_series_switch() -> None:
-    """The series and direct forms of ``f'(Q)`` agree where they meet (``k = 30``)."""
+def _gamma(k: int) -> float:
+    return k * _U / (1.0 - k * _U)
+
+
+def test_stirling_third_remainder_matches_mpmath_on_both_sides_of_its_switch() -> None:
+    """``S3(x) = psi''(x) + 1/x^2 + 1/x^3`` against mpmath at 50 digits.
+
+    Below ``x = 16`` it is the series at ``x + 16`` plus sixteen recurrence steps,
+    every term of one sign (negative), so nothing cancels: a step's ``x + j``,
+    ``2x + 1``, two cubes, their product and the quotient are nine roundings,
+    the sixteen-term accumulation sixteen more and the ten-term series about
+    twenty-five, so the relative error is within ``gamma_50`` of ``|S3|``.
+    """
+    mp = pytest.importorskip("mpmath")
+    from superglm.distributional.kernels.generalized_gamma import stirling_remainder_d3
+
+    x = np.array([0.05, 0.5, 3.0, 15.9, 16.0 - 2.0**-40, 16.0, 16.0 + 2.0**-40, 16.5, 40.0, 1e4])
+    computed = stirling_remainder_d3(x)
+    with mp.workdps(50):
+        for value, result in zip(x, computed, strict=True):
+            point = mp.mpf(float(value))
+            exact = mp.polygamma(2, point) + 1 / point**2 + 1 / point**3
+            assert exact < 0
+            assert abs(mp.mpf(float(result)) - exact) <= _gamma(50) * abs(exact), value
+
+
+def test_shape_term_derivative_matches_mpmath_on_both_sides_of_its_switch() -> None:
+    """``f'(Q)`` for ``f = -4 k^3 S2(k) - 6 k^2 S1(k)``, ``k = Q^-2``, against mpmath.
+
+    The oracle differentiates ``f`` at 50 digits with exact polygammas, sharing
+    nothing with the kernel's remainders.  On the series side (``k >= 30``) the
+    error is within ``gamma_32`` of the series' absolute-term scale; on the
+    direct side ``2 (18 k^2 S2 + 4 k^3 S3 + 12 k S1)/Q^3``, whose terms cancel by
+    up to ``k^2``, it is ``gamma_64`` of those terms' absolute scale (``S2`` and
+    ``S3`` within ``gamma_50`` of themselves, as above, plus the products).
+    Below ``k = 8`` ``S1`` is ``psi(k) - log k + 1/(2k)``, which cancels to
+    ``-1/(12 k^2)``, so its own terms stand in for ``|S1|`` there.  At
+    the switch (``Q = 30^-1/2``, ``k^2 = 900``) that is about ``1e-11`` of
+    ``f'``, where an error in the series' ``j = 4`` coefficient moves ``f'`` by
+    about ``1e-8``.
+    """
+    mp = pytest.importorskip("mpmath")
+    from superglm.distributional.kernels import generalized_gamma as kernel
+
     switch = 1.0 / np.sqrt(30.0)
-    shapes = switch * np.array([1.0 - 1e-9, 1.0 + 1e-9])
-    values = shape_term_d1(shapes)
-    np.testing.assert_allclose(values[0], values[1], rtol=1e-8)
-    # Direct form against the Stirling remainders, sign-odd in Q.
-    q = np.array([0.4, -0.4, 1.3])
-    k = 1.0 / (q * q)
-    expected = (
+    q = np.array(
+        [
+            0.02,
+            switch * (1.0 - 1e-9),
+            switch * (1.0 + 1e-9),
+            -switch * (1.0 + 1e-9),
+            0.4,
+            -0.4,
+            1.3,
+        ]
+    )
+    from scipy import special
+
+    computed = kernel.shape_term_d1(q)
+    k = 1.0 / q**2
+    s1_scale = np.where(
+        k < 8.0,
+        np.abs(special.digamma(k)) + np.abs(np.log(k)) + 0.5 / k,
+        np.abs(kernel.stirling_remainder_d1(k)),
+    )
+    direct_terms = (
         2.0
         * (
-            18.0 * k * k * stirling_remainder_d2(k)
-            + 4.0 * k**3 * stirling_remainder_d3(k)
-            + 12.0
-            * k
-            * (
-                np.vectorize(lambda x: __import__("scipy").special.digamma(x))(k)
-                - np.log(k)
-                + 0.5 / k
-            )
+            18.0 * k * k * np.abs(kernel.stirling_remainder_d2(k))
+            + 4.0 * k**3 * np.abs(kernel.stirling_remainder_d3(k))
+            + 12.0 * k * s1_scale
         )
-        / q**3
+        / np.abs(q) ** 3
     )
-    np.testing.assert_allclose(shape_term_d1(q), expected, rtol=1e-11)
+    series_terms = sum(
+        abs(2.0 * c * (2 * j + 1) * (4 * j + 1) * (4 * j)) * np.abs(q) ** (4 * j - 1)
+        for j, c in enumerate(kernel._BERNOULLI[1:], start=1)
+    )
+
+    def shape_term(value):
+        kk = 1 / value**2
+        s1 = mp.digamma(kk) - mp.log(kk) + 1 / (2 * kk)
+        s2 = mp.polygamma(1, kk) - 1 / kk - 1 / (2 * kk**2)
+        return -4 * kk**3 * s2 - 6 * kk**2 * s1
+
+    with mp.workdps(50):
+        for index, value in enumerate(q):
+            exact = mp.diff(shape_term, mp.mpf(float(value)))
+            series = k[index] >= 30.0
+            bound = _gamma(32) * series_terms[index] if series else _gamma(64) * direct_terms[index]
+            assert abs(mp.mpf(float(computed[index])) - exact) <= bound, value
+    assert k[1] > 30.0 > k[2]
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
