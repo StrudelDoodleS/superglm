@@ -41,6 +41,7 @@ _BatchResult = tuple[
     int,
 ]
 _BatchCore = Callable[..., _BatchResult]
+_DirectionCore = Callable[..., tuple[NDArray[np.float64], int, int]]
 
 
 class TweedieNumericalRefusal(RuntimeError):  # noqa: N818 - binding contract name
@@ -358,7 +359,10 @@ def _warmup_tweedie() -> None:
                 failing_row=int(failing_row),
                 max_terms=_DEFAULT_MAX_TERMS,
             )
-    tweedie_hessian_direction(*arrays, "prior", np.zeros((1, 3), dtype=np.float64))
+    y, mean, dispersion, power, weight = arrays
+    tweedie_hessian_direction(
+        y, mean, dispersion, power, weight, "prior", np.zeros((1, 3), dtype=np.float64)
+    )
 
 
 def evaluate_tweedie_rows(
@@ -464,7 +468,8 @@ def tweedie_hessian_direction(
     normalized = tuple(
         np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
     )
-    result, status, failing_row = _compiled._tweedie_hessian_direction_core(
+    direction_core = cast(_DirectionCore, _compiled._tweedie_hessian_direction_core)
+    result, status, failing_row = direction_core(
         *normalized,
         0 if semantics == "prior" else 1,
         natural,
