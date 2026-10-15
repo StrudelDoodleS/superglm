@@ -464,6 +464,61 @@ def test_requested_derivative_orders_are_actually_lazy(
         np.testing.assert_array_equal(computed, reference)
 
 
+def test_compiled_series_writes_only_the_requested_order() -> None:
+    """At ``derivative_order=1`` the compiled kernel writes one column and nothing else.
+
+    Numba does not bounds-check, so an order-2 write into an ``(n, 1)`` output
+    would land on the next row or past the end without raising.  The outputs
+    sit inside sentinel-filled buffers; the sentinels must survive, and the one
+    written column must equal the order-2 call's first column bit for bit.
+    """
+    counts = np.array([2, 0, 5, 1], dtype=np.int64)
+    mean = np.array([1.25, 0.4, 3.0, 0.9])
+    theta = np.full(4, np.nextafter(400.0, np.inf))
+    _, remainder_error, remainder_scale = nb_kernel._ratio_remainder(mean / theta)
+    candidate_scale = np.maximum(mean, np.maximum(counts - 1.0, 0.0))
+    rows = np.flatnonzero(candidate_scale / theta <= nb_kernel._SERIES_RATIO).astype(np.int64)
+    assert rows.size == 4
+    pad, n_rows = 8, len(counts)
+
+    def framed(dtype, sentinel, width):
+        buffer = np.full(2 * pad + n_rows * width, sentinel, dtype=dtype)
+        return buffer, buffer[pad : pad + n_rows * width].reshape(n_rows, width)
+
+    outputs = {}
+    for order in (1, 2):
+        use_buffer, use = framed(np.bool_, True, order)
+        use[:] = False
+        natural_buffer, natural = framed(np.float64, -7.25, order)
+        direct_buffer, direct = framed(np.float64, -7.25, order)
+        nb_kernel._compiled.theta_series_serial(
+            rows,
+            counts,
+            mean,
+            theta,
+            candidate_scale,
+            remainder_error,
+            remainder_scale,
+            order,
+            nb_kernel._SERIES_ORDER,
+            nb_kernel._SERIES_EXPONENTS,
+            nb_kernel._SERIES_BERNOULLI,
+            use,
+            natural,
+            direct,
+        )
+        for buffer, sentinel in (
+            (use_buffer, True),
+            (natural_buffer, -7.25),
+            (direct_buffer, -7.25),
+        ):
+            assert np.all(buffer[:pad] == sentinel) and np.all(buffer[-pad:] == sentinel)
+        outputs[order] = (use.copy(), natural.copy(), direct.copy())
+    for first, second in zip(outputs[1], outputs[2], strict=True):
+        np.testing.assert_array_equal(first[:, 0], second[:, 0])
+    assert np.all(outputs[1][0])
+
+
 def test_public_evaluator_wires_direct_log_channel_retention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
