@@ -87,9 +87,9 @@ assessed head, the Claude and Codex reviews have completed on its head commit
 (after a push, the root agent asks Codex again with "@codex review"; a Codex
 review with no findings counts as completed when its summary comment records
 that commit), every review thread on it is resolved and every finding without a
-thread has its reply (If master has moved, the bump-only pull request is closed
-and the run restarts from the assessment under the same instruction.); and the
-tag, Release and PyPI version must not already exist. The three separate
+thread has its reply; and the tag, Release and PyPI version must not already
+exist. If master has moved, the bump-only pull request is closed and the run
+restarts from the assessment under the same instruction. The three separate
 instructions remain for a release taken one step at a time. An instruction that
 names no version authorizes nothing.
 
