@@ -318,3 +318,71 @@ def test_bounded_power_link_third_derivative() -> None:
             q = 1 - p
             exact = Decimal(link.upper - link.lower) * p * q * (1 - 6 * p * q)
             assert abs(Decimal(float(computed)) - exact) <= Decimal(16 * _U) * abs(exact) * 7
+
+
+def test_generalized_gamma_refuses_a_valid_row_whose_direction_overflows() -> None:
+    """Only rows the family flags invalid publish zero; a valid overflow is refused.
+
+    At ``mu = -1e62``, ``sigma = 1``, ``Q = 1e-62`` the row is valid (``u = Q w``
+    is about 1, so ``e^u`` is finite) and its Hessian is finite (``w^4`` terms
+    near ``1e248``), but ``T_QQQ`` carries ``w^5 T4(u)``, which overflows.  At
+    7305fe25 the kernel zeroed that row and the chain rule still added its
+    ``H``, ``g''`` and ``g'''`` terms, a silently wrong derivative; now the
+    non-finite row reaches the refusal in ``natural_curvature_direction``.
+    A row whose ``e^u`` overflows is invalid and still publishes zero.
+    """
+    from superglm.distributional.kernels.generalized_gamma import location_hessian_direction
+
+    y = np.array([2.0, 2.0, 2.0])
+    mu = np.array([0.5, -1.0e62, 0.5])
+    sigma = np.ones(3)
+    q = np.array([0.3, 1.0e-62, 5000.0])
+    with np.errstate(over="ignore", invalid="ignore"):
+        rows = location_hessian_direction(y, mu, sigma, q, np.ones((3, 3)), np.ones(3))
+    assert np.all(np.isfinite(rows[0]))
+    assert not np.all(np.isfinite(rows[1]))
+    assert np.all(rows[2] == 0.0)
+
+    family = GeneralizedGammaLSS(parametrisation="location")
+    plan = _plan(family, y[:2])
+    links = _links(family)
+    eta = np.column_stack((mu[:2], links[1].link(sigma[:2]), q[:2]))
+    evaluation = family.evaluate_natural(
+        y[:2], np.column_stack((mu[:2], sigma[:2], q[:2])), plan, derivative_order=2
+    )
+    assert np.all(evaluation.valid)
+    assert np.all(np.isfinite(evaluation.hessian_packed))
+    with pytest.raises(ValueError, match="not representable"):
+        family.predictor_curvature_directional_derivative(y[:2], eta, np.ones((2, 3)), links, plan)
+
+
+def test_generalized_gamma_mean_form_keeps_a_valid_overflow_non_finite(monkeypatch) -> None:
+    """The mean form zeroes only rows whose mean does not exist or whose base is invalid.
+
+    No float64 mean-form row is known to overflow while valid, so the loading's
+    third derivative is forced to overflow on one valid row: that row must stay
+    non-finite rather than read as zero curvature change.
+    """
+    import superglm.distributional.kernels.generalized_gamma as kernel
+
+    original = kernel._log_mean_loading_third
+
+    def overflowing(sigma, shape):
+        values = list(original(sigma, shape))
+        values[-1] = np.array(values[-1], dtype=np.float64, copy=True)
+        values[-1][1] = np.inf
+        return tuple(values)
+
+    monkeypatch.setattr(kernel, "_log_mean_loading_third", overflowing)
+    y = np.array([2.0, 3.0])
+    with np.errstate(over="ignore", invalid="ignore"):
+        rows = kernel.mean_hessian_direction(
+            y,
+            np.array([2.5, 2.5]),
+            np.array([0.4, 0.4]),
+            np.array([0.6, 0.6]),
+            np.ones((2, 3)),
+            np.ones(2),
+        )
+    assert np.all(np.isfinite(rows[0]))
+    assert not np.all(np.isfinite(rows[1]))

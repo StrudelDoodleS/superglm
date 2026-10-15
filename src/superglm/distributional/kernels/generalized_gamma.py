@@ -652,7 +652,9 @@ def location_hessian_direction(
         result[:, 4] = t_msq * vm + t_ssq * vs + t_sqq * vq
         result[:, 5] = t_mqq * vm + t_sqq * vs + t_qqq * vq
         result *= m[:, None]
-    result[~np.all(np.isfinite(result), axis=1) | ~np.isfinite(e)] = 0.0
+    # Only the rows the Hessian flags invalid (``e^u`` overflows) publish zero;
+    # a valid row that overflows stays non-finite so the caller refuses it.
+    result[~np.isfinite(e)] = 0.0
     return result
 
 
@@ -1232,8 +1234,7 @@ def mean_hessian_direction(
             nu[exists],
         )
         direction_exists *= we[:, None]
-    invalid = ~np.asarray(base.valid) | ~np.all(np.isfinite(direction_exists), axis=1)
-    direction_exists[invalid] = 0.0
+    direction_exists[~np.asarray(base.valid)] = 0.0
     result[exists] = direction_exists
     return result
 
