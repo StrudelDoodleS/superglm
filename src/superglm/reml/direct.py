@@ -1882,9 +1882,11 @@ def optimize_direct_reml(
             # score-test exit only.  A shoulder here is flat by construction,
             # its gradient under the precision floor this exit certifies, and
             # over the shortest step just rejected (5/128 in log lambda) its
-            # model promises at most a few times the objective's resolution:
-            # a decrease the rejected trials have just failed to show is no
-            # ground to refuse a certified point.  (The native-Windows flip of
+            # model promises at most 0.041 times that floor: about four times
+            # the objective's resolution at the default reml_tol (1e-9), and
+            # 4e-9 / reml_tol times it at a tighter one.  A decrease the
+            # rejected trials have just failed to show is no ground to refuse
+            # a certified point.  (The native-Windows flip of
             # test_sz_aliased_levels_converge_under_reml[one_row] first blamed
             # on refusing here was the unsigned shoulder read the signed rule
             # removes.)  test_a_dead_search_beside_a_live_shoulder_certifies

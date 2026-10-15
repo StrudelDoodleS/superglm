@@ -2383,8 +2383,9 @@ class TestREMLWarmStart:
         freeze record.  Each step there is shoulder-only, so the guard that
         keeps the Newton decrement off a shoulder step is reached: without it
         the decrement reads Newton terms this step never formed (both
-        fixtures raise).  (Round 2's refusal here made a fixture's verdict
-        depend on platform rounding.)
+        fixtures raise).  The exit's reason is at its comment in
+        ``reml/direct.py``; the native-Windows flip once blamed on round 2's
+        refusal here was the unsigned shoulder read.
         """
         import dataclasses
 
