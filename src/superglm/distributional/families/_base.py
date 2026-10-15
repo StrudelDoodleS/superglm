@@ -88,17 +88,6 @@ def typed_plan[PlanT](
     return plan
 
 
-__all__ = [
-    "FLOAT",
-    "array_digest",
-    "immutable",
-    "readonly",
-    "response_row_count",
-    "typed_plan",
-    "validated_float_response",
-]
-
-
 def natural_curvature_direction(
     family,
     y: NDArray,
@@ -175,3 +164,15 @@ def natural_curvature_direction(
     if not np.all(np.isfinite(result)):
         raise ValueError("the predictor-curvature derivative is not representable at this state")
     return readonly(result)
+
+
+__all__ = [
+    "FLOAT",
+    "array_digest",
+    "immutable",
+    "natural_curvature_direction",
+    "readonly",
+    "response_row_count",
+    "typed_plan",
+    "validated_float_response",
+]
