@@ -46,7 +46,8 @@ class SlowFitWarning(UserWarning):
 # design width ``dm.p``, intercept excluded, after the spline-by-factor
 # separation hold.  In brackets, the earlier f71dc03b session (before the
 # pre-solve, on a shared machine; its walls varied up to 1.5x between
-# sessions, and its binned times were 3 to 24% slower than this quiet one).
+# sessions, and its binned times, rounded to the second in the brackets,
+# were 3 to 24% slower than this quiet one's).
 #
 #   model              coefs  n p^2    exact          discrete=True
 #   main effects          67  2.4e9    7.0 s (9 s)    2.5 s (3 s)
