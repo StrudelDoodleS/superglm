@@ -70,7 +70,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
@@ -113,6 +113,16 @@ class _Term:
     raw_read: bool  # a categorical or a spline-by-category run: read raw, centre as a constant
     lo: NDArray  # (m_t,) int32 window start the kernels read (raw rows if raw_read, else 0)
     hi: NDArray  # (m_t,) int32 window stop (raw rows if raw_read, else p_t)
+
+
+@dataclass
+class _LevelRun:
+    """An open spline-by-category run: disjoint levels stacked into one term."""
+
+    codes: NDArray  # (n,) int32 stacked-table row per observation, -1 outside the run
+    tables: list[NDArray] = field(default_factory=list)
+    columns: list[NDArray] = field(default_factory=list)
+    next: int = 0  # first stacked-table row of the next level
 
 
 @dataclass(frozen=True)
@@ -253,7 +263,7 @@ def _build_plan(dm) -> LookupPlan | None:
     terms: list[_Term] = []
     term_codes: list[NDArray] = []
     dense: list[tuple[int, int, NDArray]] = []
-    run: dict | None = None  # an open spline-by-category run of disjoint levels
+    run: _LevelRun | None = None
 
     def add_term(columns: NDArray, raw: NDArray, raw_read: bool) -> None:
         if raw_read:
@@ -267,7 +277,7 @@ def _build_plan(dm) -> LookupPlan | None:
         nonlocal run
         if run is None:
             return
-        tables = run["tables"]
+        tables = run.tables
         stacked = np.zeros(
             (sum(t.shape[0] for t in tables) + 1, sum(t.shape[1] for t in tables)),
             dtype=np.float64,
@@ -277,9 +287,9 @@ def _build_plan(dm) -> LookupPlan | None:
             stacked[r : r + table.shape[0], c : c + table.shape[1]] = table
             r += table.shape[0]
             c += table.shape[1]
-        codes = run["codes"]
+        codes = run.codes
         codes[codes < 0] = stacked.shape[0] - 1
-        add_term(np.concatenate(run["columns"]), stacked, True)
+        add_term(np.concatenate(run.columns), stacked, True)
         term_codes.append(codes)
         run = None
 
@@ -301,14 +311,14 @@ def _build_plan(dm) -> LookupPlan | None:
                 raw = raw @ np.asarray(transform, dtype=np.float64)
         if level is not None:
             level_rows = np.asarray(level[0], dtype=np.intp)
-            if run is not None and np.any(run["codes"][level_rows] >= 0):
+            if run is not None and np.any(run.codes[level_rows] >= 0):
                 close_run()  # rows shared with the open run: a new term
-            if run is None:
-                run = {"tables": [], "columns": [], "codes": np.full(n, -1, np.int32), "next": 0}
-            run["codes"][level_rows] = run["next"] + np.asarray(level[1], dtype=np.int32)
-            run["next"] += raw.shape[0]
-            run["tables"].append(raw)
-            run["columns"].append(columns)
+            open_run = run if run is not None else _LevelRun(np.full(n, -1, np.int32))
+            run = open_run
+            open_run.codes[level_rows] = open_run.next + np.asarray(level[1], dtype=np.int32)
+            open_run.next += raw.shape[0]
+            open_run.tables.append(raw)
+            open_run.columns.append(columns)
             continue
         close_run()
         add_term(columns, raw, values is None)
