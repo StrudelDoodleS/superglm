@@ -80,16 +80,18 @@ One instruction that names an exact version and says to release it, using the
 word "release" ("release 0.40", "release 0.40.1"), authorizes all three steps
 below for exactly that version, in order. Asking only to assess, prepare or
 draft a release, or "ship", "deploy" or "finish" with a version, does not
-qualify. Each step still runs its own checks: the assessment must recommend
-the named version and preparation uses its ID; the root agent rebase-merges
-the bump-only pull request only once it is green,
-origin/master is still at the assessed head, the automatic Claude and Codex
-reviews have posted on its head commit, every review thread on it is resolved
-and every finding without a thread has its reply (if master has moved, the
-bump pull request is closed and the run restarts from the assessment); and the tag, Release and PyPI version must not already
-exist. The three separate instructions
-remain for a release taken one step at a time. An instruction that names no
-version authorizes nothing.
+qualify. Each step still runs its own checks: the assessment must recommend the
+named version and preparation uses its ID; the root agent rebase-merges the
+bump-only pull request only once it is green, origin/master is still at the
+assessed head, the Claude and Codex reviews have completed on its head commit
+(after a push, the root agent asks Codex again with "@codex review"; a Codex
+review with no findings counts as completed when its summary comment records
+that commit), every review thread on it is resolved and every finding without a
+thread has its reply (If master has moved, the bump-only pull request is closed
+and the run restarts from the assessment under the same instruction.); and the
+tag, Release and PyPI version must not already exist. The three separate
+instructions remain for a release taken one step at a time. An instruction that
+names no version authorizes nothing.
 
 Assessment of the unreleased changes on master is read-only:
 

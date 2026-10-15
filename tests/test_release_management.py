@@ -177,9 +177,10 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "the Assessment ID of the assessment run under it when that assessment recommends exactly the named version",
         "The root agent, never the specialist, rebase-merges the bump-only pull request",
         "naming the exact v0.x.y tag, or the single release instruction naming that version",
-        "Verify the automatic Claude and Codex reviews posted on the merged bump-only pull "
-        "request's head commit, it has no unresolved review threads, and every finding "
-        "without a thread has its reply",
+        "Verify the Claude and Codex reviews completed on the merged bump-only pull "
+        "request's head commit (a Codex review with no findings counts when its summary "
+        "comment records that commit), it has no unresolved review threads, and every "
+        "finding without a thread has its reply",
         "or a SINGLE RELEASE INSTRUCTION, stop and report the exact authority required",
         "An instruction that names no version grants nothing",
     ):
@@ -340,9 +341,15 @@ SINGLE_RELEASE_EXCLUSION = (
     '"finish" with a version, does not qualify.'
 )
 SINGLE_RELEASE_MERGE = (
-    "only once it is green, origin/master is still at the assessed head, the automatic "
-    "Claude and Codex reviews have posted on its head commit, every review thread on it "
+    "only once it is green, origin/master is still at the assessed head, the Claude and "
+    "Codex reviews have completed on its head commit (after a push, the root agent asks "
+    'Codex again with "@codex review"; a Codex review with no findings counts as '
+    "completed when its summary comment records that commit), every review thread on it "
     "is resolved and every finding without a thread has its reply"
+)
+SINGLE_RELEASE_RESTART = (
+    "If master has moved, the bump-only pull request is closed and the run restarts "
+    "from the assessment under the same instruction"
 )
 
 
@@ -355,3 +362,4 @@ def test_single_release_instruction_reads_the_same_everywhere(path) -> None:
     assert SINGLE_RELEASE_TRIGGER in flat
     assert SINGLE_RELEASE_EXCLUSION in flat
     assert SINGLE_RELEASE_MERGE in flat
+    assert SINGLE_RELEASE_RESTART in flat
