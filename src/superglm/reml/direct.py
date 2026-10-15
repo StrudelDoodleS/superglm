@@ -1154,7 +1154,9 @@ def optimize_direct_reml(
                 if w_corr[1] is not None:
                     correction_mode = "derivative_grams"
                 elif len(w_corr) > 2:
-                    correction_mode = "leverage_hessian"
+                    correction_mode = (
+                        "leverage_hessian" if w_corr[2] is not None else "leverage_tables"
+                    )
                 else:
                     correction_mode = "leverage_gradient"
             profile["reml_w_correction_mode"] = correction_mode
