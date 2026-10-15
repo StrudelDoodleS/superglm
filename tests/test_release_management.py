@@ -166,8 +166,10 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "Never upload distributions directly",
         "merges nothing",
         "Never move, overwrite, or recreate a published tag",
+        "SINGLE RELEASE INSTRUCTION",
     ):
         assert marker in policy
+    assert "An instruction that names no version grants nothing" in " ".join(policy.split())
 
 
 def test_release_manager_prepares_a_bump_only_pull_request() -> None:
@@ -229,6 +231,11 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     assert "move together" in agents
     assert "never authorizes a tag or publication" in agents
     assert "Tags remain release-only" in agents
+    # One instruction naming the version and saying to release grants all
+    # three steps; one naming no version grants nothing.
+    flat = " ".join(agents.split())
+    assert "names the version and says to release it" in flat
+    assert "An instruction that names no version authorizes nothing" in flat
 
 
 def test_repository_guidance_pins_review_thread_handling() -> None:

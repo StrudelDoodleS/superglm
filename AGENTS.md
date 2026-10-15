@@ -235,6 +235,16 @@ The three gates are separate requests, and each does only its own step:
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
    new explicit instruction naming the exact tag.
 
+One instruction can also grant all three. A user instruction that names the
+version and says to release it ("release 0.40", "release 0.40.1") authorizes
+assessing, preparing and publishing exactly that version, in that order,
+without asking again for the phrases above. A version given as 0.x means
+0.x.0. Each step still runs its own checks and stops on any failure: the
+assessment must recommend the named version, the bump pull request must be
+reviewed, rebase-merged and green, and the tag, GitHub Release and PyPI
+version must not already exist. An instruction that names no version
+authorizes nothing.
+
 The specialist never merges feature pull requests, uploads distributions
 directly, moves an existing tag, or bypasses `.github/workflows/release.yml`
 and PyPI Trusted Publishing.

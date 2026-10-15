@@ -70,9 +70,11 @@ Four changes follow from it:
   search's bound of 1e-6 or 1e10. Those bounds applied in the column's units and
   now apply in knot intervals, so such a term can move: smoother on a column in
   large units, less smooth on one in small units. The reported smoothing
-  parameter is larger by `h**-3`, where `h` is the mean knot interval in the
-  column's units: 729 times for nine intervals across a column from 0 to 1. A
-  penalty order `m` other than 2 takes `h**-(2m - 1)`.
+  parameter is multiplied by `h**-3`, where `h` is the mean knot interval in the
+  column's units: 729 times larger for nine intervals across a column from 0 to
+  1, and smaller on a column in large units, such as driver age from 18 to 100
+  with eight knots (`h` about 9, so about 750 times smaller). A penalty order
+  `m` other than 2 takes `h**-(2m - 1)`.
 - **`SuperGLM.fit_reml()` or `SuperLSS.fit_reml()` with such a spline on a column
   in large units**: a smoothing parameter that 0.39 stopped at the cap (1e10, or
   `max_lambda`) can now stop below it, because the cap no longer depends on the

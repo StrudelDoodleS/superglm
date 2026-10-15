@@ -76,6 +76,12 @@ tag; the numbers themselves are skipped, exactly as `0.16.2` was.
 The release specialist is a spawned Codex subagent. It does not replace the
 current agent and never starts automatically.
 
+One instruction that names the version and says to release it ("release
+0.40") authorizes all three steps below for exactly that version, in order;
+each step still runs its own checks. The three separate instructions remain
+for a release taken one step at a time. An instruction that names no
+version authorizes nothing.
+
 Assessment of the unreleased changes on master is read-only:
 
 ```text

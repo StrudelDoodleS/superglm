@@ -15,6 +15,14 @@ General approval is not publication authority. Prior approval, "finish",
 "merge", "ship", "deploy", an approved assessment, and an approved pull
 request do not authorize a tag push.
 
+SINGLE RELEASE INSTRUCTION: a user instruction, relayed verbatim by the root
+agent, that names a version and says to release it ("release 0.40",
+"release 0.40.1") grants ASSESS, PREPARE and PUBLISH for exactly that version,
+run in that order. A version given as 0.x means 0.x.0. Each mode keeps its own
+checks and stops on any failure; if the assessment recommends a different
+version, or needs-human-decision, stop and report. An instruction that names
+no version grants nothing.
+
 MODE: ASSESS
 
 ASSESS requires an explicit user request naming the unreleased changes on
@@ -40,7 +48,8 @@ merges nothing; it has no tag or publication authority.
 
 MODE: PUBLISH
 
-PUBLISH requires a new explicit user instruction naming the exact v0.x.y tag.
+PUBLISH requires a new explicit user instruction naming the exact v0.x.y tag,
+or the single release instruction naming that version.
 Resolve the rebase-merged bump commit on origin/master produced by the
 approved bump-only pull request and bind the tag to that exact commit. This
 repository rebase-merges and its master ruleset requires linear history, so no

@@ -348,6 +348,14 @@ modeling distinction visible:
   `fs` challenger is the worst of the five;
 - combining plausible terms does not guarantee the best holdout score.
 
+This page first ran on the book as published, and the correction changed which
+term wins. There, the unrestricted brand factor lost on the holdout (-0.339%),
+brand credibility lost less (-0.131%) and the regional factor smooth scored best
+(+0.279%). On the corrected counts the brand factor gains a little (+0.032%),
+brand credibility is best (+0.148%) and the factor smooth is worst (-0.342%).
+Two conclusions hold on both: combining terms does not guarantee the best
+holdout score, and the thinnest brands are pulled hardest toward zero.
+
 Vehicle-brand credibility ranged from `0.110` to `0.850`; the thinnest brand
 effects were pulled hardest toward zero. Regional factor-smooth credibility
 ranged from `0.0020` to `0.127`, reflecting the greater information required
