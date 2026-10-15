@@ -268,18 +268,30 @@ def test_gradient_certificate_carries_the_theta_third_bound() -> None:
     block = layout.predictors[1].coefficient_slice
     design = np.asarray(dense[1])
     leverage = np.einsum("ij,jk,ik->i", design, inverse[block, block], design)
-    third_terms = []
+    leverage_scale = np.einsum(
+        "ij,jk,ik->i", np.abs(design), np.abs(inverse[block, block]), np.abs(design)
+    )
+    width = len(beta)
+    gamma = (4 * width + 8) * _U / (1.0 - (4 * width + 8) * _U)
+    third_terms, slacks = [], []
     for name in layout.penalty_names:
         penalty = layout.penalty_matrix(
             {other: (lambdas[other] if other == name else 0.0) for other in layout.penalty_names}
         )
         direction = design @ (-(inverse @ (penalty @ beta)))[block]
+        direction_scale = (
+            np.abs(design) @ (np.abs(inverse) @ (np.abs(penalty) @ np.abs(beta)))[block]
+        )
         third_terms.append(0.5 * float(np.sum(np.abs(direction) * np.abs(leverage) * error)))
-    expected = np.array(third_terms)
-    assert np.all(expected > 0.0)
-    # Two independent float64 contractions of n nonnegative products: gamma_{2n+8} apart.
-    slack = 1.0 - 2.0 * (2 * n_rows + 8) * _U
-    assert np.all(result.gradient_certificate >= slack * expected)
+        # Both sides round G_i and eta_k[i] from the same inputs, each within
+        # gamma_{2p+4} of its absolute-term scale, so they differ by at most
+        # twice that (the sums of n nonnegative products add only gamma_n of themselves).
+        slacks.append(2.0 * gamma * float(np.sum(direction_scale * leverage_scale * error)))
+    expected, slack = np.array(third_terms), np.array(slacks)
+    # The theta component's scales sit 3.6e-5 of its term apart: the check still
+    # demands all but a thousandth of the term, where 7305fe25 carried none.
+    assert np.all(expected > 0.0) and np.all(slack < 1e-3 * expected)
+    assert np.all(result.gradient_certificate >= (1.0 - 2.0 * n_rows * _U) * expected - slack)
 
 
 def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
