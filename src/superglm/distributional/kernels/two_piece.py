@@ -471,6 +471,31 @@ def location_hessian_direction(
     return result
 
 
+def join_crossing_rows(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    location_direction: NDArray,
+) -> NDArray[np.bool_]:
+    """Rows on the join ``z = 0`` whose Hessian has no derivative along the direction.
+
+    With nonzero skew the Hessian jumps at ``z = 0`` (``s`` changes from
+    ``1 + eps`` to ``1 - eps``), so a direction that moves the location there
+    has only one-sided derivatives, the right piece's when ``mu`` falls and
+    the left piece's when it rises; the directions that leave ``mu`` fixed
+    keep ``z = 0`` and the right piece, and are differentiable.  ``z`` is
+    formed exactly as the Hessian's piece selection forms it.
+    """
+    t = _vector(variate, name="variate")
+    mu = _vector(location, name="location")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    moved = np.asarray(location_direction, dtype=_FLOAT)
+    _same_shape(t, mu, sigma, eps, moved)
+    return ((t - mu) / sigma == 0.0) & (eps != 0.0) & (moved != 0.0)
+
+
 def _log_mean_loading_third(
     sigma: NDArray[np.float64], eps: NDArray[np.float64]
 ) -> tuple[NDArray[np.float64], ...]:
@@ -729,6 +754,7 @@ __all__ = [
     "TwoPieceInitializationWarning",
     "TwoPieceKernelEvaluation",
     "initialize_two_piece",
+    "join_crossing_rows",
     "location_expected_information",
     "location_of_mean",
     "location_rows",

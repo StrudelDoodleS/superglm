@@ -282,8 +282,8 @@ def test_gradient_certificate_carries_the_theta_third_bound() -> None:
     assert np.all(result.gradient_certificate >= slack * expected)
 
 
-def test_first_axis_reuses_the_probe(monkeypatch) -> None:
-    """K axis derivatives cost K kernel calls: the admitting probe is the first axis."""
+def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
+    """K axis derivatives cost K kernel calls: the admission check is the pass itself."""
     from superglm.distributional.smoothing.derivatives import (
         _analytic_first_derivative,
         _first_derivatives,
@@ -309,5 +309,5 @@ def test_first_axis_reuses_the_probe(monkeypatch) -> None:
         lambda values: values, eta, DEFAULT_STEP, analytic_first=analytic
     )
     assert len(calls) == 2 and evaluations == 0
-    np.testing.assert_array_equal(first[0], analytic.probe[0])
-    np.testing.assert_array_equal(certificate[0], analytic.probe[1])
+    np.testing.assert_array_equal(first[0], analytic.axes[0][0])
+    np.testing.assert_array_equal(certificate[0], analytic.axes[0][1])

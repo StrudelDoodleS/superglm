@@ -45,10 +45,12 @@ from superglm.distributional.kernels.two_piece import (
 )
 from superglm.distributional.kernels.two_piece import (
     initialize_two_piece,
+    join_crossing_rows,
     location_expected_information,
     location_hessian_direction,
     location_of_mean,
     location_rows,
+    log_mean_loading,
     mean_expected_information,
     mean_hessian_direction,
     mean_of_location,
@@ -64,6 +66,29 @@ from superglm.distributional.weights import (
 from superglm.links import IdentityLink, Link, LogLink
 
 Parametrisation = Literal["mean", "location"]
+
+
+def _refuse_join_crossing(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    location_direction: NDArray,
+) -> None:
+    """Refuse the analytic direction when it moves a row's location across the join.
+
+    There the Hessian has only one-sided derivatives, so no analytic value
+    carries authority; the caller differences the published curvature, whose
+    certificate records the jump, as v0.40.0 did for every two-piece row.
+    """
+    crossing = join_crossing_rows(variate, location, scale, skew, location_direction)
+    if np.any(crossing):
+        row = int(np.flatnonzero(crossing)[0])
+        raise UnsupportedLikelihoodContractError(
+            f"two-piece curvature has no derivative across its join at row {row}"
+        )
+
+
 TwoPieceRowLaw = Literal[
     "unit-prior-explicitly-equals-frequency/v1",
     "two-piece-epsilon-skew-literal-replication/v1",
@@ -444,9 +469,21 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             if self.parametrisation == "mean":
+                # mu = log m - log K(sigma, eps) moves by v_m/m - K_s v_s - K_e v_e.
+                logk, k_s, k_e = log_mean_loading(theta[:, 1], theta[:, 2])[:3]
+                _refuse_join_crossing(
+                    np.log(response),
+                    np.log(theta[:, 0]) - logk,
+                    theta[:, 1],
+                    theta[:, 2],
+                    natural[:, 0] / theta[:, 0] - k_s * natural[:, 1] - k_e * natural[:, 2],
+                )
                 return mean_hessian_direction(
                     response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
                 )
+            _refuse_join_crossing(
+                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0]
+            )
             return location_hessian_direction(
                 np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
             )
@@ -692,6 +729,7 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         bound = self._plan(plan, len(response))
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            _refuse_join_crossing(response, theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0])
             return location_hessian_direction(
                 response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
             )

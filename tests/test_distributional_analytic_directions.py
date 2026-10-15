@@ -386,3 +386,61 @@ def test_generalized_gamma_mean_form_keeps_a_valid_overflow_non_finite(monkeypat
         )
     assert np.all(np.isfinite(rows[0]))
     assert not np.all(np.isfinite(rows[1]))
+
+
+def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
+    """At ``t == mu`` with nonzero skew the direction is refused when it moves ``mu``.
+
+    The Hessian jumps there (``s`` is ``1 + eps`` on the right, ``1 - eps`` on
+    the left), so a direction that moves the location has only one-sided
+    derivatives; at 7305fe25 the analytic path returned the right piece's as
+    exact.  The refusal sends the caller to the Richardson difference, which
+    v0.40.0 used for every two-piece row and whose certificate records the
+    jump.  Directions that leave ``mu`` fixed keep ``z = 0`` on the right piece
+    and are still analytic, as is a zero-skew row, where nothing jumps.
+    """
+    from superglm.distributional.kernels.two_piece import log_mean_loading
+    from superglm.distributional.smoothing.derivatives import _analytic_first_derivative
+    from superglm.distributional.smoothing.endpoint_direction import (
+        analytic_curvature_direction,
+    )
+    from superglm.distributional.weights import UnsupportedLikelihoodContractError
+
+    y = np.array([1.0, 1.3, 0.7])
+    family = TwoPieceNormalLSS()
+    links = _links(family)
+    plan = _plan(family, y)
+    eta = np.column_stack(
+        (np.ones(3), links[1].link(np.full(3, 0.8)), links[2].link(np.full(3, 0.3)))
+    )
+    moving = np.tile([0.3, -0.5, 0.8], (3, 1))
+    with pytest.raises(UnsupportedLikelihoodContractError, match="join at row 0"):
+        family.predictor_curvature_directional_derivative(y, eta, moving, links, plan)
+    assert analytic_curvature_direction(family, y, eta, moving, links, plan) is None
+    assert _analytic_first_derivative(family, y, eta, links, plan, 3, 3) is None
+
+    fixed = np.tile([0.0, 1.0, -0.4], (3, 1))
+    analytic = family.predictor_curvature_directional_derivative(y, eta, fixed, links, plan)
+    numeric = finite_difference_curvature_direction(family, y, eta, fixed, links, plan)
+    scale = np.max(np.abs(analytic), axis=1, keepdims=True)
+    assert np.all(np.abs(numeric.values - analytic) <= numeric.certificate + 1e-9 * scale)
+
+    symmetric = eta.copy()
+    symmetric[:, 2] = links[2].link(np.zeros(3))
+    family.predictor_curvature_directional_derivative(y, symmetric, moving, links, plan)
+
+    mean_family = TwoPieceLogNormalLSS(parametrisation="mean")
+    mean_links = _links(mean_family)
+    response = np.array([2.0, 3.0])
+    sigma, skew = np.full(2, 0.6), np.full(2, -0.25)
+    mean = np.exp(np.log(response) + log_mean_loading(sigma, skew)[0])
+    mean_eta = np.column_stack(
+        (mean_links[0].link(mean), mean_links[1].link(sigma), mean_links[2].link(skew))
+    )
+    mean_plan = _plan(mean_family, response)
+    # Only the scale moves, and mu = log m - log K(sigma, eps) moves with it.
+    scale_only = np.tile([0.0, 1.0, 0.0], (2, 1))
+    with pytest.raises(UnsupportedLikelihoodContractError, match="join"):
+        mean_family.predictor_curvature_directional_derivative(
+            response, mean_eta, scale_only, mean_links, mean_plan
+        )

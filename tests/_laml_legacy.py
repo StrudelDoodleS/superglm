@@ -67,7 +67,7 @@ def _legacy_axis_derivatives(rows, eta, step, *, want_second, analytic_first):
             stencil = _stencil(rows, eta, unit, step)
             evaluations += 4
         if analytic_first is not None:
-            values, certificate = analytic_first.derivative(unit)
+            values, certificate = analytic_first.axes[q]
         else:
             values, certificate = _first_difference(stencil, step)
         first.append(values)

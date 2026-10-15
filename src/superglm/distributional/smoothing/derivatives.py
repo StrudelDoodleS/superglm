@@ -211,7 +211,7 @@ def _first_derivatives(
 
     Returns ``(D1, C1, stencils, evaluations)``: ``D1[q]`` is ``d rows / d eta_q``
     with certificate ``C1[q]`` (for an analytic derivative, the family's
-    certified error, zero for closed forms; the first axis reuses the probe) and
+    certified error, zero for closed forms, evaluated once when admitted) and
     ``stencils[q]`` the four-point axis stencil it was differenced on, which
     the second-derivative stage shares (``None`` for an analytic derivative,
     which evaluates nothing).
@@ -226,9 +226,7 @@ def _first_derivatives(
         unit[:, q] = 1.0
         stencil: _Stencil | None = None
         if analytic_first is not None:
-            values, certificate = (
-                analytic_first.probe if q == 0 else analytic_first.derivative(unit)
-            )
+            values, certificate = analytic_first.axes[q]
         else:
             stencil = _stencil(rows, eta, unit, step)
             evaluations += 4
@@ -416,15 +414,15 @@ _CertifiedRows = tuple[NDArray[np.float64], NDArray[np.float64]]
 
 @dataclass(frozen=True)
 class _AnalyticFirst:
-    """A family's analytic axis derivative and the axis-0 probe that admitted it.
+    """A family's analytic derivatives along every parameter axis.
 
-    ``derivative(unit)`` returns ``(values, certificate)``, the certificate the
-    family's certified absolute error (zero for closed-form channels);
-    ``probe`` is that pair along ``e_0``, which the first axis reuses.
+    ``axes[q]`` is ``(values, certificate)`` along ``e_q``, the certificate the
+    family's certified absolute error (zero for closed-form channels).  All
+    ``K`` axes are evaluated before any is used, so a family that refuses one
+    axis (the two-piece join) sends the whole pass to differences.
     """
 
-    derivative: Callable[[NDArray[np.float64]], _CertifiedRows]
-    probe: _CertifiedRows
+    axes: tuple[_CertifiedRows, ...]
 
 
 def _analytic_first_derivative(
@@ -438,9 +436,9 @@ def _analytic_first_derivative(
 ) -> _AnalyticFirst | None:
     """The family's analytic directional derivative of the observed curvature, if usable.
 
-    ``None`` when the family does not implement the protocol or refuses these
-    links (NB2 and GammaLS accept only their log links); the caller then
-    differences.
+    ``None`` when the family does not implement the protocol, refuses these
+    links (NB2 and GammaLS accept only their log links) or refuses a row on any
+    axis (a two-piece row on its join); the caller then differences.
     """
     if not isinstance(family, PredictorCurvatureDirectionalFamily):
         return None
@@ -463,10 +461,12 @@ def _analytic_first_derivative(
             raise LamlDerivativeError("family returned an invalid curvature-direction certificate")
         return values, certificate
 
-    unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
-    unit[:, 0] = 1.0
+    axes = []
     try:
-        probe = derivative(unit)
+        for q in range(k_parameters):
+            unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
+            unit[:, q] = 1.0
+            axes.append(derivative(unit))
     except (
         TypeError,
         ValueError,
@@ -476,7 +476,7 @@ def _analytic_first_derivative(
         LamlDerivativeError,
     ):
         return None
-    return _AnalyticFirst(derivative=derivative, probe=probe)
+    return _AnalyticFirst(axes=tuple(axes))
 
 
 @dataclass
