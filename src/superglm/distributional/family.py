@@ -599,6 +599,28 @@ class PredictorCurvatureDirectionalFamily(Protocol):
 
 
 @runtime_checkable
+class CertifiedCurvatureDirectionalFamily(Protocol):
+    """Optional analytic curvature direction that carries a certified error.
+
+    Returns ``(values, certificate)``: ``values`` is what
+    ``predictor_curvature_directional_derivative`` returns and
+    ``certificate`` an entrywise non-negative absolute bound on the error the
+    family's kernel certifies for it (a series or recurrence that is exact
+    only to a bound).  A family whose analytic channels are closed forms
+    leaves this out and its direction counts as exact.
+    """
+
+    def certified_predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> tuple[NDArray, NDArray]: ...
+
+
+@runtime_checkable
 class ResponseBoundaryFamily(Protocol):
     """Optional declaration of the response boundaries a predictor can escape to.
 

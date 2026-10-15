@@ -40,7 +40,7 @@ from superglm.distributional.kernels.negative_binomial import (
     evaluate_negative_binomial_rows,
     has_resolved_poisson_boundary,
     initialize_negative_binomial,
-    negative_binomial_predictor_curvature_directional,
+    negative_binomial_certified_predictor_curvature_directional,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -352,13 +352,28 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
+        values, _certificate = self.certified_predictor_curvature_directional_derivative(
+            y, eta, eta_direction, links, plan
+        )
+        return values
+
+    def certified_predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The curvature direction and the certified error of its ``l_bbb`` channel."""
+
         link_tuple = tuple(links)
         if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
             raise UnsupportedLikelihoodContractError(
                 "NB2 endpoint curvature derivatives require the built-in log links"
             )
         candidate = _typed_plan(plan, response_row_count(y))
-        return negative_binomial_predictor_curvature_directional(
+        return negative_binomial_certified_predictor_curvature_directional(
             candidate.exact_count,
             eta,
             eta_direction,

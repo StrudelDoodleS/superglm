@@ -153,3 +153,130 @@ def test_analytic_direction_refuses_links_it_does_not_differentiate() -> None:
         NegativeBinomialLS().predictor_curvature_directional_derivative(
             response, eta, eta, (IdentityLink(), LogLink()), plan
         )
+
+
+def test_certified_direction_bounds_its_theta_channel_against_the_oracle() -> None:
+    """Every row's ``bb`` entry is within its certificate plus the closed-form rounding.
+
+    The ``bb`` entry is ``-(l_abb d_a + l_bbb d_b)``: ``l_abb`` is a closed form
+    within ``gamma_11`` of its scale, ``l_bbb`` is within its certified ``e``,
+    and the two products and the sum add three roundings, so
+    ``|bb - exact| <= |d_b| e + gamma_14 (|l_abb d_a| + (|l_bbb| + e) |d_b|)``,
+    with ``|d_b| e`` the certificate.  Held at the maximum over rows from deep
+    near Poisson (``mean / theta`` down to ``2^-52``) to far from it.
+    """
+    counts, mean, theta = _oracle_rows(9, 400)
+    counts[:3], mean[:3], theta[:3] = [3.0, 0.0, 2.0], [0.5, 1e-3, 2.0**-30], [1e15, 1e12, 2.0**20]
+    rng = np.random.default_rng(10)
+    direction = rng.normal(size=(len(counts), 2))
+    eta = np.column_stack((np.log(mean), np.log(theta)))
+    values, certificate = nb_kernel.negative_binomial_certified_predictor_curvature_directional(
+        counts, eta, direction, np.ones(len(counts)), "prior"
+    )
+    _, error = nb_kernel.negative_binomial_log_third_derivatives(
+        counts, np.exp(eta[:, 0]), np.exp(eta[:, 1]), np.ones(len(counts)), "prior"
+    )
+    assert np.all(certificate[:, :2] == 0.0)
+    assert np.all(certificate[:, 2] >= np.abs(direction[:, 1]) * error)
+    gamma_14 = Decimal(14 * _U / (1 - 14 * _U))
+    for row in range(len(counts)):
+        oracle = _oracle_third(
+            int(counts[row]), float(np.exp(eta[row, 0])), float(np.exp(eta[row, 1]))
+        )
+        d_a, d_b = Decimal(float(direction[row, 0])), Decimal(float(direction[row, 1]))
+        exact = -(oracle[2] * d_a + oracle[3] * d_b)
+        rounding = gamma_14 * (
+            abs(oracle[2] * d_a) + (abs(oracle[3]) + Decimal(float(error[row]))) * abs(d_b)
+        )
+        miss = abs(Decimal(float(values[row, 2])) - exact)
+        assert miss <= Decimal(float(certificate[row, 2])) + rounding
+
+
+def test_gradient_certificate_carries_the_theta_third_bound() -> None:
+    """The LAML gradient certificate holds the certified ``l_bbb`` error, not zero.
+
+    With the axis direction ``e_theta`` the certificate of the ``bb`` channel is
+    ``e_i``, and the gradient certificate's third-derivative term is
+    ``1/2 sum_i |eta_k[i, theta]| |G_i[theta, theta]| e_i`` with
+    ``eta_k = X beta_k``, ``beta_k = -H^-1 lambda_k S_k beta`` and
+    ``G_i = X_i H^-1 X_i'``, formed here independently of the assembly.  At
+    7305fe25 the analytic direction published no certificate and this fit's
+    gradient certificate was zero.
+    """
+    import pandas as pd
+
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.layout import build_stacked_layout
+    from superglm.distributional.predictor import Predictor, compile_predictors
+    from superglm.distributional.result import DenseSolverConfig
+    from superglm.distributional.smoothing.derivatives import laml_derivatives
+    from superglm.distributional.solver import fit_dense_fixed_lambda
+    from superglm.distributional.solver.solver import _DenseObservedReuseSession
+    from superglm.features import Spline
+
+    rng = np.random.default_rng(5)
+    n_rows = 400
+    x = rng.uniform(0.0, 1.0, n_rows)
+    mean = np.exp(0.2 + 0.9 * np.sin(2.0 * np.pi * x))
+    theta = np.exp(5.0 + 0.5 * np.sin(np.pi * x))
+    response = rng.negative_binomial(theta, theta / (theta + mean)).astype(np.float64)
+    plan = _plan(response, None, "prior")
+    family = NegativeBinomialLS()
+    frame = as_eager_frame(pd.DataFrame({"x": x}))
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            plan.weights,
+            family.parameters,
+            (
+                Predictor("mean", {"x": Spline(kind="cr", k=8)}),
+                Predictor("theta", {"x": Spline(kind="cr", k=6)}),
+            ),
+        )
+    )
+    lambdas = dict.fromkeys(layout.penalty_names, 1.0)
+    fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        layout.penalty_matrix(lambdas),
+        config=DenseSolverConfig(
+            max_iterations=200, tolerance=1e-11, coefficient_curvature="observed"
+        ),
+    )
+    assert fit.converged
+    dense = _DenseObservedReuseSession().dense_matrices(layout)
+    result = laml_derivatives(
+        family,
+        layout,
+        response,
+        plan,
+        lambdas=lambdas,
+        fit=fit,
+        dense_matrices=dense,
+        want_hessian=False,
+    )
+    assert result.third_derivative_authority == "analytic-observed-curvature-direction/v1"
+
+    eta = np.asarray(fit.eta)
+    _, error = nb_kernel.negative_binomial_log_third_derivatives(
+        plan.exact_count, np.exp(eta[:, 0]), np.exp(eta[:, 1]), np.ones(n_rows), "prior"
+    )
+    inverse = np.asarray(fit.terminal_pseudo_inverse())
+    beta = np.asarray(fit.coefficients)
+    block = layout.predictors[1].coefficient_slice
+    design = np.asarray(dense[1])
+    leverage = np.einsum("ij,jk,ik->i", design, inverse[block, block], design)
+    third_terms = []
+    for name in layout.penalty_names:
+        penalty = layout.penalty_matrix(
+            {other: (lambdas[other] if other == name else 0.0) for other in layout.penalty_names}
+        )
+        direction = design @ (-(inverse @ (penalty @ beta)))[block]
+        third_terms.append(0.5 * float(np.sum(np.abs(direction) * np.abs(leverage) * error)))
+    expected = np.array(third_terms)
+    assert np.all(expected > 0.0)
+    # Two independent float64 contractions of n nonnegative products: gamma_{2n+8} apart.
+    slack = 1.0 - 2.0 * (2 * n_rows + 8) * _U
+    assert np.all(result.gradient_certificate >= slack * expected)

@@ -876,6 +876,31 @@ def negative_binomial_predictor_curvature_directional(
 
     The curvature is the negated Hessian in ``(log mean, log theta)``, packed
     ``(aa, ab, bb)``; its derivative along ``d`` is ``-sum_k l_ijk d_k``.
+    :func:`negative_binomial_certified_predictor_curvature_directional`
+    returns the same values with the certified error of the ``bb`` channel.
+    """
+
+    values, _certificate = negative_binomial_certified_predictor_curvature_directional(
+        counts, eta, eta_direction, weights, semantics
+    )
+    return values
+
+
+def negative_binomial_certified_predictor_curvature_directional(
+    counts: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The packed curvature direction and an entrywise bound on its certified error.
+
+    ``l_bbb`` is the one channel computed only to a certified bound ``e``
+    (series truncation and recurrence rounding, which cancel by ``theta^2``
+    near Poisson), and it enters only the ``bb`` entry, multiplied by
+    ``d_b``; so the certificate is ``|d_b| e`` on ``bb``, rounded upward once
+    for the one rounded product, and zero on ``aa`` and ``ab``, whose third
+    derivatives are closed forms.
     """
 
     try:
@@ -894,7 +919,7 @@ def negative_binomial_predictor_curvature_directional(
     with np.errstate(over="ignore", under="ignore"):
         mean = np.exp(predictors[:, 0])
         theta = np.exp(predictors[:, 1])
-    third, _ = negative_binomial_log_third_derivatives(counts, mean, theta, weights, semantics)
+    third, error = negative_binomial_log_third_derivatives(counts, mean, theta, weights, semantics)
     along_mean, along_theta = direction[:, 0], direction[:, 1]
     result = np.empty((len(mean), 3), dtype=_FLOAT)
     with np.errstate(over="ignore", invalid="ignore"):
@@ -902,7 +927,16 @@ def negative_binomial_predictor_curvature_directional(
         result[:, 1] = -(third[:, 1] * along_mean + third[:, 2] * along_theta)
         result[:, 2] = -(third[:, 2] * along_mean + third[:, 3] * along_theta)
     _finite_output(result, "curvature direction", NegativeBinomialDerivativeRepresentationError)
-    return readonly(result, dtype=np.dtype(np.float64), shape=result.shape)
+    certificate = np.zeros_like(result)
+    with np.errstate(over="ignore"):
+        certificate[:, 2] = np.nextafter(np.abs(along_theta) * error, np.inf)
+    _finite_output(
+        certificate, "curvature-direction bound", NegativeBinomialDerivativeRepresentationError
+    )
+    return (
+        readonly(result, dtype=np.dtype(np.float64), shape=result.shape),
+        readonly(certificate, dtype=np.dtype(np.float64), shape=certificate.shape),
+    )
 
 
 __all__ = [
@@ -914,6 +948,7 @@ __all__ = [
     "evaluate_negative_binomial_rows",
     "has_resolved_poisson_boundary",
     "initialize_negative_binomial",
+    "negative_binomial_certified_predictor_curvature_directional",
     "negative_binomial_log_third_derivatives",
     "negative_binomial_predictor_curvature_directional",
     "recurrence_cells",

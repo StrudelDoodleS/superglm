@@ -12,7 +12,6 @@ from numpy.typing import NDArray
 from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
-    PredictorCurvatureDirectionalFamily,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import (
@@ -26,6 +25,7 @@ from superglm.distributional.result import (
 from superglm.distributional.results.solver import _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
+    analytic_curvature_direction,
     finite_difference_curvature_direction,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
@@ -562,9 +562,6 @@ def evaluate_endpoint_laplace_derivative(
     eta = endpoint_fit.eta
     if eta is None:
         raise EndpointLaplaceError("endpoint derivative requires retained predictor rows")
-    analytic_direction = isinstance(family, PredictorCurvatureDirectionalFamily) and callable(
-        getattr(family, "predictor_curvature_directional_derivative", None)
-    )
     if endpoint_fit.coefficient_face is not endpoint_face:
         raise EndpointLaplaceError("endpoint derivative requires the fitted endpoint face")
     endpoint_face.validate_layout(layout)
@@ -617,17 +614,18 @@ def evaluate_endpoint_laplace_derivative(
     links = tuple(state.link for state in layout.predictors)
     certificate: NDArray[np.float64] | None = None
     try:
-        if analytic_direction:
-            curvature_direction = np.asarray(
-                family.predictor_curvature_directional_derivative(
-                    y,
-                    eta,
-                    eta_direction,
-                    links,
-                    likelihood_plan,
-                ),
-                dtype=np.float64,
-            )
+        # A family that refuses these links (UnsupportedLikelihoodContractError)
+        # is differenced, as v0.40.0 differenced every family without the protocol.
+        analytic = analytic_curvature_direction(
+            family,
+            y,
+            eta,
+            eta_direction,
+            links,
+            likelihood_plan,
+        )
+        if analytic is not None:
+            curvature_direction, certificate = analytic
             authority = ANALYTIC_DIRECTION_AUTHORITY
         else:
             numeric: FiniteDifferenceDirection = finite_difference_curvature_direction(
@@ -652,6 +650,12 @@ def evaluate_endpoint_laplace_derivative(
         np.isfinite(curvature_direction)
     ):
         raise EndpointLaplaceError("family returned an invalid endpoint curvature direction")
+    if certificate is not None and (
+        certificate.shape != curvature_direction.shape
+        or not np.all(np.isfinite(certificate))
+        or np.any(certificate < 0.0)
+    ):
+        raise EndpointLaplaceError("family returned an invalid curvature-direction certificate")
     zeros_score = np.zeros((n_observations, n_parameters), dtype=np.float64)
     zeros_penalty = np.zeros_like(curvature)
     zeros_coefficients = np.zeros(layout.n_coefficients, dtype=np.float64)

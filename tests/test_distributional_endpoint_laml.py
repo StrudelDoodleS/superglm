@@ -36,6 +36,9 @@ from superglm.distributional.face_efs import (
 )
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
+from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+from superglm.distributional.families.log_normal import LogNormalLS
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     InitialParameterState,
@@ -57,7 +60,7 @@ from superglm.distributional.result import (
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features import Numeric, RandomEffect, Spline
-from superglm.links import IdentityLink
+from superglm.links import IdentityLink, SqrtLink
 from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
 
@@ -2503,6 +2506,104 @@ def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_c
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="not certified"):
         smoothing.assert_matched_certified()
+
+
+class _LogLinkWithoutThirdDerivative:
+    """A user link that supplies two inverse derivatives, not the optional third."""
+
+    def link(self, mu):
+        return np.log(mu)
+
+    def inverse(self, eta):
+        return np.exp(eta)
+
+    def deriv(self, mu):
+        return 1.0 / mu
+
+    def deriv_inverse(self, eta):
+        return np.exp(eta)
+
+    def deriv2_inverse(self, eta):
+        return np.exp(eta)
+
+
+def _refused_link_case(case: str):
+    rng = np.random.default_rng(3)
+    w = np.tile(np.linspace(-1.0, 1.0, 12), 40)
+    x = np.repeat(np.linspace(-1.0, 1.0, 6), 80)
+    mean = np.exp(1.0 + 0.55 * np.sin(np.pi * w) + 0.15 * w + 0.03 * np.sin(np.pi * x))
+    if case == "negative-binomial-sqrt":
+        family = NegativeBinomialLS()
+        response = rng.negative_binomial(3.0, 3.0 / (3.0 + mean)).astype(np.float64)
+        link = SqrtLink()
+    elif case == "gamma-sqrt":
+        family = GammaLS()
+        response = mean * rng.gamma(4.0, 0.25, size=mean.size)
+        link = SqrtLink()
+    elif case == "log-normal-sqrt":
+        family = LogNormalLS()
+        response = mean * np.exp(0.4 * rng.standard_normal(mean.size) - 0.08)
+        link = SqrtLink()
+    else:
+        family = GeneralizedParetoLSS()
+        response = mean * (rng.uniform(size=mean.size) ** -0.2 - 1.0) / 0.2
+        link = _LogLinkWithoutThirdDerivative()
+    return family, response, link, x, w
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["negative-binomial-sqrt", "gamma-sqrt", "log-normal-sqrt", "pareto-custom-link"],
+)
+def test_exact_face_check_differences_a_family_that_refuses_its_links(case: str) -> None:
+    """A link the analytic direction refuses is differenced; the fit is not aborted.
+
+    NB2, GammaLS and the log-normal differentiate only their built-in links,
+    and every family routed through ``natural_curvature_direction`` needs
+    ``deriv3_inverse``, which the ``Link`` protocol makes optional.  Each
+    refuses with ``UnsupportedLikelihoodContractError``.  At 7305fe25 that
+    escaped ``evaluate_endpoint_laplace_derivative`` and ended the fit the
+    first time a capped component reached its exact-face check (GammaLS
+    already did so on master); the check now differences the family's
+    curvature, as v0.40.0 did for every family without the protocol.
+    """
+    family, response, link, x, w = _refused_link_case(case)
+    weights = resolved_prior(np.ones_like(response))
+    frame = as_eager_frame(pd.DataFrame({"x": x, "w": w}))
+    first, second = (parameter.name for parameter in family.parameters)
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (
+                Predictor(
+                    first,
+                    {"x": Spline(kind="cr", n_knots=5), "w": Spline(kind="cr", n_knots=5)},
+                    link=link,
+                ),
+                Predictor(second, {}),
+            ),
+        )
+    )
+    capped_name, finite_name = layout.penalty_names
+    efs_config = DistributionalEFSConfig(outer="efs", max_iterations=120, tolerance=1.0e-3)
+    smoothing = fit_distributional_efs(
+        family,
+        layout,
+        response,
+        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),
+        lambdas={capped_name: efs_config.maximum_lambda, finite_name: 0.5},
+        solver_config=DenseSolverConfig(max_iterations=150, tolerance=1.0e-9),
+        efs_config=efs_config,
+    )
+
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == (capped_name,)
+    evidence = smoothing.terminal_endpoint_directions[capped_name]
+    assert evidence.authority_identifier == "finite-difference-curvature-direction/v1"
+    assert evidence.decision == "endpoint"
 
 
 def _resolved_quadratic_gap_fit() -> DenseSolverResult:
