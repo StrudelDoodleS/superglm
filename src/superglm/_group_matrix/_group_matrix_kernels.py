@@ -15,7 +15,9 @@ default and hold the GIL.
 from __future__ import annotations
 
 from fractions import Fraction
+from itertools import repeat
 from math import frexp
+from operator import add, mul
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
@@ -100,23 +102,197 @@ def _ssp_gram_needs_exact(*operands) -> bool:
     return False
 
 
+#: Every bin sum below adds 53-bit binary64 significands split into a signed
+#: high part below 2**27 and a low part below 2**26 (``_exact_bin_sums``); int64
+#: holds such sums of fewer than 2**36 terms exactly.
+_EXACT_SPLIT_BITS = 26
+_EXACT_MAX_TERMS = 1 << 36
+#: Trailing-zero classes of the exact bin masses (``_exact_gram_moments``).
+_EXACT_CLASS_BITS = 64
+
+
+def _dyadic_parts(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(m, e)`` with ``values == m * 2**e`` exactly, ``|m| < 2**53``, for finite float64.
+
+    ``frexp`` returns ``f`` in ``[0.5, 1)`` and ``2**53 f`` is an integer
+    below ``2**53`` (subnormals included), so both conversions are exact.
+    """
+    fraction, exponent = np.frexp(values)
+    return np.ldexp(fraction, 53).astype(np.int64), exponent.astype(np.int64) - 53
+
+
+def _exact_integers(values: np.ndarray, scale: int) -> np.ndarray:
+    """Python integers ``values * 2**-scale`` (an object array), exact for every finite entry.
+
+    ``scale`` is at most every nonzero entry's ``frexp`` exponent minus 53
+    (``binary_scale`` in ``_exact_ssp_moments``), so every shift is a left shift.
+    """
+    mantissa, exponent = _dyadic_parts(values)
+    # A zero's exponent says nothing about the scale: give it no shift.
+    shift = np.where(mantissa != 0, exponent - scale, 0)
+    return mantissa.astype(object) << shift.astype(object)
+
+
+def _exact_bin_sums(values: np.ndarray, bins: np.ndarray, n_bins: int, scale: int) -> np.ndarray:
+    """Exact ``sum(values[bins == b]) * 2**-scale`` for every bin, as Python integers.
+
+    One accumulator per (bin, binary exponent), as in Malcolm's summation
+    (Malcolm, CACM 14(11), 1971) and Neal's superaccumulators (arXiv
+    1505.05571, 2015): rows sharing an exponent add their significands as
+    fixed-width integers, so no row enters Python arithmetic. Each significand
+    ``m = h 2**26 + l`` splits into ``|h| < 2**27`` and ``0 <= l < 2**26``;
+    fewer than ``2**36`` of either sum below ``2**63`` in int64, whatever the
+    order. Only the per-group totals become Python integers, shifted to the
+    common scale and added per bin. Every operation is exact.
+    """
+    if values.size >= _EXACT_MAX_TERMS:  # pragma: no cover - beyond addressable memory
+        raise ValueError("exact SSP bin sums take fewer than 2**36 rows")
+    out = np.zeros(n_bins, dtype=object)
+    mantissa, exponent = _dyadic_parts(values)
+    nonzero = mantissa != 0
+    if not np.any(nonzero):
+        return out
+    mantissa, exponent = mantissa[nonzero], exponent[nonzero]
+    bins = np.asarray(bins, dtype=np.int64)[nonzero]
+    lowest = int(exponent.min())
+    span = int(exponent.max()) - lowest + 1
+    key = bins * span + (exponent - lowest)
+    order = np.argsort(key)
+    key = key[order]
+    mantissa = mantissa[order]
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    high = np.add.reduceat(mantissa >> _EXACT_SPLIT_BITS, starts)
+    low = np.add.reduceat(mantissa & ((1 << _EXACT_SPLIT_BITS) - 1), starts)
+    group = key[starts]
+    group_bins = group // span
+    shift = (group % span + lowest - scale).astype(object)
+    totals = ((high.astype(object) << _EXACT_SPLIT_BITS) + low.astype(object)) << shift
+    first = np.flatnonzero(np.r_[True, group_bins[1:] != group_bins[:-1]])
+    out[group_bins[first]] = np.add.reduceat(totals, first)
+    return out
+
+
+def _exact_gram_moments(indptr, columns, entries, masses, rhs_masses, width):
+    """Exact ``B'MB``, ``B'm`` and ``B'r`` of a CSR row set, as lists of Python integers.
+
+    ``entries`` are the rows' stored values as exact integers. Duplicate
+    columns within a row are summed exactly first (a canonicalized, rounded
+    row would lose that sum). Each row then adds ``m b_i b_j`` to the upper
+    triangle in place; a row whose columns are contiguous (a dense support
+    row) does so a slice at a time through ``map``, so the per-pair work runs
+    in C. Measured on freMTPL2's dense tensor supports (1957 x 169 and
+    3882 x 117), in-place list accumulation beat object-array matmul, outer
+    products and sorted pair reduction by 1.4-3x.
+    """
+    # Masses share the weights' scale, so an ordinary bin beside a 2**-600
+    # weight is a ~600-bit integer with ~550 trailing zeros. Each row adds
+    # into the accumulator of its trailing-zero class, at that class's shift,
+    # so the products stay narrow; the classes are shifted back and summed once.
+    grams: dict[int, list[list[int]]] = {}
+    xtws: dict[int, list[int]] = {}
+    xtw = [0] * width
+    xtr = [0] * width
+    pointers = indptr.tolist()
+    all_columns = columns.tolist()
+    all_entries = entries.tolist()
+    rhs = None if rhs_masses is None else rhs_masses.tolist()
+    for row, mass in enumerate(masses.tolist()):
+        lo, hi = pointers[row], pointers[row + 1]
+        cols, vals = all_columns[lo:hi], all_entries[lo:hi]
+        if len(set(cols)) != len(cols) or cols != sorted(cols):
+            summed: dict[int, int] = {}
+            for column, value in zip(cols, vals, strict=True):
+                summed[column] = summed.get(column, 0) + value
+            cols = sorted(summed)
+            vals = [summed[column] for column in cols]
+        if rhs is not None and rhs[row]:
+            for column, value in zip(cols, vals, strict=True):
+                xtr[column] += rhs[row] * value
+        if not mass or not cols:
+            continue
+        shift = ((mass & -mass).bit_length() - 1) // _EXACT_CLASS_BITS * _EXACT_CLASS_BITS
+        if shift not in grams:
+            grams[shift] = [[0] * width for _ in range(width)]
+            xtws[shift] = [0] * width
+        gram, class_xtw = grams[shift], xtws[shift]
+        mass >>= shift
+        weighted = [mass * value for value in vals]
+        for column, value in zip(cols, weighted, strict=True):
+            class_xtw[column] += value
+        if cols[-1] - cols[0] + 1 == len(cols):
+            for offset, value in enumerate(weighted):
+                i = cols[0] + offset
+                stop = cols[0] + len(cols)
+                target = gram[i]
+                target[i:stop] = map(add, target[i:stop], map(mul, repeat(value), vals[offset:]))
+        else:
+            for offset, (i, value) in enumerate(zip(cols, weighted, strict=True)):
+                target = gram[i]
+                for j, other in zip(cols[offset:], vals[offset:], strict=True):
+                    target[j] += value * other
+    gram = [[0] * width for _ in range(width)]
+    for shift, partial in grams.items():
+        for i in range(width):
+            row = gram[i]
+            row[i:] = map(add, row[i:], (value << shift for value in partial[i][i:]))
+        xtw = [total + (value << shift) for total, value in zip(xtw, xtws[shift], strict=True)]
+    for i in range(width):
+        for j in range(i):
+            gram[i][j] = gram[j][i]
+    return gram, xtw, xtr
+
+
+def _exact_congruence(gram, xtw, xtr, coefficients):
+    """``C' G C``, ``C' x`` and ``C' r`` in Python integers, visiting only nonzero ``C`` entries.
+
+    A transform with few nonzeros per column (a permutation-like ``R``)
+    costs ``(k + width)`` times its nonzeros instead of a dense triple product.
+    """
+    k, width = coefficients.shape
+    table = coefficients.tolist()
+    support = [[(m, table[m][c]) for m in range(k) if table[m][c]] for c in range(width)]
+    gram_c = [
+        [sum(row[m] * value for m, value in support[c]) for c in range(width)] for row in gram
+    ]
+    out = [[0] * width for _ in range(width)]
+    for left in range(width):
+        for right in range(left, width):
+            out[left][right] = out[right][left] = sum(
+                value * gram_c[m][right] for m, value in support[left]
+            )
+    return (
+        out,
+        [sum(value * xtw[m] for m, value in support[c]) for c in range(width)],
+        [sum(value * xtr[m] for m, value in support[c]) for c in range(width)],
+    )
+
+
 def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
     """Round the requested source-factor moments once on exceptional inputs.
 
-    Finite binary64 entries are exact dyadic rationals. Accumulating B R,
-    X' W X and optional X' W / X' Wz over those entries avoids an overflowing
-    raw Gram, reciprocal basis or bin mass. No rank or regularization decision
-    is made here. The target is the represented source product B R, before
-    floating-point matrix multiplication rounds that product.
+    Finite binary64 entries are exact dyadic rationals. Accumulating
+    ``X' W X = R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz``
+    over those entries, with ``M`` the bin (or row) masses, avoids an
+    overflowing raw Gram, reciprocal basis or bin mass. No rank or
+    regularization decision is made here. The target is the represented
+    source product ``B R``, before floating-point matrix multiplication rounds
+    that product; in exact arithmetic the two association orders agree, so the
+    once-rounded outputs do too.
 
-    A shared binary scale per source operand makes every inner operation an
+    This is an exact dot product rounded once (Kulisch's long accumulator):
+    a shared binary scale per source operand makes every inner operation an
     integer operation. Binary64's finite exponent span bounds integer widths,
     apart from logarithmic growth with reduction length; no inner product
     needs rational normalization. Only final outputs use Fraction rounding.
-    Only one effective row and the requested output are retained. Sparse B
-    stays sparse outside the current row; discrete weights are aggregated
-    exactly before visiting their support rows. Ordinary operands never use
-    this path.
+    Error-free float transformations (Ogita, Rump & Oishi 2005; Rump, Ogita &
+    Oishi 2008) need products clear of underflow, which is exactly the range
+    that sends operands here, and Demmel & Hida's wider accumulator is not
+    correctly rounded, so neither replaces the integers. Bin and row sums are
+    vectorised (``_exact_bin_sums``); the Gram is accumulated over each
+    active row's support (``_exact_gram_moments``), never as a dense
+    row-by-column table, and the transform touches only its nonzeros
+    (``_exact_congruence``).
+    Ordinary operands never use this path.
     """
     weights = np.asarray(weights)
     if bin_indices is None:
@@ -146,15 +322,11 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
         # below validates all weights/transforms, but only active basis rows.
         return int(np.min(exponents, where=values != 0, initial=1024)) - 53
 
-    def exact(value, scale):
-        try:
-            numerator, denominator = float(value).as_integer_ratio()
-        except (ValueError, OverflowError) as error:
-            raise np.linalg.LinAlgError("SSP moments require finite source factors.") from error
-        shift = 1 - denominator.bit_length() - scale
-        # The chosen scale divides every represented source value exactly,
-        # including when large integral inputs require a right shift.
-        return numerator << shift if shift >= 0 else numerator >> -shift
+    def finite(values):
+        values = np.asarray(values, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise np.linalg.LinAlgError("SSP moments require finite source factors.")
+        return values
 
     def rounded(value, scale):
         return float(value << scale) if scale >= 0 else float(Fraction(value, 1 << -scale))
@@ -164,57 +336,50 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
     transform_scale = binary_scale(transform)
     weight_scale = binary_scale(weights)
     rhs_scale = 0 if weighted_rhs is None else binary_scale(weighted_rhs)
-    coefficients = [
-        [exact(value, transform_scale) for value in row] for row in np.asarray(transform)
-    ]
+    transform = finite(transform)
+    weights = finite(weights)
+    if weighted_rhs is not None:
+        weighted_rhs = finite(weighted_rhs)
+    coefficients = _exact_integers(transform, transform_scale)
     width = transform.shape[1]
-    gram = [[0 for _ in range(width)] for _ in range(width)]
-    xtw = [0 for _ in range(width)] if weighted_rhs is not None else None
-    xtrhs = [0 for _ in range(width)] if weighted_rhs is not None else None
-    if bin_indices is None:
-        masses = [exact(value, weight_scale) for value in weights]
-        rhs_masses = (
-            None if weighted_rhs is None else [exact(value, rhs_scale) for value in weighted_rhs]
-        )
-    else:
-        masses = [0 for _ in range(basis.shape[0])]
-        rhs_masses = None if weighted_rhs is None else [0 for _ in range(basis.shape[0])]
-        for row, index in enumerate(bin_indices):
-            masses[index] += exact(weights[row], weight_scale)
-            if rhs_masses is not None:
-                rhs_masses[index] += exact(weighted_rhs[row], rhs_scale)
+    n_rows = basis.shape[0]
+    bins = np.arange(n_rows) if bin_indices is None else bin_indices
+    masses = _exact_bin_sums(weights, bins, n_rows, weight_scale)
+    rhs_masses = (
+        None if weighted_rhs is None else _exact_bin_sums(weighted_rhs, bins, n_rows, rhs_scale)
+    )
+    active = masses != 0
+    if rhs_masses is not None:
+        active |= rhs_masses != 0
+    active_rows = np.flatnonzero(active)
 
-    for row, mass in enumerate(masses):
-        rhs_mass = 0 if rhs_masses is None else rhs_masses[row]
-        if mass == 0 and rhs_mass == 0:
-            continue
-        if sparse:
-            # Convert each stored term before summing duplicate columns.
-            # Densifying or canonicalizing first can lose their exact sum.
-            nonzero = [
-                (basis.indices[index], exact(basis.data[index], basis_scale))
-                for index in range(basis.indptr[row], basis.indptr[row + 1])
-                if basis.data[index] != 0
-            ]
-        else:
-            raw = np.asarray(basis[row]).ravel()
-            nonzero = [
-                (index, exact(value, basis_scale)) for index, value in enumerate(raw) if value != 0
-            ]
-        effective = [
-            sum(value * coefficients[index][column] for index, value in nonzero)
-            for column in range(width)
-        ]
-        for left, value in enumerate(effective):
-            weighted = mass * value
-            for right in range(left, width):
-                gram[left][right] += weighted * effective[right]
-            if xtw is not None and xtrhs is not None:
-                xtw[left] += weighted
-                xtrhs[left] += rhs_mass * value
-    for left in range(width):
-        for right in range(left):
-            gram[left][right] = gram[right][left]
+    # The active rows' stored nonzeros, row by row. Sparse duplicates stay
+    # separate entries: densifying or canonicalizing first can lose their
+    # exact sum. Inactive rows are neither converted nor validated.
+    if sparse:
+        counts = np.diff(basis.indptr)
+        owner = np.repeat(np.arange(n_rows), counts)
+        data = np.asarray(basis.data, dtype=np.float64)
+        keep = active[owner] & (data != 0)
+        columns = np.asarray(basis.indices)[keep]
+        values = data[keep]
+        row_counts = np.bincount(owner[keep], minlength=n_rows)[active_rows]
+    else:
+        dense = np.asarray(basis, dtype=np.float64)[active_rows]
+        local_rows, columns = np.nonzero(dense)
+        values = dense[local_rows, columns]
+        row_counts = np.bincount(local_rows, minlength=active_rows.size)
+    indptr = np.concatenate(([0], np.cumsum(row_counts))).astype(np.int64)
+    entries = _exact_integers(finite(values), basis_scale)
+    raw_gram, raw_xtw, raw_xtr = _exact_gram_moments(
+        indptr,
+        np.asarray(columns, dtype=np.int64),
+        entries,
+        masses[active_rows],
+        None if rhs_masses is None else rhs_masses[active_rows],
+        coefficients.shape[0],
+    )
+    gram, xtw, xtrhs = _exact_congruence(raw_gram, raw_xtw, raw_xtr, coefficients)
     effective_scale = basis_scale + transform_scale
     try:
         rounded_gram = np.array(
@@ -222,12 +387,12 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
         ).reshape(width, width)
         rounded_xtw = (
             None
-            if xtw is None
+            if weighted_rhs is None
             else np.array([rounded(value, weight_scale + effective_scale) for value in xtw])
         )
         rounded_rhs = (
             None
-            if xtrhs is None
+            if weighted_rhs is None
             else np.array([rounded(value, rhs_scale + effective_scale) for value in xtrhs])
         )
     except OverflowError as error:
