@@ -7,7 +7,7 @@ solved rows ``H^-1 x_r`` (``reml/_leverage_rows.py``), in place of one
 values against the Gram route within a bound derived in the unit roundoff, on
 both row producers, and its cost: one solved-row pass per REML iteration,
 whatever the number of smoothing parameters.  A design of lookups reads its
-leverages back from term-pair tables instead (``reml/_leverage_tables.py``,
+leverages back from term-pair tables instead (``_group_matrix/_lookup_tables.py``,
 ``tests/test_reml_leverage_tables.py``); the solved-row tests here turn that
 route off with ``_solved_rows_only``.
 """
@@ -42,7 +42,7 @@ def _gamma(k: int) -> float:
 
 def _solved_rows_only(monkeypatch) -> None:
     """Send the leverage route to the solved rows, as for a design that is not all lookups."""
-    monkeypatch.setattr(w_derivatives, "table_plan", lambda *args, **kwargs: None)
+    monkeypatch.setattr(w_derivatives, "lookup_plan", lambda *args, **kwargs: None)
 
 
 def _poisson_frame(n: int, offset: float, seed: int = 31):
@@ -293,7 +293,7 @@ def test_leverage_route_never_forms_a_row_without_weight(monkeypatch, producer):
 
     assert leverage is not None
     assert np.all(np.isfinite(leverage[0]))
-    # The table route forms no per-row cross terms (``_leverage_tables``).
+    # The table route forms no per-row cross terms (``_lookup_tables``).
     assert (leverage[2] is None) == (producer == "tables")
     assert producer == "tables" or np.all(np.isfinite(leverage[2]))
 

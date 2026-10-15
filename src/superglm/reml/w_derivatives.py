@@ -21,11 +21,11 @@ from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
+from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
 from superglm.reml._leverage_rows import solved_row_blocks
-from superglm.reml._leverage_tables import table_leverages, table_plan, table_rmatvec
 from superglm.reml.observed_geometry import ObservedREMLGeometry
 from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
@@ -120,7 +120,7 @@ def _leverage_table_gradient(
     sum_w: float,
     penalty_rhs: NDArray,
 ) -> NDArray:
-    """The W(rho) gradient correction from table read-back leverages (``_leverage_tables``).
+    """The W(rho) gradient correction from table read-back leverages (``_lookup_tables``).
 
     ``grad_j = sum_r w'_r (x_r' dbeta_j) (h_r + 1/sum_w) / 2`` is ``dbeta_j'
     X_c' v`` with the row channel ``v_r = w'_r (h_r + 1/sum_w) / 2``: one
@@ -599,7 +599,7 @@ def reml_w_correction(
     factor is not dense or the weight sum is not profiled the request is not
     taken, and the derivative-Gram result is returned instead.
 
-    When every group is a lookup or a dense column (``_leverage_tables``),
+    When every group is a lookup or a dense column (``_lookup_tables``),
     the leverages are read back from term-pair tables and no row is solved:
     the result is ``(grad_correction, None, None)``, the same exact gradient
     and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
@@ -832,7 +832,7 @@ def reml_w_correction(
                 pirls_result.beta[pc.group_sl],
                 gms[pc.group_index],
             )
-        plan = table_plan(dm, centre_hi, centre_lo)
+        plan = lookup_plan(dm)
         if plan is not None:
             # Every group a lookup or a dense column: leverages read back from
             # term-pair tables, the gradient exact, no per-row cross terms.

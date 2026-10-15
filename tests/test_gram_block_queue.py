@@ -15,8 +15,8 @@ import superglm._group_matrix._block_queue as queue
 import superglm._group_matrix._group_matrix_algebra as algebra
 import superglm._group_matrix._group_matrix_execution as execution
 import superglm._group_matrix._group_matrix_kernels as kernels
+import superglm._group_matrix._lookup_tables as lookup_tables
 import superglm._parallel as parallel
-import superglm.reml._leverage_tables as leverage_tables
 from superglm import Categorical, Spline, SuperGLM
 from superglm._group_matrix._block_queue import BlockTask, block_queue_config
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
@@ -356,7 +356,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     pooled_kernels = (
         kernels._POOLED_BLOCK_KERNELS
         + kernels._POOLED_LEAF_KERNELS
-        + leverage_tables._POOLED_ROW_KERNELS
+        + lookup_tables._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:

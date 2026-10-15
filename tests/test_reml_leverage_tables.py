@@ -1,4 +1,4 @@
-"""Leverages read back from term-pair tables (``reml/_leverage_tables.py``).
+"""Leverages read back from term-pair tables (``_group_matrix/_lookup_tables.py``).
 
 A design whose groups are lookups (categoricals, support-compressed splines,
 tensors, spline-by-category levels) and dense columns reads the exact REML
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.reml._leverage_tables as leverage_tables
+import superglm._group_matrix._lookup_tables as leverage_tables
 import superglm.reml.direct as direct
 import superglm.reml.w_derivatives as w_derivatives
 from superglm import Numeric, Spline, SuperGLM
@@ -57,11 +57,14 @@ def _magnitudes(model: SuperGLM, centre: np.ndarray) -> tuple[np.ndarray, np.nda
     dm = model._dm
     rows, column, widest = [], 0, 1
     raw = np.zeros(dm.p, dtype=bool)
+    dense = np.zeros(dm.p, dtype=bool)
     for gm in dm.group_matrices:
         width = gm.shape[1]
         cols = slice(column, column + width)
         if type(gm) is DenseGroupMatrix:
-            rows.append(np.zeros((dm.n, width)))
+            # read as its exactly centred values on both routes
+            rows.append(np.abs(np.asarray(gm.M, dtype=np.float64) - centre[cols]))
+            dense[cols] = True
         elif type(gm) is CategoricalGroupMatrix:
             rows.append(np.abs(gm.toarray()))
             raw[cols] = True
@@ -77,12 +80,13 @@ def _magnitudes(model: SuperGLM, centre: np.ndarray) -> tuple[np.ndarray, np.nda
             rows.append((np.abs(gm.B_unique) @ np.abs(gm.R_inv))[gm.bin_idx])
             widest = max(widest, gm.B_unique.shape[1])
         column += width
-    magnitude = np.hstack(rows) + np.where(raw, 2.0, 1.0) * np.abs(centre)
+    magnitude = np.hstack(rows) + np.where(dense, 0.0, np.where(raw, 2.0, 1.0)) * np.abs(centre)
     return magnitude, raw, widest
 
 
+@pytest.mark.parametrize("pair_form", [None, "table", "accumulate"])
 @pytest.mark.parametrize("offset", [1.0e3, 1.0e9])
-def test_table_leverages_match_the_dense_design_within_their_bound(offset):
+def test_table_leverages_match_the_dense_design_within_their_bound(monkeypatch, offset, pair_form):
     """``h`` from the tables against ``x_r' V x_r`` on the materialised centred rows.
 
     Bound: the table route is within ``gamma_K eta_r`` (``K =
@@ -94,9 +98,12 @@ def test_table_leverages_match_the_dense_design_within_their_bound(offset):
     model = _poisson_model(offset)
     dm, inverse = model._dm, np.asarray(model._fit_inference_info["XtWX_inv"], dtype=np.float64)
     centre_hi, centre_lo = _centre(model)
-    plan = leverage_tables.table_plan(dm, centre_hi, centre_lo)
+    monkeypatch.setattr(leverage_tables, "_FORCE_PAIR_FORM", pair_form)
+    dm._structured_layout_cache.pop("lookup_tables", None)
+    plan = leverage_tables.lookup_plan(dm)
     assert plan is not None and plan.n_pairs > 0 and plan.dense_columns.size == 1
-    assert plan.tab_pairs.size and plan.acc_pairs.size  # both pair forms are exercised
+    assert plan.tab_pairs.size if pair_form != "accumulate" else not plan.tab_pairs.size
+    assert plan.acc_pairs.size if pair_form != "table" else not plan.acc_pairs.size
 
     leverage = leverage_tables.table_leverages(
         plan, inverse, centre_hi, centre_lo, np.ones(dm.n, dtype=bool)
@@ -116,7 +123,7 @@ def test_table_gradient_matches_the_derivative_grams_within_rounding(monkeypatch
     """The table route's gradient is the exact one; it forms no cross terms."""
     model = _poisson_model(1.0e3)
     centre_hi, centre_lo = _centre(model)
-    plan = leverage_tables.table_plan(model._dm, centre_hi, centre_lo)
+    plan = leverage_tables.lookup_plan(model._dm)
     assert plan is not None
     gradient, _, gradient_bound, _ = _rounding_bounds(
         model, raw_centre_copies=2, extra_roundings=plan.count_roundings()
@@ -144,7 +151,7 @@ def test_table_leverages_are_bitwise_identical_for_any_worker_count(monkeypatch)
     model = _poisson_model(1.0e3)
     args, kwargs = _correction_inputs(model)
     centre_hi, centre_lo = _centre(model)
-    plan = leverage_tables.table_plan(model._dm, centre_hi, centre_lo)
+    plan = leverage_tables.lookup_plan(model._dm)
     inverse = args[4]
     active = np.ones(model._dm.n, dtype=bool)
     results = {}
@@ -204,13 +211,13 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     counts = _count_row_passes(monkeypatch)
     plans = []
-    plan = w_derivatives.table_plan
+    plan = w_derivatives.lookup_plan
 
     def recorded(*args, **kwargs):
         plans.append(plan(*args, **kwargs))
         return plans[-1]
 
-    monkeypatch.setattr(w_derivatives, "table_plan", recorded)
+    monkeypatch.setattr(w_derivatives, "lookup_plan", recorded)
     model = _continuous_model()
 
     assert all(type(gm) is not CategoricalGroupMatrix for gm in model._dm.group_matrices)
@@ -222,4 +229,4 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
         n=model._dm.n,
         p=sum(gm.shape[1] for gm in model._dm.group_matrices if type(gm) is DenseGroupMatrix),
     )
-    assert plan(dense_only, np.zeros(dense_only.p), None) is None
+    assert plan(dense_only) is None
