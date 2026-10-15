@@ -23,8 +23,9 @@ Consecutive spline-by-category levels with disjoint rows merge into one term
 row).  The structural plan (:func:`lookup_plan`: index columns, raw tables,
 pair forms) depends on the design only; it is held in the design's
 ``_structured_layout_cache`` (owner: the ``DesignMatrix``; lifetime: the
-design's; invalidated when any group matrix or its basis, transform or index
-array is replaced, which the plan checks by identity).  Weights, centre and
+design's; invalidated when any group matrix, its basis, transform or index
+array, or a dense group's values are replaced, which the plan checks by
+identity).  Weights, centre and
 inverse enter per call.
 
 **Centring.**  Rows are the profiled-intercept rows ``x_r = (raw_r - c) -
@@ -44,14 +45,17 @@ about the rounded anchor with Bjorck's two-pass correction
 - Gram: a histogram cell sums nonnegative weights, so it is within
   ``gamma_n`` of its exact value relatively, and ``A_t' T A_u`` adds
   ``gamma_(m_t + m_u)``; an entry is within ``gamma_(n + 2m + 2) sum_r W_r
-  (|x_r| + |z|)(|x_r| + |z|)'`` (``m`` the largest table, ``z`` the centre on
-  the raw-read columns), the bound of a direct centred Gram plus the raw
-  window's centre.
+  (|x_r| + |c|)(|x_r| + |c|)'`` (``m`` the largest table, ``c`` the centre,
+  on every lookup column), the bound of a direct centred Gram plus the
+  centres: a raw window reads its centre, and an accumulated pair's row side
+  is centred about the computed mean ``m_x``, for which ``A_x' m_x = 0``
+  holds only to ``gamma_(n + m + 2) sum_r W_r |raw_x,r|``, and that residual
+  multiplies the window's centre.
 - Leverage: with ``eta_r = (|a_r| + |z| + |d_r|)' |V| (|a_r| + |z| + |d_r|)``
   (``a_r`` the table rows read, ``d_r`` the centred dense values) every table
   entry is a bilinear form read through at most ``3p + 1`` roundings and a
   row sums ``S <= 1 + T + P + n_d (T + n_d + 3)`` terms, so ``|h_r(computed)
-  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 1``
+  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 2``
   (:meth:`LookupPlan.count_roundings`).
 - ``X_c' v``: compensated (Neumaier) sums per bin (Higham 2002, sec. 4.3),
   within ``2u |s| + O(n u^2) sum |terms|``, then ``gamma_(m+1)`` in
@@ -143,7 +147,10 @@ class LookupPlan:
         return int(self.tab_pairs.shape[0] + self.acc_pairs.shape[0])
 
     def count_roundings(self) -> int:
-        """``K = 3p + S + 1``, the roundings along one leverage's longest chain (module docstring)."""
+        """``K = 3p + S + 2``, the roundings along one leverage's longest chain (module docstring).
+
+        ``3p + 1`` for a table entry's bilinear form, ``S`` for the row's sum,
+        and one for a dense column's last product ``d_j (partial + d_j V_jj)``."""
         t, n_d = len(self.terms), int(self.dense_columns.size)
         return 3 * self.p + 1 + (1 + t + self.n_pairs + n_d * (t + n_d + 3)) + 1
 
@@ -178,10 +185,19 @@ def _windows(table: NDArray) -> tuple[NDArray, NDArray]:
 
 
 def _owners(dm) -> tuple:
+    """Every object the plan reads, compared by identity: the group tuple, each group matrix
+    and each array it reads (a dense group's ``M``; a level's rows and codes, flattened)."""
+    from superglm.group_matrix import DenseGroupMatrix
+
     owners: list = [dm.group_matrices]
     for gm in dm.group_matrices:
-        parts = _lookup_parts(gm)
-        owners.extend(() if parts is None else (part for part in parts if part is not None))
+        owners.append(gm)
+        parts = (gm.M,) if type(gm) is DenseGroupMatrix else _lookup_parts(gm) or ()
+        for part in parts:
+            if isinstance(part, tuple):
+                owners.extend(part)
+            elif part is not None:
+                owners.append(part)
     return tuple(owners)
 
 
@@ -190,8 +206,11 @@ def lookup_plan(dm) -> LookupPlan | None:
 
     ``None`` (the callers' other routes) when a group is neither a lookup nor a
     ``DenseGroupMatrix``, when no group is a lookup, when a table does not
-    read as float64, or when the index and tables would not fit a quarter of
-    ``max_memory``.
+    read as float64, when a support's factors lie outside the range in which
+    ``B R`` may be reassociated (``_ssp_gram_needs_exact``, which sends the
+    established routes to exact moments) or its product is not finite, or
+    when the index and tables would not fit a quarter of ``max_memory``.  A
+    zero-width group (an empty categorical) reads no column and is no term.
     """
     from superglm.group_matrix import DesignMatrix
 
@@ -232,11 +251,14 @@ def table_gram_plan(dm) -> LookupPlan | None:
 
 def _build_plan(dm) -> LookupPlan | None:
     from superglm._group_matrix._group_matrix_centered import _reads_as_float64
+    from superglm._group_matrix._group_matrix_kernels import _ssp_gram_needs_exact
     from superglm._parallel import resolve_max_memory
     from superglm.group_matrix import DenseGroupMatrix
 
+    # A zero-width group reads nothing: no term, no table, no window.
+    groups = [gm for gm in dm.group_matrices if gm.shape[1]]
     parts = []
-    for gm in dm.group_matrices:
+    for gm in groups:
         if type(gm) is DenseGroupMatrix:
             parts.append(None)
             continue
@@ -248,13 +270,15 @@ def _build_plan(dm) -> LookupPlan | None:
             for operand in found[:2]
         ):
             return None
+        if found[1] is not None and _ssp_gram_needs_exact(found[0], found[1]):
+            return None
         parts.append(found)
     if all(part is None for part in parts):
         return None
     n = dm.n
     table_rows = sum(
         (np.asarray(part[0]).shape[0] if part[0] is not None else gm.shape[1]) + 1
-        for part, gm in zip(parts, dm.group_matrices, strict=True)
+        for part, gm in zip(parts, groups, strict=True)
         if part is not None
     )
     if 4 * n * len(parts) + 8 * table_rows * dm.p > resolve_max_memory() // 4:
@@ -294,7 +318,7 @@ def _build_plan(dm) -> LookupPlan | None:
         run = None
 
     column = 0
-    for gm, part in zip(dm.group_matrices, parts, strict=True):
+    for gm, part in zip(groups, parts, strict=True):
         width = int(gm.shape[1])
         columns = np.arange(column, column + width, dtype=np.intp)
         column += width
@@ -309,6 +333,8 @@ def _build_plan(dm) -> LookupPlan | None:
             raw = np.asarray(values, dtype=np.float64)
             if transform is not None:
                 raw = raw @ np.asarray(transform, dtype=np.float64)
+            if not np.all(np.isfinite(raw)):
+                return None
         if level is not None:
             level_rows = np.asarray(level[0], dtype=np.intp)
             if run is not None and np.any(run.codes[level_rows] >= 0):
@@ -619,7 +645,8 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
         first_all[column : column + width] = first[g]
         rhs[column : column + width] = dense_rhs[g]
     if not plan.dense:
-        return mean_x, gram, rhs, mean_x.copy(), None
+        # An own-term block is a GEMM, ``(A W)' A``, whose triangles round apart.
+        return mean_x, 0.5 * (gram + gram.T), rhs, mean_x.copy(), None
     mean_lo = np.where(dense_mask, first_all / sum_w, 0.0)
     gram = two_pass_centred_gram(first_all, gram, mean_lo, sum_w)
     rhs = rhs - mean_lo * float(np.dot(W, z_centered))

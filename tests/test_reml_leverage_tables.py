@@ -230,3 +230,170 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
         p=sum(gm.shape[1] for gm in model._dm.group_matrices if type(gm) is DenseGroupMatrix),
     )
     assert plan(dense_only) is None
+
+
+def _hand_built_design(n: int = 2 * 8192 + 4096, *, empty_level: bool = False, seed: int = 17):
+    """Two dense groups (three columns, offset), two categoricals and a support spline, by hand.
+
+    Large enough for the table Gram's row rule and three leverage row blocks.
+    ``empty_level`` puts a zero-width categorical between the groups.
+    """
+    from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
+
+    rng = np.random.default_rng(seed)
+    support, basis = 40, 6
+    grid = np.linspace(0.0, 1.0, support)
+    knots = np.linspace(0.0, 1.0, basis)
+    B = np.maximum(0.0, 1.0 - np.abs(grid[:, None] - knots[None, :]) * (basis - 1))
+    spline = SupportCompressedSSPGroupMatrix(
+        B, rng.normal(size=(basis, basis - 1)), rng.integers(0, support, n)
+    )
+    groups = [
+        DenseGroupMatrix(rng.normal(1.0e3, 4.0, (n, 2))),
+        CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
+        spline,
+        DenseGroupMatrix(rng.normal(-50.0, 2.0, (n, 1))),
+        CategoricalGroupMatrix(rng.integers(-1, 3, n), 3),
+    ]
+    if empty_level:
+        groups.insert(2, CategoricalGroupMatrix(np.full(n, -1), 0))
+    return DesignMatrix(groups, n=n, p=sum(gm.shape[1] for gm in groups))
+
+
+def _hand_built_magnitudes(dm, centre: np.ndarray) -> tuple[np.ndarray, int]:
+    """``_magnitudes`` for the hand-built design: ``|B| |R|`` rows plus ``|c|``, raw rows plus
+    ``2 |c|``, dense rows ``|x - c|``; and the widest basis."""
+    rows, column, widest = [], 0, 1
+    for gm in dm.group_matrices:
+        cols = slice(column, column + gm.shape[1])
+        if type(gm) is DenseGroupMatrix:
+            rows.append(np.abs(gm.M - centre[cols]))
+        elif type(gm) is CategoricalGroupMatrix:
+            rows.append(np.abs(gm.toarray()) + 2.0 * np.abs(centre[cols]))
+        else:
+            rows.append((np.abs(gm.B_unique) @ np.abs(gm.R_inv))[gm.bin_idx] + np.abs(centre[cols]))
+            widest = max(widest, gm.B_unique.shape[1])
+        column += gm.shape[1]
+    return np.hstack(rows), widest
+
+
+def _hand_built_operands(dm, seed: int = 4):
+    """A symmetric positive definite inverse, a centre pair and active rows for the hand-built design."""
+    rng = np.random.default_rng(seed)
+    root = rng.normal(size=(dm.p, dm.p))
+    inverse = root @ root.T / dm.p + np.eye(dm.p)
+    weights = rng.uniform(0.1, 2.0, dm.n)
+    design = dm.toarray()
+    mean = design.T @ weights / weights.sum()
+    dense = w_derivatives.dense_columns(dm)
+    centre_lo = np.where(dense, rng.normal(scale=1e-3, size=dm.p), 0.0)
+    active = rng.uniform(size=dm.n) > 0.1
+    return inverse, mean, centre_lo, active
+
+
+@pytest.mark.parametrize("pair_form", [None, "table", "accumulate"])
+def test_hand_built_dense_columns_match_the_materialised_design(monkeypatch, pair_form):
+    """Two dense groups, three dense columns, three row blocks: ``x_r' V x_r`` and ``X_c' v``.
+
+    Every dense-to-dense path runs here (``Vdd``'s off-diagonal ``2 V_ij d_i d_j``
+    across groups, blocks after the first), which the model fixtures, one dense
+    column each, never reach.  Bounds as in
+    ``test_table_leverages_match_the_dense_design_within_their_bound``; ``X_c' v``
+    is within ``gamma_(n + m + 3) sum_r |v_r| M_r`` on either route.
+    Mutations (each fails here): ``Vdd`` without the factor 2; the dense loop over
+    ``range(j + 1)``.
+    """
+    dm = _hand_built_design()
+    monkeypatch.setattr(leverage_tables, "_FORCE_PAIR_FORM", pair_form)
+    plan = leverage_tables.lookup_plan(dm)
+    assert plan is not None and plan.dense_columns.size == 3 and len(plan.dense) == 2
+    assert dm.n > 2 * leverage_tables._BLOCK_ROWS
+    inverse, centre_hi, centre_lo, active = _hand_built_operands(dm)
+
+    leverage = leverage_tables.table_leverages(plan, inverse, centre_hi, centre_lo, active)
+    centred = (dm.toarray() - centre_hi) - centre_lo
+    reference = np.where(active, np.einsum("ij,jk,ik->i", centred, inverse, centred), 0.0)
+    magnitude, widest = _hand_built_magnitudes(dm, centre_hi + centre_lo)
+    eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
+    bound = _gamma(plan.count_roundings() + 2 * dm.p + 2 + 4 * widest) * eta
+    assert np.all(np.abs(leverage - reference) <= bound)
+    assert np.max(bound[active] / np.abs(reference[active])) < 1e-9
+
+    values = np.where(active, np.random.default_rng(9).normal(size=dm.n), 0.0)
+    product = leverage_tables.table_rmatvec(plan, values, centre_hi, centre_lo)
+    m_largest = max(term.raw.shape[0] for term in plan.terms)
+    rmatvec_bound = _gamma(dm.n + m_largest + 4 * widest + 3) * (magnitude.T @ np.abs(values))
+    assert np.all(np.abs(product - centred.T @ values) <= rmatvec_bound)
+
+
+def test_an_empty_categorical_adds_nothing_to_the_tables():
+    """A zero-width categorical (``n_levels=0``) reads a ``(1, 0)`` table, which is no term.
+
+    The leverages, ``X_c' v`` and the centred Gram of a design that takes the
+    table route by the row rule are, bit for bit, those of the same design
+    without it.  On the PR head ``_windows`` raised in ``argmax`` on it.
+    """
+    from superglm.solvers.centered_system import build_centered_system
+
+    with_empty, without = _hand_built_design(empty_level=True), _hand_built_design()
+    assert with_empty.n >= leverage_tables._MIN_TABLE_GRAM_ROWS
+    inverse, centre_hi, centre_lo, active = _hand_built_operands(without)
+    W, z = np.random.default_rng(2).uniform(0.1, 2.0, without.n), np.zeros(without.n)
+    results = []
+    for dm in (with_empty, without):
+        plan = leverage_tables.table_gram_plan(dm)
+        assert plan is not None
+        system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.eye(dm.p))
+        leverage = leverage_tables.table_leverages(plan, inverse, centre_hi, centre_lo, active)
+        product = leverage_tables.table_rmatvec(plan, leverage, centre_hi, centre_lo)
+        results.append((system.data_gram.tobytes(), leverage.tobytes(), product.tobytes()))
+    assert results[0] == results[1]
+
+
+def test_the_plan_is_cached_for_a_spline_by_category_design():
+    """Every level's rows and codes are owners in their own right: the cached plan is reused.
+
+    On the PR head the level entered the owners as a tuple built per call,
+    never ``is`` the cached one, so every call rebuilt the plan.
+    """
+    dm = _poisson_model(1.0e3)._dm
+    assert any(isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) for gm in dm.group_matrices)
+    assert leverage_tables.lookup_plan(dm) is leverage_tables.lookup_plan(dm)
+
+
+def test_replacing_a_dense_column_rebuilds_the_plan():
+    """The plan holds the dense values it was built from; a replaced ``M`` invalidates it."""
+    dm = _hand_built_design()
+    plan = leverage_tables.lookup_plan(dm)
+    assert plan is not None and leverage_tables.lookup_plan(dm) is plan
+    dense = dm.group_matrices[0]
+    dense.M = dense.M + 1.0
+    rebuilt = leverage_tables.lookup_plan(dm)
+    assert rebuilt is not plan and rebuilt.dense[0][2] is dense.M
+
+
+def test_a_support_outside_the_reassociation_range_keeps_the_old_routes():
+    """``B R`` is not formed when a factor lies outside ``[2**-128, 2**128]``.
+
+    The established support routes take exact moments there
+    (``_ssp_gram_needs_exact``); the table plan declines the design, so both
+    the Gram and the leverages keep them.  Here ``B`` carries ``2**600`` and
+    ``R`` ``2**-600``: the represented row is ordinary, yet ``B`` alone is
+    out of range.  On the PR head the plan admitted it.
+    """
+    from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
+    from superglm.solvers.centered_system import build_centered_system
+
+    base = _hand_built_design()
+    spline = base.group_matrices[2]
+    scaled = SupportCompressedSSPGroupMatrix(
+        spline.B_unique * 2.0**600, spline.R_inv * 2.0**-600, spline.bin_idx
+    )
+    groups = list(base.group_matrices)
+    groups[2] = scaled
+    dm = DesignMatrix(groups, n=base.n, p=base.p)
+    assert leverage_tables.lookup_plan(dm) is None
+    assert leverage_tables.table_gram_plan(dm) is None
+    W = np.random.default_rng(2).uniform(0.1, 2.0, dm.n)
+    system = build_centered_system(dm=dm, W=W, z_off=np.zeros(dm.n), penalty=np.eye(dm.p))
+    assert np.all(np.isfinite(system.data_gram))

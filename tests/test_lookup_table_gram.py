@@ -16,9 +16,15 @@ import pytest
 
 import superglm._group_matrix._lookup_tables as lookup_tables
 from superglm._parallel import parallel_config
+from superglm.group_matrix import DenseGroupMatrix
 from superglm.solvers.centered_system import build_centered_system
 from tests.test_reml_leverage_hessian import _gamma, _poisson_model
-from tests.test_reml_leverage_tables import _continuous_model, _magnitudes
+from tests.test_reml_leverage_tables import (
+    _continuous_model,
+    _hand_built_design,
+    _hand_built_magnitudes,
+    _magnitudes,
+)
 
 
 def _working_rows(n: int, seed: int = 3) -> tuple[np.ndarray, np.ndarray]:
@@ -62,7 +68,9 @@ def test_table_gram_matches_the_chunked_route_within_its_bound(monkeypatch, offs
 
     assert np.all(np.abs(table.data_gram - reference.data_gram) <= gram_bound)
     assert np.all(np.abs(table.rhs - reference.rhs) <= rhs_bound)
-    assert np.allclose(table.mean_x, reference.mean_x, rtol=_gamma(2 * dm.n), atol=_gamma(2 * dm.n))
+    # A weighted mean is within gamma_k sum_r W_r M_r / sum W of its value on either route.
+    mean_bound = _gamma(2 * dm.n) * (magnitude.T @ W) / W.sum()
+    assert np.all(np.abs(table.mean_x - reference.mean_x) <= mean_bound)
     assert np.max(gram_bound) < 1e-8 * np.max(np.abs(reference.data_gram))
 
 
@@ -128,3 +136,58 @@ def test_a_design_without_lookups_keeps_todays_gram(monkeypatch):
 
     assert lookup_tables.lookup_plan(model._dm) is None
     assert "centered_table_gram_hits" not in model._reml_profile
+
+
+@pytest.mark.parametrize("pair_form", [None, "table", "accumulate"])
+def test_hand_built_dense_groups_match_the_materialised_gram(monkeypatch, pair_form):
+    """``X_c' W X_c`` and ``X_c' W z`` against the materialised centred design.
+
+    Two dense groups (widths 2 and 1) put a cross block between dense groups
+    (``_dense_moments_sweep`` with ``g != h``) and its mirrored placement under
+    a value check.  The reference centres about its own weighted means; both
+    routes are within ``gamma_k sum_r W_r M_r M_r'`` (the bound of
+    ``test_table_gram_matches_the_chunked_route_within_its_bound``).
+    Mutation (fails here): the mirrored dense block written as ``out``.
+    """
+    from superglm.solvers.centered_system import build_centered_system
+
+    dm = _hand_built_design()
+    monkeypatch.setattr(lookup_tables, "_FORCE_PAIR_FORM", pair_form)
+    W, z = _working_rows(dm.n)
+    system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
+    plan = lookup_tables.table_gram_plan(dm)
+    assert plan is not None and len(plan.dense) == 2
+
+    design = dm.toarray()
+    mean = design.T @ W / W.sum()
+    centred = design - mean
+    z_centred = z - W @ z / W.sum()
+    gram = centred.T @ (W[:, None] * centred)
+    rhs = centred.T @ (W * z_centred)
+    magnitude, widest = _hand_built_magnitudes(dm, mean)
+    m_largest = max(term.raw.shape[0] for term in plan.terms)
+    k = 2 * dm.n + 2 * m_largest + dm.p + 4 * widest + 16
+    assert np.all(
+        np.abs(system.data_gram - gram) <= _gamma(k) * (magnitude.T @ (W[:, None] * magnitude))
+    )
+    z_magnitude = np.abs(z_centred) + abs(W @ z / W.sum())
+    assert np.all(np.abs(system.rhs - rhs) <= _gamma(k) * (magnitude.T @ (W * z_magnitude)))
+    assert np.all(np.abs(system.mean_x - mean) <= _gamma(2 * dm.n) * (magnitude.T @ W) / W.sum())
+
+
+def test_a_table_gram_without_dense_columns_is_exactly_symmetric():
+    """Each own-term block is a GEMM, ``(A W)' A``, whose two triangles round apart.
+
+    The tables return a symmetric Gram as every other route does, dense
+    columns or not; on the PR head the design without a dense column
+    returned the GEMM's two triangles as they rounded.
+    """
+    dm = _poisson_model(1.0e3)._dm
+    lookups = [gm for gm in dm.group_matrices if type(gm) is not DenseGroupMatrix]
+    design = type(dm)(lookups, n=dm.n, p=sum(gm.shape[1] for gm in lookups))
+    W, z = _working_rows(design.n)
+    with lookup_tables.table_gram_config(True):
+        plan = lookup_tables.table_gram_plan(design)
+        assert plan is not None and not plan.dense
+        _, gram, *_ = lookup_tables.table_centred_system(plan, design, W, z, float(W.sum()))
+    assert np.array_equal(gram, gram.T)
