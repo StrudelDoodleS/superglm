@@ -14,12 +14,26 @@ every term above 1e-60 of the largest, and takes log-sum derivatives by the
 quotient rule, so it shares nothing with the kernel's anchored two-pass
 cumulants.
 
-Tolerances are in the unit roundoff ``u`` of each row's channel scale (the
-largest oracle value of that derivative order in that row).  The NB2
-``l_bbb`` channel is held to the bound its kernel certifies; every other
-channel has no certified bound and is held to its measured worst error over
-these grids times four (``_MARGIN``), the measured values being recorded
-against each tolerance.
+Where a kernel states its error, the channel is held to that statement,
+derived in the unit roundoff ``u`` from the channel's absolute-term scale
+formed in mpmath from the kernel's own float64 inputs (the "derived bounds"
+section): the two-piece location direction (``gamma_8`` per entry), the
+log-normal mean direction (``gamma_16``), the NB2 direction (``gamma_11``
+closed forms and the certified ``l_bbb`` bound) and the shared chain rule
+(``gamma_{2K+12}``).  These hold on any IEEE binary64 host.
+
+The family-level channels (scores, Hessians and predictor directions through
+``evaluate_natural`` and the links) have no stated bound: no score or Hessian
+kernel states one, and every predictor direction inherits their error through
+the chain rule, as do the Tweedie series channels and the generalized gamma
+mean loading.  They are held to their worst error over these grids, in ``u``
+of the row's channel scale (the largest oracle value of that derivative order
+in that row), times four (``_MARGIN``), with a floor of ``4u``.  Those values
+were measured on one host, x86-64 Linux on an AMD EPYC 9645 (Zen 5, AVX-512)
+with the locked NumPy and SciPy wheels; the native Windows, macOS ARM64 and
+Linux ARM64 CI jobs pass them at 7305fe25, but a special function rounding
+differently elsewhere can move a measurement, and a failure there is a
+re-measurement, not by itself a kernel defect.
 """
 
 from __future__ import annotations
@@ -246,7 +260,10 @@ _LSS_CASES = {
 }
 
 # Measured worst error in u of each row's channel scale over these grids, as
-# (score, Hessian, third); each is held to _MARGIN times its measurement.
+# (score, Hessian, third), on x86-64 Linux (AMD EPYC 9645, Zen 5); each is held
+# to _MARGIN times its measurement.  No kernel states a bound for these
+# family-level channels (see the module docstring); the derived-bound tests
+# below hold the kernels that do.
 _MEASURED = {
     "gamma": (1.9, 2.2, 4.4),
     "gaussian": (2.8, 3.2, 2.0),
@@ -575,3 +592,237 @@ def test_a_wrong_coefficient_fails_the_oracle(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(kernel, "series_f", wrong_series_f)
     with pytest.raises(AssertionError):
         _assert_within("gp", _closed_form_check("gp"))
+
+
+# ---------------------------------------------------------------- derived bounds
+#
+# Where a kernel states its error, the channel is held to that statement: gamma_k
+# of the channel's absolute-term scale, the scale formed here in mpmath from the
+# same float64 inputs the kernel receives, so the bound is independent of the host.
+
+
+def _gamma(k: int):
+    return mp.mpf(k) * mp.mpf(_U) / (1 - mp.mpf(k) * mp.mpf(_U))
+
+
+_TWO_PIECE_DIRECTION_ROWS = [
+    # (t, (mu, sigma, eps)): both pieces, a residual 2^-40 of sigma on either
+    # side of the join, and skew near either bound.
+    (0.5, (1.0, 0.7, 0.6)),
+    (2.5, (1.0, 0.7, -0.85)),
+    (-3.0, (0.2, 2.0, 0.88)),
+    (1.0 + 2.0**-40, (1.0, 0.9, 0.4)),
+    (1.0 - 2.0**-40, (1.0, 0.9, 0.4)),
+    (40.0, (-3.0, 0.05, -0.2)),
+]
+
+
+def test_two_piece_location_direction_is_within_its_stated_bound() -> None:
+    """Each ``T`` entry is within ``gamma_8`` of its term scale; a channel sums three.
+
+    The channel is ``m sum_k T_k v_k``: the entries' ``gamma_8``, one rounding
+    per product with ``v``, two additions and the multiplier, so ``gamma_12`` of
+    ``m sum_k S(T_k) |v_k|``.  ``S(T)`` is ``|T|`` for the monomials and
+    ``(12 u^2 + 2)/sigma^3`` for ``T_sss = (12 u^2 - 2)/sigma^3``.  The oracle is
+    the residual form at the float64 ``t`` the kernel receives.
+    """
+    from superglm.distributional.kernels.two_piece import location_hessian_direction
+
+    a, b, c = sp.symbols("a b c", real=True)
+    t_symbol = sp.Symbol("t", real=True)
+    direction = np.array([[0.7, -1.3, 0.4]])
+    pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+    for t_value, theta in _TWO_PIECE_DIRECTION_ROWS:
+        side = -1 if t_value - theta[0] < 0 else 1
+        s = 1 - c if side < 0 else 1 + c
+        density = -sp.log(b) - ((t_symbol - a) / (b * s)) ** 2 / 2
+        third = _SymbolicRow(density.subs(t_symbol, sp.Float(t_value, _DIGITS)), (a, b, c))
+        third = third.evaluate(theta)[2]
+        computed = location_hessian_direction(
+            np.array([t_value]), *(np.array([v]) for v in theta), direction, np.ones(1)
+        )[0]
+        with mp.workdps(_DIGITS):
+            mu, sigma, eps = (_mpf(v) for v in theta)
+            u = (_mpf(t_value) - mu) / (sigma * (1 + side * eps))
+            for column, (left, right) in enumerate(pairs):
+                exact = mp.mpf(0)
+                scale = mp.mpf(0)
+                for axis in range(3):
+                    entry = _third(third, left, right, axis)
+                    entry_scale = (
+                        (12 * u**2 + 2) / sigma**3
+                        if (left, right, axis) == (1, 1, 1)
+                        else abs(entry)
+                    )
+                    exact += entry * _mpf(direction[0, axis])
+                    scale += entry_scale * abs(_mpf(direction[0, axis]))
+                assert abs(_mpf(computed[column]) - exact) <= _gamma(12) * scale, (
+                    t_value,
+                    theta,
+                    column,
+                )
+
+
+_LOG_NORMAL_DIRECTION_ROWS = [
+    (3.0, (np.log(2.0), np.log(0.05 - 0.01))),
+    (0.4, (np.log(7.0), np.log(1.2 - 0.01))),
+    (900.0, (np.log(5.0), np.log(30.0 - 0.01))),
+    # The residual crosses zero and the scale sits just above its floor.
+    (np.exp(np.log(2.0) - 0.5 * 0.3**2), (np.log(2.0), np.log(0.3 - 0.01))),
+    (1.5, (0.2, -30.0)),
+]
+
+
+def test_log_normal_mean_direction_is_within_its_stated_bound() -> None:
+    """``gamma_16`` of each channel's absolute-term scale, as the kernel states.
+
+    With ``kappa = e^b``, ``sigma = floor + kappa``, ``u = kappa/sigma``,
+    ``f = floor/sigma`` and the residual's terms ``R = |log y| + |a| + sigma^2/2``,
+    the factors' scales are ``2u/sigma^2`` (``l_aab``),
+    ``u (floor + 2 kappa)/sigma (1 + 2R/sigma^2)`` (``l_abb``) and
+    ``u f (floor + kappa)/sigma + 3 kappa^2 f + u (1 + 9u + 12u^2)((R/sigma)^2 + R)``
+    (``l_bbb``); a channel's scale is ``m`` times the sum of its factors' scales
+    times ``|d|``.  The oracle differentiates the mean-form density in the predictors.
+    """
+    from superglm.distributional.kernels.log_normal import mean_curvature_directional
+
+    family = LogNormalLS()
+    floor = family.scale_floor
+    links = tuple(spec.default_link for spec in family.parameters)
+    symbols = _densities()["lognormal_mean"][1]
+    eta_symbols = sp.symbols("e0:2", real=True)
+    direction = np.array([[0.9, -1.7]])
+    for y_value, eta in _LOG_NORMAL_DIRECTION_ROWS:
+        theta = tuple(float(link.inverse(np.array([e]))[0]) for link, e in zip(links, eta))
+        _, predictor = _row_oracles("lognormal_mean", y_value, theta, symbols, eta_symbols, links)
+        third = predictor.evaluate(eta)[2]
+        computed = mean_curvature_directional(
+            np.array([y_value]), np.array([eta]), direction, np.ones(1), scale_floor=floor
+        )[0]
+        with mp.workdps(_DIGITS):
+            kappa = mp.exp(_mpf(eta[1]))
+            sigma = _mpf(floor) + kappa
+            u, f = kappa / sigma, _mpf(floor) / sigma
+            residual_scale = abs(mp.log(_mpf(y_value))) + abs(_mpf(eta[0])) + sigma**2 / 2
+            s_aab = 2 * u / sigma**2
+            s_abb = u * (_mpf(floor) + 2 * kappa) / sigma * (1 + 2 * residual_scale / sigma**2)
+            s_bbb = (
+                u * f * (_mpf(floor) + kappa) / sigma
+                + 3 * kappa**2 * f
+                + u * (1 + 9 * u + 12 * u**2) * ((residual_scale / sigma) ** 2 + residual_scale)
+            )
+            d_a, d_b = (abs(_mpf(v)) for v in direction[0])
+            scales = (s_aab * d_b, s_aab * d_a + s_abb * d_b, s_abb * d_a + s_bbb * d_b)
+            for column, (left, right) in enumerate([(0, 0), (0, 1), (1, 1)]):
+                exact = -sum(
+                    _third(third, left, right, axis) * _mpf(direction[0, axis]) for axis in range(2)
+                )
+                assert abs(_mpf(computed[column]) - exact) <= _gamma(16) * scales[column], (
+                    y_value,
+                    eta,
+                    column,
+                )
+
+
+def test_nb2_direction_is_within_its_closed_form_and_certified_bounds() -> None:
+    """``l_aaa``, ``l_aab``, ``l_abb`` within ``gamma_11`` of their scales, ``l_bbb`` certified.
+
+    In the log coordinates the direction is ``-sum_k l_ijk d_k``: the closed forms'
+    ``gamma_11``, one rounding per product and one addition give ``gamma_13`` of
+    ``sum_k S_ijk |d_k|`` beside the certificate ``|d_b| e`` on ``bb``; the scales
+    are ``|l_aaa|``, ``s (|y r| + 2 mu p)`` and ``|l_abb|`` (``q = mu/t``,
+    ``p = theta/t``, ``r = (theta - mu)/t``, ``s = qp``, ``t = mu + theta``).
+    """
+    from superglm.distributional.kernels.negative_binomial import (
+        negative_binomial_certified_predictor_curvature_directional,
+    )
+
+    a, b = sp.symbols("a b", real=True)
+    direction = np.array([[1.1, -0.6]])
+    for y_value, (mean, theta) in _LSS_CASES["nb"][1]:
+        mu, size = sp.exp(a), sp.exp(b)
+        density = (
+            sp.loggamma(y_value + size)
+            - sp.loggamma(size)
+            + size * sp.log(size)
+            + y_value * sp.log(mu)
+            - (y_value + size) * sp.log(mu + size)
+        )
+        eta = (float(np.log(mean)), float(np.log(theta)))
+        third = _SymbolicRow(density, (a, b)).evaluate(eta)[2]
+        computed, certificate = negative_binomial_certified_predictor_curvature_directional(
+            np.array([y_value]), np.array([eta]), direction, np.ones(1), "prior"
+        )
+        with mp.workdps(_DIGITS):
+            m, th = mp.exp(_mpf(eta[0])), mp.exp(_mpf(eta[1]))
+            total = m + th
+            q, p, r = m / total, th / total, (th - m) / total
+            s = q * p
+            entries = {
+                (0, 0, 0): abs(third[0, 0, 0]),
+                (0, 0, 1): s * (abs(y_value * r) + 2 * m * p),
+                (0, 1, 1): abs(third[0, 1, 1]),
+                (1, 1, 1): mp.mpf(0),
+            }
+            for column, (left, right) in enumerate([(0, 0), (0, 1), (1, 1)]):
+                exact = -sum(
+                    _third(third, left, right, axis) * _mpf(direction[0, axis]) for axis in range(2)
+                )
+                scale = sum(
+                    entries[tuple(sorted((left, right, axis)))] * abs(_mpf(direction[0, axis]))
+                    for axis in range(2)
+                )
+                bound = _gamma(13) * scale + _mpf(certificate[0, column])
+                assert abs(_mpf(computed[0, column]) - exact) <= bound, (y_value, column)
+
+
+@pytest.mark.parametrize("k_parameters", [2, 3])
+def test_chain_rule_is_within_gamma_2k_plus_12(k_parameters: int) -> None:
+    """The shared chain rule holds its stated ``gamma_{2K+12}`` of the absolute-term scale.
+
+    Fed float64 inputs, it is compared with the same formula evaluated in
+    mpmath on those inputs, so only its own arithmetic is measured; the scale is
+    the sum of the absolute values of every product in the formula.
+    """
+    from superglm.distributional.kernels._curvature_direction import (
+        predictor_curvature_direction,
+    )
+
+    rng = np.random.default_rng(31 + k_parameters)
+    n_rows, k = 200, k_parameters
+    channels = k * (k + 1) // 2
+    score = rng.normal(size=(n_rows, k)) * np.exp(rng.uniform(-8, 8, (n_rows, k)))
+    hessian = rng.normal(size=(n_rows, channels)) * np.exp(rng.uniform(-8, 8, (n_rows, channels)))
+    hessian_direction = rng.normal(size=(n_rows, channels))
+    first, second, third = (rng.normal(size=(n_rows, k)) for _ in range(3))
+    direction = rng.normal(size=(n_rows, k))
+    computed = predictor_curvature_direction(
+        score, hessian, hessian_direction, first, second, third, direction
+    )
+    pairs = [(left, right) for left in range(k) for right in range(left, k)]
+    index = {pair: column for column, pair in enumerate(pairs)}
+
+    def entry(values, row, left, right):
+        return _mpf(values[row, index[(min(left, right), max(left, right))]])
+
+    with mp.workdps(_DIGITS):
+        for row in range(n_rows):
+            g1 = [_mpf(v) for v in first[row]]
+            g2 = [_mpf(v) for v in second[row]]
+            g3 = [_mpf(v) for v in third[row]]
+            d = [_mpf(v) for v in direction[row]]
+            v = [g1[i] * d[i] for i in range(k)]
+            for column, (left, right) in enumerate(pairs):
+                h = entry(hessian, row, left, right)
+                dh = entry(hessian_direction, row, left, right)
+                terms = [
+                    g1[left] * g1[right] * dh,
+                    h * g2[left] * d[left] * g1[right],
+                    h * g1[left] * g2[right] * d[right],
+                ]
+                if left == right:
+                    terms += [g2[left] * entry(hessian, row, left, r) * v[r] for r in range(k)]
+                    terms.append(_mpf(score[row, left]) * g3[left] * d[left])
+                exact = -sum(terms)
+                scale = sum(abs(term) for term in terms)
+                assert abs(_mpf(computed[row, column]) - exact) <= _gamma(2 * k + 12) * scale
