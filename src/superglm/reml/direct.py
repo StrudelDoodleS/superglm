@@ -1232,7 +1232,6 @@ def optimize_direct_reml(
         prev_obj = obj
 
         revalidated_hess = None
-        revalidated_model_hess = None
         # A loose reml_tol can be satisfied by an iteration whose starved
         # candidate PIRLS never certified: the compound criterion's
         # objective and gradient were then measured at a nonstationary
@@ -1269,7 +1268,14 @@ def optimize_direct_reml(
             # -P_ii has no fixed sign.  The stop's second-order check and its
             # freeze decision read the v0.40.0 leverage route's Hessian
             # instead: one solved-row pass forms the cross terms here, at the
-            # candidate stop only.
+            # candidate stop only.  A stop they refuse steps on that Hessian
+            # too, as v0.40.0 did: the step's own freeze then keeps the
+            # directions the revalidation reactivated.  (Stepping on the
+            # gradient-only Hessian refroze them, and the next stop was refused
+            # again: on the 10-pair freMTPL2 fit two directions whose curvature
+            # straddles the freeze bar, 0.0033 and 0.0030 without the cross
+            # terms and 0.0038 and 0.0040 with them against 0.0035, held
+            # gradients of 5e-4 and 1.7e-3 through ten refused stops.)
             stop_cross = None
             if table_route:
                 _t0 = _time.perf_counter()
@@ -1282,7 +1288,7 @@ def optimize_direct_reml(
                 _n_stop_cross_passes += 1
                 _t_w_correction += _time.perf_counter() - _t0
             _t0 = _time.perf_counter()
-            revalidated_model_hess = reml_direct_hessian(
+            revalidated_hess = reml_direct_hessian(
                 dm.group_matrices,
                 distribution,
                 reml_inverse,
@@ -1299,11 +1305,8 @@ def optimize_direct_reml(
                 dH2_cross=dH2_cross,
                 reml_penalties=penalties,
             )
-            revalidated_hess = (
-                revalidated_model_hess
-                if stop_cross is None
-                else revalidated_model_hess + stop_cross
-            )
+            if stop_cross is not None:
+                revalidated_hess = revalidated_hess + stop_cross
             concave_live = concave_live_directions(
                 proj_grad,
                 revalidated_hess,
@@ -1375,8 +1378,8 @@ def optimize_direct_reml(
                 break
             # A re-activated direction with a live gradient: not converged.
             # Fall through into this iteration's Newton step, reusing the
-            # Hessian just computed (the Newton model's, without the stop's
-            # cross terms on the table route).
+            # Hessian just computed (with the stop's cross terms on the table
+            # route).
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
         # includes the exact available second curvature derivatives; the
@@ -1388,8 +1391,8 @@ def optimize_direct_reml(
         # first-order W correction twice on the diagonal.
         _t0 = _time.perf_counter()
         hess = (
-            revalidated_model_hess
-            if revalidated_model_hess is not None
+            revalidated_hess
+            if revalidated_hess is not None
             else reml_direct_hessian(
                 dm.group_matrices,
                 distribution,

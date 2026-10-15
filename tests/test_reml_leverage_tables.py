@@ -204,12 +204,14 @@ def test_a_lookup_design_solves_rows_only_at_a_candidate_stop(monkeypatch):
     assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
 
 
-def _record_stops(monkeypatch) -> tuple[list[dict], list]:
+def _record_stops(monkeypatch, *, refuse_first: bool = False) -> tuple[list[dict], list]:
     """At each candidate stop: the Hessian its checks read, and v0.40.0's at the same point.
 
     v0.40.0's leverage route formed the same Hessian with its own ``w_cross``
     (``reml_w_correction(leverage_hessian=True)`` on the solved rows), recomputed
     here from the iteration's own correction inputs with the table route off.
+    ``refuse_first`` reports every estimated direction live at the first stop,
+    so that stop is refused.
     """
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     corrections, hessians, reads, ranks = [], [], [], []
@@ -246,7 +248,8 @@ def _record_stops(monkeypatch) -> tuple[list[dict], list]:
                 "kwargs": kwargs,
             }
         )
-        return concave(gradient, hess, estimated, **kwargs)
+        live = concave(gradient, hess, estimated, **kwargs)
+        return np.asarray(estimated, dtype=bool) if refuse_first and len(reads) == 1 else live
 
     monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
     monkeypatch.setattr(direct, "reml_direct_hessian", recorded_hessian)
@@ -271,6 +274,36 @@ def test_the_stop_reads_the_leverage_routes_hessian(monkeypatch):
     for read in reads:
         assert np.any(read["cross"] != 0.0)
         assert np.array_equal(read["hessian"], read["reference"])
+
+
+def test_a_refused_stop_steps_on_the_stops_hessian(monkeypatch):
+    """A stop the cross terms refuse takes its Newton step, and that step's freeze, on their Hessian.
+
+    Stepping on the gradient-only Hessian refroze what the stop's freeze
+    revalidation had reactivated, so the next stop was refused the same way:
+    on the 10-pair freMTPL2 fit two directions straddling the freeze bar
+    held their gradients through ten refused stops (16 exact iterations
+    against 7).  The first stop is refused here; both freeze decisions made
+    at that iteration read v0.40.0's Hessian.
+    """
+    reads, _ = _record_stops(monkeypatch, refuse_first=True)
+    freezes = []
+    freeze = direct.freeze_flat_directions
+
+    def recorded_freeze(gradient, hess, *args, **kwargs):
+        freezes.append((len(reads), np.array(hess, copy=True)))
+        return freeze(gradient, hess, *args, **kwargs)
+
+    monkeypatch.setattr(direct, "freeze_flat_directions", recorded_freeze)
+    model = _poisson_model(1.0e3)
+
+    assert model._reml_profile["reml_n_concave_stop_refusals"] == 1
+    # the stop's revalidation, then the step's own freeze (later iterations follow)
+    at_refusal = [hess for stop, hess in freezes if stop == 1][:2]
+    assert len(at_refusal) == 2
+    for hess in at_refusal:
+        assert np.array_equal(hess, reads[0]["reference"])
+    assert model._reml_result.converged
 
 
 def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkeypatch):
