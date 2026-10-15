@@ -280,3 +280,34 @@ def test_gradient_certificate_carries_the_theta_third_bound() -> None:
     # Two independent float64 contractions of n nonnegative products: gamma_{2n+8} apart.
     slack = 1.0 - 2.0 * (2 * n_rows + 8) * _U
     assert np.all(result.gradient_certificate >= slack * expected)
+
+
+def test_first_axis_reuses_the_probe(monkeypatch) -> None:
+    """K axis derivatives cost K kernel calls: the admitting probe is the first axis."""
+    from superglm.distributional.smoothing.derivatives import (
+        _analytic_first_derivative,
+        _first_derivatives,
+    )
+
+    response = np.array([0.0, 1.0, 2.0, 0.0, 5.0])
+    plan = _plan(response, None, "prior")
+    eta = np.column_stack((np.full(5, 0.1), np.full(5, 1.5)))
+    family = NegativeBinomialLS()
+    calls = []
+    original = NegativeBinomialLS.certified_predictor_curvature_directional_derivative
+
+    def counted(self, *args):
+        calls.append(1)
+        return original(self, *args)
+
+    monkeypatch.setattr(
+        NegativeBinomialLS, "certified_predictor_curvature_directional_derivative", counted
+    )
+    analytic = _analytic_first_derivative(family, response, eta, (LogLink(), LogLink()), plan, 5, 2)
+    assert analytic is not None
+    first, certificate, _stencils, evaluations = _first_derivatives(
+        lambda values: values, eta, DEFAULT_STEP, analytic_first=analytic
+    )
+    assert len(calls) == 2 and evaluations == 0
+    np.testing.assert_array_equal(first[0], analytic.probe[0])
+    np.testing.assert_array_equal(certificate[0], analytic.probe[1])
