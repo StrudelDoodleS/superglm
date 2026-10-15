@@ -463,18 +463,31 @@ def test_tweedie_direction_agrees_with_the_published_curvature(semantics: str) -
 
 
 def test_bounded_power_link_third_derivative() -> None:
+    """``span p q (1 - 6 p q)`` within ``gamma_16`` of its term scale ``span p q (1 + 6 p q)``.
+
+    ``1 - 6pq`` vanishes at ``pq = 1/6``, ``eta = logit((1 -+ 3^-1/2)/2)``, so the
+    error is relative to the terms, not the value: each ``expit`` is an ``exp``
+    (under one ulp, two roundings), an addition and a division, four in all;
+    then the product, ``6 *``, the subtraction and the two multiplications by
+    ``span`` and by ``1 - 6pq``: thirteen roundings, within ``gamma_16``.  The
+    grid includes both zeros.
+    """
     from superglm.distributional.families.tweedie import BoundedPowerLink
 
     link = BoundedPowerLink()
-    eta = np.linspace(-30.0, 30.0, 121)
+    zeros = np.log(np.array([(1.0 - 3.0**-0.5) / (1.0 + 3.0**-0.5)]))
+    eta = np.concatenate((np.linspace(-30.0, 30.0, 121), zeros, -zeros))
+    span = link.upper - link.lower
     with localcontext() as context:
         context.prec = 60
         for value, computed in zip(eta, link.deriv3_inverse(eta), strict=True):
             e = Decimal(float(value))
             p = 1 / (1 + (-e).exp())
-            q = 1 - p
-            exact = Decimal(link.upper - link.lower) * p * q * (1 - 6 * p * q)
-            assert abs(Decimal(float(computed)) - exact) <= Decimal(16 * _U) * abs(exact) * 7
+            q = 1 / (1 + e.exp())
+            exact = Decimal(span) * p * q * (1 - 6 * p * q)
+            scale = Decimal(span) * p * q * (1 + 6 * p * q)
+            bound = Decimal(16 * _U / (1 - 16 * _U)) * scale
+            assert abs(Decimal(float(computed)) - exact) <= bound, value
 
 
 def test_generalized_gamma_refuses_a_valid_row_whose_direction_overflows() -> None:
