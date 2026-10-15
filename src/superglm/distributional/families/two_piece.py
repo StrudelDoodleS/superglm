@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +14,7 @@ from numpy.typing import NDArray
 from superglm.distributional.families._base import (
     array_digest,
     immutable,
+    natural_curvature_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -44,9 +46,11 @@ from superglm.distributional.kernels.two_piece import (
 from superglm.distributional.kernels.two_piece import (
     initialize_two_piece,
     location_expected_information,
+    location_hessian_direction,
     location_of_mean,
     location_rows,
     mean_expected_information,
+    mean_hessian_direction,
     mean_of_location,
     mean_rows,
     real_line_mean,
@@ -57,7 +61,7 @@ from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
-from superglm.links import IdentityLink, LogLink
+from superglm.links import IdentityLink, Link, LogLink
 
 Parametrisation = Literal["mean", "location"]
 TwoPieceRowLaw = Literal[
@@ -425,6 +429,32 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
             valid=evaluated.valid,
         )
 
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            if self.parametrisation == "mean":
+                return mean_hessian_direction(
+                    response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+                )
+            return location_hessian_direction(
+                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+            )
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
+        )
+
     def expected_information_natural(
         self, theta: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
@@ -646,6 +676,28 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            return location_hessian_direction(
+                response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+            )
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
         )
 
     def expected_information_natural(

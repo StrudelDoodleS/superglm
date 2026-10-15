@@ -97,3 +97,81 @@ __all__ = [
     "typed_plan",
     "validated_float_response",
 ]
+
+
+def natural_curvature_direction(
+    family,
+    y: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    links,
+    plan,
+    hessian_direction,
+) -> NDArray[np.float64]:
+    """Packed predictor-curvature direction from a family's natural ``dH(v)``.
+
+    ``hessian_direction(theta, v)`` returns the packed derivative of the
+    family's weighted natural Hessian along the natural direction ``v``.
+    Every inverse link must supply three derivatives.
+    """
+    from superglm.distributional.kernels._curvature_direction import (
+        predictor_curvature_direction,
+    )
+
+    try:
+        predictors = np.asarray(eta, dtype=FLOAT)
+        direction = np.asarray(eta_direction, dtype=FLOAT)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("predictor state and direction must be finite arrays") from exc
+    link_tuple = tuple(links)
+    k_parameters = len(family.parameters)
+    expected = (response_row_count(y), k_parameters)
+    if (
+        predictors.shape != expected
+        or direction.shape != expected
+        or len(link_tuple) != k_parameters
+        or not np.all(np.isfinite(predictors))
+        or not np.all(np.isfinite(direction))
+    ):
+        raise ValueError("predictor state and direction must be finite n-by-K arrays")
+    derivatives = []
+    for index, link in enumerate(link_tuple):
+        third = getattr(link, "deriv3_inverse", None)
+        if not callable(third):
+            raise UnsupportedLikelihoodContractError(
+                f"link {index} has no third inverse-link derivative"
+            )
+        column = predictors[:, index]
+        derivatives.append(
+            tuple(
+                np.asarray(values, dtype=FLOAT)
+                for values in (
+                    link.inverse(column),
+                    link.deriv_inverse(column),
+                    link.deriv2_inverse(column),
+                    third(column),
+                )
+            )
+        )
+    theta, first, second, third_derivative = (
+        np.column_stack([row[order] for row in derivatives]) for order in range(4)
+    )
+    evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
+    natural = first * direction
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        result = predictor_curvature_direction(
+            np.asarray(evaluation.score, dtype=FLOAT),
+            np.asarray(evaluation.hessian_packed, dtype=FLOAT),
+            np.asarray(hessian_direction(theta, natural), dtype=FLOAT),
+            first,
+            second,
+            third_derivative,
+            direction,
+        )
+    # A row the family flags invalid publishes zero curvature, so its
+    # derivative is zero too.
+    valid = np.asarray(evaluation.valid, dtype=np.bool_)
+    result[~valid] = 0.0
+    if not np.all(np.isfinite(result)):
+        raise ValueError("the predictor-curvature derivative is not representable at this state")
+    return readonly(result)

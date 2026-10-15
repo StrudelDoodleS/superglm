@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from superglm.distributional.families._base import (
     array_digest,
     immutable,
+    natural_curvature_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -49,6 +50,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     generalized_pareto_mean,
     generalized_pareto_quantile,
     initialize_generalized_pareto,
+    scale_hessian_direction,
     scale_rows,
 )
 from superglm.distributional.weights import (
@@ -348,6 +350,23 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self, y, eta, eta_direction, links, plan
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = _validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            return scale_hessian_direction(
+                response, theta[:, 0], theta[:, 1], natural, bound.multiplier
+            )
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
         )
 
     def expected_information_natural(self, theta, plan) -> NDArray[np.float64]:
