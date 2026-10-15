@@ -252,6 +252,10 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     assert "the assessment must recommend the named version, and preparation uses its ID" in flat
     assert "naming the exact tag, or the single instruction below" in flat
     assert STEP_BY_STEP_MERGE in flat
+    assert (
+        "which needs its own approval (under the single instruction below, the run "
+        "restarts from the assessment under the same instruction)" in flat
+    )
     assert "separate requests, unless one instruction grants all three" in flat
     assert (
         'An instruction to release that names no version ("release it", "cut a release") authorizes nothing'
@@ -330,6 +334,10 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     flat = " ".join(documentation.split())
     assert "or the single instruction above" in flat
     assert STEP_BY_STEP_MERGE in flat
+    assert (
+        "which needs its own approval (under the single instruction above, the run "
+        "restarts from the assessment under the same instruction)" in flat
+    )
     assert "the assessment must recommend the named version" in flat
     assert "releases" in development_toctree
 
