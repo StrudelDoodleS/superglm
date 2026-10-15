@@ -222,18 +222,51 @@ Only an explicit user request to assess, prepare or publish a release may
 invoke the project-scoped `release_manager` specialist defined in
 `.codex/agents/release_manager.toml`. Proactive delegation and ordinary words
 such as "finish", "merge", "ship" or "deploy" do not authorize publication.
-The three gates are separate requests, and each does only its own step:
+The three gates are separate requests, unless one instruction grants all three
+(below), and each does only its own step:
 
 1. "Use the release_manager agent to assess the unreleased changes as a
    release candidate." Assessment is read-only and bound to the exact base
    and head SHAs.
 2. "Use the release_manager agent to prepare the approved 0.x.y." Preparation
-   requires the exact approved version and assessment ID. It writes the
+   requires the exact approved version and assessment ID (under the single
+   instruction below, the ID of the assessment it just produced). It writes the
    single bump commit via a bump-only pull request, rebase-merged under the
    linear-history rule so the release tag binds to the rebased commit on
-   master. Preparation does not authorize publication.
+   master. That pull request is merged only once it is green, origin/master is still at
+   the assessed head, the Claude and Codex reviews have completed on its head
+   commit (after a push, ask Codex again with "@codex review"), every review
+   thread on it is resolved and every finding without a thread has its reply.
+   If master has moved, the pull request is closed and the release starts again
+   from a fresh assessment, which needs its own approval (under the single
+   instruction below, the run restarts from the assessment under the same
+   instruction).
+   Preparation does not authorize publication.
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
-   new explicit instruction naming the exact tag.
+   new explicit instruction naming the exact tag, or the single instruction
+   below.
+
+One instruction can also grant all three. A user instruction that names an
+exact version and says to release it, using the word "release" ("release
+0.40", "release 0.40.1"), authorizes assessing, preparing and publishing
+exactly that version, in that order, without asking again for the phrases
+above. Asking only to assess, prepare or draft a release, or "ship", "deploy"
+or "finish" with a version, does not qualify. A version given as 0.x means
+0.x.0. Each step still runs its own checks and stops on any failure:
+- the assessment must recommend the named version, and preparation uses its
+  ID;
+- the root agent, never the specialist, rebase-merges the bump-only pull
+  request, and only once it is green, origin/master is still at the assessed
+  head, the Claude and Codex reviews have completed on its head commit (after a
+  push, the root agent asks Codex again with "@codex review"; a Codex review
+  with no findings counts as completed when its summary comment records that
+  commit), every review thread on it is resolved and every finding without a
+  thread has its reply. If master has moved, the bump-only pull request is
+  closed and the run restarts from the assessment under the same instruction;
+- the tag, GitHub Release and PyPI version must not already exist.
+
+An instruction to release that names no version ("release it", "cut a release")
+authorizes nothing.
 
 The specialist never merges feature pull requests, uploads distributions
 directly, moves an existing tag, or bypasses `.github/workflows/release.yml`

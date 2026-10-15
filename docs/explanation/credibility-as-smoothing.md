@@ -343,13 +343,23 @@ modeling distinction visible:
 
 - unrestricted brand coefficients gain little on this split;
 - brand credibility pools those estimates and gives the best holdout score,
-  about four times the gain of the unrestricted factor;
+  about 4.5 times the gain of the unrestricted factor;
 - regional driver-age deviations do not carry over to the holdout here: the
   `fs` challenger is the worst of the five;
 - combining plausible terms does not guarantee the best holdout score.
 
-Vehicle-brand credibility ranged from `0.110` to `0.850`; the thinnest brand
-effects were pulled hardest toward zero. Regional factor-smooth credibility
+This page ran on the book as published until the correction (its last such
+revision is `7d01428c`), and the correction changed which term wins. There, the
+unrestricted brand factor lost on the holdout (-0.339%), brand credibility lost
+less (-0.131%) and the regional factor smooth scored best (+0.279%). On the
+corrected counts the brand factor gains a little (+0.032%), brand credibility
+is best (+0.148%) and the factor smooth is worst (-0.342%). One finding holds on
+both runs: combining terms does not guarantee the best holdout score. That the
+thinnest brands are pulled hardest toward zero is a property of the estimator,
+`Z_j = I_j / (I_j + lambda)`, not a finding of either run.
+
+Vehicle-brand credibility ranged from `0.110` to `0.850`, lowest on the
+thinnest brands, as `Z_j` implies. Regional factor-smooth credibility
 ranged from `0.0020` to `0.127`, reflecting the greater information required
 to estimate a complete curve rather than one intercept.
 
