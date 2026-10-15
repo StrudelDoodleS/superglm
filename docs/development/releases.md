@@ -76,13 +76,16 @@ tag; the numbers themselves are skipped, exactly as `0.16.2` was.
 The release specialist is a spawned Codex subagent. It does not replace the
 current agent and never starts automatically.
 
-One instruction that uses the word "release" with an exact version ("release
-0.40") authorizes all three steps below for exactly that version, in order;
-"ship", "deploy" or "finish" with a version do not. Each step still runs its
-own checks: the assessment must recommend the named version and preparation
-uses its ID; the root agent rebase-merges the bump-only pull request only once
-it is green and every review thread on it is resolved; and the tag, Release
-and PyPI version must not already exist. The three separate instructions
+One instruction that names an exact version and says to release it, using the
+word "release" ("release 0.40", "release 0.40.1"), authorizes all three steps
+below for exactly that version, in order. Asking only to assess, prepare or
+draft a release, or "ship", "deploy" or "finish" with a version, does not
+qualify. Each step still runs its own checks: the assessment must recommend
+the named version and preparation uses its ID; the root agent rebase-merges
+the bump-only pull request only once it is green, the reviews requested on it
+have posted, every review thread on it is resolved and every finding without a
+thread has its reply; and the tag, Release and PyPI version must not already
+exist. The three separate instructions
 remain for a release taken one step at a time. An instruction that names no
 version authorizes nothing.
 

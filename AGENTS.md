@@ -238,17 +238,19 @@ The three gates are separate requests, unless one instruction grants all three
    new explicit instruction naming the exact tag, or the single instruction
    below.
 
-One instruction can also grant all three. A user instruction that names the
-version and says to release it, with the word "release" ("release 0.40",
-"release 0.40.1"), authorizes assessing, preparing and publishing exactly that
-version, in that order, without asking again for the phrases above. "Ship",
-"deploy" or "finish" with a version do not qualify. A version given as 0.x
-means 0.x.0. Each step still runs its own checks and stops on any failure:
+One instruction can also grant all three. A user instruction that names an
+exact version and says to release it, using the word "release" ("release
+0.40", "release 0.40.1"), authorizes assessing, preparing and publishing
+exactly that version, in that order, without asking again for the phrases
+above. Asking only to assess, prepare or draft a release, or "ship", "deploy"
+or "finish" with a version, does not qualify. A version given as 0.x means
+0.x.0. Each step still runs its own checks and stops on any failure:
 - the assessment must recommend the named version, and preparation uses its
   ID;
 - the root agent, never the specialist, rebase-merges the bump-only pull
-  request, and only once it is green and every review thread on it is
-  resolved;
+  request, and only once it is green, the reviews requested on it have posted,
+  every review thread on it is resolved and every finding without a thread has
+  its reply;
 - the tag, GitHub Release and PyPI version must not already exist.
 
 An instruction that names no version authorizes nothing.

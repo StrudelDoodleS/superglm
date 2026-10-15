@@ -171,12 +171,14 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         assert marker in policy
     flat = " ".join(policy.split())
     for clause in (
-        'uses the word "release" with an exact version',
-        '"Ship", "deploy" or "finish" with a version do not qualify',
+        "or in the modes a SINGLE RELEASE INSTRUCTION grants, in order",
+        "naming the unreleased changes on master, or a SINGLE RELEASE INSTRUCTION",
         "If the assessment recommends a different version, or needs-human-decision, stop and report",
         "the Assessment ID of the assessment run under it when that assessment recommends exactly the named version",
+        "The root agent, never the specialist, rebase-merges the bump-only pull request",
         "naming the exact v0.x.y tag, or the single release instruction naming that version",
-        "Verify the merged bump-only pull request has no unresolved review threads",
+        "Verify the reviews requested on the merged bump-only pull request posted",
+        "or a SINGLE RELEASE INSTRUCTION, stop and report the exact authority required",
         "An instruction that names no version grants nothing",
     ):
         assert clause in flat
@@ -244,11 +246,9 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     # One instruction naming the version and saying to release grants all
     # three steps; one naming no version grants nothing.
     flat = " ".join(agents.split())
-    assert 'names the version and says to release it, with the word "release"' in flat
-    assert '"Ship", "deploy" or "finish" with a version do not qualify' in flat
     assert "the assessment must recommend the named version, and preparation uses its ID" in flat
-    assert "only once it is green and every review thread on it is resolved" in flat
     assert "naming the exact tag, or the single instruction below" in flat
+    assert "separate requests, unless one instruction grants all three" in flat
     assert "An instruction that names no version authorizes nothing" in flat
 
 
@@ -321,6 +321,34 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     assert "never minting phantom versions" in documentation
     assert "Trusted Publishing" in documentation
     flat = " ".join(documentation.split())
-    assert 'One instruction that uses the word "release" with an exact version' in flat
+    assert "or the single instruction above" in flat
     assert "the assessment must recommend the named version" in flat
     assert "releases" in development_toctree
+
+
+# The single release instruction is defined once, in the same words, in all
+# three documents a reader or the specialist acts on, so they cannot drift
+# apart on when publication is granted.
+SINGLE_RELEASE_TRIGGER = (
+    'names an exact version and says to release it, using the word "release" '
+    '("release 0.40", "release 0.40.1")'
+)
+SINGLE_RELEASE_EXCLUSION = (
+    'Asking only to assess, prepare or draft a release, or "ship", "deploy" or '
+    '"finish" with a version, does not qualify.'
+)
+SINGLE_RELEASE_MERGE = (
+    "only once it is green, the reviews requested on it have posted, every review "
+    "thread on it is resolved and every finding without a thread has its reply"
+)
+
+
+@pytest.mark.parametrize(
+    "path", ["AGENTS.md", ".codex/agents/release_manager.toml", "docs/development/releases.md"]
+)
+def test_single_release_instruction_reads_the_same_everywhere(path) -> None:
+    flat = " ".join((ROOT / path).read_text(encoding="utf-8").split())
+
+    assert SINGLE_RELEASE_TRIGGER in flat
+    assert SINGLE_RELEASE_EXCLUSION in flat
+    assert SINGLE_RELEASE_MERGE in flat

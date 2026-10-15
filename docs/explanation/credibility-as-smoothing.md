@@ -358,8 +358,8 @@ both runs: combining terms does not guarantee the best holdout score. That the
 thinnest brands are pulled hardest toward zero is a property of the estimator,
 `Z_j = I_j / (I_j + lambda)`, not a finding of either run.
 
-Vehicle-brand credibility ranged from `0.110` to `0.850`; the thinnest brand
-effects were pulled hardest toward zero. Regional factor-smooth credibility
+Vehicle-brand credibility ranged from `0.110` to `0.850`, lowest on the
+thinnest brands, as `Z_j` implies. Regional factor-smooth credibility
 ranged from `0.0020` to `0.127`, reflecting the greater information required
 to estimate a complete curve rather than one intercept.
 

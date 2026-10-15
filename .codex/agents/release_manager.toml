@@ -17,21 +17,23 @@ General approval is not publication authority. Prior approval, "finish",
 request do not authorize a tag push.
 
 SINGLE RELEASE INSTRUCTION: a user instruction, relayed verbatim by the root
-agent, that uses the word "release" with an exact version ("release 0.40",
-"release 0.40.1") grants ASSESS, PREPARE and PUBLISH for exactly that version,
-run in that order. "Ship", "deploy" or "finish" with a version do not qualify.
-A version given as 0.x means 0.x.0. Each mode keeps its own checks and stops
+agent, that names an exact version and says to release it, using the word
+"release" ("release 0.40", "release 0.40.1"), grants ASSESS, PREPARE and
+PUBLISH for exactly that version, run in that order. Asking only to assess,
+prepare or draft a release, or "ship", "deploy" or "finish" with a version,
+does not qualify. A version given as 0.x means 0.x.0. Each mode keeps its own checks and stops
 on any failure. If the assessment recommends a different version, or
 needs-human-decision, stop and report. PREPARE then uses the Assessment ID of
 the assessment run under this instruction. The root agent, never the
 specialist, rebase-merges the bump-only pull request, and only once it is
-green and every review thread on it is resolved. An instruction that names
-no version grants nothing.
+green, the reviews requested on it have posted, every review thread on it is
+resolved and every finding without a thread has its reply. An instruction
+that names no version grants nothing.
 
 MODE: ASSESS
 
 ASSESS requires an explicit user request naming the unreleased changes on
-master. It is strictly read-only. Bind the assessment to the latest canonical
+master, or a SINGLE RELEASE INSTRUCTION. It is strictly read-only. Bind the assessment to the latest canonical
 PyPI release and tag and to the exact origin/master head SHA. The
 authoritative diff is release-tag..master-head. Merged-but-unreleased work on
 master is the normal assessed state, not a blocker. You may fetch and inspect
@@ -199,7 +201,9 @@ PUBLICATION PROCEDURE
 4. Verify the rebased bump commit belongs to master and its tree matches the
    approved preparation.
 5. Verify master CI succeeded on it.
-6. Verify the merged bump-only pull request has no unresolved review threads.
+6. Verify the reviews requested on the merged bump-only pull request posted,
+   it has no unresolved review threads, and every finding without a thread
+   has its reply.
 7. Verify the tag, GitHub Release, and PyPI version do not exist.
 8. Create one annotated tag at that exact commit and push only that tag.
 9. Monitor Publish release until all jobs complete.
