@@ -569,7 +569,6 @@ def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
     jump.  Directions that leave ``mu`` fixed keep ``z = 0`` on the right piece
     and are still analytic, as is a zero-skew row, where nothing jumps.
     """
-    from superglm.distributional.kernels.two_piece import log_mean_loading
     from superglm.distributional.smoothing.derivatives import _analytic_first_derivative
     from superglm.distributional.smoothing.endpoint_direction import (
         analytic_curvature_direction,
@@ -599,21 +598,78 @@ def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
     symmetric[:, 2] = links[2].link(np.zeros(3))
     family.predictor_curvature_directional_derivative(y, symmetric, moving, links, plan)
 
-    mean_family = TwoPieceLogNormalLSS(parametrisation="mean")
-    mean_links = _links(mean_family)
+
+def test_two_piece_mean_form_refuses_any_path_through_its_join(monkeypatch) -> None:
+    """In the mean form every join row the path moves is refused, tangent paths included.
+
+    ``mu = log m - log K(sigma, eps)`` is not linear in the predictors, so a
+    direction whose first-order change ``v_m/m - K_s v_s - K_e v_e`` vanishes
+    still moves ``mu`` at second order through ``log K`` and leaves the join
+    for one piece on both sides.  At 9f1495ef such a direction passed the
+    first-order test and was admitted as exact.  Whether ``z == 0`` holds
+    exactly depends on how a platform's ``exp``, ``log`` and ``log_ndtr``
+    round, so the join is stubbed onto row 0 and the test checks what the
+    family hands the join test: a nonzero mark for every direction that moves
+    the row, and the refusal that follows.
+    """
+    import superglm.distributional.families.two_piece as two_piece_family
+    from superglm.distributional.kernels.two_piece import log_mean_loading
+    from superglm.distributional.weights import UnsupportedLikelihoodContractError
+
+    recorded = []
+
+    def on_row_zero(variate, location, scale, skew, moved):
+        marks = np.asarray(moved, dtype=np.float64)
+        recorded.append(marks.copy())
+        return (np.arange(len(marks)) == 0) & (marks != 0.0)
+
+    monkeypatch.setattr(two_piece_family, "join_crossing_rows", on_row_zero)
+    family = TwoPieceLogNormalLSS(parametrisation="mean")
+    links = _links(family)
     response = np.array([2.0, 3.0])
-    sigma, skew = np.full(2, 0.6), np.full(2, -0.25)
-    mean = np.exp(np.log(response) + log_mean_loading(sigma, skew)[0])
-    mean_eta = np.column_stack(
-        (mean_links[0].link(mean), mean_links[1].link(sigma), mean_links[2].link(skew))
-    )
-    mean_plan = _plan(mean_family, response)
-    # Only the scale moves, and mu = log m - log K(sigma, eps) moves with it.
-    scale_only = np.tile([0.0, 1.0, 0.0], (2, 1))
-    with pytest.raises(UnsupportedLikelihoodContractError, match="join"):
-        mean_family.predictor_curvature_directional_derivative(
-            response, mean_eta, scale_only, mean_links, mean_plan
+    eta = np.column_stack(
+        (
+            links[0].link(np.full(2, 2.5)),
+            links[1].link(np.full(2, 0.6)),
+            links[2].link(np.full(2, -0.25)),
         )
+    )
+    plan = _plan(family, response)
+    theta = np.column_stack([link.inverse(eta[:, k]) for k, link in enumerate(links)])
+    first = np.column_stack([link.deriv_inverse(eta[:, k]) for k, link in enumerate(links)])
+    _, k_s, k_e = log_mean_loading(theta[:, 1], theta[:, 2])[:3]
+
+    # The scale alone moves mu through log K.
+    with pytest.raises(UnsupportedLikelihoodContractError, match="join at row 0"):
+        family.predictor_curvature_directional_derivative(
+            response, eta, np.tile([0.0, 1.0, 0.0], (2, 1)), links, plan
+        )
+    assert recorded[-1][0] != 0.0
+
+    # A tangent direction: the mean component cancels the loading's first
+    # derivative to the last bit of the first-order expression.
+    d_s, d_e = 1.0, -0.5
+    target = (k_s[0] * (first[0, 1] * d_s) + k_e[0] * (first[0, 2] * d_e)) * theta[0, 0]
+    d_m = target / first[0, 0]
+    for _ in range(400):
+        change = (
+            first[0, 0] * d_m / theta[0, 0]
+            - k_s[0] * (first[0, 1] * d_s)
+            - k_e[0] * (first[0, 2] * d_e)
+        )
+        if change == 0.0:
+            break
+        d_m = np.nextafter(d_m, -np.inf if change > 0.0 else np.inf)
+    assert change == 0.0
+    tangent = np.tile([d_m, d_s, d_e], (2, 1))
+    with pytest.raises(UnsupportedLikelihoodContractError, match="join at row 0"):
+        family.predictor_curvature_directional_derivative(response, eta, tangent, links, plan)
+    assert recorded[-1][0] != 0.0
+
+    # A direction that leaves the row where it is moves nothing and stays analytic.
+    still = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    family.predictor_curvature_directional_derivative(response, eta, still, links, plan)
+    assert recorded[-1][0] == 0.0
 
 
 def test_tweedie_direction_differentiates_the_windowed_hessian(monkeypatch) -> None:

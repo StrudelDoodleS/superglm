@@ -73,15 +73,18 @@ def _refuse_join_crossing(
     location: NDArray,
     scale: NDArray,
     skew: NDArray,
-    location_direction: NDArray,
+    moved: NDArray,
 ) -> None:
-    """Refuse the analytic direction when it moves a row's location across the join.
+    """Refuse the analytic direction when it can move a row's location off the join.
 
     There the Hessian has only one-sided derivatives, so no analytic value
     carries authority; the caller differences the published curvature, whose
     certificate records the jump, as v0.40.0 did for every two-piece row.
+    ``moved`` is nonzero on a row whose location the path can move: ``v_mu``
+    in the location form, where the location is linear in the predictor, and
+    any nonzero direction in the mean form, where it is not.
     """
-    crossing = join_crossing_rows(variate, location, scale, skew, location_direction)
+    crossing = join_crossing_rows(variate, location, scale, skew, moved)
     if np.any(crossing):
         row = int(np.flatnonzero(crossing)[0])
         raise UnsupportedLikelihoodContractError(
@@ -469,14 +472,17 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             if self.parametrisation == "mean":
-                # mu = log m - log K(sigma, eps) moves by v_m/m - K_s v_s - K_e v_e.
-                logk, k_s, k_e = log_mean_loading(theta[:, 1], theta[:, 2])[:3]
+                # mu = log m - log K(sigma, eps) is not linear in the predictors:
+                # a direction whose first-order change v_m/m - K_s v_s - K_e v_e
+                # vanishes still moves mu at second order through log K, so a
+                # join row is refused whenever the direction moves it at all.
+                logk = log_mean_loading(theta[:, 1], theta[:, 2])[0]
                 _refuse_join_crossing(
                     np.log(response),
                     np.log(theta[:, 0]) - logk,
                     theta[:, 1],
                     theta[:, 2],
-                    natural[:, 0] / theta[:, 0] - k_s * natural[:, 1] - k_e * natural[:, 2],
+                    np.any(natural != 0.0, axis=1).astype(np.float64),
                 )
                 return mean_hessian_direction(
                     response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
