@@ -26,8 +26,11 @@ on any failure. If the assessment recommends a different version, or
 needs-human-decision, stop and report. PREPARE then uses the Assessment ID of
 the assessment run under this instruction. The root agent, never the
 specialist, rebase-merges the bump-only pull request, and only once it is
-green, the reviews requested on it have posted, every review thread on it is
-resolved and every finding without a thread has its reply. An instruction
+green, origin/master is still at the assessed head, the automatic Claude and
+Codex reviews have posted on its head commit, every review thread on it is
+resolved and every finding without a thread has its reply. If master has
+moved, the bump-only pull request is closed and the run restarts from ASSESS
+under the same instruction. An instruction
 that names no version grants nothing.
 
 MODE: ASSESS
@@ -201,9 +204,9 @@ PUBLICATION PROCEDURE
 4. Verify the rebased bump commit belongs to master and its tree matches the
    approved preparation.
 5. Verify master CI succeeded on it.
-6. Verify the reviews requested on the merged bump-only pull request posted,
-   it has no unresolved review threads, and every finding without a thread
-   has its reply.
+6. Verify the automatic Claude and Codex reviews posted on the merged
+   bump-only pull request's head commit, it has no unresolved review threads,
+   and every finding without a thread has its reply.
 7. Verify the tag, GitHub Release, and PyPI version do not exist.
 8. Create one annotated tag at that exact commit and push only that tag.
 9. Monitor Publish release until all jobs complete.

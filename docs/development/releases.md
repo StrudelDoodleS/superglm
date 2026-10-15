@@ -82,9 +82,11 @@ below for exactly that version, in order. Asking only to assess, prepare or
 draft a release, or "ship", "deploy" or "finish" with a version, does not
 qualify. Each step still runs its own checks: the assessment must recommend
 the named version and preparation uses its ID; the root agent rebase-merges
-the bump-only pull request only once it is green, the reviews requested on it
-have posted, every review thread on it is resolved and every finding without a
-thread has its reply; and the tag, Release and PyPI version must not already
+the bump-only pull request only once it is green,
+origin/master is still at the assessed head, the automatic Claude and Codex
+reviews have posted on its head commit, every review thread on it is resolved
+and every finding without a thread has its reply (if master has moved, the
+bump pull request is closed and the run restarts from the assessment); and the tag, Release and PyPI version must not already
 exist. The three separate instructions
 remain for a release taken one step at a time. An instruction that names no
 version authorizes nothing.

@@ -177,7 +177,9 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "the Assessment ID of the assessment run under it when that assessment recommends exactly the named version",
         "The root agent, never the specialist, rebase-merges the bump-only pull request",
         "naming the exact v0.x.y tag, or the single release instruction naming that version",
-        "Verify the reviews requested on the merged bump-only pull request posted",
+        "Verify the automatic Claude and Codex reviews posted on the merged bump-only pull "
+        "request's head commit, it has no unresolved review threads, and every finding "
+        "without a thread has its reply",
         "or a SINGLE RELEASE INSTRUCTION, stop and report the exact authority required",
         "An instruction that names no version grants nothing",
     ):
@@ -338,8 +340,9 @@ SINGLE_RELEASE_EXCLUSION = (
     '"finish" with a version, does not qualify.'
 )
 SINGLE_RELEASE_MERGE = (
-    "only once it is green, the reviews requested on it have posted, every review "
-    "thread on it is resolved and every finding without a thread has its reply"
+    "only once it is green, origin/master is still at the assessed head, the automatic "
+    "Claude and Codex reviews have posted on its head commit, every review thread on it "
+    "is resolved and every finding without a thread has its reply"
 )
 
 

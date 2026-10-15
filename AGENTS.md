@@ -248,9 +248,11 @@ or "finish" with a version, does not qualify. A version given as 0.x means
 - the assessment must recommend the named version, and preparation uses its
   ID;
 - the root agent, never the specialist, rebase-merges the bump-only pull
-  request, and only once it is green, the reviews requested on it have posted,
-  every review thread on it is resolved and every finding without a thread has
-  its reply;
+  request, and only once it is green, origin/master is still at the
+  assessed head, the automatic Claude and Codex reviews have posted on its head
+  commit, every review thread on it is resolved and every finding without a
+  thread has its reply; if master has moved, it closes the bump pull request and
+  restarts from the assessment under the same instruction;
 - the tag, GitHub Release and PyPI version must not already exist.
 
 An instruction that names no version authorizes nothing.
