@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, SuperGLM
+from superglm import Constraint, LambdaPolicy, SuperGLM
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
@@ -2258,6 +2258,206 @@ class TestREMLWarmStart:
         bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
         assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
 
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_start_on_a_plateau_shoulder_returns_to_the_optimum(self, discrete):
+        """A start far up the flat end of a needed smooth is not converged.
+
+        x2 carries a weak real effect (optimum lambda about 22); started at
+        1e8 its direction sits on a concave shoulder: gradient small, and
+        curvature negative.  The freeze held it there as flat and the fit
+        reported convergence 5.3 worse than the cold fit, lambda still 1e8
+        (mutation check: the PR #487 head, both engines).  A concave
+        direction is not held while its trust-region model promises a
+        decrease the stopping rule can resolve, and steps to the step bound,
+        so the fit returns to the cold optimum, within twice the stop bar.
+        """
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.3 + 0.8 * np.sin(2 * np.pi * x1) + 0.1 * np.sin(3 * np.pi * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        cold_info = _two_smooth_model(discrete).fit_reml(X, y).reml_diagnostics()
+        start = {"x1": cold_info["lambdas"]["x1"], "x2": 1e8}
+        warm_info = (
+            _two_smooth_model(discrete).fit_reml(X, y, lambda2_init=start).reml_diagnostics()
+        )
+
+        assert warm_info["converged"]
+        bar = 2.0 * cold_info["profile"]["reml_tol_resolved"] * (1.0 + abs(cold_info["objective"]))
+        assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
+        # Both fits stop on the score test, |g_x2| < tol * (1 + |V|); near the
+        # optimum a gradient g sits g / H_x2x2 from it in log-lambda, so the
+        # two stops agree to bar / H_x2x2 (x2's own curvature, read from the
+        # cold fit's freeze record; its coupling to x1 is left out).
+        # Measured: 1.8e-7 exact, 9.0e-9 discrete, against a bound of 4.0e-6.
+        assert cold_info["termination_reason"] == "score_objective_tolerance"
+        assert warm_info["termination_reason"] == "score_objective_tolerance"
+        freeze = cold_info["profile"]["reml_freeze_decision"]
+        curvature = freeze["hess_diag"][freeze["names"].index("x2")]
+        assert (
+            abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) <= bar / curvature
+        )
+
+    def test_a_tensor_shoulder_steps_inside_the_tensor_trust_region(self):
+        """A shoulder on the discrete path's shared-tensor search keeps its box.
+
+        That search bounds every log-lambda step by base_cap (1.0, 2.5 once a
+        full step was accepted) and each shared pair's half-difference by
+        cap_v.  Started at 1e8, this ti pair's margins sit on a shoulder; the
+        shoulder step was the generic path's 5.0, set after the damping, so
+        it left the box (mutation check: the PR #487 head recorded steps of
+        5.0).  It now steps to the box's edge, and the fit converges (to the
+        cold fit's objective within 5.3e-6, 1.2 times the twice-tolerance
+        band: the discrete stop is a working-model fixed point).
+        """
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = (
+            0.3
+            + 0.8 * np.sin(2 * np.pi * x1)
+            + 0.3 * np.cos(3 * x2)
+            + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        cold_info = _two_smooth_model(True, interaction=True).fit_reml(X, y).reml_diagnostics()
+        assert cold_info["converged"]
+        start = {
+            name: (1e8 if ":" in name else value) for name, value in cold_info["lambdas"].items()
+        }
+        warm = _two_smooth_model(True, interaction=True).fit_reml(X, y, lambda2_init=start)
+        warm_info = warm.reml_diagnostics()
+
+        steps = warm_info["profile"]["reml_outer_step_stats"]
+        # Each step against the box it was held to (1.0 while locked, 2.5 after).
+        assert all(row["max_delta_used"] <= row["base_cap"] for row in steps)
+        assert any(row["base_cap"] == 1.0 for row in steps)
+        assert warm_info["converged"]
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_stop_refused_by_a_live_shoulder_is_recorded(self, discrete, monkeypatch):
+        """The second-order check gates only the score-test exit, and a shoulder
+        is usually stepped off before the score test passes, so the refusal is
+        forced here: the first time the score test passes, x2 is reported
+        live.  The refusal is counted and recorded with the direction's
+        gradient and curvature, and the fit then stops normally (mutation
+        check: the PR #487 head kept no record)."""
+        import superglm.reml.direct as direct_module
+        import superglm.reml.discrete as discrete_module
+
+        module = discrete_module if discrete else direct_module
+        real = module.concave_live_directions
+        calls = []
+
+        def first_refuses(gradient, hessian, estimated, **kwargs):
+            live = real(gradient, hessian, estimated, **kwargs)
+            calls.append(1)
+            return np.asarray(estimated, dtype=bool) if len(calls) == 1 else live
+
+        monkeypatch.setattr(module, "concave_live_directions", first_refuses)
+        X, y = _two_smooth_poisson()
+        info = _two_smooth_model(discrete).fit_reml(X, y).reml_diagnostics()
+        profile = info["profile"]
+        assert profile["reml_n_concave_stop_refusals"] == 1
+        record = profile["reml_concave_stop_refusal"]
+        assert record["names"] == ["x1", "x2"]
+        assert len(record["gradient"]) == len(record["curvature"]) == 2
+        assert info["converged"]
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_a_dead_search_beside_a_live_shoulder_certifies(self, discrete, monkeypatch):
+        """Every line-search trial is made worse, so the first search dies.
+
+        The dead-search exit certifies on its first-order precision floor;
+        the second-order check gates only the score-test exit.  Beside a live
+        shoulder whose gradient is under that floor -- a weak smooth started
+        at 1e8 on the exact engine, a ti pair's margins at 1e8 beside held
+        mains on the discrete shared-tensor search -- the exit certifies
+        (converged_at_precision), with the shoulder still marked in the last
+        freeze record.  Each step there is shoulder-only, so the guard that
+        keeps the Newton decrement off a shoulder step is reached: without it
+        the decrement reads Newton terms this step never formed (both
+        fixtures raise).  The exit's reason is at its comment in
+        ``reml/direct.py``; the native-Windows flip once blamed on round 2's
+        refusal here was the unsigned shoulder read.
+        """
+        import dataclasses
+
+        import superglm.reml.direct as direct_module
+        import superglm.reml.discrete as discrete_module
+
+        if discrete:
+            real_objective = discrete_module.reml_laml_objective
+
+            def worse_trial(*args, **kwargs):
+                value = real_objective(*args, **kwargs)
+                # Cached trials ask for a bare value; candidates for an evaluation.
+                return value if kwargs.get("return_evaluation") else value + 1e6
+
+            monkeypatch.setattr(discrete_module, "reml_laml_objective", worse_trial)
+        else:
+            real_fit = direct_module.fit_irls_direct
+
+            def worse_trial(*args, **kwargs):
+                result, inverse, gram = real_fit(*args, **kwargs)
+                if (kwargs.get("debug_context") or {}).get("phase") == "line_search":
+                    result = dataclasses.replace(result, deviance=result.deviance + 1e6)
+                return result, inverse, gram
+
+            monkeypatch.setattr(direct_module, "fit_irls_direct", worse_trial)
+
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        if discrete:
+            # The discrete dead-search exit is the shared-tensor search's; the
+            # mains are held so the shoulder is the only live direction.
+            eta = (
+                0.3
+                + 0.8 * np.sin(2 * np.pi * x1)
+                + 0.3 * np.cos(3 * x2)
+                + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
+            )
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=True,
+                features={
+                    "x1": Spline(kind="ps", k=10, lambda_policy=LambdaPolicy.fixed(3.0)),
+                    "x2": Spline(kind="ps", k=10, lambda_policy=LambdaPolicy.fixed(60.0)),
+                },
+                interactions=[("x1", "x2")],
+            )
+            start = {"x1:x2:margin_x1": 1e8, "x1:x2:margin_x2": 1e8}
+        else:
+            eta = 0.3 + 0.1 * np.sin(3 * np.pi * x2)
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                discrete=False,
+                features={"x2": Spline(kind="ps", k=10)},
+            )
+            X = X[["x2"]]
+            start = {"x2": 1e8}
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        info = model.fit_reml(X, y, lambda2_init=start).reml_diagnostics()
+        assert info["termination_reason"] == "converged_at_precision"
+        assert info["converged"]
+        freeze = info["profile"]["reml_freeze_decision"]
+        shoulders = [
+            name for name, on in zip(freeze["names"], freeze["shoulder"], strict=True) if on
+        ]
+        assert shoulders and set(shoulders) <= set(start)
+
     def test_a_scalar_keeps_the_cold_start(self):
         """A float is not a warm start: the fit is the default fit, bit for bit."""
         X, y = _two_smooth_poisson(n=1500)
@@ -2627,3 +2827,231 @@ class TestREMLNonConvergenceDisclosure:
         assert scop.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
         explicit = _two_smooth_model(True).fit_reml(X, y, max_reml_iter=50)
         assert explicit.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 50
+
+
+def _ten_penalty_poisson(n=3000, seed=1):
+    """Three smooths, a factor and a spline-by-factor: ten estimated smoothing parameters."""
+    rng = np.random.default_rng(seed)
+    x1, x2, x3 = rng.uniform(0, 1, n), rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    g = rng.integers(0, 8, n)
+    eta = (
+        -1.0
+        + 0.6 * np.sin(2 * np.pi * x1)
+        + 0.3 * x2**2
+        + 0.2 * (g % 3)
+        + 0.15 * np.sin(4 * x3) * (g == 2)
+    )
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3, "g": g.astype(str)})
+    model = SuperGLM(
+        family="poisson",
+        discrete=False,
+        features={
+            "x1": Spline(n_knots=10),
+            "x2": Spline(n_knots=8),
+            "x3": Spline(n_knots=8),
+            "g": Categorical(),
+        },
+        interactions=[("x3", "g")],
+    )
+    return model, X, rng.poisson(np.exp(eta)).astype(float)
+
+
+class TestExactPresolve:
+    """A cold exact fit with many smoothing parameters starts from the cached-W fixed point.
+
+    The cached-W (performance) iteration, mgcv's ``outerPIsteps`` taken to its
+    fixed point, runs on the same lossless design and hands the exact Newton
+    loop its smoothing parameters and coefficients; the exact loop's gradient
+    and stopping rule are unchanged.
+    """
+
+    def test_a_cold_ten_parameter_fit_converges_from_the_presolve(self):
+        """Mutation check: on the PR #487 head (no pre-solve) the exact loop took
+        14 iterations; from the pre-solve's 11 cached-W updates it converges in
+        4, to an objective 1.8e-5 lower (both stops within reml_tol)."""
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert info["profile"]["reml_presolve_n_iter"] > 0
+        assert info["n_presolve_iter"] == info["profile"]["reml_presolve_n_iter"]
+        assert info["converged"]
+        assert info["n_reml_iter"] <= 6
+
+    def test_the_presolve_replaces_the_bootstrap_fit(self, monkeypatch):
+        """After the pre-solve every estimated component starts warm, so the
+        bootstrap PIRLS fitted the mode the first candidate fits again, at the
+        same lambdas.  The candidate now starts from the pre-solve's mode:
+        one PIRLS call and one row pass fewer, the same fit (mutation check:
+        the PR #487 head ran a bootstrap phase; 5 PIRLS calls and 6 PIRLS
+        iterations against 4 and 5 now, the objective equal to 1e-15)."""
+        import superglm.reml.direct as direct_module
+
+        phases = []
+        real_fit = direct_module.fit_irls_direct
+
+        def recorded(*args, **kwargs):
+            phases.append((kwargs.get("debug_context") or {}).get("phase"))
+            return real_fit(*args, **kwargs)
+
+        monkeypatch.setattr(direct_module, "fit_irls_direct", recorded)
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert info["profile"]["reml_presolve_n_iter"] > 0
+        assert "bootstrap" not in phases
+        assert "candidate" in phases
+
+    @pytest.mark.parametrize("cap", ["fast_candidate", "max_reml_iter_5"])
+    def test_a_short_iteration_cap_skips_the_presolve(self, cap):
+        """The pre-solve takes up to the fit's own max_reml_iter cached-W
+        updates, so under a cap of 5 (interaction_mode="fast_candidate", or an
+        explicit one) a fit could run 10.  Below 10 it does not run (mutation
+        check: the PR #487 head pre-solved both)."""
+        model, X, y = _ten_penalty_poisson()
+        kwargs = (
+            {"interaction_mode": "fast_candidate"}
+            if cap == "fast_candidate"
+            else {"max_reml_iter": 5}
+        )
+        info = model.fit_reml(X, y, runtime_validation="skip", **kwargs).reml_diagnostics()
+        assert "reml_presolve_n_iter" not in info["profile"]
+        assert info["n_presolve_iter"] == 0
+
+    def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self):
+        """Its freeze and stop bars scale with the tolerance: under the caller's
+        reml_tol = 1e-5 it stopped after 8 updates instead of 11, and the exact
+        loop, stopping on that loose bar, published an objective 5.1e-3 higher.
+        Its tolerance is never looser than 1e-9 (a tighter one passes through)."""
+        updates = []
+        for tol in (None, 1e-5):
+            model, X, y = _ten_penalty_poisson()
+            info = model.fit_reml(X, y, runtime_validation="skip", reml_tol=tol)
+            updates.append(info.reml_diagnostics()["profile"]["reml_presolve_n_iter"])
+        assert updates[0] == updates[1]
+
+    def test_two_parameters_keep_the_cold_newton_start(self):
+        """Below eight estimated smoothing parameters the pre-solve did not pay
+        (off/on wall 0.75 .. 0.96 with two), so the fit is the plain cold one."""
+        X, y = _two_smooth_poisson()
+        info = _two_smooth_model(False).fit_reml(X, y).reml_diagnostics()
+        assert "reml_presolve_n_iter" not in info["profile"]
+
+
+def _ten_penalty_frame(n=3000, seed=1):
+    rng = np.random.default_rng(seed)
+    x1, x2, x3 = rng.uniform(0, 1, n), rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    g = rng.integers(0, 8, n)
+    eta = (
+        0.6 * np.sin(2 * np.pi * x1)
+        + 0.3 * x2**2
+        + 0.2 * (g % 3)
+        + 0.15 * np.sin(4 * x3) * (g == 2)
+    )
+    h = rng.integers(0, 30, n)
+    X = pd.DataFrame({"x1": x1, "x2": x2, "x3": x3, "g": g.astype(str), "h": h.astype(str)})
+    return X, eta, rng
+
+
+def _ten_penalty_features(random_effect: bool) -> dict:
+    from superglm import RandomEffect
+
+    features = {
+        "x1": Spline(n_knots=10),
+        "x2": Spline(n_knots=8),
+        "x3": Spline(n_knots=8),
+        "g": Categorical(),
+    }
+    if random_effect:
+        features["h"] = RandomEffect()
+    return features
+
+
+class TestExactPresolveScope:
+    """The automatic pre-solve runs only where it was measured.
+
+    That is Poisson with the log link on the dense solver.  A non-canonical
+    link (whose exact loop uses observed curvature, or, binomial with the log
+    link, a boundary restoration the cached-W engine lacks), an unmeasured
+    canonical one (binomial with the logit link, Gaussian with the identity),
+    a model the structured solvers can take, and a Tweedie power search's
+    candidates keep the plain cold start, bit for bit.  Mutation check: on the
+    PR #487 head eeea40f5 the binomial/log, Gamma/log and structured cases
+    pre-solved, and on fa839a72 the binomial/logit and Gaussian cases did.
+    """
+
+    @pytest.mark.parametrize(
+        "case", ["binomial_log", "gamma_log", "binomial_logit", "gaussian", "structured"]
+    )
+    def test_an_excluded_fit_keeps_the_plain_cold_start(self, case, monkeypatch):
+        import superglm.model.reml_ops as reml_ops_module
+        import superglm.reml.direct as direct_module
+
+        X, eta, rng = _ten_penalty_frame()
+        if case == "binomial_log":
+            y = rng.binomial(1, np.exp(eta - 2.5)).astype(float)
+            kwargs = {"family": "binomial", "link": "log"}
+        elif case == "gamma_log":
+            y = rng.gamma(4.0, np.exp(eta) / 4.0)
+            kwargs = {"family": "gamma", "link": "log"}
+        elif case == "binomial_logit":
+            y = rng.binomial(1, 1.0 / (1.0 + np.exp(1.0 - eta))).astype(float)
+            kwargs = {"family": "binomial"}
+        elif case == "gaussian":
+            y = eta + rng.normal(size=len(eta))
+            kwargs = {"family": "gaussian"}
+        else:
+            y = rng.poisson(np.exp(eta - 1.0)).astype(float)
+            kwargs = {"family": "poisson"}
+
+        def model():
+            return SuperGLM(
+                discrete=False,
+                features=_ten_penalty_features(case == "structured"),
+                interactions=[("x3", "g")],
+                **kwargs,
+            )
+
+        presolves = []
+        real_presolve = direct_module.optimize_discrete_reml_cached_w
+
+        def counted(*args, **kw):
+            presolves.append(1)
+            return real_presolve(*args, **kw)
+
+        monkeypatch.setattr(direct_module, "optimize_discrete_reml_cached_w", counted)
+        fitted = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert len(fitted["lambdas"]) >= 8
+        assert presolves == []
+
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def without_presolve(*args, **kw):
+            kw["presolve"] = False
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", without_presolve)
+        plain = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert fitted["lambdas"] == plain["lambdas"]
+        assert fitted["objective"] == plain["objective"]
+
+    def test_a_power_search_candidate_keeps_the_plain_cold_start(self, monkeypatch):
+        import superglm.model.reml_ops as reml_ops_module
+
+        X, eta, rng = _ten_penalty_frame(n=1500)
+        y = rng.poisson(np.exp(eta - 1.0)) * rng.gamma(2.0, 0.5, len(eta))
+        calls = []
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def recorded(*args, **kw):
+            calls.append(kw.get("presolve"))
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", recorded)
+        from superglm import families
+
+        model = SuperGLM(
+            family=families.tweedie(p=1.5),
+            discrete=False,
+            features=_ten_penalty_features(False),
+            interactions=[("x3", "g")],
+        )
+        model.estimate_p(X, y, fit_mode="reml", p_bounds=(1.3, 1.7), xatol=0.05)
+        assert calls and all(presolve is False for presolve in calls[:-1])

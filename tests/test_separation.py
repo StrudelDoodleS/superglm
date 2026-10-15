@@ -224,9 +224,9 @@ def test_an_unpenalised_refit_keeps_the_models_separation_mode():
 # ── #341: runtime backstop for separation the build scan cannot see ──
 
 
-def separated_numeric_design(seed=7, n=3000):
+def separated_numeric_design(seed=7, n=3000, share=0.25):
     rng = np.random.default_rng(seed)
-    z = (rng.uniform(size=n) < 0.25).astype(float)
+    z = (rng.uniform(size=n) < share).astype(float)
     y = _tweedie_response(rng, n, rate=0.5)
     y = np.where(z == 1.0, 0.0, y)
     return pd.DataFrame({"z": z}), y, np.ones(n)
@@ -251,6 +251,71 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     message = str(sep[0].message)
     assert "signature of separation" in message
     assert "'z'" in message  # the drifting group is named
+
+
+@pytest.mark.parametrize("share", [0.25, 0.6])
+def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
+    """A coefficient's size is no guide across groups; what it moves on the stopped rows is.
+
+    ``x`` is a real effect on a column of scale 1e-3, so its coefficient
+    (about 260) dwarfs the separated ``z`` (pinned near -80).  Naming the
+    largest coefficient named ``x``; the rows the guard stopped are moved by
+    ``z``.  On the freMTPL2 guide model the same rule named a tensor term for
+    a brand's spline-by-factor curve.  At ``share=0.6`` the stopped rows are
+    most of the rows, so a median over every row sits on them and ``z``
+    moved nothing from it; the move is measured from the rows that did not
+    stop.
+    """
+    df, y, w = separated_numeric_design(share=share)
+    rng = np.random.default_rng(11)
+    df = df.assign(x=rng.normal(size=len(df)) * 1e-3)
+    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(300.0 * df["x"].to_numpy()))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric(), "x": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w)
+    beta = dict(zip(["z", "x"], model.result.beta, strict=True))
+    assert abs(beta["x"]) > abs(beta["z"]) + 2.0, (
+        "fixture must make the bystander's coefficient larger"
+    )
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    assert "overflow guard" in message, "the regression needs the pinned branch"
+    assert "group(s): ['z']" in message
+
+
+def test_runtime_backstop_measures_a_group_from_its_bulk_not_from_zero():
+    """A covariate far from zero carries a large constant the intercept cancels.
+
+    ``year`` sits near 2015 with a coefficient of 0.1, so its raw contribution
+    is about 212 on every row, beyond the separated ``z`` (pinned near -80).
+    What it moves the stopped rows away from the bulk is under 1.
+    """
+    df, y, w = separated_numeric_design()
+    year = 2015.0 + np.random.default_rng(11).integers(-5, 6, size=len(df)).astype(float)
+    df = df.assign(year=year)
+    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(0.1 * (year - 2015.0)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"z": Numeric(), "year": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w)
+    beta = dict(zip(["z", "year"], model.result.beta, strict=True))
+    assert abs(beta["year"]) * 2010 > abs(beta["z"]), "fixture must make the raw offset larger"
+    message = next(str(c.message) for c in caught if issubclass(c.category, SeparationWarning))
+    assert "group(s): ['z']" in message
 
 
 def test_runtime_backstop_reports_the_expected_curvature_ratio():

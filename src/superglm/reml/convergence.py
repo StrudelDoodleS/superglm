@@ -63,6 +63,12 @@ FLAT_DIRECTION_CURVATURE_ANCHOR = 0.1
 DECREMENT_GRADIENT_CEILING = 10.0
 
 
+# The curvature-to-gradient ratio band of a plateau shoulder
+# (``concave_live_directions``).
+SHOULDER_CURVATURE_RATIO_LOW = 0.5
+SHOULDER_CURVATURE_RATIO_HIGH = 2.0
+
+
 def _score_scale(objective: float) -> float:
     return max(1.0 + abs(objective), 1.0)
 
@@ -81,6 +87,10 @@ class FlatDirectionDecision:
     penalty_rank: NDArray
     normalized_curvature: NDArray
     curvature_bar: float
+    # Concave-shoulder directions the flat test alone would have held
+    # (``concave_live_directions``): left active, and stepped to the step
+    # bound by the engines rather than by a flipped-curvature Newton step.
+    shoulder: NDArray | None = None
 
 
 def direction_penalty_ranks(penalty_components, penalty_ranks) -> NDArray:
@@ -107,6 +117,74 @@ def direction_penalty_ranks(penalty_components, penalty_ranks) -> NDArray:
     )
 
 
+def concave_live_directions(
+    projected_gradient: NDArray,
+    hessian: NDArray,
+    estimated_mask: NDArray,
+    *,
+    objective: float,
+    tolerance: float,
+    step_bound: float,
+) -> NDArray:
+    """Estimated directions with negative curvature and a decrease left to take.
+
+    A direction whose diagonal curvature is negative fails the second-order
+    necessary condition for a minimum (More & Sorensen 1979): the quadratic
+    model decreases along it without bound, so a trust-region step lies on
+    the region's boundary.  Over a step of ``step_bound`` the model
+    promises ``step_bound * |g_i| + step_bound**2 * |H_ii| / 2``; when that
+    reaches the stopping resolution ``tolerance * (1 + |objective|)`` the
+    point is not a minimum to the precision asked for, whatever the
+    gradient alone says.  A projected gradient of exactly zero is a bound
+    holding the direction (``project_reml_gradient``) or exact
+    stationarity, and is left to the first-order test.
+
+    Only the shoulder's own signature is read, its sign included.  A flat
+    direction sits at the lambda -> infinity end (towards lambda -> 0 an
+    identified term's log-penalty slope, -r/2, is not flat), where the
+    criterion expands in powers of 1/lambda, ``V_inf + c exp(-j rho) + ...``
+    with j >= 1 the leading power (the penalized part of a term shrinks
+    like 1/lambda), so ``g_i = -j c exp(-j rho)`` and ``H_ii = -j g_i``.  A
+    shoulder approaches the plateau from below (c < 0): ``g_i > 0`` and
+    ``H_ii < 0``, and descent leads away from the plateau, into the
+    interior.  A direction with ``g_i < 0`` decreases into the plateau, the
+    projected-Newton hold applies (Bertsekas 1982), and its true curvature
+    is positive: a negative diagonal read there is an error in that entry,
+    not a shoulder, at any ratio.  (Measured on a spline-by-factor fit with
+    aliased levels: every negative diagonal read on its frozen ``x``
+    direction, -7.3e-5 to -1.4e-4, came with g = -2.7e-4 to -3.3e-4, while
+    differences of the criterion along ``x`` gave curvature +9.4e-4 against
+    slope -9.4e-4, j = 1.  Read inside the band once on native Windows, it
+    stepped ``x`` from 7e6 to 1.3e9, where the search ended
+    line_search_failed; default OpenBLAS kernels read it there on another
+    variant.)  The band brackets j: measured k = 0.66 .. 1.72 on freMTPL2
+    fits started at lambda = 1e4.  A negative diagonal hundreds of times the
+    gradient is the roughness the rank decisions of a strongly penalized
+    system can give the criterion near the lambda cap (measured -0.0025 ..
+    -0.016 against a gradient of 2e-5 on a spline-by-factor fit with aliased
+    levels, whose steps from there ended line_search_failed on OpenBLAS
+    Haswell and Zen kernels), and stays with the first-order hold.  The lower
+    edge has no derivation: off the asymptote k need not be the integer j,
+    and 0.5 only brackets the measured k from below as 2 does from above.  A
+    shoulder with k under 0.5 keeps the first-order hold, so a start on one
+    can still stop there.
+    """
+    signed_gradient = np.asarray(projected_gradient, dtype=np.float64)
+    gradient = np.abs(signed_gradient)
+    diagonal = np.diagonal(np.asarray(hessian, dtype=np.float64))
+    model_decrease = step_bound * gradient + 0.5 * step_bound**2 * np.abs(diagonal)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(signed_gradient > 0.0, -diagonal / signed_gradient, 0.0)
+    return (
+        np.asarray(estimated_mask, dtype=bool)
+        & (signed_gradient > 0.0)
+        & (diagonal < 0.0)
+        & (ratio >= SHOULDER_CURVATURE_RATIO_LOW)
+        & (ratio <= SHOULDER_CURVATURE_RATIO_HIGH)
+        & (model_decrease >= tolerance * _score_scale(objective))
+    )
+
+
 def freeze_flat_directions(
     projected_gradient: NDArray,
     hessian: NDArray,
@@ -115,6 +193,7 @@ def freeze_flat_directions(
     *,
     objective: float,
     tolerance: float,
+    step_bound: float | None = None,
 ) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
@@ -139,6 +218,27 @@ def freeze_flat_directions(
     constants' calibration): per-dimension curvature is O(1) in both the
     row count and the rank, where an absolute, objective-scaled, or
     raw-relative bar is not. Fixed lambdas are always frozen.
+
+    Holding a direction is Wood's (2008, sec. 3.4) "working infinity":
+    a smoothing parameter on a flat end of the criterion is dropped from
+    the Newton step.  That is a projected-Newton hold at a virtual bound,
+    and it is valid only where the objective decreases INTO that bound
+    (Bertsekas 1982: a coordinate is held only when its gradient pushes it
+    against the bound).  On a convex tail -- ``H_ii > 0``, whichever end
+    -- descent leads to the end the direction is moving toward.  A
+    direction with ``H_ii < 0`` is on a concave shoulder: descent leads
+    away from the plateau, back into the interior, and negative curvature
+    is itself a descent direction (More & Sorensen 1979), so it is never
+    held while its trust-region model still promises a decrease the
+    stopping rule can resolve (``concave_live_directions``).  Such a
+    direction the flat test alone would have held is reported in
+    ``shoulder``; a caller without a trust-region step (``step_bound``
+    None) keeps the first-order hold.  (Measured on freMTPL2 as published,
+    before the claim recount, with the mains and 10 pairs: a start at
+    lambda = 1e4 held VehAge x VehBrand[B4] at 1e4 against an optimum near
+    7.8, gradient 1.8e-3 and curvature -1.9e-3, and reported a fit 8.8 worse
+    as converged.  On the recounted book with 4 gated pairs the same start
+    reported 1.89 worse.)
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
     hess = np.abs(np.asarray(hessian, dtype=np.float64))
@@ -159,13 +259,27 @@ def freeze_flat_directions(
     curvature_bar = FLAT_DIRECTION_CURVATURE_REL * max(
         curvature_anchor, FLAT_DIRECTION_CURVATURE_ANCHOR
     )
-    frozen = ~estimated | ((gradient < gradient_bar) & (normalized < curvature_bar))
+    flat = estimated & (gradient < gradient_bar) & (normalized < curvature_bar)
+    shoulder = (
+        np.zeros_like(flat)
+        if step_bound is None
+        else flat
+        & concave_live_directions(
+            projected_gradient,
+            hessian,
+            estimated,
+            objective=objective,
+            tolerance=tolerance,
+            step_bound=step_bound,
+        )
+    )
     return FlatDirectionDecision(
-        frozen=frozen,
+        frozen=~estimated | (flat & ~shoulder),
         row_curvature=row_curvature,
         penalty_rank=ranks,
         normalized_curvature=normalized,
         curvature_bar=float(curvature_bar),
+        shoulder=shoulder,
     )
 
 

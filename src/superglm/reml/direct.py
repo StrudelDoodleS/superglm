@@ -18,11 +18,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Binomial, Gamma, Gaussian, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
-from superglm.links import LogitLink
+from superglm.links import LogitLink, LogLink
 from superglm.reml.convergence import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
+    concave_live_directions,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
@@ -74,7 +76,11 @@ from superglm.solvers.centered_system import (
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
-from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
+from superglm.solvers.structured import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+    select_structured_group,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 # The solve ceiling and the certification bar both live in observed_geometry
@@ -86,6 +92,53 @@ _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 # spline/categorical timings cross over at four penalties on the reference host;
 # below that, the specialized Gram route remains cheaper.
 _LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+# The pre-solve (``presolve``) hands the exact loop a start, not a result: it
+# stops once a working-model update moves the objective by less than this
+# fraction of its scale.  On freMTPL2 (1 to 10 interaction pairs) the cached-W
+# objective then oscillates at 1e-9 of its scale for several more updates
+# without moving the exact loop's iteration count; at 1e-6 it stopped early
+# enough on 3 pairs to cost three more exact iterations.
+_PRESOLVE_OBJECTIVE_TOL = 1e-7
+# The pre-solve's stopping tolerance is never looser than this (a tighter
+# caller tolerance passes through): its freeze and stop bars scale with it,
+# and a loose caller tolerance (1e-5) took the cached-W loop 20 updates where
+# 1e-9 took 16 on freMTPL2 (3 pairs), for a start the exact loop then
+# corrects anyway.
+_PRESOLVE_REML_TOL = 1e-9
+# The automatic pre-solve (``presolve=None``) runs on a cold exact fit with at
+# least this many estimated smoothing parameters.  Each exact iteration pays
+# a weight-correction pass whose cost grows with that count; measured
+# single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
+# with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
+_PRESOLVE_MIN_ESTIMATED = 8
+# Nor under a short iteration cap: the pre-solve takes up to the fit's own
+# ``max_reml_iter`` cached-W updates before the exact loop (7 to 16 measured
+# on freMTPL2 and the test fixtures), so a caller capping the search below
+# this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
+# would get up to twice the work it budgeted for.
+_PRESOLVE_MIN_REML_ITER = 10
+# It also runs only where it was measured: Poisson with the log link, with
+# no RandomEffect or FactorSmooth term the structured solvers could take.
+# Elsewhere it would choose its start on curvature the exact loop does not
+# use (observed-curvature families), carry a boundary coefficient into the
+# exact fit without the mean-space restoration (binomial with the log link),
+# take a backend route whose parity with the dense one is untested past a few
+# smoothing parameters, or rest on an unmeasured cost: binomial with the logit
+# link takes its own leverage-gradient route, and a constant-weight Gaussian
+# identity fit's cached-W criterion is already the exact one.  Each of those
+# keeps the plain cold start until it is measured.  A Tweedie power
+# search turns it off itself: a changed start moves the selected power.
+# The other first-order fits keep the derivative Grams, and with them the
+# outer Hessian's weight-product term, until those Grams cost real time: one
+# ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
+# iteration against ``n p^2`` for the one-pass route that forms the gradient and
+# the first-order Hessian terms (``reml_w_correction(leverage_hessian=True)``).
+# Wood (2011, sec. 3.5.1) prices exact second derivatives at ``O(M n p^2)`` and
+# first derivatives at ``O(n p^2)``, and prefers the cheaper scheme only for
+# large ``M``.  1e11 is about two seconds a REML iteration on the reference host
+# (a freMTPL2 fit with one interaction pair is 2.7e11); below it a fit keeps the
+# exact first-order Hessian and its established path.
+_LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
@@ -146,12 +199,24 @@ def optimize_direct_reml(
     debug_recorder=None,
     trace_run: TraceRun | None = None,
     warm_lambdas: Mapping[str, float] | None = None,
+    presolve: bool | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
     ``warm_lambdas`` (a previous fit's estimates, keyed by component name)
     seeds the bootstrap and the first Newton iterate of every component it
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
+
+    A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
+    estimated smoothing parameters, Poisson with the log link, no
+    structured-solver term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
+    runs the cached-W performance
+    iteration (``optimize_discrete_reml_cached_w``) on this same lossless
+    design until its objective settles, and the exact Newton loop starts
+    from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
+    (performance-iteration steps that initialize the outer iteration), taken
+    to the cached-W fixed point.  The exact loop's gradient and stopping test
+    are unchanged.  ``presolve`` overrides the rule for tests only.
 
     Two algorithm variants depending on ``discrete``:
 
@@ -251,6 +316,13 @@ def optimize_direct_reml(
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
+    # A model the structured solvers can also fit keeps the derivative Grams on
+    # the dense solver too: both backends then build the same outer Hessian and
+    # take the same REML path (tests/test_factor_smooth_structured_parity.py).
+    structured_alternative = (
+        select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
+        is not None
+    )
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
@@ -328,12 +400,15 @@ def optimize_direct_reml(
     _t_gradient = 0.0
     _t_hessian = 0.0
     _t_w_correction = 0.0
+    _n_w_correction = 0
     _t_observed_geometry = 0.0
     _accepted_observed_mode_residual_max = 0.0
     _rejected_trial_observed_mode_residual_max = 0.0
     _observed_mode_rejected_trial_count = 0
     # line-search trials whose structured factor refused (a shorter step)
     _n_refused_structured_trials = 0
+    # score-test stops refused because a concave shoulder was live
+    _n_concave_stop_refusals = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
     # Only a rejected general raw-centering route crosses coefficient fits.
@@ -341,61 +416,162 @@ def optimize_direct_reml(
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
 
+    # === Pre-solve: cached-W performance iteration on this same design ===
+    # The cached-W loop (no dW/drho term) is cheap per iteration and covers
+    # the far-from-optimum phase in which exact Newton spends most of its
+    # iterations.  Its fixed point is a start, never a result: the exact loop
+    # below evaluates, steps and stops on the exact criterion from there.
+    presolve_beta: NDArray | None = None
+    presolve_intercept: float | None = None
+    presolve_centred: tuple[float, NDArray] | None = None
+    if presolve is None:
+        presolve = (
+            not warm_lambdas
+            and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
+            and type(distribution) is Poisson
+            and type(link) is LogLink
+            and not use_observed_geometry
+            and not structured_alternative
+            and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
+        )
+    if presolve and not all_lambdas_fixed:
+        presolve_profile: dict = {}
+        presolve_start: dict = {}
+        _t0 = _time.perf_counter()
+        pre = optimize_discrete_reml_cached_w(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            sample_weight,
+            offset_arr,
+            reml_groups,
+            penalty_ranks,
+            lambdas,
+            weight_semantics=weight_semantics,
+            max_reml_iter=max_reml_iter,
+            reml_tol=min(reml_tol, _PRESOLVE_REML_TOL),
+            verbose=verbose,
+            penalty_caches=penalty_caches,
+            profile=presolve_profile,
+            select_snap=select_snap,
+            direct_solve=direct_solve,
+            reml_penalties=penalties,
+            estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            warm_lambdas=warm_lambdas,
+            start_out=presolve_start,
+            start_objective_tol=_PRESOLVE_OBJECTIVE_TOL,
+        )
+        warm_lambdas = {
+            **(warm_lambdas or {}),
+            **{
+                pc.name: float(pre.lambdas[pc.name])
+                for pc, free in zip(penalties, estimated_mask, strict=True)
+                if free
+            },
+        }
+        presolve_beta = presolve_start["beta"]
+        presolve_intercept = presolve_start["intercept"]
+        presolve_centred = presolve_start["centred"]
+        presolve_wall = _time.perf_counter() - _t0
+        if trace_run is not None and trace_run.enabled:
+            # The pre-solve runs untraced; one summary event stands for it, and
+            # the stream's REML evaluations start after it.
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "direct_reml",
+                    "phase": "presolve",
+                    "updates": int(pre.n_reml_iter),
+                    "objective": float(pre.objective) if pre.objective is not None else None,
+                    "lambdas": dict(pre.lambdas),
+                    "wall_s": float(presolve_wall),
+                    "termination_reason": pre.termination_reason,
+                },
+                channel="reml",
+                purpose="reml_presolve",
+                authoritative=False,
+            )
+        if profile is not None:
+            profile["reml_presolve_s"] = presolve_wall
+            profile["reml_presolve_n_iter"] = int(pre.n_reml_iter)
+            profile["reml_presolve_converged"] = bool(pre.converged)
+            profile["reml_presolve_termination_reason"] = pre.termination_reason
+            profile["reml_presolve_objective"] = pre.objective
+            for key, value in presolve_profile.items():
+                if key.startswith(("irls_", "reml_", "dm_")) and isinstance(value, int | float):
+                    profile[f"presolve_{key}"] = value
+
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
     # interaction penalty components from a materially stronger seed. A warm
     # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
     boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
-    S_boot = (
-        None
-        if use_structured
-        else build_penalty_matrix(
-            dm.group_matrices,
-            groups,
-            boot_lambdas,
-            dm.p,
-            reml_penalties=penalties,
+    # After the pre-solve every estimated component starts warm, so the
+    # bootstrap would fit the mode the first candidate fits again at the same
+    # lambdas: the candidate starts from the pre-solve's mode instead.
+    skip_bootstrap = presolve_beta is not None
+    if skip_bootstrap:
+        S_boot = None
+        boot_result = boot_inv = None
+        warm_beta = np.array(presolve_beta, dtype=np.float64, copy=True)
+        warm_intercept = presolve_intercept
+        warm_centred = presolve_centred
+    else:
+        S_boot = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                boot_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
         )
-    )
-    _t0 = _time.perf_counter()
-    boot_result, boot_inv, boot_xtwx = fit_irls_direct(
-        X=dm,
-        y=y,
-        weights=sample_weight,
-        family=distribution,
-        link=link,
-        groups=groups,
-        lambda2=boot_lambdas,
-        offset=offset_arr,
-        max_iter=max_pirls_iter,
-        tol=pirls_tol,
-        return_xtwx=True,
-        profile=profile,
-        direct_solve=direct_solve,
-        S_override=S_boot,
-        reml_penalties=penalties,
-        debug_recorder=debug_recorder,
-        # Nothing reads the bootstrap's rank metadata, and its data rank can
-        # take an O(n p^2) factor: a traced fit records it, as for candidates.
-        compute_rank_info=loop_fit_statistics,
-        debug_context={"phase": "bootstrap", "reml_iteration": 0},
-        trace_run=trace_run,
-        trace_purpose="reml_bootstrap",
-        _compensate_centred_intercept=False,
-        weight_semantics=weight_semantics,
-        _raw_moment_policy=raw_moment_policy,
-        _fisher_data_reuse=fisher_data_reuse,
-        _mode_bar=mode_bar,
-    )
-    _t_pirls += _time.perf_counter() - _t0
-    warm_beta = boot_result.beta.copy()
-    warm_intercept = float(boot_result.intercept)
-    warm_centred = centred_warm_start(boot_result)
+        _t0 = _time.perf_counter()
+        boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=boot_lambdas,
+            offset=offset_arr,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            return_xtwx=True,
+            profile=profile,
+            direct_solve=direct_solve,
+            S_override=S_boot,
+            reml_penalties=penalties,
+            debug_recorder=debug_recorder,
+            # Nothing reads the bootstrap's rank metadata, and its data rank can
+            # take an O(n p^2) factor: a traced fit records it, as for candidates.
+            compute_rank_info=loop_fit_statistics,
+            debug_context={"phase": "bootstrap", "reml_iteration": 0},
+            trace_run=trace_run,
+            trace_purpose="reml_bootstrap",
+            _compensate_centred_intercept=False,
+            weight_semantics=weight_semantics,
+            _raw_moment_policy=raw_moment_policy,
+            _fisher_data_reuse=fisher_data_reuse,
+            _mode_bar=mode_bar,
+        )
+        _t_pirls += _time.perf_counter() - _t0
+        warm_beta = boot_result.beta.copy()
+        warm_intercept = float(boot_result.intercept)
+        warm_centred = centred_warm_start(boot_result)
 
     boot_phi = 1.0
     boot_inv_phi = 1.0
-    if not scale_known:
+    if not scale_known and not skip_bootstrap:
+        assert boot_result is not None
         pq_boot = total_penalty_quadratic(
             boot_result.beta,
             boot_lambdas,
@@ -466,6 +642,8 @@ def optimize_direct_reml(
             # The warm start is the iterate; no Fellner-Schall step from it.
             rho[i] = np.clip(np.log(boot_lambdas[pc.name]), log_lo, log_hi)
             continue
+        # Reached only cold: after the pre-solve every component is warm.
+        assert boot_result is not None and boot_inv is not None
         gm = dm.group_matrices[pc.group_index]
         beta_g = boot_result.beta[pc.group_sl]
         quad = penalty_component_quadratic(pc, beta_g, gm)
@@ -879,6 +1057,8 @@ def optimize_direct_reml(
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
+                    "shoulder": [False] * m,
+                    "proj_grad_signed": [0.0] * m,
                 }
             converged = True
             termination_reason = "fixed_lambdas"
@@ -899,6 +1079,7 @@ def optimize_direct_reml(
         # W(rho) correction
         _t0 = _time.perf_counter()
         leverage_gradient = False
+        leverage_hessian = False
         if not discrete:
             leverage_gradient = bool(
                 type(distribution) is Binomial
@@ -907,6 +1088,13 @@ def optimize_direct_reml(
                 and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
                 and geometry is None
                 and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
+            )
+            leverage_hessian = bool(
+                not leverage_gradient
+                and not structured_alternative
+                and w_correction_order == 1
+                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
+                and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
@@ -947,6 +1135,7 @@ def optimize_direct_reml(
                     reml_penalties=penalties,
                     geometry=geometry,
                     gradient_only=leverage_gradient,
+                    leverage_hessian=leverage_hessian,
                 )
             except np.linalg.LinAlgError as error:
                 raise ObservedModeNotConvergedError(
@@ -962,12 +1151,21 @@ def optimize_direct_reml(
         if profile is not None:
             correction_mode = "none"
             if w_corr is not None:
-                correction_mode = "leverage_gradient" if w_corr[1] is None else "derivative_grams"
+                if w_corr[1] is not None:
+                    correction_mode = "derivative_grams"
+                elif len(w_corr) > 2:
+                    correction_mode = "leverage_hessian"
+                else:
+                    correction_mode = "leverage_gradient"
             profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
+            _n_w_correction += 1
             grad_w_correction = w_corr[0]
             dH_extra = w_corr[1]
+            # Second order: the second-derivative terms.  The leverage route:
+            # the first-order cross terms its pass formed in place of
+            # ``dH_extra``.  Either is an (m, m) term added to the Hessian.
             dH2_cross = w_corr[2] if len(w_corr) > 2 else None
             grad = grad_partial + grad_w_correction
         else:
@@ -1040,10 +1238,10 @@ def optimize_direct_reml(
                     np.asarray(stop_criterion_frozen) & (np.abs(proj_grad) >= _tol * score_scale)
                 )
             )
-            if not masked_live:
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                break
+            # The compound test is first order.  A point it accepts must also
+            # pass the second-order necessary condition to the precision asked
+            # for (``concave_live_directions``): on a concave shoulder of a
+            # plateau the gradient is small however far the optimum is.
             _t0 = _time.perf_counter()
             revalidated_hess = reml_direct_hessian(
                 dm.group_matrices,
@@ -1062,6 +1260,32 @@ def optimize_direct_reml(
                 dH2_cross=dH2_cross,
                 reml_penalties=penalties,
             )
+            concave_live = concave_live_directions(
+                proj_grad,
+                revalidated_hess,
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+                step_bound=max_newton_step,
+            )
+            if bool(np.any(concave_live)):
+                # The score test passed but the second-order check did not:
+                # record which shoulders refused the stop (score-test exit only).
+                _n_concave_stop_refusals += 1
+                if profile is not None:
+                    live = np.flatnonzero(concave_live)
+                    profile["reml_concave_stop_refusal"] = {
+                        "iter": int(n_iter),
+                        "names": [group_names[i] for i in live],
+                        "gradient": [float(abs(proj_grad[i])) for i in live],
+                        "curvature": [float(revalidated_hess[i, i]) for i in live],
+                        "step_bound": float(max_newton_step),
+                    }
+            if not masked_live and not bool(np.any(concave_live)):
+                _t_hessian += _time.perf_counter() - _t0
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                break
             revalidation = freeze_flat_directions(
                 proj_grad,
                 revalidated_hess,
@@ -1069,6 +1293,7 @@ def optimize_direct_reml(
                 estimated_mask,
                 objective=obj,
                 tolerance=_tol,
+                step_bound=max_newton_step,
             )
             if profile is not None:
                 profile["reml_freeze_revalidated"] = True
@@ -1086,11 +1311,18 @@ def optimize_direct_reml(
                     "score_scale": float(score_scale),
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
+                    "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
+                    # The shoulder arm reads the sign (``concave_live_directions``).
+                    "proj_grad_signed": [float(v) for v in proj_grad],
                 }
             _t_hessian += _time.perf_counter() - _t0
-            reactivated = (
+            reactivated = concave_live | (
                 ~np.asarray(revalidation.frozen)
-                & np.asarray(stop_criterion_frozen)
+                & (
+                    np.asarray(stop_criterion_frozen)
+                    if stop_criterion_frozen is not None
+                    else np.zeros(m, dtype=bool)
+                )
                 & (np.abs(proj_grad) >= _tol * score_scale)
             )
             if not bool(np.any(reactivated)):
@@ -1154,8 +1386,10 @@ def optimize_direct_reml(
             estimated_mask,
             objective=obj,
             tolerance=_tol,
+            step_bound=max_newton_step,
         )
         frozen = freeze_decision.frozen
+        shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
@@ -1176,7 +1410,23 @@ def optimize_direct_reml(
                 "score_scale": float(score_scale),
                 "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen],
+                "shoulder": [bool(v) for v in shoulder],
+                # The shoulder arm reads the sign (``concave_live_directions``).
+                "proj_grad_signed": [float(v) for v in proj_grad],
             }
+            if shoulder.any():
+                # Every iteration that steps a shoulder, with its signed
+                # gradient and curvature: the last freeze decision alone
+                # forgets a shoulder read earlier in the fit.
+                idx = np.flatnonzero(shoulder)
+                profile.setdefault("reml_shoulder_reads", []).append(
+                    {
+                        "iter": int(n_iter),
+                        "names": [group_names[i] for i in idx],
+                        "gradient": [float(proj_grad[i]) for i in idx],
+                        "curvature": [float(hess[i, i]) for i in idx],
+                    }
+                )
 
         if active_idx.size == 0:
             rho = rho_clipped
@@ -1209,25 +1459,33 @@ def optimize_direct_reml(
             termination_reason = "active_set_stationary"
             break
 
-        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
-        if active_idx.size < m:
-            hess_sub = hess[np.ix_(active_idx, active_idx)]
-            grad_sub = grad[active_idx]
-        else:
-            hess_sub = hess
-            grad_sub = grad
-
-        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
-        max_eig = max(abs(eigvals_h).max(), 1e-12)
-        eig_floor = max_eig * _eps**0.7
-        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
-
-        hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
-        delta_sub = -np.linalg.solve(hess_pd, grad_sub)
-
-        # Scatter back to full delta
+        # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues.
+        # A concave shoulder takes its trust-region step instead: the model
+        # decreases without bound along negative curvature, so the step lies
+        # on the region's boundary (More & Sorensen 1979), here the step cap,
+        # in the descent direction.  A flipped-curvature Newton step on an
+        # exponential shoulder moves one e-fold per iteration.
+        newton_idx = np.where(~frozen & ~shoulder)[0] if shoulder.any() else active_idx
         delta = np.zeros(m)
-        delta[active_idx] = delta_sub
+        if newton_idx.size:
+            if newton_idx.size < m:
+                hess_sub = hess[np.ix_(newton_idx, newton_idx)]
+                grad_sub = grad[newton_idx]
+            else:
+                hess_sub = hess
+                grad_sub = grad
+
+            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
+            max_eig = max(abs(eigvals_h).max(), 1e-12)
+            eig_floor = max_eig * _eps**0.7
+            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
+
+            hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
+            delta_sub = -np.linalg.solve(hess_pd, grad_sub)
+
+            # Scatter back to full delta
+            delta[newton_idx] = delta_sub
+        delta[shoulder] = -np.sign(proj_grad[shoulder]) * max_newton_step
 
         # Proportional step cap: scale entire vector if any component > max_step
         max_delta = float(np.max(np.abs(delta)))
@@ -1590,20 +1848,49 @@ def optimize_direct_reml(
             active_grad_norm = (
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )
+            dead_evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
+                candidate_mode_stationary, obj
+            )
+            dead_predicted_decrease = (
+                None
+                if max_delta > max_newton_step or bool(shoulder.any())
+                else newton_predicted_decrease(
+                    grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
+                )
+            )
             termination_reason = classify_dead_feasible_exit(
                 active_grad_norm,
                 objective=obj,
                 tolerance=_tol,
-                evaluated_trial=evaluated_feasible_trial
-                and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
-                predicted_decrease=(
-                    None
-                    if max_delta > max_newton_step
-                    else newton_predicted_decrease(
-                        grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
-                    )
-                ),
+                evaluated_trial=dead_evidence,
+                predicted_decrease=dead_predicted_decrease,
             )
+            if profile is not None:
+                # The dead-search exit's evidence, as the discrete engine
+                # records it.
+                profile["reml_dead_line_search"] = {
+                    "iter": int(n_iter),
+                    "active_gradient_norm": active_grad_norm,
+                    "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale),
+                    "predicted_decrease": dead_predicted_decrease,
+                    "decrease_bar": float(_tol * score_scale),
+                    "evaluated_trial": bool(dead_evidence),
+                    "candidate_mode_stationary": bool(candidate_mode_stationary),
+                    "termination_reason": termination_reason,
+                }
+            # The second-order check (``concave_live_directions``) gates the
+            # score-test exit only.  A shoulder here is flat by construction,
+            # its gradient under the precision floor this exit certifies, and
+            # over the shortest step just rejected (5/128 in log lambda) its
+            # model promises at most 0.041 times that floor: about four times
+            # the objective's resolution at the default reml_tol (1e-9), and
+            # 4e-9 / reml_tol times it at a tighter one.  A decrease the
+            # rejected trials have just failed to show is no ground to refuse
+            # a certified point.  (The native-Windows flip of
+            # test_sz_aliased_levels_converge_under_reml[one_row] first blamed
+            # on refusing here was the unsigned shoulder read the signed rule
+            # removes.)  test_a_dead_search_beside_a_live_shoulder_certifies
+            # pins this exit beside a shoulder on both engines.
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0
@@ -1617,6 +1904,7 @@ def optimize_direct_reml(
         profile["reml_objective_s"] = _t_objective
         profile["reml_gradient_s"] = _t_gradient
         profile["reml_w_correction_s"] = _t_w_correction
+        profile["reml_n_w_correction"] = _n_w_correction
         profile["reml_observed_geometry_s"] = _t_observed_geometry
         profile["reml_observed_mode_residual_accepted_max"] = _accepted_observed_mode_residual_max
         profile["reml_observed_mode_residual_rejected_trial_max"] = (
@@ -1624,6 +1912,7 @@ def optimize_direct_reml(
         )
         profile["reml_observed_mode_rejected_trial_count"] = _observed_mode_rejected_trial_count
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_w_correction_order"] = int(w_correction_order)
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch

@@ -10,10 +10,11 @@ record next to the places it does not.
 It is a point-in-time study on one book and one family. Read
 [Caveats](#caveats) before quoting any number here.
 
-The PSST-versus-FAST rankings below used the earlier PSST denominator,
-`sqrt(2 * edf0)`. The current screen uses the candidate's squared shrinkage
-factors for its reference variance. These historical correlations have not
-been recomputed with that correction. The unpenalized categorical examples
+The rankings below use the current screen, whose reference variance comes
+from the candidate's squared shrinkage factors. The earlier denominator,
+`sqrt(2 * edf0)`, is shown beside it for comparison with the first version of
+this page; on these candidates the two differ appreciably only for the
+spline-by-spline (`ti`) pairs and change no conclusion. The unpenalized categorical examples
 later on this page retain the same normalization.
 The [reference-variance follow-up](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-psst-reference-variance.md)
 records the derivation, regenerated guide and null battery, a small paired
@@ -33,10 +34,21 @@ truth — no top-k shortlist.
 
 ## Setup
 
-freMTPL2 frequency, under the replication weight contract
+freMTPL2 frequency, with the claim counts taken from the severity file.
+`freMTPL2freq` records the wrong `ClaimNb` for policies with `IDpol` up to
+24,500, so, following Wüthrich & Merz (*Statistical Foundations of Actuarial
+Learning and its Applications*, Springer 2023, Section 13.1), each policy's
+count is the number of its claims in `freMTPL2sev`, the six policies with
+more than five claims are dropped and exposure is capped at one year
+(`load_corrected_freq` in `examples/fremtpl2_data.py`). The first version of
+this page used the published counts; where a conclusion changed with the
+correction, the section says so.
+
+The data are fitted under the replication weight contract
 (`weight_semantics="frequency"`):
 
 ```python
+# df = load_corrected_freq()            # examples/fremtpl2_data.py
 df["Exposure"] = df["Exposure"].clip(lower=0.01)
 exposure = df["Exposure"].to_numpy(float)
 y = df["ClaimNb"].to_numpy(float) / exposure   # claim RATE
@@ -48,15 +60,21 @@ contract used by Tweedie.
 
 | | |
 |---|---|
-| Full book | 678,013 rows / 36,102 claims |
-| Study sample | 200,000 rows (`random_state=0`) / 10,633 claims |
-| Split | 70/30 hash of `IDpol` → 139,790 train / 60,210 holdout |
+| Full book | 678,007 rows / 26,383 claims |
+| Study sample | 200,000 rows (`random_state=0`) / 7,813 claims |
+| Split | 70/30 hash of `IDpol` → 139,887 train / 60,113 holdout |
 
-Both *screens* handle the full book comfortably. The binding constraint is the
-gold standard: one confirmatory refit of the cheapest pair on 678k rows takes
-**733.8 s**, and the study needed 36 refits. The subsample is applied
-identically to both methods and to the gold standard, and every ranking was
-re-run on the full 678k book to confirm no conclusion depends on it.
+A policy is in the training split when the first eight hexadecimal digits of
+the MD5 digest of its `IDpol`, taken mod 100, are below 70. A second split,
+built the same way from SHA-1, is used as a check.
+
+Both *screens* handle the full book comfortably, and on the current release
+so does the gold standard: on one thread, each confirmatory refit on the full
+book took between 14 s and 202 s. The tables keep the 200,000-row sample,
+applied identically to both methods and to the gold standard, and every
+ranking and every refit was also re-run on the full book (474,109 train /
+203,898 holdout rows on the same hash split); those results are given beside
+the sample's.
 
 Two specifications were run, because the choice turns out to be load-bearing:
 
@@ -77,63 +95,81 @@ identical.
 Spearman correlation of each screen's ranking against the ranking by
 **realized out-of-sample deviance gain** from the confirmatory refit.
 
-| ranker | spec A (n=8) | spec B (n=10) |
-|---|---:|---:|
-| **PSST `z`** | **+0.810** | **+0.830** |
-| FAST, default | +0.667 | +0.612 |
-| FAST, `Purify` flag | +0.714 | +0.661 |
-| FAST, on its own EBM baseline | +0.714 | +0.661 |
-| FAST, no baseline at all | +0.667 | +0.564 |
-| FAST, full-tensor gain | +0.524 | +0.321 |
+| ranker | spec A (n=8) | spec B (n=10) | A, second split | B, second split | A, full book | B, full book |
+|---|---:|---:|---:|---:|---:|---:|
+| **PSST `z`** | **+0.905** | **+0.867** | **+0.857** | **+0.879** | **+0.952** | **+0.952** |
+| PSST, earlier denominator | +0.905 | +0.842 | +0.857 | +0.830 | +0.952 | +0.952 |
+| FAST, default | +0.738 | +0.733 | +0.762 | +0.806 | +0.929 | +0.927 |
+| FAST, `Purify` flag | +0.738 | +0.733 | +0.762 | +0.794 | +0.929 | +0.927 |
+| FAST, on its own EBM baseline | +0.738 | +0.709 | +0.690 | +0.794 | +0.857 | +0.830 |
+| FAST, no baseline at all | +0.571 | +0.685 | +0.571 | +0.770 | +0.571 | +0.745 |
+| FAST, full-tensor gain | +0.714 | +0.721 | +0.690 | +0.782 | +0.738 | +0.818 |
 
-PSST ranks better on every FAST configuration found, on both specs, on
-Spearman and Kendall.
+PSST ranks better on every FAST configuration found, on both specs, both
+splits and the full book, on Spearman and Kendall. On the full book the margin
+over default FAST shrinks to about one rank swap.
 
-Against **in-sample** gain the result reverses — FAST +0.394 against PSST
-+0.309 — and against a complexity-penalised in-sample view (`gain - 2*edf`)
-`Purify`-flagged FAST is the best ranker in the whole study at +0.964, above
-PSST's +0.855. All three are reported because the choice of gold standard, not
-the screens, decides the winner.
+Against **in-sample** gain the result reverses — on spec B, FAST +0.236
+against PSST +0.030. Against a complexity-penalised in-sample view
+(`gain - 2*edf`), PSST is the best ranker on the sample at +0.952 on spec B,
+above the best FAST variant (+0.879, no baseline); on the full book the two
+tie. This is a change from the published counts, where `Purify`-flagged FAST
+led this view. All three are reported because the choice of gold standard, not
+the screens, decides the winner, and on the corrected counts only the
+in-sample view still favours FAST.
 
 ### Why the two verdicts disagree
 
-One row accounts for it. `VehBrand x Region` is an 11 x 22 factor block:
+One row accounts for most of it. `VehBrand x Region` is an 11 x 22 factor
+block:
 
 | | value |
 |---|---|
-| effective df | 208 |
-| in-sample deviance gain | +237.6 (rank **2 of 10**) |
-| out-of-sample deviance gain | **−903.7** (rank 10 of 10) |
-| PSST rank | 10 of 10 (`z` = −5.89) |
-| FAST rank | 10 of 10 |
+| effective df | 209 |
+| in-sample deviance gain | +195.7 (rank **1 of 10**) |
+| out-of-sample deviance gain | **−1,887.9** (rank 10 of 10) |
+| PSST rank | 10 of 10 (`z` = −7.15) |
+| FAST rank | 9 of 10 |
 
-It buys the second-largest training gain in the study and destroys nearly four
-times that on the holdout. Both screens rank it last; the in-sample gold ranks
-it second. **Both screens are right and the in-sample gold standard is
-wrong** — and because PSST is maximally "wrong" against that gold, this single
-row is most of the reason the in-sample comparison reverses.
+It buys the largest training gain in the study and loses nearly ten times
+that on the holdout. Both screens put it at or next to the bottom; the
+in-sample gold ranks it first. **Both screens are right and the in-sample gold
+standard is wrong** — and because PSST is maximally "wrong" against that gold,
+this single row is most of the reason the in-sample comparison reverses.
 
 ## Mechanism
 
-The two screens disagree materially on three pairs. For each, the realized
-interaction surface was refit, the shift in linear predictor extracted, and
-the fraction of its weighted variance reproducible by each screen's probe
-shape measured directly.
+On the published counts the two screens disagreed materially on three pairs,
+and the disagreement was traced by refitting the realized interaction surface,
+extracting the shift in linear predictor, and measuring the fraction of its
+weighted variance each screen's probe shape can reproduce. The same
+measurement on the corrected counts, spec A:
 
-**`BonusMalus x VehBrand`** — PSST ranks it 2nd of 8, FAST 7th; the refit puts
-it **2nd out of sample** (+37.2 on 9.8 edf).
+**`BonusMalus x VehBrand`** — PSST ranks it 1st of 8, FAST 4th of 10 (2nd of
+the 8 pairs both could rank); the refit puts it **1st out of sample** (+20.3
+on 10.0 edf).
 
 | | |
 |---|---|
-| reproducible by a per-level linear slope (PSST's `numeric_cat` probe) | **96.4%** |
-| reproducible by the best 4-quadrant step (FAST's probe) | 72.1% |
-| total weighted shift variance | **576** |
-| …against `VehAge x Region` | 32,778 |
+| reproducible by a per-level linear slope (PSST's `numeric_cat` probe) | **98.1%** |
+| reproducible by the best 4-quadrant step (FAST's probe) | 74.7% |
+| total weighted shift variance | **675** |
+| …against `VehAge x Region` | 491 |
 
-**`VehAge x Region`** is the mirror image and FAST's clearest false positive:
-FAST ranks it 3rd–4th, PSST 7th–9th, and the refit shows a 30.8-edf term that
-gains 88 in training and **loses** it out of sample. FAST's probe explains only
-**1.7%** of that pair's shift — but 1.7% of 32,778 still exceeds 72.1% of 576.
+Here the shift variance is the exposure-weighted sum of squared deviations of
+the shift over the training rows, and the 4-quadrant step is the best single
+cut on each axis, with factor levels ordered by their mean shift first.
+
+**`VehAge x Region`** was FAST's clearest false positive on the published
+counts: FAST ranked it 3rd–4th, PSST 7th–9th, and its large shift (32,778
+against 576) let a probe that explained only 1.7% of it outrank
+`BonusMalus x VehBrand`. On the corrected counts that shift is 491, smaller
+than `BonusMalus x VehBrand`'s; most of its size came with the miscounted
+claims. FAST now ranks it 5th–7th of 10 and PSST 7th–9th, and the refit, a
+28-edf term that gains 41 in training and loses 8 out of sample, agrees with
+both. No pair takes over that role consistently: FAST's top pair under spec B,
+`BonusMalus x Region` (PSST 4th), loses 2.1 out of sample on this split but
+gains 22.9 on the second split and 67.8 on the full book.
 
 FAST reports an average Newton gain, while the benchmarked PSST subtracts the probe EDF and
 rescales its local score. That complexity adjustment can promote a smaller,
@@ -143,40 +179,46 @@ The [reference-law limitation](../how-to/screen-interactions.md#reference-distri
 explains why reference standardization alone does not establish fitted-model calibration.
 
 FAST's `Purify` flag removes main-effect-shaped components from the tensor.
-It moves FAST toward PSST's ordering and is its best-performing variant in
-this comparison. Removing additive components matters for both methods;
-their projection procedures need not be identical.
+On the published counts it moved FAST toward PSST's ordering. On the
+corrected counts it leaves FAST's ordering unchanged in five of the six
+comparisons and makes two adjacent swaps in the sixth, so it neither helps
+nor hurts here. Removing additive components matters for both methods; their projection
+procedures need not be identical.
 
 The obvious alternative explanation was tested and **refuted**. 57% of rows
 share a single `BonusMalus` value, so tie-heavy quantile binning was the
 suspect; rank-uniformising the margins and raising `max_interaction_bins` to
-256 and 1024 leave FAST's ordering completely unchanged. Binning resolution is
-not the mechanism.
+256 and 1024 leave FAST's ordering completely unchanged, in every run on
+either set of counts. Binning resolution is not the mechanism.
 
 ## Where FAST wins
 
-`VehAge x BonusMalus`. FAST ranks it **2nd on every configuration and both
-splits**, and the refit confirms it: gold rank 3 by both standards, +32.0 out
-of sample on 10.1 edf. Under spec A, PSST cannot rank it at all — spline x
-numeric is deferred.
+Under spec A, the pairs of a spline with `BonusMalus` are spline x numeric,
+which PSST defers, and on the corrected counts they are the best pairs in the
+study. `DrivAge x BonusMalus` is the top pair out of sample under spec B on
+both splits and the full book (+38.2 on 17.2 edf on this split), and
+`VehAge x BonusMalus` is 3rd on both splits (+13.5 on 5.5 edf). FAST ranks
+`DrivAge x BonusMalus` **1st** of 10 under spec A and `VehAge x BonusMalus`
+3rd; PSST cannot rank either.
 
-Stated fairly in both directions: superglm cannot *fit* that interaction under
-spec A either, so the deferral is internally consistent and the screen is not
-hiding something the model could exploit. And the remedy works — under spec B
-PSST ranks the same pair **1st** (`z` = 11.83), above FAST's 2nd.
+Stated fairly in both directions: superglm cannot *fit* those interactions
+under spec A either, so the deferral is internally consistent and the screen
+is not hiding something the model could exploit. And the remedy works — under
+spec B PSST ranks `DrivAge x BonusMalus` **1st** (`z` = 5.09) and
+`VehAge x BonusMalus` 2nd (`z` = 4.99), against FAST's 2nd and 3rd.
 
 But the deeper reading is that spec A was the problem. `BonusMalus` fitted as a
-spline uses **edf 7.5 of 11** with chi2(8.2) = 1705.9; specifying it linearly
-costs 195 deviance in sample and 37 on the holdout. It is a strongly curved
-feature, and the only reason this pair was ever spline x numeric is that a
+spline uses **edf 7.9 of 11** with chi2(8.7) = 1519.6; specifying it linearly
+costs 235 deviance in sample and 83 on the holdout. It is a strongly curved
+feature, and the only reason these pairs were ever spline x numeric is that a
 worked example declared an obviously non-linear margin linear. The screening
 guide's example has since been respecified. What remains true is narrower: a
-practitioner who mis-specifies a curved numeric gets a queue with a real
-interaction silently absent, and FAST's queue does not have that hole.
+practitioner who mis-specifies a curved numeric gets a queue with real
+interactions silently absent, and FAST's queue does not have that hole.
 
 ## Cost
 
-Ten candidate pairs, n = 200,000:
+Ten candidate pairs, n = 200,000, as first measured on the published counts:
 
 | | spec A | spec B |
 |---|---:|---:|
@@ -184,64 +226,74 @@ Ten candidate pairs, n = 200,000:
 | FAST `measure_interactions` | 0.106 s | 0.113 s |
 | *one* confirmatory refit (full book, cheapest pair) | **733.8 s** | |
 
-In this recorded comparison, FAST was **26–43× faster** than PSST. The
+In that recorded comparison, FAST was **26–43× faster** than PSST. The
 733.8-second refit used the full 678,013-row book, whereas the two screen
 timings above used 200,000 rows; they do not support a direct screen-to-refit
 speed ratio. These are historical measurements of the benchmarked versions,
-not timings of subsequent implementations.
+not timings of subsequent implementations. The rerun on the corrected counts
+was single-threaded on a shared machine, so its times are indicative only: the
+PSST sweep took about 0.4 s and FAST about 0.1–0.2 s on the 139,887-row
+training split, and each full-book refit 14–202 s.
 
 ## The baseline: deviance against shape
 
 PSST is defined against the fitted mains model, so the quality of that model
 bounds the screen. FAST turns out to be nearly insensitive to which additive
-model it screens against — its ranking barely moves between the superglm
-baseline, an EBM baseline, and *no baseline at all* — which is itself a
-finding: on this book it behaves more like a marginal-dependence detector than
-a residual-structure detector. PSST has no such property.
+model it screens against — across the corrected runs its ranking correlates
+at 0.82–0.99 with itself between the superglm baseline, an EBM baseline and
+*no baseline at all* — which is itself a finding: on this book it behaves more
+like a marginal-dependence detector than a residual-structure detector. PSST
+has no such property.
 
-That makes the mains model worth measuring. Fitted on the same split
-(measurements below use an independently constructed 139,752/60,248 split, so
-they are internally consistent but not directly comparable to the refit gains
-above):
+That makes the mains model worth measuring. Fitted on the same split as the
+refits above:
 
-| model | train deviance | **holdout deviance** | fit |
+| model | train deviance | **holdout deviance** | fit (one thread) |
 |---|---:|---:|---:|
-| superglm (spec B, penalized splines) | 44,419.8 | 18,933.8 | 1.5 s |
-| EBM mains (`interactions=0`, 8 bags) | 43,550.3 | **18,499.4** | 8.1 s |
+| superglm (spec B, penalized splines) | 33,737.8 | 14,339.7 | 2.7 s |
+| EBM mains (`interactions=0`, 8 bags) | 33,431.9 | **14,279.6** | 33.1 s |
 
-**The EBM mains model is genuinely better on deviance** — by 870 in sample and
-**434 out of sample**. It is not merely more flexible; it generalises better.
-Stated plainly because it is the result.
+**The EBM mains model is still better on deviance** — by 306 in sample and
+**60 out of sample**. That holdout gap is about a seventh of the 431 measured
+on the published counts, but it is not noise to be explained away: it
+generalises. Stated plainly because it is the result.
 
-Two things follow. First, the gap is resolution on the smooth margins, not
-regularization of the factors:
+Two things follow. First, on the corrected counts the gap is explained by
+neither knot resolution nor regularization of the factors:
 
 | variant | holdout | gap to EBM closed |
 |---|---:|---:|
-| baseline (k=8/6/8, fixed factors) | 18,933.8 | — |
-| richer splines (k=20 each) | 18,705.9 | **228 of 434** |
-| credibility factors (`RandomEffect`) | 18,932.6 | 1 of 434 |
+| baseline (k=8/6/8, fixed factors) | 14,339.7 | — |
+| richer splines (k=20 each) | 14,334.7 | 5 of 60 |
+| credibility factors (`RandomEffect`) | 14,335.0 | 5 of 60 |
 
-Shrinking the 33 factor levels buys nothing. Knot resolution buys half the gap.
+On the published counts richer splines closed about half the gap and
+credibility factors almost none. On the corrected counts each closes a
+twelfth, and most of the gap is left unexplained by either.
 
 Second — and this is why the deviance table is not the end of it — the shape
 EBM buys it with is not one a pricing model can ship. Measuring monotonicity
-violations along the fitted `BonusMalus` relativity over its observed range:
+violations along the fitted `BonusMalus` effect over its observed range, on
+the log scale against BM=50 at every integer from 50 to 230:
 
-| fit | dips | **total violation** | relativity at BM=230 |
-|---|---:|---:|---:|
-| superglm, ps k=8 uniform | 41 | 0.175 | 2.530 |
-| superglm, ps k=12 `quantile_tempered` | 8 | 0.233 | 2.405 |
-| **EBM mains** | 18 | **4.094** | 1.995 |
+| fit | dips | **total violation** | violation up to BM=150 | log-relativity at BM=230 |
+|---|---:|---:|---:|---:|
+| superglm, ps k=8 uniform | 34 | 0.773 | 0.017 | 2.772 |
+| superglm, ps k=12 `quantile_tempered` | 36 | 0.615 | 0.068 | 2.770 |
+| **EBM mains** | 16 | **2.598** | **2.598** | 3.599 |
 
-EBM's total violation is **23× the penalized spline's**, and it is not diffuse
-wiggle. Its fitted relativity runs 0.942 at BM=70 and **0.620 at BM=90** — the
-model asserts that a driver at bonus-malus 90 has materially lower claim
-frequency than one at 70. That is a reversal in the middle of the scale, on
+EBM's total violation is **3.4× the penalized spline's**, down from 23× on
+the published counts, but the totals hide where it sits. Above BM=150, where
+0.02% of the training exposure lies, the spline drifts down by 0.76 as it
+extrapolates a smooth through a nearly empty tail; up to BM=150 its violation
+is 0.017 and EBM's is 2.598, about 150 times as much. EBM's is not diffuse
+wiggle. Its fitted log-relativity is 1.258 at BM=75 and **0.919 at BM=80** —
+the model asserts that a driver at bonus-malus 80 has about 29% lower claim
+frequency than one at 75. That is a reversal in the middle of the scale, on
 the one variable in the book whose direction is a matter of contractual
 definition rather than inference.
 
-So the honest summary is that EBM wins 434 holdout deviance and loses the
+So the honest summary is that EBM wins 60 holdout deviance and loses the
 shape, and on a rating factor like Bonus-Malus the shape is the binding
 constraint. This is the ordinary penalized-GAM-against-boosting trade, and it
 is stated here rather than left out because the deviance comparison alone
@@ -249,13 +301,15 @@ would be misleading in our favour.
 
 Two practical notes fell out of the same measurements:
 
-- **Tempered-quantile knots are worth using on Bonus-Malus**, as
-  [Feature Types](../how-to/specify-features.md) already recommends: they improve holdout
-  deviance and cut dips from 41 to 8. Plain `quantile_rows` is **bit-identical
-  to uniform** on this feature and buys nothing — with 57% of mass at the
-  scale minimum, every quantile up to the 57th *is* that value, so the interior
-  knots collapse onto one point and de-duplicate back to uniform. Tempering is
-  what rescues it.
+- **Tempered-quantile knots on Bonus-Malus** improve holdout deviance only
+  slightly here (14,339.7 to 14,336.6) and do not cut the dips (34 to 36),
+  where on the published counts they had cut them from 41 to 8. The first
+  version of this page also found plain `quantile_rows` **bit-identical to
+  uniform** on this feature, because 57% of the mass sits at the scale
+  minimum and the interior knots collapsed onto it. That no longer holds on
+  the current release, on either set of counts: `quantile_rows` gives a
+  holdout deviance of 14,337.1 here, with 49 dips and a total violation of
+  0.217.
 - Enforcing monotonicity directly is the obvious response to the shape
   problem, and it does not currently work through `fit_reml()`. See
   [issue #189](https://github.com/StrudelDoodleS/superglm/issues/189).
@@ -306,8 +360,8 @@ size settles nothing. See [caveats 9 and 15](#caveats).
 
 ### The threshold is not a constant
 
-[Caveat 3](#caveats) already notes that scoring by `gain - 2*edf` changes which
-screen wins. For the unpenalized Gaussian `cat_cat` rows measured here, the
+[Caveat 3](#caveats) already notes that the choice among in-sample gain,
+out-of-sample gain and `gain - 2*edf` changes which screen wins. For the unpenalized Gaussian `cat_cat` rows measured here, the
 Cp score rule can also be written as a threshold on PSST's z. Their reference
 variance is `2·edf0`, so `z = (T/φ − edf0) / sqrt(2·edf0)` gives:
 
@@ -504,27 +558,31 @@ benchmark does. Reproduce with
 Any of these could change a conclusion.
 
 1. **Eight to ten pairs.** A one-place swap moves Spearman by 0.05–0.10, so
-   the +0.83 against +0.61 margin is about two rank swaps wide. It reproduces
-   on both specs, both splits and the full book, but it is not a large-sample
-   claim.
-2. **One holdout.** A single 60,210-row split, no repeated splitting or CV.
-   `VehBrand x Region`'s −904 is unambiguous; the ordering among the small
-   positives (+5.6, +2.5, +0.5, −0.25) is within holdout noise.
+   the +0.87 against +0.73 margin on spec B is about two rank swaps wide, and
+   on the full book it is about one. It reproduces on both specs, both splits
+   and the full book, but it is not a large-sample claim.
+2. **One holdout per split.** A 60,113-row holdout, checked against one second
+   split; no repeated splitting or CV. `VehBrand x Region`'s −1,888 is
+   unambiguous; the ordering among the small effects (+2.1, −2.1, −3.7, −7.3,
+   −7.7) is within holdout noise.
 3. **The gold standard's definition decides the winner.** Out-of-sample gain
-   favours PSST, in-sample gain favours FAST, `gain - 2*edf` favours
-   `Purify`-FAST. The out-of-sample reading is taken as primary here; that
-   choice should be quoted alongside the result.
+   and `gain - 2*edf` favour PSST; in-sample gain favours FAST. On the
+   published counts `gain - 2*edf` had favoured `Purify`-FAST. The
+   out-of-sample reading is taken as primary here; that choice should be
+   quoted alongside the result.
 4. **The gold standard is superglm's own refit** — by construction the exact
    basis PSST probes. A gold standard defined by EBM's own pair refit would
    likely favour FAST. That experiment was not run. Scoring on out-of-sample
    deviance mitigates this but does not remove it.
-5. **One book, one family.** Poisson frequency on freMTPL2. The mechanism
-   above predicts the ordering generalises to any book mixing small
-   well-identified with large thinly-identified interactions — a prediction,
-   not a result.
-6. **Subsample.** Gold-standard refits are at 200k of 678k rows. Both
-   rankings are stable at full scale; the refit gains themselves were not
-   recomputed at 678k.
+5. **One book, one family.** Poisson frequency on freMTPL2, with the claim
+   counts corrected from the severity file. The mechanism above predicts the
+   ordering generalises to any book mixing small well-identified with large
+   thinly-identified interactions — a prediction, not a result.
+6. **Subsample.** The main tables use 200,000 of 678,007 rows. Every ranking
+   and every confirmatory refit was re-run on the full book on the first
+   split, and the ranking conclusions hold there, with the out-of-sample
+   margin narrowed to about one rank swap. The mains-model and Bonus-Malus
+   comparison was measured on the sample only.
 7. **`DisableNewton`** is not reachable through the public
    `measure_interactions` surface and was not swept.
 
@@ -718,10 +776,28 @@ only, which is a separate simulated study.
 ## Reproducing
 
 The FAST comparison requires `interpret-core`, which is not a dependency of
-this library; it was supplied out of tree and nothing in the package was
-modified to run it. The mains-model and relativity measurements in
-[the baseline section](#the-baseline-deviance-against-shape) need only
-superglm and the freMTPL2 parquet.
+this library; it was installed in a separate environment (version 0.7.8) and
+nothing in the package was modified to run it. Every measurement in the
+freMTPL2 sections above comes from `benchmarks/fremtpl_screening_study.py`,
+one JSON file per run and a `report` step that prints the tables:
+
+```
+python benchmarks/fremtpl_screening_study.py pairs --spec A --out OUT
+python benchmarks/fremtpl_screening_study.py pairs --spec B --out OUT
+python benchmarks/fremtpl_screening_study.py baseline --out OUT
+python benchmarks/fremtpl_screening_study.py report --out OUT
+```
+
+`--split secondary` gives the second split, `--scale full` the full book
+(`--no-refit`, then one `--pair A:B` run per refit), and `--book raw` the
+published counts. On the published counts the script reproduces the first
+version's spec B mains deviances (44,419.8 train, 18,933.8 holdout), its
+credibility-factor holdout and its k=8 Bonus-Malus shape row to the printed
+digit, its k=20 holdout to within 0.1, and its EBM deviances to within 0.2%.
+Figures that depend on knot placement that has changed since (the tempered
+and `quantile_rows` rows) do not reproduce. The split behind the first
+version's pair study could not be reconstructed, so its pair-level figures
+could not be checked directly.
 
 [From rank to decision](#from-rank-to-decision-does-the-pair-pay-for-its-own-df)
 is simulated and needs neither, so it runs from a clean checkout:

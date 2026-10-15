@@ -115,6 +115,7 @@ def compile_predictor_design(
     alias_prune: bool = True,
     own_specs: bool = True,
     first_tensor_id: int = 0,
+    separation_response: NDArray | None = None,
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
 
@@ -136,7 +137,12 @@ def compile_predictor_design(
     ``separation_boundaries`` is the caller's response-boundary tuple, empty
     when no scan is wanted; the terms it makes this build record come back on
     ``CompiledPredictorDesign.separation_records`` for the caller to scan once
-    it pairs them with a response.  ``group_pricing`` and ``alias_prune`` are
+    it pairs them with a response.  ``separation_response``, when the caller
+    has one, lets a spline-by-factor term scan its levels' curves while it
+    builds them, because it acts on what it finds: a level's curve directions
+    only a separated covariate range sees are held at their smooth
+    continuation (``SplineCategorical._hold_separated_levels``), and the
+    finding comes back as a ``("curve", name, curves)`` record.  ``group_pricing`` and ``alias_prune`` are
     passed through to the dimension pricing and the categorical-interaction
     pruning exactly as ``build_design_matrix`` documents them.
 
@@ -534,6 +540,7 @@ def compile_predictor_design(
             add_interaction(pair[0], pair[1], specs, interaction_specs, interaction_order)
     pending_interactions.clear()
     _next_tensor_id = first_tensor_id
+    scan_curves = separation_response is not None and bool(separation_boundaries)
 
     for iname in interaction_order:
         ispec = interaction_specs[iname]
@@ -551,6 +558,19 @@ def compile_predictor_design(
             parent_specs = specs
         else:
             parent_specs = {**specs, p1: spec1, p2: spec2}
+        curve_separation = (
+            (
+                separation_response,
+                sample_weight,
+                separation_boundaries,
+                isinstance(specs.get(ispec.cat_name), Categorical),
+                specs.get(ispec.spline_name)
+                if isinstance(specs.get(ispec.spline_name), _SplineBase)
+                else None,
+            )
+            if scan_curves and isinstance(ispec, SplineCategorical)
+            else None
+        )
         use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
         use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
             ispec,
@@ -603,12 +623,17 @@ def compile_predictor_design(
                 parent_specs,
                 n_bins_spline,
                 sample_weight=interaction_build_weight,
+                separation=curve_separation,
             )
         else:
             build_kwargs: dict[str, Any] = {"sample_weight": interaction_build_weight}
             if getattr(ispec, "accepts_alias_prune_flag", False):
                 build_kwargs["alias_prune"] = alias_prune
+            if curve_separation is not None:
+                build_kwargs["separation"] = curve_separation
             result = ispec.build(x1, x2, parent_specs, **build_kwargs)
+        if isinstance(ispec, SplineCategorical) and ispec._separated_curves:
+            separation_records.append(("curve", iname, ispec._separated_curves))
 
         pi_kwargs: dict[str, Any] = dict(
             B_unique=B_unique_inter,

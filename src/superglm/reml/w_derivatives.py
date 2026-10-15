@@ -11,6 +11,7 @@ References
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -23,9 +24,11 @@ from superglm._group_matrix._group_matrix_centered import (
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
+from superglm.reml._leverage_rows import solved_row_blocks
 from superglm.reml.observed_geometry import ObservedREMLGeometry
 from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
+    penalty_component_dense_matrix,
     penalty_component_matvec,
 )
 from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
@@ -105,6 +108,188 @@ def _leverage_gradient_rhs(
         compensation = (updated - result) - corrected
         result = updated
     return result
+
+
+@dataclass(frozen=True)
+class _PenaltyBatch:
+    """Adjacent penalty blocks of one shape, traced together (``_leverage_cross_batches``).
+
+    Block ``b`` is columns ``start + b * width`` onward, ``width`` of them, and
+    ``members[b]`` are its penalties, the ``dense`` matrix penalties first
+    (``stacked[b]``, lambda-scaled and side by side), then identity penalties
+    (``identity_scales[b]``, their lambdas).
+    """
+
+    start: int
+    width: int
+    members: NDArray
+    dense: int
+    stacked: NDArray | None
+    identity_scales: NDArray
+
+    @property
+    def stop(self) -> int:
+        return self.start + self.width * self.members.shape[0]
+
+
+def _leverage_derivative_terms(
+    dm: DesignMatrix,
+    inverse: NDArray,
+    mean_x: NDArray,
+    row_weights: NDArray,
+    sum_w: float,
+    batches: list[_PenaltyBatch],
+    penalty_rhs: NDArray,
+    mean_lo: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """The W(rho) gradient correction and the Hessian's penalty-by-weight cross traces, in one pass.
+
+    For each centred row ``x_r`` with a nonzero weight derivative ``w'_r``,
+    ``_leverage_rows.solved_row_blocks`` supplies ``y_r = H^-1 x_r`` and the
+    leverage ``h_r = x_r' y_r``.  With ``s_j = S_j beta`` (``penalty_rhs``) the
+    direction ``dbeta_j = -H^-1 s_j`` moves the linear predictor by ``x_r'
+    dbeta_j = -y_r' s_j`` and the working weight by ``a_jr = w'_r x_r'
+    dbeta_j``, and the pass accumulates
+
+    - ``grad_j = sum_r a_jr (h_r + 1/sum_w) / 2 = tr(H^-1 C_j) / 2 + d log(sum
+      W)/(2 drho_j)``, with ``C_j = X_c' diag(a_j) X_c`` (Wood 2011, sec.
+      3.5.1: ``tr(K' T_k K)`` from the leading diagonal of ``K K'``);
+    - ``P_ij = sum_r q_ri a_jr = tr(H^-1 S_i H^-1 C_j)``, ``q_ri = y_r' S_i
+      y_r`` with ``S_i = lambda_i Omega_i`` on its block: the Hessian's cross
+      term between the penalty derivative ``S_i`` and the weight derivative
+      ``C_j``.
+
+    Rows are centred as ``(x - mean_x) - mean_lo`` when the centre is an exact
+    pair.  The work is one solved row per data row whatever ``m`` is, ``O(n
+    p_i^2)`` per penalty block and ``O(n m^2)`` for ``P``: never a ``p x p``
+    Gram per penalty.
+    """
+    m = penalty_rhs.shape[1]
+    block_rhs = [
+        np.stack(
+            [
+                penalty_rhs[batch.start + b * batch.width : batch.start + (b + 1) * batch.width][
+                    :, members
+                ]
+                for b, members in enumerate(batch.members)
+            ]
+        )
+        for batch in batches
+    ]
+    grad = np.zeros(m, dtype=np.float64)
+    grad_compensation = np.zeros(m, dtype=np.float64)
+    cross = np.zeros((m, m), dtype=np.float64)
+    cross_compensation = np.zeros((m, m), dtype=np.float64)
+    for rows, solved, leverage in solved_row_blocks(
+        dm, inverse, mean_x, mean_lo, row_weights != 0.0
+    ):
+        quadratic = np.empty((rows.size, m), dtype=np.float64)
+        directions = np.empty((rows.size, m), dtype=np.float64)
+        for batch, rhs in zip(batches, block_rhs, strict=True):
+            # (blocks, rows, width): a view of each block's solved rows, for matmul
+            n_blocks, width = batch.members.shape[0], batch.width
+            solved_blocks = (
+                solved[:, batch.start : batch.stop]
+                .reshape(rows.size, n_blocks, width)
+                .transpose(1, 0, 2)
+            )
+            directions[:, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
+            # Row sums over a block's width as one matrix-vector product: a
+            # level is a dozen columns wide, too short for a loop per row.
+            ones = np.ones(width, dtype=np.float64)
+            if batch.stacked is not None:
+                products = np.matmul(solved_blocks, batch.stacked).reshape(
+                    n_blocks, rows.size, batch.dense, width
+                )
+                products *= solved_blocks[:, :, None, :]
+                quadratic[:, batch.members[:, : batch.dense]] = (
+                    (products.reshape(-1, width) @ ones)
+                    .reshape(n_blocks, rows.size, batch.dense)
+                    .transpose(1, 0, 2)
+                )
+            if batch.members.shape[1] > batch.dense:
+                squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
+                    n_blocks, rows.size
+                )
+                quadratic[:, batch.members[:, batch.dense :]] = (
+                    squares.T[:, :, None] * batch.identity_scales[None, :, :]
+                )
+        weighted = row_weights[rows, None] * directions
+        for total, compensation, contribution in (
+            (grad, grad_compensation, weighted.T @ (0.5 * (leverage + 1.0 / sum_w))),
+            (cross, cross_compensation, quadratic.T @ weighted),
+        ):
+            corrected = contribution - compensation
+            updated = total + corrected
+            compensation[...] = (updated - total) - corrected
+            total[...] = updated
+    return grad, cross
+
+
+def _leverage_cross_batches(
+    penalties: list[PenaltyComponent],
+    lambdas: dict[str, float],
+    group_matrices,
+) -> list[_PenaltyBatch]:
+    """The penalties by coefficient block, lambda-scaled, blocks of one shape batched together.
+
+    Each dense member is the matrix ``reml_direct_hessian`` traces against
+    (``penalty_component_dense_matrix``), so the cross term and the penalty
+    products in the outer Hessian read the same ``S_i``.  Adjacent blocks of
+    one width and one count of dense and identity penalties (a
+    spline-by-category term's levels) share a batch, read as one view of the
+    solved rows, so a row block costs a few products per term, not per level.
+    """
+    members: dict[tuple[int, int], list[int]] = {}
+    for index, pc in enumerate(penalties):
+        members.setdefault((pc.group_sl.start, pc.group_sl.stop), []).append(index)
+    # Runs of adjacent blocks of one shape: (start, width, n_dense, n_identity) and blocks.
+    runs: list[tuple[tuple[int, int, int, int], list[tuple[list[int], list[int]]]]] = []
+    for (start, stop), indices in sorted(members.items()):
+        dense = [i for i in indices if penalties[i].penalty_kind != "identity"]
+        identity = [i for i in indices if penalties[i].penalty_kind == "identity"]
+        shape = (stop - start, len(dense), len(identity))
+        if runs:
+            (run_start, width, n_dense, n_identity), blocks = runs[-1]
+            if (width, n_dense, n_identity) == shape and run_start + width * len(blocks) == start:
+                blocks.append((dense, identity))
+                continue
+        runs.append(((start, *shape), [(dense, identity)]))
+    batches = []
+    for (start, width, n_dense, _), blocks in runs:
+        stacked = None
+        if n_dense:
+            stacked = np.stack(
+                [
+                    np.hstack(
+                        [
+                            float(lambdas[penalties[i].name])
+                            * penalty_component_dense_matrix(
+                                penalties[i], group_matrices[penalties[i].group_index]
+                            )
+                            for i in dense
+                        ]
+                    )
+                    for dense, _ in blocks
+                ]
+            )
+        batches.append(
+            _PenaltyBatch(
+                start=start,
+                width=width,
+                members=np.array([dense + identity for dense, identity in blocks], dtype=np.intp),
+                dense=n_dense,
+                stacked=stacked,
+                identity_scales=np.array(
+                    [
+                        [float(lambdas[penalties[i].name]) for i in identity]
+                        for _, identity in blocks
+                    ],
+                    dtype=np.float64,
+                ).reshape(len(blocks), -1),
+            )
+        )
+    return batches
 
 
 def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> NDArray:
@@ -317,9 +502,10 @@ def reml_w_correction(
     reml_penalties: list[PenaltyComponent] | None = None,
     geometry: ObservedREMLGeometry | None = None,
     gradient_only: bool = False,
+    leverage_hessian: bool = False,
 ) -> (
     tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
-    | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator], NDArray | None]
+    | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None, NDArray | None]
     | None
 ):
     """W(rho) correction for REML derivatives (first- or second-order).
@@ -371,10 +557,28 @@ def reml_w_correction(
     corrections.  It includes the second derivative of the profiled data
     Hessian ``X_c' W X_c`` (including both weighted-mean outer terms) and the
     scalar curvature of ``0.5 * log(sum(W))``.
+
+    ``leverage_hessian`` (first order, dense inverse, profiled intercept)
+    replaces the ``m`` derivative Grams ``C_j = X_c' diag(dw/drho_j) X_c`` by
+    one row pass (``_leverage_derivative_terms``) and returns
+    ``(grad_correction, None, w_cross)``.  The gradient correction is the same
+    exact quantity, by the leverage identity.  ``w_cross`` is the additive
+    ``(m, m)`` outer-Hessian term ``-(P + P') / 2`` with ``P_ij = tr(H^-1 S_i
+    H^-1 C_j)``, the cross products that ``dH_extra`` contributes to
+    ``-tr(F_i F_j) / 2`` through ``F_i = H^-1 (S_i + C_i)``; the
+    weight-derivative product ``tr(H^-1 C_i H^-1 C_j)``, which no identity
+    reduces below one Gram per direction (Wood 2011, sec. 3.5.1: second
+    derivatives cost ``O(M n p^2 / 2)``, first derivatives ``O(n p^2)``), is
+    left out, as order 1 already leaves out the second weight derivatives.
+    Callers add ``w_cross`` where they would add ``dH2_cross``.  When the
+    factor is not dense or the weight sum is not profiled the request is not
+    taken, and the derivative-Gram result is returned instead.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if gradient_only and w_correction_order != 1:
         raise ValueError("gradient_only requires w_correction_order=1")
+    if leverage_hessian and (gradient_only or w_correction_order != 1):
+        raise ValueError("leverage_hessian requires w_correction_order=1 without gradient_only")
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -587,6 +791,26 @@ def reml_w_correction(
             )
         grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
         return grad_correction, None
+
+    if leverage_hessian and isinstance(factor, DenseHessianFactor) and sum_w is not None:
+        penalty_rhs = np.zeros((p, m), dtype=np.float64)
+        for i, pc in enumerate(penalties):
+            penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
+                pc,
+                pirls_result.beta[pc.group_sl],
+                gms[pc.group_index],
+            )
+        grad_correction[:], penalty_weight_cross = _leverage_derivative_terms(
+            dm,
+            factor.inverse,
+            centre_hi,
+            dW_deta,
+            sum_w,
+            _leverage_cross_batches(penalties, lambdas, gms),
+            penalty_rhs,
+            mean_lo=centre_lo,
+        )
+        return grad_correction, None, -0.5 * (penalty_weight_cross + penalty_weight_cross.T)
 
     batch_moments = (
         type(dm) is DesignMatrix

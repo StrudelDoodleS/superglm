@@ -488,3 +488,32 @@ def test_debug_tests_do_not_leak_enabled_state():
     from superglm._debug import get_debug_level
 
     assert get_debug_level() == 0
+
+
+def test_debug_trace_summarises_the_presolve_before_the_reml_events(tmp_path: Path, monkeypatch):
+    """The pre-solve is untraced; one summary event, purpose reml_presolve,
+    stands for it ahead of every REML evaluation (mutation check: the PR #487
+    head emitted none, and since the pre-solve replaced the bootstrap the
+    stream had no trace of the start at all)."""
+    from superglm._debug import set_debug_level
+    from superglm.model.reml_debug import load_reml_debug_run
+    from tests.test_reml import _ten_penalty_poisson
+
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    model, x, y = _ten_penalty_poisson()
+    model.fit_reml(x, y, runtime_validation="skip")
+
+    run_file = next(tmp_path.glob("*run.json"))
+    run = load_reml_debug_run(tmp_path, run_file.name.removesuffix("_run.json"))
+    summaries = [event for event in run.events if event["purpose"] == "reml_presolve"]
+    assert len(summaries) == 1
+    payload = summaries[0]["payload"]
+    assert payload["phase"] == "presolve"
+    assert payload["updates"] == model.reml_diagnostics()["n_presolve_iter"] > 0
+    first_reml_evaluation = next(
+        event["sequence"]
+        for event in run.events
+        if event["channel"] == "reml" and event["event_kind"] == "evaluation"
+    )
+    assert summaries[0]["sequence"] < first_reml_evaluation

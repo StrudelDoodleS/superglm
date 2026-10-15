@@ -137,8 +137,8 @@ Four changes follow from it:
 
 ## Measured
 
-The freMTPL2 frequency book (678,013 rows), Poisson with exposure weights,
-fitted with `fit_reml()`. The splines are `DrivAge` (`n_knots=8`), `VehAge`
+The freMTPL2 frequency book as published (678,013 rows), Poisson with exposure
+weights, fitted with `fit_reml()`. The splines are `DrivAge` (`n_knots=8`), `VehAge`
 (`n_knots=12`) and `BonusMalus` (`n_knots=12`, `knot_strategy="quantile_tempered"`),
 all with no kind, beside `LogDensity`, `VehBrand` and `Region`. Each row is the
 same code run on 0.39 and on 0.40, alternated 0.39, 0.40, 0.40, 0.39, with
@@ -155,9 +155,31 @@ memory is the whole process's, data loading included. Re-measured on
 
 At the head, the solver was checked from the fits themselves: `reml_diagnostics()` reports the `gram` backend for both 0.40 fits, and the constrained `BonusMalus` group's monotone engine is `qp`. The two 0.40 fits' total EDF differ only in the third decimal (61.163 unconstrained, 61.164 constrained).
 
-On this book both 0.40 fits also emit a `SeparationWarning`. It comes from one
-inner fit during the smoothing-parameter search, and names `VehAge`. The final
-fit converged.
+This table is a measurement of the code on one fixed input, the book as
+published. Its claim counts are wrong for policies with `IDpol` up to 24,500
+(Wüthrich & Merz, *Statistical Foundations of Actuarial Learning*, Section
+13.1): those 9,139 policies all show a claim. They put a spike in the claim
+rate at `VehAge` 0 (0.311 against 0.090 at age 1), and almost all of the
+2,023 deviance between `ps` and `cr` comes from it: with `VehAge` alone
+switched back to `ps`, the 0.40 fit's deviance is 213,612.6.
+
+On the corrected counts, taken from the severity file (`examples/fremtpl2_data.py`;
+678,007 rows, 26,383 claims), the observed rate at `VehAge` 0 is 0.071, in
+line with ages 1 to 3 (0.071 to 0.075), and `cr` is 26.6 deviance worse than
+`ps` rather than 2,023 (20.1 with `BonusMalus` increasing). The same fits, one
+run each, on 0.39.0 and on the 0.40 branch at 7d01428c, where the rows above
+reproduce to the printed digit; deviance and EDF only, since these runs were
+not timed:
+
+| Model | Version | Kind | Deviance | Total EDF |
+|---|---|---|---|---|
+| No constraint | 0.39 | `ps` | 162,431.8 | 58.76 |
+| No constraint | 0.40 | `cr` | 162,458.4 | 58.11 |
+| `BonusMalus` increasing | 0.39 | `ps` | 162,505.3 | 54.10 |
+| `BonusMalus` increasing | 0.40 | `cr` | 162,525.4 | 58.11 |
+
+Here the gap is not `VehAge`'s: switching `VehAge` alone back to `ps` moves
+the 0.40 fit by 0.1 deviance.
 
 ## Verification trail
 

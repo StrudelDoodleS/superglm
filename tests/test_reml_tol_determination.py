@@ -542,8 +542,11 @@ class TestFreezeDiagnostics:
             "score_scale",
             "estimated",
             "frozen",
+            "shoulder",
+            "proj_grad_signed",
         }
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
+        assert [abs(v) for v in freeze["proj_grad_signed"]] == freeze["proj_grad"]
         assert len(freeze["frozen"]) == len(freeze["names"])
         assert len(freeze["row_curvature"]) == len(freeze["penalty_rank"]) == len(freeze["names"])
         assert len(freeze["normalized_curvature"]) == len(freeze["names"])
@@ -553,16 +556,21 @@ class TestFreezeDiagnostics:
         # The audit reconstructs the verdict from the recorded quantities:
         # fixed directions freeze definitionally; estimated ones by the
         # judged symmetric per-dimension curvature against the bar and the
-        # gradient against scale.
-        for g, norm, est, fz in zip(
+        # gradient against scale, unless they read as a concave shoulder,
+        # which needs a positive signed gradient and negative curvature.
+        for g, signed, hess_ii, norm, est, fz, sh in zip(
             freeze["proj_grad"],
+            freeze["proj_grad_signed"],
+            freeze["hess_diag"],
             freeze["normalized_curvature"],
             freeze["estimated"],
             freeze["frozen"],
+            freeze["shoulder"],
         ):
             gradient_flat = g < 1e-7 * float(freeze["score_scale"])
             curvature_flat = norm < float(freeze["curvature_bar"])
-            assert fz == ((not est) or (gradient_flat and curvature_flat))
+            assert fz == ((not est) or (gradient_flat and curvature_flat and not sh))
+            assert not sh or (signed > 0.0 and hess_ii < 0.0)
 
 
 class TestFreezeRevalidation:
@@ -830,6 +838,8 @@ class TestAllFixedLambdaDiagnostics:
             "score_scale",
             "estimated",
             "frozen",
+            "shoulder",
+            "proj_grad_signed",
         }
         assert freeze["frozen"] == [True] * len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0

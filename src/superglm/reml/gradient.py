@@ -137,7 +137,10 @@ def reml_direct_hessian(
         Second-order W(rho) Hessian correction from ``reml_w_correction``
         with ``w_correction_order=2``.  An (m, m) matrix of
         0.5 * tr(H^{-1} X'diag(d2w/(drho_j drho_k))X) values,
-        added directly to the Hessian.
+        added directly to the Hessian.  With ``leverage_hessian=True`` it is
+        instead the first-order cross terms ``-(P + P')/2``,
+        ``P_ij = tr(H^{-1} S_i H^{-1} X'diag(dw/drho_j)X)``, passed with
+        ``dH_extra=None``, and is added the same way.
     """
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,

@@ -603,3 +603,81 @@ def test_discrete_density_by_area_on_the_whole_book_fits(kind, n_knots, penalty,
     assert not any(refused)
     assert diagnostics["profile"]["reml_n_formation_limited_trials"] == 0
     assert np.all(np.isfinite(model.predict(frame)))
+
+
+@NB2_SKIP
+@pytest.mark.slow
+def test_brand_b12_past_vehicle_age_22_is_held_not_priced_at_the_floor():
+    """The screening guide's VehAge x VehBrand curve for B12 on its 80% training split.
+
+    A regression anchor on the book's uncorrected claim counts (a fixed input,
+    deliberately not the corrected book of ``examples/fremtpl2_data.py``).
+    B12 has no claims past VehAge 22 (21 training rows, 23 to 48).  On these
+    counts its curve took a smoothing parameter near 1e-3 from a jump at
+    VehAge 0 that is an artefact of the corrupted block (``IDpol <= 24500``),
+    and past 22 it fell to the log link's floor: those rows were priced at
+    ``exp(-80)``, and the runtime warning named ``VehAge:BonusMalus``.  The
+    curve is now held at its value at 22, so each such row prices as the same
+    policy at 22.  On the corrected counts the jump is gone (B12's smoothing
+    parameter is near 7), and the tail is still held: VehAge 23 to 49, 24
+    training rows.
+    """
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Numeric, SeparationWarning
+
+    df = _datasets.load_freq()
+    df["Exposure"] = df["Exposure"].clip(lower=0.01)
+    df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
+    perm = np.random.default_rng(20261012).permutation(len(df))
+    train = df.iloc[np.sort(perm[: int(round(0.8 * len(df)))])].reset_index(drop=True)
+    exposure = train["Exposure"].to_numpy(dtype=np.float64)
+    y = train["ClaimNb"].to_numpy(dtype=np.float64) / exposure
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "DrivAge": Spline(n_knots=8),
+            "VehAge": Spline(n_knots=12),
+            "BonusMalus": Spline(n_knots=12, knot_strategy="quantile_tempered", knot_alpha=0.2),
+            "LogDensity": Numeric(),
+            "VehBrand": Categorical(),
+            "Region": Categorical(),
+        },
+        interactions=[("VehAge", "VehBrand")],
+        weight_semantics="frequency",
+        discrete=True,
+        n_bins=256,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(train, y, sample_weight=exposure)
+    lines = [
+        line
+        for c in caught
+        if issubclass(c.category, SeparationWarning)
+        for line in str(c.message).splitlines()
+        if "'VehAge:VehBrand', level 'B12'" in line
+    ]
+    assert len(lines) == 1
+    assert "VehAge 23 to 48 (21 rows" in lines[0]
+    assert "held at its value at VehAge 22" in lines[0]
+
+    def b12_relativity(rows):
+        """B12's log relativity to the base brand B1 for the same policies."""
+        base = rows.assign(VehBrand=pd.Categorical(["B1"] * len(rows), categories=brands))
+        return np.log(model.predict(rows)) - np.log(model.predict(base))
+
+    brands = train["VehBrand"].cat.categories
+    tail = train[(train["VehBrand"] == "B12").to_numpy() & (train["VehAge"] >= 23).to_numpy()]
+    # B12's curve on each such policy is its value at 22: one basis row on
+    # both sides, so the relativities agree to the roundings of sums of a few
+    # terms of size below 16.
+    unit = np.finfo(np.float64).eps / 2
+    np.testing.assert_allclose(
+        b12_relativity(tail),
+        b12_relativity(tail.assign(VehAge=22)),
+        rtol=0,
+        atol=64 * unit * 16,
+    )

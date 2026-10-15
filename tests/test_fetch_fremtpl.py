@@ -136,11 +136,12 @@ def test_the_discovery_finds_the_suites_that_are_known_to_guard_on_data():
         "test_realdata_parity.py",
         "test_screening_guide_numbers.py",
         "test_mixed_interaction_screening.py",
+        "test_fremtpl2_data.py",
     }, found
-    assert found["test_realdata_parity.py"] == {
-        "freMTPL2freq.parquet",
-        "freMTPL2sev.parquet",
-    }
+    # Every one of them needs the severity file: the parity suite joins it, and
+    # the others recount ClaimNb from it (examples/fremtpl2_data.py).
+    for module in found:
+        assert found[module] == {"freMTPL2freq.parquet", "freMTPL2sev.parquet"}, module
 
 
 # ── the job covers every data-guarded suite, and arms the switch ────────────

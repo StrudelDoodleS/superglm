@@ -3,6 +3,15 @@
 The source is OpenML data set 41214, ``freMTPL2freq``:
 https://www.openml.org/d/41214
 
+Its ``ClaimNb`` column is wrong for the policies with ``IDpol`` up to 24,500,
+so by default every claim count is recounted from the severity file
+``freMTPL2sev`` (OpenML 41215), as Wüthrich & Merz do (*Statistical
+Foundations of Actuarial Learning and its Applications*, 2023, Section 13.1).
+``fremtpl2_data.py`` beside this script holds that rule. The script reads both
+files from a local data directory when it has them and fetches them from
+OpenML otherwise. ``--data PATH`` instead fits one frequency file exactly as
+given, without the recount.
+
 The preprocessing caps follow scikit-learn's insurance-pricing example:
 https://scikit-learn.org/stable/auto_examples/linear_model/
 plot_tweedie_regression_insurance_claims.html
@@ -20,6 +29,7 @@ diagnostic plot.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -39,7 +49,13 @@ from superglm import (
     SuperGLM,
 )
 
+_EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
+import fremtpl2_data  # noqa: E402
+
 OPENML_DATA_ID = 41214
+OPENML_SEVERITY_ID = 41215
 DEFAULT_VARIANTS = ("baseline", "brand_fixed", "re", "fs", "re_fs")
 MODEL_COLUMNS = (
     "DrivAge",
@@ -54,14 +70,26 @@ MODEL_COLUMNS = (
 )
 
 
+def _fetch_openml_frame(data_id: int) -> pd.DataFrame:
+    return fetch_openml(data_id=data_id, as_frame=True, parser="auto").frame
+
+
 def load_data(path: Path | None = None) -> pd.DataFrame:
-    """Load a local copy or fetch the public OpenML frame."""
+    """Load the frequency data.
+
+    With no ``path``, return the frequency file with its claim counts recounted
+    from the severity file (``fremtpl2_data.recount_claims``), read from a local
+    data directory when both parquet files are there and fetched from OpenML
+    41214 and 41215 otherwise. With a ``path``, read that one file as given.
+    """
     if path is None:
-        return fetch_openml(
-            data_id=OPENML_DATA_ID,
-            as_frame=True,
-            parser="auto",
-        ).frame
+        try:
+            return fremtpl2_data.load_corrected_freq()
+        except FileNotFoundError:
+            return fremtpl2_data.recount_claims(
+                _fetch_openml_frame(OPENML_DATA_ID),
+                _fetch_openml_frame(OPENML_SEVERITY_ID),
+            )
     suffix = path.suffix.lower()
     if suffix in {".parquet", ".pq"}:
         return pd.read_parquet(path)
@@ -341,13 +369,21 @@ def write_outputs(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=None)
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=None,
+        help=(
+            "fit this frequency file (CSV or Parquet) as given, without recounting "
+            "its claims; by default the claims are recounted from freMTPL2sev"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("fremtpl2_credibility_results"))
     parser.add_argument("--max-rows", type=int, default=30_000)
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=20260724)
     parser.add_argument("--n-bins", type=int, default=256)
-    parser.add_argument("--max-reml-iter", type=int, default=12)
+    parser.add_argument("--max-reml-iter", type=int, default=50)
     # None defers to the engine default (1e-9 on the Newton engines).
     parser.add_argument("--reml-tol", type=float, default=None)
     parser.add_argument(

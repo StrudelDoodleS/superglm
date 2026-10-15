@@ -263,6 +263,57 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
     return "\n".join(lines)
 
 
+def drifting_groups(
+    design: Any,
+    groups: list,
+    beta: NDArray,
+    eta: NDArray,
+    eta_unclipped: NDArray,
+    weights: NDArray,
+) -> list[str]:
+    """The groups that carry the linear predictor to where the walk stopped.
+
+    The rows are those pinned at the link's guard; with none pinned (an
+    exhausted, stagnant walk) the rows whose predictor lies farthest from the
+    bulk, at least half as far as the farthest.  A group is named by how far
+    its own contribution moves those rows from where it puts the bulk (its
+    median over the rows with weight that did not stop, so a group carrying
+    every stopped row still reads as moving them when they are most of the
+    rows), which compares across groups; the size
+    of its coefficients does not, since each group's coefficients are in its
+    own reparametrised scale (a tensor's can dwarf the curve that walked), and
+    nor does its raw contribution, whose constant part -- ``mean * beta`` for a
+    covariate far from zero -- the intercept cancels.  Groups reaching at least
+    half the farthest are named, at most five.
+    """
+    live = weights > 0
+    rows = np.flatnonzero((eta != eta_unclipped) & live)
+    if not rows.size and np.any(live):
+        spread = np.abs(eta_unclipped - np.median(eta_unclipped[live]))
+        spread[~live] = 0.0
+        top = float(np.max(spread))
+        rows = np.flatnonzero(spread >= 0.5 * top) if top > 0.0 else rows
+    if not rows.size:
+        return []
+    rest = live.copy()
+    rest[rows] = False
+    bulk = rest if rest.any() else live
+    reach = []
+    for group, matrix in zip(groups, design.group_matrices, strict=True):
+        coefficients = beta[group.sl]
+        if not coefficients.size or group.scop_reparameterization is not None:
+            continue
+        contribution = np.asarray(matrix.matvec(coefficients), dtype=np.float64)
+        moved = contribution[rows] - np.median(contribution[bulk])
+        reach.append((float(np.max(np.abs(moved))), group.name))
+    farthest = max((value for value, _ in reach), default=0.0)
+    if farthest <= 0.0:
+        # No group moves the stopped rows from the rest: none is named.
+        return []
+    ranked = sorted(reach, key=lambda item: -item[0])
+    return [name for value, name in ranked if value >= 0.5 * farthest][:5]
+
+
 def format_runtime_message(
     w_ratio: float,
     n_iter: int,
@@ -272,7 +323,7 @@ def format_runtime_message(
     """Terminal-state message for the in-solver backstop (issue #341)."""
     where = ""
     if drifting_groups:
-        where = f" (largest drifting coefficients in group(s): {drifting_groups})"
+        where = f" (the rows it reached are carried there by group(s): {drifting_groups})"
     if pinned:
         how = (
             f"IRLS stopped after {n_iter} iterations with the linear predictor pinned "
@@ -293,10 +344,11 @@ def format_runtime_message(
         "maximum-likelihood estimates and the collapsed cells' predictions are "
         "unusable, even though rank and aggregate metrics will look healthy. The "
         "build-time check (separation='warn', the default) names separated "
-        "categorical cells before fitting; separation this check reports at "
-        "runtime instead involves non-categorical structure the design scan "
-        "cannot see. Remove it (collapse levels, RandomEffect, or a selection "
-        "penalty on the term), or pass separation='ignore' to silence this."
+        "categorical cells, and holds spline-by-factor curves over separated "
+        "ranges, before fitting; separation this check reports at runtime "
+        "involves structure that check cannot see. Remove it (collapse levels, "
+        "RandomEffect, or a selection penalty on the term), or pass "
+        "separation='ignore' to silence this."
     )
 
 
@@ -310,6 +362,16 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
     # stacklevel points past the builder into the user's fit call region; the
     # exact frame depth varies by entrypoint, so the message carries the term
     # names rather than relying on the reported line.
+    warnings.warn(message, SeparationWarning, stacklevel=3)
+
+
+def emit_curve_separation(curves: list, mode: str) -> None:
+    """Warn, or refuse, for spline-by-factor curves held over a separated range."""
+    if not curves or mode == "ignore":
+        return
+    message = format_curve_separation(curves)
+    if mode == "error" and any(curve.refusable for curve in curves):
+        raise SeparationError(message)
     warnings.warn(message, SeparationWarning, stacklevel=3)
 
 
@@ -498,3 +560,264 @@ def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int)
         f"population curve, the mean of the levels the data identify. {SZ_SELECT_REMEDY} "
         "separation='ignore' silences this warning."
     )
+
+
+# ── spline x factor curves: a level's curve over a range it separates ──────
+
+
+@dataclass(frozen=True)
+class SeparatedRange:
+    """One run of a level's covariate values whose responses all sit on a boundary."""
+
+    low: float
+    high: float
+    n_rows: int
+    weight: float
+    boundary: str  # "zero", "one", or "mixed" when the run holds both
+    # Past the level's first or last anchor: the covariate value the curve is
+    # held at there.  ``None`` for a run between anchors, where ``interpolated``
+    # says whether the curve directions only it sees are held.
+    held_at: float | None = None
+    interpolated: bool = False
+
+
+@dataclass(frozen=True)
+class SeparatedCurve:
+    """A factor level whose penalised curve separates the response over some ranges."""
+
+    term: str
+    covariate: str
+    level: Any
+    ranges: tuple[SeparatedRange, ...]
+    note: str = ""
+    # Whether ``separation="error"`` refuses on this finding; a factor base's
+    # range, found on the main effect alone, is reported only.
+    refusable: bool = True
+
+
+def _unseen_directions(rows: NDArray) -> NDArray:
+    """Orthonormal directions ``rows`` do not see, at the shared factor rank cut.
+
+    A direction whose image is below ``factor_rcond`` times the largest
+    singular value moves those rows by less than ``sqrt(eps)`` of what the
+    best-seen direction does: for separation it is as good as unseen, since
+    a walk along it changes their fitted values only after it has carried the
+    rest ``1 / sqrt(eps)`` times further.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    width = rows.shape[1]
+    if rows.shape[0] == 0:
+        return np.eye(width)
+    # Only the right factor is read.  A tall matrix (a level's distinct values on
+    # the exact path) already yields the full width x width one without the
+    # M x M left factor; a wide one needs full matrices for its null directions.
+    _, sigma, vt = np.linalg.svd(rows, full_matrices=rows.shape[0] < width)
+    cut = SHARED_RANK_POLICY.factor_rcond * float(sigma[0]) if sigma.size else 0.0
+    return vt[int(np.count_nonzero(sigma > cut)) :].T
+
+
+#: How far a linear program must move a row, of unit length, for it to count as
+#: moved: a hundred times HiGHS's default primal feasibility tolerance (1e-7),
+#: so a solver residual never reads as a held row.  Rows a direction does hold
+#: move by a property of the cone's geometry, measured at 0.018 and above on
+#: the freMTPL2 guide model's levels.
+_PROGRAM_TOL = 1e-5
+
+
+def _held_rows(D: NDArray) -> NDArray:
+    """The rows some direction ``a`` moves strictly the right way, ``D a > 0``, with the others unmoved.
+
+    Such directions form a cone, and the rows it moves are the complement of
+    the linearity in Geyer (2009, section 3.12), which he finds with one
+    linear program per row.  One program first maximises how many rows a
+    direction moves, ``sum t`` under ``D a >= t``, ``0 <= t <= 1``, with
+    ``|a| <= 1``; a row the cone moves only together with a larger cost to
+    the others can be left at ``t = 0`` there, so each row it leaves gets its
+    own program, maximising ``D_j a`` under ``D a >= 0``.  Each row is scaled
+    to unit length first, which leaves its sign, and so the cone, unchanged
+    and keeps a row the free directions see only faintly within the
+    solver's tolerances; the box keeps the programs bounded, as HiGHS fails
+    on the free ones once rows differ in scale.  The rows passed in are ones
+    the free directions see by more than the rank cut
+    (``separated_curve_support``).
+    """
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    D = D / np.linalg.norm(D, axis=1, keepdims=True)
+    n_rows, width = D.shape
+    box = [(-1.0, 1.0)] * width
+    program = linprog(
+        np.concatenate([np.zeros(width), -np.ones(n_rows)]),
+        A_ub=sparse.hstack(
+            [sparse.csr_matrix(-D), sparse.identity(n_rows, format="csr")], format="csr"
+        ),
+        b_ub=np.zeros(n_rows),
+        bounds=box + [(0.0, 1.0)] * n_rows,
+        method="highs",
+    )
+    held = (
+        np.asarray(program.x[width:]) > _PROGRAM_TOL
+        if program.status == 0
+        else np.zeros(n_rows, dtype=bool)
+    )
+    for row in np.flatnonzero(~held):
+        single = linprog(-D[row], A_ub=-D, b_ub=np.zeros(n_rows), bounds=box, method="highs")
+        held[row] = single.status == 0 and -float(single.fun) > _PROGRAM_TOL
+    return held
+
+
+def separated_curve_support(
+    raw: NDArray,
+    projection: NDArray,
+    lower: NDArray,
+    upper: NDArray,
+    inside: NDArray,
+) -> tuple[NDArray, NDArray] | None:
+    """The support points over which one level's curve separates, and the directions only they see.
+
+    ``raw`` holds the level's distinct raw basis rows (one per covariate value,
+    or bin, that carries positive weight), ``projection`` maps the scanned
+    coefficients to raw ones, and ``lower`` / ``upper`` / ``inside`` say
+    whether a point holds rows on the lower boundary (``y == 0`` under a log
+    link with mass at zero), the upper one (``y == 1``, binomial) or strictly
+    between.  A point holding an interior row, or rows on both boundaries,
+    anchors the curve: any direction of recession leaves it unmoved.  The
+    others hold rows on one boundary only, and a direction ``h`` with
+    ``g = raw projection h`` zero at every anchor, ``g <= 0`` where the
+    responses sit on the lower boundary and ``g >= 0`` on the upper, and not
+    zero throughout, raises the likelihood without bound: a direction of
+    recession (Geyer 2009, Theorem 4; the linear-programming test of Konis
+    2007), here inside the curve's penalised range.  Points some such
+    direction moves are the separated ones.
+
+    Returns ``(separated, free)``: a mask over the points and an orthonormal
+    basis of the scanned directions every other point leaves unseen
+    (``_unseen_directions``), in which every direction of recession lies;
+    ``None`` when no point separates.  The set is settled when a direction in
+    ``free`` moves every point of it the right way; a point no such direction
+    moves is returned to the others, which can only shrink ``free``, so the
+    loop ends.
+    """
+    anchor = inside | (lower & upper)
+    edge = ~anchor & (lower | upper)
+    if not np.any(edge):
+        return None
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    rows = raw @ projection
+    sign = np.where(lower, -1.0, 1.0)
+    free = _unseen_directions(rows[anchor])
+    # A point the free directions do not see -- its row within the rank
+    # cut's angle of the anchors' span -- cannot be held; leaving it out keeps
+    # the program to the ranges the anchors leave open, which is what bounds
+    # its size on a covariate with many distinct values.
+    norms = np.linalg.norm(rows, axis=1)
+    separated = edge.copy()
+    while True:
+        separated &= np.linalg.norm(rows @ free, axis=1) > SHARED_RANK_POLICY.factor_rcond * norms
+        if not free.shape[1] or not separated.any():
+            return None
+        points = np.flatnonzero(separated)
+        held = _held_rows(sign[points, None] * (rows[points] @ free))
+        if held.all():
+            return separated, free
+        separated[points[~held]] = False
+        free = _unseen_directions(rows[~separated])
+
+
+def continuation_basis(
+    free: NDArray,
+    omega: NDArray,
+    omega_null: NDArray,
+    projection: NDArray,
+    projected_null: NDArray,
+) -> NDArray | None:
+    """Block coefficients whose separated part is the smooth continuation of the rest.
+
+    ``free`` (raw coefficients, orthonormal columns) spans the curve
+    directions only a level's separated rows see.  The penalised likelihood
+    keeps rising along a direction of recession, so those rows cannot fix
+    the curve there; it is held where the penalty alone puts it given the
+    rest of the curve -- its minimum-penalty continuation, ``free' omega f =
+    0`` for the level's raw curve ``f``, which is how the penalty sets a curve
+    over a range with no rows.  The level's own constant lies in ``omega``'s
+    null space, so the condition reads on the block coefficients ``h`` alone,
+    ``free' omega projection h = 0``.  A ``free`` direction the penalty does
+    not see either (``omega_null``: a straight line no unseparated row pins)
+    has no continuation; the block's own unpenalised directions
+    (``projected_null``) are then held at zero, so the line comes from the
+    rest of the model.  Returns an orthonormal basis of the block coefficients
+    left, or ``None`` when none is.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    width = projection.shape[1]
+    outside = free - omega_null @ (omega_null.T @ free) if omega_null.size else free
+    _, sines, vt = np.linalg.svd(outside, full_matrices=True)
+    # Sines of the principal angles between span(free) and null(omega).
+    n_line = free.shape[1] - int(np.count_nonzero(sines > SHARED_RANK_POLICY.factor_rcond))
+    penalised = free @ vt[: free.shape[1] - n_line].T
+    held = [(omega @ penalised).T @ projection]
+    if n_line:
+        held.append(projected_null.T)
+    # Rows of the two kinds are orthogonal (projection maps projected_null
+    # into omega's null space), and each kind has full row rank, so the rank
+    # is known and no cut decides it.
+    rank = penalised.shape[1] + (projected_null.shape[1] if n_line else 0)
+    if rank >= width:
+        return None
+    return np.linalg.svd(np.vstack(held), full_matrices=True)[2][rank:].T
+
+
+def format_curve_separation(findings: list[SeparatedCurve]) -> str:
+    """One plain message naming each level, the covariate range and what the fit did there."""
+    words = {
+        "zero": "every response 0",
+        "one": "every response 1",
+        "mixed": "every response 0 or 1",
+    }
+    lines = []
+    for item in findings[:_MAX_LISTED_LABELS]:
+        spans = []
+        for r in item.ranges:
+            where = f"{r.low:g}" if r.low == r.high else f"{r.low:g} to {r.high:g}"
+            if r.held_at is not None:
+                how = f"held at its value at {item.covariate} {r.held_at:g}"
+            elif r.interpolated:
+                how = "held at the smooth interpolation of the curve on either side"
+            else:
+                how = "left to the smoothing penalty"
+            spans.append(
+                f"{item.covariate} {where} ({r.n_rows} rows, total weight {r.weight:.4g}, "
+                f"{words[r.boundary]}): {how}"
+            )
+        note = f" ({item.note})" if item.note else ""
+        lines.append(f"  {item.term!r}, level {item.level!r}{note}: " + "; ".join(spans))
+    if len(findings) > _MAX_LISTED_LABELS:
+        lines.append(f"  ... and {len(findings) - _MAX_LISTED_LABELS} more levels")
+    upper = any(r.boundary != "zero" for item in findings for r in item.ranges)
+    edge = "0 (or 1)" if upper else "0"
+    head = (
+        f"Separation in a spline-by-factor term: {len(findings)} level(s) have a range of the "
+        f"covariate where every response is {edge}. The data there show the mean is near "
+        f"{edge} but not how near (its maximum-likelihood value is {edge} itself), so nothing "
+        "in the data stops the level's curve heading to that limit on those rows; only its "
+        "smoothing penalty does, and the rest of the curve can set that penalty weak. The "
+        "fit holds the curve over each such range it can, as each line says:"
+    )
+    tail = (
+        "Past the first or last value where a level's responses vary, its curve keeps its "
+        "value there, as a spline keeps its value past its training range "
+        "(extrapolation='clip'), in the fit and in predict(). To let the data shape these "
+        "ranges, merge the level into a similar one (Categorical(grouping=...)) or drop the "
+        "interaction. separation='ignore' leaves the curves free there, as earlier versions "
+        "did; separation='error' refuses the design"
+        + (
+            "."
+            if any(item.refusable for item in findings)
+            else ", except on a factor base's range, which it names and does not refuse."
+        )
+    )
+    return "\n".join([head, *lines, tail])

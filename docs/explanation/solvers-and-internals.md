@@ -705,6 +705,8 @@ When `selection_penalty = 0`, the inner problem is smooth. The repo uses direct 
 
 That is `optimize_direct_reml()`.
 
+A cold exact fit with at least eight estimated smoothing parameters, Poisson with the log link (the only family measured so far), no random-effect or factor-smooth term and a `max_reml_iter` of at least 10 starts from the cached-W fixed point: the discrete path's cached-weights REML loop runs first on the same exact design, and the Newton loop below starts from its smoothing parameters and coefficients instead of the bootstrap. A fit warm-started with a `lambda2_init` mapping starts from those values and skips it, as do `estimate_p`'s power-search candidates.
+
 ```
 # ── Direct REML: Newton on log-λ ──────────────────────────────
 # Phase 1: fixed-point warmup (3 iterations)
@@ -743,6 +745,8 @@ for iter in 1, 2, ..., max_reml_iter:
 ```
 
 This is the cleanest path mathematically. The $W(\boldsymbol{\rho})$ correction (enabled after warmup) accounts for the fact that changing $\boldsymbol{\lambda}$ changes $\hat{\boldsymbol{\beta}}$, which changes $\boldsymbol{\mu}$, which changes $\mathbf{W}$.
+
+Its gradient term is $\tfrac12\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, with $\mathbf{D}_j$ the change of the weights along $\rho_j$. It equals $\tfrac12\sum_r d_{jr} h_r$, where $h_r = \mathbf{x}_r^\top\mathbf{H}^{-1}\mathbf{x}_r$ is row $r$'s leverage (Wood 2011, section 3.5.1). One pass over the rows therefore serves every smoothing parameter. The exact Newton Hessian also needs $\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_i\mathbf{X}\,\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, which costs one $p \times p$ weighted cross-product per smoothing parameter. On the dense solver, a model with four or more smoothing parameters and no random-effect or factor-smooth term leaves that product out of the outer Hessian once those cross-products would cost about two seconds a step ($m\,n\,p^2 \ge 10^{11}$ multiply-adds). It keeps the terms the same pass forms. The gradient stays exact, so the fit stops at the same optimum; only the Newton steps that reach it can differ.
 
 In this repo: `src/superglm/reml/direct.py::optimize_direct_reml`.
 

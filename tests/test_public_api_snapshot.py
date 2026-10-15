@@ -91,6 +91,7 @@ PUBLIC_API = [
     "ScoreTestZIResult",
     "SeparationError",
     "SeparationWarning",
+    "SlowFitWarning",
     "SparseGroupLasso",
     "Spline",
     "SplineRedundancyReport",

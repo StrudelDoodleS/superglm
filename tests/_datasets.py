@@ -108,6 +108,35 @@ def load_freq() -> pd.DataFrame | None:
     return pd.read_parquet(p) if p else None
 
 
+def _fremtpl2_data():
+    """``examples/fremtpl2_data.py``, loaded by path: the one copy of the recount rule."""
+    path = Path(__file__).resolve().parent.parent / "examples" / "fremtpl2_data.py"
+    spec = importlib.util.spec_from_file_location("_superglm_examples_fremtpl2_data", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - the file is in the repository
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_freq_corrected() -> pd.DataFrame | None:
+    """freMTPL2freq with ``ClaimNb`` recounted from freMTPL2sev, or None.
+
+    The Wüthrich & Merz correction (``examples/fremtpl2_data.py``): the raw
+    ``ClaimNb`` is wrong for ``IDpol <= 24500``, so every policy's count is
+    taken from the severity file, policies with more than five claims are
+    dropped and exposure is capped at one year.  678,007 rows, 26,383 claims.
+    Needs both parquet files, so a suite that calls it binds BOTH
+    ``_FREQ_SKIP_REASON = skip_reason("freMTPL2freq.parquet")`` and
+    ``_SEV_SKIP_REASON = skip_reason("freMTPL2sev.parquet")`` at module scope:
+    that is the form ``tests/test_fetch_fremtpl.data_guarded_suites`` discovers.
+    """
+    freq, sev = find("freMTPL2freq.parquet"), find("freMTPL2sev.parquet")
+    if freq is None or sev is None:
+        return None
+    return _fremtpl2_data().recount_claims(pd.read_parquet(freq), pd.read_parquet(sev))
+
+
 def load_sev() -> pd.DataFrame | None:
     """Load freMTPL2sev.parquet, or None if not found."""
     p = find("freMTPL2sev.parquet")

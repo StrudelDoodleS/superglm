@@ -66,6 +66,23 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
+An exact fit (`discrete=False`, the default) that will be slow says so
+before it starts, with a `SlowFitWarning`. It fires when rows x coefficients
+squared reaches 1e11, because every coefficient update forms a weighted
+coefficients-by-coefficients product over all rows, and choosing the smoothing
+takes dozens of them. A Gaussian fit with the identity link does not warn,
+since its weights never change and the product is formed once. Nor does a fit
+that uses the structured solver for a random effect or factor smooth, since it
+never forms that product. A model with a monotone (shape-constrained) term does
+not warn either: its smoothing is chosen by a different method, whose run time
+has not been measured.
+
+On the 542,000-row freMTPL2 frequency book, a model with three interaction
+pairs (about 480 coefficients) took 48 seconds exactly and 17 seconds with
+`discrete=True`; with ten pairs (about 1,540 coefficients) it took 3.6 minutes
+and 76 seconds. With one pair (about 190 coefficients) it took 15 seconds and
+does not warn.
+
 ## When a REML fit counts as converged
 
 A REML fit stops only when the solver can check that it has reached the best
@@ -123,9 +140,11 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
 - **A heavily smoothed term can come back down.** Earlier releases could not
   lower a large smoothing parameter, whatever the data said, and still
   reported the fit as converged. A smoothing parameter is now held only where
-  the REML objective is flat in the direction of its step. On the cleaned
-  freMTPL2 counts this moved VehAge's smoothing parameter from 468 to 371 and
-  its effective degrees of freedom from 3.57 to 3.74. Predictions moved by at
+  the REML objective is flat in the direction of its step. On freMTPL2
+  with the Wüthrich & Merz cleaning, whose claim counts come from the
+  severity file (`examples/fremtpl2_data.py`), this moved VehAge's smoothing
+  parameter from 468 to 371 and its effective degrees of freedom from 3.57 to
+  3.74. Predictions moved by at
   most 0.04 standard errors on the full book and 0.27 out of fold.
 - **A term smoothed to its limit stops near the limit.** Once such a term has
   under 0.05 effective degrees of freedom left, the search stops it, and

@@ -544,3 +544,29 @@ class TestUntouchedByTheTensorRepair:
         assert result.objective == pytest.approx(UNFIXED_MILD_OBJECTIVE, rel=1e-6)
         for name, value in UNFIXED_MILD_LAMBDAS.items():
             assert result.lambdas[name] == pytest.approx(value, rel=1e-4)
+
+
+@pytest.mark.parametrize(
+    ("own", "other", "expected_own", "expected_scale"),
+    [
+        # shortened toward its partner, direction kept
+        (1.0, 0.2, 0.7, 1.0),
+        (-1.0, -0.1, -0.6, 1.0),
+        # the cap would turn it uphill: it stays put and the whole step scales
+        (1.0, -0.8, 0.0, 0.625),
+        (-2.5, 1.5, 0.0, 1.0 / 3.0),
+    ],
+)
+def test_a_shoulder_in_a_shared_pair_keeps_the_pair_cap(own, other, expected_own, expected_scale):
+    """The pair's half-difference |d_i - d_j| / 2 stays within cap_v in both
+    branches: shortened toward the partner when that keeps the shoulder's
+    direction, otherwise held at 0 with the whole step scaled (which keeps it
+    a descent direction)."""
+    from superglm.reml.discrete import _bound_shoulder_in_pair
+
+    cap_v = 0.25
+    bounded, scale = _bound_shoulder_in_pair(own, other, cap_v)
+    assert bounded == pytest.approx(expected_own)
+    assert scale == pytest.approx(expected_scale)
+    assert bounded * own >= 0.0
+    assert abs(bounded * scale - other * scale) / 2.0 <= cap_v * (1.0 + 4.0 * np.finfo(float).eps)

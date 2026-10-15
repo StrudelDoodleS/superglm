@@ -200,6 +200,16 @@ class SuperGLM:
             governs the in-solver backstop that fires when an exhausted,
             stagnant IRLS run shows the extreme-working-weight signature of
             separation the build scan cannot see.
+            A spline-by-factor level whose responses all sit on the boundary
+            over a covariate range is held there before fitting: before its
+            first and past its last response off the boundary its curve keeps
+            its value at that point, in the fit and in ``predict``, and
+            between two such responses it takes the smoothest path joining
+            them; the factor's base, whose curve is the main effect's, is
+            scanned on the main effect alone and named as approximate, not
+            held.  ``"warn"`` names the term, the level and the range,
+            ``"error"`` refuses (never on a base's range alone), and
+            ``"ignore"`` leaves those curves free.
             A ``FactorSmooth(basis="sz")`` level whose unpenalized line
             separates the response is named in a ``SeparationWarning`` at fit
             under ``"warn"`` and ``"error"`` alike (never refused) and left
@@ -746,7 +756,12 @@ class SuperGLM:
             iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
             returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
-            summary says why.
+            summary says why. A cold exact Poisson fit with the log link, at
+            least eight smoothing parameters, no ``RandomEffect`` or
+            ``FactorSmooth`` term and a cap of at least 10 can first run up to
+            this many cached-W updates (a pre-solve) before the exact loop;
+            ``reml_diagnostics()["n_reml_iter"]`` counts the exact loop and
+            ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
             it resolves per engine: 1e-9 for the Newton engines (exact and
@@ -766,7 +781,13 @@ class SuperGLM:
             and the objective change both fall below
             ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
             directions: inferentially flat directions are frozen where they
-            stand rather than marched toward the lambda cap. A direction
+            stand rather than marched toward the lambda cap. One on a concave
+            shoulder of a flat region (a positive gradient, the criterion
+            still falling toward the optimum, with negative curvature about
+            equal to it, whose model still promises a decrease this tolerance
+            resolves) refuses the stop and keeps stepping; the last such
+            refusal is recorded under
+            ``profile["reml_concave_stop_refusal"]``. A direction
             freezes when its gradient falls below
             ``max(0.1 * reml_tol, 1e-7) * (1 + |objective|)`` -- a loose
             tolerance widens that arm; tightening stops at the 1e-7 floor
