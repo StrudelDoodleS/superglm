@@ -182,7 +182,7 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "comment records that commit), it has no unresolved review threads, and every "
         "finding without a thread has its reply",
         "or a SINGLE RELEASE INSTRUCTION, stop and report the exact authority required",
-        "An instruction that names no version grants nothing",
+        'An instruction to release that names no version ("release it", "cut a release") grants nothing',
     ):
         assert clause in flat
 
@@ -253,7 +253,10 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     assert "naming the exact tag, or the single instruction below" in flat
     assert STEP_BY_STEP_MERGE in flat
     assert "separate requests, unless one instruction grants all three" in flat
-    assert "An instruction that names no version authorizes nothing" in flat
+    assert (
+        'An instruction to release that names no version ("release it", "cut a release") authorizes nothing'
+        in flat
+    )
 
 
 def test_repository_guidance_pins_review_thread_handling() -> None:
@@ -352,9 +355,12 @@ SINGLE_RELEASE_MERGE = (
 # The step-by-step flow's merge waits for the same reviews PUBLISH step 6
 # checks, so a bump PR amended once cannot merge before Codex has seen it.
 STEP_BY_STEP_MERGE = (
-    "merged only once it is green, the Claude and Codex reviews have completed on its "
-    'head commit (after a push, ask Codex again with "@codex review"), every review '
-    "thread on it is resolved and every finding without a thread has its reply"
+    "merged only once it is green, origin/master is still at the assessed head, the "
+    "Claude and Codex reviews have completed on its head commit (after a push, ask Codex "
+    'again with "@codex review"), every review thread on it is resolved and every '
+    "finding without a thread has its reply. If master has moved, the pull request is "
+    "closed and the release starts again from a fresh assessment, which needs its own "
+    "approval"
 )
 SINGLE_RELEASE_RESTART = (
     "If master has moved, the bump-only pull request is closed and the run restarts "

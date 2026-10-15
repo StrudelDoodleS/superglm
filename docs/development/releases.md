@@ -90,8 +90,9 @@ that commit), every review thread on it is resolved and every finding without a
 thread has its reply; and the tag, Release and PyPI version must not already
 exist. If master has moved, the bump-only pull request is closed and the run
 restarts from the assessment under the same instruction. The three separate
-instructions remain for a release taken one step at a time. An instruction that
-names no version authorizes nothing.
+instructions remain for a release taken one step at a time. An instruction to
+release that names no version ("release it", "cut a release") authorizes
+nothing.
 
 Assessment of the unreleased changes on master is read-only:
 
@@ -113,10 +114,12 @@ The specialist updates versions through `scripts/bump_version.py`, refreshes
 changelog, and opens the bump-only pull request. It merges nothing and holds
 no tag or publication authority.
 
-The bump-only pull request is rebase-merged only once it is green, the Claude
-and Codex reviews have completed on its head commit (after a push, ask Codex
-again with "@codex review"), every review thread on it is resolved and every
-finding without a thread has its reply. After that merge, publication requires
+The bump-only pull request is rebase-merged only once it is green, origin/master
+is still at the assessed head, the Claude and Codex reviews have completed on its
+head commit (after a push, ask Codex again with "@codex review"), every review
+thread on it is resolved and every finding without a thread has its reply. If
+master has moved, the pull request is closed and the release starts again from a
+fresh assessment, which needs its own approval. After that merge, publication requires
 a new exact instruction, or the single instruction above:
 
 ```text

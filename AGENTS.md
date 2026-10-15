@@ -233,10 +233,12 @@ The three gates are separate requests, unless one instruction grants all three
    instruction below, the ID of the assessment it just produced). It writes the
    single bump commit via a bump-only pull request, rebase-merged under the
    linear-history rule so the release tag binds to the rebased commit on
-   master. That pull request is merged only once it is green, the Claude and
-   Codex reviews have completed on its head commit (after a push, ask Codex
-   again with "@codex review"), every review thread on it is resolved and every
-   finding without a thread has its reply.
+   master. That pull request is merged only once it is green, origin/master is still at
+   the assessed head, the Claude and Codex reviews have completed on its head
+   commit (after a push, ask Codex again with "@codex review"), every review
+   thread on it is resolved and every finding without a thread has its reply.
+   If master has moved, the pull request is closed and the release starts again
+   from a fresh assessment, which needs its own approval.
    Preparation does not authorize publication.
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
    new explicit instruction naming the exact tag, or the single instruction
@@ -261,7 +263,8 @@ or "finish" with a version, does not qualify. A version given as 0.x means
   closed and the run restarts from the assessment under the same instruction;
 - the tag, GitHub Release and PyPI version must not already exist.
 
-An instruction that names no version authorizes nothing.
+An instruction to release that names no version ("release it", "cut a release")
+authorizes nothing.
 
 The specialist never merges feature pull requests, uploads distributions
 directly, moves an existing tag, or bypasses `.github/workflows/release.yml`
