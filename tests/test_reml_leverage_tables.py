@@ -31,6 +31,7 @@ from tests.test_reml_leverage_hessian import (
     _correction_inputs,
     _count_row_passes,
     _gamma,
+    _poisson_frame,
     _poisson_model,
     _rounding_bounds,
 )
@@ -397,3 +398,32 @@ def test_a_support_outside_the_reassociation_range_keeps_the_old_routes():
     W = np.random.default_rng(2).uniform(0.1, 2.0, dm.n)
     system = build_centered_system(dm=dm, W=W, z_off=np.zeros(dm.n), penalty=np.eye(dm.p))
     assert np.all(np.isfinite(system.data_gram))
+
+
+def test_the_plan_is_released_when_the_fit_publishes_its_state():
+    """A fitted model keeps no plan (its ``(T, n)`` index and raw tables).
+
+    At this size the fit's last centred systems come from the table Gram on
+    the published design; on the PR head their plan stayed in that design's
+    layout cache.  Predict, the diagnostics, metrics and a refit still work.
+    """
+    n = leverage_tables._MIN_TABLE_GRAM_ROWS
+    frame, y, weights = _poisson_frame(n, 1.0e3)
+    built = []
+    build = leverage_tables._build_plan
+
+    def recorded(dm):
+        built.append(dm)
+        return build(dm)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(leverage_tables, "_build_plan", recorded)
+        model = _poisson_model(1.0e3, n=n)
+    assert any(dm is model._dm for dm in built)
+    assert leverage_tables._CACHE_KEY not in model._dm._structured_layout_cache
+    assert np.all(np.isfinite(model.predict(frame)))
+    assert model.reml_diagnostics()["converged"]
+    assert np.isfinite(model.metrics(frame, y, sample_weight=weights).deviance)
+    refit = model.fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    assert refit._reml_result.converged
+    assert leverage_tables._CACHE_KEY not in refit._dm._structured_layout_cache

@@ -22,8 +22,8 @@ Consecutive spline-by-category levels with disjoint rows merge into one term
 (their table stacks the levels' rows; a row outside every level reads a zero
 row).  The structural plan (:func:`lookup_plan`: index columns, raw tables,
 pair forms) depends on the design only; it is held in the design's
-``_structured_layout_cache`` (owner: the ``DesignMatrix``; lifetime: the
-design's; invalidated when any group matrix, its basis, transform or index
+``_structured_layout_cache`` (owner: the ``DesignMatrix``; lifetime: one
+fit, released when the fit publishes its state, :func:`release_lookup_plan`; invalidated when any group matrix, its basis, transform or index
 array, or a dense group's values are replaced, which the plan checks by
 identity).  Weights, centre and
 inverse enter per call.
@@ -226,6 +226,16 @@ def lookup_plan(dm) -> LookupPlan | None:
     plan = _build_plan(dm)
     cache[_CACHE_KEY] = (_owners(dm), plan)
     return plan
+
+
+def release_lookup_plan(layout_cache: dict | None) -> None:
+    """Drop the design's plan once a fit has published its state.
+
+    The plan (an ``(T, n)`` index and the raw tables, about ``4 T n`` bytes)
+    serves the fit's repeated passes; a later pass on the design rebuilds it.
+    """
+    if layout_cache is not None:
+        layout_cache.pop(_CACHE_KEY, None)
 
 
 def table_gram_plan(dm) -> LookupPlan | None:

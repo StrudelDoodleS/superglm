@@ -71,8 +71,8 @@ def _poisson_frame(n: int, offset: float, seed: int = 31):
     return frame, y, weights
 
 
-def _poisson_model(offset: float) -> SuperGLM:
-    frame, y, weights = _poisson_frame(1500, offset)
+def _poisson_model(offset: float, n: int = 1500) -> SuperGLM:
+    frame, y, weights = _poisson_frame(n, offset)
     return SuperGLM(
         family="poisson",
         features={
