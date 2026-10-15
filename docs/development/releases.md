@@ -76,6 +76,24 @@ tag; the numbers themselves are skipped, exactly as `0.16.2` was.
 The release specialist is a spawned Codex subagent. It does not replace the
 current agent and never starts automatically.
 
+One instruction that names an exact version and says to release it, using the
+word "release" ("release 0.40", "release 0.40.1"), authorizes all three steps
+below for exactly that version, in order. Asking only to assess, prepare or
+draft a release, or "ship", "deploy" or "finish" with a version, does not
+qualify. A version given as 0.x means 0.x.0. Each step still runs its own
+checks: the assessment must recommend the named version and preparation uses
+its ID; the root agent rebase-merges the bump-only pull request only once it is
+green, origin/master is still at the assessed head, the Claude and Codex
+reviews have completed on its head commit (after a push, the root agent asks
+Codex again with "@codex review"; a Codex review with no findings counts as
+completed when its summary comment records that commit), every review thread on
+it is resolved and every finding without a thread has its reply; and the tag,
+Release and PyPI version must not already exist. If master has moved, the
+bump-only pull request is closed and the run restarts from the assessment under
+the same instruction. The three separate instructions remain for a release
+taken one step at a time. An instruction to release that names no version
+("release it", "cut a release") authorizes nothing.
+
 Assessment of the unreleased changes on master is read-only:
 
 ```text
@@ -84,7 +102,8 @@ Use the release_manager agent to assess the unreleased changes as a release cand
 
 The assessment is bound to the latest published release and the exact
 `origin/master` head SHA; its authoritative diff is release-tag to master
-head. After approving the exact version and that SHA-bound assessment:
+head. After approving the exact version and that SHA-bound assessment (under
+the single instruction, the assessment it produced):
 
 ```text
 Use the release_manager agent to prepare the approved 0.x.y.
@@ -95,8 +114,15 @@ The specialist updates versions through `scripts/bump_version.py`, refreshes
 changelog, and opens the bump-only pull request. It merges nothing and holds
 no tag or publication authority.
 
-After the bump-only pull request is reviewed, rebase-merged, and green,
-publication requires a new exact instruction:
+The bump-only pull request is rebase-merged only once it is green,
+origin/master is still at the assessed head, the Claude and Codex reviews have
+completed on its head commit (after a push, ask Codex again with "@codex
+review"), every review thread on it is resolved and every finding without a
+thread has its reply. If master has moved, the pull request is closed and the
+release starts again from a fresh assessment, which needs its own approval
+(under the single instruction above, the run restarts from the assessment under
+the same instruction). After that merge, publication requires a new exact
+instruction, or the single instruction above:
 
 ```text
 Use the release_manager agent to publish v0.x.y and monitor PyPI deployment.
