@@ -59,6 +59,19 @@ lambdas to 1.4e-12 in log. Two lambdas on flat directions moved further,
 ``theta:z#wiggle`` by 1.8e-6 in log, with the fits unmoved. Coefficients and
 covariance are in the SSP basis, whose ridge ``0.1 Omega`` the new scale of
 ``Omega`` changes, so they moved and were re-recorded with the rest.
+
+Re-recorded ``twopiece:reml+newton`` alone on 2026-10-15, when the two-piece
+families gained analytic curvature directions and the Newton endgame stopped
+differencing third derivatives. On the finite-difference gradient the endgame
+had ended ``objective_rejected`` at V = -1.406281 with gradient (0.089, 0.152);
+on the exact gradient it certifies ``stationary`` (|g| 7.4e-8) at
+V = -1.390557, lambdas (7.126, 371.9) against (7.096, 354.8) in the fit's own
+units. Both values reproduce from fresh starts at either lambda, so they are
+two points of the same criterion, which is only piecewise smooth for this
+family: its Hessian jumps where a row's residual changes sign, and log|H| with
+it. Every other
+entry, including the other seven ``+newton`` cases, reproduced within the
+record's tolerances (coefficients to 2.4e-14).
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ from typing import Literal, overload
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.kernels import _negative_binomial_numba as _compiled
+import superglm.distributional.kernels._negative_binomial_numba as _compiled
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,

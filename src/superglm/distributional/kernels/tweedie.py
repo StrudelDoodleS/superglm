@@ -330,6 +330,13 @@ def _warmup_compiled_tweedie_dispatchers(
             ),
         ),
         (_compiled._complete_batch_status, (values, scores, hessians, 2)),
+        (_compiled._polygamma_012, (1.0,)),
+        (_compiled._third_term_channels, (1, 0.0, 0.0, 0.0, 2.0)),
+        (
+            _compiled._series_third_cumulants,
+            (0.0, 0.0, 0.0, 0.0, 2.0, 1.0, *limits, coefficients),
+        ),
+        (_compiled._tweedie_third_row, (1.0, 1.2, 0.7, 1.5, rho, *limits, coefficients)),
     )
     for dispatcher, arguments in calls:
         cast(Callable[..., object], dispatcher)(*arguments)
@@ -351,6 +358,7 @@ def _warmup_tweedie() -> None:
                 failing_row=int(failing_row),
                 max_terms=_DEFAULT_MAX_TERMS,
             )
+    tweedie_hessian_direction(*arrays, "prior", np.zeros((1, 3), dtype=np.float64))
 
 
 def evaluate_tweedie_rows(
