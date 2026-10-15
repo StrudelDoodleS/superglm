@@ -113,9 +113,11 @@ The specialist updates versions through `scripts/bump_version.py`, refreshes
 changelog, and opens the bump-only pull request. It merges nothing and holds
 no tag or publication authority.
 
-After the bump-only pull request is reviewed, rebase-merged, and green,
-publication requires a new exact instruction, or the single instruction
-above:
+The bump-only pull request is rebase-merged only once it is green, the Claude
+and Codex reviews have completed on its head commit (after a push, ask Codex
+again with "@codex review"), every review thread on it is resolved and every
+finding without a thread has its reply. After that merge, publication requires
+a new exact instruction, or the single instruction above:
 
 ```text
 Use the release_manager agent to publish v0.x.y and monitor PyPI deployment.

@@ -251,6 +251,7 @@ def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     flat = " ".join(agents.split())
     assert "the assessment must recommend the named version, and preparation uses its ID" in flat
     assert "naming the exact tag, or the single instruction below" in flat
+    assert STEP_BY_STEP_MERGE in flat
     assert "separate requests, unless one instruction grants all three" in flat
     assert "An instruction that names no version authorizes nothing" in flat
 
@@ -325,6 +326,7 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     assert "Trusted Publishing" in documentation
     flat = " ".join(documentation.split())
     assert "or the single instruction above" in flat
+    assert STEP_BY_STEP_MERGE in flat
     assert "the assessment must recommend the named version" in flat
     assert "releases" in development_toctree
 
@@ -346,6 +348,13 @@ SINGLE_RELEASE_MERGE = (
     'Codex again with "@codex review"; a Codex review with no findings counts as '
     "completed when its summary comment records that commit), every review thread on it "
     "is resolved and every finding without a thread has its reply"
+)
+# The step-by-step flow's merge waits for the same reviews PUBLISH step 6
+# checks, so a bump PR amended once cannot merge before Codex has seen it.
+STEP_BY_STEP_MERGE = (
+    "merged only once it is green, the Claude and Codex reviews have completed on its "
+    'head commit (after a push, ask Codex again with "@codex review"), every review '
+    "thread on it is resolved and every finding without a thread has its reply"
 )
 SINGLE_RELEASE_RESTART = (
     "If master has moved, the bump-only pull request is closed and the run restarts "

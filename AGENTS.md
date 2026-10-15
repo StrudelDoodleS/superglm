@@ -233,7 +233,11 @@ The three gates are separate requests, unless one instruction grants all three
    instruction below, the ID of the assessment it just produced). It writes the
    single bump commit via a bump-only pull request, rebase-merged under the
    linear-history rule so the release tag binds to the rebased commit on
-   master. Preparation does not authorize publication.
+   master. That pull request is merged only once it is green, the Claude and
+   Codex reviews have completed on its head commit (after a push, ask Codex
+   again with "@codex review"), every review thread on it is resolved and every
+   finding without a thread has its reply.
+   Preparation does not authorize publication.
 3. "Use the release_manager agent to publish v0.x.y." Publication requires a
    new explicit instruction naming the exact tag, or the single instruction
    below.
