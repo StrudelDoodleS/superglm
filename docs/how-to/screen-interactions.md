@@ -174,6 +174,17 @@ count is taken from the severity file `freMTPL2sev`, policies with more than
 five claims are dropped and exposure is capped at one year
 (`examples/fremtpl2_data.py`). The sample is drawn from that 678,007-row book.
 
+This guide ran on the book as published until the correction (its last such
+revision is `7d01428c`), and the correction changed some of its numbers but not
+its point. The dispersion estimate fell from 4.81 to 2.85. The top pair is still
+`VehAge x BonusMalus`, with a smaller refit gain (41.7 then, 32.3 now) but a
+higher `z` (2.66 then, 3.76 now): `z` is read from the score statistic divided
+by the dispersion, not from the refit gain. Per unit of dispersion the refit
+gain rose too, from 8.7 to 11.3. The second confirmatory pair was
+`BonusMalus x VehBrand` (69.0 deviance on 10 df) and is now
+`DrivAge x BonusMalus` (68.6 on 8 df); either way it buys more and ranks lower.
+The spline on log-density now buys 0.02 deviance instead of 1.0.
+
 The specification is spelled out rather than assumed, because the screen is
 defined *against the fitted mains*. A margin mis-specified there does not
 merely go unscreened — it changes which pairs are screenable at all:
