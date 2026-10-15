@@ -312,13 +312,15 @@ def _moment_theta_candidate(
     try:
         mean_square = mean * mean
         residual = response - mean
+        # Elementwise float64 terms as before, summed exactly: fsum of a list
+        # equals fsum of the same values from a generator.
         if semantics == "frequency":
-            numerator = math.fsum(float(weight * mean_square) for weight in weights)
-            terms = (weight * (value * value - mean) for weight, value in zip(weights, residual))
+            numerator = math.fsum((weights * mean_square).tolist())
+            terms = weights * (residual * residual - mean)
         else:
-            numerator = math.fsum(mean_square for _ in response)
-            terms = (weight * value * value - mean for weight, value in zip(weights, residual))
-        denominator = math.fsum(float(value) for value in terms)
+            numerator = math.fsum([mean_square] * len(response))
+            terms = weights * residual * residual - mean
+        denominator = math.fsum(terms.tolist())
         candidate = numerator / denominator
     except (FloatingPointError, OverflowError, ZeroDivisionError):
         return None
@@ -332,7 +334,9 @@ def _initial_mean(
 ) -> float:
     weighted_counts = exact_count if semantics == "prior" else weights * exact_count
     try:
-        mean = math.fsum(float(value) for value in weighted_counts) / float(np.sum(weights))
+        mean = math.fsum(np.asarray(weighted_counts, dtype=_FLOAT).tolist()) / float(
+            np.sum(weights)
+        )
     except (OverflowError, ZeroDivisionError) as exc:
         raise NegativeBinomialInitializationError("NB2 initial mean is not representable") from exc
     if not math.isfinite(mean) or mean <= 0.0:
@@ -349,8 +353,8 @@ def _resolved_negative_sum(
     if not np.all(np.isfinite(terms)) or not np.all(np.isfinite(scales)):
         return False
     try:
-        total = math.fsum(float(value) for value in terms)
-        scale = math.fsum(float(value) for value in scales)
+        total = math.fsum(terms.tolist())
+        scale = math.fsum(scales.tolist())
     except (OverflowError, ValueError):
         return False
     operation_error = (32 * len(terms) + 32) * _EPS

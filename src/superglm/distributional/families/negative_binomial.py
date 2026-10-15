@@ -121,14 +121,30 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
         raise ValueError(message) from exc
     if not np.all(np.isfinite(response)) or np.any(response < 0.0):
         raise ValueError(message)
-    if any(
+    if not _lossless(source, response):
+        raise ValueError("y must be losslessly representable as exact float64 values")
+    return response
+
+
+def _lossless(source: NDArray, response: NDArray[np.float64]) -> bool:
+    """Whether every converted value equals its source exactly.
+
+    Vectorised by dtype: a float source compares exactly against its float64
+    image; an integer source of magnitude at most ``2**53`` converts exactly,
+    so only larger integers (and object arrays) are compared one by one, as
+    exact integer-float comparisons.
+    """
+    if source.dtype.kind == "f":
+        return not bool(np.any(source != response))
+    if source.dtype.kind in "iu":
+        large = np.flatnonzero((source > _MAX_EXACT_COUNT) | (source < -_MAX_EXACT_COUNT))
+        return all(int(source[index]) == float(response[index]) for index in large)
+    return not any(
         int(source_value) != float(converted_value)
         if isinstance(source_value, int | np.integer)
         else source_value != converted_value
         for source_value, converted_value in zip(source, response, strict=True)
-    ):
-        raise ValueError("y must be losslessly representable as exact float64 values")
-    return response
+    )
 
 
 def _typed_plan(plan: object, n_observations: int) -> NegativeBinomialLikelihoodPlan:
