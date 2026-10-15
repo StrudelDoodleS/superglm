@@ -444,3 +444,63 @@ def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
         mean_family.predictor_curvature_directional_derivative(
             response, mean_eta, scale_only, mean_links, mean_plan
         )
+
+
+def test_tweedie_direction_differentiates_the_windowed_hessian(monkeypatch) -> None:
+    """The analytic direction is the derivative of the published, windowed Hessian.
+
+    At a deliberately short window (``log_cutoff = 6``) the window's distance
+    from the full law is large, so the two candidate targets separate: the
+    derivative of the windowed Hessian (its Richardson stencil, on rows whose
+    window is the same at every stencil point) and the derivative of the full
+    law (the direction at the default window).  On rows where the window is
+    material the analytic direction sits at least ``1e4`` times nearer the
+    first, near both power walls and between them.  This records that the
+    series tail is the published likelihood's approximation, shared with the
+    Hessian and with v0.40.0's stencil, not an error of the direction against
+    the objective it differentiates.  It guards the shared window; it is
+    evidence, not a fix, and passes at 7305fe25 as well.
+    """
+    import itertools
+
+    import superglm.distributional.kernels.tweedie as tweedie_kernel
+    from superglm.distributional.families import TweedieLSS
+
+    family = TweedieLSS()
+    links = _links(family)
+    grid = itertools.product(
+        (1.0505, 1.07, 1.5, 1.93, 1.9495), (0.05, 1.0, 10.0), (0.3, 5.0, 80.0), (1.0, 20.0)
+    )
+    power, dispersion, y, mean = np.array(list(grid)).T
+    eta = np.column_stack((links[0].link(mean), links[1].link(dispersion), links[2].link(power)))
+    plan = _plan(family, y)
+    direction = np.random.default_rng(2).normal(size=eta.shape)
+    full = family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+    for function in (
+        tweedie_kernel.tweedie_hessian_direction,
+        tweedie_kernel.evaluate_tweedie_rows,
+    ):
+        monkeypatch.setitem(function.__kwdefaults__, "log_cutoff", 6.0)
+    windowed = family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+    step = 1.0e-4
+    stencil = finite_difference_curvature_direction(
+        family, y, eta, direction, links, plan, step=step
+    )
+
+    def window_terms(values):
+        natural = np.column_stack([links[k].inverse(values[:, k]) for k in range(3)])
+        return tweedie_kernel.evaluate_tweedie_rows(
+            y, *natural.T, np.ones(len(y)), "prior", derivative_order=2
+        ).terms
+
+    unit = direction / np.linalg.norm(direction, axis=1, keepdims=True)
+    centre = window_terms(eta)
+    same = np.ones(len(y), dtype=bool)
+    for offset in (step, -step, step / 2, -step / 2):
+        same &= window_terms(eta + offset * unit) == centre
+    scale = np.max(np.abs(full), axis=1)
+    to_stencil = np.max(np.abs(windowed - stencil.values), axis=1) / scale
+    to_full = np.max(np.abs(windowed - full), axis=1) / scale
+    material = same & (to_full > 1e-3)
+    assert np.any(material & (power < 1.06)) and np.any(material & (power > 1.94))
+    assert np.all(to_full[material] >= 1e4 * to_stencil[material])

@@ -450,6 +450,18 @@ def tweedie_hessian_direction(
     derivatives over the Hessian's own window (two passes: means, then
     central moments about them); the zero row and the canonical part are
     closed forms.  Rows the Hessian would refuse are refused here too.
+
+    The cumulants of the window's normalized terms are exactly the derivatives
+    of the windowed sums, so this is the derivative of the published Hessian,
+    window included, which is the curvature the LAML objective is defined on;
+    it carries no certificate for the omitted tail, and needs none against
+    that objective.  The window's distance from the full Tweedie law is the
+    published likelihood's own, uncertified (see the module note), and
+    v0.40.0's Richardson stencil differenced the same windowed Hessian, so
+    its certificate did not cover that distance either.  The Hessian moves
+    discontinuously only where the window gains or loses a term below
+    ``exp(-log_cutoff)`` of the mode term: at the default cutoff, within the
+    Hessian's own rounding.
     """
     arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
         y,
