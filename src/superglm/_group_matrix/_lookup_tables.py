@@ -94,6 +94,15 @@ _FORCE_PAIR_FORM: str | None = None
 # The Gram takes the tables from this many rows: below it a Gram pass is
 # milliseconds on every route, and the established rungs keep small fits.
 _MIN_TABLE_GRAM_ROWS = 20_000
+# ...and only while the design has at least this many columns per row sweep of
+# the tables (one per term, term pair, term and dense block, and dense pair).
+# The tables cost a sweep each, the chunked rungs about one pass per column:
+# per call on freMTPL2 (542,406 rows, one thread) 3.2-3.8 ns per row and
+# sweep against 0.56-0.77 ns per row and column at up to 340 columns.  Below
+# the crossover a main-effects design (67 columns, 21 sweeps) is 1.65 times
+# faster on the rungs; a spline-by-factor pair (197 columns, 28 sweeps) is
+# 1.65 times faster on the tables, a tensor pair (184, 28) the same on both.
+_TABLE_GRAM_COLUMNS_PER_SWEEP = 6
 
 _gram_override: ContextVar[bool | None] = ContextVar("superglm_table_gram", default=None)
 
@@ -145,6 +154,12 @@ class LookupPlan:
     @property
     def n_pairs(self) -> int:
         return int(self.tab_pairs.shape[0] + self.acc_pairs.shape[0])
+
+    @property
+    def n_sweeps(self) -> int:
+        """Row sweeps of one table Gram: margins, pairs, term-by-dense blocks, dense pairs."""
+        t, d = len(self.terms), len(self.dense)
+        return t + self.n_pairs + t * d + d * (d + 1) // 2
 
     def count_roundings(self) -> int:
         """``K = 3p + S + 2``, the roundings along one leverage's longest chain (module docstring).
@@ -244,6 +259,8 @@ def table_gram_plan(dm) -> LookupPlan | None:
     The exact path's designs only: every lookup group a categorical or a
     lossless support (``is_lossless_support``).  A binned design (the
     discrete path) keeps its own tensor routes, which were measured there.
+    A design with fewer than ``_TABLE_GRAM_COLUMNS_PER_SWEEP`` columns per row
+    sweep (:meth:`LookupPlan.n_sweeps`) keeps the chunked rungs, cheaper there.
     """
     from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix
 
@@ -256,7 +273,14 @@ def table_gram_plan(dm) -> LookupPlan | None:
         for gm in getattr(dm, "group_matrices", ())
     ):
         return None
-    return lookup_plan(dm)
+    plan = lookup_plan(dm)
+    if (
+        enabled is None
+        and plan is not None
+        and dm.p < _TABLE_GRAM_COLUMNS_PER_SWEEP * plan.n_sweeps
+    ):
+        return None
+    return plan
 
 
 def _build_plan(dm) -> LookupPlan | None:

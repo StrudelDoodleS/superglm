@@ -123,6 +123,7 @@ def test_a_lookup_fit_takes_every_centred_gram_from_the_tables(monkeypatch):
     for module in ("superglm.solvers.irls_direct", "superglm.reml.observed_geometry"):
         monkeypatch.setattr(f"{module}.build_centered_system", counted_build)
     monkeypatch.setattr(lookup_tables, "_MIN_TABLE_GRAM_ROWS", 0)
+    monkeypatch.setattr(lookup_tables, "_TABLE_GRAM_COLUMNS_PER_SWEEP", 0)
     _poisson_model(1.0e3)
 
     assert built["tables"] >= 3
@@ -154,8 +155,9 @@ def test_hand_built_dense_groups_match_the_materialised_gram(monkeypatch, pair_f
     dm = _hand_built_design()
     monkeypatch.setattr(lookup_tables, "_FORCE_PAIR_FORM", pair_form)
     W, z = _working_rows(dm.n)
-    system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
-    plan = lookup_tables.table_gram_plan(dm)
+    with lookup_tables.table_gram_config(True):
+        system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
+        plan = lookup_tables.table_gram_plan(dm)
     assert plan is not None and len(plan.dense) == 2
 
     design = dm.toarray()
@@ -191,3 +193,21 @@ def test_a_table_gram_without_dense_columns_is_exactly_symmetric():
         assert plan is not None and not plan.dense
         _, gram, *_ = lookup_tables.table_centred_system(plan, design, W, z, float(W.sum()))
     assert np.array_equal(gram, gram.T)
+
+
+def test_a_narrow_design_keeps_the_chunked_gram():
+    """Below ``_TABLE_GRAM_COLUMNS_PER_SWEEP`` columns per row sweep the rungs are cheaper.
+
+    The hand-built design has 15 sweeps (3 terms, 3 pairs, 6 term-by-dense
+    blocks, 3 dense pairs): at 16 columns it keeps the rungs, at 110 it takes
+    the tables; its leverages read the tables either way.  On the PR head the
+    narrow design took the tables (as the freMTPL2 main-effects model did,
+    1.65 times slower per Gram).
+    """
+    narrow, wide = _hand_built_design(), _hand_built_design(basis=100)
+    for dm in (narrow, wide):
+        assert lookup_tables.lookup_plan(dm) is not None
+        assert lookup_tables.lookup_plan(dm).n_sweeps == 15
+    assert narrow.p < lookup_tables._TABLE_GRAM_COLUMNS_PER_SWEEP * 15 <= wide.p
+    assert lookup_tables.table_gram_plan(narrow) is None
+    assert lookup_tables.table_gram_plan(wide) is lookup_tables.lookup_plan(wide)

@@ -374,16 +374,19 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
     assert plan(dense_only) is None
 
 
-def _hand_built_design(n: int = 2 * 8192 + 4096, *, empty_level: bool = False, seed: int = 17):
+def _hand_built_design(
+    n: int = 2 * 8192 + 4096, *, empty_level: bool = False, seed: int = 17, basis: int = 6
+):
     """Two dense groups (three columns, offset), two categoricals and a support spline, by hand.
 
     Large enough for the table Gram's row rule and three leverage row blocks.
-    ``empty_level`` puts a zero-width categorical between the groups.
+    ``empty_level`` puts a zero-width categorical between the groups;
+    ``basis=100`` makes the design wide enough for the table Gram's column rule.
     """
     from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
 
     rng = np.random.default_rng(seed)
-    support, basis = 40, 6
+    support = max(40, 2 * basis)
     grid = np.linspace(0.0, 1.0, support)
     knots = np.linspace(0.0, 1.0, basis)
     B = np.maximum(0.0, 1.0 - np.abs(grid[:, None] - knots[None, :]) * (basis - 1))
@@ -477,7 +480,8 @@ def test_an_empty_categorical_adds_nothing_to_the_tables():
     """
     from superglm.solvers.centered_system import build_centered_system
 
-    with_empty, without = _hand_built_design(empty_level=True), _hand_built_design()
+    with_empty = _hand_built_design(empty_level=True, basis=100)
+    without = _hand_built_design(basis=100)
     assert with_empty.n >= leverage_tables._MIN_TABLE_GRAM_ROWS
     inverse, centre_hi, centre_lo, active = _hand_built_operands(without)
     W, z = np.random.default_rng(2).uniform(0.1, 2.0, without.n), np.zeros(without.n)
