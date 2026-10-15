@@ -331,16 +331,23 @@ def _warmup_compiled_tweedie_dispatchers(
             ),
         ),
         (_compiled._complete_batch_status, (values, scores, hessians, 2)),
-        (_compiled._polygamma_012, (1.0,)),
-        (_compiled._third_term_channels, (1, 0.0, 0.0, 0.0, 2.0)),
-        (
-            _compiled._series_third_cumulants,
-            (0.0, 0.0, 0.0, 0.0, 2.0, 1.0, *limits, coefficients),
-        ),
-        (_compiled._tweedie_third_row, (1.0, 1.2, 0.7, 1.5, rho, *limits, coefficients)),
     )
     for dispatcher, arguments in calls:
         cast(Callable[..., object], dispatcher)(*arguments)
+
+
+# The LAML endgame's third-derivative kernels (``_tweedie_hessian_direction_core``
+# and the four helpers it calls) compile, or load from numba's cache, on a
+# Tweedie fit's first endgame call, not here: warming them cost every
+# ``superglm.warmup()`` about 0.4 s with a warm cache and 5.6 s cold, whether or
+# not the process fits a Tweedie SuperLSS model.
+_FIRST_USE_DISPATCHERS = (
+    "_polygamma_012",
+    "_third_term_channels",
+    "_series_third_cumulants",
+    "_tweedie_third_row",
+    "_tweedie_hessian_direction_core",
+)
 
 
 def _warmup_tweedie() -> None:
@@ -359,10 +366,6 @@ def _warmup_tweedie() -> None:
                 failing_row=int(failing_row),
                 max_terms=_DEFAULT_MAX_TERMS,
             )
-    y, mean, dispersion, power, weight = arrays
-    tweedie_hessian_direction(
-        y, mean, dispersion, power, weight, "prior", np.zeros((1, 3), dtype=np.float64)
-    )
 
 
 def evaluate_tweedie_rows(
