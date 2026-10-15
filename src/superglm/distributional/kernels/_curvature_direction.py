@@ -120,7 +120,7 @@ def mean_form_hessian_direction(
     third[:, 1, 1] = -(c_aaa * va + c_aab * vb)
     third[:, 1, 2] = third[:, 2, 1] = -(c_aab * va + c_abb * vb)
     third[:, 2, 2] = -(c_abb * va + c_bbb * vb)
-    w = np.einsum("nai,ni->na", jacobian, direction)
+    w = np.matmul(jacobian, direction[:, :, None])[:, :, 0]
     pairs = _pairs(3)
     hessian = np.empty((n_rows, 3, 3), dtype=np.float64)
     location = np.empty((n_rows, 3, 3), dtype=np.float64)
@@ -128,11 +128,11 @@ def mean_form_hessian_direction(
     for column, (left, right) in enumerate(pairs):
         hessian[:, left, right] = hessian[:, right, left] = location_hessian[:, column]
         location[:, left, right] = location[:, right, left] = packed_location[:, column]
-    z = np.einsum("nij,nj->ni", second, direction)
-    hessian_jacobian_mu = np.einsum("nb,nbj->nj", hessian[:, 0, :], jacobian)
-    hessian_w_mu = np.einsum("nb,nb->n", hessian[:, 0, :], w)
+    z = np.matmul(second, direction[:, :, None])[:, :, 0]
+    hessian_jacobian_mu = np.matmul(hessian[:, 0:1, :], jacobian)[:, 0, :]
+    hessian_w_mu = np.sum(hessian[:, 0, :] * w, axis=1)
     full = (
-        np.einsum("nai,nab,nbj->nij", jacobian, location, jacobian)
+        np.matmul(np.matmul(np.swapaxes(jacobian, 1, 2), location), jacobian)
         + z[:, :, None] * hessian_jacobian_mu[:, None, :]
         + hessian_jacobian_mu[:, :, None] * z[:, None, :]
         + second * hessian_w_mu[:, None, None]
