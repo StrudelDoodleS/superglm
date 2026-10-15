@@ -136,3 +136,30 @@ def test_dataframe_boundary_documentation_is_discoverable() -> None:
     assert "adds no AFT API" in developer
     assert "construction-time eligibility" in developer
     assert "traces" in developer
+
+
+def test_the_symbolic_oracle_is_a_dev_dependency_never_imported_by_the_package() -> None:
+    """SymPy (and the mpmath it brings) check derivatives in tests only.
+
+    It sits in the ``dev`` extra, never in ``[project]``, and no module under
+    ``src/superglm`` imports either, so an installed superglm never needs them.
+    """
+    import ast
+
+    project = _toml_section("project")
+    optional = _toml_section("project.optional-dependencies")
+    assert "sympy" not in project and "mpmath" not in project
+    dev = optional.partition("dev = [")[2].partition("]")[0]
+    assert re.search(r'^\s*"sympy>=', dev, flags=re.MULTILINE)
+    offenders = []
+    for path in sorted((ROOT / "src" / "superglm").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module]
+            if any(name.split(".")[0] in {"sympy", "mpmath"} for name in names):
+                offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []
