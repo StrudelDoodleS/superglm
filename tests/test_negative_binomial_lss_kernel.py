@@ -7,6 +7,7 @@ import math
 import numpy as np
 import pytest
 
+from tests import _nb_series_reference as series_reference
 from tests._distributional_family_kernels import negative_binomial as nb_kernel
 from tests._negative_binomial_lss_oracles import (
     NEGATIVE_BINOMIAL_LSS_CASES,
@@ -371,14 +372,21 @@ def test_series_candidate_boundary_is_accurate_and_conditioned(
         remainder_scale[-1:],
         2,
     )
-    scaled_power_sums = nb_kernel._scaled_power_sums
+    # The compiled series is the reference loop bit for bit
+    # (test_negative_binomial_compiled_kernel), so the reference shows the
+    # power-sum conditioning deciding this row.
+    for computed, expected in zip(
+        nb_kernel._theta_series(*arguments), series_reference._theta_series(*arguments), strict=True
+    ):
+        np.testing.assert_array_equal(computed, expected)
+    scaled_power_sums = series_reference._scaled_power_sums
 
     def omit_conditioning(count: int):
         values, errors = scaled_power_sums(count)
         return values, np.zeros_like(errors)
 
-    monkeypatch.setattr(nb_kernel, "_scaled_power_sums", omit_conditioning)
-    np.testing.assert_array_equal(nb_kernel._theta_series(*arguments)[0], [[True, True]])
+    monkeypatch.setattr(series_reference, "_scaled_power_sums", omit_conditioning)
+    np.testing.assert_array_equal(series_reference._theta_series(*arguments)[0], [[True, True]])
 
 
 @pytest.mark.parametrize("raw_count", [2, 7, 100_000])
@@ -389,10 +397,16 @@ def test_scaled_power_sums_are_fixed_width_and_enclose_roundoff(raw_count: int) 
             raise AssertionError("integer exponentiation must not be used")
 
     count = NoPowerInt(raw_count)
-    values, errors = nb_kernel._scaled_power_sums(count)
+    values, errors = series_reference._scaled_power_sums(count)
+    compiled_values, compiled_errors = np.empty(12), np.empty(12)
+    nb_kernel._compiled._scaled_power_sums(
+        raw_count, nb_kernel._SERIES_BERNOULLI, compiled_values, compiled_errors, np.empty(12)
+    )
 
     assert values.dtype == errors.dtype == np.dtype(np.float64)
     assert np.all(np.isfinite(values)) and np.all(np.isfinite(errors))
+    np.testing.assert_array_equal(compiled_values, values)
+    np.testing.assert_array_equal(compiled_errors, errors)
     expected = np.array(
         [
             math.fsum((float(offset) / count) ** power for offset in range(count)) / count
@@ -440,12 +454,14 @@ def test_requested_derivative_orders_are_actually_lazy(
         )
         assert natural.shape == direct.shape == (1, order)
 
-    monkeypatch.setattr(nb_kernel, "_series_hessian_step", unexpected)
+    monkeypatch.setattr(series_reference, "_series_hessian_step", unexpected)
     theta = np.array([np.nextafter(20.0, np.inf)])
     _, remainder_error, remainder_scale = nb_kernel._ratio_remainder(np.array([1.25]) / theta)
-    nb_kernel._theta_series(
-        np.array([2]), np.array([1.25]), theta, remainder_error, remainder_scale, 1
-    )
+    arguments = (np.array([2]), np.array([1.25]), theta, remainder_error, remainder_scale, 1)
+    expected = series_reference._theta_series(*arguments)
+    for computed, reference in zip(nb_kernel._theta_series(*arguments), expected, strict=True):
+        assert computed.shape == (1, 1)
+        np.testing.assert_array_equal(computed, reference)
 
 
 def test_public_evaluator_wires_direct_log_channel_retention(

@@ -40,6 +40,7 @@ from superglm.distributional.kernels.negative_binomial import (
     evaluate_negative_binomial_rows,
     has_resolved_poisson_boundary,
     initialize_negative_binomial,
+    negative_binomial_predictor_curvature_directional,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -323,6 +324,30 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        link_tuple = tuple(links)
+        if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
+            raise UnsupportedLikelihoodContractError(
+                "NB2 endpoint curvature derivatives require the built-in log links"
+            )
+        candidate = _typed_plan(plan, response_row_count(y))
+        return negative_binomial_predictor_curvature_directional(
+            candidate.exact_count,
+            eta,
+            eta_direction,
+            candidate.weights.values,
+            candidate.weights.provenance.contract.semantics,
         )
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
