@@ -186,6 +186,11 @@ class ProbitLink:
         eta = _as_float64(eta)
         return (eta**2 - 1) * _normal_pdf(eta)
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = (3η - η³)·φ(η)."""
+        eta = _as_float64(eta)
+        return (3 * eta - eta**3) * _normal_pdf(eta)
+
 
 #: ``sqrt(2 pi)`` as ``scipy.stats`` forms it, so the density below is the same float64.
 _NORMAL_PDF_C = np.sqrt(2 * np.pi)
@@ -211,12 +216,6 @@ def _normal_pdf(x):
     """
     result = np.exp(-(x**2) / 2.0) / _NORMAL_PDF_C
     return result[()] if np.ndim(result) == 0 else result
-
-    def deriv4_inverse(self, eta: NDArray) -> NDArray:
-        """d⁴μ/dη⁴ = (3η - η³)·φ(η)."""
-        from scipy.stats import norm
-
-        return (3 * eta - eta**3) * norm.pdf(eta)
 
 
 class CloglogLink:
