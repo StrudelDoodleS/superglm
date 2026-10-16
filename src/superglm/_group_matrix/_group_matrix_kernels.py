@@ -103,8 +103,9 @@ def _ssp_gram_needs_exact(*operands) -> bool:
 
 
 #: Every bin sum below adds 53-bit binary64 significands split into a signed
-#: high part below 2**27 and a low part below 2**26 (``_exact_bin_sums``); int64
-#: holds such sums of fewer than 2**36 terms exactly.
+#: high part with |h| <= 2**27 (floor division: m = -(2**53 - 1) gives
+#: h = -2**27) and a low part below 2**26 (``_exact_bin_sums``); fewer than
+#: 2**36 such terms sum within (2**36 - 1) 2**27 = 2**63 - 2**27, inside int64.
 _EXACT_SPLIT_BITS = 26
 _EXACT_MAX_TERMS = 1 << 36
 #: Trailing-zero classes of the exact bin masses (``_exact_gram_moments``).
@@ -140,9 +141,9 @@ def _exact_bin_sums(values: np.ndarray, bins: np.ndarray, n_bins: int, scale: in
     (Malcolm, CACM 14(11), 1971) and Neal's superaccumulators (arXiv
     1505.05571, 2015): rows sharing an exponent add their significands as
     fixed-width integers, so no row enters Python arithmetic. Each significand
-    ``m = h 2**26 + l`` splits into ``|h| < 2**27`` and ``0 <= l < 2**26``;
-    fewer than ``2**36`` of either sum below ``2**63`` in int64, whatever the
-    order. Only the per-group totals become Python integers, shifted to the
+    ``m = h 2**26 + l`` splits into ``|h| <= 2**27`` (``h = -2**27`` at
+    ``m = -(2**53 - 1)``) and ``0 <= l < 2**26``; fewer than ``2**36`` of
+    either sum within ``2**63 - 2**27`` in int64, whatever the order. Only the per-group totals become Python integers, shifted to the
     common scale and added per bin. Every operation is exact.
     """
     if values.size >= _EXACT_MAX_TERMS:  # pragma: no cover - beyond addressable memory
@@ -267,6 +268,57 @@ def _exact_congruence(gram, xtw, xtr, coefficients):
     )
 
 
+def _exact_projects_first(row_counts, columns, transform) -> bool:
+    """Whether forming each row's ``b R`` first costs fewer integer products than ``R'(B'MB)R``.
+
+    Raw Gram: ``sum(nnz_r**2) / 2`` pair products, then the congruence's
+    ``(k + width / 2) nnz(R)``. Projected: each stored entry times its row
+    of ``R`` (``sum`` of ``nnz(R[i])``), then at most ``width**2 / 2`` pairs
+    per row. Both give the same exact integers; this chooses by work only.
+    """
+    k, width = transform.shape
+    nonzero = transform != 0
+    row_nonzeros = nonzero.sum(axis=1).astype(np.float64)
+    counts = np.asarray(row_counts, dtype=np.float64)
+    raw = 0.5 * float(counts @ counts) + (k + 0.5 * width) * float(row_nonzeros.sum())
+    rows = np.repeat(np.arange(counts.size), np.asarray(row_counts, dtype=np.int64))
+    per_row = np.bincount(rows, weights=row_nonzeros[columns], minlength=counts.size)
+    projected = float(per_row.sum()) + 0.5 * float(np.sum(np.minimum(per_row, width) ** 2))
+    return projected < raw
+
+
+def _exact_projected_rows(indptr, columns, entries, coefficients):
+    """Each CSR row's exact ``b R`` as a CSR row of Python integers (zeros dropped)."""
+    k, width = coefficients.shape
+    table = coefficients.tolist()
+    support = [[(c, value) for c, value in enumerate(row) if value] for row in table]
+    pointers = indptr.tolist()
+    all_columns = columns.tolist()
+    all_entries = entries.tolist()
+    out_pointers, out_columns, out_entries = [0], [], []
+    for row in range(len(pointers) - 1):
+        effective = [0] * width
+        for i, value in zip(
+            all_columns[pointers[row] : pointers[row + 1]],
+            all_entries[pointers[row] : pointers[row + 1]],
+            strict=True,
+        ):
+            for c, coefficient in support[i]:
+                effective[c] += value * coefficient
+        for c, value in enumerate(effective):
+            if value:
+                out_columns.append(c)
+                out_entries.append(value)
+        out_pointers.append(len(out_columns))
+    entries_out = np.empty(len(out_entries), dtype=object)
+    entries_out[:] = out_entries
+    return (
+        np.asarray(out_pointers, dtype=np.int64),
+        np.asarray(out_columns, dtype=np.int64),
+        entries_out,
+    )
+
+
 def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
     """Round the requested source-factor moments once on exceptional inputs.
 
@@ -371,15 +423,22 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
         row_counts = np.bincount(local_rows, minlength=active_rows.size)
     indptr = np.concatenate(([0], np.cumsum(row_counts))).astype(np.int64)
     entries = _exact_integers(finite(values), basis_scale)
-    raw_gram, raw_xtw, raw_xtr = _exact_gram_moments(
-        indptr,
-        np.asarray(columns, dtype=np.int64),
-        entries,
-        masses[active_rows],
-        None if rhs_masses is None else rhs_masses[active_rows],
-        coefficients.shape[0],
-    )
-    gram, xtw, xtrhs = _exact_congruence(raw_gram, raw_xtw, raw_xtr, coefficients)
+    columns = np.asarray(columns, dtype=np.int64)
+    active_masses = masses[active_rows]
+    active_rhs = None if rhs_masses is None else rhs_masses[active_rows]
+    if _exact_projects_first(row_counts, columns, transform):
+        # A narrow transform (a decomposed tensor's bilinear subgroup, R
+        # k x 1): forming each row's B R first keeps the Gram r x r, as the
+        # row-at-a-time version did, instead of a k x k raw Gram per class.
+        indptr, columns, entries = _exact_projected_rows(indptr, columns, entries, coefficients)
+        gram, xtw, xtrhs = _exact_gram_moments(
+            indptr, columns, entries, active_masses, active_rhs, width
+        )
+    else:
+        raw_gram, raw_xtw, raw_xtr = _exact_gram_moments(
+            indptr, columns, entries, active_masses, active_rhs, coefficients.shape[0]
+        )
+        gram, xtw, xtrhs = _exact_congruence(raw_gram, raw_xtw, raw_xtr, coefficients)
     effective_scale = basis_scale + transform_scale
     try:
         rounded_gram = np.array(

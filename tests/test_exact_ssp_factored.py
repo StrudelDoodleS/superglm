@@ -175,6 +175,42 @@ def test_bin_aggregation_makes_no_python_call_per_observation(moments):
         weights = _stress_vector(rng, n, signed=False)
         return _python_calls(moments, support, transform, weights, weights, bin_indices=bins)
 
+    # The reference converts each weight with a Python call, at least one
+    # call per added row; the bound allows one per hundred.
     small, large = calls(2_000), calls(32_000)
-    vectorised = small < 1_000 and large <= small + 50
+    vectorised = large - small < (32_000 - 2_000) // 100
     assert vectorised is (moments is kernels._exact_ssp_moments), (small, large)
+
+
+@pytest.mark.parametrize("width", [1, 3, 29])
+def test_a_rectangular_projection_matches_the_reference_and_narrow_ones_stay_narrow(
+    width, monkeypatch
+):
+    """A projected group's ``R`` is ``k x r`` (a decomposed tensor's bilinear subgroup: ``r = 1``).
+
+    Dense 30-column support rows, as a tensor's are. A narrow ``R`` is applied
+    to each row first, so the exact Gram is ``r x r`` and not ``k x k`` per
+    mass class; a wide one keeps the raw Gram. Both match the reference bit
+    for bit. Mutation check: always accumulating the raw ``k x k`` Gram (as
+    at 236c0483) fails the width assertion for ``r = 1`` and ``r = 3``.
+    """
+    rng = np.random.default_rng(40 + width)
+    k, n_bins = 30, 200
+    support = rng.uniform(0.05, 1.0, (n_bins, k))
+    transform = rng.normal(size=(k, width))
+    bins = rng.integers(0, n_bins, 5_000)
+    weights = _stress_vector(rng, bins.size, signed=False)
+    rhs = _stress_vector(rng, bins.size, signed=True)
+    widths = []
+    accumulate = kernels._exact_gram_moments
+
+    def recorded(*args):
+        widths.append(args[-1])
+        return accumulate(*args)
+
+    monkeypatch.setattr(kernels, "_exact_gram_moments", recorded)
+    _assert_bitwise(
+        kernels._exact_ssp_moments(support, transform, weights, rhs, bin_indices=bins),
+        reference_exact_ssp_moments(support, transform, weights, rhs, bin_indices=bins),
+    )
+    assert widths == [width if width < 10 else k]
