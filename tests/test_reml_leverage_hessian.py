@@ -6,7 +6,10 @@ solved rows ``H^-1 x_r`` (``reml/_leverage_rows.py``), in place of one
 ``p x p`` derivative Gram per smoothing parameter.  These tests pin its
 values against the Gram route within a bound derived in the unit roundoff, on
 both row producers, and its cost: one solved-row pass per REML iteration,
-whatever the number of smoothing parameters.
+whatever the number of smoothing parameters.  A design of lookups reads its
+leverages back from term-pair tables instead (``_group_matrix/_lookup_tables.py``,
+``tests/test_reml_leverage_tables.py``); the solved-row tests here turn that
+route off with ``_solved_rows_only``.
 """
 
 from __future__ import annotations
@@ -37,6 +40,11 @@ def _gamma(k: int) -> float:
     return k * _U / (1.0 - k * _U)
 
 
+def _solved_rows_only(monkeypatch) -> None:
+    """Send the leverage route to the solved rows, as for a design that is not all lookups."""
+    monkeypatch.setattr(w_derivatives, "lookup_plan", lambda *args, **kwargs: None)
+
+
 def _poisson_frame(n: int, offset: float, seed: int = 31):
     rng = np.random.default_rng(seed)
     # Coarse covariates: every spline term has a small indexed support, so the
@@ -63,8 +71,8 @@ def _poisson_frame(n: int, offset: float, seed: int = 31):
     return frame, y, weights
 
 
-def _poisson_model(offset: float) -> SuperGLM:
-    frame, y, weights = _poisson_frame(1500, offset)
+def _poisson_model(offset: float, n: int = 1500) -> SuperGLM:
+    frame, y, weights = _poisson_frame(n, offset)
     return SuperGLM(
         family="poisson",
         features={
@@ -92,7 +100,9 @@ def _correction_inputs(model: SuperGLM) -> tuple[tuple, dict]:
     return args, kwargs
 
 
-def _rounding_bounds(model: SuperGLM) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _rounding_bounds(
+    model: SuperGLM, *, raw_centre_copies: int = 1, extra_roundings: int = 0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Reference terms from the Gram route and the bounds both routes keep, in ``u``.
 
     Each term is a sum over rows of products whose magnitudes the test forms
@@ -104,7 +114,11 @@ def _rounding_bounds(model: SuperGLM) -> tuple[np.ndarray, np.ndarray, np.ndarra
     |a|_jr (M_r' |H^-1| M_r + 1/sum_w) / 2``, and the cross term ``P_ij`` within
     ``gamma_K F_ij``, ``F_ij = sum_r (M_r' G_i M_r) |a|_jr``: products, solves
     and sums of at most ``K = n + 4p + 16`` roundings along each chain (Higham
-    2002, secs. 3.1, 3.5).  Two routes differ by at most twice that.
+    2002, secs. 3.1, 3.5).  Two routes differ by at most twice that.  The
+    table route reads a raw group's row and its centre as separate terms,
+    ``|a_r| + |z|`` with ``|a_r| <= |x_r| + |c_raw|``, so it passes
+    ``raw_centre_copies=2``, and adds its own row-sum count
+    (``extra_roundings``, ``TablePlan.count_roundings``).
     """
     args, kwargs = _correction_inputs(model)
     gradient, extra = w_derivatives.reml_w_correction(*args, **kwargs)
@@ -115,7 +129,7 @@ def _rounding_bounds(model: SuperGLM) -> tuple[np.ndarray, np.ndarray, np.ndarra
     dense = w_derivatives.dense_columns(dm)
     design = dm.toarray()
     centred = design - np.where(dense, design.mean(axis=0), np.asarray(summary.mean_x))
-    magnitude = np.abs(centred) + np.where(dense, 0.0, np.abs(summary.mean_x))
+    magnitude = np.abs(centred) + raw_centre_copies * np.where(dense, 0.0, np.abs(summary.mean_x))
     eta = design @ model.result.beta + model.result.intercept
     mu = link.inverse(eta)
     weight_derivative = w_derivatives.compute_dW_deta(
@@ -150,7 +164,7 @@ def _rounding_bounds(model: SuperGLM) -> tuple[np.ndarray, np.ndarray, np.ndarra
         axis=1,
     )
     cross_scale = quadratic_scale.T @ weight_scale
-    k = n + 4 * p + 16
+    k = n + 4 * p + 16 + extra_roundings
     hessian_terms = []
     for i in range(m):
         left = inverse @ smoothing[:, :, i]
@@ -172,6 +186,7 @@ def test_leverage_terms_match_derivative_grams_within_rounding(monkeypatch, prod
     """
     import superglm.reml._leverage_rows as leverage_rows
 
+    _solved_rows_only(monkeypatch)
     model = _poisson_model(offset)
     gradient, reference_cross, gradient_bound, cross_bound = _rounding_bounds(model)
     planned = []
@@ -263,11 +278,13 @@ def _outlier_case() -> dict:
     }
 
 
-@pytest.mark.parametrize("producer", ["support", "chunked"])
+@pytest.mark.parametrize("producer", ["support", "chunked", "tables"])
 def test_leverage_route_never_forms_a_row_without_weight(monkeypatch, producer):
     """A ``1e200`` row with zero weight derivative must not overflow into the terms."""
     import superglm.reml._leverage_rows as leverage_rows
 
+    if producer != "tables":
+        _solved_rows_only(monkeypatch)
     if producer == "chunked":
         monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
     case = _outlier_case()
@@ -275,7 +292,10 @@ def test_leverage_route_never_forms_a_row_without_weight(monkeypatch, producer):
     leverage = w_derivatives.reml_w_correction(**case, leverage_hessian=True)
 
     assert leverage is not None
-    assert np.all(np.isfinite(leverage[0])) and np.all(np.isfinite(leverage[2]))
+    assert np.all(np.isfinite(leverage[0]))
+    # The table route forms no per-row cross terms (``_lookup_tables``).
+    assert (leverage[2] is None) == (producer == "tables")
+    assert producer == "tables" or np.all(np.isfinite(leverage[2]))
 
 
 def _count_row_passes(monkeypatch) -> dict:
@@ -321,6 +341,7 @@ def test_weight_correction_makes_one_row_pass_per_reml_iteration(monkeypatch, pa
     """
     # A small fixture: admit it below the work bar that keeps cheap Grams.
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    _solved_rows_only(monkeypatch)
     counts = _count_row_passes(monkeypatch)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
     interactions = [("a", "b"), ("e", "c")][:pairs]
@@ -416,8 +437,8 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
     frozen direction it may still fall by up to the freeze bar, ``1e-7 * (1 +
     |V|)``, per unit of log-lambda.
 
-    The leverage route leaves only a Hessian term out, so its gradient is the
-    Gram route's.  Each fit's terminal candidate is therefore re-scored with
+    The leverage route (here the table read-back) leaves only Hessian terms
+    out, so its gradient is the Gram route's.  Each fit's terminal candidate is therefore re-scored with
     the *other* route's weight correction, on the same PIRLS state, inverse
     and frozen set, and must pass the same bar.  Rounding between the routes
     is ``O(u)`` of the gradient terms (``test_leverage_terms_match_*``),
@@ -472,7 +493,7 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
         result = model._reml_result
         assert result.converged
         assert model._reml_profile["reml_w_correction_mode"] == (
-            "leverage_hessian" if leverage else "derivative_grams"
+            "leverage_tables" if leverage else "derivative_grams"
         )
         args, kwargs, own = last["correction"]
         swapped: dict[str, Any] = dict(kwargs)

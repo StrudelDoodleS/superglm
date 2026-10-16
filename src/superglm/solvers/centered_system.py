@@ -27,6 +27,7 @@ from superglm._group_matrix._group_matrix_centered import (
     packed_centered_gram_rhs,
     try_raw_moment_centering,
 )
+from superglm._group_matrix._lookup_tables import table_centred_system, table_gram_plan
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import (
     corrected_two_pass_pair,
@@ -757,6 +758,19 @@ def build_centered_system(
         return _attach_centered_penalty(*refreshed, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
+    # A design of lookups and dense columns: one weighted histogram (or
+    # accumulator) per term pair, every table centred before its product
+    # (``_lookup_tables``; Li & Wood 2020, Algorithm 1).  No raw moment is
+    # subtracted, so no rung's value certificate is needed.
+    plan = None if _force_chunked else table_gram_plan(dm)
+    table = None if plan is None else table_centred_system(plan, dm, W, z_centered, sum_w)
+    if table is not None:
+        mean_x, data_gram, rhs, mean_hi, mean_lo = table
+        if profile is not None:
+            profile["centered_table_gram_hits"] = profile.get("centered_table_gram_hits", 0) + 1
+        return _attach_centered_penalty(
+            sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
+        )
     # A ``DenseGroupMatrix`` column, the one type whose entries its type does
     # not bound, never enters a raw-moment rung: each subtracts ``sum W x x'``
     # and ``(X'W)(X'W)' / sum W`` under a value certificate
