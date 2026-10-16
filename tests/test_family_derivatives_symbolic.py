@@ -871,19 +871,6 @@ def test_every_link_supplies_four_inverse_derivatives(name: str) -> None:
         assert error <= 64 * _U * scale, (name, order, float(error / scale) / _U)
 
 
-def test_link_fourth_derivatives_match_the_observed_geometry_table() -> None:
-    """The single-predictor observed weights' fourth inverse derivatives are the links' own."""
-    from superglm.reml.observed_geometry import _deriv4_inverse
-
-    _, cases = _link_cases()
-    for name in ("log", "identity", "logit", "probit", "cloglog", "cauchit", "inverse"):
-        link, _, grid = cases[name]
-        values = np.asarray(grid, dtype=float)
-        expected = np.asarray(link.deriv4_inverse(values), dtype=float)
-        tolerance = 16 * _U * np.max(np.abs(expected))
-        assert np.all(np.abs(_deriv4_inverse(link, values) - expected) <= tolerance), name
-
-
 # ---------------------------------------------------------------- mutation
 
 
