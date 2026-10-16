@@ -432,6 +432,12 @@ def optimize_direct_reml(
     # This owner dies with the optimizer; outside/finalization fits stay fresh.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
+    # One flag for the fit's PIRLS solves: once a Gamma/log solve has had to
+    # leave Fisher scoring for Newton (``fit_irls_direct``), the solves after
+    # it start on Newton, since the same data and nearby smoothing parameters
+    # give Fisher the same trouble.  A fit whose Fisher solves converge never
+    # sets it.
+    newton_latch = [False]
 
     # === Pre-solve: cached-W performance iteration on this same design ===
     # The cached-W loop (no dW/drho term) is cheap per iteration and covers
@@ -578,6 +584,7 @@ def optimize_direct_reml(
             weight_semantics=weight_semantics,
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
+            _newton_latch=newton_latch,
             _mode_bar=mode_bar,
         )
         _t_pirls += _time.perf_counter() - _t0
@@ -741,6 +748,7 @@ def optimize_direct_reml(
             weight_semantics=weight_semantics,
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
+            _newton_latch=newton_latch,
             _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=mode_bar,
             cache_out=fit_cache,
@@ -1620,6 +1628,7 @@ def optimize_direct_reml(
                     _initial_data_reuse=_initial_data_reuse,
                     _raw_moment_policy=raw_moment_policy,
                     _fisher_data_reuse=fisher_data_reuse,
+                    _newton_latch=newton_latch,
                     _laplace_excluded=tuple(int(index) for index in identified.weak),
                     _mode_bar=mode_bar,
                     cache_out=trial_cache,

@@ -981,6 +981,7 @@ def fit_irls_direct(
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
     _working_newton: bool = False,
+    _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1042,6 +1043,7 @@ def fit_irls_direct(
             _retain_reml_decomposition=_retain_reml_decomposition,
             _use_observed_newton=_use_observed_newton,
             _working_newton=_working_newton,
+            _newton_latch=_newton_latch,
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
@@ -1097,6 +1099,7 @@ def _fit_irls_direct_once(
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
     _working_newton: bool = False,
+    _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1203,6 +1206,11 @@ def _fit_irls_direct_once(
         performance iteration's update takes the declared pairs' Newton rows
         instead of Fisher's, once the discrete optimizer measured its Fisher
         iteration to cycle or stall (``reml.discrete``).
+    _newton_latch : list of one bool, optional
+        Internal, shared by the PIRLS solves of one REML fit.  A Gamma/log
+        solve that switched from Fisher to Newton sets it, and a later solve
+        of the fit that finds it set starts on Newton steps.  ``None`` (the
+        default) shares nothing.
     _use_observed_newton : bool
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
@@ -2113,7 +2121,9 @@ def _fit_irls_direct_once(
         )
     )
     # A declared Newton pair kept on Fisher rows for its constant weights
-    # (Gamma/log), which switches to Newton if its Fisher score stagnates.
+    # (Gamma/log), which switches to Newton if its Fisher score stagnates,
+    # and starts on Newton when an earlier solve of the same REML fit
+    # switched (``_newton_latch``).
     _stagnation_newton_available = bool(
         _use_observed_newton
         and not has_constraints
@@ -2122,6 +2132,8 @@ def _fit_irls_direct_once(
         and supports_observed_newton(family, link)
         and not _observed_newton_active
     )
+    if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
+        _observed_newton_active = True
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -3813,6 +3825,8 @@ def _fit_irls_direct_once(
                     _can_reuse_weighted_gram = False
                     score_stagnated = False
                     _mode_ratios.clear()
+                    if _newton_latch is not None:
+                        _newton_latch[0] = True
                     if profile is not None:
                         profile["irls_fisher_newton_switches"] = (
                             profile.get("irls_fisher_newton_switches", 0) + 1

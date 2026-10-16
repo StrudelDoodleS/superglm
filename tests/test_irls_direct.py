@@ -1011,6 +1011,32 @@ class TestDirectSolverBasic:
         assert profile["irls_fisher_newton_switches"] == 1
         np.testing.assert_allclose(result.beta, [0.2], rtol=1e-7)
 
+        # One REML fit's later solves start where the switch left them: a set
+        # latch begins on Newton steps, and a switching solve sets it.
+        def solve(latch, profile):
+            return fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=LogLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                convergence="mode_score",
+                profile=profile,
+                weight_semantics="frequency",
+                _newton_latch=latch,
+            )[0]
+
+        latch = [False]
+        solve(latch, {})
+        assert latch == [True]
+        latched: dict = {}
+        started = solve(latch, latched)
+        assert started.converged
+        assert "irls_fisher_newton_switches" not in latched
+        assert latched["irls_observed_newton_iters"] == started.n_iter < result.n_iter
+
     def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
         """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
 
