@@ -14,8 +14,10 @@ BLAS pools -- tabmat's OpenMP kernels and numba threading are untouched.
 
 ``SUPERGLM_BLAS_THREADS`` overrides the policy: unset or ``auto`` caps BLAS
 to one thread during fits; an integer caps to that many; ``native`` disables
-capping and leaves the user's BLAS configuration alone. Wide designs release
-the automatic cap once they reach the measured p³ break-even.
+capping and leaves the user's BLAS configuration alone. Wide designs the
+structured backend can take (a RandomEffect or FactorSmooth term) release the
+automatic cap once they reach the measured p³ break-even; every other design
+keeps it, its row passes running on the worker pool (``_parallel``).
 """
 
 from __future__ import annotations
@@ -61,7 +63,8 @@ def _scope_stack() -> list:
 # Break-even measured on the 16-core reference box (audit J.6 follow-up): the
 # single-thread cap wins 7x at p=203 and 1.4x at p=834, breaks even near
 # p=1500 and loses 1.6x by p=2500. Designs at or past break-even release the
-# cap for the remainder of the fit.
+# cap for the remainder of the fit, if the structured backend can take them
+# (``allow_wide_design``).
 _WIDE_DESIGN_THRESHOLD = 1_500
 
 
@@ -136,7 +139,7 @@ def _release_current_scope() -> None:
         _settle(1)
 
 
-def allow_wide_design(p: int) -> None:
+def allow_wide_design(p: int, *, structured: bool = True) -> None:
     """Release the automatic cap while a wide design's fit is active.
 
     Called once per fit as soon as the design width is known.  Only the
@@ -145,8 +148,18 @@ def allow_wide_design(p: int) -> None:
     for the overlap — but only for the overlap: the release is owned by the
     calling fit's scope, and when the last wide scope exits the cap is
     re-armed for any narrow fits still running.
+
+    ``structured`` is False for a design the structured backend cannot take
+    (no RandomEffect or FactorSmooth term): such a design keeps the cap at
+    every width.  Its row passes, the Gram, the leverages and the factor run
+    on the worker pool, the one parallelism level, and its dense kernels at
+    the widths fitted measured faster on one thread: the 10-pair freMTPL2 fit
+    (1,535 coefficients, the dense Gram route) took 92 s with BLAS on one
+    thread and 124-137 s with it released, at a seventh of the CPU time,
+    while pg17 step E (16,850 coefficients, the structured route) took 745 s
+    released and 1,682 s on one thread (16 cores, 2026-10-16).
     """
-    if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
+    if p < _WIDE_DESIGN_THRESHOLD or not structured or not _auto_policy():
         return
     _release_current_scope()
 

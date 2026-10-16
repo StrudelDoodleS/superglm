@@ -330,6 +330,17 @@ def record_auto_backend_decision(
         )
 
 
+def has_structured_term(group_matrices: Sequence) -> bool:
+    """Whether the design has a term the structured backend eliminates (RandomEffect, FactorSmooth).
+
+    A design without one always takes the dense Gram route.
+    """
+    return any(
+        isinstance(matrix, RandomEffectGroupMatrix | FactorSmoothGroupMatrix)
+        for matrix in group_matrices
+    )
+
+
 def _selection_failure(
     reason: str,
     mode: Literal["auto", "structured"],

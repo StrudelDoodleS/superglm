@@ -507,3 +507,49 @@ def test_a_pooled_section_runs_blas_on_one_thread_under_every_policy(monkeypatch
             assert all(count == 1 for count in _blas_thread_counts())
         assert all(count == explicit for count in _blas_thread_counts())
     assert _blas_thread_counts() == before
+
+
+def test_a_design_the_structured_backend_cannot_take_keeps_the_cap_at_any_width(monkeypatch):
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    with solver_blas_threads():
+        allow_wide_design(50_000, structured=False)
+        assert all(count == 1 for count in _blas_thread_counts())
+        allow_wide_design(50_000)
+        assert _blas_thread_counts() == before
+
+
+def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
+    """threadpoolctl probe: a wide design without a RandomEffect or FactorSmooth term
+    factors its Grams on one BLAS thread, and the process's pools come back after."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    import superglm.solvers.rank as rank
+    from superglm import Categorical, Spline, SuperGLM
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    # Every design counts as wide, so only the structured test keeps the cap.
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
+    seen: list[list[int]] = []
+    decompose = rank._decompose_gram
+
+    def probe(*args, **kwargs):
+        seen.append(_blas_thread_counts())
+        return decompose(*args, **kwargs)
+
+    monkeypatch.setattr(rank, "_decompose_gram", probe)
+    rng = np.random.default_rng(3)
+    n = 2_000
+    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "g": rng.choice(list("pqr"), n)})
+    y = rng.poisson(np.exp(0.3 * np.sin(4.0 * X["a"]))).astype(float)
+    SuperGLM(
+        family="poisson",
+        features={"a": Spline(n_knots=6), "g": Categorical()},
+        interactions=[("a", "g")],
+    ).fit_reml(X, y)
+    assert seen and all(all(count == 1 for count in counts) for counts in seen)
+    assert _blas_thread_counts() == before

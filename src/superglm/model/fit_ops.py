@@ -930,6 +930,7 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
     from superglm.links import resolve_link
     from superglm.model.base import model_build_design_matrix
     from superglm.model.fit_state import configured_family, configured_link
+    from superglm.solvers._structured.selection import has_structured_term
 
     if cache:
         dm = cache["dm"]
@@ -948,7 +949,7 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
             model._interaction_specs = cache["interaction_specs"]
             model._interaction_order = cache["interaction_order"]
             model._pending_interactions = ()
-            allow_wide_design(dm.p)
+            allow_wide_design(dm.p, structured=has_structured_term(dm.group_matrices))
             return (
                 cache["y"].copy(),
                 cache["sample_weight"].copy(),

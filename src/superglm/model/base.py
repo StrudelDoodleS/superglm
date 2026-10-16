@@ -1337,10 +1337,12 @@ def model_build_design_matrix(
     validate_penalty_features(configured_penalty(model), result.groups)
     model._dm = result.dm
     # Every fit path funnels through here, so this is the first point the
-    # design width is known: wide designs release the small-p BLAS cap.
+    # design width is known: wide designs the structured backend can take
+    # release the small-p BLAS cap.
     from superglm._blas_threads import allow_wide_design
+    from superglm.solvers._structured.selection import has_structured_term
 
-    allow_wide_design(result.dm.p)
+    allow_wide_design(result.dm.p, structured=has_structured_term(result.dm.group_matrices))
     return result.y, result.sample_weight, result.offset
 
 
