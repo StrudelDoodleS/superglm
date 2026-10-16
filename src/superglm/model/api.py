@@ -1567,21 +1567,22 @@ class SuperGLM:
             candidate, then ``"best_found"`` and ``"final_refit"`` with
             ``{"profile_estimate": ...}``.
         """
-        with self._parallel_scope():
-            return profile_ops.estimate_p(
-                self,
-                X,
-                y,
-                sample_weight,
-                offset,
-                fit_mode=fit_mode,
-                search_fit_mode=search_fit_mode,
-                p_bounds=p_bounds,
-                xatol=xatol,
-                ci_alpha=ci_alpha,
-                max_reml_iter=max_reml_iter,
-                progress_callback=progress_callback,
-            )
+        with fit_record(self, "estimate_p", locals()):
+            with self._parallel_scope():
+                return profile_ops.estimate_p(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    fit_mode=fit_mode,
+                    search_fit_mode=search_fit_mode,
+                    p_bounds=p_bounds,
+                    xatol=xatol,
+                    ci_alpha=ci_alpha,
+                    max_reml_iter=max_reml_iter,
+                    progress_callback=progress_callback,
+                )
 
     def estimate_theta(
         self,

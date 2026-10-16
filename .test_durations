@@ -20666,8 +20666,10 @@
     "tests/test_benchmark_books.py::test_compare_refuses_a_key_that_differs[spec_hash-<lambda>]": 0.0009965463541448116,
     "tests/test_benchmark_books.py::test_compare_refuses_without_a_usable_baseline": 0.0005606049671769142,
     "tests/test_benchmark_books.py::test_counts_only_record_has_every_field_and_no_timing": 7.826306206639856,
-    "tests/test_fit_record.py::test_a_failing_fit_keeps_its_own_exception_and_is_recorded": 0.006631891708821058,
-    "tests/test_fit_record.py::test_a_recorder_failure_never_fails_the_fit": 0.24447130504995584,
-    "tests/test_fit_record.py::test_set_spools_one_record_per_fit": 0.18070974852889776,
-    "tests/test_fit_record.py::test_unset_writes_nothing_and_never_imports_the_recorder": 0.18739194702357054
+    "tests/test_fit_record.py::test_a_failing_fit_keeps_its_own_exception_and_is_recorded": 0.008440022822469473,
+    "tests/test_fit_record.py::test_a_recorder_failure_never_fails_the_fit": 0.23232355248183012,
+    "tests/test_fit_record.py::test_set_spools_one_record_per_fit": 0.1406466905027628,
+    "tests/test_fit_record.py::test_unset_writes_nothing_and_never_imports_the_recorder": 0.15913263289257884,
+    "tests/test_fit_record.py::test_a_fit_that_never_ends_leaves_a_started_marker": 0.16490039275959134,
+    "tests/test_fit_record.py::test_outside_a_job_records_into_benchboards_unowned_spool": 0.22219349863007665
 }

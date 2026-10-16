@@ -38,6 +38,40 @@ _parent = contextvars.ContextVar("superglm_fit_record_parent", default=None)
 _process: dict = {}
 _sequence = [0]
 last_fit_id: str | None = None
+_SAMPLE_ROWS = 200_000  # numeric-shape statistics read at most this many rows
+_DISTINCT_CAP = 10_000
+
+
+class _CompileClock:
+    """Seconds numba spends compiling in this process (outermost compile events only)."""
+
+    def __init__(self):
+        self.total, self._depth, self._t0, self.installed = 0.0, 0, 0.0, False
+
+    def install(self):
+        numba = sys.modules.get("numba")
+        if self.installed or numba is None:
+            return
+        from numba.core import event
+
+        clock = self
+
+        class _Listener(event.Listener):
+            def on_start(self, ev):
+                clock._depth += 1
+                if clock._depth == 1:
+                    clock._t0 = time.perf_counter()
+
+            def on_end(self, ev):
+                clock._depth = max(clock._depth - 1, 0)
+                if clock._depth == 0:
+                    clock.total += time.perf_counter() - clock._t0
+
+        event.register("numba:compile", _Listener())
+        self.installed = True
+
+
+_compile = _CompileClock()
 
 
 def _plain(value, depth=0):
@@ -60,8 +94,13 @@ def _plain(value, depth=0):
 
 
 def _safe(fn, *args):
+    """Call ``fn``; its floating-point warnings stay out of the user's warning stream."""
+    numpy = sys.modules.get("numpy")
     try:
-        return fn(*args)
+        if numpy is None:
+            return fn(*args)
+        with numpy.errstate(all="ignore"):
+            return fn(*args)
     except Exception as exc:  # noqa: BLE001 - a missing field never fails a record
         return {"unavailable": f"{type(exc).__name__}: {exc}"[:200]}
 
@@ -86,6 +125,54 @@ def _peak_rss_mib():
 
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return raw / 2**20 if sys.platform == "darwin" else raw / 1024.0
+
+
+def _proc_start(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _cpu_now() -> dict:
+    """Per-fit machine state: mean CPU clock and available memory."""
+    out = {}
+    try:
+        mhz = [
+            float(line.split(":", 1)[1])
+            for line in Path("/proc/cpuinfo").read_text().splitlines()
+            if line.startswith("cpu MHz")
+        ]
+        out["mhz_mean"] = sum(mhz) / len(mhz) if mhz else None
+    except (OSError, ValueError):
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                out["mem_available_gib"] = round(int(line.split()[1]) / 2**20, 2)
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def _cpu_topology() -> dict:
+    """Cache sizes, SMT and NUMA nodes from sysfs (Linux); empty elsewhere."""
+    out: dict = {"caches": {}}
+    cpu0 = Path("/sys/devices/system/cpu/cpu0/cache")
+    for index in sorted(cpu0.glob("index*")):
+        try:
+            level = (index / "level").read_text().strip()
+            kind = (index / "type").read_text().strip()
+            name = f"L{level}" + ("d" if kind == "Data" else "i" if kind == "Instruction" else "")
+            out["caches"][name] = (index / "size").read_text().strip()
+        except OSError:
+            pass
+    try:
+        out["smt_active"] = Path("/sys/devices/system/cpu/smt/active").read_text().strip() == "1"
+    except OSError:
+        out["smt_active"] = None
+    out["numa_nodes"] = len(list(Path("/sys/devices/system/node").glob("node[0-9]*"))) or None
+    return out
 
 
 def _git(root, *args):
@@ -151,7 +238,10 @@ def _process_facts() -> dict:
             "physical_cores": cores,
             "logical_cpus": os.cpu_count(),
             "ram_gib": ram,
+            **_safe(_cpu_topology),
         },
+        process_start=_proc_start(os.getpid()),
+        fits_seen=0,
     )
     return _process
 
@@ -199,8 +289,9 @@ def _vector_stats(v) -> dict | None:
     }
 
 
-def _gm_facts(gm) -> dict:
-    """Width, cardinality, basis non-zeros per row and empty cells of one group matrix."""
+def _gm_facts(gm, y_nonzero=None) -> dict:
+    """Width, cardinality, basis non-zeros per row, empty cells and all-zero-response cells
+    of one group matrix (``y_nonzero``: the training rows whose response is not zero)."""
     import numpy as np
 
     n = gm.shape[0]
@@ -215,7 +306,14 @@ def _gm_facts(gm) -> dict:
             empty_cells=int(np.count_nonzero(counts[: L + 1] == 0)),
             min_level_count=int(counts[: L + 1].min()),
         )
+        if y_nonzero is not None and len(y_nonzero) == n:
+            hits = np.bincount(np.asarray(codes), weights=y_nonzero, minlength=L + 1)
+            out["zero_response_cells"] = int(np.count_nonzero((counts > 0) & (hits == 0)))
         return out
+    rows = getattr(gm, "row_idx", None)
+    if rows is not None and y_nonzero is not None and len(y_nonzero) == n:
+        rows = np.asarray(rows)
+        out["zero_response_cells"] = int(rows.size > 0 and not y_nonzero[rows].any())
     B = getattr(gm, "B", None)
     if B is not None and hasattr(B, "nnz"):
         out.update(nnz_per_row=float(B.nnz / n), basis_width=int(B.shape[1]))
@@ -249,12 +347,12 @@ def _gm_facts(gm) -> dict:
     return out
 
 
-def _terms(groups, design, kinds) -> list[dict]:
+def _terms(groups, design, kinds, y_nonzero=None) -> list[dict]:
     """Per term (feature or pair): kind, width, cardinality, nnz per row, empty cells."""
     terms: dict[str, dict] = {}
     for group, gm in zip(groups, design.group_matrices, strict=False):
         name = getattr(group, "feature_name", None) or group.name
-        facts = _safe(_gm_facts, gm)
+        facts = _safe(_gm_facts, gm, y_nonzero)
         term = terms.setdefault(
             name,
             {
@@ -272,7 +370,12 @@ def _terms(groups, design, kinds) -> list[dict]:
             term["nnz_per_row"] += facts["nnz_per_row"]
         else:
             term["nnz_per_row"] = None
-        for key, combine in (("cardinality", max), ("empty_cells", sum), ("min_level_count", min)):
+        for key, combine in (
+            ("cardinality", max),
+            ("empty_cells", sum),
+            ("min_level_count", min),
+            ("zero_response_cells", sum),
+        ):
             if isinstance(facts.get(key), int):
                 term[key] = combine((term[key], facts[key])) if key in term else facts[key]
     return list(terms.values())
@@ -286,6 +389,7 @@ def _design_summary(terms, n_rows) -> dict:
         "groups": sum(len(t["groups"]) for t in terms),
         "nnz_per_row": float(sum(nnz)) if all(v is not None for v in nnz) else None,
         "empty_cells": sum(t.get("empty_cells", 0) for t in terms),
+        "zero_response_cells": sum(t.get("zero_response_cells", 0) for t in terms),
         "min_level_count": min(
             (t["min_level_count"] for t in terms if "min_level_count" in t), default=None
         ),
@@ -321,6 +425,55 @@ def _data(params, lss) -> dict:
     return out
 
 
+def _nonzero(y):
+    import numpy as np
+
+    return None if y is None else np.asarray(y, dtype=np.float64).ravel() != 0
+
+
+def _numeric_shape(X, names) -> dict:
+    """Per numeric input: distinct values (capped), skew, share of ties at the mode, share
+    beyond 5 sd.  One pass over at most ``_SAMPLE_ROWS`` evenly strided rows."""
+    import numpy as np
+
+    out = {}
+    for name in names:
+        try:
+            column = np.asarray(X[name].to_numpy() if hasattr(X[name], "to_numpy") else X[name])
+            if column.dtype.kind not in "fiub":
+                continue
+            n = column.shape[0]
+            x = column[:: max(1, n // _SAMPLE_ROWS)].astype(np.float64)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                continue
+            values, counts = np.unique(x, return_counts=True)
+            mean, sd = float(x.mean()), float(x.std())
+            out[name] = {
+                "distinct": int(min(values.size, _DISTINCT_CAP)),
+                "distinct_capped": bool(values.size > _DISTINCT_CAP),
+                "skew": float(np.mean(((x - mean) / sd) ** 3)) if sd > 0 else 0.0,
+                "mode_tie_share": float(counts.max() / x.size),
+                "beyond_5sd_share": float(np.mean(np.abs(x - mean) > 5 * sd)) if sd > 0 else 0.0,
+                "sampled_rows": int(x.size),
+            }
+        except Exception as exc:  # noqa: BLE001 - one column's failure drops that column only
+            out[name] = {"unavailable": f"{type(exc).__name__}: {exc}"[:120]}
+    return out
+
+
+def _family_params(model, method, parent_method) -> dict:
+    """What the family was asked for before the fit: NB theta (fixed or "auto"), Tweedie
+    power, and whether the power is being estimated."""
+    family = model._config.family if hasattr(model, "_config") else getattr(model, "_family", None)
+    out = {"family": family if isinstance(family, str) else type(family).__name__}
+    for attr, key in (("theta", "theta"), ("p", "power")):
+        if not isinstance(family, str) and hasattr(family, attr):
+            out[key] = _plain(getattr(family, attr))
+    out["estimate_p"] = "estimate_p" in (method, parent_method)
+    return out
+
+
 # --------------------------------------------------------------------------- the model
 
 
@@ -346,12 +499,16 @@ def _glm(model, params) -> dict:
     }
     dm = getattr(model, "_dm", None)
     if dm is not None:
-        terms = _terms(model._groups, dm, kinds)
+        terms = _terms(model._groups, dm, kinds, _nonzero(params.get("y")))
         out.update(n_columns=int(dm.p), term_list=terms, design=_design_summary(terms, dm.p))
+    numeric = [
+        k for k, v in getattr(model, "_specs", {}).items() if type(v).__name__ != "Categorical"
+    ]
+    out["numeric_inputs"] = _safe(_numeric_shape, params.get("X"), numeric)
     return out
 
 
-def _glm_outcome(model) -> dict:
+def _glm_outcome(model, params=None) -> dict:
     profile = getattr(model, "_reml_profile", None) or {}
     scalar = {
         k: _plain(v)
@@ -388,6 +545,11 @@ def _glm_outcome(model) -> dict:
                 n_lambdas=len(diag.get("lambdas") or {}),
             )
     out["certification"] = {k: v for k, v in out["flags"].items() if "certif" in k}
+    dist = getattr(model, "_distribution", None)
+    out["fitted_family"] = {
+        "theta": _plain(getattr(dist, "theta", None)),
+        "power": _plain(getattr(dist, "p", None)),
+    }
     return out
 
 
@@ -412,7 +574,7 @@ def _lss(model, params) -> dict:
     return out
 
 
-def _lss_outcome(model) -> dict:
+def _lss_outcome(model, params) -> dict:
     out = {}
     fitted = getattr(model, "_model", None)
     if fitted is None:
@@ -421,7 +583,8 @@ def _lss_outcome(model) -> dict:
     terms = []
     for p in state.layout.predictors:
         kinds = {}
-        terms += [dict(t, predictor=p.name) for t in _terms(p.groups, p.design, kinds)]
+        yn = _nonzero(params.get("y"))
+        terms += [dict(t, predictor=p.name) for t in _terms(p.groups, p.design, kinds, yn)]
     out.update(
         n_columns=int(state.layout.n_coefficients),
         term_list=terms,
@@ -442,7 +605,17 @@ def _lss_outcome(model) -> dict:
         n_iter=_plain(getattr(sm, "iterations", None)),
         objective=_plain(getattr(sm, "objective", None)),
         edf=_plain(sum(state.result.predictor_edf.values())),
+        n_lambdas=len(getattr(sm, "lambdas", None) or {}),
     )
+    numeric = sorted(
+        {
+            k
+            for p in model._predictors
+            for k, v in p.features.items()
+            if type(v).__name__ != "Categorical"
+        }
+    )
+    out["numeric_inputs"] = _safe(_numeric_shape, params.get("X"), numeric)
     profile = _safe(lambda: model.diagnose().profile)
     if not isinstance(profile, dict):
         out.setdefault("work", {}).update(
@@ -456,49 +629,100 @@ def _lss_outcome(model) -> dict:
 # --------------------------------------------------------------------------- begin / end
 
 
-def begin(model, method, params) -> dict:
-    """Facts taken before the fit; the clock starts last."""
+def _write_atomic(path: Path, data: bytes) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def begin(model, method, params, place) -> dict:
+    """Facts taken before the fit, and a "started" marker so a killed fit leaves a censored
+    record; the clocks start last."""
     lss = type(model).__name__ == "SuperLSS"
+    spool, task = place
+    facts = _process_facts()
+    if task is None:  # outside a benchboard job: one synthetic task per process
+        task = f"unowned-{facts['machine']['host']}-{os.getpid()}-{facts['process_start']}"
+    parent = _parent.get() or (None, None)
+    _compile.install()
     token = {
         "id": uuid.uuid4().hex,
         "method": method,
         "lss": lss,
-        "parent": _parent.get(),
+        "spool": Path(spool),
+        "task": task,
+        "parent": parent[0],
+        "parent_method": parent[1],
         "params": dict(params),
+        "first_fit_in_process": facts["fits_seen"] == 0,
+        "family_params": _safe(_family_params, model, method, parent[1]),
         "load_start": _load(),
+        "cpu_start": _safe(_cpu_now),
         "ticks_start": _steal_ticks(),
         "threads": _safe(_threads),
         "data": _safe(_data, params, lss),
     }
-    token["reset"] = _parent.set(token["id"])
-    token["started_at"], token["t0"] = time.time(), time.perf_counter()
+    facts["fits_seen"] += 1
+    token["reset"] = _parent.set((token["id"], method))
+    marker = {
+        "protocol": PROTOCOL,
+        "task_id": task,
+        "fit_id": token["id"],
+        "parent_fit_id": token["parent"],
+        "pid": os.getpid(),
+        "process_start": facts["process_start"],
+        "method": method,
+        "started_at": time.time(),
+        "config": _plain(
+            {
+                "n_rows": (token["data"] or {}).get("n_rows")
+                if isinstance(token["data"], dict)
+                else None,
+                "model": "SuperLSS" if lss else "SuperGLM",
+                "family_params": token["family_params"],
+                "threads": token["threads"],
+            }
+        ),
+    }
+    try:
+        token["spool"].mkdir(parents=True, exist_ok=True)
+        token["marker"] = token["spool"] / f"started-{token['id']}.json"
+        _write_atomic(token["marker"], json.dumps(marker, allow_nan=False).encode())
+    except Exception:  # noqa: BLE001 - without a marker a killed fit is simply not recorded
+        token["marker"] = None
+    token["compile0"] = _compile.total
+    token["started_at"], token["c0"], token["t0"] = (
+        time.time(),
+        time.process_time(),
+        time.perf_counter(),
+    )
     return token
 
 
 def end(token, model, error) -> None:
-    """Write the record; never raises."""
+    """Write the record and remove the started marker; never raises."""
     global last_fit_id
     wall = time.perf_counter() - token["t0"]
+    cpu = time.process_time() - token["c0"]
+    compile_s = _compile.total - token["compile0"]
     ended = time.time()
     try:
         _parent.reset(token["reset"])
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
     try:
-        spool, task = os.environ.get("BENCHBOARD_FIT_DIR"), os.environ.get("BENCHBOARD_TASK_ID")
-        if not spool or not task:
-            return
         facts = _process_facts()
         before = _safe(_lss if token["lss"] else _glm, model, token["params"])
         outcome = (
             {}
             if error is not None
-            else _safe(_lss_outcome if token["lss"] else _glm_outcome, model)
+            else _safe(_lss_outcome if token["lss"] else _glm_outcome, model, token["params"])
         )
         if token["lss"] and "n_columns" in outcome:
             before.update({k: outcome.pop(k) for k in ("n_columns", "term_list", "design")})
+            before["numeric_inputs"] = outcome.pop("numeric_inputs", None)
         if error is not None:  # the design on the model may be an earlier fit's
-            for key in ("n_columns", "term_list", "design"):
+            for key in ("n_columns", "term_list", "design", "numeric_inputs"):
                 before.pop(key, None)
         ticks = _steal_ticks()
         steal = None
@@ -514,28 +738,38 @@ def end(token, model, error) -> None:
             "distribution": before.get("distribution"),
             "link": before.get("link"),
             "model": before.get("model"),
+            "family_params": token["family_params"],
             "discrete": before.get("discrete"),
             "options": before.get("options"),
             "data": data,
+            "numeric_inputs": before.get("numeric_inputs"),
             "design": design,
             "terms": before.get("term_list"),
             "predictors": before.get("predictors"),
             "commit": facts["commit"],
             "threads": token["threads"],
+            "first_fit_in_process": token["first_fit_in_process"],
+            "unowned": token["task"].startswith("unowned-"),
             "load_start": token["load_start"],
+            "cpu_start": token["cpu_start"],
         }
         summary = {
             "n_columns": before.get("n_columns"),
+            "n_penalties": outcome.get("n_lambdas"),
             "solver": outcome.get("solver"),
             "converged": outcome.get("converged"),
             "n_iter": outcome.get("n_iter"),
             "termination_reason": outcome.get("termination_reason"),
             "objective": outcome.get("objective"),
             "edf": outcome.get("edf"),
+            "fitted_family": outcome.get("fitted_family"),
             "certification": outcome.get("certification"),
             "work": outcome.get("work"),
+            "cpu_s": cpu,
+            "numba_compile_s": compile_s,
             "peak_rss_mib": _safe(_peak_rss_mib),
             "load_end": _load(),
+            "cpu_end": _safe(_cpu_now),
             "steal_percent": steal,
             "error": None if error is None else f"{type(error).__name__}: {error}"[:300],
         }
@@ -545,16 +779,18 @@ def end(token, model, error) -> None:
             if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
         ]
         _sequence[0] += 1
+        status = "success" if error is None else "failed"
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            status = "interrupted"
         fit = {
             "id": token["id"],
             "parent_fit_id": token["parent"],
             "sequence": _sequence[0],
             "pid": os.getpid(),
             "ppid": os.getppid(),
+            "process_start": facts["process_start"],
             "method": token["method"],
-            "status": "success"
-            if error is None
-            else ("interrupted" if isinstance(error, KeyboardInterrupt) else "failed"),
+            "status": status,
             "started_at": token["started_at"],
             "ended_at": ended,
             "wall_s": wall,
@@ -567,16 +803,19 @@ def end(token, model, error) -> None:
         }
         payload = {
             "protocol": PROTOCOL,
-            "task_id": task,
+            "task_id": token["task"],
             "environment": _plain({**facts["environment"], "machine": facts["machine"]}),
             "fits": [fit],
         }
-        target = Path(spool) / f"superglm-{os.getpid()}-{token['id']}.json.gz"
-        tmp = target.with_name(target.name + ".tmp")
-        tmp.write_bytes(
-            gzip.compress(json.dumps(payload, allow_nan=False).encode(), compresslevel=1, mtime=0)
-        )
-        tmp.replace(target)
+        target = token["spool"] / f"superglm-{os.getpid()}-{token['id']}.json.gz"
+        data_bytes = json.dumps(payload, allow_nan=False).encode()
+        _write_atomic(target, gzip.compress(data_bytes, compresslevel=1, mtime=0))
         last_fit_id = token["id"]
-    except Exception:  # noqa: BLE001, S110 - recording never fails or slows a fit's caller beyond this
+    except Exception:  # noqa: BLE001, S110 - recording never fails a fit
         pass
+    finally:
+        try:
+            if token.get("marker") is not None:
+                token["marker"].unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001, S110
+            pass

@@ -41,8 +41,15 @@ def _records(folder):
     return [json.loads(gzip.decompress(p.read_bytes())) for p in sorted(folder.glob("*.json.gz"))]
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_benchboard(monkeypatch, tmp_path_factory):
+    """Each test chooses its own destination; the machine's benchboard directory stays out."""
+    for name in ("BENCHBOARD_FIT_DIR", "BENCHBOARD_TASK_ID", "SUPERGLM_FIT_RECORD"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BENCHBOARD_DIR", str(tmp_path_factory.mktemp("absent") / "benchboard"))
+
+
 def test_unset_writes_nothing_and_never_imports_the_recorder(monkeypatch, tmp_path):
-    monkeypatch.delenv("BENCHBOARD_FIT_DIR", raising=False)
     monkeypatch.delitem(sys.modules, RECORDER, raising=False)
     X, y, w = _book()
     _model().fit_reml(X, y, sample_weight=w, max_reml_iter=2)
@@ -56,6 +63,7 @@ def test_set_spools_one_record_per_fit(monkeypatch, tmp_path):
     X, y, w = _book()
     _model().fit_reml(X, y, sample_weight=w, max_reml_iter=3)
     (payload,) = _records(tmp_path)
+    assert not list(tmp_path.glob("started-*"))  # the marker goes once the record is written
     assert payload["protocol"] == 1 and payload["task_id"] == "task-1"
     (fit,) = payload["fits"]
     assert fit["method"] == "fit_reml" and fit["status"] == "success" and fit["wall_s"] > 0
@@ -69,6 +77,10 @@ def test_set_spools_one_record_per_fit(monkeypatch, tmp_path):
     assert config["design"]["nnz_per_row"] > 0
     assert "pools" in config["threads"] and "SUPERGLM_N_JOBS" in config["threads"]["env"]
     assert summary["n_columns"] > 0 and summary["n_iter"] >= 1 and summary["converged"] is not None
+    assert summary["n_penalties"] >= 1 and summary["cpu_s"] >= 0 and summary["numba_compile_s"] >= 0
+    assert cat["zero_response_cells"] >= 0 and "skew" in config["numeric_inputs"]["a"]
+    assert config["family_params"] == {"family": "poisson", "estimate_p": False}
+    assert isinstance(config["first_fit_in_process"], bool)
     assert fit["phases"] and all(p["wall_s"] >= 0 for p in fit["phases"])
     json.dumps(payload, allow_nan=False)
 
@@ -100,3 +112,33 @@ def test_a_failing_fit_keeps_its_own_exception_and_is_recorded(monkeypatch, tmp_
     (payload,) = _records(tmp_path)
     assert payload["fits"][0]["status"] == "failed"
     assert payload["fits"][0]["summary"]["error"].startswith("ValueError")
+
+
+def test_outside_a_job_records_into_benchboards_unowned_spool(monkeypatch, tmp_path):
+    base = tmp_path / "benchboard"
+    base.mkdir()
+    monkeypatch.setenv("BENCHBOARD_DIR", str(base))
+    X, y, w = _book()
+    _model().fit_reml(X, y, sample_weight=w, max_reml_iter=2)
+    (payload,) = _records(base / "fits" / "unowned")
+    assert payload["task_id"].startswith("unowned-")
+    assert payload["fits"][0]["config"]["unowned"] is True
+    monkeypatch.setenv("SUPERGLM_FIT_RECORD", "0")
+    _model().fit_reml(X, y, sample_weight=w, max_reml_iter=2)
+    assert len(_records(base / "fits" / "unowned")) == 1
+
+
+def test_a_fit_that_never_ends_leaves_a_started_marker(monkeypatch, tmp_path):
+    from superglm import families
+    from superglm.diagnostics import _fit_record
+
+    monkeypatch.setenv("BENCHBOARD_FIT_DIR", str(tmp_path))
+    monkeypatch.setenv("BENCHBOARD_TASK_ID", "task-4")
+    monkeypatch.setattr(_fit_record, "end", lambda *args: None)  # as if the process were killed
+    X, y, w = _book()
+    model = SuperGLM(family=families.nb2(theta="auto"), features={"a": Spline(n_knots=5)})
+    model.fit_reml(X, np.round(y * w), max_reml_iter=2)
+    (marker,) = tmp_path.glob("started-*.json")
+    started = json.loads(marker.read_text())
+    assert started["task_id"] == "task-4" and started["method"] == "fit_reml" and started["pid"] > 0
+    assert started["config"]["family_params"]["theta"] == "auto"
