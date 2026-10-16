@@ -41,6 +41,7 @@ _BatchResult = tuple[
     int,
 ]
 _BatchCore = Callable[..., _BatchResult]
+_DirectionCore = Callable[..., tuple[NDArray[np.float64], int, int]]
 
 
 class TweedieNumericalRefusal(RuntimeError):  # noqa: N818 - binding contract name
@@ -335,6 +336,20 @@ def _warmup_compiled_tweedie_dispatchers(
         cast(Callable[..., object], dispatcher)(*arguments)
 
 
+# The LAML endgame's third-derivative kernels (``_tweedie_hessian_direction_core``
+# and the four helpers it calls) compile, or load from numba's cache, on a
+# Tweedie fit's first endgame call, not here: warming them cost every
+# ``superglm.warmup()`` about 0.4 s with a warm cache and 5.6 s cold, whether or
+# not the process fits a Tweedie SuperLSS model.
+_FIRST_USE_DISPATCHERS = (
+    "_polygamma_012",
+    "_third_term_channels",
+    "_series_third_cumulants",
+    "_tweedie_third_row",
+    "_tweedie_hessian_direction_core",
+)
+
+
 def _warmup_tweedie() -> None:
     arrays = tuple(np.array([value], dtype=np.float64) for value in (1.0, 1.2, 0.7, 1.5, 1.0))
     _warmup_compiled_tweedie_dispatchers(arrays)
@@ -420,9 +435,73 @@ def evaluate_tweedie_rows(
     )
 
 
+def tweedie_hessian_direction(
+    y: NDArray[np.float64],
+    mean: NDArray[np.float64],
+    dispersion: NDArray[np.float64],
+    power: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    semantics: WeightSemantics,
+    direction: NDArray[np.float64],
+    *,
+    max_terms: int = _DEFAULT_MAX_TERMS,
+    log_cutoff: float = _DEFAULT_LOG_CUTOFF,
+) -> NDArray[np.float64]:
+    """Packed derivative of the natural ``(mu, phi, p)`` Hessian along ``direction``.
+
+    The positive-row series contributes the joint cumulants of its term
+    derivatives over the Hessian's own window (two passes: means, then
+    central moments about them); the zero row and the canonical part are
+    closed forms.  Rows the Hessian would refuse are refused here too.
+
+    The cumulants of the window's normalized terms are exactly the derivatives
+    of the windowed sums, so this is the derivative of the published Hessian,
+    window included, which is the curvature the LAML objective is defined on;
+    it carries no certificate for the omitted tail, and needs none against
+    that objective.  The window's distance from the full Tweedie law is the
+    published likelihood's own, uncertified (see the module note), and
+    v0.40.0's Richardson stencil differenced the same windowed Hessian, so
+    its certificate did not cover that distance either.  The Hessian moves
+    discontinuously only where the window gains or loses a term below
+    ``exp(-log_cutoff)`` of the mode term: at the default cutoff, within the
+    Hessian's own rounding.
+    """
+    arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
+        y,
+        mean,
+        dispersion,
+        power,
+        weight,
+        semantics,
+        derivative_order=2,
+        max_terms=max_terms,
+        log_cutoff=log_cutoff,
+    )
+    natural = np.require(np.asarray(direction, dtype=np.float64), requirements=("C", "A"))
+    if natural.shape != (len(arrays[0]), 3) or not np.all(np.isfinite(natural)):
+        raise ValueError("Tweedie natural direction must be a finite n-by-3 array")
+    normalized = tuple(
+        np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
+    )
+    direction_core = cast(_DirectionCore, _compiled._tweedie_hessian_direction_core)
+    result, status, failing_row = direction_core(
+        *normalized,
+        0 if semantics == "prior" else 1,
+        natural,
+        min(row_max_terms, _MAX_SAFE_MODE + 1),
+        cutoff,
+    )
+    if status != _compiled.KERNEL_OK:
+        _raise_compiled_refusal(
+            status=int(status), failing_row=int(failing_row), max_terms=row_max_terms
+        )
+    return result
+
+
 __all__ = [
     "TweedieNumericalRefusal",
     "TweediePointEvaluation",
     "initialize_tweedie",
     "evaluate_tweedie_rows",
+    "tweedie_hessian_direction",
 ]

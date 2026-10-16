@@ -65,6 +65,11 @@ dev = [
     "pytest-xdist>=3.8",
     "pyyaml>=6.0",
     "ruff==0.16.3",
+    # Test-only derivative oracle (tests/test_family_derivatives_symbolic.py);
+    # src/superglm never imports it. Floor by SPEC 0: 1.14 (2025-04-27) is the
+    # oldest minor released within 24 months; 1.13 (2024-07-08) is outside.
+    # It brings mpmath (<1.4), which the importorskip("mpmath") oracles use.
+    "sympy>=1.14",
     "ty==0.0.72",
     "polars>=1.42.1",
     "pre-commit",

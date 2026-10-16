@@ -521,3 +521,18 @@ def test_million_cell_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> No
     assert per_row._require_fitted().fit_state.solver_result.converged
     assert compact._require_fitted().fit_state.solver_result.converged
     assert abs(per_row_total - compact_total) <= 1.0e-9 * abs(per_row_total)
+
+
+def test_response_validation_is_exact_without_a_row_loop() -> None:
+    """Integers above 2**53 are compared exactly; every other numeric dtype converts exactly."""
+    validated = nb_module._validated_response
+    exact = np.array([0, 3, 2**53, 2**53 + 2], dtype=np.int64)
+    np.testing.assert_array_equal(validated(exact), exact.astype(np.float64))
+    with pytest.raises(ValueError, match="losslessly"):
+        validated(np.array([1, 2**53 + 1], dtype=np.int64))
+    with pytest.raises(ValueError, match="losslessly"):
+        validated(np.array([1, 2**63 + 1], dtype=np.uint64))
+    np.testing.assert_array_equal(validated(np.array([0.5, 2.0], dtype=np.float32)), [0.5, 2.0])
+    np.testing.assert_array_equal(validated(np.array([1, 2.0], dtype=object)), [1.0, 2.0])
+    with pytest.raises(ValueError, match="losslessly"):
+        validated(np.array([2**53 + 1], dtype=object))

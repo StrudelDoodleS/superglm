@@ -37,6 +37,7 @@ from superglm.distributional.kernels._common import readonly, readonly_bool
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
+    gaussian_predictor_curvature_directional,
 )
 
 Parametrisation = Literal["mean", "location"]
@@ -332,6 +333,103 @@ def mean_rows(
         hessian_packed=hessian,
         valid=base.valid,
     )
+
+
+def _predictor_arrays(
+    response: NDArray, eta: NDArray, eta_direction: NDArray, multiplier: NDArray
+) -> tuple[NDArray[np.float64], ...]:
+    y = _positive_vector(response, name="response")
+    mass = _positive_vector(multiplier, name="multiplier")
+    _aligned(y, mass)
+    try:
+        predictors = np.asarray(eta, dtype=_FLOAT)
+        direction = np.asarray(eta_direction, dtype=_FLOAT)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise LogNormalDomainError(
+            "log-normal predictor state and direction must be finite n-by-2 arrays"
+        ) from exc
+    expected = (len(y), 2)
+    if (
+        predictors.shape != expected
+        or direction.shape != expected
+        or not np.all(np.isfinite(predictors))
+        or not np.all(np.isfinite(direction))
+    ):
+        raise LogNormalDomainError(
+            "log-normal predictor state and direction must be finite n-by-2 arrays"
+        )
+    return y, mass, predictors, direction
+
+
+def location_curvature_directional(
+    response: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    multiplier: NDArray,
+    *,
+    scale_floor: float,
+) -> NDArray[np.float64]:
+    """Directional derivative of the location-form packed curvature.
+
+    In ``(mu, log(sigma - floor))`` the row is the Gaussian's at ``log y`` with
+    replication mass, so the Gaussian sibling's analytic channels apply as they are.
+    """
+    y, mass, predictors, direction = _predictor_arrays(response, eta, eta_direction, multiplier)
+    return gaussian_predictor_curvature_directional(
+        np.log(y), predictors, direction, mass, "frequency", scale_floor=scale_floor
+    )
+
+
+def mean_curvature_directional(
+    response: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    multiplier: NDArray,
+    *,
+    scale_floor: float,
+) -> NDArray[np.float64]:
+    """Directional derivative of the mean-form packed curvature.
+
+    Predictors ``a = log m`` and ``b = log(sigma - floor)``, so
+    ``mu = a - sigma^2/2``, ``kappa = sigma - floor = e^b`` and the residual
+    ``r = log y - mu``.  With ``u = kappa/sigma`` and ``P(u) = u (1 - 9u + 12u^2)``
+    the row's third derivatives, per unit mass, are
+
+    * ``l_aaa = 0`` and ``l_aab = 2u / sigma^2``,
+    * ``l_abb = u (1 - 3u) (1 - 2r/sigma^2)``,
+    * ``l_bbb = -u (1 - u)(1 - 2u) - 3 kappa^2 (1 - u) + P(u) ((r/sigma)^2 - r)``,
+
+    with ``1 - u = floor/sigma``, ``1 - 2u = (floor - kappa)/sigma`` and
+    ``1 - 3u = (floor - 2 kappa)/sigma`` formed from the exact difference so no
+    factor cancels.  Each channel is a short sum of products of singly rounded
+    factors, so its error is ``gamma_k`` of its absolute-term scale with
+    ``k <= 16`` (``k`` counts the exponential, the factors and the sum).
+    """
+    y, mass, predictors, direction = _predictor_arrays(response, eta, eta_direction, multiplier)
+    floor = float(scale_floor)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        kappa = np.exp(predictors[:, 1])
+        sigma = floor + kappa
+        u = kappa / sigma
+        complement = floor / sigma
+        residual = np.log(y) - (predictors[:, 0] - 0.5 * sigma * sigma)
+        standardized = residual / sigma
+        lab_b = 2.0 * u / (sigma * sigma)
+        lab_bb = u * ((floor - 2.0 * kappa) / sigma) * (1.0 - 2.0 * (residual / (sigma * sigma)))
+        polynomial = u * (1.0 - 9.0 * u + 12.0 * u * u)
+        lbbb = (
+            -u * complement * ((floor - kappa) / sigma)
+            - 3.0 * (kappa * kappa) * complement
+            + polynomial * (standardized * standardized - residual)
+        )
+        along_mean, along_scale = direction[:, 0], direction[:, 1]
+        result = np.empty((len(y), 3), dtype=_FLOAT)
+        result[:, 0] = -mass * (lab_b * along_scale)
+        result[:, 1] = -mass * (lab_b * along_mean + lab_bb * along_scale)
+        result[:, 2] = -mass * (lab_bb * along_mean + lbbb * along_scale)
+    if not np.all(np.isfinite(result)):
+        raise LogNormalDomainError("log-normal predictor-curvature derivative is not representable")
+    return readonly(result)
 
 
 def mean_expected_information(

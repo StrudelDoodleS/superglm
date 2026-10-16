@@ -40,6 +40,7 @@ from superglm.distributional.kernels.negative_binomial import (
     evaluate_negative_binomial_rows,
     has_resolved_poisson_boundary,
     initialize_negative_binomial,
+    negative_binomial_certified_predictor_curvature_directional,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -120,14 +121,30 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
         raise ValueError(message) from exc
     if not np.all(np.isfinite(response)) or np.any(response < 0.0):
         raise ValueError(message)
-    if any(
+    if not _lossless(source, response):
+        raise ValueError("y must be losslessly representable as exact float64 values")
+    return response
+
+
+def _lossless(source: NDArray, response: NDArray[np.float64]) -> bool:
+    """Whether every converted value equals its source exactly.
+
+    Vectorised by dtype: a float source compares exactly against its float64
+    image; an integer source of magnitude at most ``2**53`` converts exactly,
+    so only larger integers (and object arrays) are compared one by one, as
+    exact integer-float comparisons.
+    """
+    if source.dtype.kind == "f":
+        return not bool(np.any(source != response))
+    if source.dtype.kind in "iu":
+        large = np.flatnonzero((source > _MAX_EXACT_COUNT) | (source < -_MAX_EXACT_COUNT))
+        return all(int(source[index]) == float(response[index]) for index in large)
+    return not any(
         int(source_value) != float(converted_value)
         if isinstance(source_value, int | np.integer)
         else source_value != converted_value
         for source_value, converted_value in zip(source, response, strict=True)
-    ):
-        raise ValueError("y must be losslessly representable as exact float64 values")
-    return response
+    )
 
 
 def _typed_plan(plan: object, n_observations: int) -> NegativeBinomialLikelihoodPlan:
@@ -323,6 +340,45 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        values, _certificate = self.certified_predictor_curvature_directional_derivative(
+            y, eta, eta_direction, links, plan
+        )
+        return values
+
+    def certified_predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The curvature direction and the certified error of its ``l_bbb`` channel."""
+
+        link_tuple = tuple(links)
+        if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
+            raise UnsupportedLikelihoodContractError(
+                "NB2 endpoint curvature derivatives require the built-in log links"
+            )
+        candidate = _typed_plan(plan, response_row_count(y))
+        return negative_binomial_certified_predictor_curvature_directional(
+            candidate.exact_count,
+            eta,
+            eta_direction,
+            candidate.weights.values,
+            candidate.weights.provenance.contract.semantics,
         )
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:

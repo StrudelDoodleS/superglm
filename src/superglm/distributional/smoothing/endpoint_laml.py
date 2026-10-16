@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
@@ -9,10 +10,10 @@ from numbers import Integral, Real
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._row_design import bounded_predictor_matrices, matrix_row_chunk
 from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
-    PredictorCurvatureDirectionalFamily,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import (
@@ -26,6 +27,7 @@ from superglm.distributional.result import (
 from superglm.distributional.results.solver import _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
+    analytic_curvature_direction,
     finite_difference_curvature_direction,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
@@ -37,6 +39,7 @@ from superglm.distributional.smoothing.penalty_geometry import (
     _projected_penalty_group_indices as _projected_penalty_group_indices,
 )
 from superglm.distributional.solver.assembly import assemble_grouped_geometry
+from superglm.distributional.solver.packing import packed_pairs
 from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
 from superglm.solvers.rank import RankDecomposition, decompose_gram
 from superglm.types import PenaltyComponent
@@ -545,6 +548,64 @@ def _predictor_direction(
     return result
 
 
+def _row_certificate_error(
+    layout: StackedLayout,
+    certificate: NDArray[np.float64],
+    basis: NDArray[np.float64],
+    inverse: NDArray[np.float64],
+) -> float:
+    """Bound on half the drift term's error, contracted row by row before any sum.
+
+    The drift term is ``tr(R^-1 B' (sum_i X_i' D_i X_i) B) = sum_i <D_i, G_i>_w``
+    with ``G_i = X_i Q X_i'``, ``Q = B R^-1 B'`` and ``w`` two on an off-diagonal
+    packed channel, so an entrywise error ``|dD_i| <= C_i`` moves it by at most
+    ``sum_i <C_i, |G_i|>_w``.  Each row is contracted before rows are summed,
+    so mixed-sign design rows cannot cancel each other's error.  ``G_i`` is
+    formed in float64 from ``p``-term dot products, so ``gamma_{2p + 4}`` of
+    ``|X_i| |Q| |X_i|'`` is added to ``|G_i|``; the nonnegative chunk sums are
+    within ``gamma_{chunk + 4}`` and are inflated by it, and the chunks are
+    summed by ``math.fsum``.  A channel whose certificate is zero on every
+    row contributes nothing and is skipped (NB2 certifies only ``l_bbb``, so
+    two of its three channels are zero), and an all-zero certificate is zero.
+    """
+    matrices = bounded_predictor_matrices(layout)
+    pairs = packed_pairs(len(matrices))
+    live = [channel for channel in range(len(pairs)) if np.any(certificate[:, channel])]
+    if not live:
+        return 0.0
+    slices = [state.coefficient_slice for state in layout.predictors]
+    projector = basis @ np.asarray(inverse, dtype=np.float64) @ basis.T
+    absolute_projector = np.abs(projector)
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+
+    def gamma(count: int) -> float:
+        return count * unit_roundoff / (1.0 - count * unit_roundoff)
+
+    leverage_rounding = gamma(2 * layout.n_coefficients + 4)
+    n_observations = certificate.shape[0]
+    chunk = matrix_row_chunk(matrices, 4096)
+    partials = []
+    for start in range(0, n_observations, chunk):
+        rows = slice(start, min(start + chunk, n_observations))
+        local = [matrix[rows] for matrix in matrices]
+        absolute = [np.abs(values) for values in local]
+        total = np.zeros(rows.stop - rows.start, dtype=np.float64)
+        for channel in live:
+            left, right = pairs[channel]
+            block = (slices[left], slices[right])
+            leverage = np.einsum("ij,ij->i", local[left] @ projector[block], local[right])
+            scale = np.einsum(
+                "ij,ij->i", absolute[left] @ absolute_projector[block], absolute[right]
+            )
+            weight = 1.0 if left == right else 2.0
+            total += (
+                weight * certificate[rows, channel] * (np.abs(leverage) + leverage_rounding * scale)
+            )
+        partials.append(float(np.sum(total, dtype=np.float64)))
+    inflation = 1.0 + gamma(chunk + 4)
+    return 0.5 * inflation * math.fsum(partials)
+
+
 def evaluate_endpoint_laplace_derivative(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -562,9 +623,6 @@ def evaluate_endpoint_laplace_derivative(
     eta = endpoint_fit.eta
     if eta is None:
         raise EndpointLaplaceError("endpoint derivative requires retained predictor rows")
-    analytic_direction = isinstance(family, PredictorCurvatureDirectionalFamily) and callable(
-        getattr(family, "predictor_curvature_directional_derivative", None)
-    )
     if endpoint_fit.coefficient_face is not endpoint_face:
         raise EndpointLaplaceError("endpoint derivative requires the fitted endpoint face")
     endpoint_face.validate_layout(layout)
@@ -617,17 +675,18 @@ def evaluate_endpoint_laplace_derivative(
     links = tuple(state.link for state in layout.predictors)
     certificate: NDArray[np.float64] | None = None
     try:
-        if analytic_direction:
-            curvature_direction = np.asarray(
-                family.predictor_curvature_directional_derivative(
-                    y,
-                    eta,
-                    eta_direction,
-                    links,
-                    likelihood_plan,
-                ),
-                dtype=np.float64,
-            )
+        # A family that refuses these links (UnsupportedLikelihoodContractError)
+        # is differenced, as v0.40.0 differenced every family without the protocol.
+        analytic = analytic_curvature_direction(
+            family,
+            y,
+            eta,
+            eta_direction,
+            links,
+            likelihood_plan,
+        )
+        if analytic is not None:
+            curvature_direction, certificate = analytic
             authority = ANALYTIC_DIRECTION_AUTHORITY
         else:
             numeric: FiniteDifferenceDirection = finite_difference_curvature_direction(
@@ -652,6 +711,12 @@ def evaluate_endpoint_laplace_derivative(
         np.isfinite(curvature_direction)
     ):
         raise EndpointLaplaceError("family returned an invalid endpoint curvature direction")
+    if certificate is not None and (
+        certificate.shape != curvature_direction.shape
+        or not np.all(np.isfinite(certificate))
+        or np.any(certificate < 0.0)
+    ):
+        raise EndpointLaplaceError("family returned an invalid curvature-direction certificate")
     zeros_score = np.zeros((n_observations, n_parameters), dtype=np.float64)
     zeros_penalty = np.zeros_like(curvature)
     zeros_coefficients = np.zeros(layout.n_coefficients, dtype=np.float64)
@@ -670,16 +735,8 @@ def evaluate_endpoint_laplace_derivative(
     curvature_drift_term = float(np.trace(retained_inverse @ reduced_curvature_dot))
     certificate_error = 0.0
     if certificate is not None:
-        certificate_dot = assemble_grouped_geometry(
-            layout,
-            zeros_score,
-            certificate,
-            penalty=zeros_penalty,
-            coefficients=zeros_coefficients,
-        ).data_curvature
-        reduced_certificate = retained_basis.T @ np.abs(certificate_dot) @ retained_basis
-        certificate_error = 0.5 * float(
-            np.sum(np.abs(retained_inverse) * np.abs(reduced_certificate), dtype=np.float64)
+        certificate_error = _row_certificate_error(
+            layout, certificate, retained_basis, retained_inverse
         )
     derivative = 0.5 * (profile_score_term + curvature_schur_term + curvature_drift_term)
     magnitude = max(

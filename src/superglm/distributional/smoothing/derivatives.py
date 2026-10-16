@@ -31,6 +31,7 @@ from superglm.distributional._row_design import (
     matrix_row_chunk,
 )
 from superglm.distributional.family import (
+    CertifiedCurvatureDirectionalFamily,
     DistributionalFamily,
     FamilyLikelihoodPlan,
     PredictorCurvatureDirectionalFamily,
@@ -44,6 +45,7 @@ from superglm.distributional.smoothing.endpoint_direction import (
     _first_difference,
     _second_difference,
     _unit_directions,
+    analytic_curvature_direction,
 )
 from superglm.distributional.smoothing.endpoint_laml import (
     EndpointLaplaceError,
@@ -204,12 +206,13 @@ def _first_derivatives(
     eta: NDArray[np.float64],
     step: float,
     *,
-    analytic_first: Callable[[NDArray[np.float64]], NDArray[np.float64]] | None,
+    analytic_first: _AnalyticFirst | None,
 ) -> tuple[list[NDArray[np.float64]], list[NDArray[np.float64]], list[_Stencil | None], int]:
     """First derivatives of the packed rows along the parameter axes.
 
     Returns ``(D1, C1, stencils, evaluations)``: ``D1[q]`` is ``d rows / d eta_q``
-    with certificate ``C1[q]`` (zero for an analytic derivative) and
+    with certificate ``C1[q]`` (for an analytic derivative, the family's
+    certified error, zero for closed forms, evaluated once when admitted) and
     ``stencils[q]`` the four-point axis stencil it was differenced on, which
     the second-derivative stage shares (``None`` for an analytic derivative,
     which evaluates nothing).
@@ -224,8 +227,7 @@ def _first_derivatives(
         unit[:, q] = 1.0
         stencil: _Stencil | None = None
         if analytic_first is not None:
-            values = analytic_first(unit)
-            certificate = np.zeros_like(values)
+            values, certificate = analytic_first.axes[q]
         else:
             stencil = _stencil(rows, eta, unit, step)
             evaluations += 4
@@ -408,6 +410,22 @@ def _penalty_apply(
     return result
 
 
+_CertifiedRows = tuple[NDArray[np.float64], NDArray[np.float64]]
+
+
+@dataclass(frozen=True)
+class _AnalyticFirst:
+    """A family's analytic derivatives along every parameter axis.
+
+    ``axes[q]`` is ``(values, certificate)`` along ``e_q``, the certificate the
+    family's certified absolute error (zero for closed-form channels).  All
+    ``K`` axes are evaluated before any is used, so a family that refuses one
+    axis (the two-piece join) sends the whole pass to differences.
+    """
+
+    axes: tuple[_CertifiedRows, ...]
+
+
 def _analytic_first_derivative(
     family: DistributionalFamily,
     y: NDArray,
@@ -416,32 +434,42 @@ def _analytic_first_derivative(
     likelihood_plan: FamilyLikelihoodPlan,
     n_observations: int,
     k_parameters: int,
-) -> Callable[[NDArray[np.float64]], NDArray[np.float64]] | None:
+) -> _AnalyticFirst | None:
     """The family's analytic directional derivative of the observed curvature, if usable.
 
-    ``None`` when the family does not implement the protocol or refuses these
-    links (GammaLS accepts only its log links); the caller then differences.
+    ``None`` when the family does not implement the protocol, refuses these
+    links (NB2 and GammaLS accept only their log links) or refuses a row on any
+    axis (a two-piece row on its join); the caller then differences.
     """
-    if not (
-        isinstance(family, PredictorCurvatureDirectionalFamily)
-        and callable(getattr(family, "predictor_curvature_directional_derivative", None))
+    if not isinstance(
+        family, (PredictorCurvatureDirectionalFamily, CertifiedCurvatureDirectionalFamily)
     ):
         return None
     expected = (n_observations, k_parameters * (k_parameters + 1) // 2)
 
-    def derivative(unit: NDArray[np.float64]) -> NDArray[np.float64]:
-        values = np.asarray(
-            family.predictor_curvature_directional_derivative(y, eta, unit, links, likelihood_plan),
-            dtype=np.float64,
-        )
+    def derivative(unit: NDArray[np.float64]) -> _CertifiedRows:
+        analytic = analytic_curvature_direction(family, y, eta, unit, links, likelihood_plan)
+        if analytic is None:
+            raise UnsupportedLikelihoodContractError("the family refused these links")
+        values, certificate = analytic
         if values.shape != expected or not np.all(np.isfinite(values)):
             raise LamlDerivativeError("family returned an invalid curvature direction")
-        return values
+        if certificate is None:
+            return values, np.zeros_like(values)
+        if (
+            certificate.shape != expected
+            or not np.all(np.isfinite(certificate))
+            or np.any(certificate < 0.0)
+        ):
+            raise LamlDerivativeError("family returned an invalid curvature-direction certificate")
+        return values, certificate
 
-    probe = np.zeros((n_observations, k_parameters), dtype=np.float64)
-    probe[:, 0] = 1.0
+    axes = []
     try:
-        derivative(probe)
+        for q in range(k_parameters):
+            unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
+            unit[:, q] = 1.0
+            axes.append(derivative(unit))
     except (
         TypeError,
         ValueError,
@@ -451,7 +479,7 @@ def _analytic_first_derivative(
         LamlDerivativeError,
     ):
         return None
-    return derivative
+    return _AnalyticFirst(axes=tuple(axes))
 
 
 @dataclass

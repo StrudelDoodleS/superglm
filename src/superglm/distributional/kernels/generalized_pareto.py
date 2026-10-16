@@ -273,6 +273,115 @@ def scale_rows(
     )
 
 
+def series_f(z: NDArray) -> NDArray[np.float64]:
+    """``E'(z) = -(2/(1 + z)^3 + 3 E(z))/z``, ``3/2`` at zero (``D' = E``, ``E' = F``)."""
+
+    def direct(a):
+        return -(2.0 / ((1.0 + a) * (1.0 + a) * (1.0 + a)) + 3.0 * series_e(a)) / a
+
+    return _piecewise(z, lambda j: (-1.0) ** j * (j + 1) * (j + 2) * (j + 3) / (j + 4), direct)
+
+
+_TAIL_SERIES_LIMIT = 0.8
+_TAIL_SERIES_TERMS = 200
+
+
+def _tail_third_numerator(log_support: NDArray, u: NDArray) -> NDArray[np.float64]:
+    """``6L - 6u - 3u^2 - 2u^3`` with ``L = log1p(z) = -log(1 - u)``, ``u = z/(1 + z)``.
+
+    It equals ``6 sum_{k >= 4} u^k / k``, a sum of positive terms, which is
+    summed below ``u = 0.8`` (200 terms leave a tail under ``0.8^200``);
+    the direct form there would cancel by a factor near 100 at ``z = 1/2``.
+    Above, the direct form cancels by at most a factor of five.
+    """
+    result = 6.0 * log_support - 6.0 * u - 3.0 * u * u - 2.0 * u**3
+    inner = u < _TAIL_SERIES_LIMIT
+    if np.any(inner):
+        base = u[inner]
+        power = base**4
+        total = np.zeros_like(base)
+        for k in range(4, 4 + _TAIL_SERIES_TERMS):
+            total = total + power / k
+            power = power * base
+        result[inner] = 6.0 * total
+    return result
+
+
+def scale_hessian_direction(
+    response: NDArray,
+    scale: NDArray,
+    shape: NDArray,
+    direction: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed derivative of the ``(psi, xi)`` Hessian along a natural direction ``v``.
+
+    With ``v = t/(1 + z)`` and ``a = 1/(1 + z)`` (both bounded on the support):
+
+    * ``T_ppp = 2 (v (1 + a + a^2) - a^3)/psi^3``,
+    * ``T_ppx = -v (2 a^2 - v (1 + 2a))/psi^2``,
+    * ``T_pxx = 2 v^2 (v - a)/psi``,
+    * ``T_xxx = t^4 F(z) - 2 v^3`` below ``z = 1/2`` (``F`` by its series) and
+      ``(6L - 6u - 3u^2 - 2u^3)/xi^4 - 2 v^3`` in the positive tail, with
+      ``L = log1p(z)`` and ``u = xi v``, the Hessian's own tail split.
+
+    Rows outside the support (published as zero) return zero.
+    """
+    y = _nonnegative_vector(response, name="response")
+    psi = _positive_vector(scale, name="scale")
+    xi = _vector(shape, name="shape")
+    weight = _positive_vector(multiplier, name="multiplier")
+    _matching(y, psi, xi, weight)
+    nu = np.asarray(direction, dtype=_FLOAT)
+    if nu.shape != (len(y), 2) or not np.all(np.isfinite(nu)):
+        raise GeneralizedParetoDomainError("natural direction must be a finite n-by-2 array")
+    with np.errstate(over="ignore", invalid="ignore"):
+        t = y / psi
+        z = xi * t
+    support = 1.0 + z
+    positive_tail = (xi > 0.0) & (z >= _Z_SERIES_RADIUS)
+    ordinary = np.isfinite(support) & (support > 0.0) & ~positive_tail
+    result = np.zeros((len(y), 3), dtype=_FLOAT)
+    for rows in (ordinary, positive_tail):
+        if not np.any(rows):
+            continue
+        yi, pi, xi_i, wi, ni = y[rows], psi[rows], xi[rows], weight[rows], nu[rows]
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            if rows is ordinary:
+                ti, zi = t[rows], z[rows]
+                a = 1.0 / (1.0 + zi)
+                v = ti * a
+                t_xxx = ti**4 * series_f(zi) - 2.0 * v**3
+            else:
+                inverse_t = pi / yi
+                zi = z[rows]
+                log_support = np.log1p(zi)
+                overflowed = ~np.isfinite(zi)
+                if np.any(overflowed):
+                    log_support[overflowed] = (
+                        np.log(xi_i[overflowed])
+                        + np.log(yi[overflowed])
+                        - np.log(pi[overflowed])
+                        + np.log1p(inverse_t[overflowed] / xi_i[overflowed])
+                    )
+                v = 1.0 / (xi_i + inverse_t)
+                a = inverse_t * v
+                u = xi_i * v
+                t_xxx = _tail_third_numerator(log_support, u) / xi_i**4 - 2.0 * v**3
+            t_ppp = 2.0 * (v * (1.0 + a + a * a) - a**3) / pi**3
+            t_ppx = -v * (2.0 * a * a - v * (1.0 + 2.0 * a)) / (pi * pi)
+            t_pxx = 2.0 * v * v * (v - a) / pi
+            vp, vx = ni[:, 0], ni[:, 1]
+            result[rows, 0] = wi * (t_ppp * vp + t_ppx * vx)
+            result[rows, 1] = wi * (t_ppx * vp + t_pxx * vx)
+            result[rows, 2] = wi * (t_pxx * vp + t_xxx * vx)
+    if not np.all(np.isfinite(result)):
+        raise GeneralizedParetoDomainError(
+            "generalized Pareto Hessian direction is not representable"
+        )
+    return result
+
+
 def expected_information(
     scale: NDArray,
     shape: NDArray,

@@ -22,12 +22,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.family import (
+    CertifiedCurvatureDirectionalFamily,
     DistributionalFamily,
     FamilyLikelihoodPlan,
+    PredictorCurvatureDirectionalFamily,
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
 from superglm.distributional.solver.derivatives import transform_natural_derivatives
+from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.links import Link
 
 FINITE_DIFFERENCE_AUTHORITY = "finite-difference-curvature-direction/v1"
@@ -230,6 +233,40 @@ def _unit_directions(
     return norms, direction / safe[:, None]
 
 
+def analytic_curvature_direction(
+    family: DistributionalFamily,
+    y: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    links: Sequence[Link],
+    plan: FamilyLikelihoodPlan,
+) -> tuple[NDArray[np.float64], NDArray[np.float64] | None] | None:
+    """The family's analytic curvature direction and its certified error, if it has one.
+
+    ``None`` when the family does not implement the protocol or refuses these
+    links with :class:`UnsupportedLikelihoodContractError` (NB2 and GammaLS
+    differentiate only their log links; a link without ``deriv3_inverse``
+    cannot be differentiated a third time), so the caller differences
+    instead.  The certificate is the family's own certified absolute error
+    (:class:`CertifiedCurvatureDirectionalFamily`), or ``None`` for a family
+    whose channels are closed forms.  Numerical failures propagate.
+    """
+    certified = getattr(family, "certified_predictor_curvature_directional_derivative", None)
+    plain = getattr(family, "predictor_curvature_directional_derivative", None)
+    try:
+        if isinstance(family, CertifiedCurvatureDirectionalFamily) and callable(certified):
+            values, certificate = certified(y, eta, eta_direction, links, plan)
+            return (
+                np.asarray(values, dtype=np.float64),
+                np.asarray(certificate, dtype=np.float64),
+            )
+        if isinstance(family, PredictorCurvatureDirectionalFamily) and callable(plain):
+            return np.asarray(plain(y, eta, eta_direction, links, plan), dtype=np.float64), None
+    except UnsupportedLikelihoodContractError:
+        return None
+    return None
+
+
 def finite_difference_curvature_direction(
     family: DistributionalFamily,
     y: NDArray,
@@ -335,6 +372,7 @@ __all__ = [
     "DEFAULT_STEP",
     "FINITE_DIFFERENCE_AUTHORITY",
     "FiniteDifferenceDirection",
+    "analytic_curvature_direction",
     "finite_difference_curvature_direction",
     "finite_difference_curvature_second_direction",
 ]

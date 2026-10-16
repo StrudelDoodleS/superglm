@@ -7,6 +7,7 @@ import math
 import numpy as np
 import pytest
 
+from tests import _nb_series_reference as series_reference
 from tests._distributional_family_kernels import negative_binomial as nb_kernel
 from tests._negative_binomial_lss_oracles import (
     NEGATIVE_BINOMIAL_LSS_CASES,
@@ -371,14 +372,21 @@ def test_series_candidate_boundary_is_accurate_and_conditioned(
         remainder_scale[-1:],
         2,
     )
-    scaled_power_sums = nb_kernel._scaled_power_sums
+    # The compiled series is the reference loop bit for bit
+    # (test_negative_binomial_compiled_kernel), so the reference shows the
+    # power-sum conditioning deciding this row.
+    for computed, expected in zip(
+        nb_kernel._theta_series(*arguments), series_reference._theta_series(*arguments), strict=True
+    ):
+        np.testing.assert_array_equal(computed, expected)
+    scaled_power_sums = series_reference._scaled_power_sums
 
     def omit_conditioning(count: int):
         values, errors = scaled_power_sums(count)
         return values, np.zeros_like(errors)
 
-    monkeypatch.setattr(nb_kernel, "_scaled_power_sums", omit_conditioning)
-    np.testing.assert_array_equal(nb_kernel._theta_series(*arguments)[0], [[True, True]])
+    monkeypatch.setattr(series_reference, "_scaled_power_sums", omit_conditioning)
+    np.testing.assert_array_equal(series_reference._theta_series(*arguments)[0], [[True, True]])
 
 
 @pytest.mark.parametrize("raw_count", [2, 7, 100_000])
@@ -389,10 +397,16 @@ def test_scaled_power_sums_are_fixed_width_and_enclose_roundoff(raw_count: int) 
             raise AssertionError("integer exponentiation must not be used")
 
     count = NoPowerInt(raw_count)
-    values, errors = nb_kernel._scaled_power_sums(count)
+    values, errors = series_reference._scaled_power_sums(count)
+    compiled_values, compiled_errors = np.empty(12), np.empty(12)
+    nb_kernel._compiled._scaled_power_sums(
+        raw_count, nb_kernel._SERIES_BERNOULLI, compiled_values, compiled_errors, np.empty(12)
+    )
 
     assert values.dtype == errors.dtype == np.dtype(np.float64)
     assert np.all(np.isfinite(values)) and np.all(np.isfinite(errors))
+    np.testing.assert_array_equal(compiled_values, values)
+    np.testing.assert_array_equal(compiled_errors, errors)
     expected = np.array(
         [
             math.fsum((float(offset) / count) ** power for offset in range(count)) / count
@@ -440,12 +454,69 @@ def test_requested_derivative_orders_are_actually_lazy(
         )
         assert natural.shape == direct.shape == (1, order)
 
-    monkeypatch.setattr(nb_kernel, "_series_hessian_step", unexpected)
+    monkeypatch.setattr(series_reference, "_series_hessian_step", unexpected)
     theta = np.array([np.nextafter(20.0, np.inf)])
     _, remainder_error, remainder_scale = nb_kernel._ratio_remainder(np.array([1.25]) / theta)
-    nb_kernel._theta_series(
-        np.array([2]), np.array([1.25]), theta, remainder_error, remainder_scale, 1
-    )
+    arguments = (np.array([2]), np.array([1.25]), theta, remainder_error, remainder_scale, 1)
+    expected = series_reference._theta_series(*arguments)
+    for computed, reference in zip(nb_kernel._theta_series(*arguments), expected, strict=True):
+        assert computed.shape == (1, 1)
+        np.testing.assert_array_equal(computed, reference)
+
+
+def test_compiled_series_writes_only_the_requested_order() -> None:
+    """At ``derivative_order=1`` the compiled kernel writes one column and nothing else.
+
+    Numba does not bounds-check, so an order-2 write into an ``(n, 1)`` output
+    would land on the next row or past the end without raising.  The outputs
+    sit inside sentinel-filled buffers; the sentinels must survive, and the one
+    written column must equal the order-2 call's first column bit for bit.
+    """
+    counts = np.array([2, 0, 5, 1], dtype=np.int64)
+    mean = np.array([1.25, 0.4, 3.0, 0.9])
+    theta = np.full(4, np.nextafter(400.0, np.inf))
+    _, remainder_error, remainder_scale = nb_kernel._ratio_remainder(mean / theta)
+    candidate_scale = np.maximum(mean, np.maximum(counts - 1.0, 0.0))
+    rows = np.flatnonzero(candidate_scale / theta <= nb_kernel._SERIES_RATIO).astype(np.int64)
+    assert rows.size == 4
+    pad, n_rows = 8, len(counts)
+
+    def framed(dtype, sentinel, width):
+        buffer = np.full(2 * pad + n_rows * width, sentinel, dtype=dtype)
+        return buffer, buffer[pad : pad + n_rows * width].reshape(n_rows, width)
+
+    outputs = {}
+    for order in (1, 2):
+        use_buffer, use = framed(np.bool_, True, order)
+        use[:] = False
+        natural_buffer, natural = framed(np.float64, -7.25, order)
+        direct_buffer, direct = framed(np.float64, -7.25, order)
+        nb_kernel._compiled.theta_series_serial(
+            rows,
+            counts,
+            mean,
+            theta,
+            candidate_scale,
+            remainder_error,
+            remainder_scale,
+            order,
+            nb_kernel._SERIES_ORDER,
+            nb_kernel._SERIES_EXPONENTS,
+            nb_kernel._SERIES_BERNOULLI,
+            use,
+            natural,
+            direct,
+        )
+        for buffer, sentinel in (
+            (use_buffer, True),
+            (natural_buffer, -7.25),
+            (direct_buffer, -7.25),
+        ):
+            assert np.all(buffer[:pad] == sentinel) and np.all(buffer[-pad:] == sentinel)
+        outputs[order] = (use.copy(), natural.copy(), direct.copy())
+    for first, second in zip(outputs[1], outputs[2], strict=True):
+        np.testing.assert_array_equal(first[:, 0], second[:, 0])
+    assert np.all(outputs[1][0])
 
 
 def test_public_evaluator_wires_direct_log_channel_retention(

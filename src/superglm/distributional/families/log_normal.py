@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -40,6 +41,7 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels.log_normal import (
     LogNormalDomainError,
     initialize_log_normal,
+    location_curvature_directional,
     location_expected_information,
     location_of_mean,
     location_rows,
@@ -47,6 +49,7 @@ from superglm.distributional.kernels.log_normal import (
     log_normal_expected_shortfall,
     log_normal_expected_shortfall_from_mean,
     log_normal_quantile,
+    mean_curvature_directional,
     mean_expected_information,
     mean_of_location,
     mean_rows,
@@ -55,7 +58,7 @@ from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
-from superglm.links import IdentityLink, LogLink
+from superglm.links import IdentityLink, Link, LogLink
 
 Parametrisation = Literal["mean", "location"]
 LogNormalRowLaw = Literal[
@@ -384,6 +387,38 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         if self.parametrisation == "mean":
             return mean_expected_information(values[:, 0], values[:, 1], bound.multiplier)
         return location_expected_information(values[:, 1], bound.multiplier)
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = _validated_response(y)
+        first_link = LogLink if self.parametrisation == "mean" else IdentityLink
+        link_tuple = tuple(links)
+        if (
+            len(link_tuple) != 2
+            or type(link_tuple[0]) is not first_link
+            or type(link_tuple[1]) is not LowerBoundedLogLink
+            or link_tuple[1].floor != self.scale_floor
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "log-normal endpoint curvature derivatives require the built-in links"
+            )
+        bound = self._plan(plan, len(response))
+        directional = (
+            mean_curvature_directional
+            if self.parametrisation == "mean"
+            else location_curvature_directional
+        )
+        return directional(
+            response, eta, eta_direction, bound.multiplier, scale_floor=self.scale_floor
+        )
 
     def _location_coordinates(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
         if self.parametrisation == "mean":
