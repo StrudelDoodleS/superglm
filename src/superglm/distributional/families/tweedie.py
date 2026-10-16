@@ -14,8 +14,12 @@ from scipy.special import expit
 from scipy.stats import poisson
 
 from superglm.distributional.families._base import (
+    composed_second_direction,
+    link_derivative_columns,
+    link_inner_derivatives,
     natural_curvature_direction,
     readonly,
+    second_direction_arrays,
     typed_plan,
     validated_float_response,
 )
@@ -38,6 +42,7 @@ from superglm.distributional.kernels.tweedie import (
     evaluate_tweedie_rows,
     initialize_tweedie,
     tweedie_hessian_direction,
+    tweedie_natural_fourth,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -778,6 +783,69 @@ class TweedieLSS(TweediePredictors):
         return natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
         )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``.
+
+        The kernel's derivatives are in ``(mu, rho = log phi, p)``; the
+        dispersion's predictor reaches ``rho`` through ``log`` of its inverse
+        link, which under the default log link is the identity, so no
+        ``phi``-scale round trip cancels.  A row the kernel refuses sends the
+        caller to differences.
+        """
+
+        response = _validated_response(y)
+        tweedie_plan = _validated_plan(plan, n_observations=len(response))
+        single = np.ndim(direction_a) == 2
+        predictors, first, second = second_direction_arrays(
+            response, eta, direction_a, direction_b, 3
+        )
+        theta, *derivatives = link_derivative_columns(predictors, tuple(links), 4)
+        try:
+            values = tweedie_natural_fourth(
+                response,
+                np.ascontiguousarray(theta[:, 0]),
+                np.ascontiguousarray(theta[:, 1]),
+                np.ascontiguousarray(theta[:, 2]),
+                tweedie_plan.weights.values,
+                tweedie_plan.weights.provenance.contract.semantics,
+            )
+        except TweedieNumericalRefusal as exc:
+            raise UnsupportedLikelihoodContractError(
+                f"Tweedie fourth derivatives refused: {exc}"
+            ) from exc
+        outer = {1: values[:, 0:3], 2: values[:, 3:9], 3: values[:, 9:19], 4: values[:, 19:34]}
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            inner = link_inner_derivatives(*derivatives)
+            g = theta[:, 1]
+            ratios = [derivative[:, 1] / g for derivative in derivatives]
+            first_log = ratios[0]
+            log_link = (
+                first_log,
+                ratios[1] - first_log * first_log,
+                ratios[2] - 3.0 * first_log * ratios[1] + 2.0 * first_log**3,
+                ratios[3]
+                - 4.0 * first_log * ratios[2]
+                - 3.0 * ratios[1] * ratios[1]
+                + 12.0 * first_log * first_log * ratios[1]
+                - 6.0 * first_log**4,
+            )
+            for order, value in enumerate(log_link, start=1):
+                inner[order][(1, (1,) * order)] = value
+            result = composed_second_direction(outer, inner, first, second)
+        if not np.all(np.isfinite(result)):
+            raise ValueError(
+                "the predictor-curvature second derivative is not representable at this state"
+            )
+        return readonly(result[0] if single else result)
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
         parameters = _validated_parameter_matrix(

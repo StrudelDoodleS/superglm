@@ -336,9 +336,10 @@ def _warmup_compiled_tweedie_dispatchers(
         cast(Callable[..., object], dispatcher)(*arguments)
 
 
-# The LAML endgame's third-derivative kernels (``_tweedie_hessian_direction_core``
-# and the four helpers it calls) compile, or load from numba's cache, on a
-# Tweedie fit's first endgame call, not here: warming them cost every
+# The LAML endgame's third- and fourth-derivative kernels
+# (``_tweedie_hessian_direction_core``, ``_tweedie_fourth_core`` and the helpers
+# they call) compile, or load from numba's cache, on a Tweedie fit's first
+# endgame call, not here: warming the third-order set cost every
 # ``superglm.warmup()`` about 0.4 s with a warm cache and 5.6 s cold, whether or
 # not the process fits a Tweedie SuperLSS model.
 _FIRST_USE_DISPATCHERS = (
@@ -347,6 +348,11 @@ _FIRST_USE_DISPATCHERS = (
     "_series_third_cumulants",
     "_tweedie_third_row",
     "_tweedie_hessian_direction_core",
+    "_polygamma_0123",
+    "_fourth_term_channels",
+    "_series_fourth_cumulants",
+    "_tweedie_fourth_row",
+    "_tweedie_fourth_core",
 )
 
 
@@ -498,10 +504,61 @@ def tweedie_hessian_direction(
     return result
 
 
+def tweedie_natural_fourth(
+    y: NDArray[np.float64],
+    mean: NDArray[np.float64],
+    dispersion: NDArray[np.float64],
+    power: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    semantics: WeightSemantics,
+    *,
+    max_terms: int = _DEFAULT_MAX_TERMS,
+    log_cutoff: float = _DEFAULT_LOG_CUTOFF,
+) -> NDArray[np.float64]:
+    """Derivatives of orders one to four in ``(mu, rho, p)``, ``rho = log phi``, as ``(n, 34)``.
+
+    Packed by order (3 + 6 + 10 + 15).  ``rho`` rather than ``phi`` because
+    the series is linear in ``rho`` and the default dispersion link is
+    ``rho`` itself; the caller composes with its links.  The positive row's
+    series contributes the joint cumulants of its term derivatives through
+    fourth order over the Hessian's own window (two passes, as
+    :func:`tweedie_hessian_direction`), so this differentiates the published,
+    windowed likelihood; the closed part, and the zero row, are generated
+    closed forms.  Rows the Hessian would refuse are refused here too.
+    """
+    arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
+        y,
+        mean,
+        dispersion,
+        power,
+        weight,
+        semantics,
+        derivative_order=2,
+        max_terms=max_terms,
+        log_cutoff=log_cutoff,
+    )
+    normalized = tuple(
+        np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
+    )
+    fourth_core = cast(_DirectionCore, _compiled._tweedie_fourth_core)
+    result, status, failing_row = fourth_core(
+        *normalized,
+        0 if semantics == "prior" else 1,
+        min(row_max_terms, _MAX_SAFE_MODE + 1),
+        cutoff,
+    )
+    if status != _compiled.KERNEL_OK:
+        _raise_compiled_refusal(
+            status=int(status), failing_row=int(failing_row), max_terms=row_max_terms
+        )
+    return result
+
+
 __all__ = [
     "TweedieNumericalRefusal",
     "TweediePointEvaluation",
     "initialize_tweedie",
     "evaluate_tweedie_rows",
     "tweedie_hessian_direction",
+    "tweedie_natural_fourth",
 ]

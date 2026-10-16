@@ -8,6 +8,8 @@ import numpy as np
 from numba import njit, prange  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+import superglm.distributional.kernels._fourth_generated as _generated
+
 KERNEL_OK = 0
 KERNEL_MODE_RATIO = 1
 KERNEL_MODE_RANGE = 2
@@ -1481,7 +1483,390 @@ def _tweedie_hessian_direction_core(
     return result, KERNEL_OK, -1
 
 
+# ---------------------------------------------------------------- fourth order
+#
+# The fourth-order kernel calls the generated closed forms of
+# ``_fourth_generated`` compiled here.  Numba's on-disk cache keys a caller on
+# its own file only, so the generator rewrites this digest of its output
+# whenever it writes the module, which invalidates these cached callers too.
+_FOURTH_GENERATED_DIGEST = "94dfd057670ec60498fdf6535ea203284de57f7d483f0c697493ae031f821c6a"
+
+_positive_closed = njit(cache=True)(_generated.tweedie_positive_closed)
+_zero_closed = njit(cache=True)(_generated.tweedie_zero_closed)
+_zeta_derivatives = njit(cache=True)(_generated.tweedie_zeta_derivatives)
+_term_derivatives = njit(cache=True)(_generated.tweedie_term_derivatives)
+_series_cumulants = njit(cache=True)(_generated.tweedie_series_cumulants)
+
+
+@njit(cache=True)
+def _polygamma_0123(value: float) -> tuple[float, float, float, float]:
+    """Digamma, trigamma, tetragamma and pentagamma of a finite positive scalar.
+
+    The recurrence lifts the argument to at least 16, where the asymptotic
+    expansions through ``B_14`` (DLMF 5.11.2 and 5.15.8, differentiated) leave
+    a relative remainder below ``1e-16`` in every channel.
+    """
+    shifted_digamma = 0.0
+    shifted_trigamma = 0.0
+    shifted_tetragamma = 0.0
+    shifted_pentagamma = 0.0
+    x = value
+    while x < 16.0:
+        inverse = 1.0 / x
+        inverse2 = inverse * inverse
+        shifted_digamma -= inverse
+        shifted_trigamma += inverse2
+        shifted_tetragamma -= 2.0 * inverse2 * inverse
+        shifted_pentagamma += 6.0 * inverse2 * inverse2
+        x += 1.0
+    inverse = 1.0 / x
+    i2 = inverse * inverse
+    digamma = 0.0
+    trigamma = 0.0
+    tetragamma = 0.0
+    pentagamma = 0.0
+    power = i2
+    for k in range(_POLYGAMMA_TERMS):
+        b = _POLYGAMMA_BERNOULLI[k]
+        order = 2.0 * (k + 1)
+        digamma -= b / order * power
+        trigamma += b * power * inverse
+        tetragamma -= (order + 1.0) * b * power * i2
+        pentagamma += (order + 1.0) * (order + 2.0) * b * power * i2 * inverse
+        power *= i2
+    digamma += shifted_digamma + math.log(x) - 0.5 * inverse
+    trigamma += shifted_trigamma + inverse + 0.5 * i2
+    tetragamma += shifted_tetragamma - i2 - i2 * inverse
+    pentagamma += shifted_pentagamma + 2.0 * i2 * inverse + 3.0 * i2 * i2
+    return digamma, trigamma, tetragamma, pentagamma
+
+
+_POLYGAMMA_TERMS = 7
+_POLYGAMMA_BERNOULLI = np.array(
+    [1.0 / 6.0, -1.0 / 30.0, 1.0 / 42.0, -1.0 / 30.0, 5.0 / 66.0, -691.0 / 2730.0, 7.0 / 6.0]
+)
+
+
+@njit(cache=True)
+def _fourth_term_channels(
+    j: int, zeta1: float, zeta2: float, zeta3: float, zeta4: float, r: float
+) -> tuple[float, float, float, float]:
+    """``(q_p, q_pp, q_ppp, q_pppp)`` of series term ``j`` (generated)."""
+    j_float = float(j)
+    p0, p1, p2, p3 = _polygamma_0123((1.0 / r - 1.0) * j_float)
+    return _term_derivatives(j_float, r, zeta1, zeta2, zeta3, zeta4, p0, p1, p2, p3)
+
+
+@njit(cache=True)
+def _series_fourth_cumulants(
+    zeta: float,
+    zeta1: float,
+    zeta2: float,
+    zeta3: float,
+    zeta4: float,
+    r: float,
+    alpha: float,
+    max_terms: int,
+    log_cutoff: float,
+    coefficients: NDArray[np.float64],
+):
+    """Status, then ``W``'s 14 derivatives of orders one to four in ``(rho, p)``.
+
+    The window is the Hessian's (walked out from the mode until a term falls
+    below ``exp(-log_cutoff)`` of it); pass one forms the anchored means of
+    ``j`` and the term derivatives ``Y, Z, V, U``, pass two the central
+    moments about them, and the generated ``tweedie_series_cumulants`` turns
+    those into the derivatives of the window's log-sum.
+    """
+    coefficients[0] = math.nan
+    nan14 = (
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+    )
+    status, mode, mode_lower_ratio, mode_upper_ratio = _locate_series_mode(
+        zeta, alpha, coefficients
+    )
+    if status != KERNEL_OK:
+        return status, nan14
+    anchor_y, anchor_z, anchor_v, anchor_u = _fourth_term_channels(
+        mode, zeta1, zeta2, zeta3, zeta4, r
+    )
+    mode_float = float(mode)
+    mass = 1.0
+    sum_j = 0.0
+    sum_y = 0.0
+    sum_z = 0.0
+    sum_v = 0.0
+    sum_u = 0.0
+    lowest = mode
+    highest = mode
+    terms = 1
+    for direction in (-1, 1):
+        relative_log = 0.0
+        current = mode
+        while True:
+            if direction < 0:
+                if current <= 1:
+                    break
+                ratio_value = (
+                    mode_lower_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
+                )
+                if not math.isfinite(ratio_value) or ratio_value <= 0.0:
+                    return KERNEL_LOWER_RATIO, nan14
+                relative_log -= ratio_value
+                current -= 1
+            else:
+                if current >= _MAX_SAFE_MODE:
+                    return KERNEL_WINDOW_RANGE, nan14
+                ratio_value = (
+                    mode_upper_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                )
+                if not math.isfinite(ratio_value) or ratio_value > 0.0:
+                    return KERNEL_UPPER_RATIO, nan14
+                relative_log += ratio_value
+                current += 1
+            terms += 1
+            if terms > max_terms:
+                return KERNEL_MAX_TERMS, nan14
+            relative = math.exp(relative_log)
+            q_y, q_z, q_v, q_u = _fourth_term_channels(current, zeta1, zeta2, zeta3, zeta4, r)
+            mass += relative
+            sum_j += relative * (float(current) - mode_float)
+            sum_y += relative * (q_y - anchor_y)
+            sum_z += relative * (q_z - anchor_z)
+            sum_v += relative * (q_v - anchor_v)
+            sum_u += relative * (q_u - anchor_u)
+            if direction < 0:
+                lowest = current
+            else:
+                highest = current
+            if relative_log <= -log_cutoff:
+                break
+    offset_j = sum_j / mass
+    offset_y = sum_y / mass
+    offset_z = sum_z / mass
+    mean_j = mode_float + offset_j
+    mean_y = _sum2(anchor_y, offset_y)
+    mean_z = _sum2(anchor_z, offset_z)
+    mean_v = _sum2(anchor_v, sum_v / mass)
+    mean_u = _sum2(anchor_u, sum_u / mass)
+    c_jj = 0.0
+    c_jy = 0.0
+    c_jz = 0.0
+    c_jv = 0.0
+    c_yy = 0.0
+    c_yz = 0.0
+    c_yv = 0.0
+    c_zz = 0.0
+    c_jjj = 0.0
+    c_jjy = 0.0
+    c_jjz = 0.0
+    c_jyy = 0.0
+    c_jyz = 0.0
+    c_yyy = 0.0
+    c_yyz = 0.0
+    c_jjjj = 0.0
+    c_jjjy = 0.0
+    c_jjyy = 0.0
+    c_jyyy = 0.0
+    c_yyyy = 0.0
+    for direction in (-1, 1):
+        relative_log = 0.0
+        current = mode
+        while True:
+            if direction < 0:
+                if current != mode:
+                    ratio_value = (
+                        mode_lower_ratio
+                        if current + 1 == mode
+                        else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                    )
+                    relative_log -= ratio_value
+            else:
+                if current >= highest:
+                    break
+                ratio_value = (
+                    mode_upper_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                )
+                relative_log += ratio_value
+                current += 1
+            relative = math.exp(relative_log)
+            q_y, q_z, q_v, _ = _fourth_term_channels(current, zeta1, zeta2, zeta3, zeta4, r)
+            dj = (float(current) - mode_float) - offset_j
+            dy = (q_y - anchor_y) - offset_y
+            dz = (q_z - anchor_z) - offset_z
+            dv = q_v - mean_v
+            wj = relative * dj
+            wy = relative * dy
+            c_jj += wj * dj
+            c_jy += wj * dy
+            c_jz += wj * dz
+            c_jv += wj * dv
+            c_yy += wy * dy
+            c_yz += wy * dz
+            c_yv += wy * dv
+            c_zz += relative * dz * dz
+            c_jjj += wj * dj * dj
+            c_jjy += wj * dj * dy
+            c_jjz += wj * dj * dz
+            c_jyy += wj * dy * dy
+            c_jyz += wj * dy * dz
+            c_yyy += wy * dy * dy
+            c_yyz += wy * dy * dz
+            c_jjjj += wj * dj * dj * dj
+            c_jjjy += wj * dj * dj * dy
+            c_jjyy += wj * dj * dy * dy
+            c_jyyy += wj * dy * dy * dy
+            c_yyyy += wy * dy * dy * dy
+            if direction < 0:
+                if current <= lowest:
+                    break
+                current -= 1
+    inverse_mass = 1.0 / mass
+    values = _series_cumulants(
+        r,
+        mean_j,
+        mean_y,
+        mean_z,
+        mean_v,
+        mean_u,
+        c_jj * inverse_mass,
+        c_jy * inverse_mass,
+        c_jz * inverse_mass,
+        c_jv * inverse_mass,
+        c_yy * inverse_mass,
+        c_yz * inverse_mass,
+        c_yv * inverse_mass,
+        c_zz * inverse_mass,
+        c_jjj * inverse_mass,
+        c_jjy * inverse_mass,
+        c_jjz * inverse_mass,
+        c_jyy * inverse_mass,
+        c_jyz * inverse_mass,
+        c_yyy * inverse_mass,
+        c_yyz * inverse_mass,
+        c_jjjj * inverse_mass,
+        c_jjjy * inverse_mass,
+        c_jjyy * inverse_mass,
+        c_jyyy * inverse_mass,
+        c_yyyy * inverse_mass,
+    )
+    return KERNEL_OK, values
+
+
+# Packed positions of the (rho, p) block inside the (mu, rho, p) orders one to
+# four: W's derivatives land on the entries that never differentiate in mu.
+_SERIES_POSITIONS = np.array([1, 2, 6, 7, 8, 15, 16, 17, 18, 29, 30, 31, 32, 33])
+
+
+@njit(cache=True)
+def _tweedie_fourth_row(
+    y: float,
+    mean: float,
+    power: float,
+    rho: float,
+    max_terms: int,
+    log_cutoff: float,
+    coefficients: NDArray[np.float64],
+    out: NDArray[np.float64],
+) -> int:
+    """All 34 derivatives of orders one to four in ``(mu, rho, p)``, ``rho = log phi``.
+
+    The closed part (generated) carries every derivative through ``mu``; the
+    positive row's series ``W(rho, p)`` adds its cumulants to the rest.
+    Returns the status; ``out`` holds the values.
+    """
+    log_mean = math.log(mean)
+    r = power - 1.0
+    s = 2.0 - power
+    f_term = math.exp(-rho)
+    c_term = math.exp(s * log_mean)
+    m_term = math.exp(-log_mean)
+    if y == 0.0:
+        closed = _zero_closed(f_term, 0.0, c_term, m_term, log_mean, r, s)
+        for index in range(34):
+            out[index] = closed[index]
+    else:
+        log_y = math.log(y)
+        a_term = y * math.exp(-r * log_mean)
+        closed = _positive_closed(f_term, a_term, c_term, m_term, log_mean, r, s)
+        alpha = s / r
+        d_value = math.log(r) - log_y + rho
+        zeta = alpha * (log_y - math.log(r)) - math.log(s) - rho / r
+        zeta1, zeta2, zeta3, zeta4 = _zeta_derivatives(r, s, d_value)
+        if not (math.isfinite(zeta) and math.isfinite(zeta4)):
+            return KERNEL_SERIES_BASE
+        status, series = _series_fourth_cumulants(
+            zeta, zeta1, zeta2, zeta3, zeta4, r, alpha, max_terms, log_cutoff, coefficients
+        )
+        if status != KERNEL_OK:
+            return status
+        for index in range(34):
+            out[index] = closed[index]
+        for index in range(14):
+            out[_SERIES_POSITIONS[index]] += series[index]
+    for index in range(34):
+        if not math.isfinite(out[index]):
+            return KERNEL_ROW_DERIVATIVES
+    return KERNEL_OK
+
+
+@njit(cache=True, parallel=True)
+def _tweedie_fourth_core(
+    y: NDArray[np.float64],
+    mean: NDArray[np.float64],
+    dispersion: NDArray[np.float64],
+    power: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    weight_mode: int,
+    max_terms: int,
+    log_cutoff: float,
+):
+    """``(n, 34)`` derivatives in ``(mu, rho, p)``, weighted; status and first failing row last."""
+    n_rows = y.size
+    result = np.empty((n_rows, 34), dtype=np.float64)
+    statuses = np.empty(n_rows, dtype=np.int64)
+    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+        coefficients = np.empty(10, dtype=np.float64)
+        rho = math.log(dispersion[row])
+        multiplier = 1.0
+        if weight_mode == 0:
+            rho -= math.log(weight[row])
+        else:
+            multiplier = weight[row]
+        status = _tweedie_fourth_row(
+            y[row], mean[row], power[row], rho, max_terms, log_cutoff, coefficients, result[row]
+        )
+        statuses[row] = status
+        if status == KERNEL_OK and multiplier != 1.0:
+            for index in range(34):
+                result[row, index] *= multiplier
+    for row in range(n_rows):
+        if statuses[row] != KERNEL_OK:
+            return result, statuses[row], row
+    return result, KERNEL_OK, -1
+
+
 __all__ = [
+    "_tweedie_fourth_core",
     "_evaluate_tweedie_batch_core",
     "_evaluate_tweedie_batch_parallel_core",
     "_tweedie_hessian_direction_core",
