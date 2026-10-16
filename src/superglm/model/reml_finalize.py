@@ -9,6 +9,7 @@ from dataclasses import replace
 import numpy as np
 
 from superglm._fit_trace import TraceRun
+from superglm._group_matrix._lookup_tables import release_lookup_plan
 from superglm._reporting_state import (
     FactorSmoothLevelSupport,
     StructuredLevelSupport,
@@ -1021,6 +1022,7 @@ def finalize_reml_fit(
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
     release_leaf_memo(getattr(model._dm, "_structured_layout_cache", None))
+    release_lookup_plan(getattr(model._dm, "_structured_layout_cache", None))
 
     update_reml_r_inv(model, reml_groups, lambdas)
 
