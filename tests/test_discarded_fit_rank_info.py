@@ -5,6 +5,7 @@ Gram cannot certify itself) is read only by retained-fit inference.  The
 Tweedie power search's candidate fits and the NB2 auto-theta mean fits are
 never published, and an auto-theta REML refit is published only if no later
 refit replaces it, so only the published fit may pay for it.  The tests
+turn certification on (``_certify``: the factor route exists only there),
 force the factor route and count the data-rank factorisations; master paid
 one per candidate and per mean fit, and fails both counts.
 """
@@ -18,6 +19,7 @@ import pytest
 
 import superglm.model.reml_finalize as reml_finalize
 import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.rank as rank
 from superglm import NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
@@ -35,14 +37,20 @@ def _without_condition_estimate(rank_info):
 
 
 def _force_factor_route(patch):
-    """Send every fit's data rank to its TSQR route (the Gram is not taken as authoritative)."""
-    decide = irls_direct.decompose_gram_if_authoritative
+    """Send every certified fit's data rank to its TSQR route (the Gram is not taken as authoritative)."""
+    decide = rank.decompose_gram_if_authoritative
 
     def factor_route(matrix, **kwargs):
-        # Only the data-rank call passes ``psd_by_construction``.
+        # Only the data-rank call (``rank.decide_data_rank``) passes ``psd_by_construction``.
         return None if "psd_by_construction" in kwargs else decide(matrix, **kwargs)
 
-    patch.setattr(irls_direct, "decompose_gram_if_authoritative", factor_route)
+    patch.setattr(rank, "decompose_gram_if_authoritative", factor_route)
+
+
+def _certified(model):
+    """``model`` with the certification dial on, the only setting with a factor route."""
+    model._certify = True
+    return model
 
 
 def _record_terminal_refits(patch, *, inline=False):
@@ -94,7 +102,7 @@ def test_power_search_candidates_skip_the_data_rank_factorisation(data_rank_fact
     rng, frame, mu = _frame(11, 400)
     y = np.where(rng.random(len(mu)) < 0.6, 0.0, rng.gamma(1.5, mu))
     weights = rng.uniform(0.2, 1.0, len(mu))
-    model = SuperGLM(family=Tweedie(p=1.5), features=_features())
+    model = _certified(SuperGLM(family=Tweedie(p=1.5), features=_features()))
     result = model.estimate_p(frame, y, sample_weight=weights, fit_mode="reml")
     assert len(result.evaluations) > 2
     # The published refit at p_hat, and nothing else.
@@ -110,7 +118,7 @@ def _nb_auto(seed=3, n=600):
 
 def test_nb_auto_theta_pays_the_data_rank_factorisation_once(data_rank_factorisations, monkeypatch):
     frame, y = _nb_auto()
-    model = SuperGLM(family=NegativeBinomial(theta="auto"), features=_features())
+    model = _certified(SuperGLM(family=NegativeBinomial(theta="auto"), features=_features()))
     terminal = _record_terminal_refits(monkeypatch)
     model.fit_reml(frame, y)
     # Precondition: a later theta refit replaced a REML fit, so deferral is
@@ -136,7 +144,7 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
 
     def fit(inline):
         frame, y = _nb_auto(seed=8)
-        model = SuperGLM(family=NegativeBinomial(theta="auto"), features=_features())
+        model = _certified(SuperGLM(family=NegativeBinomial(theta="auto"), features=_features()))
         with monkeypatch.context() as patch:
             if factor_route:
                 _force_factor_route(patch)
