@@ -2686,6 +2686,41 @@ class TestREMLNonConvergenceDisclosure:
         assert "lambda2_init" in message
         assert "max_pirls_iter" not in message
 
+    def test_a_maximum_on_the_mean_space_boundary_is_named_not_given_more_budget(self):
+        """A log-binomial whose penalized maximum holds a probability of 1 has no
+        interior optimum: the statement says so, and does not advise a larger
+        budget, whether the boundary held the final refit (the discrete
+        path) or smoothing parameters the search tried (the exact engine's
+        restorations).  Mutation check: before, the capped fit was told to
+        refit with a larger max_reml_iter, and the restored one heard nothing
+        of the boundary."""
+        from superglm.diagnostics.convergence import reml_nonconvergence_message
+
+        capped = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=20,
+            converged=False,
+            termination_reason="max_reml_iter",
+        )
+        capped.terminal_refit_termination = "mean_space_boundary"
+        message = reml_nonconvergence_message(capped)
+        assert "boundary of the family's mean space" in message
+        assert "no interior optimum" in message
+        assert "lambda2_init" not in message
+
+        restored = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=3,
+            converged=False,
+            termination_reason="line_search_failed",
+            mean_space_restorations=4,
+        )
+        message = reml_nonconvergence_message(restored)
+        assert "no smoothing step improved" in message
+        assert "no interior optimum" in message
+
     def test_both_budgets_are_named_when_both_ran_out(self):
         """A capped search whose final refit also stopped on its iteration cap
         needs both budgets raised, so the advice names both. Mutation check: on

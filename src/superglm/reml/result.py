@@ -101,6 +101,12 @@ class REMLResult:
     # (``converged`` is then False whatever ``termination_reason`` says), or
     # None.
     terminal_refit_termination: str | None = None
+    # Smoothing parameters at which the penalized maximum held rows on the
+    # boundary of the family's mean space (a binomial/log probability of 1),
+    # each restored to an interior start by the exact engine
+    # (``reml.direct``): the search was confined to the smoothing parameters
+    # that have an interior mode.
+    mean_space_restorations: int = 0
     # Fit-invariant Tweedie saturated-density state built by the optimizer.
     # Carried so the terminal REML evaluations in finalize re-enter the SAME
     # per-fit phi cache the search filled, instead of rebuilding a cold one and

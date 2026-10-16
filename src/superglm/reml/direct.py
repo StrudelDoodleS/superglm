@@ -1982,4 +1982,5 @@ def optimize_direct_reml(
         curvature_source="observed" if use_observed_geometry else "fisher",
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_scale_data,
+        mean_space_restorations=n_mean_space_restorations,
     )

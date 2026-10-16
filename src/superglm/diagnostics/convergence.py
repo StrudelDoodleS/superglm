@@ -82,6 +82,18 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             "constrained optimum: the inner quadratic program did not complete its KKT "
             f"certificate (termination_reason={refit_reason!r})"
         )
+    # The penalized maximum on the mean-space boundary at the published
+    # smoothing parameters, or at some the search tried: the model has no
+    # interior optimum there, which no iteration budget changes.
+    boundary = refit_reason == "mean_space_boundary" or bool(
+        getattr(reml_result, "mean_space_restorations", 0)
+    )
+    if refit_reason == "mean_space_boundary":
+        refit = (
+            "the final coefficient fit at the selected smoothing parameters holds fitted "
+            "means on the boundary of the family's mean space "
+            f"(termination_reason={refit_reason!r})"
+        )
     if reason in _REML_CONVERGED_REASONS:
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
@@ -106,7 +118,15 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             " Its last Newton step on the smoothing parameters improved nothing, and no "
             "iteration was left to restart the search with smaller steps."
         )
-    if reason == "max_reml_iter":
+    if boundary:
+        message += (
+            " The penalized maximum lies on the boundary of the family's mean space (a "
+            "fitted probability of 1 under the binomial log link) at some smoothing "
+            "parameters: the model has no interior optimum there, so more iterations will "
+            "not make it converge. A link whose means stay inside (0, 1), such as logit, "
+            "has one."
+        )
+    elif reason == "max_reml_iter":
         message += (
             " Refit with a larger max_reml_iter"
             + (" and a larger max_pirls_iter" if refit_reason == "max_iter" else "")
