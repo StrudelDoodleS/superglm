@@ -89,7 +89,7 @@ identical for any worker count.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -714,6 +714,56 @@ def _pair_table(ta: _Term, A: NDArray, tb: _Term, B: NDArray, X: NDArray) -> NDA
     return _rows_times(ta, A, _rows_times(tb, B, X.T).T)
 
 
+# Rows per range of the Gram's sweeps.  The ranges depend on the row count
+# alone, never on the worker count, so the summed tables are the same at
+# every worker count; a design of at most this many rows sweeps in one range,
+# exactly as a single pass.
+_SWEEP_ROWS = 1 << 17
+# A sweep splits only while its outputs are this small: each range then holds
+# and adds one copy of them, which a table of many cells (a tensor's
+# occupied cells against another's) would make cost more than the split buys.
+_SPLIT_MAX_ENTRIES = 1 << 14
+
+
+class _Sweeps:
+    """Row sweeps over fixed row ranges, each range into its own partial outputs.
+
+    ``add(cost, outputs, run)`` registers one sweep: ``run(lo, hi, parts)``
+    sweeps rows ``lo:hi`` into ``parts``, arrays shaped as ``outputs``.  A
+    design of one range sweeps straight into ``outputs``; otherwise every
+    range sweeps into its own zeroed partials, and :meth:`run` sums them into
+    ``outputs`` in range order once the pool has run them, largest estimated
+    cost (``cost`` per row) first.  A sweep whose outputs exceed
+    ``_SPLIT_MAX_ENTRIES`` runs whole.  Each partial has one owner, and
+    whether a sweep splits depends on the design alone, so the sums are
+    bitwise the same at every worker count.
+    """
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.ranges = [(lo, min(lo + _SWEEP_ROWS, n)) for lo in range(0, n, _SWEEP_ROWS)]
+        self.jobs: list[tuple[float, Callable[[], None]]] = []
+        self.reductions: list[tuple[list[NDArray], list[list[NDArray]]]] = []
+
+    def add(self, cost: float, outputs: list[NDArray], run: Callable) -> None:
+        if len(self.ranges) <= 1 or sum(out.size for out in outputs) > _SPLIT_MAX_ENTRIES:
+            self.jobs.append((cost * self.n, lambda: run(0, self.n, outputs)))
+            return
+        parts = [[np.zeros_like(out) for out in outputs] for _ in self.ranges]
+        for (lo, hi), part in zip(self.ranges, parts, strict=True):
+            self.jobs.append((cost * (hi - lo), lambda lo=lo, hi=hi, part=part: run(lo, hi, part)))
+        self.reductions.append((outputs, parts))
+
+    def run(self, job_bytes: int) -> None:
+        order = sorted(range(len(self.jobs)), key=lambda i: (-self.jobs[i][0], i))
+        _pool_run([self.jobs[i][1] for i in order], job_bytes)
+        for outputs, parts in self.reductions:
+            for k, out in enumerate(outputs):
+                out[...] = parts[0][k]
+                for part in parts[1:]:
+                    out += part[k]
+
+
 def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, sum_w: float):
     """``(mean_x, data_gram, rhs, mean_hi, mean_lo)`` of the centred system, from the tables.
 
@@ -732,11 +782,16 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
     Wz = np.ascontiguousarray(W * z_centered, dtype=np.float64)
     terms, codes, p = plan.terms, plan.codes, plan.p
     margins = [(np.zeros(term.raw.shape[0]), np.zeros(term.raw.shape[0])) for term in plan.terms]
-    jobs = [
-        (lambda t=t: _margins_sweep(codes[t], W, Wz, margins[t][0], margins[t][1]))
-        for t in range(len(terms))
-    ]
-    _pool_run(jobs, 16 * max(term.raw.shape[0] for term in terms))
+    sweeps = _Sweeps(plan.n)
+    for t in range(len(terms)):
+        sweeps.add(
+            2.0,
+            list(margins[t]),
+            lambda lo, hi, out, t=t: _margins_sweep(
+                codes[t][lo:hi], W[lo:hi], Wz[lo:hi], out[0], out[1]
+            ),
+        )
+    sweeps.run(16 * max(term.raw.shape[0] for term in terms))
     for term, (wm, _) in zip(terms, margins, strict=True):
         if term.identity and _dominated(wm):
             return None
@@ -758,6 +813,7 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
         np.ascontiguousarray(terms[y].raw if terms[y].raw_read else centred[y]).ravel()
         for _, y in plan.acc_pairs
     ]
+    dense_values = [np.asarray(values, dtype=np.float64) for (_, _, values) in plan.dense]
     dense_out = [
         [np.zeros(term.raw.shape[0] * width) for (_, width, _) in plan.dense] for term in terms
     ]
@@ -770,88 +826,125 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
     first = [np.zeros(width) for (_, width, _) in plan.dense]
     dense_rhs = [np.zeros(width) for (_, width, _) in plan.dense]
 
-    jobs = []
+    sweeps = _Sweeps(plan.n)
     for q, (a, b) in enumerate(plan.tab_pairs):
-        jobs.append(
-            lambda q=q, a=a, b=b: _hist_sweep(
-                codes[a], codes[b], W, terms[b].raw.shape[0], tab_out[q]
-            )
+        sweeps.add(
+            1.0,
+            [tab_out[q]],
+            lambda lo, hi, out, a=a, b=b: _hist_sweep(
+                codes[a][lo:hi], codes[b][lo:hi], W[lo:hi], terms[b].raw.shape[0], out[0]
+            ),
         )
     for q, (x, y) in enumerate(plan.acc_pairs):
-        jobs.append(
-            lambda q=q, x=x, y=y: _acc_sweep(
-                codes[x],
-                codes[y],
-                W,
+        sweeps.add(
+            1.0 + float(np.mean(terms[y].hi - terms[y].lo)),
+            [acc_out[q]],
+            lambda lo, hi, out, x=x, y=y, q=q: _acc_sweep(
+                codes[x][lo:hi],
+                codes[y][lo:hi],
+                W[lo:hi],
                 acc_read[q],
                 terms[y].lo,
                 terms[y].hi,
                 terms[y].raw.shape[1],
-                acc_out[q],
-            )
+                out[0],
+            ),
         )
     for t in range(len(terms)):
-        for g, (column, width, values) in enumerate(plan.dense):
-            jobs.append(
-                lambda t=t, g=g, column=column, width=width, values=values: _dense_term_sweep(
-                    codes[t],
-                    W,
-                    np.asarray(values, dtype=np.float64),
+        for g, (column, width, _) in enumerate(plan.dense):
+            sweeps.add(
+                1.0 + width,
+                [dense_out[t][g]],
+                lambda lo, hi, out, t=t, g=g, column=column, width=width: _dense_term_sweep(
+                    codes[t][lo:hi],
+                    W[lo:hi],
+                    dense_values[g][lo:hi],
                     anchor[column : column + width],
-                    dense_out[t][g],
-                )
+                    out[0],
+                ),
             )
     for (g, h), out in dd_out.items():
-        cg, wg, vg = plan.dense[g]
-        ch, wh, vh = plan.dense[h]
-        jobs.append(
-            lambda g=g, h=h, out=out, cg=cg, wg=wg, vg=vg, ch=ch, wh=wh, vh=vh: (
-                _dense_moments_sweep(
-                    W,
-                    Wz,
-                    np.asarray(vg, dtype=np.float64),
-                    anchor[cg : cg + wg],
-                    np.asarray(vh, dtype=np.float64),
-                    anchor[ch : ch + wh],
-                    out,
-                    first[g],
-                    dense_rhs[g],
-                    g == h,
-                )
-            )
+        cg, wg, _ = plan.dense[g]
+        ch, wh, _ = plan.dense[h]
+        # Only the diagonal pair accumulates ``first`` and ``rhs``, so only it owns them.
+        outputs = [out, first[g], dense_rhs[g]] if g == h else [out]
+        sweeps.add(
+            1.0 + wg * wh,
+            outputs,
+            lambda lo, hi, parts, g=g, h=h, cg=cg, wg=wg, ch=ch, wh=wh: _dense_moments_sweep(
+                W[lo:hi],
+                Wz[lo:hi],
+                dense_values[g][lo:hi],
+                anchor[cg : cg + wg],
+                dense_values[h][lo:hi],
+                anchor[ch : ch + wh],
+                parts[0],
+                parts[1] if g == h else np.zeros(wg),
+                parts[2] if g == h else np.zeros(wg),
+                g == h,
+            ),
         )
     largest = max([o.size for o in tab_out] + [o.size for o in acc_out] + [1])
-    _pool_run(jobs, 8 * largest)
+    sweeps.run(8 * largest)
 
+    # Every coefficient block is one product, written once to its own part of
+    # the Gram (and its transpose), so the products run on the pool too.
     gram = np.zeros((p, p), dtype=np.float64)
     rhs = np.zeros(p, dtype=np.float64)
-    for t, term in enumerate(terms):
-        wm, zm = margins[t]
+    blocks: list[tuple[float, Callable[[], None]]] = []
+
+    def own_block(t: int) -> None:
+        term, (wm, zm) = terms[t], margins[t]
         A, d = centred[t], shifts[t]
         own = _identity_gram(wm, d) if term.identity else (A * wm[:, None]).T @ A
         gram[np.ix_(term.columns, term.columns)] = own
         rhs[term.columns] = _left(term, A, d, zm[:, None])[:, 0]
-    for q, (a, b) in enumerate(plan.tab_pairs):
+
+    def pair_block(q: int, a: int, b: int) -> None:
         A, B = centred[a], centred[b]
         T = tab_out[q].reshape(A.shape[0], B.shape[0])
         block = _pair_block(terms[a], A, shifts[a], terms[b], B, shifts[b], T)
         gram[np.ix_(terms[a].columns, terms[b].columns)] = block
         gram[np.ix_(terms[b].columns, terms[a].columns)] = block.T
-    for q, (x, y) in enumerate(plan.acc_pairs):
+
+    def acc_block(q: int, x: int, y: int) -> None:
         # A raw window's centre enters through the row side's residual alone,
         # ``A_x' (m_x c_y') = e_x c_y'`` with ``e_x = A_x' W 1`` (module docstring).
         M = acc_out[q].reshape(terms[x].raw.shape[0], terms[y].raw.shape[1])
         block = _left(terms[x], centred[x], shifts[x], M)
         gram[np.ix_(terms[x].columns, terms[y].columns)] = block
         gram[np.ix_(terms[y].columns, terms[x].columns)] = block.T
+
+    def dense_block(t: int, g: int) -> None:
+        term = terms[t]
+        column, width, _ = plan.dense[g]
+        block = _left(
+            term, centred[t], shifts[t], dense_out[t][g].reshape(term.raw.shape[0], width)
+        )
+        cols = np.arange(column, column + width)
+        gram[np.ix_(term.columns, cols)] = block
+        gram[np.ix_(cols, term.columns)] = block.T
+
     for t, term in enumerate(terms):
-        for g, (column, width, _) in enumerate(plan.dense):
-            block = _left(
-                term, centred[t], shifts[t], dense_out[t][g].reshape(term.raw.shape[0], width)
+        rows, width = term.raw.shape
+        blocks.append((float(rows * width * width), lambda t=t: own_block(t)))
+    for q, (a, b) in enumerate(plan.tab_pairs):
+        (ma, pa), (mb, pb) = terms[a].raw.shape, terms[b].raw.shape
+        blocks.append(
+            (
+                float(ma * mb * min(pa, pb) + pa * pb * max(ma, mb)),
+                lambda q=q, a=a, b=b: pair_block(q, a, b),
             )
-            cols = np.arange(column, column + width)
-            gram[np.ix_(term.columns, cols)] = block
-            gram[np.ix_(cols, term.columns)] = block.T
+        )
+    for q, (x, y) in enumerate(plan.acc_pairs):
+        (mx, px), py = terms[x].raw.shape, terms[y].raw.shape[1]
+        blocks.append((float(mx * px * py), lambda q=q, x=x, y=y: acc_block(q, x, y)))
+    for t, term in enumerate(terms):
+        for g, (_, width, _) in enumerate(plan.dense):
+            rows, pt = term.raw.shape
+            blocks.append((float(rows * pt * width), lambda t=t, g=g: dense_block(t, g)))
+    blocks.sort(key=lambda entry: -entry[0])
+    _pool_run([job for _, job in blocks], 8 * max(term.raw.size for term in terms))
     first_all = np.zeros(p, dtype=np.float64)
     for (g, h), out in dd_out.items():
         cg, wg, _ = plan.dense[g]
