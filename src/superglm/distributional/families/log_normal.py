@@ -13,8 +13,10 @@ from numpy.typing import NDArray
 
 from superglm.distributional.families._base import (
     array_digest,
+    contract_second_direction,
     immutable,
     readonly,
+    second_direction_arrays,
     typed_plan,
     validated_float_response,
 )
@@ -53,6 +55,7 @@ from superglm.distributional.kernels.log_normal import (
     mean_expected_information,
     mean_of_location,
     mean_rows,
+    predictor_fourth_derivatives,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -419,6 +422,44 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         return directional(
             response, eta, eta_direction, bound.multiplier, scale_floor=self.scale_floor
         )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = _validated_response(y)
+        first_link = LogLink if self.parametrisation == "mean" else IdentityLink
+        link_tuple = tuple(links)
+        if (
+            len(link_tuple) != 2
+            or type(link_tuple[0]) is not first_link
+            or type(link_tuple[1]) is not LowerBoundedLogLink
+            or link_tuple[1].floor != self.scale_floor
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "log-normal endpoint curvature derivatives require the built-in links"
+            )
+        bound = self._plan(plan, len(response))
+        single = np.ndim(direction_a) == 2
+        predictors, first, second = second_direction_arrays(
+            response, eta, direction_a, direction_b, 2
+        )
+        fourth = predictor_fourth_derivatives(
+            response,
+            predictors,
+            bound.multiplier,
+            parametrisation=self.parametrisation,
+            scale_floor=self.scale_floor,
+        )
+        result = contract_second_direction(fourth, first, second)
+        return readonly(result[0] if single else result)
 
     def _location_coordinates(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
         if self.parametrisation == "mean":

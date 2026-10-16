@@ -432,6 +432,51 @@ def mean_curvature_directional(
     return readonly(result)
 
 
+def predictor_fourth_derivatives(
+    response: NDArray,
+    eta: NDArray,
+    multiplier: NDArray,
+    *,
+    parametrisation: Parametrisation,
+    scale_floor: float,
+) -> NDArray[np.float64]:
+    """Packed predictor fourth derivatives ``(aaaa, ..., bbbb)`` of the log-normal row.
+
+    The location form is the Gaussian's at ``log y`` with replication mass;
+    the mean form, ``mu = a - sigma^2/2``, is generated
+    (``log_normal_mean_predictor_fourth``) in the residual
+    ``r = log y - mu``, ``u = kappa/sigma`` and ``c = floor/sigma``.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import (
+        log_normal_mean_predictor_fourth,
+    )
+    from superglm.distributional.kernels.gaussian import gaussian_predictor_fourth_derivatives
+
+    y = _positive_vector(response, name="response")
+    mass = _positive_vector(multiplier, name="multiplier")
+    _aligned(y, mass)
+    predictors = np.asarray(eta, dtype=_FLOAT)
+    if predictors.shape != (len(y), 2) or not np.all(np.isfinite(predictors)):
+        raise LogNormalDomainError("log-normal predictor state must be a finite n-by-2 array")
+    if parametrisation == "location":
+        return gaussian_predictor_fourth_derivatives(
+            np.log(y), predictors, mass, "frequency", scale_floor=scale_floor
+        )
+    floor = float(scale_floor)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        kappa = np.exp(predictors[:, 1])
+        sigma = floor + kappa
+        residual = np.log(y) - (predictors[:, 0] - 0.5 * sigma * sigma)
+        fourth = stack_columns(
+            log_normal_mean_predictor_fourth(residual, mass, sigma, kappa / sigma, floor / sigma),
+            len(y),
+        )
+    if not np.all(np.isfinite(fourth)):
+        raise LogNormalDomainError("log-normal fourth derivatives are not representable")
+    return fourth
+
+
 def mean_expected_information(
     mean: NDArray, sigma: NDArray, multiplier: NDArray
 ) -> NDArray[np.float64]:
@@ -503,4 +548,5 @@ __all__ = [
     "mean_expected_information",
     "mean_of_location",
     "mean_rows",
+    "predictor_fourth_derivatives",
 ]
