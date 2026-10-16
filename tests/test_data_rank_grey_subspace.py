@@ -138,11 +138,11 @@ PENALIZED_NULLS = ("sparse_tensor_cells", "thin_level_curve")
 def test_default_decides_the_data_rank_without_a_row_factor(kind, row_factor_passes):
     """No TSQR of every row by default, and today's decision; the base branch ran one per fit."""
     model = _fit(kind, full_factor=False)
+    assert row_factor_passes == []
     data = model.result.rank_info.data
     # Precondition: the Gram cannot certify itself here.
     assert data.grey_subspace is not None and data.grey_subspace["certified"] == 1.0
     assert 0 < data.grey_subspace["k"] < model._dm.p
-    assert row_factor_passes == []
     assert model._reml_profile["data_rank_route"] == "grey_subspace"
     reference = _fit(kind, full_factor=True).result.rank_info.data
     _assert_same_decisions(data, reference)
