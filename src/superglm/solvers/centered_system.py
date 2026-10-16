@@ -725,12 +725,13 @@ def grouped_structural_nulls(
             mass = np.bincount(second, weights=weights, minlength=support.shape[0])
             outside = 0.0
         elif kind == "rows" and _is_plain_level(group, level_type):
-            support = np.asarray(group.B_unique, dtype=np.float64) @ np.asarray(
-                group.R_inv, dtype=np.float64
+            level = cast(DiscretizedSplineCategoricalGroupMatrix, group)
+            support = np.asarray(level.B_unique, dtype=np.float64) @ np.asarray(
+                level.R_inv, dtype=np.float64
             )
-            rows = np.asarray(group.row_idx)
+            rows = np.asarray(level.row_idx)
             mass = np.bincount(
-                np.asarray(group.bin_idx_level), weights=weights[rows], minlength=support.shape[0]
+                np.asarray(level.bin_idx_level), weights=weights[rows], minlength=support.shape[0]
             )
             outside = max(total - float(np.sum(mass)), 0.0)
         else:
@@ -840,13 +841,14 @@ def grouped_projected_factor(
     groups = dm.group_matrices if len(parts) == len(dm.group_matrices) else [None] * len(parts)
     for (column, kind, first, second), group in zip(parts, groups, strict=True):
         if kind == "rows" and _is_plain_level(group, level_type):
-            columns = slice(column, column + int(group.shape[1]))
-            raw = np.asarray(group.B_unique, dtype=np.float64) @ np.asarray(
-                group.R_inv, dtype=np.float64
+            level = cast(DiscretizedSplineCategoricalGroupMatrix, group)
+            columns = slice(column, column + int(level.shape[1]))
+            raw = np.asarray(level.B_unique, dtype=np.float64) @ np.asarray(
+                level.R_inv, dtype=np.float64
             )
-            order = np.argsort(group.row_idx, kind="stable")
-            rows = np.ascontiguousarray(np.asarray(group.row_idx)[order], dtype=np.intp)
-            codes = np.ascontiguousarray(np.asarray(group.bin_idx_level)[order], dtype=np.intp)
+            order = np.argsort(level.row_idx, kind="stable")
+            rows = np.ascontiguousarray(np.asarray(level.row_idx)[order], dtype=np.intp)
+            codes = np.ascontiguousarray(np.asarray(level.bin_idx_level)[order], dtype=np.intp)
             centre = _centred_support(np.zeros((1, raw.shape[1])), center, center_lo, columns)
             base += (centre @ basis[columns])[0]
             level_weight = np.bincount(
