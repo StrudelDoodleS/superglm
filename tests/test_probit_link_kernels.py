@@ -50,16 +50,19 @@ def test_the_density_is_the_in_repo_expression_bit_for_bit():
 
 
 def test_the_density_is_within_its_rounding_bound_of_the_exact_value():
-    """``|phi^ - phi| <= ((x**2 / 2) + 4.5) u |phi|`` against a 60-digit oracle, while phi is normal.
+    """``|phi^ - phi| <= ((x**2 / 2) + 5.5) u |phi|`` against a 60-digit oracle, while phi is normal.
 
     ``fl(x*x)`` carries ``|d1| <= u`` and halving is exact, so the exponent
     is ``-(x**2 / 2)(1 + d1)`` and ``exp`` turns ``d1`` into a relative
-    factor ``exp(x**2 d1 / 2)``, at most ``(x**2 / 2) u``. NumPy's own
-    accuracy validation set holds float64 ``exp`` to 1 ulp (``2u``
-    relative); ``sqrt(fl(2 pi))`` carries ``u/2`` from pi and ``u`` from the
-    correctly rounded sqrt; the division ``u``. First order: ``(x**2/2 + 4.5) u``;
-    the second-order terms are below ``1e-10`` of it on this grid. Outside
-    ``|x| <= 37`` the density is subnormal and the bound is absolute instead.
+    factor ``exp(x**2 d1 / 2)``, at most ``(x**2 / 2) u``. NumPy's accuracy
+    validation set holds float64 ``exp`` within 1 ulp of the stored,
+    correctly rounded value, so up to 1.5 ulp (``3u`` relative) of the exact
+    one, on its sampled inputs. ``sqrt(fl(2 pi))`` carries ``u/2`` from pi
+    and ``u`` from the correctly rounded sqrt, and the division ``u``. First
+    order: ``(x**2/2 + 5.5) u``; the second-order terms are below ``1e-10``
+    of it on this grid. phi is normal while ``x**2 <= 2 (1022 ln 2 - ln
+    sqrt(2 pi))``, ``|x| <= 37.6``; past that it is subnormal and the bound
+    is absolute instead, so the grid stays within ``|x| <= 37``.
     """
     rng = np.random.default_rng(37)
     x = np.concatenate([np.linspace(-37.0, 37.0, 1_001), rng.uniform(-37.0, 37.0, 500), [0.0]])
@@ -69,7 +72,7 @@ def test_the_density_is_within_its_rounding_bound_of_the_exact_value():
         root = (2 * _PI_60).sqrt()
         for value, observed in zip(x.tolist(), computed.tolist(), strict=True):
             exact = (-(Decimal(value) * Decimal(value)) / 2).exp() / root
-            bound = (value * value / 2.0 + 4.5) * U * (1.0 + 1e-9)
+            bound = (value * value / 2.0 + 5.5) * U * (1.0 + 1e-9)
             assert abs(Decimal(observed) - exact) <= Decimal(bound) * exact, value
 
 

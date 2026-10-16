@@ -86,9 +86,26 @@ def test_discrete_bins_match_the_reference_bit_for_bit(seed, with_rhs):
 
 
 @pytest.mark.parametrize("with_rhs", [False, True])
-def test_sparse_rows_with_duplicate_columns_match_the_reference(with_rhs):
+@pytest.mark.parametrize(("width", "route_width"), [(7, 7), (1, 1)], ids=["raw", "projected"])
+def test_sparse_rows_with_duplicate_columns_match_the_reference(
+    with_rhs, width, route_width, monkeypatch
+):
+    """Repeated stored columns sum exactly on both routes.
+
+    ``R`` of width 7 keeps the raw Gram (``k x k``); width 1 projects each
+    row first (``_exact_projected_rows``), which must add the repeated
+    column's entries rather than keep one. The recorder pins the route.
+    """
     rng = np.random.default_rng(11)
-    n, k, width = 3000, 7, 7
+    n, k = 3000, 7
+    widths = []
+    accumulate = kernels._exact_gram_moments
+
+    def recorded(*args):
+        widths.append(args[-1])
+        return accumulate(*args)
+
+    monkeypatch.setattr(kernels, "_exact_gram_moments", recorded)
     canonical = sp.csr_matrix(_banded_support(rng, n, k, 3))
     # Two duplicates of row 0's first stored column: their exact sum enters,
     # not a canonicalized, rounded one.
@@ -100,11 +117,19 @@ def test_sparse_rows_with_duplicate_columns_match_the_reference(with_rhs):
     assert not basis.has_canonical_format
     weights = _stress_vector(rng, n, signed=False)
     rhs = _stress_vector(rng, n, signed=True) if with_rhs else None
-    transform = _transform(rng, k, width)
+    # The duplicated row carries the largest weight, so its sum is visible
+    # beside the 1e200 rows that otherwise set every moment's magnitude.
+    weights[0] = 1e200
+    if rhs is not None:
+        rhs[0] = 1e200
+    # A width-1 R with no zero and no 2**60 entry, so row 0's repeated
+    # column enters its projected value visibly.
+    transform = _transform(rng, k, width) if width > 1 else rng.uniform(0.5, 1.5, (k, 1))
     _assert_bitwise(
         kernels._exact_ssp_moments(basis, transform, weights, rhs),
         reference_exact_ssp_moments(basis, transform, weights, rhs),
     )
+    assert widths == [route_width]
 
 
 def test_dense_rows_and_many_bins_match_the_reference():

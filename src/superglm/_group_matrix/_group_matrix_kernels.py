@@ -143,8 +143,9 @@ def _exact_bin_sums(values: np.ndarray, bins: np.ndarray, n_bins: int, scale: in
     fixed-width integers, so no row enters Python arithmetic. Each significand
     ``m = h 2**26 + l`` splits into ``|h| <= 2**27`` (``h = -2**27`` at
     ``m = -(2**53 - 1)``) and ``0 <= l < 2**26``; fewer than ``2**36`` of
-    either sum within ``2**63 - 2**27`` in int64, whatever the order. Only the per-group totals become Python integers, shifted to the
-    common scale and added per bin. Every operation is exact.
+    either sum within ``2**63 - 2**27`` in int64, whatever the order. Only
+    the per-group totals become Python integers, shifted to the common scale
+    and added per bin. Every operation is exact.
     """
     if values.size >= _EXACT_MAX_TERMS:  # pragma: no cover - beyond addressable memory
         raise ValueError("exact SSP bin sums take fewer than 2**36 rows")

@@ -9,6 +9,7 @@ force the factor route and count the data-rank factorisations; master paid
 one per candidate and per mean fit, and fails both counts.
 """
 
+import dataclasses
 import pickle
 
 import numpy as np
@@ -20,6 +21,17 @@ import superglm.solvers.irls_direct as irls_direct
 from superglm import NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
+
+
+def _without_condition_estimate(rank_info):
+    """``rank_info`` with each decomposition's dpocon condition estimate zeroed."""
+    return dataclasses.replace(
+        rank_info,
+        **{
+            name: dataclasses.replace(getattr(rank_info, name), pre_truncation_condition=0.0)
+            for name in ("data", "augmented", "coefficient")
+        },
+    )
 
 
 def _force_factor_route(patch):
@@ -137,7 +149,15 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
     deferred, inline = fit(inline=False), fit(inline=True)
     np.testing.assert_array_equal(deferred.result.beta, inline.result.beta)
     assert deferred.result.rank_info is not None
-    assert pickle.dumps(deferred.result.rank_info) == pickle.dumps(inline.result.rank_info)
+    # pre_truncation_condition is dpocon's condition estimate, which can
+    # differ in its last bit between runs (alignment-dependent BLAS); it is
+    # compared as finite only, and every other field byte for byte.
+    for result in (deferred.result, inline.result):
+        for name in ("data", "augmented", "coefficient"):
+            assert np.isfinite(getattr(result.rank_info, name).pre_truncation_condition)
+    assert pickle.dumps(_without_condition_estimate(deferred.result.rank_info)) == pickle.dumps(
+        _without_condition_estimate(inline.result.rank_info)
+    )
     assert deferred._solver_result.rank_info is deferred.result.rank_info
     assert deferred._reml_result.pirls_result.rank_info is deferred.result.rank_info
 
