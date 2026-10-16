@@ -686,8 +686,13 @@ def _identity_gram(wm: NDArray, d: NDArray) -> NDArray:
 
     ``diag(w) - d w' - w d' + (1' wm) d d'`` with ``w`` the levels' weights:
     ``O(K^2)`` where the centred table's GEMM is ``O(K^3)``, and exactly
-    symmetric.  The chunked route's categorical Gram is the same diagonal
-    plus rank-one centring.
+    symmetric.  This is a raw-moment subtraction: level ``k`` with weight
+    share ``d_k`` loses about ``u * S / R_k`` of its curvature to
+    cancellation (``R_k`` the rest of the weight), where the chunked route
+    centres each row before multiplying.  ``_dominated`` keeps that factor
+    below ``2**26`` (about ``1e-8`` of the column's curvature), within
+    float64 accuracy for every fitted value and standard error; a more
+    dominant level sends the call to the chunked route.
     """
     w = wm[: d.shape[0]]
     cross = np.outer(d, w)
