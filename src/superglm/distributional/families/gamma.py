@@ -13,8 +13,10 @@ from scipy import special
 
 from superglm.distributional.families._base import (
     array_digest,
+    contract_second_direction,
     immutable,
     readonly,
+    second_direction_arrays,
     typed_plan,
     validated_float_response,
 )
@@ -44,6 +46,7 @@ from superglm.distributional.kernels.gamma import (
     gamma_expected_information,
     gamma_expected_shortfall,
     gamma_predictor_curvature_directional,
+    gamma_predictor_fourth_derivatives,
     initialize_gamma,
 )
 from superglm.distributional.weights import (
@@ -382,6 +385,37 @@ class GammaLS(MeanPredictor, ScalePredictor):
             gamma_plan.weights.values,
             gamma_plan.weights.provenance.contract.semantics,
         )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = _validated_response(y)
+        link_tuple = tuple(links)
+        if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
+            raise UnsupportedLikelihoodContractError(
+                "Gamma endpoint curvature derivatives require the built-in log links"
+            )
+        gamma_plan = _validated_plan(plan, n_observations=len(response))
+        single = np.ndim(direction_a) == 2
+        predictors, first, second = second_direction_arrays(
+            response, eta, direction_a, direction_b, 2
+        )
+        fourth = gamma_predictor_fourth_derivatives(
+            gamma_plan.exact_response,
+            predictors,
+            gamma_plan.weights.values,
+            gamma_plan.weights.provenance.contract.semantics,
+        )
+        result = contract_second_direction(fourth, first, second)
+        return readonly(result[0] if single else result)
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
         parameters = _validated_parameter_matrix(
