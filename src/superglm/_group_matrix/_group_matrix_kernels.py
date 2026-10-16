@@ -647,6 +647,66 @@ def _csr_weighted_bincount_channels(
 
 
 @njit(cache=True, nogil=True)
+def _sorted_intersection(a, b):  # pragma: no cover - compiled
+    """``np.intersect1d(a, b, assume_unique=True, return_indices=True)`` by one merge.
+
+    For strictly increasing ``a`` and ``b`` (a level's rows): the common
+    entries in increasing order and their positions in each, the integers
+    ``intersect1d`` returns, in ``O(len(a) + len(b))`` without its sort.
+    ``ok`` is False, and nothing else is meaningful, when either input is not
+    strictly increasing; the caller then takes ``intersect1d``.
+    """
+    n = min(a.shape[0], b.shape[0])
+    common = np.empty(n, dtype=a.dtype)
+    pos_a = np.empty(n, dtype=np.intp)
+    pos_b = np.empty(n, dtype=np.intp)
+    for t in range(1, a.shape[0]):
+        if a[t] <= a[t - 1]:
+            return common[:0], pos_a[:0], pos_b[:0], False
+    for t in range(1, b.shape[0]):
+        if b[t] <= b[t - 1]:
+            return common[:0], pos_a[:0], pos_b[:0], False
+    i = 0
+    j = 0
+    k = 0
+    while i < a.shape[0] and j < b.shape[0]:
+        if a[i] < b[j]:
+            i += 1
+        elif a[i] > b[j]:
+            j += 1
+        else:
+            common[k] = a[i]
+            pos_a[k] = i
+            pos_b[k] = j
+            k += 1
+            i += 1
+            j += 1
+    return common[:k], pos_a[:k], pos_b[:k], True
+
+
+@njit(cache=True, nogil=True)
+def _level_tensor_channels(rows, idx1, idx2, bin_cat, W, B2, n_bins1, n_cat):  # pragma: no cover
+    """``H[c][idx1_r, bin_k] += W_r B2[idx2_r, c]`` over one level's rows ``r = rows[k]``.
+
+    Every channel ``c`` of the tensor's second margin in one pass, in row
+    order: each entry is the sum ``_disc_disc_2d_hist`` forms from the
+    channel's weights ``W_r B2[idx2_r, c]`` (one rounding each), added in the
+    same order, so it is that histogram bit for bit.
+    """
+    width = B2.shape[1]
+    result = np.zeros((width, n_bins1, n_cat))
+    for k in range(rows.shape[0]):
+        r = rows[k]
+        w = W[r]
+        a = idx1[r]
+        b = bin_cat[k]
+        s = idx2[r]
+        for c in range(width):
+            result[c, a, b] += w * B2[s, c]
+    return result
+
+
+@njit(cache=True, nogil=True)
 def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
     """Fused 2D histogram for disc-disc cross-gram."""
     n = len(W)
@@ -1159,6 +1219,8 @@ _POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
 """The kernels a TSQR leaf (``rank._tsqr_leaf``) runs on its pool worker: ``nogil`` too."""
 
 _POOLED_BLOCK_KERNELS = (
+    _sorted_intersection,
+    _level_tensor_channels,
     _tensor_operand_in_reassociation_range,
     _float64_operand_exponent_bounds,
     _operand_exponent_bounds,
@@ -1240,6 +1302,9 @@ def _warmup_group_matrix_kernels() -> None:
     ):
         array.setflags(write=False)
 
+    # Two spline-by-category levels' rows, and a level's rows into a tensor's channels.
+    _sorted_intersection(codes, codes)
+    _level_tensor_channels(codes, codes, codes, codes, values, matrix, 2, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, absolute_weights=True)
     _csr_weighted_cross(

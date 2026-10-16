@@ -26,7 +26,9 @@ from ._group_matrix_kernels import (
     _disc_disc_2d_hist_channels,
     _fused_2d_bincount_2,
     _gather_cell_order,
+    _level_tensor_channels,
     _operand_exponent_bounds,
+    _sorted_intersection,
     _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
@@ -63,6 +65,10 @@ _MAX_CROSS_EXPANSION_BYTES = 64 << 20
 # them bounds a row count from one block against a width from the other.  That
 # product is what the aggregate allocates, so it needs its own ceiling.
 _MAX_AGGREGATE_CELLS = _MAX_CROSS_EXPANSION_BYTES // 8
+# A tensor-by-level block forms its channels' histograms in one pass
+# (``_level_tensor_channels``); False keeps one histogram per channel, the
+# route the tests compare it with bit for bit.
+_FUSED_LEVEL_CHANNELS = True
 
 # Ceiling on one multi-channel row-pass result: cells times channels. Wider
 # results take the channels in groups, a group of one being the single-weight
@@ -1495,16 +1501,30 @@ def _cross_gram_tensor_spline_categorical(
         # A lossless spline_cat support is bounded by its row count, not by a
         # bin count, so the joint histogram is not automatically small; expand
         # the level's rows once and aggregate on them when it is not.
-        if gm_tensor.n_bins1 * gm_spline_cat.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
-            for j2 in range(K2):
-                w_col = W_rows * B2[idx2, j2]
-                H = _disc_disc_2d_hist(
-                    idx1,
+        n_cat = gm_spline_cat.n_bins
+        if gm_tensor.n_bins1 * n_cat <= _MAX_DISC_DISC_HIST_CELLS:
+            if _FUSED_LEVEL_CHANNELS and K2 * gm_tensor.n_bins1 * n_cat <= _MAX_AGGREGATE_CELLS:
+                # Every channel's histogram in one compiled pass over the
+                # level's rows, without the GIL: each is the per-channel
+                # histogram below, bit for bit (``_level_tensor_channels``).
+                channels = _level_tensor_channels(
+                    np.asarray(rows, dtype=np.intp),
+                    gm_tensor.idx1,
+                    gm_tensor.idx2,
                     bin_cat,
-                    w_col,
+                    W,
+                    np.ascontiguousarray(B2, dtype=np.float64),
                     gm_tensor.n_bins1,
-                    gm_spline_cat.n_bins,
+                    n_cat,
                 )
+            else:
+                channels = None
+            for j2 in range(K2):
+                if channels is None:
+                    w_col = W_rows * B2[idx2, j2]
+                    H = _disc_disc_2d_hist(idx1, bin_cat, w_col, gm_tensor.n_bins1, n_cat)
+                else:
+                    H = channels[j2]
                 result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
             return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
@@ -1903,6 +1923,18 @@ def _cross_gram_categorical_spline_categorical(
     return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
 
 
+def _level_intersection(rows_i: NDArray, rows_j: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """Two levels' common rows and their positions in each, as ``np.intersect1d`` gives them.
+
+    A level's rows are increasing, so one compiled merge finds them without
+    the sort (``_sorted_intersection``); rows that are not take ``intersect1d``.
+    """
+    common, pos_i, pos_j, ok = _sorted_intersection(rows_i, rows_j)
+    if ok:
+        return common, pos_i, pos_j
+    return np.intersect1d(rows_i, rows_j, assume_unique=True, return_indices=True)
+
+
 def _cross_gram_spline_categorical_spline_categorical(
     gm_i: SplineCategoricalGroupMatrix | DiscretizedSplineCategoricalGroupMatrix,
     gm_j: SplineCategoricalGroupMatrix | DiscretizedSplineCategoricalGroupMatrix,
@@ -1947,12 +1979,7 @@ def _cross_gram_spline_categorical_spline_categorical(
             raw = raw.toarray()
         return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
 
-    common_rows, pos_i, pos_j = np.intersect1d(
-        gm_i.row_idx,
-        gm_j.row_idx,
-        assume_unique=True,
-        return_indices=True,
-    )
+    common_rows, pos_i, pos_j = _level_intersection(gm_i.row_idx, gm_j.row_idx)
     if common_rows.size == 0:
         return np.zeros((gm_i.shape[1], gm_j.shape[1]))
 
