@@ -39,6 +39,7 @@ from superglm.solvers.mode_score import (
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _GREY_LEAF_ROWS = 2048
+_UNIT = float(np.finfo(np.float64).eps) / 2.0
 _GREY_SPAN_ROWS = 65536
 _FACTOR_CHUNK_ROWS = 8192
 
@@ -684,6 +685,80 @@ def _centred_support(values: NDArray, center, center_lo, columns: slice) -> NDAr
     if center_lo is not None:
         centred = centred - center_lo[columns]
     return centred
+
+
+def grouped_structural_nulls(
+    dm: DesignMatrix,
+    W: NDArray,
+    *,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> list[tuple[slice, NDArray, float]]:
+    """Exact nulls of the weighted, centred design read off each group's occupied support rows.
+
+    A group whose rows are rows of a small support table ``S`` (an indexed
+    support, or a spline-by-level block, zero off its level) has ``X_g v = 0``
+    on every row for each ``v`` with ``S_occ v = 0``, ``S_occ`` the support
+    rows that carry weight; then ``c_g' v``, a weighted mean of those rows
+    times ``v``, is zero too, so ``A v = 0`` with no pass over the rows.  The
+    candidates are the right singular vectors of ``S_occ`` below ``n_s eps``
+    of its largest singular value; each group returns ``(columns, N_g,
+    bound)`` with ``bound >= ||A N_g||_F``, formed from the support rows'
+    weight sums: the residual of every occupied row and of the rows off a
+    level, plus the rounding of forming them (``gamma_(w + 2)`` of
+    ``(|S| + |c|) |N_g|``, Higham 2002, sec. 3.5).
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+
+    weights = np.asarray(W, dtype=np.float64)
+    total = float(np.sum(weights))
+    parts = _design_leaf_parts(dm).parts
+    if len(parts) != len(dm.group_matrices):
+        return []
+    found: list[tuple[slice, NDArray, float]] = []
+    level_type = DiscretizedSplineCategoricalGroupMatrix
+    for (column, kind, first, second), group in zip(parts, dm.group_matrices, strict=True):
+        if kind == "gather":
+            support = np.asarray(first, dtype=np.float64)
+            mass = np.bincount(second, weights=weights, minlength=support.shape[0])
+            outside = 0.0
+        elif kind == "rows" and _is_plain_level(group, level_type):
+            support = np.asarray(group.B_unique, dtype=np.float64) @ np.asarray(
+                group.R_inv, dtype=np.float64
+            )
+            rows = np.asarray(group.row_idx)
+            mass = np.bincount(
+                np.asarray(group.bin_idx_level), weights=weights[rows], minlength=support.shape[0]
+            )
+            outside = max(total - float(np.sum(mass)), 0.0)
+        else:
+            continue
+        width = support.shape[1]
+        occupied = support[mass > 0.0]
+        if occupied.shape[0] == 0:
+            continue
+        if occupied.shape[0] > width:
+            # The same right singular vectors from the w x w triangle.
+            occupied = np.linalg.qr(occupied, mode="r")
+        _, singular, right = np.linalg.svd(occupied, full_matrices=True)
+        cut = max(support.shape) * _UNIT * 2.0 * (float(singular[0]) if singular.size else 0.0)
+        rank = int(np.count_nonzero(singular > cut))
+        null = right[rank:].T
+        if null.shape[1] == 0:
+            continue
+        columns = slice(column, column + width)
+        # ``(0 - c) - c_lo``: the centred value of a row off the support
+        shift = _centred_support(np.zeros((1, width)), center, center_lo, columns)[0]
+        residual = np.abs((support + shift[None, :]) @ null)
+        scale = (np.abs(support) + np.abs(shift)[None, :]) @ np.abs(null)
+        gamma = (width + 3) * _UNIT / (1.0 - (width + 3) * _UNIT)
+        row_bound = residual + gamma * scale
+        off = np.abs(shift @ null) + gamma * (np.abs(shift) @ np.abs(null))
+        squared = float(mass @ np.sum(row_bound**2, axis=1)) + outside * float(np.sum(off**2))
+        found.append((columns, null, float(np.nextafter(math.sqrt(squared), np.inf))))
+    return found
 
 
 def _is_plain_level(group, level_type) -> bool:
