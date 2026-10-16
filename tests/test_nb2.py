@@ -102,6 +102,64 @@ class TestNB2DevianceUnit:
         d = nb.deviance_unit(y, mu)
         assert np.sum(d) > 0
 
+    def test_trial_step_with_a_large_mean_leaks_no_runtime_warning(self):
+        """A trial state at mu = e**60 reaches y = 0 rows; np.where's other branch must not warn.
+
+        At such a mu, 1e-300 / mu underflows, so the unselected y > 0 branch
+        takes log(0) and 0 * -inf. Mutation check: without the errstate
+        master raises "divide by zero encountered in log" here (NB2 auto-theta
+        mean fits on freMTPL2 hit it).
+        """
+        from superglm.group_matrix import DesignMatrix
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        n = 200
+        y = np.random.default_rng(0).poisson(0.3, n).astype(np.float64)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result, _ = fit_irls_direct(
+                X=DesignMatrix([], n=n, p=0),
+                y=y,
+                weights=np.ones(n),
+                family=NegativeBinomial(theta=1.0),
+                link=LogLink(),
+                groups=[],
+                lambda2=0.0,
+                intercept_init=60.0,
+                max_iter=50,
+                tol=1e-10,
+                direct_solve="gram",
+                compute_rank_info=False,
+                _return_working_system=True,
+                _compute_fit_statistics=False,
+                _compute_reml_geometry=False,
+                _compute_scop_postfit_inference=False,
+                weight_semantics="prior",
+            )
+        # The solver walks down from the overshoot on finite deviances.
+        assert np.isfinite(result.deviance)
+        assert result.intercept < 60.0
+
+    def test_values_are_the_both_branch_formula_bit_for_bit(self):
+        theta = 1.7
+        y = np.array([0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 1.0, 2.0, 0.0, 5.0])
+        mu = np.array([1e30, np.inf, 0.0, 0.4, 1e30, np.inf, 0.0, 2.5, 5e-324, 1e-300])
+        with np.errstate(all="ignore"):
+            expected = np.where(
+                y > 0,
+                2
+                * (
+                    y * np.log(np.maximum(y, 1e-300) / mu)
+                    - (y + theta) * np.log((y + theta) / (mu + theta))
+                ),
+                2 * theta * np.log((mu + theta) / theta),
+            )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            actual = NegativeBinomial(theta=theta).deviance_unit(y, mu)
+        np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
 
 class TestNB2LogLikelihood:
     def test_matches_scipy(self):

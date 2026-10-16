@@ -219,6 +219,9 @@ class _PowerProfile:
         # and share one design build across candidates
         # (fit_ops._fetch_or_build_design) since the design does not depend on p.
         clone._suppress_reporting_support = True
+        # Nor their rank metadata, a data-subspace TSQR read only by
+        # retained-fit inference (``reml_finalize``).
+        clone._discard_rank_info = True
         clone._profile_design_cache = {}
         # estimate_p checked the rows' random-effect nesting once at its entry
         clone._random_effect_nesting_checked = True

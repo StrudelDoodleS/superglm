@@ -613,6 +613,19 @@ def finalize_reml_fit(
         certified_terminal = observed_terminal or (not qp_passthrough and not shaped)
         final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
         terminal_bar = mode_certification_bar(profile.get("reml_tol_resolved"))
+        # Rank metadata (a data-subspace TSQR on a large book) is read only
+        # by retained-fit inference.  A power-search candidate is discarded
+        # (``_discard_rank_info``), so it skips it; an NB2 auto-theta refit
+        # may be replaced by the next, so it defers it (``_defer_rank_info``,
+        # computed by ``fit_ops`` for the refit that is published).  Shaped
+        # fits keep it: their SCOP and QP routes rewrite it after this refit.
+        discard_rank_info = not shaped and bool(getattr(model, "_discard_rank_info", False))
+        deferred_rank_info: list | None = (
+            []
+            if not (shaped or qp_passthrough or discard_rank_info)
+            and bool(getattr(model, "_defer_rank_info", False))
+            else None
+        )
         final_output = fit_irls_direct(
             X=model._dm,
             y=y,
@@ -645,10 +658,14 @@ def finalize_reml_fit(
             weight_semantics=model_weight_semantics(model),
             _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=terminal_bar,
+            compute_rank_info=not discard_rank_info and deferred_rank_info is None,
+            _defer_rank_info=deferred_rank_info,
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
             raise RuntimeError("terminal direct REML refit omitted its working Gram")
         solver_result, final_factor, final_xtwx = final_output
+        if deferred_rank_info:
+            model._deferred_rank_info = deferred_rank_info[0]
         if certified_terminal:
             terminal_certified = bool(solver_result.converged)
 

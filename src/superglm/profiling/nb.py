@@ -353,6 +353,8 @@ class _MeanFit:
             beta_init=self.warm_beta,
             intercept_init=self.warm_intercept,
             reml_penalties=self.reml_penalties,
+            # Only the mean is read; the published fit computes its own.
+            compute_rank_info=False,
         )
         self.warm_beta, self.warm_intercept = result.beta, result.intercept
         eta = stabilize_eta(linear_predictor(model._dm, result, self.offset), model._link)
