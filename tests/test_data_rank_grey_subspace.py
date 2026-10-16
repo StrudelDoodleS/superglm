@@ -5,8 +5,7 @@ is decided at the factor route's resolution.  The Gram decides it when it can
 certify itself; otherwise ``rank.decompose_gram_deflated`` factors only the
 rows projected onto the Gram's grey subspace (``n x k``) and certifies the
 rest from the Gram, and only a failed certificate pays for the TSQR of every
-row.  ``_certify`` (the model's certification dial) skips the deflated step
-and keeps the full factor, bit for bit as before.  The fixtures reach the
+row, the route every such fit took before.  The fixtures reach the
 Gram's uncertifiable band the ways the freMTPL2 books do: a level whose curve
 has fewer distinct points than basis functions, tensor cells with three
 points, and a near-collinear pair inside the band ``eps < sigma^2 /
@@ -113,11 +112,19 @@ FIXTURES = {
 }
 
 
-def _fit(kind, certify):
+def _fit(kind, full_factor):
+    """Fit ``kind``; ``full_factor`` fails the grey-subspace certificate, so the full factor decides."""
     frame, y, features, interactions = FIXTURES[kind]()
     model = SuperGLM(family="poisson", features=features, interactions=interactions)
-    model._certify = certify
-    model.fit_reml(frame, y)
+    if not full_factor:
+        model.fit_reml(frame, y)
+        return model
+    original = rank.decompose_gram_deflated
+    rank.decompose_gram_deflated = lambda *args, **kwargs: (None, {})
+    try:
+        model.fit_reml(frame, y)
+    finally:
+        rank.decompose_gram_deflated = original
     return model
 
 
@@ -130,39 +137,28 @@ PENALIZED_NULLS = ("sparse_tensor_cells", "thin_level_curve")
 @pytest.mark.parametrize("kind", PENALIZED_NULLS)
 def test_default_decides_the_data_rank_without_a_row_factor(kind, row_factor_passes):
     """No TSQR of every row by default, and today's decision; the base branch ran one per fit."""
-    model = _fit(kind, certify=False)
+    model = _fit(kind, full_factor=False)
     data = model.result.rank_info.data
     # Precondition: the Gram cannot certify itself here.
     assert data.grey_subspace is not None and data.grey_subspace["certified"] == 1.0
     assert 0 < data.grey_subspace["k"] < model._dm.p
     assert row_factor_passes == []
     assert model._reml_profile["data_rank_route"] == "grey_subspace"
-    reference = _fit(kind, certify=True).result.rank_info.data
+    reference = _fit(kind, full_factor=True).result.rank_info.data
     _assert_same_decisions(data, reference)
 
 
-@pytest.mark.parametrize("kind", PENALIZED_NULLS)
-def test_certify_decides_on_the_row_factor_bit_for_bit(kind, row_factor_passes):
-    """``certify`` keeps the factor route: its RankInfo.data is the SVD of the TSQR it ran."""
-    model = _fit(kind, certify=True)
-    data = model.result.rank_info.data
-    assert data.method == "qr_svd"
-    assert len(row_factor_passes) == 1
-    _assert_same_bits(data, rank.decompose_factor(row_factor_passes[0]))
-    assert model._reml_profile["data_rank_route"] == "row_factor"
-
-
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
-def test_the_dial_moves_no_fitted_value(kind):
-    """The data rank is decided after the solve: coefficients, EDF and SEs are the same bits."""
-    tolerance, certified = _fit(kind, certify=False), _fit(kind, certify=True)
-    np.testing.assert_array_equal(tolerance.result.beta, certified.result.beta)
-    assert tolerance.result.intercept == certified.result.intercept
-    assert tolerance.result.effective_df == certified.result.effective_df
+def test_the_route_moves_no_fitted_value(kind):
+    """The data rank is decided after the solve: coefficients, EDF and Hessian are the same bits."""
+    grey, full = _fit(kind, full_factor=False), _fit(kind, full_factor=True)
+    np.testing.assert_array_equal(grey.result.beta, full.result.beta)
+    assert grey.result.intercept == full.result.intercept
+    assert grey.result.effective_df == full.result.effective_df
     np.testing.assert_array_equal(
-        tolerance.result.rank_info.feature_edf, certified.result.rank_info.feature_edf
+        grey.result.rank_info.feature_edf, full.result.rank_info.feature_edf
     )
-    _assert_same_bits(tolerance.result.rank_info.augmented, certified.result.rank_info.augmented)
+    _assert_same_bits(grey.result.rank_info.augmented, full.result.rank_info.augmented)
 
 
 def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
@@ -188,8 +184,8 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
     monkeypatch.setattr(irls_direct, "decide_data_rank", recorded)
     for kind in sorted(FIXTURES):
         grams.clear()
-        deflated = _fit(kind, certify=False).result.rank_info.data
-        full = _fit(kind, certify=True).result.rank_info.data
+        deflated = _fit(kind, full_factor=False).result.rank_info.data
+        full = _fit(kind, full_factor=True).result.rank_info.data
         _assert_same_decisions(deflated, full)
         tolerance = rank.decompose_gram(grams[0])
         if kind == "near_collinear_pair":
@@ -202,25 +198,13 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
 
 
 def test_a_failed_certificate_keeps_the_full_factor(monkeypatch, row_factor_passes):
-    """No split for the grey subspace: the full factor decides, as it did before."""
-    monkeypatch.setattr(rank, "_GREY_CEILING", 0.0)
-    model = _fit("thin_level_curve", certify=False)
+    """No split for the grey subspace: the full factor decides, bit for bit as it did before."""
+    monkeypatch.setattr(rank, "_GREY_FLOOR", float("inf"))
+    model = _fit("thin_level_curve", full_factor=False)
     data = model.result.rank_info.data
     assert data.grey_subspace is None and data.method == "qr_svd"
     assert len(row_factor_passes) == 1
     _assert_same_bits(data, rank.decompose_factor(row_factor_passes[0]))
-
-
-def test_certification_scope_is_off_outside_a_model():
-    from superglm._certify import certification_requested, certification_scope
-
-    assert certification_requested() is False
-    with certification_scope(True):
-        assert certification_requested() is True
-        with certification_scope(False):
-            assert certification_requested() is False
-        assert certification_requested() is True
-    assert certification_requested() is False
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])

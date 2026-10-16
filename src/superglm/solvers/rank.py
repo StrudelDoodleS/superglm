@@ -2488,9 +2488,9 @@ def decompose_gram_if_authoritative(
 
 # Grey-subspace certification (``decompose_gram_deflated``): the split sits
 # where the Gram's eigenvalues clear this many times their own error bound,
-# and below this share of the largest; within those it takes the first
-# eigenvalue at least ``_GREY_GAP`` times its predecessor, else the widest gap.
-_GREY_FLOOR = 64.0
+# searched up to this share of the largest; it takes the first eigenvalue at
+# least ``_GREY_GAP`` times its predecessor, else the widest gap.
+_GREY_FLOOR = 4.0
 _GREY_CEILING = 1e-4
 _GREY_GAP = 2.0
 
@@ -2577,11 +2577,13 @@ def decompose_gram_deflated(
             np.inf,
         )
     )
-    floor = _GREY_FLOOR * error
-    candidates = np.flatnonzero((values >= floor) & (values <= _GREY_CEILING * largest))
-    candidates = candidates[candidates >= 1]
-    if candidates.size == 0:
+    # Every direction below the floor is grey; the split is searched from the
+    # first eigenvalue above it up to the ceiling (that first one at least).
+    first = int(np.searchsorted(values, _GREY_FLOOR * error, side="left"))
+    if first == 0 or first >= n_active:
         return None, info
+    last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
+    candidates = np.arange(first, min(last, n_active - 1) + 1)
     below = values[candidates - 1]
     with np.errstate(divide="ignore"):
         ratio = np.where(below > 0.0, values[candidates] / np.maximum(below, _MIN_POSITIVE), np.inf)
@@ -2656,7 +2658,7 @@ def decide_data_rank(
     project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]] | None = None,
     rows: int = 0,
     psd_by_construction: bool = False,
-    certify: bool | None = None,
+    certify: bool = False,
     policy: RankPolicy = SHARED_RANK_POLICY,
 ) -> RankDecomposition:
     """The published data-subspace rank, at the factor route's resolution, without a full row factor when it can.
@@ -2667,14 +2669,11 @@ def decide_data_rank(
     p^2)``), and ``project`` the grey-subspace pass that
     :func:`decompose_gram_deflated` reads.  The order is the Gram when it
     certifies itself (:func:`decompose_gram_if_authoritative`), then the
-    deflated certificate, then the full factor.  ``certify`` (default: the
-    model's dial, ``superglm._certify``) skips the deflated step, so the
-    decision is today's full-factor route bit for bit.
+    grey-subspace certificate, then the full factor, which runs only when that
+    certificate fails.  ``certify`` goes straight to the full factor: a caller
+    that already holds it (an unpenalized fit, whose Hessian is this Gram)
+    pays nothing for it.
     """
-    if certify is None:
-        from superglm._certify import certification_requested
-
-        certify = certification_requested()
     decomposition = decompose_gram_if_authoritative(
         gram, policy=policy, psd_by_construction=psd_by_construction
     )

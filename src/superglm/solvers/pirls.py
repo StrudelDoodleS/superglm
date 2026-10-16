@@ -2034,7 +2034,7 @@ def _fit_pirls_inner(
             selected_dm, W_final, basis, center=centre, center_lo=centre_lo
         ),
         rows=selected_dm.n,
-        certify=True if not np.any(selected_penalty) else None,
+        certify=not np.any(selected_penalty),
     )
     # Reusing ``data_rank`` cannot need certifying: unpenalized, it is either
     # a factor certificate or a Gram the predicate already accepted.
