@@ -616,16 +616,26 @@ def test_two_piece_mean_form_refuses_any_path_through_its_join(monkeypatch) -> N
     first-order test and was admitted as exact.  Whether ``z == 0`` holds
     exactly depends on how a platform's ``exp``, ``log`` and ``log_ndtr``
     round, so the join is stubbed onto row 0 and the test checks what the
-    family hands the join test: a nonzero mark for every direction that moves
-    the row, and the refusal that follows.
+    family hands the join test: the variate ``log y`` and the location
+    ``log m - log K(sigma, eps)`` that the Hessian's piece selection uses, bit
+    for bit, a nonzero mark for every direction that moves the row, and the
+    refusal that follows.
     """
     import superglm.distributional.families.two_piece as two_piece_family
+    from superglm.distributional.kernels.two_piece import (
+        location_of_mean as two_piece_location_of_mean,
+    )
     from superglm.distributional.kernels.two_piece import log_mean_loading
     from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
     recorded = []
 
     def on_row_zero(variate, location, scale, skew, moved):
+        # ``response`` and ``theta`` are bound below, before the first call.
+        np.testing.assert_array_equal(variate, np.log(response))
+        np.testing.assert_array_equal(location, two_piece_location_of_mean(*theta.T))
+        np.testing.assert_array_equal(scale, theta[:, 1])
+        np.testing.assert_array_equal(skew, theta[:, 2])
         marks = np.asarray(moved, dtype=np.float64)
         recorded.append(marks.copy())
         return (np.arange(len(marks)) == 0) & (marks != 0.0)
