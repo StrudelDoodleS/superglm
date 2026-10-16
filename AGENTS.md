@@ -93,6 +93,29 @@ an implementation specification: if repository evidence contradicts it, report
 the discrepancy and propose an update rather than conforming the
 implementation to an outdated assumption.
 
+## Fidelity and guards
+
+superglm fits converge to a tolerance and work within float64 accuracy, as
+every statistical engine does. Fits must be fast; certifying a result to the
+last rounding is a separate question, answered on request. Guards are
+proportional to what a user would see go wrong:
+
+- **Always required:** correct mathematics; no crash and no silently wrong
+  number in anything a user reads (fitted values, predictions, standard
+  errors, EDF, prices); convergence disclosed, never refused; the same
+  decision on every supported platform.
+- **Standard tolerances:** decisions that sit inside floating-point noise,
+  such as numerical rank, near-zero curvature or a flat-direction freeze, use
+  the tolerances established engines use (LAPACK, mgcv, statsmodels). A
+  stricter certified route may sit behind an explicit option, a fidelity dial
+  like `tol`, and is never a cost every fit pays.
+- **Not required:** error bounds tracked to the last rounding, exact or
+  rational arithmetic for inputs no real model produces, or test tolerances
+  counted rounding by rounding where an outcome check with a sensible
+  tolerance shows the same thing.
+- **Credibility** comes from documented agreement with established engines
+  and from held-out performance on real books, not from certificates.
+
 ## Numerical policy
 
 Production numerical code targets portable IEEE binary64 (`numpy.float64`) on
@@ -124,9 +147,13 @@ dtype is float64 analysis, not a custom arbitrary-precision layer:
   belongs in independent test oracles: `tests/_exact_reference.py`, the
   `tests/_*oracle*.py` modules and references a test computes for itself.
 
-Loosening a numerical check needs an analysis of why the old bound was wrong.
+Loosening a check that guards a number a user sees needs evidence that the
+number does not move; loosening certificate bookkeeping inside the tolerance
+needs none.
 
-Error analysis is written in the unit roundoff.
+Where code carries an error bound (an opt-in certificate, or a guard against
+a crash or a silently wrong number), its analysis is written in the unit
+roundoff.
 `eps = np.finfo(np.float64).eps = 2**-52` is the spacing of float64 values at
 1.0, and the unit roundoff `u = eps / 2 = 2**-53` bounds the relative error of
 one rounding. Derivations are written in `u` and `gamma_n = n*u / (1 - n*u)`
@@ -155,15 +182,18 @@ regression coverage; a simulation of the platform on another one does not
 establish native compatibility. Compare complete-fit cost before accepting the
 change.
 
-Tests assert what the mathematics certifies. Boundary tests check invariants
-such as rank, subspace, residual, reconstruction, prediction or backward
-error, never the sign or magnitude of BLAS/LAPACK round-off, which varies by
-driver and machine. Tolerances derive from dimensions, the unit roundoff `u`,
-norms and conditioning or error bounds, not from what passed locally.
+Tests assert what users see: fitted values, predictions, standard errors, EDF
+and decisions, against an independent reference. Boundary tests check
+invariants such as rank, subspace, residual, reconstruction, prediction or
+backward error, never the sign or magnitude of BLAS/LAPACK round-off, which
+varies by driver and machine. Tolerances follow from the problem's scale and
+conditioning, a sensible multiple of `u` times a magnitude, not from what
+passed locally; they need not count every rounding. A test that needs an event
+(a stop, a refusal, a freeze) forces it rather than relying on the trajectory
+to reach it, because other BLAS builds round onto other paths.
 Coefficient-forward accuracy is tested on well-conditioned fixtures; near-rank
-and cancellation fixtures test certification, refusal and the stable
-observables instead. Performance and backend dispatch are tested separately
-from numerical correctness.
+and cancellation fixtures test the stable observables instead. Performance and
+backend dispatch are tested separately from numerical correctness.
 
 ## Pull request reviews
 
@@ -186,6 +216,10 @@ finding without a thread has its reply.
 A summary comment's findings that have no thread of their own get one reply
 comment that answers each in turn. If any of them is real, put a 👍 on the
 summary comment.
+
+Findings about rounding bookkeeping inside the tolerance (an uncounted
+rounding, a `gamma_k` off by one, a bound tighter than any decision needs) are
+not raised; see *Fidelity and guards*.
 
 A reviewer does not raise again a finding already answered with evidence on a
 resolved thread. If it believes the evidence is wrong, it says so on that

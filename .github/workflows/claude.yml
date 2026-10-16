@@ -89,8 +89,10 @@ jobs:
             1. Correctness defects: wrong numbers, broken invariants, lost
                behaviour, error paths that cannot be reached or are unhandled.
             2. Test adequacy: tests that would still pass against the unfixed
-               code, and tolerances that are not derived from an error analysis
-               or a recorded measurement.
+               code, tolerances loose enough to let a user-visible error
+               through, and tests that depend on BLAS round-off or on a
+               trajectory reaching an event. Rounding bookkeeping inside the
+               tolerance is not a finding (AGENTS.md, Fidelity and guards).
             3. AGENTS.md compliance: numerical policy, performance evidence for
                anything that changes time to fit, and the release-impact
                declaration in the description.

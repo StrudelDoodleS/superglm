@@ -303,6 +303,20 @@ def test_repository_guidance_pins_the_numerical_policy() -> None:
     assert "dtype epsilon" not in text
 
 
+def test_repository_guidance_pins_fidelity_and_guards() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    section = agents.split("## Fidelity and guards", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    text = " ".join(section.split())
+
+    assert "certifying a result to the last rounding is a separate question" in text
+    assert "no crash and no silently wrong number in anything a user reads" in text
+    assert "the same decision on every supported platform" in text
+    assert "a fidelity dial like `tol`, and is never a cost every fit pays" in text
+    assert "exact or rational arithmetic for inputs no real model produces" in text
+    assert "Credibility** comes from documented agreement with established engines" in text
+    assert agents.index("## Fidelity and guards") < agents.index("## Numerical policy")
+
+
 def test_pull_request_template_records_impact_as_advice() -> None:
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
 
