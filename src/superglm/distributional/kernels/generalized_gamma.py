@@ -1239,6 +1239,317 @@ def mean_hessian_direction(
     return result
 
 
+# ---------------------------------------------------------------- fourth order
+
+
+def _stirling_d4_series(x: NDArray[np.float64]) -> NDArray[np.float64]:
+    """The Bernoulli series ``sum_j c_j (2j+1)(2j+2)(2j+3)(2j+4) x^-(2j+5)`` of the fourth derivative."""
+    inv2 = 1.0 / (x * x)
+    acc = np.zeros_like(x)
+    power = inv2 * inv2 / x
+    for j, coefficient in enumerate(_BERNOULLI):
+        acc = acc + (2 * j + 1) * (2 * j + 2) * (2 * j + 3) * (2 * j + 4) * coefficient * power
+        power = power * inv2
+    return acc
+
+
+def stirling_remainder_d4(x: NDArray) -> NDArray[np.float64]:
+    """Fourth derivative of the Stirling remainder, ``psi'''(x) - 2/x^3 - 3/x^4``.
+
+    Below ``x = 16`` the recurrence
+    ``S4(x) = S4(x + 1) + (10 x^2 + 10 x + 3)/(x^4 (x + 1)^4)`` (the third
+    derivative's recurrence differentiated) walks onto the series with
+    positive steps, so nothing cancels.
+    """
+    x = np.asarray(x, dtype=_FLOAT)
+    out = np.empty_like(x)
+    big = x >= _STIRLING_D3_SWITCH
+    if np.any(big):
+        out[big] = _stirling_d4_series(x[big])
+    small = ~big
+    if np.any(small):
+        xs = x[small]
+        steps = np.zeros_like(xs)
+        for j in range(int(_STIRLING_D3_SWITCH)):
+            lower, upper = xs + j, xs + j + 1.0
+            steps = steps + (10.0 * lower * lower + 10.0 * lower + 3.0) / (lower**4 * upper**4)
+        out[small] = _stirling_d4_series(xs + _STIRLING_D3_SWITCH) + steps
+    return out
+
+
+def shape_term_d2(shape: NDArray) -> NDArray[np.float64]:
+    """Second derivative in ``Q`` of the Hessian's shape term ``f(Q) = h''(Q)``, ``h = -S(Q^-2)``.
+
+    For ``k = Q^-2 >= 30`` the series ``-2 sum_{j >= 1} c_j (2j+1)(4j+1)(4j)(4j-1) Q^(4j-2)``
+    (``f``'s Bernoulli series differentiated twice, nothing cancelling);
+    below, ``h''''`` from ``S1..S4`` at ``k`` (generated,
+    ``generalized_gamma_shape_term_fourth``), which cancels by at most about
+    ``k^2``, as ``shape_term_d1`` does.
+    """
+    from superglm.distributional.kernels._fourth_generated import (
+        generalized_gamma_shape_term_fourth,
+    )
+
+    q = np.asarray(shape, dtype=_FLOAT)
+    out = np.empty_like(q)
+    series = q * q <= 1.0 / _SHAPE_SERIES_K
+    if np.any(series):
+        qs = q[series]
+        q4 = qs**4
+        acc = np.zeros_like(qs)
+        power = qs * qs
+        for j, coefficient in enumerate(_BERNOULLI[1:], start=1):
+            acc = (
+                acc - 2.0 * coefficient * (2 * j + 1) * (4 * j + 1) * (4 * j) * (4 * j - 1) * power
+            )
+            power = power * q4
+        out[series] = acc
+    direct = ~series
+    if np.any(direct):
+        qd = q[direct]
+        k = 1.0 / (qd * qd)
+        out[direct] = generalized_gamma_shape_term_fourth(
+            qd,
+            stirling_remainder_d1(k),
+            stirling_remainder_d2(k),
+            stirling_remainder_d3(k),
+            stirling_remainder_d4(k),
+        )[0]
+    return out
+
+
+def _generated_series(name: str, u: NDArray[np.float64]) -> NDArray[np.float64]:
+    """``M_ab(u)`` from the generator's table: the series inside its radius, the direct form out."""
+    from superglm.distributional.kernels._fourth_generated import GENERALIZED_GAMMA_SERIES
+
+    radius, coefficients, direct = GENERALIZED_GAMMA_SERIES[name]
+    return _piecewise(u, radius, lambda arg: _horner(arg, coefficients), direct)
+
+
+def location_third_fourth(
+    response: NDArray,
+    mu: NDArray,
+    sigma: NDArray,
+    shape: NDArray,
+    multiplier: NDArray,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Packed natural third ``(n, 10)`` and fourth ``(n, 15)`` derivatives in ``(mu, sigma, Q)``.
+
+    Generated (``generalized_gamma_location_third_fourth``) from the row
+    ``-log sigma + h(Q) + G(w, Q)`` through ``w = (log y - mu)/sigma``: every
+    partial of ``G = -(e^(Q w) - 1 - Q w)/Q^2`` is ``w^i Q^j M_ab(u)`` with
+    ``M_ab`` a series in ``u = Q w`` or its closed form, and the shape term
+    contributes ``f'(Q)`` and ``f''(Q)``.  Each is multiplied by
+    ``multiplier``; rows whose ``e^u`` overflows are invalid in the Hessian
+    and return zero.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import (
+        generalized_gamma_location_third_fourth,
+    )
+
+    y = _positive_vector(response, name="response")
+    mu_values = _vector(mu, name="mu")
+    sigma_values = _positive_vector(sigma, name="sigma")
+    q = _vector(shape, name="shape")
+    m = _positive_vector(multiplier, name="multiplier")
+    if any(values.shape != y.shape for values in (mu_values, sigma_values, q, m)):
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    w = (np.log(y) - mu_values) / sigma_values
+    u = q * w
+    names = ("M03", "M04", "M10", "M11", "M12", "M13", "M20", "M21", "M22", "M30", "M31", "M40")
+    with np.errstate(over="ignore", invalid="ignore"):
+        series = [_generated_series(name, u) for name in names]
+        values = stack_columns(
+            generalized_gamma_location_third_fourth(
+                w, q, sigma_values, shape_term_d1(q), shape_term_d2(q), *series
+            ),
+            len(y),
+        )
+        values *= m[:, None]
+        values[~np.isfinite(np.exp(u))] = 0.0
+    return values[:, :10], values[:, 10:]
+
+
+def _phi_fourth(
+    v: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """``Phi', ..., Phi''''`` for ``Phi(v) = ((1 + v) log1p(v) - v)/v^2``.
+
+    The first three as :func:`_phi_derivatives`; the fourth by its series
+    inside ``|v| < 1/2`` and outside by the recursion from ``v^2 Phi`` four
+    times differentiated, ``v^2 Phi'''' + 8 v Phi''' + 12 Phi'' = 2/(1 + v)^3``.
+    """
+    first, second, third = _phi_derivatives(v)
+    fourth = np.empty_like(v)
+    inner = np.abs(v) < _PHI_SERIES_RADIUS
+    if np.any(inner):
+        a = v[inner]
+        coefficients = [(-1.0) ** j / ((j + 1) * (j + 2)) for j in range(_PHI_SERIES_TERMS)]
+        fourth[inner] = _horner(
+            a,
+            tuple(
+                j * (j - 1) * (j - 2) * (j - 3) * coefficients[j]
+                for j in range(4, _PHI_SERIES_TERMS)
+            ),
+        )
+    outer = ~inner
+    if np.any(outer):
+        a = v[outer]
+        one = 1.0 + a
+        fourth[outer] = (
+            2.0 / (one * one * one) - 8.0 * a * third[outer] - 12.0 * second[outer]
+        ) / (a * a)
+    return first, second, third, fourth
+
+
+def _log_mean_loading_fourth(
+    sigma: NDArray[np.float64], q: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """``(C_ssss, C_sssQ, C_ssQQ, C_sQQQ, C_QQQQ)`` for ``log C`` (see ``_log_mean_loading_third``).
+
+    The ``Phi`` and ``log1p`` part is generated
+    (``generalized_gamma_loading_phi_fourth``).  The Stirling difference is
+    its Bernoulli series ``sum_j c_j Q^n g_j(v)``, ``n = 4j + 2``,
+    ``g_j = (1 + v)^-(2j+1) - 1``, wherever ``k`` and ``x`` are both at least
+    30, each term differentiated by Leibniz's rule
+    ``d^a_sigma d^b_Q [Q^n g(sigma Q)] = sum_i C(b, i) (n + a)_(b - i) Q^(n + a - b + i) sigma^i g^(a + i)(v)``;
+    otherwise the direct route through ``S1..S4`` at ``x`` and ``k``
+    (generated, ``generalized_gamma_loading_stirling_fourth``).
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import (
+        generalized_gamma_loading_phi_fourth,
+        generalized_gamma_loading_stirling_fourth,
+    )
+
+    v = sigma * q
+    one = 1.0 + v
+    phi = _phi_fourth(v)
+    n_rows = len(sigma)
+    result = stack_columns(generalized_gamma_loading_phi_fourth(sigma, q, one, *phi), n_rows)
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        k = 1.0 / (q * q)
+        x = one * k
+    series = (k >= _SHAPE_SERIES_K) & (x >= _SHAPE_SERIES_K)
+    if np.any(series):
+        qs, ss, vs = q[series], sigma[series], v[series]
+        log_one = np.log1p(vs)
+        totals = np.zeros((len(qs), 5))
+        for j, coefficient in enumerate(_BERNOULLI):
+            n = 4 * j + 2
+            power = 2 * j + 1
+            g = [np.expm1(-power * log_one)]
+            rate = 1.0
+            for m in range(1, 5):
+                rate *= -(power + m - 1)
+                g.append(rate * np.exp(-(power + m) * log_one))
+            for column, a in enumerate((4, 3, 2, 1, 0)):
+                b = 4 - a
+                for i in range(b + 1):
+                    falling = math.perm(n + a, b - i)
+                    if falling == 0:
+                        continue
+                    totals[:, column] += (
+                        coefficient
+                        * math.comb(b, i)
+                        * falling
+                        * qs ** (n + a - b + i)
+                        * ss**i
+                        * g[a + i]
+                    )
+        result[series] += totals
+    direct = ~series
+    if np.any(direct):
+        qd, xd, kd = q[direct], x[direct], k[direct]
+        result[direct] += stack_columns(
+            generalized_gamma_loading_stirling_fourth(
+                sigma[direct],
+                qd,
+                stirling_remainder_d1(xd),
+                stirling_remainder_d2(xd),
+                stirling_remainder_d3(xd),
+                stirling_remainder_d4(xd),
+                stirling_remainder_d1(kd),
+                stirling_remainder_d2(kd),
+                stirling_remainder_d3(kd),
+                stirling_remainder_d4(kd),
+            ),
+            int(np.count_nonzero(direct)),
+        )
+    return result
+
+
+def mean_third_fourth(
+    response: NDArray,
+    mean: NDArray,
+    sigma: NDArray,
+    shape: NDArray,
+    multiplier: NDArray,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Packed mean-form third ``(n, 10)`` and fourth ``(n, 15)`` derivatives in ``(m, sigma, Q)``.
+
+    The location form's derivatives composed with ``mu = log m - log C(sigma, Q)``
+    by the set-partition chain rule (``compose_derivatives``).  Rows whose
+    mean does not exist, or whose Hessian is invalid, return zero.
+    """
+    from superglm.distributional.kernels._curvature_direction import (
+        compose_derivatives,
+        packed_tuples,
+    )
+
+    y = _positive_vector(response, name="response")
+    m = _positive_vector(mean, name="mean")
+    sigma_values = _positive_vector(sigma, name="sigma")
+    q = _vector(shape, name="shape")
+    weight = _positive_vector(multiplier, name="multiplier")
+    if any(values.shape != y.shape for values in (m, sigma_values, q, weight)):
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    third = np.zeros((len(y), 10), dtype=_FLOAT)
+    fourth = np.zeros((len(y), 15), dtype=_FLOAT)
+    exists = mean_exists(sigma_values, q)
+    if not np.any(exists):
+        return third, fourth
+    ye, me, se, qe, we = (values[exists] for values in (y, m, sigma_values, q, weight))
+    loading, stirling = _log_mean_loading_and_stirling(se, qe)
+    logc, c_s, c_q, c_ss, c_sq, c_qq = loading
+    location = np.log(me) - logc
+    unit = np.ones_like(we)
+    base = _location_rows(ye, location, se, qe, unit, derivative_order=2, stirling=stirling)
+    assert base.score is not None and base.hessian_packed is not None
+    location_third, location_fourth = location_third_fourth(ye, location, se, qe, unit)
+    orders = {
+        1: np.column_stack((c_s, c_q)),
+        2: np.column_stack((c_ss, c_sq, c_qq)),
+        3: np.column_stack(_log_mean_loading_third(se, qe)),
+        4: _log_mean_loading_fourth(se, qe),
+    }
+    inner: dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]] = {
+        1: {(0, (0,)): 1.0 / me, (1, (1,)): 1.0, (2, (2,)): 1.0},
+        2: {(0, (0, 0)): -1.0 / (me * me)},
+        3: {(0, (0, 0, 0)): 2.0 / (me * me * me)},
+        4: {(0, (0, 0, 0, 0)): -6.0 / (me * me * me * me)},
+    }
+    for order, values in orders.items():
+        for column, key in enumerate(packed_tuples(2, order)):
+            inner[order][(0, tuple(index + 1 for index in key))] = -values[:, column]
+    outer = {
+        1: np.asarray(base.score),
+        2: np.asarray(base.hessian_packed),
+        3: location_third,
+        4: location_fourth,
+    }
+    with np.errstate(over="ignore", invalid="ignore"):
+        third_exists = compose_derivatives(outer, inner, 3, 3) * we[:, None]
+        fourth_exists = compose_derivatives(outer, inner, 4, 3) * we[:, None]
+    invalid = ~np.asarray(base.valid)
+    third_exists[invalid] = 0.0
+    fourth_exists[invalid] = 0.0
+    third[exists] = third_exists
+    fourth[exists] = fourth_exists
+    return third, fourth
+
+
 def mean_expected_information(
     mean: NDArray,
     sigma: NDArray,
@@ -1730,11 +2041,13 @@ __all__ = [
     "location_expected_information",
     "location_of_mean",
     "location_rows",
+    "location_third_fourth",
     "log_mean_loading",
     "mean_exists",
     "mean_expected_information",
     "mean_of_location",
     "mean_rows",
+    "mean_third_fourth",
     "Parametrisation",
     "series_e1",
     "series_l1",
@@ -1749,4 +2062,5 @@ __all__ = [
     "stirling_remainder",
     "stirling_remainder_d1",
     "stirling_remainder_d2",
+    "stirling_remainder_d4",
 ]
