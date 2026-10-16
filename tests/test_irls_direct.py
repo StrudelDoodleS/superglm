@@ -335,7 +335,8 @@ class TestDirectSolverBasic:
 
             return counted
 
-        for name in ("decompose_gram", "decompose_gram_if_authoritative"):
+        # The data rank's entry point (``rank.decide_data_rank``) counts too.
+        for name in ("decompose_gram", "decompose_gram_if_authoritative", "decide_data_rank"):
             monkeypatch.setattr(irls_direct, name, _counting(name))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
         retained_geometry_calls = decomposition_calls

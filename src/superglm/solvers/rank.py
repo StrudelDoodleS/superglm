@@ -2626,6 +2626,9 @@ def decompose_gram_deflated(
     basis[active] = grey / d[:, None]
     factor, cross, roundings, magnitudes = project(basis)
     factor = np.asarray(factor, dtype=np.float64)
+    if factor.shape[0] < split:
+        # Fewer rows than grey directions: the factor's missing rows are zero.
+        factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
     # The cross product's rows are bounded by |A|'|B|, a column's weighted
     # norm times ||B||: d itself where rows were centred first, the
     # projection's (|x| + |c|) norm where they were not.
