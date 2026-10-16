@@ -822,6 +822,121 @@ def mean_third_fourth(
     return mean_third, mean_fourth
 
 
+#: The reach of the analytic Hessian's local model near the join, in
+#: predictor units along a unit direction: the engine's derivative step
+#: (``smoothing.endpoint_direction.DEFAULT_STEP``), the span its second
+#: differences cover.
+JOIN_REACH = 1.0e-3
+
+
+def location_join_jumps(
+    scale: NDArray, skew: NDArray, multiplier: NDArray
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The location form's Hessian ``(n, 6)`` and third-derivative ``(n, 10)`` jumps at the join.
+
+    Right piece minus left piece at ``u = 0``.  The Hessian jumps only in
+    ``(mu, mu)``, by ``1/(sigma^2 (1 - eps)^2) - 1/(sigma^2 (1 + eps)^2)``; the
+    third derivatives jump in ``(mu, mu, sigma)`` and ``(mu, mu, eps)``, the
+    latter even at zero skew, where ``T_mme = 2e/(sigma^2 s^3)`` changes sign.
+    The score is continuous.  Each is multiplied by ``multiplier``.
+    """
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    m = _positive_vector(multiplier, name="multiplier")
+    _same_shape(sigma, eps, m)
+    n_rows = len(sigma)
+    zero = np.zeros_like(sigma)
+    inverse_sigma = 1.0 / sigma
+    right = stack_columns(
+        two_piece_location_third_fourth(zero, inverse_sigma, 1.0 / (1.0 + eps), 1.0), n_rows
+    )
+    left = stack_columns(
+        two_piece_location_third_fourth(zero, inverse_sigma, 1.0 / (1.0 - eps), -1.0), n_rows
+    )
+    hessian = np.zeros((n_rows, 6), dtype=_FLOAT)
+    hessian[:, 0] = (1.0 / ((1.0 - eps) * (1.0 - eps)) - 1.0 / ((1.0 + eps) * (1.0 + eps))) * (
+        inverse_sigma * inverse_sigma
+    )
+    return hessian * m[:, None], (right[:, :10] - left[:, :10]) * m[:, None]
+
+
+def mean_join_jumps(
+    mean: NDArray, scale: NDArray, skew: NDArray, multiplier: NDArray
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The mean form's Hessian and third-derivative jumps at the join, in ``(m, sigma, eps)``.
+
+    The location form's jumps composed with ``mu = log m - log K(sigma, eps)``;
+    the score is continuous, so only the jumps of order two and three enter.
+    """
+    m = _positive_vector(mean, name="mean")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    weight = _positive_vector(multiplier, name="multiplier")
+    _same_shape(m, sigma, eps, weight)
+    hessian, third = location_join_jumps(sigma, eps, weight)
+    inner = _mean_inner_derivatives(m, _log_mean_loading_fourth(sigma, eps))
+    outer = {1: np.zeros((len(m), 3), dtype=_FLOAT), 2: hessian, 3: third}
+    return compose_derivatives(outer, inner, 2, 3), compose_derivatives(outer, inner, 3, 3)
+
+
+def join_certificate(
+    distance: NDArray,
+    location_gradient: NDArray,
+    natural_jumps: tuple[NDArray, NDArray],
+    link_derivatives: tuple[NDArray, NDArray, NDArray],
+    first: NDArray,
+    second: NDArray,
+    *,
+    reach: float = JOIN_REACH,
+) -> NDArray[np.float64]:
+    """The analytic second curvature direction's trust signal on rows near the join.
+
+    The analytic fourth derivatives are exact on each piece, but the
+    curvature jumps at the join (``natural_jumps``, the Hessian and third
+    derivatives of :func:`location_join_jumps` or :func:`mean_join_jumps`),
+    so as a local model over a displacement ``r`` they are wrong by about
+    ``|jump of C| / r^2 + |jump of dC| / r`` on a row whose location the
+    displacement carries across the join.  A row is near when ``|t - mu|``
+    (``distance``) is at most ``reach`` times the location's rate along
+    either unit direction (``location_gradient`` is ``d mu / d eta``); there
+    its certificate is that error at ``r = reach`` times ``|a| |b|``, which
+    is the size of what second differences over ``reach`` record across a
+    kink; elsewhere it is zero.  Directions as for the second direction,
+    ``(m, n, K)`` or ``(m, 1, K)``.  The jumps reach the predictors through
+    the links' first three derivatives.
+    """
+    g1, g2, g3 = link_derivatives
+    n_rows, k_parameters = g1.shape
+    inner = {
+        order: {(k, (k,) * order): values[:, k] for k in range(k_parameters)}
+        for order, values in enumerate((g1, g2, g3), start=1)
+    }
+    hessian_jump, third_jump = natural_jumps
+    outer = {1: np.zeros((n_rows, k_parameters), dtype=_FLOAT), 2: hessian_jump, 3: third_jump}
+    value_jump = np.abs(compose_derivatives(outer, inner, 2, k_parameters))
+    slope_jump = np.abs(compose_derivatives(outer, inner, 3, k_parameters))
+    norm_a = np.linalg.norm(first, axis=-1)
+    norm_b = np.linalg.norm(second, axis=-1)
+    unit_a = first / np.where(norm_a > 0.0, norm_a, 1.0)[..., None]
+    unit_b = second / np.where(norm_b > 0.0, norm_b, 1.0)[..., None]
+    rate = np.maximum(
+        np.abs(np.sum(location_gradient * unit_a, axis=-1)),
+        np.abs(np.sum(location_gradient * unit_b, axis=-1)),
+    )
+    near = (rate > 0.0) & (np.asarray(distance, dtype=_FLOAT) <= reach * rate)
+    pairs = packed_tuples(k_parameters, 2)
+    triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
+    reach_a = np.maximum(np.abs(unit_a), np.abs(unit_b))
+    certificate = np.zeros((*near.shape, len(pairs)), dtype=_FLOAT)
+    for column, (i, j) in enumerate(pairs):
+        slope = np.zeros(near.shape, dtype=_FLOAT)
+        for k in range(k_parameters):
+            slope = slope + slope_jump[:, triples[tuple(sorted((i, j, k)))]] * reach_a[..., k]
+        certificate[..., column] = value_jump[:, column] / (reach * reach) + slope / reach
+    certificate *= (near * norm_a * norm_b)[..., None]
+    return certificate
+
+
 # ---------------------------------------------------------------- initialiser
 
 _A1 = 1.0 / math.sqrt(2.0 * math.pi)
@@ -920,14 +1035,18 @@ __all__ = [
     "TwoPieceDomainError",
     "TwoPieceInitializationWarning",
     "TwoPieceKernelEvaluation",
+    "JOIN_REACH",
     "initialize_two_piece",
+    "join_certificate",
     "join_crossing_rows",
     "location_expected_information",
     "location_of_mean",
+    "location_join_jumps",
     "location_rows",
     "location_third_fourth",
     "log_mean_loading",
     "mean_expected_information",
+    "mean_join_jumps",
     "mean_of_location",
     "mean_rows",
     "mean_third_fourth",

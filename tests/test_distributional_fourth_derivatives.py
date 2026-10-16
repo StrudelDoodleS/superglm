@@ -329,3 +329,74 @@ def test_the_generated_module_is_current() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def _stacked_axis_pairs(k: int):
+    pairs = [(q, r) for q in range(k) for r in range(q, k)]
+    first = np.zeros((len(pairs), 1, k))
+    second = np.zeros_like(first)
+    for index, (q, r) in enumerate(pairs):
+        first[index, 0, q] = 1.0
+        second[index, 0, r] = 1.0
+    return pairs, first, second
+
+
+def test_two_piece_certifies_rows_within_reach_of_its_join() -> None:
+    """A row the derivative reach carries across its join carries the curvature's jump.
+
+    The analytic Hessian is exact on each piece; as a local model across the
+    join it is off by about ``|jump of C| / r^2``, which is what second
+    differences over ``r`` recorded there.  In the location form only pairs
+    that move ``mu`` reach the join; a far row and the other pairs carry none,
+    and the values are the uncertified ones.
+    """
+    from superglm.distributional.kernels.two_piece import JOIN_REACH, location_join_jumps
+
+    family = TwoPieceNormalLSS()
+    links = _links(family)
+    y = np.array([1.0 + 0.5 * JOIN_REACH, 1.5, 1.0 - 0.2 * JOIN_REACH])
+    plan = _plan(family, y)
+    sigma, skew = 0.8, 0.3
+    eta = np.column_stack(
+        (np.ones(3), links[1].link(np.full(3, sigma)), links[2].link(np.full(3, skew)))
+    )
+    pairs, first, second = _stacked_axis_pairs(3)
+    values, certificate = family.certified_predictor_curvature_second_directional_derivative(
+        y, eta, first, second, links, plan
+    )
+    np.testing.assert_array_equal(
+        values,
+        family.predictor_curvature_second_directional_derivative(
+            y, eta, first, second, links, plan
+        ),
+    )
+    moves_mu = np.array([0 in pair for pair in pairs])
+    assert np.all(certificate[:, 1] == 0.0)
+    assert np.all(certificate[~moves_mu] == 0.0)
+    hessian_jump, _ = location_join_jumps(np.full(3, sigma), np.full(3, skew), np.ones(3))
+    floor = hessian_jump[0, 0] / JOIN_REACH**2
+    assert np.all(certificate[moves_mu][:, [0, 2], 0] >= floor * (1.0 - 1e-12))
+    resolved = analytic_curvature_second_direction(family, y, eta, first, second, links, plan)
+    assert resolved is not None and resolved[1] is not None
+    np.testing.assert_array_equal(resolved[1], certificate)
+
+
+def test_two_piece_mean_form_certifies_a_row_near_its_join_on_every_pair() -> None:
+    """In the mean form every direction moves ``mu = log m - log K``, so a near row is certified on every pair, even at zero skew, where only the third derivative jumps."""
+    from superglm.distributional.kernels.two_piece import JOIN_REACH, log_mean_loading
+
+    family = TwoPieceLogNormalLSS()
+    links = _links(family)
+    y = np.array([2.0, 2.0])
+    sigma, skew = np.array([0.6, 0.6]), np.array([0.0, 0.0])
+    logk = log_mean_loading(sigma, skew)[0]
+    offsets = np.array([0.3 * JOIN_REACH, 0.5])
+    mean = np.exp(np.log(y) - offsets + logk)
+    eta = np.column_stack((np.log(mean), links[1].link(sigma), links[2].link(skew)))
+    plan = _plan(family, y)
+    _, first, second = _stacked_axis_pairs(3)
+    _, certificate = family.certified_predictor_curvature_second_directional_derivative(
+        y, eta, first, second, links, plan
+    )
+    assert np.all(np.max(certificate[:, 0, :], axis=-1) > 0.0)
+    assert np.all(certificate[:, 1, :] == 0.0)
