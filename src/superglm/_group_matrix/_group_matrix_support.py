@@ -34,6 +34,8 @@ whether it is checked against the basis:
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
@@ -199,9 +201,10 @@ def _canonical_csr(B_csr: sp.spmatrix) -> sp.csr_matrix | None:
     """The matrix as a CSR matrix whose rows hold each column at most once, or ``None``."""
     if not sp.isspmatrix_csr(B_csr) and not isinstance(B_csr, sp.csr_array):
         return None
-    if not B_csr.has_canonical_format:
+    csr = cast("sp.csr_matrix", B_csr)
+    if not csr.has_canonical_format:
         return None
-    return B_csr
+    return csr
 
 
 def _row_hashes(B_csr: sp.spmatrix, chunk_rows: int) -> NDArray:
