@@ -104,11 +104,14 @@ proportional to what a user would see go wrong:
   number in anything a user reads (fitted values, predictions, standard
   errors, EDF, prices); convergence disclosed, never refused; the same
   decision on every supported platform.
-- **Standard tolerances:** decisions that sit inside floating-point noise,
-  such as numerical rank, near-zero curvature or a flat-direction freeze, use
-  the tolerances established engines use (LAPACK, mgcv, statsmodels). A
-  stricter certified route may sit behind an explicit option, a fidelity dial
-  like `tol`, and is never a cost every fit pays.
+- **Standard tolerances:** decisions that sit inside floating-point noise and
+  change nothing a user reads, such as near-zero curvature or a
+  flat-direction freeze, use the tolerances established engines use (LAPACK,
+  mgcv, statsmodels). Where a tolerance would change a user-visible number
+  (numerical rank decides which coefficients get standard errors), the
+  decision is certified, and the certification is made cheap rather than
+  skipped. A certificate that cannot be made cheap may sit behind an explicit
+  option, a fidelity dial like `tol`, and is never a cost every fit pays.
 - **Not required:** error bounds tracked to the last rounding, exact or
   rational arithmetic for inputs no real model produces, or test tolerances
   counted rounding by rounding where an outcome check with a sensible

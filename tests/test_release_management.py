@@ -312,6 +312,7 @@ def test_repository_guidance_pins_fidelity_and_guards() -> None:
     assert "no crash and no silently wrong number in anything a user reads" in text
     assert "the same decision on every supported platform" in text
     assert "a fidelity dial like `tol`, and is never a cost every fit pays" in text
+    assert "the certification is made cheap rather than skipped" in text
     assert "exact or rational arithmetic for inputs no real model produces" in text
     assert "Credibility** comes from documented agreement with established engines" in text
     assert agents.index("## Fidelity and guards") < agents.index("## Numerical policy")
