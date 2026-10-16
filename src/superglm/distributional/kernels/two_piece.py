@@ -507,10 +507,23 @@ def _log_mean_loading_third(
     ``g = a -+ r`` (``r`` the inverse Mills ratio of the piece) the piece
     derivatives use ``g'' = r + (a - 2r) r (r - a)`` (left) and
     ``g'' = -r + (a + 2r) r (a + r)`` (right), from ``r' = r (r - a)`` and
-    ``r' = -r (a + r)``.  The pieces combine by the log-sum-exp (cumulant) rule:
-    ``K_abc = R_abc - S_ab M_c - S_ac M_b - S_bc M_a + 2 M_a M_b M_c`` with the
-    mixture moments ``M_a = E[L_a]``, ``S_ab = E[L_ab + L_a L_b]`` and
-    ``R_abc = E[L_abc + L_ab L_c + L_ac L_b + L_bc L_a + L_a L_b L_c]``.
+    ``r' = -r (a + r)``.
+
+    ``log K = log(e^L1 + e^L2)`` is a softplus of ``L1 - L2``, so with the
+    piece weights ``w_j = e^(L_j - log K)``, ``E[.]`` their average and
+    ``D = L2 - L1`` differentiated channel by channel:
+
+    * ``K_ab = E[L_ab] + w1 w2 D_a D_b``,
+    * ``K_abc = E[L_abc] + w1 w2 (D_ab D_c + D_ac D_b + D_bc D_a)
+      + w1 w2 (w1 - w2) D_a D_b D_c``.
+
+    These are the mixture cumulants formed from centred piece derivatives,
+    since ``L_j,a - E[L_a]`` is ``-w2 D_a`` on the left piece and ``w1 D_a`` on
+    the right.  The raw-moment identity ``R_abc - 3 S M + 2 M^3`` cancels terms
+    of order ``E[L_a]^3`` when one piece dominates (16 against 0.305 at
+    ``sigma = 401.93``, ``eps = 0.8703``); here ``w1 w2`` vanishes there and
+    the one-piece limit is what remains.  ``w1 - w2`` is ``tanh((L1 - L2)/2)``,
+    accurate when the weights are equal.
 
     Returns ``(K_s, K_e, K_ss, K_se, K_ee, K_sss, K_sse, K_see, K_eee)``.
     """
@@ -553,37 +566,33 @@ def _log_mean_loading_third(
         ),
     )
 
-    def mixture(term) -> NDArray[np.float64]:
-        return sum(weight * term(*piece) for weight, piece in zip(weights, pieces, strict=True))
-
-    m_s = mixture(lambda ls, le, *_: ls)
-    m_e = mixture(lambda ls, le, *_: le)
-    s_ss = mixture(lambda ls, le, lss, lse, lee, *_: lss + ls * ls)
-    s_se = mixture(lambda ls, le, lss, lse, lee, *_: lse + ls * le)
-    s_ee = mixture(lambda ls, le, lss, lse, lee, *_: lee + le * le)
-    r_sss = mixture(
-        lambda ls, le, lss, lse, lee, lsss, lsse, lsee, leee: lsss + 3.0 * lss * ls + ls**3
+    w1, w2 = weights
+    spread = w1 * w2
+    tilt = np.tanh(0.5 * (log_left - log_right))  # w1 - w2
+    (ls1, le1, lss1, lse1, lee1, lsss1, lsse1, lsee1, leee1) = pieces[0]
+    (ls2, le2, lss2, lse2, lee2, lsss2, lsse2, lsee2, leee2) = pieces[1]
+    d_s, d_e = ls2 - ls1, le2 - le1
+    d_ss, d_se, d_ee = lss2 - lss1, lse2 - lse1, lee2 - lee1
+    m_s = w1 * ls1 + w2 * ls2
+    m_e = w1 * le1 + w2 * le2
+    k_ss = w1 * lss1 + w2 * lss2 + spread * d_s * d_s
+    k_se = w1 * lse1 + w2 * lse2 + spread * d_s * d_e
+    k_ee = w1 * lee1 + w2 * lee2 + spread * d_e * d_e
+    spread_tilt = spread * tilt
+    k_sss = w1 * lsss1 + w2 * lsss2 + spread * 3.0 * d_ss * d_s + spread_tilt * d_s**3
+    k_sse = (
+        w1 * lsse1
+        + w2 * lsse2
+        + spread * (d_ss * d_e + 2.0 * d_se * d_s)
+        + spread_tilt * d_s * d_s * d_e
     )
-    r_sse = mixture(
-        lambda ls, le, lss, lse, lee, lsss, lsse, lsee, leee: (
-            lsse + lss * le + 2.0 * lse * ls + ls * ls * le
-        )
+    k_see = (
+        w1 * lsee1
+        + w2 * lsee2
+        + spread * (d_ee * d_s + 2.0 * d_se * d_e)
+        + spread_tilt * d_s * d_e * d_e
     )
-    r_see = mixture(
-        lambda ls, le, lss, lse, lee, lsss, lsse, lsee, leee: (
-            lsee + lee * ls + 2.0 * lse * le + ls * le * le
-        )
-    )
-    r_eee = mixture(
-        lambda ls, le, lss, lse, lee, lsss, lsse, lsee, leee: leee + 3.0 * lee * le + le**3
-    )
-    k_ss = s_ss - m_s * m_s
-    k_se = s_se - m_s * m_e
-    k_ee = s_ee - m_e * m_e
-    k_sss = r_sss - 3.0 * s_ss * m_s + 2.0 * m_s**3
-    k_sse = r_sse - s_ss * m_e - 2.0 * s_se * m_s + 2.0 * m_s * m_s * m_e
-    k_see = r_see - s_ee * m_s - 2.0 * s_se * m_e + 2.0 * m_s * m_e * m_e
-    k_eee = r_eee - 3.0 * s_ee * m_e + 2.0 * m_e**3
+    k_eee = w1 * leee1 + w2 * leee2 + spread * 3.0 * d_ee * d_e + spread_tilt * d_e**3
     return m_s, m_e, k_ss, k_se, k_ee, k_sss, k_sse, k_see, k_eee
 
 

@@ -114,11 +114,15 @@ def mp_packed(function, point, dps=50):
     return first, second
 
 
-def mp_loading_derivatives(sigma, eps, dps=50):
-    """``(K_s, K_e, K_ss, K_se, K_ee)`` by high-precision differentiation."""
+def mp_loading_derivatives(sigma, eps, dps=50, orders=None):
+    """``(K_s, K_e, K_ss, K_se, K_ee)`` by high-precision differentiation.
+
+    ``orders`` selects other partial orders ``(i, j)`` in ``(sigma, eps)``.
+    """
     import mpmath as mp
 
     with mp.workdps(dps):
         pt = (mp.mpf(sigma), mp.mpf(eps))
-        orders = ((1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
+        if orders is None:
+            orders = ((1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
         return [float(mp.diff(lambda a, b: mp_log_mean_loading(a, b), pt, o)) for o in orders]
