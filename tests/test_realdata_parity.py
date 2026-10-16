@@ -681,3 +681,59 @@ def test_brand_b12_past_vehicle_age_22_is_held_not_priced_at_the_floor():
         rtol=0,
         atol=64 * unit * 16,
     )
+
+
+@GAMMA_SKIP
+def test_book_severity_gamma_log_discrete_finishes_a_stalled_fisher_iteration_on_newton():
+    """The corrected book's severity Gamma/log fit, mains and four pairs, discrete.
+
+    Its Fisher performance iteration slows to a crawl near the stop (the stop
+    score barely moves over the last iterations) and ran to the 20-iteration
+    cap; mgcv's bam fails the same model (200 PIRLS iterations, "algorithm
+    did not converge").  Measured stalled, the iteration switches to Newton
+    rows and converges.  Mutation check: before the switch the fit ended at
+    ``max_reml_iter``.
+    """
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Numeric
+
+    freq = _datasets.load_freq_corrected()
+    freq["LogDensity"] = np.log1p(freq["Density"].to_numpy(dtype=np.float64))
+    for column in ("DrivAge", "VehAge", "BonusMalus"):
+        freq[column] = freq[column].astype(np.float64)
+    for column in ("VehBrand", "Region"):
+        freq[column] = freq[column].astype(str)
+    perm = np.random.default_rng(20261012).permutation(len(freq))
+    freq["is_train"] = False
+    freq.loc[freq.index[perm[: int(round(0.8 * len(freq)))]], "is_train"] = True
+    columns = ["IDpol", "DrivAge", "VehAge", "BonusMalus", "LogDensity", "VehBrand", "Region"]
+    sev = _datasets.load_sev().merge(freq[[*columns, "is_train"]], on="IDpol", how="inner")
+    sev = sev[(sev["ClaimAmount"] > 0) & sev["is_train"]].reset_index(drop=True)
+    model = SuperGLM(
+        family="gamma",
+        link="log",
+        features={
+            "DrivAge": Spline(n_knots=8),
+            "VehAge": Spline(n_knots=12),
+            "BonusMalus": Spline(n_knots=12, knot_strategy="quantile_tempered", knot_alpha=0.2),
+            "LogDensity": Numeric(),
+            "VehBrand": Categorical(),
+            "Region": Categorical(),
+        },
+        interactions=[
+            ("VehAge", "VehBrand"),
+            ("VehAge", "BonusMalus"),
+            ("DrivAge", "BonusMalus"),
+            ("BonusMalus", "VehBrand"),
+        ],
+        discrete=True,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame(sev[columns[1:]]), sev["ClaimAmount"].to_numpy(np.float64))
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"]
+    assert model._reml_profile.get("reml_poi_newton_switch_iter") is not None

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
-from superglm.features import Spline
+from superglm.features import Categorical, Spline
 from superglm.reml.scale import (
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
@@ -114,3 +114,47 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
 
     assert prepare_calls == 1
     assert hessian_checks >= 2
+
+
+def test_a_converging_discrete_gamma_log_fit_keeps_its_fisher_iteration():
+    """A discrete Gamma/log fit whose Fisher performance iteration converges never switches.
+
+    The switch to Newton rows is for an iteration measured to cycle or stall
+    (``reml.discrete.poi_stalled``); one that converges keeps Fisher rows and
+    their Gram reuse, and reports the Fisher curvature it optimized.
+    Mutation check: Newton rows from the start reported ``"observed"``.
+    """
+    rng = np.random.default_rng(3)
+    n = 4000
+    x = rng.integers(0, 40, n) / 40.0
+    level = rng.integers(0, 4, n).astype(str)
+    y = rng.gamma(0.7, np.exp(1.0 + np.sin(5.0 * x) + 0.2 * (level == "1")) / 0.7)
+    model = SuperGLM(
+        family="gamma",
+        link="log",
+        features={"x": Spline(n_knots=8), "c": Categorical()},
+        discrete=True,
+    )
+    model.fit_reml(pd.DataFrame({"x": x, "c": level}), y)
+    assert model.reml_diagnostics()["converged"]
+    assert "reml_poi_newton_switch_iter" not in model._reml_profile
+    assert model._reml_result.curvature_source == "fisher"
+
+
+@pytest.mark.parametrize(
+    ("ratios", "rose", "done", "stalled"),
+    [
+        # converging: the stop score falls fast enough to stop in the budget
+        ([np.inf, 1.7e5, 5.6e4, 2.8e4, 3.9e3], False, 5, False),
+        # stalling: three iterations barely move a score far above the stop
+        ([np.inf, 3.1e5, 1.9e5, 1.15e5, 1.9e5], False, 5, True),
+        # cycling: the objective rose near the stop
+        ([np.inf, 1.3e6, 6.8e5, 285.0], True, 4, True),
+        # a rise far from the stop is the working model still moving
+        ([np.inf, 1.3e6, 6.8e5], True, 3, False),
+    ],
+)
+def test_poi_stalled_reads_cycles_and_stalls_near_the_stop(ratios, rose, done, stalled):
+    from superglm.reml.discrete import poi_stalled
+
+    assert poi_stalled(ratios, rose=rose, done=done, max_iter=20) is stalled

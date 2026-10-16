@@ -980,6 +980,7 @@ def fit_irls_direct(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _working_newton: bool = False,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1040,6 +1041,7 @@ def fit_irls_direct(
             _compute_reml_geometry=_compute_reml_geometry,
             _retain_reml_decomposition=_retain_reml_decomposition,
             _use_observed_newton=_use_observed_newton,
+            _working_newton=_working_newton,
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
@@ -1094,6 +1096,7 @@ def _fit_irls_direct_once(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _working_newton: bool = False,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1195,6 +1198,11 @@ def _fit_irls_direct_once(
         with one joint latent-coordinate LAML geometry. This requires both
         retained rank metadata and fit statistics to be disabled. Public and
         terminal fits must leave this True.
+    _working_newton : bool
+        Internal fREML switch, read only with ``_return_working_system``: the
+        performance iteration's update takes the declared pairs' Newton rows
+        instead of Fisher's, once the discrete optimizer measured its Fisher
+        iteration to cycle or stall (``reml.discrete``).
     _use_observed_newton : bool
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
@@ -2088,13 +2096,21 @@ def _fit_irls_direct_once(
     # positive definite takes a Levenberg shift inside the same curvature
     # (``_levenberg_shifted_operator``), and a trial whose observed rows are
     # not finite is rejected by the line search.
+    # The fREML performance iteration (``_return_working_system``) keeps
+    # Fisher rows unless its optimizer asks for Newton's (``_working_newton``),
+    # which it does once its Fisher iteration is measured to cycle or stall
+    # (``reml.discrete``; Wood 2008, JRSSB 70(3), section 2.1: performance
+    # iteration "diverges, or cycles").
     _observed_newton_active = bool(
         _use_observed_newton
         and not has_constraints
         and not _has_scop
-        and not _return_working_system
         and supports_observed_newton(family, link)
-        and not _has_constant_irls_weights(family, link)
+        and (
+            _working_newton
+            if _return_working_system
+            else not _has_constant_irls_weights(family, link)
+        )
     )
     # A declared Newton pair kept on Fisher rows for its constant weights
     # (Gamma/log), which switches to Newton if its Fisher score stagnates.
