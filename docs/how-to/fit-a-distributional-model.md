@@ -1203,7 +1203,7 @@ the packed rows.
 | `LogNormalLS` | smooth to every order | yes | yes (built-in links only) | yes (built-in links only) |
 | `GeneralizedGammaLSS` | smooth to every order; `Q = 0` is removable and the kernel's series cover it | yes | yes | yes |
 | `GeneralizedParetoLSS` | smooth to every order on `0 < ξ < 1` | yes | yes | yes |
-| `TwoPieceNormalLSS`, `TwoPieceLogNormalLSS` | `C¹` only: the curvature jumps at the mode `w = 0` | yes, away from the kink | yes away from the kink; a path through the kink is refused and differenced, because there the third derivative is a point mass | yes away from the kink; refused and differenced on it |
+| `TwoPieceNormalLSS`, `TwoPieceLogNormalLSS` | `C¹` only: the curvature jumps at the mode `w = 0` | yes, away from the kink | yes away from the kink; a path through the kink is refused and differenced, because there the third derivative is a point mass | yes away from the kink, with a certificate near it; refused and differenced on it |
 
 For the two-piece families a path through the kink takes the differenced
 route with its certificate, which is the correct method there, not a
@@ -1215,6 +1215,11 @@ Fellner–Schall route and are certified by differences, and no analytic
 endgame exists for them. A family is a candidate for the analytic hook exactly
 when its row log-likelihood is `C³` in every natural parameter over the whole
 support the links can reach.
+
+Two-piece rows close enough to the kink that a step of `1e-3` along either
+direction could carry them across it keep their analytic fourth derivatives,
+but report a certificate scaled by the curvature jump there, so the endgame
+trusts that Hessian no more than a differenced one.
 
 ## Telemetry and serialization
 
