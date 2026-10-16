@@ -20657,5 +20657,13 @@
     "tests/test_negative_binomial_third_derivatives.py::test_certified_direction_bounds_its_theta_channel_against_the_oracle": 0.193,
     "tests/test_negative_binomial_third_derivatives.py::test_gradient_certificate_carries_the_theta_third_bound": 0.052,
     "tests/test_negative_binomial_third_derivatives.py::test_axis_derivatives_are_evaluated_once": 0.002,
-    "tests/test_release_packaging.py::test_the_symbolic_oracle_is_a_dev_dependency_never_imported_by_the_package": 3.818
+    "tests/test_release_packaging.py::test_the_symbolic_oracle_is_a_dev_dependency_never_imported_by_the_package": 3.818,
+    "tests/test_benchmark_books.py::test_benchboard_payload_follows_worker_protocol_v1": 0.001057491172105074,
+    "tests/test_benchmark_books.py::test_compare_pairs_a_record_with_the_baseline_of_the_same_key": 0.001429431140422821,
+    "tests/test_benchmark_books.py::test_compare_refuses_a_key_that_differs[dataset_hash-<lambda>]": 0.0008413344621658325,
+    "tests/test_benchmark_books.py::test_compare_refuses_a_key_that_differs[environment.numpy-<lambda>]": 0.0009103198535740376,
+    "tests/test_benchmark_books.py::test_compare_refuses_a_key_that_differs[machine.cpu_model-<lambda>]": 0.0009316140785813332,
+    "tests/test_benchmark_books.py::test_compare_refuses_a_key_that_differs[spec_hash-<lambda>]": 0.0009965463541448116,
+    "tests/test_benchmark_books.py::test_compare_refuses_without_a_usable_baseline": 0.0005606049671769142,
+    "tests/test_benchmark_books.py::test_counts_only_record_has_every_field_and_no_timing": 7.826306206639856
 }
