@@ -17,11 +17,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._blas_threads import pooled_blas_threads
 from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
 from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
+from superglm._parallel import pooled_map
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
@@ -205,9 +207,12 @@ def _leverage_derivative_terms(
     grad_compensation = np.zeros(m, dtype=np.float64)
     cross = np.zeros((m, m), dtype=np.float64)
     cross_compensation = np.zeros((m, m), dtype=np.float64)
-    for rows, solved, leverage in solved_row_blocks(
-        dm, inverse, mean_x, mean_lo, row_weights != 0.0
-    ):
+
+    def contributions(block):
+        """One block's gradient and cross-trace terms (``None`` for a block with no active row)."""
+        if block is None:
+            return None
+        rows, solved, leverage = block
         quadratic = np.empty((rows.size, m), dtype=np.float64)
         directions = np.empty((rows.size, m), dtype=np.float64)
         for batch, rhs in zip(batches, block_rhs, strict=True):
@@ -240,9 +245,26 @@ def _leverage_derivative_terms(
                     squares.T[:, :, None] * batch.identity_scales[None, :, :]
                 )
         weighted = row_weights[rows, None] * directions
+        return (
+            weighted.T @ (0.5 * (leverage + 1.0 / sum_w)),
+            quadratic.T @ weighted,
+        )
+
+    # Blocks are formed and reduced on the pool when they are independent;
+    # their terms are summed here in row order either way, so the totals are
+    # the same at every worker count (``_parallel.pooled_map``).
+    blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
+    if blocks.block_bytes is None:
+        with pooled_blas_threads():
+            parts = [contributions(job()) for job in blocks.jobs]
+    else:
+        parts = pooled_map(lambda job: contributions(job()), list(blocks.jobs), blocks.block_bytes)
+    for part in parts:
+        if part is None:
+            continue
         for total, compensation, contribution in (
-            (grad, grad_compensation, weighted.T @ (0.5 * (leverage + 1.0 / sum_w))),
-            (cross, cross_compensation, quadratic.T @ weighted),
+            (grad, grad_compensation, part[0]),
+            (cross, cross_compensation, part[1]),
         ):
             corrected = contribution - compensation
             updated = total + corrected

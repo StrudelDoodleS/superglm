@@ -209,6 +209,43 @@ def test_leverage_terms_match_derivative_grams_within_rounding(monkeypatch, prod
     assert np.max(cross_bound) < 1e-6 * np.max(np.abs(reference_cross))
 
 
+def test_solved_row_pass_is_bitwise_at_every_worker_count(monkeypatch):
+    """The support route's blocks run on a pool and sum in row order: the same bits at any count.
+
+    Small blocks make several independent jobs; the test records which
+    threads formed them, so it fails if the pool never ran.
+    """
+    import threading
+
+    import superglm.reml._leverage_rows as leverage_rows
+    from superglm._parallel import parallel_config
+
+    _solved_rows_only(monkeypatch)
+    model = _poisson_model(1.0e3)
+    monkeypatch.setattr(leverage_rows, "_BLOCK_BYTES", 1)  # 256-row blocks
+    threads: set[str] = set()
+    original_block = leverage_rows._support_block
+
+    def block(*args, **kwargs):
+        threads.add(threading.current_thread().name)
+        return original_block(*args, **kwargs)
+
+    monkeypatch.setattr(leverage_rows, "_support_block", block)
+    args, kwargs = _correction_inputs(model)
+    results = {}
+    for workers in (1, 2, 5):
+        threads.clear()
+        with parallel_config(n_jobs=workers):
+            results[workers] = w_derivatives.reml_w_correction(
+                *args, leverage_hessian=True, **kwargs
+            )
+        pooled = any(name.startswith("superglm-map") for name in threads)
+        assert pooled == (workers > 1)
+    for workers in (2, 5):
+        assert results[workers][0].tobytes() == results[1][0].tobytes()
+        assert results[workers][2].tobytes() == results[1][2].tobytes()
+
+
 def _outlier_case() -> dict:
     """A dense column with a ``1e200`` row that carries no weight, beside a categorical."""
     rng = np.random.default_rng(9411)
