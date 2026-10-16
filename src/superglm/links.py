@@ -160,11 +160,13 @@ class ProbitLink:
         return _normal_pdf(_as_float64(eta))
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
-        return -eta * _normal_pdf(_as_float64(eta))
+        eta = _as_float64(eta)
+        return -eta * _normal_pdf(eta)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = (η² - 1)·φ(η). Wood (2011) Appendix D."""
-        return (eta**2 - 1) * _normal_pdf(_as_float64(eta))
+        eta = _as_float64(eta)
+        return (eta**2 - 1) * _normal_pdf(eta)
 
 
 #: ``sqrt(2 pi)`` as ``scipy.stats`` forms it, so the density below is the same float64.
@@ -172,9 +174,13 @@ _NORMAL_PDF_C = np.sqrt(2 * np.pi)
 
 
 def _as_float64(values):
-    """``scipy.stats.norm``'s argument conversion: promote to at least float64."""
-    values = np.asarray(values)
-    return np.asarray(values, dtype=np.promote_types(values.dtype, np.float64))
+    """The probit kernels' argument as binary64.
+
+    Always float64, never an extended type (``AGENTS.md``, numerical policy):
+    ``scipy.stats.norm`` (master) promoted with ``promote_types``, which keeps
+    ``longdouble``. The solver passes float64, where the two agree.
+    """
+    return np.asarray(values, dtype=np.float64)
 
 
 def _normal_pdf(x):

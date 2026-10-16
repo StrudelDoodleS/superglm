@@ -1,10 +1,21 @@
-"""The probit link's normal cdf and pdf are scipy.stats.norm's float64 values, without scipy.stats."""
+"""The probit link's normal cdf and pdf: binary64, accurate to a derived bound, and scipy-identical."""
+
+import math
+from decimal import Decimal, localcontext
 
 import numpy as np
 import pytest
+import scipy
 import scipy.stats
 
-from superglm.links import ProbitLink
+from superglm.links import ProbitLink, _normal_pdf
+
+U = 2.0**-53
+#: scipy releases whose ``_norm_pdf`` is ``np.exp(-x**2/2.0) / np.sqrt(2*np.pi)``
+#: and whose ``_norm_cdf`` is ``ndtr`` (read in scipy/stats/_continuous_distns.py
+#: at v1.15.0, v1.16.0, v1.17.0, v1.18.0). Another release needs that re-read.
+_SCIPY_PARITY = {(1, 15), (1, 16), (1, 17), (1, 18)}
+_PI_60 = Decimal("3.14159265358979323846264338327950288419716939937510582097494")
 
 
 def _grid():
@@ -30,6 +41,54 @@ def _bits(values):
     return np.asarray(values, dtype=np.float64).view(np.uint64)
 
 
+def test_the_density_is_the_in_repo_expression_bit_for_bit():
+    x = _grid()
+    with np.errstate(over="ignore"):
+        expected = np.exp(-(x**2) / 2.0) / np.sqrt(2 * np.pi)
+        actual = _normal_pdf(x)
+    np.testing.assert_array_equal(_bits(actual), _bits(expected))
+
+
+def test_the_density_is_within_its_rounding_bound_of_the_exact_value():
+    """``|phi^ - phi| <= ((x**2 / 2) + 4.5) u |phi|`` against a 60-digit oracle, while phi is normal.
+
+    ``fl(x*x)`` carries ``|d1| <= u`` and halving is exact, so the exponent
+    is ``-(x**2 / 2)(1 + d1)`` and ``exp`` turns ``d1`` into a relative
+    factor ``exp(x**2 d1 / 2)``, at most ``(x**2 / 2) u``. NumPy's own
+    accuracy validation set holds float64 ``exp`` to 1 ulp (``2u``
+    relative); ``sqrt(fl(2 pi))`` carries ``u/2`` from pi and ``u`` from the
+    correctly rounded sqrt; the division ``u``. First order: ``(x**2/2 + 4.5) u``;
+    the second-order terms are below ``1e-10`` of it on this grid. Outside
+    ``|x| <= 37`` the density is subnormal and the bound is absolute instead.
+    """
+    rng = np.random.default_rng(37)
+    x = np.concatenate([np.linspace(-37.0, 37.0, 1_001), rng.uniform(-37.0, 37.0, 500), [0.0]])
+    computed = _normal_pdf(x)
+    with localcontext() as context:
+        context.prec = 60
+        root = (2 * _PI_60).sqrt()
+        for value, observed in zip(x.tolist(), computed.tolist(), strict=True):
+            exact = (-(Decimal(value) * Decimal(value)) / 2).exp() / root
+            bound = (value * value / 2.0 + 4.5) * U * (1.0 + 1e-9)
+            assert abs(Decimal(observed) - exact) <= Decimal(bound) * exact, value
+
+
+@pytest.mark.parametrize("method", ["inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse"])
+def test_an_extended_argument_is_evaluated_in_binary64(method):
+    """``np.longdouble`` is cast to float64, never carried through (``AGENTS.md``).
+
+    Mutation check: promoting with ``promote_types`` (as ``scipy.stats.norm``
+    did on master) keeps ``longdouble`` where it is wider than binary64.
+    """
+    eta = np.linspace(-6.0, 6.0, 25)
+    link = ProbitLink()
+    with np.errstate(all="ignore"):
+        extended = getattr(link, method)(eta.astype(np.longdouble))
+        binary64 = getattr(link, method)(eta)
+    assert np.asarray(extended).dtype == np.float64
+    np.testing.assert_array_equal(_bits(extended), _bits(binary64))
+
+
 @pytest.mark.parametrize(
     ("method", "reference"),
     [
@@ -39,7 +98,13 @@ def _bits(values):
         ("deriv3_inverse", lambda eta: (eta**2 - 1) * scipy.stats.norm.pdf(eta)),
     ],
 )
-def test_probit_eta_kernels_match_scipy_stats_bit_for_bit(method, reference):
+def test_probit_eta_kernels_keep_parity_with_the_scipy_stats_master_used(method, reference):
+    """Master called ``scipy.stats.norm``; for the verified scipy releases the values are identical."""
+    release = tuple(int(part) for part in scipy.__version__.split(".")[:2])
+    if release not in _SCIPY_PARITY:
+        pytest.skip(
+            f"scipy {scipy.__version__}: re-read _norm_pdf/_norm_cdf before claiming parity"
+        )
     eta = _grid()
     with np.errstate(invalid="ignore", over="ignore"):
         actual = getattr(ProbitLink(), method)(eta)
@@ -47,15 +112,17 @@ def test_probit_eta_kernels_match_scipy_stats_bit_for_bit(method, reference):
     finite = np.isfinite(expected)
     np.testing.assert_array_equal(_bits(actual[finite]), _bits(expected[finite]))
     np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
-    np.testing.assert_array_equal(
-        actual[~finite & ~np.isnan(expected)], expected[~finite & ~np.isnan(expected)]
-    )
+    tails = ~finite & ~np.isnan(expected)
+    np.testing.assert_array_equal(actual[tails], expected[tails])
     scalar = getattr(ProbitLink(), method)(-1.25)
     assert type(scalar) is type(reference(-1.25))
     assert _bits(scalar) == _bits(reference(-1.25))
 
 
-def test_probit_deriv_matches_scipy_stats_bit_for_bit():
+def test_probit_deriv_keeps_parity_with_scipy_stats():
+    release = tuple(int(part) for part in scipy.__version__.split(".")[:2])
+    if release not in _SCIPY_PARITY:
+        pytest.skip(f"scipy {scipy.__version__}: re-read _norm_pdf before claiming parity")
     mu = np.r_[np.linspace(0.0, 1.0, 10_001), 1e-7, 1 - 1e-7, 1e-15, 1 - 1e-15, 1e-300]
     norm = scipy.stats.norm
     expected = 1.0 / norm.pdf(norm.ppf(np.clip(mu, 1e-15, 1 - 1e-15)))
@@ -73,3 +140,4 @@ def test_probit_eta_kernels_do_not_route_through_scipy_stats(monkeypatch):
     link, eta = ProbitLink(), np.linspace(-6.0, 6.0, 13)
     for method in ("inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse"):
         getattr(link, method)(eta)
+    assert math.isfinite(float(link.inverse(0.0)))
