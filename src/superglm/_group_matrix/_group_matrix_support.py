@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import numpy as np
 import scipy.sparse as sp
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 # Require a real win before paying the bookkeeping and the (n_support, p_b)
@@ -142,11 +143,78 @@ def _row_hash_multipliers(p_b: int) -> NDArray:
     return mults | np.uint64(1)
 
 
+@njit(cache=True, nogil=True)
+def _csr_row_hashes(indptr, indices, data, mults, hashes):  # pragma: no cover - compiled
+    """``_row_hashes`` on a canonical CSR matrix's stored entries, without densifying.
+
+    A densified row holds ``0.0 + v`` at a stored entry (SciPy adds the
+    entries into zeros, so a stored ``-0.0`` reads ``+0.0``) and ``+0.0``,
+    whose bits are zero, everywhere else; the uint64 mix is a wrapping sum,
+    so summing the stored entries' terms in any order gives its value.
+    """
+    value = np.empty(1, dtype=np.float64)
+    for r in range(hashes.shape[0]):
+        h = np.uint64(0)
+        for k in range(indptr[r], indptr[r + 1]):
+            value[0] = 0.0 + data[k]
+            h += value.view(np.uint64)[0] * mults[indices[k]]
+        hashes[r] = h
+
+
+@njit(cache=True, nogil=True)
+def _csr_rows_match(indptr, indices, data, row_index, rep_bits):  # pragma: no cover - compiled
+    """Whether every densified row's bits equal its representative's, read from the stored entries.
+
+    A row matches when each stored entry's ``0.0 + v`` has the representative's
+    bits in its column and the representative's other columns are all ``+0.0``
+    (zero bits): the same test as comparing the densified rows.
+    """
+    rep_nonzero = np.zeros(rep_bits.shape[0], dtype=np.int64)
+    for g in range(rep_bits.shape[0]):
+        for j in range(rep_bits.shape[1]):
+            if rep_bits[g, j] != 0:
+                rep_nonzero[g] += 1
+    value = np.empty(1, dtype=np.float64)
+    for r in range(row_index.shape[0]):
+        g = row_index[r]
+        nonzero = 0
+        for k in range(indptr[r], indptr[r + 1]):
+            value[0] = 0.0 + data[k]
+            bits = value.view(np.uint64)[0]
+            if bits != rep_bits[g, indices[k]]:
+                return False
+            if bits != 0:
+                nonzero += 1
+        if nonzero != rep_nonzero[g]:
+            return False
+    return True
+
+
+_POOLED_SUPPORT_KERNELS = (_csr_row_hashes, _csr_rows_match)
+"""The kernels a support scan runs on an interaction build's pool worker: ``nogil``, never
+``prange``, writing only the arrays the call allocates."""
+
+
+def _canonical_csr(B_csr: sp.spmatrix) -> sp.csr_matrix | None:
+    """The matrix as a CSR matrix whose rows hold each column at most once, or ``None``."""
+    if not sp.isspmatrix_csr(B_csr) and not isinstance(B_csr, sp.csr_array):
+        return None
+    if not B_csr.has_canonical_format:
+        return None
+    return B_csr
+
+
 def _row_hashes(B_csr: sp.spmatrix, chunk_rows: int) -> NDArray:
     """Mix each dense row's raw float bits column-wise into one uint64."""
     n_rows, p_b = B_csr.shape
     mults = _row_hash_multipliers(p_b)
     hashes = np.empty(n_rows, dtype=np.uint64)
+    csr = _canonical_csr(B_csr)
+    if csr is not None:
+        _csr_row_hashes(
+            csr.indptr, csr.indices, np.asarray(csr.data, dtype=np.float64), mults, hashes
+        )
+        return hashes
     for start in range(0, n_rows, chunk_rows):
         stop = min(start + chunk_rows, n_rows)
         block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)
@@ -174,6 +242,16 @@ def _verified_representatives(
         B_csr[np.asarray(first_occurrence, dtype=np.intp)].toarray(), dtype=np.float64
     )
     rep_bits = representatives.view(np.uint64)
+    csr = _canonical_csr(B_csr)
+    if csr is not None:
+        matches = _csr_rows_match(
+            csr.indptr,
+            csr.indices,
+            np.asarray(csr.data, dtype=np.float64),
+            np.asarray(row_index, dtype=np.intp),
+            rep_bits,
+        )
+        return representatives if matches else None
     for start in range(0, n_rows, chunk_rows):
         stop = min(start + chunk_rows, n_rows)
         block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)

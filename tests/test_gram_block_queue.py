@@ -359,6 +359,7 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 
 
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
+    from superglm._group_matrix import _group_matrix_support
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
@@ -368,6 +369,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + lookup_tables._POOLED_ROW_KERNELS
         + _leverage_rows._POOLED_ROW_KERNELS
         + interaction._POOLED_BUILD_KERNELS
+        + _group_matrix_support._POOLED_SUPPORT_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
