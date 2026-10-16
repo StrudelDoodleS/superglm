@@ -134,26 +134,26 @@ def _certified_second_direction(
     )
     single = np.ndim(direction_a) == 2
     predictors, first, second = second_direction_arrays(response, eta, direction_a, direction_b, 3)
-    theta, *derivatives = link_derivative_columns(predictors, tuple(links), 3)
+    theta, g1, g2, g3 = link_derivative_columns(predictors, tuple(links), 3)
     if mean_form:
         logk, k_s, k_e = log_mean_loading(theta[:, 1], theta[:, 2])[:3]
         location = np.log(theta[:, 0]) - logk
         jumps = mean_join_jumps(theta[:, 0], theta[:, 1], theta[:, 2], multiplier)
         gradient = np.column_stack(
             (
-                derivatives[0][:, 0] / theta[:, 0],
-                -k_s * derivatives[0][:, 1],
-                -k_e * derivatives[0][:, 2],
+                g1[:, 0] / theta[:, 0],
+                -k_s * g1[:, 1],
+                -k_e * g1[:, 2],
             )
         )
     else:
         location = theta[:, 0]
         jumps = location_join_jumps(theta[:, 1], theta[:, 2], multiplier)
         zero = np.zeros_like(location)
-        gradient = np.column_stack((derivatives[0][:, 0], zero, zero))
+        gradient = np.column_stack((g1[:, 0], zero, zero))
     with np.errstate(over="ignore", invalid="ignore"):
         certificate = join_certificate(
-            np.abs(variate - location), gradient, jumps, tuple(derivatives), first, second
+            np.abs(variate - location), gradient, jumps, (g1, g2, g3), first, second
         )
     if not np.all(np.isfinite(certificate)):
         raise ValueError("the two-piece join certificate is not representable at this state")
