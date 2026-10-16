@@ -117,6 +117,7 @@ from superglm.solvers.mode_score import (
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
+    rate_exhausts_budget,
     row_set_quadratics,
     row_set_residual,
     row_sets,
@@ -2070,10 +2071,19 @@ def _fit_irls_direct_once(
     # Fisher weights reuse one weighted Gram that Newton would rebuild every
     # iteration; the mode certificate's bar is set by the REML tolerance
     # (``mode_score.mode_certification_bar``), which Fisher's linear rate
-    # reaches.  The exported geometry is Fisher either way (``export_rows``),
-    # and the weighted-Gram cache is off while Newton runs.  The curvature is
-    # decided here, once, from the family, the link and the route (one-engine
-    # design §3.11): no iterate switches it.
+    # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
+    # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
+    # information ``w y / mu`` exceeds twice the Fisher information ``w``
+    # along a direction, as heavy-tailed severities give, and there the score
+    # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
+    # it in the budget.  Such a solve switches to Newton once its resolved
+    # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
+    # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
+    # reaches the bar in time never switches.
+    # The exported geometry is Fisher either way (``export_rows``), and the
+    # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
+    # is decided here, once, from the family, the link and the route
+    # (one-engine design §3.11).
     # An observed iterate whose Hessian the structured factor refuses as not
     # positive definite takes a Levenberg shift inside the same curvature
     # (``_levenberg_shifted_operator``), and a trial whose observed rows are
@@ -2085,6 +2095,16 @@ def _fit_irls_direct_once(
         and not _return_working_system
         and supports_observed_newton(family, link)
         and not _has_constant_irls_weights(family, link)
+    )
+    # A declared Newton pair kept on Fisher rows for its constant weights
+    # (Gamma/log), which switches to Newton if its Fisher score stagnates.
+    _stagnation_newton_available = bool(
+        _use_observed_newton
+        and not has_constraints
+        and not _has_scop
+        and not _return_working_system
+        and supports_observed_newton(family, link)
+        and not _observed_newton_active
     )
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
@@ -3753,6 +3773,34 @@ def _fit_irls_direct_once(
                     and min(_mode_ratios[-_stagnation_window:])
                     > 0.5 * min(_mode_ratios[:-_stagnation_window])
                 )
+                if (
+                    _stagnation_newton_available
+                    and not _observed_newton_active
+                    and not converged_this_iter
+                    and (
+                        score_stagnated
+                        or (
+                            residual.resolved
+                            and rate_exhausts_budget(
+                                _mode_ratios, _stagnation_window, it + 1, max_iter
+                            )
+                        )
+                    )
+                ):
+                    # Fisher scoring near the mode contracts too slowly to
+                    # meet the bar in the budget, or not at all (the comment
+                    # at ``_observed_newton_active``): the iterations left
+                    # take Newton steps on the observed information, positive
+                    # for Gamma/log (``w y / mu``), so the penalized Hessian
+                    # stays positive definite.
+                    _observed_newton_active = True
+                    _can_reuse_weighted_gram = False
+                    score_stagnated = False
+                    _mode_ratios.clear()
+                    if profile is not None:
+                        profile["irls_fisher_newton_switches"] = (
+                            profile.get("irls_fisher_newton_switches", 0) + 1
+                        )
                 if (
                     not converged_this_iter
                     and not step_rejected

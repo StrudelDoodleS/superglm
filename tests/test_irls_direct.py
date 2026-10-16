@@ -965,6 +965,52 @@ class TestDirectSolverBasic:
         assert "irls_observed_newton_rescues" not in profile
         assert "irls_observed_newton_iters" not in profile
 
+    def test_gamma_log_switches_to_newton_when_fisher_cannot_reach_the_bar(self):
+        """Fisher scoring that contracts too slowly for the budget finishes on Newton steps.
+
+        The response is built so the mode is known (beta = 0.2) and the
+        observed information ``y / mu`` is 0.01 on the six high-leverage rows:
+        along the slope it is about 0.14 of the Fisher information, so
+        Fisher's error map ``1 - F^-1 H`` contracts at about 0.86 an
+        iteration and its 100-iteration budget ends short of the bar (before
+        the fix: ``max_iter``, not converged).  The resolved score's measured
+        rate shows it, and the iterations left take Newton steps.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        n, far = 200, 6
+        x = np.zeros(n)
+        x[:far] = 8.0
+        x[far:] = np.linspace(-1.0, 1.0, n - far)
+        design = np.column_stack([np.ones(n), x])
+        ratio = np.ones(n)
+        ratio[:far] = 0.01
+        # the near rows take the correction that makes the mode exact
+        correction = np.linalg.lstsq(
+            design[far:].T, -design[:far].T @ (ratio[:far] - 1.0), rcond=None
+        )[0]
+        ratio[far:] = 1.0 + correction
+        assert np.all(ratio > 0.0)
+        y = ratio * np.exp(1.0 + 0.2 * x)
+        profile: dict = {}
+        result, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert result.converged
+        assert profile["irls_fisher_newton_switches"] == 1
+        np.testing.assert_allclose(result.beta, [0.2], rtol=1e-7)
+
     def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
         """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
 
