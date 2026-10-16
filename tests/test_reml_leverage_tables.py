@@ -50,10 +50,14 @@ def _centre(model: SuperGLM) -> tuple[np.ndarray, np.ndarray]:
 def _magnitudes(model: SuperGLM, centre: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
     """Row magnitudes ``M_r`` with ``eta_r <= M_r' |V| M_r``, the zero-row mask, the widest basis.
 
-    A support group's row is ``B[k] R``: its magnitude is ``(|B| |R|)[k]``,
-    which also bounds the rounding of either route's product ``B R`` (``gamma_w``
-    of it, ``w`` the basis width).  A raw group (categorical, spline level)
-    reads its centre separately from its row, so it carries ``|c|`` twice.
+    A support group's row is ``B[k] R``: its magnitude is ``(|B| |R|)[k]``
+    plus the anchor row's ``(|B| |R|)[a]`` (bounded by the column maximum).
+    The tables read ``(B[k] - B[a]) R - (c - B[a] R)``, which rounds within
+    ``gamma_(w+1) (|B[k]| + |B[a]|) |R|`` for the product and ``gamma_w
+    |B[a]| |R|`` for the offset (``w`` the basis width), and the other route's
+    ``B[k] R`` within ``gamma_w`` of the first term.  A raw group (categorical,
+    spline level, unanchored) reads its centre separately from its row, so it
+    carries ``|c|`` twice.
     """
     dm = model._dm
     rows, column, widest = [], 0, 1
@@ -78,7 +82,8 @@ def _magnitudes(model: SuperGLM, centre: np.ndarray) -> tuple[np.ndarray, np.nda
             widest = max(widest, gm.B_unique.shape[1])
         else:
             assert isinstance(gm, DiscretizedSSPGroupMatrix)
-            rows.append((np.abs(gm.B_unique) @ np.abs(gm.R_inv))[gm.bin_idx])
+            support = np.abs(gm.B_unique) @ np.abs(gm.R_inv)
+            rows.append(support[gm.bin_idx] + support.max(axis=0))
             widest = max(widest, gm.B_unique.shape[1])
         column += width
     magnitude = np.hstack(rows) + np.where(dense, 0.0, np.where(raw, 2.0, 1.0)) * np.abs(centre)
@@ -92,8 +97,9 @@ def test_table_leverages_match_the_dense_design_within_their_bound(monkeypatch, 
 
     Bound: the table route is within ``gamma_K eta_r`` (``K =
     TablePlan.count_roundings()``, module docstring); the dense reference
-    within ``gamma_(2p+2) eta_r``; the two routes' raw rows ``B R`` round
-    apart by ``gamma_w`` of ``|B| |R|`` each, adding ``2 gamma_w`` twice.  A
+    within ``gamma_(2p+2) eta_r``; the two routes' support rows round apart
+    by ``gamma_(w+1)`` of the anchored magnitudes ``_magnitudes`` carries,
+    adding ``4 gamma_w`` (covered by ``4 w + 4``).  A
     dropped centre term was 3% off on this fixture, a million times the bound.
     """
     model = _poisson_model(offset)
@@ -113,7 +119,7 @@ def test_table_leverages_match_the_dense_design_within_their_bound(monkeypatch, 
     reference = np.einsum("ij,jk,ik->i", centred, inverse, centred)
     magnitude, _, widest = _magnitudes(model, centre_hi + centre_lo)
     eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
-    k = plan.count_roundings() + 2 * dm.p + 2 + 4 * widest
+    k = plan.count_roundings() + 2 * dm.p + 2 + 4 * widest + 4
     bound = _gamma(k) * eta
 
     assert np.all(np.abs(leverage - reference) <= bound)
@@ -461,8 +467,8 @@ def _hand_built_design(
 
 
 def _hand_built_magnitudes(dm, centre: np.ndarray) -> tuple[np.ndarray, int]:
-    """``_magnitudes`` for the hand-built design: ``|B| |R|`` rows plus ``|c|``, raw rows plus
-    ``2 |c|``, dense rows ``|x - c|``; and the widest basis."""
+    """``_magnitudes`` for the hand-built design: ``|B| |R|`` rows plus the anchor row (the
+    column maximum) and ``|c|``, raw rows plus ``2 |c|``, dense rows ``|x - c|``; the widest basis."""
     rows, column, widest = [], 0, 1
     for gm in dm.group_matrices:
         cols = slice(column, column + gm.shape[1])
@@ -471,7 +477,8 @@ def _hand_built_magnitudes(dm, centre: np.ndarray) -> tuple[np.ndarray, int]:
         elif type(gm) is CategoricalGroupMatrix:
             rows.append(np.abs(gm.toarray()) + 2.0 * np.abs(centre[cols]))
         else:
-            rows.append((np.abs(gm.B_unique) @ np.abs(gm.R_inv))[gm.bin_idx] + np.abs(centre[cols]))
+            support = np.abs(gm.B_unique) @ np.abs(gm.R_inv)
+            rows.append(support[gm.bin_idx] + support.max(axis=0) + np.abs(centre[cols]))
             widest = max(widest, gm.B_unique.shape[1])
         column += gm.shape[1]
     return np.hstack(rows), widest
@@ -515,7 +522,7 @@ def test_hand_built_dense_columns_match_the_materialised_design(monkeypatch, pai
     reference = np.where(active, np.einsum("ij,jk,ik->i", centred, inverse, centred), 0.0)
     magnitude, widest = _hand_built_magnitudes(dm, centre_hi + centre_lo)
     eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
-    bound = _gamma(plan.count_roundings() + 2 * dm.p + 2 + 4 * widest) * eta
+    bound = _gamma(plan.count_roundings() + 2 * dm.p + 2 + 4 * widest + 4) * eta
     assert np.all(np.abs(leverage - reference) <= bound)
     assert np.max(bound[active] / np.abs(reference[active])) < 1e-9
 
@@ -634,7 +641,8 @@ def test_a_plain_fit_keeps_no_plan(forced):
     """``fit()`` publishes through the same hook as ``fit_reml()``: no plan stays on the design.
 
     Unforced, the 98-column fixture is below the table Gram's crossover, which
-    the group types settle (14 sweeps at least), so no plan is built at all; on
+    the group types settle (six terms and a dense block: 28 sweeps at least, so
+    168 columns), and no plan is built at all; on
     e62f0c85 the plan was built to count the sweeps and kept.  Forced on, the
     fit's Grams come from the tables and the plan is released when ``fit()``
     publishes; on e62f0c85 only ``fit_reml()`` released it.
@@ -669,23 +677,27 @@ def test_a_plain_fit_keeps_no_plan(forced):
     assert leverage_tables._CACHE_KEY not in model._dm._structured_layout_cache
 
 
-def test_a_reactivated_direction_stays_active_between_stops(monkeypatch):
-    """A direction a stop reactivated is held out of the gradient-only freeze while its gradient lives.
+def _forced_hold_fit(monkeypatch, *, freeze_at_stops: bool, concave_once: bool, bar: float):
+    """A table-route fit whose stop events are forced; returns the frozen mask each iteration used.
 
-    Forced: every odd iteration is a candidate stop and none is concave; the
-    freeze between stops (on the gradient-only Hessian) reads the iteration-0
-    steepest direction ``j`` as flat, and each stop's revalidation (on the
-    cross-term Hessian) reads it as curved.  That is the 10-pair freMTPL2
-    straddle, made deterministic.  Held, ``j`` steps between stops and the
-    second stop passes: two solved-row passes.  On e62f0c85 the freeze between
-    stops refroze ``j``, so every stop was refused (three passes in six
-    iterations, no convergence).
+    Every odd iteration is a candidate stop.  ``j`` is the iteration-0
+    steepest estimated direction.  The freeze between stops (the
+    gradient-only Hessian) reads ``j`` as flat; with ``freeze_at_stops`` the
+    stops' revalidation (the cross-term Hessian) reads it flat too, else
+    curved.  ``concave_once`` reports ``j`` as a live shoulder at the first
+    stop.  ``bar`` stands in for the freeze's gradient arm
+    (``_freeze_gradient_bar``), which releases a held direction: 0 never
+    releases it, infinity always does.  No assertion depends on where the
+    trajectory goes.  ``masks[k]`` is the mask iteration ``k`` stepped with,
+    as the next iteration's stop test reads it.
     """
     import dataclasses
 
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     evaluate, freeze = direct.evaluate_reml_candidate, direct.freeze_flat_directions
-    state: dict = {"iteration": 0, "j": None}
+    mask = direct.mask_frozen_stop_gradient
+    state: dict = {"iteration": 0, "j": None, "stops": 0}
+    masks: list = []
 
     def candidate(*args, **kwargs):
         state["iteration"] = kwargs["iteration"]
@@ -697,17 +709,31 @@ def test_a_reactivated_direction_stays_active_between_stops(monkeypatch):
         if state["j"] is None:
             state["j"] = int(np.argmax(np.where(estimated, np.abs(gradient), -1.0)))
         frozen = ~np.asarray(estimated, dtype=bool)
-        if state["iteration"] % 2 == 0:  # between stops: the gradient-only read
+        if freeze_at_stops or state["iteration"] % 2 == 0:
             frozen[state["j"]] = True
         return dataclasses.replace(
             decision, frozen=frozen, shoulder=np.zeros_like(frozen, dtype=bool)
         )
 
+    def forced_concave(gradient, hess, estimated, **kwargs):
+        state["stops"] += 1
+        live = np.zeros(len(gradient), dtype=bool)
+        if concave_once and state["stops"] == 1:
+            live[state["j"]] = True
+        return live
+
+    def recorded_mask(gradient, previously_frozen, **kwargs):
+        if previously_frozen is not None:
+            masks.append(np.array(previously_frozen, copy=True))
+        return mask(gradient, previously_frozen, **kwargs)
+
     monkeypatch.setattr(direct, "evaluate_reml_candidate", candidate)
     monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", lambda *a, **k: True)
     monkeypatch.setattr(direct, "freeze_flat_directions", forced_freeze)
+    monkeypatch.setattr(direct, "concave_live_directions", forced_concave)
+    monkeypatch.setattr(direct, "mask_frozen_stop_gradient", recorded_mask)
     monkeypatch.setattr(
-        direct, "concave_live_directions", lambda g, h, e, **k: np.zeros(len(g), dtype=bool)
+        direct, "_freeze_gradient_bar", lambda objective, tolerance: bar, raising=False
     )
     frame, y, weights = _poisson_frame(1500, 1.0e3)
     model = SuperGLM(
@@ -725,8 +751,50 @@ def test_a_reactivated_direction_stays_active_between_stops(monkeypatch):
     ).fit_reml(
         frame, y, sample_weight=weights, runtime_validation="skip", reml_tol=1e-12, max_reml_iter=6
     )
+    assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    return model, masks, state["j"]
 
-    profile = model._reml_profile
-    assert profile["reml_w_correction_mode"] == "leverage_tables"
-    assert profile["reml_n_stop_cross_passes"] == 2
+
+def test_a_reactivated_direction_stays_active_between_stops(monkeypatch):
+    """A direction a stop reactivated is held out of the gradient-only freeze while it is live.
+
+    Forced: the freeze between stops reads ``j`` as flat and each stop's
+    revalidation as curved (the 10-pair freMTPL2 straddle), and the hold is
+    never released.  Held, ``j`` steps between stops and the second stop
+    passes: two solved-row passes.  On e62f0c85 the freeze between stops
+    refroze ``j``, so every stop was refused (three passes in six iterations,
+    no convergence).
+    """
+    model, masks, j = _forced_hold_fit(
+        monkeypatch, freeze_at_stops=False, concave_once=False, bar=0.0
+    )
+    assert not masks[2][j]
+    assert model._reml_profile["reml_n_stop_cross_passes"] == 2
     assert model._reml_result.termination_reason == "score_objective_tolerance"
+
+
+def test_a_shoulder_a_stop_reactivated_is_held_too(monkeypatch):
+    """A direction reactivated as a live shoulder alone is held like a curved one (thread 23).
+
+    Forced: ``j`` reads flat on both Hessians and is a live shoulder at the
+    first stop.  The step that follows that stop keeps ``j`` active.  On
+    71e79cab only the revalidation's unfrozen directions were held, so the
+    step refroze the shoulder.
+    """
+    _, masks, j = _forced_hold_fit(monkeypatch, freeze_at_stops=True, concave_once=True, bar=0.0)
+    assert not masks[1][j]
+
+
+def test_a_held_direction_is_released_at_the_freezes_gradient_arm(monkeypatch):
+    """A held direction whose gradient is under the freeze's gradient arm is frozen again (thread 26).
+
+    Forced: the arm is raised above every gradient, so the hold the first
+    stop set is released at the next iteration and the gradient-only freeze
+    holds ``j`` where it stands.  On 71e79cab the hold lasted until the
+    gradient fell under ``reml_tol (1 + |V|)``, here 1e-12 of it, so ``j``
+    stayed active.
+    """
+    _, masks, j = _forced_hold_fit(
+        monkeypatch, freeze_at_stops=False, concave_once=False, bar=np.inf
+    )
+    assert masks[2][j]

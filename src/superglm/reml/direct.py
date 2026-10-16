@@ -23,6 +23,7 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink, LogLink
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
+    _freeze_gradient_bar,
     classify_dead_feasible_exit,
     concave_live_directions,
     direction_penalty_ranks,
@@ -757,7 +758,7 @@ def optimize_direct_reml(
     # max_reml_iter with every informative direction long determined.
     stop_criterion_frozen = None
     # Directions a table-route stop reactivated, kept out of the gradient-only
-    # freeze until their gradient falls under the stop tolerance.
+    # freeze until their gradient falls under the freeze's own gradient arm.
     held_active: NDArray | None = None
 
     if verbose:
@@ -1224,7 +1225,10 @@ def optimize_direct_reml(
         score_scale = candidate_convergence.score_scale
         obj_change = candidate_convergence.objective_change
         if held_active is not None:
-            held_active = held_active & (np.abs(proj_grad) >= _tol * score_scale)
+            # Released where the freeze's gradient arm would hold the direction,
+            # so one that reaches a lambda -> infinity plateau is frozen where it
+            # stands (``fit_reml``) rather than stepped toward the cap.
+            held_active = held_active & (np.abs(proj_grad) >= _freeze_gradient_bar(obj, _tol))
 
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
@@ -1381,10 +1385,11 @@ def optimize_direct_reml(
             if table_route:
                 # The iterations between stops freeze on the gradient-only
                 # Hessian, which can refreeze what this Hessian reactivated
-                # (curvature straddling the bar): hold them active until their
-                # gradient is under the stop tolerance.  (10-pair freMTPL2:
-                # 10 -> 9 exact iterations, 3 -> 2 stop passes.)
-                held_active = unfrozen | (held_active if held_active is not None else False)
+                # (curvature straddling the bar, or a shoulder whose -P_ii flips
+                # the sign of H_ii): hold them active until their gradient is
+                # under the freeze's gradient arm.  (10-pair freMTPL2: 10 -> 9
+                # exact iterations, 3 -> 2 stop passes.)
+                held_active = reactivated | (held_active if held_active is not None else False)
             if not bool(np.any(reactivated)):
                 converged = True
                 termination_reason = "score_objective_tolerance"
