@@ -1104,7 +1104,10 @@ def fit_payload(record: dict, clock: dict, task_id: str) -> dict:
         "fits": [
             {
                 "id": uuid.uuid4().hex,
-                "parent_fit_id": None,
+                # the fit superglm itself recorded, when its recorder is active
+                "parent_fit_id": getattr(
+                    sys.modules.get("superglm.diagnostics._fit_record"), "last_fit_id", None
+                ),
                 "sequence": 0,
                 "pid": os.getpid(),
                 "ppid": os.getppid(),

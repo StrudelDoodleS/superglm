@@ -12,6 +12,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._blas_threads import solver_blas_threads
+from superglm._fit_gate import fit_record
 from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
@@ -636,38 +637,39 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
-        # Resolve fit controls: explicit kwargs > constructor fallback
-        resolved_tol = tol if tol is not None else self._tol
-        resolved_max_iter = max_iter if max_iter is not None else self._max_iter
-        resolved_convergence = convergence if convergence is not None else self._convergence
-        if resolved_convergence not in ("deviance", "coefficients"):
-            raise ValueError(
-                f"convergence must be 'deviance' or 'coefficients', got {resolved_convergence!r}"
-            )
-        if convergence == "coefficients":
-            import warnings
+        with fit_record(self, "fit", locals()):
+            # Resolve fit controls: explicit kwargs > constructor fallback
+            resolved_tol = tol if tol is not None else self._tol
+            resolved_max_iter = max_iter if max_iter is not None else self._max_iter
+            resolved_convergence = convergence if convergence is not None else self._convergence
+            if resolved_convergence not in ("deviance", "coefficients"):
+                raise ValueError(
+                    f"convergence must be 'deviance' or 'coefficients', got {resolved_convergence!r}"
+                )
+            if convergence == "coefficients":
+                import warnings
 
-            warnings.warn(
-                "convergence='coefficients' is experimental. Near-separated levels "
-                "have no finite MLE, so coefficient-based convergence may not "
-                "terminate or may produce numerically unstable results. "
-                "Use convergence='deviance' (default) for production fits.",
-                UserWarning,
-                stacklevel=2,
-            )
+                warnings.warn(
+                    "convergence='coefficients' is experimental. Near-separated levels "
+                    "have no finite MLE, so coefficient-based convergence may not "
+                    "terminate or may produce numerically unstable results. "
+                    "Use convergence='deviance' (default) for production fits.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
-        with solver_blas_threads(), self._parallel_scope():
-            return fit_ops.fit(
-                self,
-                X,
-                y,
-                sample_weight,
-                offset,
-                tol=resolved_tol,
-                max_iter=resolved_max_iter,
-                convergence=resolved_convergence,
-                record_diagnostics=record_diagnostics,
-            )
+            with solver_blas_threads(), self._parallel_scope():
+                return fit_ops.fit(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    tol=resolved_tol,
+                    max_iter=resolved_max_iter,
+                    convergence=resolved_convergence,
+                    record_diagnostics=record_diagnostics,
+                )
 
     def fit_path(
         self,
@@ -688,17 +690,18 @@ class SuperGLM:
         from zero, rebuilding predictions from them cancels the column's
         offset (``PathResult``); predict with a fitted model instead.
         """
-        with solver_blas_threads(), self._parallel_scope():
-            return fit_ops.fit_path(
-                self,
-                X,
-                y,
-                sample_weight,
-                offset,
-                n_lambda=n_lambda,
-                lambda_ratio=lambda_ratio,
-                lambda_seq=lambda_seq,
-            )
+        with fit_record(self, "fit_path", locals()):
+            with solver_blas_threads(), self._parallel_scope():
+                return fit_ops.fit_path(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    n_lambda=n_lambda,
+                    lambda_ratio=lambda_ratio,
+                    lambda_seq=lambda_seq,
+                )
 
     def fit_reml(
         self,
@@ -903,29 +906,32 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
-        # Resolve PIRLS controls: explicit kwargs > constructor fallback
-        resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
-        resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
-
-        from superglm.solvers.centered_system import reuse_data_factors
-
-        with solver_blas_threads(), self._parallel_scope(), reuse_data_factors():
-            return fit_ops.fit_reml(
-                self,
-                X,
-                y,
-                sample_weight,
-                offset,
-                max_reml_iter=max_reml_iter,
-                reml_tol=reml_tol,
-                pirls_tol=resolved_pirls_tol,
-                max_pirls_iter=resolved_max_pirls_iter,
-                lambda2_init=lambda2_init,
-                interaction_mode=interaction_mode,
-                runtime_validation=runtime_validation,
-                verbose=verbose,
-                w_correction_order=w_correction_order,
+        with fit_record(self, "fit_reml", locals()):
+            # Resolve PIRLS controls: explicit kwargs > constructor fallback
+            resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
+            resolved_max_pirls_iter = (
+                max_pirls_iter if max_pirls_iter is not None else self._max_iter
             )
+
+            from superglm.solvers.centered_system import reuse_data_factors
+
+            with solver_blas_threads(), self._parallel_scope(), reuse_data_factors():
+                return fit_ops.fit_reml(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    max_reml_iter=max_reml_iter,
+                    reml_tol=reml_tol,
+                    pirls_tol=resolved_pirls_tol,
+                    max_pirls_iter=resolved_max_pirls_iter,
+                    lambda2_init=lambda2_init,
+                    interaction_mode=interaction_mode,
+                    runtime_validation=runtime_validation,
+                    verbose=verbose,
+                    w_correction_order=w_correction_order,
+                )
 
     def screen_interactions(
         self,

@@ -93,6 +93,23 @@ held-out metrics, base → branch with ratios), then the phases and work counts 
 each case. For a pass/fail gate on a pinned run, `benchboard run-timed --vs` with
 the same benchboard case name kills a run that passes the factor.
 
+## Every fit under benchboard is recorded
+
+When a fit runs inside a benchboard job that captures fits, benchboard sets
+`BENCHBOARD_FIT_DIR` and `BENCHBOARD_TASK_ID`, and `SuperGLM.fit`, `fit_path`
+and `fit_reml` and `SuperLSS.fit` and `fit_reml` each write one record as they
+end. A record describes the problem (rows, coefficients, terms and pairs, each
+term's kind, width, cardinality and non-zeros per row, empty cells, the
+smallest level count, weight and exposure spread, the share of zero
+responses, family, link, binning and the fit's options), the conditions (the
+thread pools the process actually runs, the commit, packages, machine, and
+load and steal at the start and end) and the outcome (phase times, work
+counts, iterations, convergence, termination reason, certification flags and
+peak RSS). Rows, responses and coefficients are summarised, never written.
+Without the variable the recorder is not imported and a fit pays one
+environment lookup; a recorder failure never changes a fit's result or
+exception.
+
 ## When a baseline is reused, and when it is not valid
 
 A baseline is reused only when its key matches the branch record in everything
