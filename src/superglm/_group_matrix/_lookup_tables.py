@@ -48,9 +48,17 @@ about the rounded anchor with Bjorck's two-pass correction
   (|x_r| + |c|)(|x_r| + |c|)'`` (``m`` the largest table, ``c`` the centre,
   on every lookup column), the bound of a direct centred Gram plus the
   centres: a raw window reads its centre, and an accumulated pair's row side
-  is centred about the computed mean ``m_x``, for which ``A_x' m_x = 0``
-  holds only to ``gamma_(n + m + 2) sum_r W_r |raw_x,r|``, and that residual
-  multiplies the window's centre.
+  is centred about the computed mean, whose weighted residual ``e_x``
+  multiplies the window's centre (as it multiplies a dense remainder, whose
+  correction reads ``e`` as zero on the lookup columns).  ``e_x`` is within
+  ``gamma_(n + m + 2) sum_r W_r |a_x,r|`` of zero, ``a`` the table rows as
+  read: a support's table is anchored before ``R`` applies, ``(B - B[a]) R``
+  with the shared row ``B[a] R`` kept apart (the established support
+  route's anchoring, ``_anchor_center_support``), so neither ``e_x`` nor any
+  row carries a common component of ``B``, whether ``R`` cancels it or not;
+  a categorical's rows are indicators.  Applying Bjorck's correction for
+  ``e_x`` (Chan, Golub & LeVeque 1983) moved no entry beyond that rounding
+  on the common-component fixtures, so it is not applied.
 - Leverage: with ``eta_r = (|a_r| + |z| + |d_r|)' |V| (|a_r| + |z| + |d_r|)``
   (``a_r`` the table rows read, ``d_r`` the centred dense values) every table
   entry is a bilinear form read through at most ``3p + 1`` roundings and a
@@ -126,6 +134,7 @@ class _Term:
     raw_read: bool  # a categorical or a spline-by-category run: read raw, centre as a constant
     lo: NDArray  # (m_t,) int32 window start the kernels read (raw rows if raw_read, else 0)
     hi: NDArray  # (m_t,) int32 window stop (raw rows if raw_read, else p_t)
+    offset: NDArray  # (p_t,) the rows' common part: a design row is raw[k] + offset
 
 
 @dataclass
@@ -260,7 +269,8 @@ def table_gram_plan(dm) -> LookupPlan | None:
     lossless support (``is_lossless_support``).  A binned design (the
     discrete path) keeps its own tensor routes, which were measured there.
     A design with fewer than ``_TABLE_GRAM_COLUMNS_PER_SWEEP`` columns per row
-    sweep (:meth:`LookupPlan.n_sweeps`) keeps the chunked rungs, cheaper there.
+    sweep (:meth:`LookupPlan.n_sweeps`) keeps the chunked rungs, cheaper there,
+    and builds no plan where the group types settle that (:func:`_sweep_bounds`).
     """
     from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix
 
@@ -273,14 +283,49 @@ def table_gram_plan(dm) -> LookupPlan | None:
         for gm in getattr(dm, "group_matrices", ())
     ):
         return None
-    plan = lookup_plan(dm)
-    if (
-        enabled is None
-        and plan is not None
-        and dm.p < _TABLE_GRAM_COLUMNS_PER_SWEEP * plan.n_sweeps
-    ):
-        return None
-    return plan
+    if enabled is None:
+        # Decided from the groups before any index is allocated where the
+        # bounds settle it; only a design between them builds the plan to count.
+        fewest, most = _sweep_bounds(dm)
+        if dm.p < _TABLE_GRAM_COLUMNS_PER_SWEEP * fewest:
+            return None
+        if dm.p < _TABLE_GRAM_COLUMNS_PER_SWEEP * most:
+            plan = lookup_plan(dm)
+            if plan is None or dm.p < _TABLE_GRAM_COLUMNS_PER_SWEEP * plan.n_sweeps:
+                return None
+            return plan
+    return lookup_plan(dm)
+
+
+def _sweeps(terms: int, dense: int) -> int:
+    """:attr:`LookupPlan.n_sweeps` for ``terms`` terms (every pair one sweep) and ``dense`` blocks."""
+    return terms + terms * (terms - 1) // 2 + terms * dense + dense * (dense + 1) // 2
+
+
+def _sweep_bounds(dm) -> tuple[int, int]:
+    """Bounds on the plan's row sweeps from the group types alone.
+
+    Spline-by-category levels merge into runs (:func:`_build_plan`): at least
+    one run per stretch of consecutive levels, at most one per level.
+    """
+    from superglm.group_matrix import DenseGroupMatrix, DiscretizedSplineCategoricalGroupMatrix
+
+    lookups = runs = levels = dense = 0
+    in_run = False
+    for gm in dm.group_matrices:
+        if not gm.shape[1]:
+            continue
+        if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
+            levels += 1
+            runs += not in_run
+            in_run = True
+            continue
+        in_run = False
+        if type(gm) is DenseGroupMatrix:
+            dense += 1
+        else:
+            lookups += 1
+    return _sweeps(lookups + runs, dense), _sweeps(lookups + levels, dense)
 
 
 def _build_plan(dm) -> LookupPlan | None:
@@ -323,13 +368,17 @@ def _build_plan(dm) -> LookupPlan | None:
     dense: list[tuple[int, int, NDArray]] = []
     run: _LevelRun | None = None
 
-    def add_term(columns: NDArray, raw: NDArray, raw_read: bool) -> None:
+    def add_term(
+        columns: NDArray, raw: NDArray, raw_read: bool, offset: NDArray | None = None
+    ) -> None:
         if raw_read:
             lo, hi = _windows(raw)
         else:
             lo = np.zeros(raw.shape[0], dtype=np.int32)
             hi = np.full(raw.shape[0], raw.shape[1], dtype=np.int32)
-        terms.append(_Term(columns, np.ascontiguousarray(raw), raw_read, lo, hi))
+        if offset is None:
+            offset = np.zeros(raw.shape[1], dtype=np.float64)
+        terms.append(_Term(columns, np.ascontiguousarray(raw), raw_read, lo, hi, offset))
 
     def close_run() -> None:
         nonlocal run
@@ -361,13 +410,23 @@ def _build_plan(dm) -> LookupPlan | None:
             dense.append((int(columns[0]), width, gm.M))
             continue
         values, transform, codes, level = part
+        offset = None
         if values is None:  # categorical: the identity, its base level the zero row
             raw = np.vstack((np.eye(width, dtype=np.float64), np.zeros((1, width))))
         else:
             raw = np.asarray(values, dtype=np.float64)
-            if transform is not None:
+            if transform is not None and level is None:
+                # Anchored before projecting, as the established support route
+                # (``_anchor_center_support``): a common component of ``B``
+                # that ``R`` cancels never enters a product, and the anchor's
+                # row ``B[a] R`` is the offset every row shares.
+                transform = np.asarray(transform, dtype=np.float64)
+                anchor = raw[int(np.argmax(np.bincount(codes, minlength=raw.shape[0])))]
+                offset = anchor @ transform
+                raw = (raw - anchor) @ transform
+            elif transform is not None:
                 raw = raw @ np.asarray(transform, dtype=np.float64)
-            if not np.all(np.isfinite(raw)):
+            if not (np.all(np.isfinite(raw)) and (offset is None or np.all(np.isfinite(offset)))):
                 return None
         if level is not None:
             level_rows = np.asarray(level[0], dtype=np.intp)
@@ -381,7 +440,7 @@ def _build_plan(dm) -> LookupPlan | None:
             open_run.columns.append(columns)
             continue
         close_run()
-        add_term(columns, raw, values is None)
+        add_term(columns, raw, values is None, offset)
         term_codes.append(np.asarray(codes, dtype=np.int32))
     close_run()
 
@@ -449,7 +508,7 @@ def _read_tables(plan: LookupPlan, centre: NDArray) -> tuple[list[NDArray], NDAr
     """Each term's table as the passes read it, and the centre ``z`` of the raw-read terms.
 
     A raw-read term keeps its raw table (its centre goes to ``z``); every other
-    term is centred, ``raw - c``.
+    term is centred, ``raw - (c - offset)``.
     """
     zero = np.zeros(plan.p, dtype=np.float64)
     tables = []
@@ -458,7 +517,7 @@ def _read_tables(plan: LookupPlan, centre: NDArray) -> tuple[list[NDArray], NDAr
             zero[term.columns] = centre[term.columns]
             tables.append(term.raw)
         else:
-            tables.append(term.raw - centre[term.columns])
+            tables.append(term.raw - (centre[term.columns] - term.offset))
     return tables, zero
 
 
@@ -561,13 +620,15 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
     _pool_run(jobs, 16 * max(term.raw.shape[0] for term in terms))
 
     mean_x = np.zeros(p, dtype=np.float64)
+    shifts = []
     for term, (wm, _) in zip(terms, margins, strict=True):
-        mean_x[term.columns] = (term.raw.T @ wm) / sum_w
+        shifts.append((term.raw.T @ wm) / sum_w)
+        mean_x[term.columns] = term.offset + shifts[-1]
     dense_mask = np.zeros(p, dtype=bool)
     dense_mask[plan.dense_columns] = True
     anchor = dense_anchor(dm, W, sum_w) if plan.dense else np.zeros(p)
     mean_hi = np.where(dense_mask, anchor, mean_x)
-    centred = [term.raw - mean_hi[term.columns] for term in terms]
+    centred = [term.raw - shift for term, shift in zip(terms, shifts, strict=True)]
 
     tab_out = [np.zeros(terms[a].raw.shape[0] * terms[b].raw.shape[0]) for a, b in plan.tab_pairs]
     acc_out = [np.zeros(terms[x].raw.shape[0] * terms[y].raw.shape[1]) for x, y in plan.acc_pairs]
@@ -657,8 +718,8 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
         gram[np.ix_(terms[a].columns, terms[b].columns)] = block
         gram[np.ix_(terms[b].columns, terms[a].columns)] = block.T
     for q, (x, y) in enumerate(plan.acc_pairs):
-        # A raw window needs no centre of its own: the row side is centred
-        # about the weighted mean, so ``A_x' (m_x c_y') = (A_x' m_x) c_y' = 0``.
+        # A raw window's centre enters through the row side's residual alone,
+        # ``A_x' (m_x c_y') = e_x c_y'`` with ``e_x = A_x' W 1`` (module docstring).
         M = acc_out[q].reshape(terms[x].raw.shape[0], terms[y].raw.shape[1])
         block = centred[x].T @ M
         gram[np.ix_(terms[x].columns, terms[y].columns)] = block

@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._lookup_tables import release_lookup_plan
 from superglm._utils import _explained_deviance, weighted_row_sum
 from superglm.distributions import (
     Distribution,
@@ -1198,6 +1199,8 @@ def _prime_fit_caches(
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
+    # Every fit publishes here: the lookup-table plan served the fit's passes only.
+    release_lookup_plan(getattr(model._dm, "_structured_layout_cache", None))
 
 
 def _maybe_release_fit_state(model) -> None:

@@ -211,3 +211,85 @@ def test_a_narrow_design_keeps_the_chunked_gram():
     assert narrow.p < lookup_tables._TABLE_GRAM_COLUMNS_PER_SWEEP * 15 <= wide.p
     assert lookup_tables.table_gram_plan(narrow) is None
     assert lookup_tables.table_gram_plan(wide) is lookup_tables.lookup_plan(wide)
+
+
+def _common_component_design(kind: str, n: int = 20_480, seed: int = 8):
+    """A support whose ``B`` carries a large common component ``C``, beside a categorical.
+
+    ``offset``: ``B = 2**40 + hat values`` and a generic ``R``, so every
+    column of ``B R`` has a mean near ``2**40 colsum(R)`` and a spread near
+    one.  ``cancelling``: ``B = 2**60 + 2**8 m`` (``m`` small integers, exact)
+    and ``R`` whose columns sum to zero, so ``R`` cancels ``C`` and ``B R`` is
+    small.  Both sit inside the reassociation range (``_ssp_gram_needs_exact``).
+    """
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DesignMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    rng = np.random.default_rng(seed)
+    support, basis = 60, 6
+    if kind == "offset":
+        common = 2.0**40
+        grid = np.linspace(0.0, 1.0, support)
+        knots = np.linspace(0.0, 1.0, basis)
+        hats = np.maximum(0.0, 1.0 - np.abs(grid[:, None] - knots[None, :]) * (basis - 1))
+        B = common + hats
+        R = rng.normal(size=(basis, basis - 1))
+    else:
+        common = 2.0**60
+        B = common + 2.0**8 * rng.integers(0, 20, (support, basis)).astype(np.float64)
+        R = np.zeros((basis, basis - 2))
+        for j in range(basis - 2):  # 1, 1, -2: each column sums to zero, three terms
+            R[j, j], R[j + 1, j], R[j + 2, j] = 1.0, 1.0, -2.0
+    spline = SupportCompressedSSPGroupMatrix(B, R, rng.integers(0, support, n))
+    categorical = CategoricalGroupMatrix(rng.integers(-1, 3, n), 3)
+    groups = [spline, categorical]
+    return DesignMatrix(groups, n=n, p=sum(gm.shape[1] for gm in groups)), common
+
+
+@pytest.mark.parametrize("pair_form", [None, "accumulate"])
+@pytest.mark.parametrize("kind", ["offset", "cancelling"])
+def test_a_common_component_of_a_support_never_rounds_into_the_gram(monkeypatch, kind, pair_form):
+    """The table is anchored before ``R`` applies, so ``C`` enters no product (threads 19, 21).
+
+    The reference centres ``B - C`` (exact: ``B`` lies in ``[C, 2C]``) before
+    projecting, so its rows carry no trace of ``C``; both routes are within
+    the bound of a direct centred Gram on those rows, ``gamma_k sum_r W_r M_r
+    M_r'`` with ``M_r`` the anchored rows' magnitudes ``|B - C| |R|`` plus
+    their largest (the anchor and the centre).  On e62f0c85 the table was
+    ``fl(B R)``, off by ``u C |R|`` in every row: 1e-4 against a spread near
+    one (``offset``: 1.3e-4 of the Gram), 1.2e-2 of the Gram
+    (``cancelling``), where the chunked route is within 1e-15.  Mutation:
+    without the anchoring all four cases fail.
+    """
+    from superglm._group_matrix._group_matrix_kernels import _ssp_gram_needs_exact
+    from superglm.solvers.centered_system import build_centered_system
+
+    dm, common = _common_component_design(kind)
+    monkeypatch.setattr(lookup_tables, "_FORCE_PAIR_FORM", pair_form)
+    spline, categorical = dm.group_matrices
+    assert not _ssp_gram_needs_exact(spline.B_unique, spline.R_inv)
+    W, z = _working_rows(dm.n)
+    with lookup_tables.table_gram_config(True):
+        system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
+        plan = lookup_tables.table_gram_plan(dm)
+    assert plan is not None and (pair_form is None or plan.acc_pairs.size)
+
+    shifted = (spline.B_unique - common) @ spline.R_inv  # exact rows, ``C`` removed first
+    rows = np.hstack((shifted[spline.bin_idx], categorical.toarray()))
+    mean = rows.T @ W / W.sum()
+    centred = rows - mean
+    gram = centred.T @ (W[:, None] * centred)
+    support_magnitude = np.abs(spline.B_unique - common) @ np.abs(spline.R_inv)
+    magnitude = np.hstack(
+        (
+            support_magnitude[spline.bin_idx] + support_magnitude.max(axis=0),
+            np.abs(categorical.toarray()) + 2.0 * np.abs(mean[spline.shape[1] :]),
+        )
+    )
+    m_largest = max(term.raw.shape[0] for term in plan.terms)
+    k = 2 * dm.n + 2 * m_largest + dm.p + 4 * spline.B_unique.shape[1] + 16
+    bound = _gamma(k) * (magnitude.T @ (W[:, None] * magnitude))
+    assert np.all(np.abs(system.data_gram - gram) <= bound)
