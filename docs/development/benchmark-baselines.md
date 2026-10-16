@@ -93,22 +93,33 @@ held-out metrics, base → branch with ratios), then the phases and work counts 
 each case. For a pass/fail gate on a pinned run, `benchboard run-timed --vs` with
 the same benchboard case name kills a run that passes the factor.
 
-## Every fit under benchboard is recorded
+## Every fit on a benchboard machine is recorded
 
-When a fit runs inside a benchboard job that captures fits, benchboard sets
-`BENCHBOARD_FIT_DIR` and `BENCHBOARD_TASK_ID`, and `SuperGLM.fit`, `fit_path`
-and `fit_reml` and `SuperLSS.fit` and `fit_reml` each write one record as they
-end. A record describes the problem (rows, coefficients, terms and pairs, each
-term's kind, width, cardinality and non-zeros per row, empty cells, the
-smallest level count, weight and exposure spread, the share of zero
-responses, family, link, binning and the fit's options), the conditions (the
-thread pools the process actually runs, the commit, packages, machine, and
-load and steal at the start and end) and the outcome (phase times, work
-counts, iterations, convergence, termination reason, certification flags and
-peak RSS). Rows, responses and coefficients are summarised, never written.
-Without the variable the recorder is not imported and a fit pays one
-environment lookup; a recorder failure never changes a fit's result or
-exception.
+`SuperGLM.fit`, `fit_path`, `fit_reml` and `estimate_p`, and `SuperLSS.fit` and
+`fit_reml`, each write one record as they end, on any machine where
+benchboard's state directory exists (`BENCHBOARD_DIR`, default
+`~/.cache/benchboard`). Inside a benchboard job the record goes to the job's
+spool; outside one it goes to `fits/unowned/`, and benchboard imports it at the
+end of its next job under one task per process. A small marker written as the
+fit starts and removed with the record lets benchboard keep a fit that was
+killed as a censored one.
+
+A record describes the problem (rows, coefficients, terms and pairs, each
+term's kind, width, cardinality and non-zeros per row, empty and
+all-zero-response cells, the smallest level count, weight, exposure and
+response spread, per numeric input its distinct values, skew, ties at the mode
+and share beyond 5 sd, family and family parameters such as a negative
+binomial theta or Tweedie power, link, binning and the fit's options), the
+conditions (the thread pools the process actually runs, the commit, packages,
+machine, caches, CPU clock, free memory, load and steal at the start and end,
+and whether it is the process's first fit) and the outcome (phase times, work
+counts, iterations, smoothing parameters, convergence, termination reason,
+certification flags, CPU seconds, numba compile seconds and peak RSS). Rows,
+responses and coefficients are summarised, never written.
+
+Without benchboard's directory the recorder is not imported and a fit pays a
+cached directory check. `SUPERGLM_FIT_RECORD=0` turns recording off. A recorder
+failure never changes a fit's result, exception or warnings.
 
 ## When a baseline is reused, and when it is not valid
 
