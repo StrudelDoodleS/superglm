@@ -293,3 +293,110 @@ def test_a_common_component_of_a_support_never_rounds_into_the_gram(monkeypatch,
     k = 2 * dm.n + 2 * m_largest + dm.p + 4 * spline.B_unique.shape[1] + 16
     bound = _gamma(k) * (magnitude.T @ (W[:, None] * magnitude))
     assert np.all(np.abs(system.data_gram - gram) <= bound)
+
+
+def _counted(monkeypatch, cost: dict) -> None:
+    """Add every ``_left`` / ``_right`` call's multiply-adds (``_left_cost``) to ``cost["madds"]``."""
+    left, right = lookup_tables._left, lookup_tables._right
+
+    def counted_left(term, A, d, X):
+        cost["madds"] += lookup_tables._left_cost(term, X.shape[0], X.shape[1])
+        return left(term, A, d, X)
+
+    def counted_right(term, A, d, X):
+        cost["madds"] += lookup_tables._left_cost(term, X.shape[0], X.shape[1])
+        return right(term, A, d, X)
+
+    monkeypatch.setattr(lookup_tables, "_left", counted_left)
+    monkeypatch.setattr(lookup_tables, "_right", counted_right)
+
+
+@pytest.mark.parametrize("pair_form", [None, "table", "accumulate"])
+def test_a_categorical_reads_its_table_as_an_identity(monkeypatch, pair_form):
+    """A K-level categorical costs ``O(K^2)`` in coefficient space, as on the chunked route.
+
+    Its own block is diagonal plus rank-one centring (``_identity_gram``),
+    and every product with its centred table reads the identity (``_left``,
+    ``_right``): on 71e79cab the own block alone was a ``(K+1) x K`` by
+    ``K`` GEMM, ``K^3`` multiply-adds per centred system (28 ms at K = 1000
+    on 542,406 rows, where the whole chunked build took 54 ms).  The count
+    here is of multiply-adds, not time.  The Gram equals the materialised
+    centred design's within the bound of a direct centred Gram.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+
+    rng = np.random.default_rng(12)
+    n, wide, narrow = 20_480, 400, 30
+    groups = [
+        CategoricalGroupMatrix(rng.integers(-1, wide, n), wide),
+        DenseGroupMatrix(rng.normal(50.0, 2.0, (n, 1))),
+        CategoricalGroupMatrix(rng.integers(-1, narrow, n), narrow),
+    ]
+    dm = DesignMatrix(groups, n=n, p=sum(gm.shape[1] for gm in groups))
+    monkeypatch.setattr(lookup_tables, "_FORCE_PAIR_FORM", pair_form)
+    own = {"calls": 0}
+    identity_gram = lookup_tables._identity_gram
+
+    def counted_own(*args):
+        own["calls"] += 1
+        return identity_gram(*args)
+
+    monkeypatch.setattr(lookup_tables, "_identity_gram", counted_own)
+    cost = {"madds": 0}
+    _counted(monkeypatch, cost)
+    W, z = _working_rows(dm.n)
+    plan = lookup_tables.lookup_plan(dm)
+    assert plan is not None
+    mean_x, gram, *_ = lookup_tables.table_centred_system(plan, dm, W, z, float(W.sum()))
+
+    assert own["calls"] == 2
+    assert cost["madds"] < wide**2 * (narrow + 4)  # one GEMM over the identity is wide**3
+    design = dm.toarray()
+    mean = design.T @ W / W.sum()
+    centred = design - mean
+    reference = centred.T @ (W[:, None] * centred)
+    magnitude = np.abs(design) + 2.0 * np.abs(mean)
+    bound = _gamma(2 * dm.n + 2 * (wide + 1) + dm.p + 16) * (magnitude.T @ (W[:, None] * magnitude))
+    assert np.all(np.abs(gram - reference) <= bound)
+
+
+def test_a_table_pair_takes_the_cheaper_association():
+    """``A' T B`` (Gram) and ``A X B'`` (leverage) pick their association by full cost.
+
+    The thread's shapes: ``m_a = 10000, p_a = 100, m_b = 10, p_b = 50``.
+    ``A' (T B)`` costs 55 million multiply-adds and ``(A' T) B`` about 10
+    million; on 71e79cab the Gram compared ``p_b`` with ``p_a`` alone and
+    took the first.  The cost is counted from the calls, not timed.
+    """
+    rng = np.random.default_rng(3)
+    shapes = ((10_000, 100), (10, 50))
+    terms, tables = [], []
+    for m, p in shapes:
+        raw = rng.normal(size=(m, p))
+        zeros = np.zeros(m, dtype=np.int32)
+        terms.append(lookup_tables._Term(np.arange(p), raw, False, zeros, zeros + p, np.zeros(p)))
+        tables.append(raw)
+    (ta, tb), (A, B) = terms, tables
+    T = rng.uniform(size=(A.shape[0], B.shape[0]))
+    with pytest.MonkeyPatch.context() as patch:
+        cost = {"madds": 0}
+        _counted(patch, cost)
+        block = lookup_tables._pair_block(ta, A, np.zeros(100), tb, B, np.zeros(50), T)
+    assert cost["madds"] == 100 * 10_000 * 10 + 100 * 10 * 50
+    assert np.allclose(block, A.T @ T @ B, rtol=1e-10, atol=1e-10 * np.abs(A.T @ T @ B).max())
+
+    X = rng.normal(size=(100, 50))
+    calls = []
+    rows_times = lookup_tables._rows_times
+    with pytest.MonkeyPatch.context() as patch:
+
+        def counted(term, table, M):
+            calls.append(lookup_tables._rows_cost(term, table, M.shape[1]))
+            return rows_times(term, table, M)
+
+        patch.setattr(lookup_tables, "_rows_times", counted)
+        G = lookup_tables._pair_table(ta, A, tb, B, X)
+    first = 10_000 * 100 * 50 + 10 * 50 * 10_000  # (A X) B'
+    second = 10 * 50 * 100 + 10_000 * 100 * 10  # A (X B')
+    assert sum(calls) == min(first, second)
+    assert np.allclose(G, A @ X @ B.T, rtol=1e-10, atol=1e-10 * np.abs(A @ X @ B.T).max())

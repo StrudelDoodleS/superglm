@@ -52,11 +52,16 @@ about the rounded anchor with Bjorck's two-pass correction
   multiplies the window's centre (as it multiplies a dense remainder, whose
   correction reads ``e`` as zero on the lookup columns).  ``e_x`` is within
   ``gamma_(n + m + 2) sum_r W_r |a_x,r|`` of zero, ``a`` the table rows as
-  read: a support's table is anchored before ``R`` applies, ``(B - B[a]) R``
-  with the shared row ``B[a] R`` kept apart (the established support
-  route's anchoring, ``_anchor_center_support``), so neither ``e_x`` nor any
-  row carries a common component of ``B``, whether ``R`` cancels it or not;
-  a categorical's rows are indicators.  Applying Bjorck's correction for
+  read: a whole support's table is anchored before ``R`` applies, ``(B -
+  B[a]) R`` with the shared row ``B[a] R`` kept apart (the established
+  support route's anchoring, ``_anchor_center_support``), so in the Gram
+  neither ``e_x`` nor any row of such a support carries a common component of
+  ``B``, whether ``R`` cancels it or not; a categorical's rows are
+  indicators.  Two reads keep ``u |B| |R|``-sized errors, as v0.40.0's did:
+  a spline-by-category level is projected unanchored (its zero row must
+  stay zero; the chunked route projects it so too), and the leverage and
+  ``X_c' v`` read a whole support as ``raw - (c - B[a] R)``, where ``c -
+  B[a] R`` differs from the Gram's shift by up to ``u |c|``.  Applying Bjorck's correction for
   ``e_x`` (Chan, Golub & LeVeque 1983) moved no entry beyond that rounding
   on the common-component fixtures, so it is not applied.
 - Leverage: with ``eta_r = (|a_r| + |z| + |d_r|)' |V| (|a_r| + |z| + |d_r|)``
@@ -135,6 +140,7 @@ class _Term:
     lo: NDArray  # (m_t,) int32 window start the kernels read (raw rows if raw_read, else 0)
     hi: NDArray  # (m_t,) int32 window stop (raw rows if raw_read, else p_t)
     offset: NDArray  # (p_t,) the rows' common part: a design row is raw[k] + offset
+    identity: bool = False  # a categorical: raw is the identity over a zero row
 
 
 @dataclass
@@ -369,7 +375,11 @@ def _build_plan(dm) -> LookupPlan | None:
     run: _LevelRun | None = None
 
     def add_term(
-        columns: NDArray, raw: NDArray, raw_read: bool, offset: NDArray | None = None
+        columns: NDArray,
+        raw: NDArray,
+        raw_read: bool,
+        offset: NDArray | None = None,
+        identity: bool = False,
     ) -> None:
         if raw_read:
             lo, hi = _windows(raw)
@@ -378,7 +388,7 @@ def _build_plan(dm) -> LookupPlan | None:
             hi = np.full(raw.shape[0], raw.shape[1], dtype=np.int32)
         if offset is None:
             offset = np.zeros(raw.shape[1], dtype=np.float64)
-        terms.append(_Term(columns, np.ascontiguousarray(raw), raw_read, lo, hi, offset))
+        terms.append(_Term(columns, np.ascontiguousarray(raw), raw_read, lo, hi, offset, identity))
 
     def close_run() -> None:
         nonlocal run
@@ -440,7 +450,7 @@ def _build_plan(dm) -> LookupPlan | None:
             open_run.columns.append(columns)
             continue
         close_run()
-        add_term(columns, raw, values is None, offset)
+        add_term(columns, raw, values is None, offset, values is None)
         term_codes.append(np.asarray(codes, dtype=np.int32))
     close_run()
 
@@ -598,6 +608,76 @@ def _dense_moments_sweep(W, Wz, X1, a1, X2, a2, gram, first, rhs, own):  # pragm
                 rhs[i] += Wz[r] * d1
 
 
+def _left(term: _Term, A: NDArray, d: NDArray, X: NDArray) -> NDArray:
+    """``A' X`` for the term's centred table ``A = raw - d``.
+
+    A categorical's raw table is the identity over a zero row, so ``A' X =
+    X[:K] - d (1' X)``: ``O(m p)`` where the product is ``O(m p K)``.
+    """
+    if term.identity:
+        return X[: term.raw.shape[1]] - np.outer(d, X.sum(axis=0))
+    return A.T @ X
+
+
+def _right(term: _Term, A: NDArray, d: NDArray, X: NDArray) -> NDArray:
+    """``X A`` for the term's centred table ``A = raw - d`` (``_left``'s transpose)."""
+    if term.identity:
+        return X[:, : term.raw.shape[1]] - np.outer(X.sum(axis=1), d)
+    return X @ A
+
+
+def _left_cost(term: _Term, rows: int, cols: int) -> int:
+    """Multiply-adds of ``_left`` (or ``_right``) on a ``rows x cols`` operand."""
+    return rows * cols * (1 if term.identity else term.raw.shape[1])
+
+
+def _rows_times(term: _Term, table: NDArray, M: NDArray) -> NDArray:
+    """``table @ M`` for a term's table as the leverage reads it (a categorical's raw identity)."""
+    if term.identity and table is term.raw:
+        return np.vstack((M, np.zeros((1, M.shape[1]), dtype=M.dtype)))
+    return table @ M
+
+
+def _pair_block(
+    ta: _Term, A: NDArray, da: NDArray, tb: _Term, B: NDArray, db: NDArray, T: NDArray
+) -> NDArray:
+    """``A' T B`` for two centred tables, in the cheaper association by its full cost."""
+    (ma, pa), (mb, pb) = A.shape, B.shape
+    if _left_cost(tb, ma, mb) + _left_cost(ta, ma, pb) <= _left_cost(ta, ma, mb) + _left_cost(
+        tb, pa, mb
+    ):
+        return _left(ta, A, da, _right(tb, B, db, T))
+    return _right(tb, B, db, _left(ta, A, da, T))
+
+
+def _identity_gram(wm: NDArray, d: NDArray) -> NDArray:
+    """A categorical's own block ``sum_k wm_k (e_k - d)(e_k - d)'`` (``e_K = 0``, the base level).
+
+    ``diag(w) - d w' - w d' + (1' wm) d d'`` with ``w`` the levels' weights:
+    ``O(K^2)`` where the centred table's GEMM is ``O(K^3)``, and exactly
+    symmetric.  The chunked route's categorical Gram is the same diagonal
+    plus rank-one centring.
+    """
+    w = wm[: d.shape[0]]
+    cross = np.outer(d, w)
+    return np.diag(w) - cross - cross.T + float(np.sum(wm)) * np.outer(d, d)
+
+
+def _rows_cost(term: _Term, table: NDArray, cols: int) -> int:
+    """Multiply-adds of ``_rows_times(term, table, M)`` for an ``M`` of ``cols`` columns."""
+    rows, inner = table.shape
+    return rows * cols * (1 if term.identity and table is term.raw else inner)
+
+
+def _pair_table(ta: _Term, A: NDArray, tb: _Term, B: NDArray, X: NDArray) -> NDArray:
+    """``A X B'`` in the cheaper association by its full cost (both products)."""
+    if _rows_cost(ta, A, X.shape[1]) + _rows_cost(tb, B, A.shape[0]) <= _rows_cost(
+        tb, B, X.shape[0]
+    ) + _rows_cost(ta, A, B.shape[0]):
+        return _rows_times(tb, B, _rows_times(ta, A, X).T).T
+    return _rows_times(ta, A, _rows_times(tb, B, X.T).T)
+
+
 def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, sum_w: float):
     """``(mean_x, data_gram, rhs, mean_hi, mean_lo)`` of the centred system, from the tables.
 
@@ -705,28 +785,28 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
     rhs = np.zeros(p, dtype=np.float64)
     for t, term in enumerate(terms):
         wm, zm = margins[t]
-        A = centred[t]
-        gram[np.ix_(term.columns, term.columns)] = (A * wm[:, None]).T @ A
-        rhs[term.columns] = A.T @ zm
+        A, d = centred[t], shifts[t]
+        own = _identity_gram(wm, d) if term.identity else (A * wm[:, None]).T @ A
+        gram[np.ix_(term.columns, term.columns)] = own
+        rhs[term.columns] = _left(term, A, d, zm[:, None])[:, 0]
     for q, (a, b) in enumerate(plan.tab_pairs):
         A, B = centred[a], centred[b]
         T = tab_out[q].reshape(A.shape[0], B.shape[0])
-        if A.shape[0] * B.shape[0] * B.shape[1] <= B.shape[0] * A.shape[0] * A.shape[1]:
-            block = A.T @ (T @ B)
-        else:
-            block = (A.T @ T) @ B
+        block = _pair_block(terms[a], A, shifts[a], terms[b], B, shifts[b], T)
         gram[np.ix_(terms[a].columns, terms[b].columns)] = block
         gram[np.ix_(terms[b].columns, terms[a].columns)] = block.T
     for q, (x, y) in enumerate(plan.acc_pairs):
         # A raw window's centre enters through the row side's residual alone,
         # ``A_x' (m_x c_y') = e_x c_y'`` with ``e_x = A_x' W 1`` (module docstring).
         M = acc_out[q].reshape(terms[x].raw.shape[0], terms[y].raw.shape[1])
-        block = centred[x].T @ M
+        block = _left(terms[x], centred[x], shifts[x], M)
         gram[np.ix_(terms[x].columns, terms[y].columns)] = block
         gram[np.ix_(terms[y].columns, terms[x].columns)] = block.T
     for t, term in enumerate(terms):
         for g, (column, width, _) in enumerate(plan.dense):
-            block = centred[t].T @ dense_out[t][g].reshape(term.raw.shape[0], width)
+            block = _left(
+                term, centred[t], shifts[t], dense_out[t][g].reshape(term.raw.shape[0], width)
+            )
             cols = np.arange(column, column + width)
             gram[np.ix_(term.columns, cols)] = block
             gram[np.ix_(cols, term.columns)] = block.T
@@ -785,27 +865,31 @@ def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _Leverage
     e_parts = []
     for term, A in zip(terms, tables, strict=True):
         # Every term meets the raw terms' centres, its own or another's.
-        e = np.einsum("ij,ij->i", A @ V[np.ix_(term.columns, term.columns)], A)
-        e -= 2.0 * (A @ Vz[term.columns])
+        Vtt = V[np.ix_(term.columns, term.columns)]
+        if term.identity and A is term.raw:
+            e = np.append(np.diag(Vtt), 0.0)
+        else:
+            e = np.einsum("ij,ij->i", A @ Vtt, A)
+        e -= 2.0 * _rows_times(term, A, Vz[term.columns][:, None])[:, 0]
         e_parts.append(e)
     tab_rows, G_parts, offset = [], [], 0
     for a, b in plan.tab_pairs:
         A, B = tables[a], tables[b]
         Vab = V[np.ix_(terms[a].columns, terms[b].columns)]
-        G = (2.0 * (A @ Vab)) @ B.T if A.shape[0] <= B.shape[0] else (2.0 * A) @ (Vab @ B.T)
+        G = _pair_table(terms[a], A, terms[b], B, 2.0 * Vab)
         tab_rows.append((a, b, offset, B.shape[0]))
         G_parts.append(G.ravel())
         offset += G.size
     acc_rows, Q_parts, offset = [], [], 0
     for x, y in plan.acc_pairs:
-        Q = 2.0 * (tables[x] @ V[np.ix_(terms[x].columns, terms[y].columns)])
+        Q = _rows_times(terms[x], tables[x], 2.0 * V[np.ix_(terms[x].columns, terms[y].columns)])
         acc_rows.append((x, y, offset, tables[y].shape[1]))
         Q_parts.append(Q.ravel())
         offset += Q.size
     dense = plan.dense_columns
     n_d = dense.size
     F_parts = [
-        np.ascontiguousarray(2.0 * (A @ V[np.ix_(term.columns, dense)])).ravel()
+        np.ascontiguousarray(_rows_times(term, A, 2.0 * V[np.ix_(term.columns, dense)])).ravel()
         for term, A in zip(terms, tables, strict=True)
     ]
     Vdd = 2.0 * V[np.ix_(dense, dense)]
