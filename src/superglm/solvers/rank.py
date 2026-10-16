@@ -258,7 +258,6 @@ _HALF_MAX = float(np.finfo(float).max) / 2.0
 # This rounds down to 2**-1024, whose reciprocal still overflows. Include the
 # endpoint when deciding whether to defer inverse coordinate scales.
 _MIN_RECIPROCAL_SCALE = 1.0 / float(np.finfo(float).max)
-_MIN_POSITIVE = float(np.finfo(float).tiny)
 
 
 def _symmetric_part(values: NDArray) -> NDArray:
@@ -2486,13 +2485,13 @@ def decompose_gram_if_authoritative(
     return decomposition
 
 
-# Grey-subspace certification (``decompose_gram_deflated``): the split sits
-# where the Gram's eigenvalues clear this many times their own error bound,
-# searched up to this share of the largest; it takes the first eigenvalue at
-# least ``_GREY_GAP`` times its predecessor, else the widest gap.
+# Grey-subspace certification (``decompose_gram_deflated``): the split is
+# searched from the first eigenvalue past ``_GREY_FLOOR`` times the Gram's
+# error bound up to ``_GREY_CEILING`` of the largest, and taken at the first
+# spacing of ``_GREY_GAP`` error bounds.
 _GREY_FLOOR = 4.0
 _GREY_CEILING = 1e-4
-_GREY_GAP = 2.0
+_GREY_GAP = 8.0
 
 
 def _gamma_up(count: float) -> float:
@@ -2508,6 +2507,7 @@ def decompose_gram_deflated(
     project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]],
     *,
     rows: int,
+    structural: Sequence[tuple[slice, NDArray, float]] = (),
     policy: RankPolicy = SHARED_RANK_POLICY,
 ) -> tuple[RankDecomposition | None, dict[str, float]]:
     """The factor-route decision from the formed Gram plus one pass over the rows on its grey subspace.
@@ -2564,7 +2564,38 @@ def decompose_gram_deflated(
         return None, info
     d = scale[active]
     equilibrated = _symmetric_part(gram[np.ix_(active, active)] / d[:, None] / d[None, :])
-    values, vectors = np.linalg.eigh(equilibrated)
+    # Structural nulls (``structural``: ``A N_g = 0`` read off a group's
+    # occupied support rows, ``||A N_g||_F <= bound``) leave the eigenproblem
+    # before any arithmetic on the rows: Z spans them in equilibrated
+    # coordinates, orthonormal by group, and the Gram is decomposed on Z's
+    # complement.  ``||A_eq Z||_2 <= residual``, so by Weyl's inequality for
+    # singular values the decision moves by at most ``residual``.
+    position = np.full(gram.shape[0], -1)
+    position[active] = np.arange(n_active)
+    blocks, residual_squared = [], 0.0
+    for columns, null, bound in structural:
+        local = position[columns]
+        if null.shape[1] == 0 or np.any(local < 0):
+            continue
+        block = np.zeros((n_active, null.shape[1]))
+        block[local] = null * d[local, None]
+        orthonormal, triangle = np.linalg.qr(block[local])
+        smallest = float(np.linalg.svd(triangle, compute_uv=False)[-1])
+        if not smallest > 0.0:
+            continue
+        block[local] = orthonormal
+        blocks.append(block)
+        residual_squared += (bound / smallest) ** 2
+    structural_null = np.hstack(blocks) if blocks else np.zeros((n_active, 0))
+    residual = float(np.nextafter(math.sqrt(residual_squared) * (1.0 + _gamma_up(8)), np.inf))
+    if structural_null.shape[1]:
+        complement = np.linalg.qr(structural_null, mode="complete")[0][
+            :, structural_null.shape[1] :
+        ]
+        values, rotation = np.linalg.eigh(_symmetric_part(complement.T @ equilibrated @ complement))
+        vectors = complement @ rotation
+    else:
+        values, vectors = np.linalg.eigh(equilibrated)
     largest = float(values[-1])
     if not (largest > 0.0 and math.isfinite(largest)):
         return None, info
@@ -2580,15 +2611,16 @@ def decompose_gram_deflated(
     # Every direction below the floor is grey; the split is searched from the
     # first eigenvalue above it up to the ceiling (that first one at least).
     first = int(np.searchsorted(values, _GREY_FLOOR * error, side="left"))
-    if first == 0 or first >= n_active:
+    if first == 0 or first >= values.size:
         return None, info
     last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
-    candidates = np.arange(first, min(last, n_active - 1) + 1)
-    below = values[candidates - 1]
-    with np.errstate(divide="ignore"):
-        ratio = np.where(below > 0.0, values[candidates] / np.maximum(below, _MIN_POSITIVE), np.inf)
-    wide = np.flatnonzero(ratio >= _GREY_GAP)
-    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(ratio))])
+    candidates = np.arange(first, min(last, values.size - 1) + 1)
+    # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past twice
+    # the Gram's error, so the split takes the first spacing of
+    # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
+    spacing = values[candidates] - values[candidates - 1]
+    wide = np.flatnonzero(spacing >= _GREY_GAP * error)
+    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
     grey = vectors[:, :split]
     basis = np.zeros((gram.shape[0], split))
     basis[active] = grey / d[:, None]
@@ -2632,11 +2664,22 @@ def decompose_gram_deflated(
     squared = singular**2
     margin = np.minimum(np.abs(squared - cut_low), np.abs(squared - cut_high))
     straddles = (squared >= cut_low) & (squared <= cut_high)
-    nearest = float(np.min(np.where(straddles, 0.0, margin)))
-    info.update(shift=shift / largest, margin=nearest / largest, rotation=coupling_norm / gap)
-    if not nearest > shift:
+    # Weyl for the structural block: each singular value moves by at most
+    # ``residual``, so its square by ``residual (2 sigma + residual)``.
+    moved = residual * (2.0 * np.sqrt(np.maximum(squared, cut_high)) + residual)
+    slack = np.where(straddles, -np.inf, margin - moved)
+    nearest = float(np.min(slack)) if slack.size else float("inf")
+    info.update(
+        shift=shift / largest,
+        margin=nearest / largest,
+        rotation=coupling_norm / gap,
+        structural=float(structural_null.shape[1]),
+        structural_residual=residual / math.sqrt(largest),
+    )
+    if not (nearest > shift and residual * residual < cut_low):
         return None, info
-    surrogate = np.zeros((n_active, gram.shape[0]))
+    # The structural nulls are the surrogate's missing rows: zero there.
+    surrogate = np.zeros((values.size, gram.shape[0]))
     surrogate[:, active] = (
         np.vstack(
             (
@@ -2656,6 +2699,7 @@ def decide_data_rank(
     factor_decomposition: Callable[[], RankDecomposition],
     *,
     project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]] | None = None,
+    structural: Callable[[], Sequence[tuple[slice, NDArray, float]]] | None = None,
     rows: int = 0,
     psd_by_construction: bool = False,
     certify: bool = False,
@@ -2680,7 +2724,9 @@ def decide_data_rank(
     if decomposition is not None:
         return decomposition
     if not certify and project is not None:
-        deflated, _ = decompose_gram_deflated(gram, project, rows=rows, policy=policy)
+        deflated, _ = decompose_gram_deflated(
+            gram, project, rows=rows, structural=structural() if structural else (), policy=policy
+        )
         if deflated is not None:
             return deflated
     return factor_decomposition()

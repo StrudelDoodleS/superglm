@@ -70,6 +70,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
     grouped_projected_factor,
+    grouped_structural_nulls,
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
@@ -4710,6 +4711,9 @@ def _fit_irls_direct_once(
                         data_factor_rank,
                         project=lambda basis: grouped_projected_factor(
                             dm, W, basis, center=final_centre, center_lo=final_centre_lo
+                        ),
+                        structural=lambda: grouped_structural_nulls(
+                            dm, W, center=final_centre, center_lo=final_centre_lo
                         ),
                         rows=dm.n,
                         psd_by_construction=not _return_working_system,

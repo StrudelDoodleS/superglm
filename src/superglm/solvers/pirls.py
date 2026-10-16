@@ -38,6 +38,7 @@ from superglm.solvers.centered_system import (
     dense_anchor,
     grouped_augmented_factor,
     grouped_projected_factor,
+    grouped_structural_nulls,
     grouped_weighted_factor,
     two_pass_centred_gram,
 )
@@ -2032,6 +2033,9 @@ def _fit_pirls_inner(
         ),
         project=lambda basis: grouped_projected_factor(
             selected_dm, W_final, basis, center=centre, center_lo=centre_lo
+        ),
+        structural=lambda: grouped_structural_nulls(
+            selected_dm, W_final, center=centre, center_lo=centre_lo
         ),
         rows=selected_dm.n,
         certify=not np.any(selected_penalty),

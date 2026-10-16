@@ -1018,6 +1018,9 @@ largest.
 - The weighted Gram $\mathbf{X}^\top\mathbf{W}\mathbf{X}$ is already formed
   during the fit. When its eigenvalues are clearly on one side of that cut, it
   decides on its own.
+- Some directions are exactly zero by construction, such as a tensor cell
+  whose rows sit on fewer distinct points than it has basis functions. These
+  are read off the term's table of distinct rows, without touching the rows.
 - Otherwise only the few *grey* directions, the eigenvectors with the smallest
   eigenvalues, are checked against the rows. The rows are projected onto those
   $k$ directions and that $n \times k$ block is factored by QR. This costs
@@ -1026,8 +1029,9 @@ largest.
   that the other directions cannot change the answer. Where it cannot confirm
   this, the fit factors every row instead.
 
-On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$ and
-$k \approx 300$.
+On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
+its 230 directions outside the data rank, 164 are read off the tables, and
+$k = 178$ directions are checked against the rows.
 
 ### 17.4 Kernels: what are they really doing?
 
