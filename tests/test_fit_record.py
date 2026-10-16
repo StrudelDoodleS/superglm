@@ -81,6 +81,7 @@ def test_set_spools_one_record_per_fit(monkeypatch, tmp_path):
     assert cat["zero_response_cells"] >= 0 and "skew" in config["numeric_inputs"]["a"]
     assert config["family_params"] == {"family": "poisson", "estimate_p": False}
     assert isinstance(config["first_fit_in_process"], bool)
+    assert config["under_pytest"] is True
     assert fit["phases"] and all(p["wall_s"] >= 0 for p in fit["phases"])
     json.dumps(payload, allow_nan=False)
 

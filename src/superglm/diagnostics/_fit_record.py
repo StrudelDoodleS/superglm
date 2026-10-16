@@ -749,6 +749,7 @@ def end(token, model, error) -> None:
             "commit": facts["commit"],
             "threads": token["threads"],
             "first_fit_in_process": token["first_fit_in_process"],
+            "under_pytest": "PYTEST_CURRENT_TEST" in os.environ,
             "unowned": token["task"].startswith("unowned-"),
             "load_start": token["load_start"],
             "cpu_start": token["cpu_start"],
