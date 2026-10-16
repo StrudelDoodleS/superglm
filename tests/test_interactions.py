@@ -2249,3 +2249,76 @@ class TestPolynomialInteractionStoredFactor:
         p1._R = p1._R * 2.0
         p2._R = p2._R * -1.0
         np.testing.assert_allclose(pi.transform(x1, x2), snapshot, atol=1e-14)
+
+
+# ── Row-wise Kronecker kernel and pooled interaction builds ─────────
+def test_row_kron_kernel_stores_the_column_products_bit_for_bit():
+    """The compiled row Kronecker stores SciPy's column-product entries, bit for bit.
+
+    The fixtures carry stored zeros and products that underflow to zero, which
+    SciPy drops, and a non-finite factor, which takes the column loop.
+    """
+    import scipy.sparse as sp
+
+    from superglm.features.interaction import _row_kron, _row_kron_columns
+
+    rng = np.random.default_rng(7)
+
+    def values(m):
+        return rng.normal(size=m) * 10.0 ** rng.integers(-200, 200, m)
+
+    for trial in range(12):
+        k1, k2 = 1 + trial % 6, 2 + trial % 5
+        A = sp.random(300, k1, density=0.5, format="csr", random_state=trial, data_rvs=values)
+        B = sp.random(300, k2, density=0.7, format="csr", random_state=99 + trial, data_rvs=values)
+        if trial % 3 == 0:
+            A.data[::4] = 0.0
+        if trial == 11:
+            B.data[0] = np.nan
+        new, old = _row_kron(A, B), _row_kron_columns(A, B)
+        old.sort_indices()
+        assert new.shape == old.shape
+        assert np.array_equal(new.indptr, old.indptr)
+        assert np.array_equal(new.indices, old.indices)
+        assert new.data.tobytes() == old.data.tobytes()
+
+
+def test_interactions_build_on_the_pool_and_match_the_serial_design(interaction_data):
+    """Interaction terms build on worker threads; the design is the serial one, bit for bit."""
+    import threading
+
+    import superglm.dm_builder as builder
+    from superglm._parallel import parallel_config
+
+    X, y, w = interaction_data
+    threads: set[str] = set()
+    original = builder._process_info
+
+    def recorded(*args, **kwargs):
+        threads.add(threading.current_thread().name)
+        return original(*args, **kwargs)
+
+    designs = {}
+    for workers in (1, 3):
+        threads.clear()
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "age": Spline(n_knots=6),
+                "bm": Spline(n_knots=5),
+                "region": Categorical(),
+                "type": Categorical(),
+            },
+            interactions=[("age", "bm"), ("age", "region"), ("region", "type")],
+        )
+        with parallel_config(n_jobs=workers), pytest.MonkeyPatch.context() as patch:
+            patch.setattr(builder, "_process_info", recorded)
+            model.fit(X, y, sample_weight=w)
+        assert any(name.startswith("superglm-map") for name in threads) == (workers > 1)
+        probe = np.random.default_rng(0).normal(size=model._dm.p)
+        designs[workers] = (
+            [g.name for g in model._groups],
+            model._dm.matvec(probe).tobytes(),
+            np.asarray(model.result.beta).tobytes(),
+        )
+    assert designs[3] == designs[1]

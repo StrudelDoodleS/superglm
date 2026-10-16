@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._parallel import pooled_map
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
@@ -90,6 +91,21 @@ def _clone_specification_graph(
         list(owned_interaction_order),
         list(pending),
     )
+
+
+# Transient bytes per data row one interaction's build may hold: its basis
+# products and the group matrix it forms (a pool sizing estimate only).
+_INTERACTION_BUILD_ROW_BYTES = 256
+
+
+@dataclass
+class _BuiltInteraction:
+    """One interaction's build: its spec, the spec's groups, each group's matrix, its records."""
+
+    spec: Any
+    result: Any
+    processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]]
+    records: list[tuple]
 
 
 def compile_predictor_design(
@@ -542,7 +558,18 @@ def compile_predictor_design(
     _next_tensor_id = first_tensor_id
     scan_curves = separation_response is not None and bool(separation_boundaries)
 
+    # Discrete tensors are numbered in interaction order before any term
+    # builds, and every parent column is read here, once, on this thread.
+    tensor_ids: dict[str, int] = {}
     for iname in interaction_order:
+        for parent in interaction_specs[iname].parent_names:
+            X.column_array(parent)
+        if should_discretize_tensor_interaction(interaction_specs[iname], specs, model_discrete):
+            tensor_ids[iname] = _next_tensor_id
+            _next_tensor_id += 1
+
+    def build_interaction(iname: str) -> _BuiltInteraction:
+        """One interaction's groups: its spec's build and each group matrix (no shared state)."""
         ispec = interaction_specs[iname]
         interaction_build_weight = (
             geometry_weight
@@ -552,8 +579,9 @@ def compile_predictor_design(
         p1, p2 = ispec.parent_names
         spec1, x1 = resolve_interaction_parent_of(ispec, specs.get(p1), X.column_array(p1))
         spec2, x2 = resolve_interaction_parent_of(ispec, specs.get(p2), X.column_array(p2))
+        records: list[tuple] = []
         if separation_boundaries and isinstance(ispec, CategoricalInteraction):
-            separation_records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
+            records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
         if spec1 is specs.get(p1) and spec2 is specs.get(p2):
             parent_specs = specs
         else:
@@ -585,7 +613,7 @@ def compile_predictor_design(
         bin_idx_inter = None
         exposure_agg_inter = None
         tensor_build: DiscreteTensorBuildResult | None = None
-        tensor_id = -1
+        tensor_id = tensor_ids.get(iname, -1)
         if use_discrete_factor_smooth:
             n_bins_factor_smooth = resolve_discrete_n_bins(p1, ispec, n_bins_config)
             result = ispec.build_discrete(
@@ -613,8 +641,6 @@ def compile_predictor_design(
                 weights=sample_weight,
                 minlength=B_unique_inter.shape[0],
             )
-            tensor_id = _next_tensor_id
-            _next_tensor_id += 1
         elif use_discrete_spline_cat:
             n_bins_spline = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
             result = ispec.build_discrete(
@@ -633,7 +659,7 @@ def compile_predictor_design(
                 build_kwargs["separation"] = curve_separation
             result = ispec.build(x1, x2, parent_specs, **build_kwargs)
         if isinstance(ispec, SplineCategorical) and ispec._separated_curves:
-            separation_records.append(("curve", iname, ispec._separated_curves))
+            records.append(("curve", iname, ispec._separated_curves))
 
         pi_kwargs: dict[str, Any] = dict(
             B_unique=B_unique_inter,
@@ -644,15 +670,33 @@ def compile_predictor_design(
             tensor_build=tensor_build,
             tensor_id=tensor_id,
         )
+        processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]] = []
+        if not isinstance(result, list):
+            processed.append((None, result, *_process_info(result, **pi_kwargs)))
+        elif any(info.subgroup_name is not None for info in result):
+            # A decomposed tensor's subgroups share one basis and its support.
+            ssp_supports: dict = {}
+            for info in result:
+                processed.append(
+                    (None, info, *_process_info(info, **pi_kwargs, ssp_supports=ssp_supports))
+                )
+        else:
+            # Per-level groups (SplineCategorical, PolynomialCategorical)
+            for level, info in zip(ispec._non_base, result):
+                processed.append((level, info, *_process_info(info, **pi_kwargs)))
+        return _BuiltInteraction(ispec, result, processed, records)
 
+    # Interactions read their parents' learned state and write only their
+    # own, so they build on the pool (``_parallel.pooled_map``); the design
+    # is assembled from them in interaction order, as the serial loop did.
+    built = pooled_map(build_interaction, list(interaction_order), _INTERACTION_BUILD_ROW_BYTES * n)
+    for iname, term in zip(interaction_order, built, strict=True):
+        ispec, result = term.spec, term.result
+        separation_records.extend(term.records)
         if isinstance(result, list):
-            has_subgroups = any(info.subgroup_name is not None for info in result)
-            if has_subgroups:
+            if any(info.subgroup_name is not None for info in result):
                 r_inv_parts_i: list[NDArray] = []
-                # A decomposed tensor's subgroups share one basis and its support.
-                ssp_supports: dict = {}
-                for info in result:
-                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs, ssp_supports=ssp_supports)
+                for _, info, gm, r_inv, n_cols in term.processed:
                     if r_inv is not None:
                         r_inv_parts_i.append(r_inv)
 
@@ -678,10 +722,8 @@ def compile_predictor_design(
                 if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
                     ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
             else:
-                # Per-level groups (SplineCategorical, PolynomialCategorical)
                 r_inv_dict: dict[str, NDArray] = {}
-                for level, info in zip(ispec._non_base, result):
-                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs)
+                for level, info, gm, r_inv, n_cols in term.processed:
                     if r_inv is not None:
                         r_inv_dict[level] = r_inv
 
@@ -707,7 +749,7 @@ def compile_predictor_design(
         else:
             # Single group (CategoricalInteraction, NumericCategorical,
             # NumericInteraction, PolynomialInteraction, TensorInteraction)
-            gm, r_inv, n_cols = _process_info(result, **pi_kwargs)
+            _, _, gm, r_inv, n_cols = term.processed[0]
             priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
             g_new = GroupSlice(
                 name=iname,

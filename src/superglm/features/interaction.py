@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
@@ -1718,15 +1719,8 @@ class PolynomialInteraction:
 # ── Row-wise Kronecker utility ────────────────────────────────
 
 
-def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
-    """Row-wise Kronecker product of two sparse matrices.
-
-    For B1 (n, k1) and B2 (n, k2), returns T (n, k1*k2) where
-    T[i, :] = B1[i, :] ⊗ B2[i, :].
-
-    Column ordering: column j1*k2 + j2 corresponds to B1[:,j1] * B2[:,j2].
-    """
-    # Ensure 2D csc_matrix (not csc_array) for correct column slicing
+def _row_kron_columns(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
+    """``_row_kron`` by SciPy column products, for factors with a non-finite entry."""
     B1c = sp.csc_matrix(B1)
     B2c = sp.csc_matrix(B2)
     k2 = B2c.shape[1]
@@ -1736,6 +1730,85 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
         for j2 in range(k2):
             blocks.append(c1.multiply(B2c[:, j2]))
     return sp.csr_matrix(sp.hstack(blocks, format="csr"))
+
+
+@njit(cache=True, nogil=True)
+def _row_kron_counts(p1, i1, d1, p2, i2, d2, counts):  # pragma: no cover - compiled
+    """Stored entries of each row of the row-wise Kronecker product: nonzero products only."""
+    for r in range(counts.shape[0] - 1):
+        stored = 0
+        for a in range(p1[r], p1[r + 1]):
+            for b in range(p2[r], p2[r + 1]):
+                if d1[a] * d2[b] != 0.0:
+                    stored += 1
+        counts[r + 1] = stored
+
+
+@njit(cache=True, nogil=True)
+def _row_kron_fill(p1, i1, d1, p2, i2, d2, k2, indptr, indices, data):  # pragma: no cover
+    """Fill each row's entries in column order ``j1 * k2 + j2`` (sorted ``j1``, then ``j2``)."""
+    for r in range(indptr.shape[0] - 1):
+        out = indptr[r]
+        for a in range(p1[r], p1[r + 1]):
+            for b in range(p2[r], p2[r + 1]):
+                value = d1[a] * d2[b]
+                if value != 0.0:
+                    indices[out] = i1[a] * k2 + i2[b]
+                    data[out] = value
+                    out += 1
+
+
+_POOLED_BUILD_KERNELS = (_row_kron_counts, _row_kron_fill)
+"""The kernels an interaction build runs on its pool worker (``_predictor_compiler``):
+``nogil``, never ``prange``, writing only the arrays the call allocates."""
+
+
+def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
+    """Row-wise Kronecker product of two sparse matrices.
+
+    For B1 (n, k1) and B2 (n, k2), returns T (n, k1*k2) where
+    T[i, :] = B1[i, :] ⊗ B2[i, :].
+
+    Column ordering: column j1*k2 + j2 corresponds to B1[:,j1] * B2[:,j2].
+
+    One pass over each row's stored entries, in two compiled sweeps (count,
+    then fill).  It stores what SciPy's column-by-column ``multiply`` and
+    ``hstack`` stored: each product ``B1[i, j1] * B2[i, j2]`` of two stored
+    entries, rounded once, kept only when it is nonzero, in sorted column
+    order; so the matrix is entry for entry the one the column loop built.
+    A non-finite entry keeps the column loop (``_row_kron_columns``): SciPy
+    multiplies it by the other column's implicit zeros as well, storing NaN.
+    """
+    B1c = sp.csr_matrix(B1)
+    B2c = sp.csr_matrix(B2)
+    if not (np.all(np.isfinite(B1c.data)) and np.all(np.isfinite(B2c.data))):
+        return _row_kron_columns(B1, B2)
+    B1c.sum_duplicates()
+    B2c.sum_duplicates()
+    B1c.sort_indices()
+    B2c.sort_indices()
+    n, k1 = B1c.shape
+    k2 = B2c.shape[1]
+    args = (
+        B1c.indptr.astype(np.int64),
+        B1c.indices.astype(np.int64),
+        np.asarray(B1c.data, dtype=np.float64),
+        B2c.indptr.astype(np.int64),
+        B2c.indices.astype(np.int64),
+        np.asarray(B2c.data, dtype=np.float64),
+    )
+    counts = np.zeros(n + 1, dtype=np.int64)
+    _row_kron_counts(*args, counts)
+    indptr = np.cumsum(counts)
+    index_dtype = np.int32 if max(int(indptr[-1]), k1 * k2) <= np.iinfo(np.int32).max else np.int64
+    indices = np.empty(int(indptr[-1]), dtype=np.int64)
+    data = np.empty(int(indptr[-1]), dtype=np.float64)
+    _row_kron_fill(*args, k2, indptr, indices, data)
+    T = sp.csr_matrix(
+        (data, indices.astype(index_dtype), indptr.astype(index_dtype)), shape=(n, k1 * k2)
+    )
+    T.has_sorted_indices = True
+    return T
 
 
 def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
