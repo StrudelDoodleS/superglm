@@ -19,6 +19,8 @@ from superglm.distributional.families._base import (
     array_digest,
     immutable,
     natural_curvature_direction,
+    natural_curvature_second_direction,
+    natural_third_from_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -50,6 +52,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     generalized_pareto_mean,
     generalized_pareto_quantile,
     initialize_generalized_pareto,
+    scale_fourth,
     scale_hessian_direction,
     scale_rows,
 )
@@ -367,6 +370,29 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         return natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
+        )
+
+    def predictor_curvature_second_directional_derivative(
+        self, y, eta, direction_a, direction_b, links, plan
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = _validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            third = natural_third_from_direction(
+                lambda v: scale_hessian_direction(
+                    response, theta[:, 0], theta[:, 1], v, bound.multiplier
+                ),
+                len(response),
+                2,
+            )
+            fourth = scale_fourth(response, theta[:, 0], theta[:, 1], bound.multiplier)
+            return third, fourth
+
+        return natural_curvature_second_direction(
+            self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
         )
 
     def expected_information_natural(self, theta, plan) -> NDArray[np.float64]:
