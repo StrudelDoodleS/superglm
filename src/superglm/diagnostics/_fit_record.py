@@ -22,6 +22,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 PROTOCOL = 1
 _THREAD_VARS = (
@@ -34,7 +35,10 @@ _THREAD_VARS = (
     "SUPERGLM_BLAS_THREADS",
     "SUPERGLM_N_JOBS",
 )
-_parent = contextvars.ContextVar("superglm_fit_record_parent", default=None)
+# (fit id, method) of the fit this one runs inside, if any
+_parent: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "superglm_fit_record_parent", default=None
+)
 _process: dict = {}
 _sequence = [0]
 last_fit_id: str | None = None
@@ -57,12 +61,12 @@ class _CompileClock:
         clock = self
 
         class _Listener(event.Listener):
-            def on_start(self, ev):
+            def on_start(self, event):
                 clock._depth += 1
                 if clock._depth == 1:
                     clock._t0 = time.perf_counter()
 
-            def on_end(self, ev):
+            def on_end(self, event):
                 clock._depth = max(clock._depth - 1, 0)
                 if clock._depth == 0:
                     clock.total += time.perf_counter() - clock._t0
@@ -575,7 +579,7 @@ def _lss(model, params) -> dict:
 
 
 def _lss_outcome(model, params) -> dict:
-    out = {}
+    out: dict[str, Any] = {}
     fitted = getattr(model, "_model", None)
     if fitted is None:
         return out

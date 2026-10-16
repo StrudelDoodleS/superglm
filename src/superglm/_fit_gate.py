@@ -60,9 +60,10 @@ class _Recording:
         return self
 
     def __exit__(self, kind, error, traceback):
-        if self.token is not None:
+        recorder = self.recorder
+        if self.token is not None and recorder is not None:
             try:
-                self.recorder.end(self.token, self.model, error)
+                recorder.end(self.token, self.model, error)
             except Exception:  # noqa: BLE001, S110
                 pass
         return False
