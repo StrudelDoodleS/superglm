@@ -763,10 +763,9 @@ def build_centered_system(
     # (``_lookup_tables``; Li & Wood 2020, Algorithm 1).  No raw moment is
     # subtracted, so no rung's value certificate is needed.
     plan = None if _force_chunked else table_gram_plan(dm)
-    if plan is not None:
-        mean_x, data_gram, rhs, mean_hi, mean_lo = table_centred_system(
-            plan, dm, W, z_centered, sum_w
-        )
+    table = None if plan is None else table_centred_system(plan, dm, W, z_centered, sum_w)
+    if table is not None:
+        mean_x, data_gram, rhs, mean_hi, mean_lo = table
         if profile is not None:
             profile["centered_table_gram_hits"] = profile.get("centered_table_gram_hits", 0) + 1
         return _attach_centered_penalty(

@@ -262,7 +262,9 @@ def test_a_common_component_of_a_support_never_rounds_into_the_gram(monkeypatch,
     ``fl(B R)``, off by ``u C |R|`` in every row: 1e-4 against a spread near
     one (``offset``: 1.3e-4 of the Gram), 1.2e-2 of the Gram
     (``cancelling``), where the chunked route is within 1e-15.  Mutation:
-    without the anchoring all four cases fail.
+    without the anchoring the ``cancelling`` cases fail.  The ``offset``
+    design's anchor row ``B[a] R`` (near ``2**40 colsum(R)``) dwarfs its rows
+    past ``_SEPARATION_LIMIT``, so it now keeps the chunked route (thread 36).
     """
     from superglm._group_matrix._group_matrix_kernels import _ssp_gram_needs_exact
     from superglm.solvers.centered_system import build_centered_system
@@ -275,7 +277,12 @@ def test_a_common_component_of_a_support_never_rounds_into_the_gram(monkeypatch,
     with lookup_tables.table_gram_config(True):
         system = build_centered_system(dm=dm, W=W, z_off=z, penalty=np.zeros((dm.p, dm.p)))
         plan = lookup_tables.table_gram_plan(dm)
-    assert plan is not None and (pair_form is None or plan.acc_pairs.size)
+    if kind == "offset":
+        assert plan is None and lookup_tables.lookup_plan(dm) is None
+        m_largest = spline.B_unique.shape[0]
+    else:
+        assert plan is not None and (pair_form is None or plan.acc_pairs.size)
+        m_largest = max(term.raw.shape[0] for term in plan.terms)
 
     shifted = (spline.B_unique - common) @ spline.R_inv  # exact rows, ``C`` removed first
     rows = np.hstack((shifted[spline.bin_idx], categorical.toarray()))
@@ -289,7 +296,6 @@ def test_a_common_component_of_a_support_never_rounds_into_the_gram(monkeypatch,
             np.abs(categorical.toarray()) + 2.0 * np.abs(mean[spline.shape[1] :]),
         )
     )
-    m_largest = max(term.raw.shape[0] for term in plan.terms)
     k = 2 * dm.n + 2 * m_largest + dm.p + 4 * spline.B_unique.shape[1] + 16
     bound = _gamma(k) * (magnitude.T @ (W[:, None] * magnitude))
     assert np.all(np.abs(system.data_gram - gram) <= bound)
@@ -400,3 +406,67 @@ def test_a_table_pair_takes_the_cheaper_association():
     second = 10 * 50 * 100 + 10_000 * 100 * 10  # A (X B')
     assert sum(calls) == min(first, second)
     assert np.allclose(G, A @ X @ B.T, rtol=1e-10, atol=1e-10 * np.abs(A @ X @ B.T).max())
+
+
+def test_an_offset_that_dwarfs_its_rows_declines_the_plan():
+    """Thread 36: a support around ``2**60`` whose anchor row the centre cannot carry apart.
+
+    ``B = 2**60 + 2**8 m`` with a generic ``R``: the anchored rows ``(B - B[a]) R``
+    are near ``2**8``, the anchor row ``B[a] R`` near ``2**60``.  The leverage
+    reads a centre ``c = fl(B[a] R + shift)`` back as ``c - B[a] R``, which
+    erases the shift there, so the plan is declined (``_SEPARATION_LIMIT``).
+    The same rows without the common part take the tables.  On 83d33d9c the
+    plan was built.
+    """
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DesignMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    rng = np.random.default_rng(21)
+    n, support, basis = 20_480, 60, 6
+    m = 2.0**8 * rng.integers(0, 20, (support, basis)).astype(np.float64)
+    R = rng.normal(size=(basis, basis - 1))
+    bins = rng.integers(0, support, n)
+    categorical = CategoricalGroupMatrix(rng.integers(-1, 3, n), 3)
+    plans = []
+    for common in (2.0**60, 0.0):
+        groups = [SupportCompressedSSPGroupMatrix(common + m, R, bins), categorical]
+        dm = DesignMatrix(groups, n=n, p=sum(gm.shape[1] for gm in groups))
+        plans.append(lookup_tables.lookup_plan(dm))
+    assert plans[0] is None and plans[1] is not None
+
+
+def test_a_categorical_dominated_by_one_bin_keeps_the_chunked_gram():
+    """Thread 37: one bin's weight ``1e16`` times the rest cancels the identity Gram's diagonal.
+
+    ``_identity_gram``'s diagonal ``w_k R_k / S`` is formed with an error of
+    ``u w_k``; with the dominant bin at ``1e16`` and the base bin at one
+    (zero weight elsewhere) that is all of the curvature, so the call is
+    declined and the chunked route builds the system, bit for bit its own.
+    Ordinary weights on the same design take the tables.  On 83d33d9c the
+    table route returned a rank-zero block.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+    from superglm.solvers.centered_system import build_centered_system
+
+    rng = np.random.default_rng(5)
+    n, K = 20_000, 6
+    codes = rng.integers(-1, K, n)
+    dm = DesignMatrix([CategoricalGroupMatrix(codes, K)], n=n, p=K)
+    dominated = np.where(codes == 0, 1.0e16 / np.sum(codes == 0), 0.0)
+    dominated[codes == -1] = 1.0 / np.sum(codes == -1)
+    z, penalty = np.zeros(n), np.eye(K)
+    for W, tables in ((dominated, 0), (rng.uniform(0.5, 2.0, n), 1)):
+        profile: dict = {}
+        with lookup_tables.table_gram_config(True):
+            system = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty, profile=profile)
+        assert profile.get("centered_table_gram_hits", 0) == tables
+        if not tables:
+            chunked = build_centered_system(
+                dm=dm, W=W, z_off=z, penalty=penalty, _force_chunked=True
+            )
+            assert np.array_equal(system.data_gram, chunked.data_gram)
+            assert np.all(np.diag(system.data_gram)[1:] == 0.0)  # those levels carry no weight
+            assert system.data_gram[0, 0] > 0.0

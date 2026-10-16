@@ -57,11 +57,17 @@ about the rounded anchor with Bjorck's two-pass correction
   support route's anchoring, ``_anchor_center_support``), so in the Gram
   neither ``e_x`` nor any row of such a support carries a common component of
   ``B``, whether ``R`` cancels it or not; a categorical's rows are
-  indicators.  Two reads keep ``u |B| |R|``-sized errors, as v0.40.0's did:
-  a spline-by-category level is projected unanchored (its zero row must
-  stay zero; the chunked route projects it so too), and the leverage and
+  indicators.  Two reads keep ``u |B| |R|``-sized errors.  The leverage and
   ``X_c' v`` read a whole support as ``raw - (c - B[a] R)``, where ``c -
-  B[a] R`` differs from the Gram's shift by up to ``u |c|``.  Applying Bjorck's correction for
+  B[a] R`` differs from the Gram's shift by up to ``u |c|`` (v0.40.0's
+  leverage read ``fl(B R) - c``, no better; a design whose offset dwarfs its
+  rows past ``_SEPARATION_LIMIT`` is declined).  A spline-by-category level
+  is projected unanchored, its zero row kept zero, in the leverage as in
+  v0.40.0 but in the Gram a narrowing against v0.40.0: its rung ladder
+  certified the raw moments and fell back to anchoring a level's ``B``
+  before ``R``, which the table Gram replaces, so a level whose ``B``
+  carries a common component that ``R`` cancels keeps a ``u C |R|`` error
+  there (at rounding level for B-spline levels, ``|B| <= 1``).  Applying Bjorck's correction for
   ``e_x`` (Chan, Golub & LeVeque 1983) moved no entry beyond that rounding
   on the common-component fixtures, so it is not applied.
 - Leverage: with ``eta_r = (|a_r| + |z| + |d_r|)' |V| (|a_r| + |z| + |d_r|)``
@@ -97,6 +103,10 @@ from numpy.typing import NDArray
 _BLOCK_ROWS = 8192
 # A pair histogram larger than this many cells is accumulated instead.
 _CELL_CAP = 1 << 22
+# Declines (to the chunked route) where float64 cannot keep what the tables
+# keep apart: a quantity rounded at ``u`` times a magnitude this many times
+# the one it must resolve has lost more than ``sqrt(u)`` of it.
+_SEPARATION_LIMIT = 2.0**26
 # Relative cost of one coefficient-space multiply-add (BLAS, in cache) against
 # one random row access (prototype measurement, solver-scaling report sec. 7).
 _P_SPACE_WEIGHT = 0.1
@@ -438,6 +448,13 @@ def _build_plan(dm) -> LookupPlan | None:
                 raw = raw @ np.asarray(transform, dtype=np.float64)
             if not (np.all(np.isfinite(raw)) and (offset is None or np.all(np.isfinite(offset)))):
                 return None
+            if offset is not None and np.any(
+                np.abs(offset) > _SEPARATION_LIMIT * np.abs(raw).max(axis=0, initial=0.0)
+            ):
+                # The leverage and ``X_c' v`` read a centre ``c = fl(offset +
+                # shift)`` back as ``c - offset``, within ``u |offset|`` of the
+                # Gram's shift; past the limit that erases the rows' scale.
+                return None
         if level is not None:
             level_rows = np.asarray(level[0], dtype=np.intp)
             if run is not None and np.any(run.codes[level_rows] >= 0):
@@ -650,6 +667,20 @@ def _pair_block(
     return _right(tb, B, db, _left(ta, A, da, T))
 
 
+def _dominated(wm: NDArray) -> bool:
+    """One bin outweighs the rest of a categorical past ``_SEPARATION_LIMIT``.
+
+    ``_identity_gram``'s diagonal ``w_k - 2 d_k w_k + S d_k^2`` is ``w_k R_k / S``
+    (``R_k`` the other bins' mass) computed with an error of ``u w_k``: past the
+    limit it has lost more than ``sqrt(u)`` of the curvature, all of it as the
+    rest falls under the dominant bin's spacing.
+    """
+    mass = np.abs(wm)
+    k = int(np.argmax(mass))
+    rest = float(np.sum(mass[:k]) + np.sum(mass[k + 1 :]))
+    return bool(mass[k] > _SEPARATION_LIMIT * rest)
+
+
 def _identity_gram(wm: NDArray, d: NDArray) -> NDArray:
     """A categorical's own block ``sum_k wm_k (e_k - d)(e_k - d)'`` (``e_K = 0``, the base level).
 
@@ -681,6 +712,9 @@ def _pair_table(ta: _Term, A: NDArray, tb: _Term, B: NDArray, X: NDArray) -> NDA
 def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, sum_w: float):
     """``(mean_x, data_gram, rhs, mean_hi, mean_lo)`` of the centred system, from the tables.
 
+    ``None`` (the caller's chunked route) when a categorical's weights are
+    dominated by one bin (``_dominated``).
+
     The same quantities ``centered_system.build_centered_system`` returns:
     ``data_gram = X_c' W X_c`` and ``rhs = X_c' W z_centered`` about the
     weighted column means, a dense column about the exact pair ``(hi, lo)``
@@ -698,6 +732,9 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
         for t in range(len(terms))
     ]
     _pool_run(jobs, 16 * max(term.raw.shape[0] for term in terms))
+    for term, (wm, _) in zip(terms, margins, strict=True):
+        if term.identity and _dominated(wm):
+            return None
 
     mean_x = np.zeros(p, dtype=np.float64)
     shifts = []
