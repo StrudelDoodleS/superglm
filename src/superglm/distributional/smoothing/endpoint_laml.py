@@ -564,10 +564,15 @@ def _row_certificate_error(
     formed in float64 from ``p``-term dot products, so ``gamma_{2p + 4}`` of
     ``|X_i| |Q| |X_i|'`` is added to ``|G_i|``; the nonnegative chunk sums are
     within ``gamma_{chunk + 4}`` and are inflated by it, and the chunks are
-    summed by ``math.fsum``.
+    summed by ``math.fsum``.  A channel whose certificate is zero on every
+    row contributes nothing and is skipped (NB2 certifies only ``l_bbb``, so
+    two of its three channels are zero), and an all-zero certificate is zero.
     """
     matrices = bounded_predictor_matrices(layout)
     pairs = packed_pairs(len(matrices))
+    live = [channel for channel in range(len(pairs)) if np.any(certificate[:, channel])]
+    if not live:
+        return 0.0
     slices = [state.coefficient_slice for state in layout.predictors]
     projector = basis @ np.asarray(inverse, dtype=np.float64) @ basis.T
     absolute_projector = np.abs(projector)
@@ -585,7 +590,8 @@ def _row_certificate_error(
         local = [matrix[rows] for matrix in matrices]
         absolute = [np.abs(values) for values in local]
         total = np.zeros(rows.stop - rows.start, dtype=np.float64)
-        for channel, (left, right) in enumerate(pairs):
+        for channel in live:
+            left, right = pairs[channel]
             block = (slices[left], slices[right])
             leverage = np.einsum("ij,ij->i", local[left] @ projector[block], local[right])
             scale = np.einsum(
