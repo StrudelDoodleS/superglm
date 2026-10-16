@@ -153,6 +153,19 @@ class BoundedPowerLink:
         product = probability * complement
         return (self.upper - self.lower) * product * (1.0 - 6.0 * product)
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray[np.float64]:
+        """``span p q (q - p)(1 - 12 p q)`` with ``q = expit(-eta)``."""
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        product = probability * complement
+        return (
+            (self.upper - self.lower)
+            * product
+            * (complement - probability)
+            * (1.0 - 12.0 * product)
+        )
+
 
 _POISSON_TAIL_TOLERANCE = 1.0e-12
 _MAX_POISSON_TERMS = 20_000

@@ -29,6 +29,9 @@ class Link(Protocol):
         (Wood 2011, Appendix D).
         If absent, the correction is skipped and REML falls back
         to the fixed-W Laplace approximation.
+        deriv4_inverse — d⁴μ/dη⁴, used by the distributional families'
+        analytic fourth derivatives (Wood, Pya and Säfken 2016, Appendix A);
+        without it those derivatives are differenced.
     """
 
     def link(self, mu: NDArray) -> NDArray:
@@ -70,6 +73,10 @@ class LogLink:
         """d³μ/dη³ = exp(η). Wood (2011) Appendix D."""
         return np.exp(eta)
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = exp(η)."""
+        return np.exp(eta)
+
 
 class IdentityLink:
     """Identity link: eta = mu, mu = eta."""
@@ -91,6 +98,10 @@ class IdentityLink:
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = 0. Wood (2011) Appendix D."""
+        return np.zeros_like(eta)
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = 0."""
         return np.zeros_like(eta)
 
 
@@ -128,6 +139,13 @@ class LogitLink:
 
         p = expit(eta)
         return p * (1 - p) * (1 - 6 * p + 6 * p**2)
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = μ(1-μ)(1 - 14μ + 36μ² - 24μ³)."""
+        from scipy.special import expit
+
+        p = expit(eta)
+        return p * (1 - p) * (1 - 14 * p + 36 * p**2 - 24 * p**3)
 
 
 class ProbitLink:
@@ -194,6 +212,12 @@ def _normal_pdf(x):
     result = np.exp(-(x**2) / 2.0) / _NORMAL_PDF_C
     return result[()] if np.ndim(result) == 0 else result
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = (3η - η³)·φ(η)."""
+        from scipy.stats import norm
+
+        return (3 * eta - eta**3) * norm.pdf(eta)
+
 
 class CloglogLink:
     """Complementary log-log link: eta = log(-log(1 - mu)).
@@ -228,6 +252,11 @@ class CloglogLink:
         """d³μ/dη³ = exp(η-eη)·((1-eη)² - eη). Wood (2011) Appendix D."""
         ee = np.exp(eta)
         return ee * np.exp(-ee) * ((1 - ee) ** 2 - ee)
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = exp(η-eη)·(1 - 7eη + 6e²η - e³η)."""
+        ee = np.exp(eta)
+        return ee * np.exp(-ee) * (1 - 7 * ee + 6 * ee**2 - ee**3)
 
 
 class CauchitLink:
@@ -298,6 +327,19 @@ class CauchitLink:
         )
         return result
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = 24η(1 - η²) / (π(1+η²)⁴), in ``1/η`` beyond ``|η| = 1``."""
+        eta_values = np.asarray(eta, dtype=np.float64)
+        result = np.empty_like(eta_values)
+        large = np.abs(eta_values) > 1.0
+        reciprocal = 1.0 / eta_values[large]
+        result[large] = (
+            24.0 * reciprocal**5 * (reciprocal**2 - 1.0) / (np.pi * (1.0 + reciprocal**2) ** 4)
+        )
+        small = eta_values[~large]
+        result[~large] = 24.0 * small * (1.0 - small**2) / (np.pi * (1.0 + small**2) ** 4)
+        return result
+
 
 class InverseLink:
     """Inverse (reciprocal) link: eta = 1/mu, mu = 1/eta.
@@ -323,6 +365,10 @@ class InverseLink:
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = -6/η⁴. Wood (2011) Appendix D."""
         return -6.0 / eta**4
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = 24/η⁵."""
+        return 24.0 / eta**5
 
 
 class InverseSquaredLink:
@@ -350,6 +396,10 @@ class InverseSquaredLink:
         """d³μ/dη³ = -15/8 · η^{-7/2}. Wood (2011) Appendix D."""
         return -1.875 * eta ** (-3.5)
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = 105/16 · η^{-9/2}."""
+        return 6.5625 * eta ** (-4.5)
+
 
 class SqrtLink:
     """Square-root link: eta = sqrt(mu), mu = eta^2.
@@ -375,6 +425,10 @@ class SqrtLink:
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = 0. Wood (2011) Appendix D."""
+        return np.zeros_like(eta)
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = 0."""
         return np.zeros_like(eta)
 
 
@@ -428,6 +482,14 @@ class PowerLink:
         q = 1.0 / p
         return q * (q - 1) * (q - 2) * np.power(np.maximum(eta, 1e-15), q - 3)
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = q(q-1)(q-2)(q-3)·η^{q-4}, q=1/p."""
+        p = self.power
+        if p == 1.0:
+            return np.zeros_like(eta)
+        q = 1.0 / p
+        return q * (q - 1) * (q - 2) * (q - 3) * np.power(np.maximum(eta, 1e-15), q - 4)
+
 
 class NegativeBinomialLink:
     """Negative binomial link: eta = log(mu / (mu + theta)).
@@ -470,6 +532,11 @@ class NegativeBinomialLink:
         """d³μ/dη³ = θe(1 + 4e + e²)/(1-e)⁴. Wood (2011) Appendix D."""
         e = np.exp(np.clip(eta, -30, 0 - 1e-10))
         return self.theta * e * (1 + 4 * e + e**2) / (1 - e) ** 4
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        """d⁴μ/dη⁴ = θe(1 + 11e + 11e² + e³)/(1-e)⁵."""
+        e = np.exp(np.clip(eta, -30, 0 - 1e-10))
+        return self.theta * e * (1 + 11 * e + 11 * e**2 + e**3) / (1 - e) ** 5
 
 
 _LOG_LINK_ETA_MIN = -80.0

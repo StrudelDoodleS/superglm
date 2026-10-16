@@ -134,6 +134,10 @@ class LowerBoundedLogLink:
         with np.errstate(over="ignore", invalid="ignore"):
             return np.exp(np.asarray(eta, dtype=np.float64))
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.exp(np.asarray(eta, dtype=np.float64))
+
 
 def _prior_weight_vector(weights: NDArray, n_observations: int) -> NDArray[np.float64]:
     """Per-row prior weights broadcast to the parameter rows of one call."""
