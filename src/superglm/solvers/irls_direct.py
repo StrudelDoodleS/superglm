@@ -93,6 +93,7 @@ from superglm.solvers.irls_state import (
     _stable_penalized_deviance_delta,
     _state_is_finite,
     interior_start_intercept,
+    link_domain_violation,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
     mean_space_first_halving,
@@ -2594,6 +2595,8 @@ def _fit_irls_direct_once(
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
+    # The link inverse's own domain (``irls_state.link_domain_violation``).
+    _link_domain_invalid = link_domain_violation(link)
     # A warm start's centred state carried to this fit's centre (one-engine
     # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
     # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -3594,6 +3597,17 @@ def _fit_irls_direct_once(
                 ) -> bool:
                     assert _mean_space_invalid is not None
                     if _mean_space_invalid(candidate.eta_unclipped, weights):
+                        return True
+                    return other is not None and other(candidate)
+
+            if _link_domain_invalid is not None and not _link_domain_invalid(
+                committed.eta_unclipped, weights
+            ):
+                # A committed state inside the link's domain keeps every
+                # accepted trial inside it (``link_domain_violation``).
+                def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
+                    assert _link_domain_invalid is not None
+                    if _link_domain_invalid(candidate.eta_unclipped, weights):
                         return True
                     return other is not None and other(candidate)
 

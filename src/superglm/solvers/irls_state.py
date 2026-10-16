@@ -12,7 +12,15 @@ from numpy.typing import NDArray
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import _BINOMIAL_CLIP_MU_EPS, Link, LogLink, SqrtLink, stabilize_eta
+from superglm.links import (
+    _BINOMIAL_CLIP_MU_EPS,
+    InverseLink,
+    InverseSquaredLink,
+    Link,
+    LogLink,
+    SqrtLink,
+    stabilize_eta,
+)
 
 _MAX_FLOAT64_HALVING_DEPTH = 1074
 
@@ -148,6 +156,30 @@ def mean_space_violation(
 
         def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
             return bool(np.any((eta_unclipped >= 0.0) & (weights > 0.0)))
+
+        return violates
+    return None
+
+
+def link_domain_violation(link: Link) -> Callable[[NDArray, NDArray], bool] | None:
+    """The test that a linear predictor leaves the link inverse's domain, or ``None``.
+
+    The inverse and inverse-squared links map only ``eta > 0`` to a positive
+    mean.  ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
+    row that crosses zero gets a mean of ``1e12`` whose Gamma or inverse
+    Gaussian deviance grows only like ``log mu``: a line search reading that
+    clipped deviance accepts the crossing, and the row is then pinned at the
+    clip with a Fisher weight ``mu^2 = 1e24`` from which no later step moves
+    it.  R's ``glm.fit`` and ``glm2`` halve a step whose linear predictor or
+    mean is invalid for the family (``valideta``, ``validmu``; Marschner
+    2011, R Journal 3(2), "inner loop 2").  The set ``{beta : X beta +
+    offset > 0}`` is convex, so halving from a state inside it finds a step
+    inside it.
+    """
+    if isinstance(link, InverseLink | InverseSquaredLink):
+
+        def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
+            return bool(np.any((eta_unclipped <= 0.0) & (weights > 0.0)))
 
         return violates
     return None

@@ -965,6 +965,41 @@ class TestDirectSolverBasic:
         assert "irls_observed_newton_rescues" not in profile
         assert "irls_observed_newton_iters" not in profile
 
+    def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
+        """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
+
+        ``stabilize_eta`` would turn a crossing row into a mean of 1e12 whose
+        deviance grows only like ``log mu``, so the line search accepted it
+        and the row stayed pinned there (before the fix: two rows at
+        eta < 0, ``step_rejected``).  Every accepted state now keeps
+        ``eta > 0`` on every row, and the fit converges.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        y = rng.gamma(0.3, (1.0 / (0.05 + 2.0 * x)) / 0.3)
+        columns = np.column_stack([x, x**2])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(columns)], n=n, p=2),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=InverseLink(),
+                groups=[GroupSlice(name="x", start=0, end=2)],
+                lambda2=0.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        eta = result.intercept + columns @ result.beta
+        assert np.all(eta > 0.0)
+        assert result.converged
+
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""
         from superglm.distributions import Gamma
