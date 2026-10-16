@@ -37,7 +37,18 @@ from superglm.distributional.kernels._common import (
     readonly_bool,
     validated_derivative_order,
 )
-from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
+from superglm.distributional.kernels._curvature_direction import (
+    compose_derivatives,
+    mean_form_hessian_direction,
+    packed_tuples,
+    stack_columns,
+)
+from superglm.distributional.kernels._fourth_generated import (
+    two_piece_left_mills,
+    two_piece_location_third_fourth,
+    two_piece_piece_loading,
+    two_piece_right_mills,
+)
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 Parametrisation = Literal["mean", "location"]
@@ -669,6 +680,148 @@ def mean_expected_information(
     return readonly(out)
 
 
+# ---------------------------------------------------------------- fourth order
+
+
+def location_third_fourth(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    multiplier: NDArray,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Packed natural third ``(n, 10)`` and fourth ``(n, 15)`` derivatives in ``(mu, sigma, eps)``.
+
+    Within a piece every derivative of ``-log sigma - u^2/2`` is a monomial in
+    ``u``, ``1/sigma`` and ``1/s`` (generated; ``two_piece_location_third_fourth``);
+    at ``u = 0`` the right piece's, as the Hessian's own piece selection.
+    Each is multiplied by ``multiplier``.  A path through the join has no
+    such derivative; the family refuses it before calling here.
+    """
+    t = _vector(variate, name="variate")
+    mu = _vector(location, name="location")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    m = _positive_vector(multiplier, name="multiplier")
+    _same_shape(t, mu, sigma, eps, m)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        u, s, e = _pieces(t, mu, sigma, eps)
+        values = stack_columns(two_piece_location_third_fourth(u, 1.0 / sigma, 1.0 / s, e), len(t))
+        values *= m[:, None]
+    return values[:, :10], values[:, 10:]
+
+
+def _log_mean_loading_fourth(
+    sigma: NDArray[np.float64], eps: NDArray[np.float64]
+) -> dict[int, NDArray[np.float64]]:
+    """``log K``'s derivatives of orders one to four in ``(sigma, eps)``, packed by order.
+
+    The pieces are those of :func:`_log_mean_loading_third`, now through
+    ``G4`` (each piece's derivatives generated from its inverse Mills ratio,
+    ``two_piece_left_mills`` and ``two_piece_right_mills``, and chained
+    through ``a = sigma s`` by ``two_piece_piece_loading``).  ``log K`` is
+    ``L2 + f(L1 - L2)`` with ``f`` the softplus, whose derivatives are
+    ``w1``, ``w1 w2``, ``w1 w2 (w2 - w1)`` and ``w1 w2 (1 - 6 w1 w2)``; order
+    ``m`` is the weighted piece average ``w1 L1 + w2 L2`` plus the softplus
+    chain rule over the partitions with at least two blocks, which carry the
+    factor ``w1 w2`` and vanish when one piece dominates.
+    """
+    left_width, right_width = 1.0 - eps, 1.0 + eps
+    a1, a2 = sigma * left_width, sigma * right_width
+    log_cdf_left = special.log_ndtr(-a1)
+    log_cdf_right = special.log_ndtr(a2)
+    log_left = np.log1p(-eps) + 0.5 * a1 * a1 + log_cdf_left
+    log_right = np.log1p(eps) + 0.5 * a2 * a2 + log_cdf_right
+    logk = np.logaddexp(log_left, log_right)
+    w1, w2 = np.exp(log_left - logk), np.exp(log_right - logk)
+    r1 = np.exp(-0.5 * a1 * a1 - _HALF_LOG_TWO_PI - log_cdf_left)
+    r2 = np.exp(-0.5 * a2 * a2 - _HALF_LOG_TWO_PI - log_cdf_right)
+    n_rows = len(sigma)
+    left = stack_columns(
+        two_piece_piece_loading(sigma, left_width, -1.0, *two_piece_left_mills(a1, r1)), n_rows
+    )
+    right = stack_columns(
+        two_piece_piece_loading(sigma, right_width, 1.0, *two_piece_right_mills(a2, r2)), n_rows
+    )
+    offsets = {1: slice(0, 2), 2: slice(2, 5), 3: slice(5, 9), 4: slice(9, 14)}
+    spread = w1 * w2
+    tilt = np.tanh(0.5 * (log_right - log_left))  # w2 - w1
+    outer = {
+        1: np.zeros((n_rows, 1)),
+        2: spread[:, None],
+        3: (spread * tilt)[:, None],
+        4: (spread * (1.0 - 6.0 * spread))[:, None],
+    }
+    difference = {order: left[:, block] - right[:, block] for order, block in offsets.items()}
+    inner = {
+        order: {
+            (0, key): difference[order][:, column]
+            for column, key in enumerate(packed_tuples(2, order))
+        }
+        for order in offsets
+    }
+    loading = {}
+    for order, block in offsets.items():
+        average = w1[:, None] * left[:, block] + w2[:, None] * right[:, block]
+        if order == 1:
+            loading[order] = average
+        else:
+            loading[order] = average + compose_derivatives(outer, inner, order, 2, components=1)
+    return loading
+
+
+def _mean_inner_derivatives(
+    mean: NDArray[np.float64], loading: dict[int, NDArray[np.float64]]
+) -> dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]]:
+    """``mu = log m - log K(sigma, eps)`` with ``sigma`` and ``eps`` unchanged, as ``inner``."""
+    inner: dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]] = {
+        1: {(0, (0,)): 1.0 / mean, (1, (1,)): 1.0, (2, (2,)): 1.0},
+        2: {(0, (0, 0)): -1.0 / (mean * mean)},
+        3: {(0, (0, 0, 0)): 2.0 / (mean * mean * mean)},
+        4: {(0, (0, 0, 0, 0)): -6.0 / (mean * mean * mean * mean)},
+    }
+    for order, values in loading.items():
+        for column, key in enumerate(packed_tuples(2, order)):
+            inner[order][(0, tuple(index + 1 for index in key))] = -values[:, column]
+    return inner
+
+
+def mean_third_fourth(
+    response: NDArray,
+    mean: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    multiplier: NDArray,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Packed mean-form third ``(n, 10)`` and fourth ``(n, 15)`` derivatives in ``(m, sigma, eps)``.
+
+    The location form's derivatives composed with
+    ``mu = log m - log K(sigma, eps)`` by the set-partition chain rule
+    (``compose_derivatives``), the loading's own derivatives from
+    :func:`_log_mean_loading_fourth`.
+    """
+    y = _positive_vector(response, name="response")
+    m = _positive_vector(mean, name="mean")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    weight = _positive_vector(multiplier, name="multiplier")
+    _same_shape(y, m, sigma, eps, weight)
+    logk = log_mean_loading(sigma, eps)[0]
+    loading = _log_mean_loading_fourth(sigma, eps)
+    location = np.log(m) - logk
+    variate = np.log(y)
+    unit = np.ones_like(weight)
+    base = location_rows(variate, location, sigma, eps, unit, derivative_order=2)
+    assert base.score is not None and base.hessian_packed is not None
+    third, fourth = location_third_fourth(variate, location, sigma, eps, unit)
+    outer = {1: np.asarray(base.score), 2: np.asarray(base.hessian_packed), 3: third, 4: fourth}
+    inner = _mean_inner_derivatives(m, loading)
+    with np.errstate(over="ignore", invalid="ignore"):
+        mean_third = compose_derivatives(outer, inner, 3, 3) * weight[:, None]
+        mean_fourth = compose_derivatives(outer, inner, 4, 3) * weight[:, None]
+    return mean_third, mean_fourth
+
+
 # ---------------------------------------------------------------- initialiser
 
 _A1 = 1.0 / math.sqrt(2.0 * math.pi)
@@ -772,10 +925,12 @@ __all__ = [
     "location_expected_information",
     "location_of_mean",
     "location_rows",
+    "location_third_fourth",
     "log_mean_loading",
     "mean_expected_information",
     "mean_of_location",
     "mean_rows",
+    "mean_third_fourth",
     "real_line_mean",
     "skew_from_sample_skewness",
     "standard_skewness",
