@@ -756,6 +756,9 @@ def optimize_direct_reml(
     # it flat), and counting it would spin the loop doing nothing until
     # max_reml_iter with every informative direction long determined.
     stop_criterion_frozen = None
+    # Directions a table-route stop reactivated, kept out of the gradient-only
+    # freeze until their gradient falls under the stop tolerance.
+    held_active: NDArray | None = None
 
     if verbose:
         boot_lam_str = ", ".join(
@@ -1220,6 +1223,8 @@ def optimize_direct_reml(
         proj_grad_norm = candidate_convergence.projected_gradient_norm
         score_scale = candidate_convergence.score_scale
         obj_change = candidate_convergence.objective_change
+        if held_active is not None:
+            held_active = held_active & (np.abs(proj_grad) >= _tol * score_scale)
 
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
@@ -1363,7 +1368,7 @@ def optimize_direct_reml(
                     "proj_grad_signed": [float(v) for v in proj_grad],
                 }
             _t_hessian += _time.perf_counter() - _t0
-            reactivated = concave_live | (
+            unfrozen = (
                 ~np.asarray(revalidation.frozen)
                 & (
                     np.asarray(stop_criterion_frozen)
@@ -1372,6 +1377,14 @@ def optimize_direct_reml(
                 )
                 & (np.abs(proj_grad) >= _tol * score_scale)
             )
+            reactivated = concave_live | unfrozen
+            if table_route:
+                # The iterations between stops freeze on the gradient-only
+                # Hessian, which can refreeze what this Hessian reactivated
+                # (curvature straddling the bar): hold them active until their
+                # gradient is under the stop tolerance.  (10-pair freMTPL2:
+                # 10 -> 9 exact iterations, 3 -> 2 stop passes.)
+                held_active = unfrozen | (held_active if held_active is not None else False)
             if not bool(np.any(reactivated)):
                 converged = True
                 termination_reason = "score_objective_tolerance"
@@ -1437,6 +1450,8 @@ def optimize_direct_reml(
             step_bound=max_newton_step,
         )
         frozen = freeze_decision.frozen
+        if held_active is not None and held_active.any():
+            frozen = frozen & ~held_active
         shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()

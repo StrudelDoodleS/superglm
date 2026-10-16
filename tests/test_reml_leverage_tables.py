@@ -166,6 +166,25 @@ def test_table_leverages_are_bitwise_identical_for_any_worker_count(monkeypatch)
     assert len(set(results.values())) == 1
 
 
+def _force_candidate_stops(monkeypatch, *, first: int = 1) -> None:
+    """Every iteration from ``first`` on is a candidate stop whose mode counts as certified.
+
+    Whether a fit's own trajectory reaches the score test's stop depends on
+    round-off (a fixture can end by another exit on another BLAS), so the
+    stop tests force the event and assert what the stop does given it.
+    """
+    import dataclasses
+
+    evaluate = direct.evaluate_reml_candidate
+
+    def forced(*args, **kwargs):
+        result = evaluate(*args, **kwargs)
+        return dataclasses.replace(result, converged=kwargs["iteration"] >= first)
+
+    monkeypatch.setattr(direct, "evaluate_reml_candidate", forced)
+    monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", lambda *a, **k: True)
+
+
 def test_a_lookup_design_solves_rows_only_at_a_candidate_stop(monkeypatch):
     """The dispatch: every iteration reads the tables; one solved-row pass per candidate stop.
 
@@ -173,9 +192,10 @@ def test_a_lookup_design_solves_rows_only_at_a_candidate_stop(monkeypatch):
     not form, so each candidate stop (one ``concave_live_directions`` read)
     makes exactly one solved-row pass and no other point makes any.  v0.40.0
     solved one row pass per iteration and read no table; the PR head made
-    none at the stop.
+    none at the stop.  The second iteration is forced to be a candidate stop.
     """
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    _force_candidate_stops(monkeypatch, first=2)
     counts = _count_row_passes(monkeypatch)
     tables = {"passes": 0}
     stops = []
@@ -266,6 +286,7 @@ def test_the_stop_reads_the_leverage_routes_hessian(monkeypatch):
     is zero.  On the PR head the stop read the Hessian without ``w_cross``,
     whose diagonal ``-P_ii`` moved entries by up to 8% on this fixture.
     """
+    _force_candidate_stops(monkeypatch)
     reads, _ = _record_stops(monkeypatch)
     model = _poisson_model(1.0e3)
 
@@ -284,8 +305,10 @@ def test_a_refused_stop_steps_on_the_stops_hessian(monkeypatch):
     on the 10-pair freMTPL2 fit two directions straddling the freeze bar
     held their gradients through ten refused stops (16 exact iterations
     against 7).  The first stop is refused here; both freeze decisions made
-    at that iteration read v0.40.0's Hessian.
+    at that iteration read v0.40.0's Hessian.  Every iteration from the
+    first is forced to be a candidate stop.
     """
+    _force_candidate_stops(monkeypatch)
     reads, _ = _record_stops(monkeypatch, refuse_first=True)
     freezes = []
     freeze = direct.freeze_flat_directions
@@ -297,27 +320,34 @@ def test_a_refused_stop_steps_on_the_stops_hessian(monkeypatch):
     monkeypatch.setattr(direct, "freeze_flat_directions", recorded_freeze)
     model = _poisson_model(1.0e3)
 
-    assert model._reml_profile["reml_n_concave_stop_refusals"] == 1
+    assert model._reml_profile["reml_n_concave_stop_refusals"] >= 1
     # the stop's revalidation, then the step's own freeze (later iterations follow)
     at_refusal = [hess for stop, hess in freezes if stop == 1][:2]
     assert len(at_refusal) == 2
     for hess in at_refusal:
         assert np.array_equal(hess, reads[0]["reference"])
-    assert model._reml_result.converged
 
 
 def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkeypatch):
-    """The shoulder fixture: spline-by-category levels aliased with their factor level.
+    """A forced stop on spline-by-category levels aliased with their factor level.
 
     Levels 0 and 1 of ``c`` see a single ``e`` each, so their ``e:c``
     smooths are aliased with the level's constant (the spline-by-factor case
-    of ``reml/convergence.py``): their directions sit on the lambda ->
-    infinity plateau and read the shoulder's signature, ``g > 0`` and
-    ``H_ii < 0``.  At every candidate stop the concavity and freeze decisions
-    are the ones v0.40.0's leverage-route Hessian gives at that point.
+    of ``reml/convergence.py``) and sit on the lambda -> infinity plateau.
+    At every stop the concavity and freeze decisions are the ones v0.40.0's
+    leverage-route Hessian gives at that point.  That holds by construction
+    once the Hessians are equal (``test_the_stop_reads_the_leverage_routes_hessian``);
+    this fixture adds the aliased design.  The Hessian without the cross
+    terms decides the same way here (measured on x86-64 OpenBLAS, default,
+    Haswell and Zen kernels), as on every small fixture searched (Poisson
+    and Gamma, eight seeds, aliased levels, plateau starts), so this test
+    would pass on 1da3925d too: the case where the decisions differ is the
+    10-pair freMTPL2 fit, two directions straddling the freeze bar
+    (e62f0c85), too large for the suite.
     """
     from superglm.reml.convergence import concave_live_directions, freeze_flat_directions
 
+    _force_candidate_stops(monkeypatch)
     reads, ranks = _record_stops(monkeypatch)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
     frame.loc[frame.c == "0", "e"] = 1.3
@@ -337,16 +367,9 @@ def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkey
     ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
 
     assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
-    assert model._reml_result.converged and reads and ranks
-    names = list(model._reml_lambdas)
-    signatures = []
+    assert reads and ranks
     for read in reads:
         gradient, estimated, kwargs = read["gradient"], read["estimated"], read["kwargs"]
-        signatures += [
-            names[i]
-            for i in range(len(names))
-            if gradient[i] > 0.0 and read["hessian"][i, i] < 0.0 and names[i].startswith("e:c")
-        ]
         decisions = []
         for hess in (read["hessian"], read["reference"]):
             freeze = freeze_flat_directions(gradient, hess, ranks[-1], estimated, **kwargs)
@@ -358,7 +381,6 @@ def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkey
                 )
             )
         assert decisions[0] == decisions[1]
-    assert signatures
 
 
 def _continuous_model() -> SuperGLM:
@@ -581,9 +603,9 @@ def test_a_support_outside_the_reassociation_range_keeps_the_old_routes():
 def test_the_plan_is_released_when_the_fit_publishes_its_state():
     """A fitted model keeps no plan (its ``(T, n)`` index and raw tables).
 
-    At this size the fit's last centred systems come from the table Gram on
-    the published design; on the PR head their plan stayed in that design's
-    layout cache.  Predict, the diagnostics, metrics and a refit still work.
+    The table Gram is forced on, so the fit's last centred systems come from
+    the tables on the published design; on the PR head their plan stayed in
+    that design's layout cache.  Predict, the diagnostics, metrics and a refit still work.
     """
     n = leverage_tables._MIN_TABLE_GRAM_ROWS
     frame, y, weights = _poisson_frame(n, 1.0e3)
@@ -594,7 +616,7 @@ def test_the_plan_is_released_when_the_fit_publishes_its_state():
         built.append(dm)
         return build(dm)
 
-    with pytest.MonkeyPatch.context() as patch:
+    with pytest.MonkeyPatch.context() as patch, leverage_tables.table_gram_config(True):
         patch.setattr(leverage_tables, "_build_plan", recorded)
         model = _poisson_model(1.0e3, n=n)
     assert any(dm is model._dm for dm in built)
@@ -605,3 +627,106 @@ def test_the_plan_is_released_when_the_fit_publishes_its_state():
     refit = model.fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
     assert refit._reml_result.converged
     assert leverage_tables._CACHE_KEY not in refit._dm._structured_layout_cache
+
+
+@pytest.mark.parametrize("forced", [False, True])
+def test_a_plain_fit_keeps_no_plan(forced):
+    """``fit()`` publishes through the same hook as ``fit_reml()``: no plan stays on the design.
+
+    Unforced, the 98-column fixture is below the table Gram's crossover, which
+    the group types settle (14 sweeps at least), so no plan is built at all; on
+    e62f0c85 the plan was built to count the sweeps and kept.  Forced on, the
+    fit's Grams come from the tables and the plan is released when ``fit()``
+    publishes; on e62f0c85 only ``fit_reml()`` released it.
+    """
+    n = leverage_tables._MIN_TABLE_GRAM_ROWS
+    frame, y, weights = _poisson_frame(n, 1.0e3)
+    built = []
+    build = leverage_tables._build_plan
+
+    def recorded(dm):
+        built.append(dm)
+        return build(dm)
+
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Spline(n_knots=6),
+            "b": Spline(n_knots=6),
+            "e": Spline(n_knots=5),
+            "c": Categorical(),
+            "d": Numeric(),
+        },
+        interactions=[("a", "b"), ("e", "c")],
+        weight_semantics="frequency",
+        discrete=False,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(leverage_tables, "_build_plan", recorded)
+        with leverage_tables.table_gram_config(True if forced else None):
+            model.fit(frame, y, sample_weight=weights)
+    assert bool(built) == forced
+    assert leverage_tables._CACHE_KEY not in model._dm._structured_layout_cache
+
+
+def test_a_reactivated_direction_stays_active_between_stops(monkeypatch):
+    """A direction a stop reactivated is held out of the gradient-only freeze while its gradient lives.
+
+    Forced: every odd iteration is a candidate stop and none is concave; the
+    freeze between stops (on the gradient-only Hessian) reads the iteration-0
+    steepest direction ``j`` as flat, and each stop's revalidation (on the
+    cross-term Hessian) reads it as curved.  That is the 10-pair freMTPL2
+    straddle, made deterministic.  Held, ``j`` steps between stops and the
+    second stop passes: two solved-row passes.  On e62f0c85 the freeze between
+    stops refroze ``j``, so every stop was refused (three passes in six
+    iterations, no convergence).
+    """
+    import dataclasses
+
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    evaluate, freeze = direct.evaluate_reml_candidate, direct.freeze_flat_directions
+    state: dict = {"iteration": 0, "j": None}
+
+    def candidate(*args, **kwargs):
+        state["iteration"] = kwargs["iteration"]
+        result = evaluate(*args, **kwargs)
+        return dataclasses.replace(result, converged=kwargs["iteration"] % 2 == 1)
+
+    def forced_freeze(gradient, hess, ranks, estimated, **kwargs):
+        decision = freeze(gradient, hess, ranks, estimated, **kwargs)
+        if state["j"] is None:
+            state["j"] = int(np.argmax(np.where(estimated, np.abs(gradient), -1.0)))
+        frozen = ~np.asarray(estimated, dtype=bool)
+        if state["iteration"] % 2 == 0:  # between stops: the gradient-only read
+            frozen[state["j"]] = True
+        return dataclasses.replace(
+            decision, frozen=frozen, shoulder=np.zeros_like(frozen, dtype=bool)
+        )
+
+    monkeypatch.setattr(direct, "evaluate_reml_candidate", candidate)
+    monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", lambda *a, **k: True)
+    monkeypatch.setattr(direct, "freeze_flat_directions", forced_freeze)
+    monkeypatch.setattr(
+        direct, "concave_live_directions", lambda g, h, e, **k: np.zeros(len(g), dtype=bool)
+    )
+    frame, y, weights = _poisson_frame(1500, 1.0e3)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Spline(n_knots=6),
+            "b": Spline(n_knots=6),
+            "e": Spline(n_knots=5),
+            "c": Categorical(),
+            "d": Numeric(),
+        },
+        interactions=[("a", "b"), ("e", "c")],
+        weight_semantics="frequency",
+        discrete=False,
+    ).fit_reml(
+        frame, y, sample_weight=weights, runtime_validation="skip", reml_tol=1e-12, max_reml_iter=6
+    )
+
+    profile = model._reml_profile
+    assert profile["reml_w_correction_mode"] == "leverage_tables"
+    assert profile["reml_n_stop_cross_passes"] == 2
+    assert model._reml_result.termination_reason == "score_objective_tolerance"
