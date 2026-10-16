@@ -144,31 +144,55 @@ class ProbitLink:
         return norm.ppf(mu_safe)
 
     def inverse(self, eta: NDArray) -> NDArray:
-        from scipy.stats import norm
+        from scipy.special import ndtr
 
-        return norm.cdf(eta)
+        # ``scipy.stats.norm.cdf`` is ``ndtr`` behind argument checks that
+        # change no value; calling it directly is the same float64 result.
+        return ndtr(_as_float64(eta))
 
     def deriv(self, mu: NDArray) -> NDArray:
         from scipy.stats import norm
 
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
-        return 1.0 / norm.pdf(norm.ppf(mu_safe))
+        return 1.0 / _normal_pdf(norm.ppf(mu_safe))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
-        from scipy.stats import norm
-
-        return norm.pdf(eta)
+        return _normal_pdf(_as_float64(eta))
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
-        from scipy.stats import norm
-
-        return -eta * norm.pdf(eta)
+        eta = _as_float64(eta)
+        return -eta * _normal_pdf(eta)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = (η² - 1)·φ(η). Wood (2011) Appendix D."""
-        from scipy.stats import norm
+        eta = _as_float64(eta)
+        return (eta**2 - 1) * _normal_pdf(eta)
 
-        return (eta**2 - 1) * norm.pdf(eta)
+
+#: ``sqrt(2 pi)`` as ``scipy.stats`` forms it, so the density below is the same float64.
+_NORMAL_PDF_C = np.sqrt(2 * np.pi)
+
+
+def _as_float64(values):
+    """The probit kernels' argument as binary64.
+
+    Always float64, never an extended type (``AGENTS.md``, numerical policy):
+    ``scipy.stats.norm`` (master) promoted with ``promote_types``, which keeps
+    ``longdouble``. The solver passes float64, where the two agree.
+    """
+    return np.asarray(values, dtype=np.float64)
+
+
+def _normal_pdf(x):
+    """The standard normal density, the same float64 operations as ``scipy.stats.norm.pdf``.
+
+    ``norm.pdf`` evaluates ``exp(-x**2/2) / sqrt(2 pi)`` (``scipy.stats``'s
+    ``_norm_pdf``, BSD-3) after argument checks that change no value: the
+    standardisation ``(x - 0) / 1`` is exact and the infinite tails give 0
+    either way. A 0-d result is returned as a scalar, as ``norm.pdf`` does.
+    """
+    result = np.exp(-(x**2) / 2.0) / _NORMAL_PDF_C
+    return result[()] if np.ndim(result) == 0 else result
 
 
 class CloglogLink:
