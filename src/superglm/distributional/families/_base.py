@@ -166,13 +166,182 @@ def natural_curvature_direction(
     return readonly(result)
 
 
+def second_direction_arrays(
+    y: NDArray,
+    eta: NDArray,
+    direction_a: NDArray,
+    direction_b: NDArray,
+    k_parameters: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Validated ``(eta, a, b)`` for a second curvature direction; ``a`` and ``b`` stacked.
+
+    ``a`` and ``b`` are ``(n, K)`` or ``(m, n, K)``, a pair the same on every
+    row also ``(m, 1, K)``; both are returned stacked, ``(m, n, K)`` or
+    ``(m, 1, K)`` (``m = 1`` for a single pair).
+    """
+    try:
+        predictors = np.asarray(eta, dtype=FLOAT)
+        first = np.asarray(direction_a, dtype=FLOAT)
+        second = np.asarray(direction_b, dtype=FLOAT)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("predictor state and directions must be finite arrays") from exc
+    expected = (response_row_count(y), k_parameters)
+    if (
+        predictors.shape != expected
+        or first.shape != second.shape
+        or first.shape[-1] != k_parameters
+        or first.ndim not in (2, 3)
+        or first.shape[-2] not in ((expected[0],) if first.ndim == 2 else (expected[0], 1))
+        or not np.all(np.isfinite(predictors))
+        or not np.all(np.isfinite(first))
+        or not np.all(np.isfinite(second))
+    ):
+        raise ValueError(
+            "predictor state must be a finite n-by-K array and the directions finite "
+            "n-by-K or m-by-n-by-K arrays of one shape"
+        )
+    if first.ndim == 2:
+        first, second = first[None], second[None]
+    return predictors, first, second
+
+
+def link_derivative_columns(
+    predictors: NDArray[np.float64], links, order: int
+) -> tuple[NDArray[np.float64], ...]:
+    """``(theta, g', ..., g^(order))`` column-stacked from each link, each ``(n, K)``.
+
+    A link without the derivative a family needs is refused with
+    ``UnsupportedLikelihoodContractError``, so the caller differences instead.
+    """
+    names = ("deriv_inverse", "deriv2_inverse", "deriv3_inverse", "deriv4_inverse")
+    columns = []
+    for index, link in enumerate(links):
+        methods = [link.inverse]
+        for name in names[:order]:
+            method = getattr(link, name, None)
+            if not callable(method):
+                raise UnsupportedLikelihoodContractError(f"link {index} has no {name}")
+            methods.append(method)
+        column = predictors[:, index]
+        columns.append(tuple(np.asarray(method(column), dtype=FLOAT) for method in methods))
+    return tuple(np.column_stack([row[k] for row in columns]) for k in range(order + 1))
+
+
+def contract_second_direction(
+    fourth: NDArray[np.float64], first: NDArray[np.float64], second: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Packed second curvature direction ``-sum_kl l_ijkl a_k b_l`` from predictor fourth derivatives."""
+    from superglm.distributional.kernels._curvature_direction import curvature_second_direction
+
+    return curvature_second_direction(fourth, first, second)
+
+
+def composed_second_direction(
+    outer: dict[int, NDArray[np.float64]],
+    inner,
+    first: NDArray[np.float64],
+    second: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """The second curvature direction of ``L(phi(eta))`` from ``L``'s derivatives and ``phi``'s.
+
+    ``outer`` holds ``L``'s packed derivatives of orders one to four and
+    ``inner`` the map's structural nonzeros (``compose_derivatives``).
+    """
+    from superglm.distributional.kernels._curvature_direction import (
+        compose_derivatives,
+        curvature_second_direction,
+    )
+
+    fourth = compose_derivatives(outer, inner, 4, first.shape[-1])
+    return curvature_second_direction(fourth, first, second)
+
+
+def link_inner_derivatives(*derivatives: NDArray[np.float64]):
+    """``inner`` for the separable links from their derivatives, each ``(n, K)``."""
+    from superglm.distributional.kernels._curvature_direction import separable_inner_derivatives
+
+    return separable_inner_derivatives(*derivatives)
+
+
+def natural_third_from_direction(hessian_direction, n_rows: int, k_parameters: int):
+    """Packed natural third derivatives from a family's ``dH(v)`` on the natural axes."""
+    from superglm.distributional.kernels._curvature_direction import (
+        third_from_hessian_direction,
+    )
+
+    return third_from_hessian_direction(hessian_direction, n_rows, k_parameters)
+
+
+def natural_curvature_second_direction(
+    family,
+    y: NDArray,
+    eta: NDArray,
+    direction_a: NDArray,
+    direction_b: NDArray,
+    links,
+    plan,
+    natural_derivatives,
+) -> NDArray[np.float64]:
+    """Packed second direction of predictor curvature from a family's natural derivatives.
+
+    ``natural_derivatives(theta, natural_a, natural_b)`` returns the packed
+    ``(third, fourth)`` derivatives of the family's weighted natural
+    log-likelihood; ``natural_a = g' a`` and ``natural_b = g' b`` (stacked
+    ``(m, n, K)``) let a family refuse rows the path cannot cross.  Every
+    inverse link must supply four derivatives.  Rows the family flags invalid
+    publish zero curvature, so their derivatives are zero; the result has the
+    directions' leading shape.
+    """
+    from superglm.distributional.kernels._curvature_direction import (
+        predictor_curvature_second_direction,
+    )
+
+    link_tuple = tuple(links)
+    k_parameters = len(family.parameters)
+    if len(link_tuple) != k_parameters:
+        raise ValueError("one link per natural parameter is required")
+    single = np.ndim(direction_a) == 2
+    predictors, first, second = second_direction_arrays(
+        y, eta, direction_a, direction_b, k_parameters
+    )
+    theta, *derivatives = link_derivative_columns(predictors, link_tuple, 4)
+    evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
+    third, fourth = natural_derivatives(theta, derivatives[0] * first, derivatives[0] * second)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        result = predictor_curvature_second_direction(
+            (
+                np.asarray(evaluation.score, dtype=FLOAT),
+                np.asarray(evaluation.hessian_packed, dtype=FLOAT),
+                np.asarray(third, dtype=FLOAT),
+                np.asarray(fourth, dtype=FLOAT),
+            ),
+            tuple(derivatives),
+            first,
+            second,
+        )
+    valid = np.asarray(evaluation.valid, dtype=np.bool_)
+    result[:, ~valid] = 0.0
+    if not np.all(np.isfinite(result)):
+        raise ValueError(
+            "the predictor-curvature second derivative is not representable at this state"
+        )
+    return readonly(result[0] if single else result)
+
+
 __all__ = [
     "FLOAT",
     "array_digest",
+    "composed_second_direction",
+    "contract_second_direction",
     "immutable",
+    "link_inner_derivatives",
+    "link_derivative_columns",
     "natural_curvature_direction",
+    "natural_curvature_second_direction",
+    "natural_third_from_direction",
     "readonly",
     "response_row_count",
+    "second_direction_arrays",
     "typed_plan",
     "validated_float_response",
 ]

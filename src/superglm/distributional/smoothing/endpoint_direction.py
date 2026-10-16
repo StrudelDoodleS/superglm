@@ -10,7 +10,9 @@ floor of a differenced first derivative.  The exact LAML Hessian needs one
 order more still -- the second directional difference of the same channel,
 bilinear in two directions -- which
 :func:`finite_difference_curvature_second_direction` takes on the same
-five-point stencil.
+five-point stencil.  A family with analytic fourth derivatives supplies that
+order directly (:func:`analytic_curvature_second_direction`), and the
+differences are its fallback.
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ from numpy.typing import NDArray
 
 from superglm.distributional.family import (
     CertifiedCurvatureDirectionalFamily,
+    CertifiedCurvatureSecondDirectionalFamily,
     DistributionalFamily,
     FamilyLikelihoodPlan,
     PredictorCurvatureDirectionalFamily,
+    PredictorCurvatureSecondDirectionalFamily,
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
@@ -267,6 +271,40 @@ def analytic_curvature_direction(
     return None
 
 
+def analytic_curvature_second_direction(
+    family: DistributionalFamily,
+    y: NDArray,
+    eta: NDArray,
+    direction_a: NDArray,
+    direction_b: NDArray,
+    links: Sequence[Link],
+    plan: FamilyLikelihoodPlan,
+) -> tuple[NDArray[np.float64], NDArray[np.float64] | None] | None:
+    """The family's analytic second curvature direction and its certified error, if any.
+
+    The counterpart of :func:`analytic_curvature_direction` one order up and
+    of :func:`finite_difference_curvature_second_direction`: ``None`` when the
+    family does not implement the protocol or refuses these links or rows
+    with :class:`UnsupportedLikelihoodContractError`, so the caller
+    differences.  ``a`` and ``b`` may be stacked ``(m, n, K)`` pairs.
+    """
+    certified = getattr(family, "certified_predictor_curvature_second_directional_derivative", None)
+    plain = getattr(family, "predictor_curvature_second_directional_derivative", None)
+    try:
+        if isinstance(family, CertifiedCurvatureSecondDirectionalFamily) and callable(certified):
+            values, certificate = certified(y, eta, direction_a, direction_b, links, plan)
+            return (
+                np.asarray(values, dtype=np.float64),
+                np.asarray(certificate, dtype=np.float64),
+            )
+        if isinstance(family, PredictorCurvatureSecondDirectionalFamily) and callable(plain):
+            values = plain(y, eta, direction_a, direction_b, links, plan)
+            return np.asarray(values, dtype=np.float64), None
+    except UnsupportedLikelihoodContractError:
+        return None
+    return None
+
+
 def finite_difference_curvature_direction(
     family: DistributionalFamily,
     y: NDArray,
@@ -373,6 +411,7 @@ __all__ = [
     "FINITE_DIFFERENCE_AUTHORITY",
     "FiniteDifferenceDirection",
     "analytic_curvature_direction",
+    "analytic_curvature_second_direction",
     "finite_difference_curvature_direction",
     "finite_difference_curvature_second_direction",
 ]
