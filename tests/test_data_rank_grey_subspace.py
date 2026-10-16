@@ -245,3 +245,29 @@ def test_grey_projection_is_the_rows_product(kind, discrete):
     qr_gamma = 4 * (dm.n * basis.shape[1] + roundings) * np.finfo(float).eps / 2
     tolerance = 4.0 * (gamma + qr_gamma) * np.outer(norms, norms)
     assert np.all(np.abs(factor.T @ factor - product.T @ product) <= tolerance)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_structural_nulls_are_nulls_of_the_rows(discrete):
+    """A group's occupied support rows give ``A N_g = 0``; each bound covers ``||A N_g||_F``.
+
+    The thin level's curve sits on two points, so its block holds such nulls
+    (the tensor fixture's one null runs across groups and is the grey
+    subspace's), and the dense design checks every bound.  Mutation check:
+    reading all support rows, occupied or not, finds none here.
+    """
+    frame, y, features, interactions = FIXTURES["thin_level_curve"]()
+    model = SuperGLM(
+        family="poisson", features=features, interactions=interactions, discrete=discrete
+    )
+    model.fit_reml(frame, y)
+    dm = model._dm
+    W = np.random.default_rng(3).uniform(0.1, 2.0, dm.n)
+    X = dm.toarray()
+    centre = (W @ X) / W.sum()
+    found = centered_system.grouped_structural_nulls(dm, W, center=centre)
+    assert sum(null.shape[1] for _, null, _ in found) > 0
+    A = np.sqrt(W)[:, None] * (X - centre)
+    for columns, null, bound in found:
+        np.testing.assert_allclose(null.T @ null, np.eye(null.shape[1]), atol=1e-12)
+        assert np.linalg.norm(A[:, columns] @ null) <= bound
