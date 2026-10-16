@@ -4,9 +4,11 @@ Each family's per-row log-density is written symbolically, differentiated by
 ``sympy.diff`` and evaluated with mpmath at 50 significant digits at the same
 float64 points the kernels see.  The kernels' first and second derivatives
 (``evaluate_natural``) are checked in the natural parameters, the analytic
-curvature directions (the third derivatives the LAML endgame uses) in the
-predictors through each family's default links, and the single-predictor
-families' IRLS weight and its two eta-derivatives through their links.
+curvature directions (the third derivatives the LAML endgame uses) and second
+curvature directions (the fourth derivatives its Hessian uses) in the
+predictors through each family's default links, every link's four inverse
+derivatives, and the single-predictor families' IRLS weight and its two
+eta-derivatives through their links.
 
 The Tweedie density is a series in the compound-Poisson count.  Its oracle
 differentiates one generic term symbolically, sums the term derivatives over
@@ -87,12 +89,25 @@ def _link_expression(link, eta):
 
 
 class _SymbolicRow:
-    """First, second and third partial derivatives of one symbolic row, lambdified."""
+    """First, second and third partial derivatives of one symbolic row, lambdified.
 
-    def __init__(self, expression, symbols, extra=()):
+    With ``fourth=True`` the fourth partials too, read by ``evaluate_fourth``.
+    """
+
+    def __init__(self, expression, symbols, extra=(), *, fourth=False):
         self.symbols = tuple(symbols)
         arguments = (*self.symbols, *extra)
         k = len(symbols)
+        self.fourth = (
+            {
+                quadruple: sp.lambdify(
+                    arguments, sp.diff(expression, *(symbols[i] for i in quadruple)), "mpmath"
+                )
+                for quadruple in itertools.combinations_with_replacement(range(k), 4)
+            }
+            if fourth
+            else {}
+        )
         self.first = [sp.lambdify(arguments, sp.diff(expression, s), "mpmath") for s in symbols]
         self.second = {
             (a, b): sp.lambdify(arguments, sp.diff(expression, symbols[a], symbols[b]), "mpmath")
@@ -114,6 +129,11 @@ class _SymbolicRow:
                 {key: f(*values) for key, f in self.second.items()},
                 {key: f(*values) for key, f in self.third.items()},
             )
+
+    def evaluate_fourth(self, point, extra=()):
+        values = [_mpf(v) for v in (*point, *extra)]
+        with mp.workdps(_DIGITS):
+            return {key: f(*values) for key, f in self.fourth.items()}
 
 
 def _third(third, left, right, axis):
@@ -305,7 +325,7 @@ def _plan(family, y):
     return family.bind_likelihood(np.asarray(y, dtype=float), resolved, COMPLETE_OBSERVATION)
 
 
-def _row_oracles(name, y_value, theta, symbols, eta_symbols, links):
+def _row_oracles(name, y_value, theta, symbols, eta_symbols, links, *, fourth=False):
     """(natural, predictor) evaluators for one row of a closed-form family."""
     density = _densities()[name][0]
     if callable(density):  # two-piece: the piece is fixed by the residual's sign
@@ -315,11 +335,11 @@ def _row_oracles(name, y_value, theta, symbols, eta_symbols, links):
         residual = (np.log(y_value) if "lognormal" in name else y_value) - location
         density = density(-1 if residual < 0 else 1)
     expression = density.subs(_Y, sp.Float(y_value, _DIGITS))
-    natural = _SymbolicRow(expression, symbols)
+    natural = _SymbolicRow(expression, symbols) if not fourth else None
     substitution = {
         s: _link_expression(link, e) for s, link, e in zip(symbols, links, eta_symbols, strict=True)
     }
-    return natural, _SymbolicRow(expression.subs(substitution), eta_symbols)
+    return natural, _SymbolicRow(expression.subs(substitution), eta_symbols, fourth=fourth)
 
 
 def _measure(family, rows, oracles) -> list[float]:
@@ -370,6 +390,94 @@ def test_lss_derivatives_match_the_symbolic_oracle(name: str) -> None:
     _assert_within(name, _closed_form_check(name))
 
 
+# ---------------------------------------------------------------- fourth order
+
+
+def _axis_pairs(k: int, n_rows: int = 1):
+    """The ``K(K+1)/2`` axis pairs stacked as ``(m, n, K)`` direction arrays."""
+    pairs = [(q, r) for q in range(k) for r in range(q, k)]
+    first = np.zeros((len(pairs), n_rows, k))
+    second = np.zeros_like(first)
+    for index, (q, r) in enumerate(pairs):
+        first[index, :, q] = 1.0
+        second[index, :, r] = 1.0
+    return pairs, first, second
+
+
+def _measure_fourth(family, rows, oracles) -> float:
+    """Worst error in u of the second curvature directions along every axis pair.
+
+    Each row is held to its fourth-order scale, the largest oracle fourth
+    derivative of the row in the predictors.  The stacked call is also the
+    one the LAML Hessian makes.
+    """
+    links = tuple(spec.default_link for spec in family.parameters)
+    worst = 0.0
+    for (y_value, theta), oracle in zip(rows, oracles, strict=True):
+        y = np.array([y_value])
+        plan = _plan(family, y)
+        eta = np.array(
+            [[float(link.link(np.array([v]))[0]) for link, v in zip(links, theta, strict=True)]]
+        )
+        fourth = oracle.evaluate_fourth(eta[0])
+        scale = max(abs(value) for value in fourth.values())
+        k = len(theta)
+        pairs, first, second = _axis_pairs(k)
+        computed = family.predictor_curvature_second_directional_derivative(
+            y, eta, first, second, links, plan
+        )
+        channels = list(itertools.combinations_with_replacement(range(k), 2))
+        for index, (q, r) in enumerate(pairs):
+            exact = [-fourth[tuple(sorted((i, j, q, r)))] for i, j in channels]
+            error = max(abs(_mpf(c) - e) for c, e in zip(computed[index, 0], exact, strict=True))
+            worst = max(worst, float(error / scale) / _U if scale else float(error))
+    return worst
+
+
+def _closed_form_fourth_check(name: str) -> float:
+    family, rows = _LSS_CASES[name]
+    symbols = _densities()[name][1]
+    eta_symbols = sp.symbols(f"e0:{len(symbols)}", real=True)
+    links = tuple(spec.default_link for spec in family.parameters)
+    oracles = [
+        _row_oracles(name, y, theta, symbols, eta_symbols, links, fourth=True)[1]
+        for y, theta in rows
+    ]
+    return _measure_fourth(family, rows, oracles)
+
+
+# Measured worst error in u of each row's fourth-order scale (the largest
+# oracle fourth derivative of the row in the predictors) over the same grids,
+# on x86-64 Linux (AMD EPYC 9645, Zen 5); each is held to _MARGIN times its
+# measurement, with a floor of 4u.  The largest sit where the third-order
+# measurements do, one derivative further: the generalized gamma pure-shape
+# entry on the direct Stirling route below k or x = 30 (2.8e-13 of the entry
+# at Q = -0.17, sigma = 0.8, where x = 29.9), and Tweedie's p channels, whose
+# series cancels its canonical part (2.7e-12 of l_pppp at p = 1.62).
+_MEASURED_FOURTH = {
+    "gamma": 21.4,
+    "gaussian": 4.1,
+    "gengamma_location": 200.8,
+    "gengamma_mean": 2521.3,
+    "gp": 41.5,
+    "lognormal_location": 3.7,
+    "lognormal_mean": 2.3,
+    "nb": 4.9,
+    "twopiece_lognormal_location": 3.9,
+    "twopiece_lognormal_mean": 688.9,
+    "twopiece_normal": 25.5,
+    "tweedie": 1157.3,
+    "tweedie_upper_wall": 19885.1,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LSS_CASES))
+def test_lss_fourth_derivatives_match_the_symbolic_oracle(name: str) -> None:
+    """The analytic second curvature direction against ``sympy.diff`` to fourth order."""
+    error = _closed_form_fourth_check(name)
+    assert error <= _MARGIN * max(_MEASURED_FOURTH.get(name, 1.0), 1.0), (name, error)
+
+
 # ---------------------------------------------------------------- Tweedie (series)
 
 
@@ -383,20 +491,81 @@ class _TweedieRow:
     quotient rule.
     """
 
-    def __init__(self, y_value, coordinates, mu, phi, p):
+    def __init__(self, y_value, coordinates, mu, phi, p, *, fourth=False):
         self.y = y_value
         j = sp.Symbol("j", positive=True)
         r, s = p - 1, 2 - p
         y = sp.Float(y_value, _DIGITS)
         if y_value == 0:
-            self.closed = _SymbolicRow(-(mu**s) / (phi * s), coordinates)
+            self.closed = _SymbolicRow(-(mu**s) / (phi * s), coordinates, fourth=fourth)
             return
-        self.closed = _SymbolicRow((-y * mu ** (-r) / r - mu**s / s) / phi - sp.log(y), coordinates)
+        self.closed = _SymbolicRow(
+            (-y * mu ** (-r) / r - mu**s / s) / phi - sp.log(y), coordinates, fourth=fourth
+        )
         alpha = s / r
         zeta = alpha * (sp.log(y) - sp.log(r)) - sp.log(s) - sp.log(phi) / r
         term = j * zeta - sp.loggamma(j + 1) - sp.loggamma(alpha * j)
-        self.term = _SymbolicRow(term, coordinates, extra=(j,))
+        self.term = _SymbolicRow(term, coordinates, extra=(j,), fourth=fourth)
         self.value = sp.lambdify((*coordinates, j), term, "mpmath")
+
+    def evaluate_fourth(self, point):
+        """Fourth derivatives: the closed part plus the log-sum's by set partitions.
+
+        With ``R_A = E[d_A e^L / e^L]`` (the term weights' raw moments of the
+        complete Bell polynomials in the term derivatives), the log-sum's
+        derivative is ``sum_pi (-1)^(|pi|-1) (|pi|-1)! prod_B R_B``.
+        """
+        fourth = self.closed.evaluate_fourth(point)
+        if self.y == 0:
+            return fourth
+        k = len(point)
+        values = [_mpf(v) for v in point]
+        with mp.workdps(_DIGITS):
+            logs, j, top = [], 1, None
+            while True:  # every term above exp(-140) of the largest
+                value = self.value(*values, j)
+                logs.append(value)
+                top = value if top is None or value > top else top
+                if j > 3 and value < top - 140:
+                    break
+                j += 1
+            keys = [
+                key
+                for order in range(1, 5)
+                for key in itertools.combinations_with_replacement(range(k), order)
+            ]
+            raw = dict.fromkeys(keys, mp.mpf(0))
+            total = mp.mpf(0)
+            for index, value in enumerate(logs, start=1):
+                weight = mp.exp(value - top)
+                l1, l2, l3 = self.term.evaluate(point, extra=(index,))
+                l4 = self.term.evaluate_fourth(point, extra=(index,))
+                derivative = {}
+                for a in range(k):
+                    derivative[(a,)] = l1[a]
+                derivative.update(l2)
+                derivative.update(l3)
+                derivative.update(l4)
+                total += weight
+                for key in keys:
+                    bell = mp.mpf(0)
+                    for partition in _partitions(list(range(len(key)))):
+                        product = mp.mpf(1)
+                        for block in partition:
+                            product *= derivative[tuple(sorted(key[i] for i in block))]
+                        bell += product
+                    raw[key] += weight * bell
+            moments = {key: raw[key] / total for key in keys}
+            for key in itertools.combinations_with_replacement(range(k), 4):
+                cumulant = mp.mpf(0)
+                for partition in _partitions([0, 1, 2, 3]):
+                    blocks = len(partition)
+                    product = mp.mpf((-1) ** (blocks - 1) * mp.factorial(blocks - 1))
+                    for block in partition:
+                        product *= moments[tuple(sorted(key[i] for i in block))]
+                    cumulant += product
+                fourth[key] += cumulant
+        return fourth
 
     def evaluate(self, point):
         first, second, third = self.closed.evaluate(point)
@@ -445,6 +614,18 @@ class _TweedieRow:
         return first, second, third
 
 
+def _partitions(positions):
+    if not positions:
+        return [[]]
+    first, rest = positions[0], positions[1:]
+    result = []
+    for partition in _partitions(rest):
+        for index in range(len(partition)):
+            result.append(partition[:index] + [[first, *partition[index]]] + partition[index + 1 :])
+        result.append([[first], *partition])
+    return result
+
+
 # Zero and positive rows, small to large phi; the power walls of [1.05, 1.95]
 # are their own group because the published p-p channel cancels there (below).
 _TWEEDIE_ROWS = {
@@ -472,6 +653,23 @@ def _tweedie_check(name: str):
 @pytest.mark.parametrize("name", sorted(_TWEEDIE_ROWS))
 def test_tweedie_derivatives_match_the_symbolic_series_oracle(name: str) -> None:
     _assert_within(name, _tweedie_check(name))
+
+
+def _tweedie_fourth_check(name: str) -> float:
+    family = TweedieLSS()
+    eta = sp.symbols("e0:3", real=True)
+    links = tuple(spec.default_link for spec in family.parameters)
+    mapped = [_link_expression(link, e) for link, e in zip(links, eta, strict=True)]
+    rows = _TWEEDIE_ROWS[name]
+    oracles = [_TweedieRow(y, eta, *mapped, fourth=True) for y, _ in rows]
+    return _measure_fourth(family, rows, oracles)
+
+
+@pytest.mark.parametrize("name", sorted(_TWEEDIE_ROWS))
+def test_tweedie_fourth_derivatives_match_the_symbolic_series_oracle(name: str) -> None:
+    """The series' fourth cumulants, against term derivatives summed at 50 digits."""
+    error = _tweedie_fourth_check(name)
+    assert error <= _MARGIN * max(_MEASURED_FOURTH.get(name, 1.0), 1.0), (name, error)
 
 
 # ---------------------------------------------------------------- certified NB2 bound
@@ -587,6 +785,105 @@ def test_single_predictor_weight_channels_match_the_symbolic_oracle(name: str) -
         assert error <= _MARGIN * max(bound, 1.0), (name, worst)
 
 
+# ---------------------------------------------------------------- links to fourth order
+
+
+def _link_cases():
+    from superglm.distributional.families._links import BoundedLogitLink
+    from superglm.distributional.families.gaussian import LowerBoundedLogLink
+    from superglm.distributional.families.tweedie import BoundedPowerLink
+    from superglm.links import (
+        CauchitLink,
+        CloglogLink,
+        IdentityLink,
+        InverseLink,
+        InverseSquaredLink,
+        LogitLink,
+        LogLink,
+        NegativeBinomialLink,
+        PowerLink,
+        ProbitLink,
+        SqrtLink,
+    )
+
+    eta = sp.Symbol("eta", real=True)
+    line = np.array([-6.0, -2.5, -1.2, -0.3, 0.0, 0.4, 1.1, 2.7, 5.5])
+    positive = np.array([0.05, 0.3, 0.9, 1.7, 4.0, 11.0])
+    negative = np.array([-8.0, -3.0, -1.0, -0.4, -0.05])
+    third = sp.Rational(1, 3)
+    return eta, {
+        "log": (LogLink(), sp.exp(eta), line),
+        "identity": (IdentityLink(), eta, line),
+        "logit": (LogitLink(), 1 / (1 + sp.exp(-eta)), line),
+        "probit": (ProbitLink(), sp.erfc(-eta / sp.sqrt(2)) / 2, line),
+        "cloglog": (CloglogLink(), 1 - sp.exp(-sp.exp(eta)), line[line < 3.0]),
+        "cauchit": (CauchitLink(), sp.Rational(1, 2) + sp.atan(eta) / sp.pi, line),
+        "inverse": (InverseLink(), 1 / eta, positive),
+        "inverse_squared": (InverseSquaredLink(), eta ** sp.Rational(-1, 2), positive),
+        "sqrt": (SqrtLink(), eta**2, line),
+        "power_third": (PowerLink(3.0), eta**third, positive),
+        "negative_binomial": (
+            NegativeBinomialLink(2.5),
+            sp.Rational(5, 2) * sp.exp(eta) / (1 - sp.exp(eta)),
+            negative,
+        ),
+        "bounded_logit": (
+            BoundedLogitLink(-0.9, 0.9),
+            sp.Rational(-9, 10) + sp.Rational(9, 5) / (1 + sp.exp(-eta)),
+            line,
+        ),
+        "bounded_power": (
+            BoundedPowerLink(),
+            sp.Rational(105, 100) + sp.Rational(90, 100) / (1 + sp.exp(-eta)),
+            line,
+        ),
+        "lower_bounded_log": (
+            LowerBoundedLogLink(0.01),
+            sp.Rational(1, 100) + sp.exp(eta),
+            line,
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_link_cases()[1]))
+def test_every_link_supplies_four_inverse_derivatives(name: str) -> None:
+    """``deriv_inverse`` to ``deriv4_inverse`` against ``sympy.diff`` of the inverse link.
+
+    Each order is held to ``64 u`` of its largest value over the grid; the
+    distributional chain rule and the single-predictor observed weights need
+    all four.
+    """
+    eta, cases = _link_cases()
+    link, inverse, grid = cases[name]
+    methods = (
+        link.deriv_inverse,
+        link.deriv2_inverse,
+        link.deriv3_inverse,
+        link.deriv4_inverse,
+    )
+    for order, method in enumerate(methods, start=1):
+        exact_function = sp.lambdify(eta, sp.diff(inverse, eta, order), "mpmath")
+        with mp.workdps(_DIGITS):
+            exact = [exact_function(_mpf(value)) for value in grid]
+        computed = np.asarray(method(np.asarray(grid, dtype=float)), dtype=float)
+        scale = max(abs(value) for value in exact)
+        error = max(abs(_mpf(c) - e) for c, e in zip(computed, exact, strict=True))
+        assert error <= 64 * _U * scale, (name, order, float(error / scale) / _U)
+
+
+def test_link_fourth_derivatives_match_the_observed_geometry_table() -> None:
+    """The single-predictor observed weights' fourth inverse derivatives are the links' own."""
+    from superglm.reml.observed_geometry import _deriv4_inverse
+
+    _, cases = _link_cases()
+    for name in ("log", "identity", "logit", "probit", "cloglog", "cauchit", "inverse"):
+        link, _, grid = cases[name]
+        values = np.asarray(grid, dtype=float)
+        expected = np.asarray(link.deriv4_inverse(values), dtype=float)
+        tolerance = 16 * _U * np.max(np.abs(expected))
+        assert np.all(np.abs(_deriv4_inverse(link, values) - expected) <= tolerance), name
+
+
 # ---------------------------------------------------------------- mutation
 
 
@@ -603,6 +900,26 @@ def test_a_wrong_coefficient_fails_the_oracle(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(kernel, "series_f", wrong_series_f)
     with pytest.raises(AssertionError):
         _assert_within("gp", _closed_form_check("gp"))
+
+
+def test_a_wrong_generated_coefficient_fails_the_fourth_order_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Gaussian fourth derivatives with one generated coefficient off by one are caught."""
+    import inspect
+
+    import superglm.distributional.kernels._fourth_generated as generated
+
+    bound = _MARGIN * max(_MEASURED_FOURTH.get("gaussian", 1.0), 1.0)
+    assert _closed_form_fourth_check("gaussian") <= bound
+    source = inspect.getsource(generated.gaussian_predictor_fourth)
+    assert source.count("33.0") == 1
+    namespace: dict[str, object] = {}
+    exec(source.replace("33.0", "34.0"), dict(vars(generated)), namespace)  # noqa: S102
+    monkeypatch.setattr(
+        generated, "gaussian_predictor_fourth", namespace["gaussian_predictor_fourth"]
+    )
+    assert _closed_form_fourth_check("gaussian") > bound
 
 
 # ---------------------------------------------------------------- derived bounds
