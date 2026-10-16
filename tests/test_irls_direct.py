@@ -1,5 +1,7 @@
 """Tests for the direct IRLS solver (no BCD)."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1631,3 +1633,44 @@ class TestREMLDirect:
 
         assert hasattr(m, "_reml_lambdas")
         assert "DrivAge" in m._reml_lambdas
+
+    def test_exact_fit_gaussian_stops_at_its_fixed_point(self):
+        """A response the model fits to rounding ends each PIRLS solve in two iterations.
+
+        Gaussian/identity is one penalised least-squares solve.  When the
+        model reproduces its response exactly (a level effect plus the
+        rounding a log-ratio leaves, |noise| <= 2.2e-16) the residuals and so
+        the score's own scale are rounding, the relative score sits near 1,
+        and the second solve returns the coefficients bit for bit.  That
+        iteration is a fixed point: the solve stops there instead of running
+        every iteration of its budget at each smoothing parameter (2,802
+        iterations over 29 solves before the fix).
+        """
+        from superglm.features.numeric import Numeric
+        from superglm.features.random_effect import RandomEffect
+
+        rng = np.random.default_rng(0)
+        n = 48
+        level = np.tile(["x", "y"], n // 2)
+        base = rng.uniform(1.0, 2.0, n)
+        noise = np.log(base * 3.0) - np.log(3.0) - np.log(base)
+        y = np.where(level == "y", np.log(0.6), 0.0) + noise
+        X = pd.DataFrame(
+            {
+                "num": np.tile([4.0, 5.5, 6.5], n // 3),
+                "a": level,
+                "fam": np.repeat(["f1", "f2"], n // 2),
+            }
+        )
+        m = SuperGLM(
+            family="gaussian",
+            features={"num": Numeric(), "a": Categorical(), "fam": RandomEffect()},
+        )
+        with warnings.catch_warnings():
+            # the smoothing parameter of a family with no effect is not
+            # identified by rounding residuals; its disclosure is not tested here
+            warnings.simplefilter("ignore")
+            m.fit_reml(X, y)
+        profile = m._reml_profile
+        assert np.max(np.abs(noise)) <= 4 * np.finfo(float).eps
+        assert profile["irls_iters"] <= 2 * profile["irls_calls"]

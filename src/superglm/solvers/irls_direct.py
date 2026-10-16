@@ -1412,6 +1412,7 @@ def _fit_irls_direct_once(
         mu_values: NDArray,
         eta_values: NDArray,
         centred_intercept: float | None = None,
+        resolve_cap: float = MODE_RESOLVE_CAP,
     ) -> ModeResidual:
         """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
 
@@ -1467,7 +1468,7 @@ def _fit_irls_direct_once(
             sum_w=sum_w,
             bar=mode_bar,
             excluded=excluded,
-            resolve_cap=MODE_RESOLVE_CAP,
+            resolve_cap=resolve_cap,
             penalty_rounding=penalty_rounding(),
         )
 
@@ -3738,6 +3739,40 @@ def _fit_irls_direct_once(
                     and min(_mode_ratios[-_stagnation_window:])
                     > 0.5 * min(_mode_ratios[:-_stagnation_window])
                 )
+                if (
+                    not converged_this_iter
+                    and not step_rejected
+                    and not _has_scop
+                    and not has_constraints
+                    and intercept == intercept_prev
+                    and np.array_equal(beta, beta_prev)
+                ):
+                    # The full step left every coefficient bitwise where it
+                    # was: the iteration is a deterministic map at a float64
+                    # fixed point, and every further iteration repeats this
+                    # one (the step-tolerance stop of Dennis & Schnabel 1996,
+                    # section 7.2, at its strictest).  It ends here.  The
+                    # floors are resolved whatever the relative score: where
+                    # the residuals are at the rounding of the fitted values
+                    # (a model that fits its response exactly, as a linear
+                    # model can) the score's own scale ``sum |s|`` is
+                    # rounding too, the relative score sits near 1 and the
+                    # resolve cap would never let the floor be read.  A score
+                    # within its floor is certified; one above it is the
+                    # limiting accuracy, published as not converged.
+                    residual = mode_residual(
+                        beta,
+                        intercept,
+                        mu,
+                        eta,
+                        centred_intercept=retained.centred_intercept,
+                        resolve_cap=math.inf,
+                    )
+                    convergence_value = mode_bar * residual.ratio()
+                    converged_this_iter = residual.ratio() <= 1.0
+                    score_stagnated = not converged_this_iter
+                    _last_mode_residual = residual
+                    _mode_ratios[-1] = residual.ratio()
             elif convergence in ("coefficients", "mode_score"):
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
