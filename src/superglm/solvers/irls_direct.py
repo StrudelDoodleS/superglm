@@ -4653,6 +4653,16 @@ def _fit_irls_direct_once(
                 weights, so it is the same whether it runs here or, for a
                 caller that does not yet know whether this fit is the one it
                 publishes (``_defer_rank_info``), after the solve returns.
+
+                Owner and lifetime: the caller's model, from the solve until
+                ``fit_ops._install_deferred_rank_info`` runs it or the next
+                REML attempt drops it. The centred system, weights, augmented
+                decomposition and EDF are bound here; the design (``dm``,
+                read by the data-rank factor route) is read when it runs, so
+                the invariant is that nothing mutates the design's group
+                matrices in place in between (``update_reml_r_inv`` writes
+                the specs; ``release_leaf_memo`` drops a memo only). The QR
+                backend never defers (below), so ``_X_full`` is not kept.
                 """
                 M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
                     centered_final.mean_x, centered_final.mean_x
@@ -4714,7 +4724,9 @@ def _fit_irls_direct_once(
                     objective_loss=None,
                 )
 
-            if compute_rank_info:
+            if compute_rank_info or (_defer_rank_info is not None and _use_qr):
+                # A deferred QR-backend computation would keep the dense
+                # (n, p) design alive until install; it is computed here.
                 rank_info = retained_rank_info()
             else:
                 rank_info = None
