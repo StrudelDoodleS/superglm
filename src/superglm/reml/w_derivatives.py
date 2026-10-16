@@ -21,6 +21,7 @@ from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
+from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
@@ -108,6 +109,30 @@ def _leverage_gradient_rhs(
         compensation = (updated - result) - corrected
         result = updated
     return result
+
+
+def _leverage_table_gradient(
+    plan,
+    factor: DenseHessianFactor,
+    centre_hi: NDArray,
+    centre_lo: NDArray | None,
+    row_weights: NDArray,
+    sum_w: float,
+    penalty_rhs: NDArray,
+) -> NDArray:
+    """The W(rho) gradient correction from table read-back leverages (``_lookup_tables``).
+
+    ``grad_j = sum_r w'_r (x_r' dbeta_j) (h_r + 1/sum_w) / 2`` is ``dbeta_j'
+    X_c' v`` with the row channel ``v_r = w'_r (h_r + 1/sum_w) / 2``: one
+    leverage gather and one scatter, never a solved row.  Rows without a
+    weight derivative are never read.
+    """
+    active = row_weights != 0.0
+    leverage = table_leverages(plan, factor.inverse, centre_hi, centre_lo, active)
+    channel = np.zeros_like(leverage)
+    channel[active] = row_weights[active] * (0.5 * (leverage[active] + 1.0 / sum_w))
+    rhs = table_rmatvec(plan, channel, centre_hi, centre_lo)
+    return rhs @ -factor.solve(penalty_rhs)
 
 
 @dataclass(frozen=True)
@@ -503,6 +528,7 @@ def reml_w_correction(
     geometry: ObservedREMLGeometry | None = None,
     gradient_only: bool = False,
     leverage_hessian: bool = False,
+    lookup_tables: bool = True,
 ) -> (
     tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
     | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None, NDArray | None]
@@ -573,6 +599,15 @@ def reml_w_correction(
     Callers add ``w_cross`` where they would add ``dH2_cross``.  When the
     factor is not dense or the weight sum is not profiled the request is not
     taken, and the derivative-Gram result is returned instead.
+
+    When every group is a lookup or a dense column (``_lookup_tables``),
+    the leverages are read back from term-pair tables and no row is solved:
+    the result is ``(grad_correction, None, None)``, the same exact gradient
+    and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
+    (4 and 10 interaction pairs) leaving it out of the Newton model cost one
+    outer iteration of six.  ``lookup_tables=False`` turns that route off: a
+    caller that needs ``w_cross`` at one point (the REML stop's second-order
+    check, ``reml/direct.py``) gets the solved-row result.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if gradient_only and w_correction_order != 1:
@@ -800,6 +835,14 @@ def reml_w_correction(
                 pirls_result.beta[pc.group_sl],
                 gms[pc.group_index],
             )
+        plan = lookup_plan(dm) if lookup_tables else None
+        if plan is not None:
+            # Every group a lookup or a dense column: leverages read back from
+            # term-pair tables, the gradient exact, no per-row cross terms.
+            grad_correction[:] = _leverage_table_gradient(
+                plan, factor, centre_hi, centre_lo, dW_deta, sum_w, penalty_rhs
+            )
+            return grad_correction, None, None
         grad_correction[:], penalty_weight_cross = _leverage_derivative_terms(
             dm,
             factor.inverse,
