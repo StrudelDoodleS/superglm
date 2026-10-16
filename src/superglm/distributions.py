@@ -435,15 +435,22 @@ class NegativeBinomial:
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """NB2 unit deviance."""
         theta = self.theta
-        d = np.where(
-            y > 0,
-            2
-            * (
-                y * np.log(np.maximum(y, 1e-300) / mu)
-                - (y + theta) * np.log((y + theta) / (mu + theta))
-            ),
-            2 * theta * np.log((mu + theta) / theta),
-        )
+        # np.where evaluates both branches on every row: at a y = 0 row with
+        # a trial step's large mu, 1e-300 / mu underflows and the unselected
+        # branch takes log(0) and 0 * -inf, warning about values the result
+        # never reads. A selected row a trial step leaves non-finite is the
+        # solver's to judge from the deviance it returns, as for Gamma.
+        # errstate changes no value.
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            d = np.where(
+                y > 0,
+                2
+                * (
+                    y * np.log(np.maximum(y, 1e-300) / mu)
+                    - (y + theta) * np.log((y + theta) / (mu + theta))
+                ),
+                2 * theta * np.log((mu + theta) / theta),
+            )
         return d
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:

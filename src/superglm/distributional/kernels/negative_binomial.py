@@ -16,6 +16,7 @@ from typing import Literal, overload
 import numpy as np
 from numpy.typing import NDArray
 
+import superglm.distributional.kernels._negative_binomial_numba as _compiled
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,
@@ -57,6 +58,11 @@ _POWER_SUM_BERNOULLI = (
     5.0 / 66.0,
     0.0,
 )
+_SERIES_BERNOULLI = np.array(_POWER_SUM_BERNOULLI, dtype=_FLOAT)
+# Exponents as data: the compiled series calls libm pow exactly where the
+# reference loop did (see _negative_binomial_numba).
+_SERIES_EXPONENTS = np.arange(_SERIES_ORDER + 2, dtype=_FLOAT)
+_PARALLEL_MIN_ROWS = 5_000
 
 
 class NegativeBinomialNumericalDomainError(FloatingPointError):
@@ -306,13 +312,15 @@ def _moment_theta_candidate(
     try:
         mean_square = mean * mean
         residual = response - mean
+        # Elementwise float64 terms as before, summed exactly: fsum of a list
+        # equals fsum of the same values from a generator.
         if semantics == "frequency":
-            numerator = math.fsum(float(weight * mean_square) for weight in weights)
-            terms = (weight * (value * value - mean) for weight, value in zip(weights, residual))
+            numerator = math.fsum((weights * mean_square).tolist())
+            terms = weights * (residual * residual - mean)
         else:
-            numerator = math.fsum(mean_square for _ in response)
-            terms = (weight * value * value - mean for weight, value in zip(weights, residual))
-        denominator = math.fsum(float(value) for value in terms)
+            numerator = math.fsum([mean_square] * len(response))
+            terms = weights * residual * residual - mean
+        denominator = math.fsum(terms.tolist())
         candidate = numerator / denominator
     except (FloatingPointError, OverflowError, ZeroDivisionError):
         return None
@@ -326,7 +334,9 @@ def _initial_mean(
 ) -> float:
     weighted_counts = exact_count if semantics == "prior" else weights * exact_count
     try:
-        mean = math.fsum(float(value) for value in weighted_counts) / float(np.sum(weights))
+        mean = math.fsum(np.asarray(weighted_counts, dtype=_FLOAT).tolist()) / float(
+            np.sum(weights)
+        )
     except (OverflowError, ZeroDivisionError) as exc:
         raise NegativeBinomialInitializationError("NB2 initial mean is not representable") from exc
     if not math.isfinite(mean) or mean <= 0.0:
@@ -343,8 +353,8 @@ def _resolved_negative_sum(
     if not np.all(np.isfinite(terms)) or not np.all(np.isfinite(scales)):
         return False
     try:
-        total = math.fsum(float(value) for value in terms)
-        scale = math.fsum(float(value) for value in scales)
+        total = math.fsum(terms.tolist())
+        scale = math.fsum(scales.tolist())
     except (OverflowError, ValueError):
         return False
     operation_error = (32 * len(terms) + 32) * _EPS
@@ -464,53 +474,6 @@ def _ratio_remainder(
     return result, error, scale
 
 
-def _scaled_power_sums(count: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Return normalized float64 power sums and absolute roundoff bounds."""
-
-    values = np.zeros(_SERIES_ORDER, dtype=_FLOAT)
-    errors = np.zeros(_SERIES_ORDER, dtype=_FLOAT)
-    if count < 2:
-        values[0] = float(count)
-        return values, errors
-
-    inverse_count = _FLOAT(1.0) / _FLOAT(count)
-    coefficients = np.zeros(_SERIES_ORDER, dtype=_FLOAT)
-    for power in range(_SERIES_ORDER):
-        choose = _FLOAT(1.0)
-        for term in range(power + 1):
-            coefficients[term] = choose * _POWER_SUM_BERNOULLI[term]
-            if term < power:
-                choose *= _FLOAT(power + 1 - term) / _FLOAT(term + 1)
-        polynomial = coefficients[power]
-        absolute = abs(polynomial)
-        for term in range(power - 1, -1, -1):
-            polynomial = coefficients[term] + inverse_count * polynomial
-            absolute = abs(coefficients[term]) + inverse_count * absolute
-        denominator = _FLOAT(power + 1)
-        values[power] = polynomial / denominator
-        errors[power] = _gamma(4 * power + 8) * absolute / denominator + _TINY
-    return values, errors
-
-
-def _series_hessian_step(
-    order: int,
-    coefficient: float,
-    coefficient_abs: float,
-    coefficient_error: float,
-    x: float,
-    state: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    """Advance only the Hessian Horner state for one series coefficient."""
-
-    weighted, transformed, weighted_absolute, weighted_error = state
-    return (
-        order * coefficient + x * weighted,
-        (1.0 - order) * coefficient + x * transformed,
-        order * coefficient_abs + x * weighted_absolute,
-        order * coefficient_error + x * weighted_error,
-    )
-
-
 def _theta_series(
     counts: NDArray[np.int64],
     mean: NDArray[np.float64],
@@ -519,109 +482,41 @@ def _theta_series(
     remainder_scale: NDArray[np.float64],
     derivative_order: Literal[1, 2],
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64], NDArray[np.float64]]:
-    """Evaluate the fixed order-12 series only when its error beats recurrence."""
+    """Evaluate the fixed order-12 series only when its error beats recurrence.
+
+    Candidate rows run through the compiled row kernel, whose arithmetic is the
+    per-row reference's operation for operation (see ``_negative_binomial_numba``).
+    """
 
     n_rows = len(counts)
     use = np.zeros((n_rows, derivative_order), dtype=np.bool_)
     natural = np.zeros((n_rows, derivative_order), dtype=_FLOAT)
     direct = np.zeros((n_rows, derivative_order), dtype=_FLOAT)
     candidate_scale = np.maximum(mean, np.maximum(counts.astype(_FLOAT) - 1.0, 0.0))
-    candidates = np.flatnonzero(candidate_scale / theta <= _SERIES_RATIO)
-
-    for row in candidates:
-        count, row_mean, row_theta = int(counts[row]), float(mean[row]), float(theta[row])
-        scale = float(candidate_scale[row])
-        x = scale / row_theta
-        polynomial = absolute = coefficient_error_absolute = 0.0
-        if derivative_order == 2:
-            weighted = transformed = weighted_absolute = weighted_error = 0.0
-        sums, sum_errors = _scaled_power_sums(count)
-        count_scale = _FLOAT(count) / _FLOAT(scale) if count > 1 else _FLOAT(0.0)
-        for order in range(_SERIES_ORDER, 1, -1):
-            if count > 1:
-                offset_factor = float(count_scale**order)
-                offset = float(sums[order - 1]) * offset_factor
-                offset_error = (
-                    abs(offset_factor) * float(sum_errors[order - 1])
-                    + _gamma(order + 2) * abs(offset)
-                    + _TINY
-                )
-            else:
-                offset = offset_error = 0.0
-            mean_term = (row_mean / scale) ** (order - 1) * (
-                ((order - 1.0) / order * row_mean - count) / scale
-            )
-            sign = -1.0 if order % 2 == 0 else 1.0
-            coefficient = sign * (offset + mean_term)
-            coefficient_abs = abs(offset) + abs(mean_term)
-            polynomial = coefficient + x * polynomial
-            absolute = coefficient_abs + x * absolute
-            coefficient_error_absolute = offset_error + x * coefficient_error_absolute
-            if derivative_order == 2:
-                weighted, transformed, weighted_absolute, weighted_error = _series_hessian_step(
-                    order,
-                    coefficient,
-                    coefficient_abs,
-                    offset_error,
-                    x,
-                    (weighted, transformed, weighted_absolute, weighted_error),
-                )
-
-        natural[row, 0] = x * x * polynomial
-        direct[row, 0] = scale * x * polynomial
-        mean_ratio = row_mean / row_theta
-        offset_ratio = max(count - 1, 0) / row_theta
-        delta = abs(row_mean - count)
-        score_tail = (
-            count / row_theta * offset_ratio**_SERIES_ORDER / (1.0 - offset_ratio)
-            + mean_ratio ** (_SERIES_ORDER + 1) / (_SERIES_ORDER + 1.0)
-            + delta / row_theta * mean_ratio**_SERIES_ORDER / (1.0 - mean_ratio)
-        )
-        series_score_error = (
-            x * x * (_gamma(80) * absolute + (1.0 + _gamma(32)) * coefficient_error_absolute)
-            + score_tail
-            + _TINY
-        )
-        total = row_mean + row_theta
-        recurrence_score_scale = count / total * (
-            (row_mean + max(count - 1, 0)) / row_theta
-        ) + float(remainder_scale[row])
-        recurrence_score_error = _gamma(count + 64) * recurrence_score_scale + float(
-            remainder_error[row]
-        )
-        use[row, 0] = series_score_error < recurrence_score_error
-
-        if derivative_order == 1:
-            continue
-        natural[row, 1] = -(x * x / row_theta) * weighted
-        direct[row, 1] = scale * x * transformed
-        hessian_tail = (
-            count
-            / row_theta**2
-            * offset_ratio**_SERIES_ORDER
-            * (_SERIES_ORDER + 1.0 - _SERIES_ORDER * offset_ratio)
-            / (1.0 - offset_ratio) ** 2
-            + mean_ratio ** (_SERIES_ORDER + 1) / row_theta / (1.0 - mean_ratio)
-            + delta
-            / row_theta**2
-            * mean_ratio**_SERIES_ORDER
-            * (_SERIES_ORDER + 1.0 - _SERIES_ORDER * mean_ratio)
-            / (1.0 - mean_ratio) ** 2
-        )
-        series_hessian_error = (
-            x
-            * x
-            / row_theta
-            * (_gamma(96) * weighted_absolute + (1.0 + _gamma(32)) * weighted_error)
-            + hessian_tail
-            + _TINY
-        )
-        recurrence_hessian_scale = (
-            recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
-            + (row_mean / total) * mean_ratio / total
-        )
-        use[row, 1] = series_hessian_error < (_gamma(count + 80) * recurrence_hessian_scale + _TINY)
-
+    candidates = np.flatnonzero(candidate_scale / theta <= _SERIES_RATIO).astype(np.int64)
+    if not candidates.size:
+        return use, natural, direct
+    core = (
+        _compiled.theta_series_parallel
+        if candidates.size >= _PARALLEL_MIN_ROWS
+        else _compiled.theta_series_serial
+    )
+    core(
+        candidates,
+        np.ascontiguousarray(counts, dtype=np.int64),
+        np.ascontiguousarray(mean, dtype=_FLOAT),
+        np.ascontiguousarray(theta, dtype=_FLOAT),
+        candidate_scale,
+        np.ascontiguousarray(remainder_error, dtype=_FLOAT),
+        np.ascontiguousarray(remainder_scale, dtype=_FLOAT),
+        int(derivative_order),
+        _SERIES_ORDER,
+        _SERIES_EXPONENTS,
+        _SERIES_BERNOULLI,
+        use,
+        natural,
+        direct,
+    )
     return use, natural, direct
 
 
@@ -924,6 +819,126 @@ def evaluate_negative_binomial_rows(
     )
 
 
+def negative_binomial_log_third_derivatives(
+    counts: NDArray,
+    mean: NDArray,
+    theta: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Third derivatives of the NB2 row log-likelihood in ``(log mean, log theta)``.
+
+    Returns ``(third, error)``: ``third[:, k]`` is ``l_aaa, l_aab, l_abb, l_bbb``
+    with ``a = log mean`` and ``b = log theta``, and ``error`` a certified
+    absolute bound on the rounding and truncation error of ``l_bbb``.  The
+    first three are closed forms with relative error at most ``gamma_11`` of
+    their absolute-term scale.  ``l_bbb`` cancels like the theta score as the
+    row approaches Poisson, so it is the near-Poisson series of the theta score
+    differentiated twice more in ``log theta`` (coefficients ``(n - 1)^2 c_n``)
+    or the count recurrence, whichever certifies the smaller error, as the
+    score and Hessian channels choose.  Inputs and domain are the row kernel's.
+    """
+
+    arrays, integer_counts, _ = _inputs(counts, mean, theta, weights, semantics, 2)
+    _, _, _, weight_values = arrays
+    _, multiplier, effective_mean, effective_theta, _ = _domain(
+        arrays[1], arrays[2], weight_values, semantics
+    )
+    remainder, remainder_error, remainder_scale = _ratio_remainder(effective_mean / effective_theta)
+    third, error, _ = _compiled.log_third_derivatives(
+        np.ascontiguousarray(integer_counts, dtype=np.int64),
+        np.ascontiguousarray(effective_mean, dtype=_FLOAT),
+        np.ascontiguousarray(effective_theta, dtype=_FLOAT),
+        np.ascontiguousarray(remainder, dtype=_FLOAT),
+        np.ascontiguousarray(remainder_error, dtype=_FLOAT),
+        np.ascontiguousarray(remainder_scale, dtype=_FLOAT),
+        _SERIES_RATIO,
+        _SERIES_ORDER,
+        _SERIES_EXPONENTS,
+        _SERIES_BERNOULLI,
+    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        third = third * multiplier[:, None]
+        error = (1.0 + _gamma(2)) * (error * multiplier)
+    _finite_output(third, "third derivative", NegativeBinomialDerivativeRepresentationError)
+    _finite_output(error, "third-derivative bound", NegativeBinomialDerivativeRepresentationError)
+    return third, error
+
+
+def negative_binomial_predictor_curvature_directional(
+    counts: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> NDArray[np.float64]:
+    """Directional derivative of the packed observed curvature under the two log links.
+
+    The curvature is the negated Hessian in ``(log mean, log theta)``, packed
+    ``(aa, ab, bb)``; its derivative along ``d`` is ``-sum_k l_ijk d_k``.
+    :func:`negative_binomial_certified_predictor_curvature_directional`
+    returns the same values with the certified error of the ``bb`` channel.
+    """
+
+    values, _certificate = negative_binomial_certified_predictor_curvature_directional(
+        counts, eta, eta_direction, weights, semantics
+    )
+    return values
+
+
+def negative_binomial_certified_predictor_curvature_directional(
+    counts: NDArray,
+    eta: NDArray,
+    eta_direction: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The packed curvature direction and an entrywise bound on its certified error.
+
+    ``l_bbb`` is the one channel computed only to a certified bound ``e``
+    (series truncation and recurrence rounding, which cancel by ``theta^2``
+    near Poisson), and it enters only the ``bb`` entry, multiplied by
+    ``d_b``; so the certificate is ``|d_b| e`` on ``bb``, rounded upward once
+    for the one rounded product, and zero on ``aa`` and ``ab``, whose third
+    derivatives are closed forms.
+    """
+
+    try:
+        predictors = np.asarray(eta, dtype=_FLOAT)
+        direction = np.asarray(eta_direction, dtype=_FLOAT)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("NB2 predictor state and direction must be finite n-by-2 arrays") from exc
+    expected = (len(np.asarray(counts)), 2)
+    if (
+        predictors.shape != expected
+        or direction.shape != expected
+        or not np.all(np.isfinite(predictors))
+        or not np.all(np.isfinite(direction))
+    ):
+        raise ValueError("NB2 predictor state and direction must be finite n-by-2 arrays")
+    with np.errstate(over="ignore", under="ignore"):
+        mean = np.exp(predictors[:, 0])
+        theta = np.exp(predictors[:, 1])
+    third, error = negative_binomial_log_third_derivatives(counts, mean, theta, weights, semantics)
+    along_mean, along_theta = direction[:, 0], direction[:, 1]
+    result = np.empty((len(mean), 3), dtype=_FLOAT)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result[:, 0] = -(third[:, 0] * along_mean + third[:, 1] * along_theta)
+        result[:, 1] = -(third[:, 1] * along_mean + third[:, 2] * along_theta)
+        result[:, 2] = -(third[:, 2] * along_mean + third[:, 3] * along_theta)
+    _finite_output(result, "curvature direction", NegativeBinomialDerivativeRepresentationError)
+    certificate = np.zeros_like(result)
+    with np.errstate(over="ignore"):
+        certificate[:, 2] = np.nextafter(np.abs(along_theta) * error, np.inf)
+    _finite_output(
+        certificate, "curvature-direction bound", NegativeBinomialDerivativeRepresentationError
+    )
+    return (
+        readonly(result, dtype=np.dtype(np.float64), shape=result.shape),
+        readonly(certificate, dtype=np.dtype(np.float64), shape=certificate.shape),
+    )
+
+
 __all__ = [
     "NegativeBinomialDerivativeRepresentationError",
     "NegativeBinomialInitializationError",
@@ -933,5 +948,8 @@ __all__ = [
     "evaluate_negative_binomial_rows",
     "has_resolved_poisson_boundary",
     "initialize_negative_binomial",
+    "negative_binomial_certified_predictor_curvature_directional",
+    "negative_binomial_log_third_derivatives",
+    "negative_binomial_predictor_curvature_directional",
     "recurrence_cells",
 ]

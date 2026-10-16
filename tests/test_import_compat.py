@@ -92,6 +92,13 @@ dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
 )
 for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
     dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
+# The LAML endgame's Tweedie third-derivative kernels compile on a Tweedie
+# fit's first use, not in every process's warmup.
+from superglm.distributional.kernels.tweedie import _FIRST_USE_DISPATCHERS
+
+first_use = {
+    name: dispatchers.pop(f"{tweedie_numba.__name__}.{name}") for name in _FIRST_USE_DISPATCHERS
+}
 assert dispatchers
 assert inspect.signature(superglm.warmup).parameters == {}
 assert all(not dispatcher.nopython_signatures for dispatcher in dispatchers.values())
@@ -110,6 +117,7 @@ def readonly(*arrays):
 superglm.warmup()
 compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
+assert not any(dispatcher.nopython_signatures for dispatcher in first_use.values())
 
 # The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
 from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries

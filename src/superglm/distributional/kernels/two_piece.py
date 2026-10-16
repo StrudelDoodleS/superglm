@@ -37,6 +37,7 @@ from superglm.distributional.kernels._common import (
     readonly_bool,
     validated_derivative_order,
 )
+from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 Parametrisation = Literal["mean", "location"]
@@ -413,6 +414,233 @@ def mean_rows(
     return _placeholders_where_invalid(optimizing, score, hessian, np.asarray(base.valid))
 
 
+def location_hessian_direction(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    direction: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed derivative of the location-form Hessian along a natural direction ``v``.
+
+    Within a piece (``u = (t - mu)/(sigma s)``, ``s = 1 + e eps``, ``e = +-1``)
+    the third derivatives of ``-log sigma - u^2/2`` are monomials in ``u``,
+    ``1/sigma`` and ``1/s``:
+
+    * ``T_mms = 2/(sigma^3 s^2)``, ``T_mme = 2e/(sigma^2 s^3)``, ``T_mmm = 0``,
+    * ``T_mss = 6u/(sigma^3 s)``, ``T_mse = 4ue/(sigma^2 s^2)``, ``T_mee = 6u/(sigma s^3)``,
+    * ``T_sss = (12u^2 - 2)/sigma^3``, ``T_sse = 6u^2 e/(sigma^2 s)``,
+      ``T_see = 6u^2/(sigma s^2)``, ``T_eee = 12u^2 e/s^3``.
+
+    The Hessian jumps at ``u = 0``; there the right piece's derivative is
+    returned, as the Hessian's own piece selection does.  Each entry has
+    relative error ``gamma_8``; each output channel sums three of them.
+    """
+    t = _vector(variate, name="variate")
+    mu = _vector(location, name="location")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    m = _positive_vector(multiplier, name="multiplier")
+    _same_shape(t, mu, sigma, eps, m)
+    v = np.asarray(direction, dtype=_FLOAT)
+    if v.shape != (len(t), 3) or not np.all(np.isfinite(v)):
+        raise TwoPieceDomainError("two-piece natural direction must be a finite n-by-3 array")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        u, s, e = _pieces(t, mu, sigma, eps)
+        u2 = u * u
+        inv_sigma, inv_s = 1.0 / sigma, 1.0 / s
+        t_mms = 2.0 * inv_sigma**3 * inv_s**2
+        t_mme = 2.0 * e * inv_sigma**2 * inv_s**3
+        t_mss = 6.0 * u * inv_sigma**3 * inv_s
+        t_mse = 4.0 * u * e * inv_sigma**2 * inv_s**2
+        t_mee = 6.0 * u * inv_sigma * inv_s**3
+        t_sss = (12.0 * u2 - 2.0) * inv_sigma**3
+        t_sse = 6.0 * u2 * e * inv_sigma**2 * inv_s
+        t_see = 6.0 * u2 * inv_sigma * inv_s**2
+        t_eee = 12.0 * u2 * e * inv_s**3
+        vm, vs, ve = v[:, 0], v[:, 1], v[:, 2]
+        result = np.empty((len(t), 6), dtype=_FLOAT)
+        result[:, 0] = t_mms * vs + t_mme * ve
+        result[:, 1] = t_mms * vm + t_mss * vs + t_mse * ve
+        result[:, 2] = t_mme * vm + t_mse * vs + t_mee * ve
+        result[:, 3] = t_mss * vm + t_sss * vs + t_sse * ve
+        result[:, 4] = t_mse * vm + t_sse * vs + t_see * ve
+        result[:, 5] = t_mee * vm + t_see * vs + t_eee * ve
+        result *= m[:, None]
+    return result
+
+
+def join_crossing_rows(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    moved: NDArray,
+) -> NDArray[np.bool_]:
+    """Rows on the join ``z = 0`` whose Hessian has no derivative along the path.
+
+    With nonzero skew the Hessian jumps at ``z = 0`` (``s`` changes from
+    ``1 + eps`` to ``1 - eps``), and at zero skew its ``(mu, eps)`` entry
+    ``-2 (t - mu) e / (sigma^2 s^3)`` is ``-2 |t - mu| / sigma^2``, a kink:
+    ``T_mme = 2e/(sigma^2 s^3)`` changes sign across the join at every skew.
+    So a path that moves the location there has only one-sided derivatives,
+    the right piece's when ``mu`` falls and the left piece's when it rises,
+    whatever the skew; a path that keeps ``mu`` fixed keeps ``z = 0`` and the
+    right piece, and is differentiable.  ``moved`` is nonzero where
+    the path can move ``mu``; the caller decides that, since only a location
+    linear in the predictor is held fixed by a zero first-order change.  ``z``
+    is formed exactly as the Hessian's piece selection forms it.
+    """
+    t = _vector(variate, name="variate")
+    mu = _vector(location, name="location")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    moved = np.asarray(moved, dtype=_FLOAT)
+    _same_shape(t, mu, sigma, eps, moved)
+    return ((t - mu) / sigma == 0.0) & (moved != 0.0)
+
+
+def _log_mean_loading_third(
+    sigma: NDArray[np.float64], eps: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], ...]:
+    """``log K``'s derivatives through third order in ``(sigma, eps)``.
+
+    The same two log pieces as :func:`log_mean_loading`; with
+    ``g = a -+ r`` (``r`` the inverse Mills ratio of the piece) the piece
+    derivatives use ``g'' = r + (a - 2r) r (r - a)`` (left) and
+    ``g'' = -r + (a + 2r) r (a + r)`` (right), from ``r' = r (r - a)`` and
+    ``r' = -r (a + r)``.
+
+    ``log K = log(e^L1 + e^L2)`` is a softplus of ``L1 - L2``, so with the
+    piece weights ``w_j = e^(L_j - log K)``, ``E[.]`` their average and
+    ``D = L2 - L1`` differentiated channel by channel:
+
+    * ``K_ab = E[L_ab] + w1 w2 D_a D_b``,
+    * ``K_abc = E[L_abc] + w1 w2 (D_ab D_c + D_ac D_b + D_bc D_a)
+      + w1 w2 (w1 - w2) D_a D_b D_c``.
+
+    These are the mixture cumulants formed from centred piece derivatives,
+    since ``L_j,a - E[L_a]`` is ``-w2 D_a`` on the left piece and ``w1 D_a`` on
+    the right.  The raw-moment identity ``R_abc - 3 S M + 2 M^3`` cancels terms
+    of order ``E[L_a]^3`` when one piece dominates (16 against 0.305 at
+    ``sigma = 401.93``, ``eps = 0.8703``); here ``w1 w2`` vanishes there and
+    the one-piece limit is what remains.  ``w1 - w2`` is ``tanh((L1 - L2)/2)``,
+    accurate when the weights are equal.
+
+    Returns ``(K_s, K_e, K_ss, K_se, K_ee, K_sss, K_sse, K_see, K_eee)``.
+    """
+    left_width, right_width = 1.0 - eps, 1.0 + eps
+    a1, a2 = sigma * left_width, sigma * right_width
+    log_cdf_left = special.log_ndtr(-a1)
+    log_cdf_right = special.log_ndtr(a2)
+    log_left = np.log1p(-eps) + 0.5 * a1 * a1 + log_cdf_left
+    log_right = np.log1p(eps) + 0.5 * a2 * a2 + log_cdf_right
+    logk = np.logaddexp(log_left, log_right)
+    weights = (np.exp(log_left - logk), np.exp(log_right - logk))
+    r1 = np.exp(-0.5 * a1 * a1 - _HALF_LOG_TWO_PI - log_cdf_left)
+    r2 = np.exp(-0.5 * a2 * a2 - _HALF_LOG_TWO_PI - log_cdf_right)
+    g1, g1d = a1 - r1, 1.0 + a1 * r1 - r1 * r1
+    g2, g2d = a2 + r2, 1.0 - a2 * r2 - r2 * r2
+    g1dd = r1 + (a1 - 2.0 * r1) * r1 * (r1 - a1)
+    g2dd = -r2 + (a2 + 2.0 * r2) * r2 * (a2 + r2)
+    pieces = (
+        (
+            left_width * g1,
+            -1.0 / left_width - sigma * g1,
+            left_width * left_width * g1d,
+            -g1 - sigma * left_width * g1d,
+            -1.0 / (left_width * left_width) + sigma * sigma * g1d,
+            left_width**3 * g1dd,
+            -2.0 * left_width * g1d - sigma * left_width * left_width * g1dd,
+            2.0 * sigma * g1d + sigma * sigma * left_width * g1dd,
+            -2.0 / left_width**3 - sigma**3 * g1dd,
+        ),
+        (
+            right_width * g2,
+            1.0 / right_width + sigma * g2,
+            right_width * right_width * g2d,
+            g2 + sigma * right_width * g2d,
+            -1.0 / (right_width * right_width) + sigma * sigma * g2d,
+            right_width**3 * g2dd,
+            2.0 * right_width * g2d + sigma * right_width * right_width * g2dd,
+            2.0 * sigma * g2d + sigma * sigma * right_width * g2dd,
+            2.0 / right_width**3 + sigma**3 * g2dd,
+        ),
+    )
+
+    w1, w2 = weights
+    spread = w1 * w2
+    tilt = np.tanh(0.5 * (log_left - log_right))  # w1 - w2
+    (ls1, le1, lss1, lse1, lee1, lsss1, lsse1, lsee1, leee1) = pieces[0]
+    (ls2, le2, lss2, lse2, lee2, lsss2, lsse2, lsee2, leee2) = pieces[1]
+    d_s, d_e = ls2 - ls1, le2 - le1
+    d_ss, d_se, d_ee = lss2 - lss1, lse2 - lse1, lee2 - lee1
+    m_s = w1 * ls1 + w2 * ls2
+    m_e = w1 * le1 + w2 * le2
+    k_ss = w1 * lss1 + w2 * lss2 + spread * d_s * d_s
+    k_se = w1 * lse1 + w2 * lse2 + spread * d_s * d_e
+    k_ee = w1 * lee1 + w2 * lee2 + spread * d_e * d_e
+    spread_tilt = spread * tilt
+    k_sss = w1 * lsss1 + w2 * lsss2 + spread * 3.0 * d_ss * d_s + spread_tilt * d_s**3
+    k_sse = (
+        w1 * lsse1
+        + w2 * lsse2
+        + spread * (d_ss * d_e + 2.0 * d_se * d_s)
+        + spread_tilt * d_s * d_s * d_e
+    )
+    k_see = (
+        w1 * lsee1
+        + w2 * lsee2
+        + spread * (d_ee * d_s + 2.0 * d_se * d_e)
+        + spread_tilt * d_s * d_e * d_e
+    )
+    k_eee = w1 * leee1 + w2 * leee2 + spread * 3.0 * d_ee * d_e + spread_tilt * d_e**3
+    return m_s, m_e, k_ss, k_se, k_ee, k_sss, k_sse, k_see, k_eee
+
+
+def mean_hessian_direction(
+    response: NDArray,
+    mean: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    direction: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed derivative of the mean-form Hessian in ``(m, sigma, eps)`` along ``v``.
+
+    The location-form direction chained through ``mu = log m - log K(sigma, eps)``
+    (see ``mean_form_hessian_direction``).
+    """
+    y = _positive_vector(response, name="response")
+    m = _positive_vector(mean, name="mean")
+    sigma = _positive_vector(scale, name="scale")
+    eps = _skew_vector(skew)
+    weight = _positive_vector(multiplier, name="multiplier")
+    _same_shape(y, m, sigma, eps, weight)
+    v = np.asarray(direction, dtype=_FLOAT)
+    if v.shape != (len(y), 3) or not np.all(np.isfinite(v)):
+        raise TwoPieceDomainError("two-piece natural direction must be a finite n-by-3 array")
+    logk = log_mean_loading(sigma, eps)[0]
+    k_s, k_e, k_ss, k_se, k_ee, k_sss, k_sse, k_see, k_eee = _log_mean_loading_third(sigma, eps)
+    location = np.log(m) - logk
+    unit = np.ones_like(weight)
+    variate = np.log(y)
+    base = location_rows(variate, location, sigma, eps, unit, derivative_order=2)
+    assert base.score is not None and base.hessian_packed is not None
+    result = mean_form_hessian_direction(
+        m,
+        base.score[:, 0],
+        base.hessian_packed,
+        lambda w: location_hessian_direction(variate, location, sigma, eps, w, unit),
+        (k_s, k_e),
+        (k_ss, k_se, k_ee),
+        (k_sss, k_sse, k_see, k_eee),
+        v,
+    )
+    return result * weight[:, None]
+
+
 def mean_expected_information(
     mean: NDArray,
     scale: NDArray,
@@ -540,6 +768,7 @@ __all__ = [
     "TwoPieceInitializationWarning",
     "TwoPieceKernelEvaluation",
     "initialize_two_piece",
+    "join_crossing_rows",
     "location_expected_information",
     "location_of_mean",
     "location_rows",

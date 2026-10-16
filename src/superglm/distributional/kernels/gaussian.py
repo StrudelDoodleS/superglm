@@ -285,7 +285,12 @@ def _gaussian_predictor_curvature_channels(
     scale_increment: NDArray[np.float64],
     weights: NDArray[np.float64],
     semantics: WeightSemantics,
+    floor: float,
 ) -> NDArray[np.float64]:
+    # With u = (scale - floor)/scale, the factors 1 - u, 1 - 2u and 1 - 3u are
+    # formed from the exact floor/increment difference, never as 1 - u: near
+    # u = 1 (scale far above its floor) 1 - u cancels to floor/scale and would
+    # carry an absolute rounding error of u's size.
     if semantics == "prior":
         normalizer_mass = np.ones(len(response), dtype=np.float64)
     else:
@@ -308,13 +313,16 @@ def _gaussian_predictor_curvature_channels(
             * inverse_scale_2
             * scale_direction
         )
+        one_minus_ratio = floor * inverse_scale
+        one_minus_two_ratio = (floor - scale_increment) * inverse_scale
+        one_minus_three_ratio = (floor - 2.0 * scale_increment) * inverse_scale
         result[:, 1] = (
             2.0
             * residual_mass
             * scale_increment
             * inverse_scale
             * inverse_scale_2
-            * (-location_direction + residual * (1.0 - 3.0 * scale_ratio) * scale_direction)
+            * (-location_direction + residual * one_minus_three_ratio * scale_direction)
         )
         result[:, 2] = (
             -2.0
@@ -322,10 +330,10 @@ def _gaussian_predictor_curvature_channels(
             * residual
             * inverse_scale_2
             * scale_ratio
-            * (3.0 * scale_ratio - 1.0)
+            * -one_minus_three_ratio
             * location_direction
             + (
-                normalizer_mass * scale_ratio * (1.0 - scale_ratio) * (1.0 - 2.0 * scale_ratio)
+                normalizer_mass * scale_ratio * one_minus_ratio * one_minus_two_ratio
                 + residual_mass
                 * scaled_residual**2
                 * scale_ratio
@@ -384,5 +392,6 @@ def gaussian_predictor_curvature_directional(
         scale_increment,
         weight_values,
         weight_semantics,
+        floor,
     )
     return readonly(result)

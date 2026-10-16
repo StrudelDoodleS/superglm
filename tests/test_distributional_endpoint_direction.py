@@ -215,6 +215,12 @@ class _GammaWithoutDirection(_GammaLS):
     predictor_curvature_directional_derivative = None  # type: ignore[assignment]
 
 
+class _TweedieWithoutDirection(TweedieLSS):
+    """TweedieLSS with the analytic protocol hidden, so the engine must fall back."""
+
+    predictor_curvature_directional_derivative = None  # type: ignore[assignment]
+
+
 def _linear_x_fixture(n: int = 1000, seed: int = 4):
     rng = np.random.default_rng(seed)
     x = rng.uniform(-1.0, 1.0, n)
@@ -308,8 +314,15 @@ def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
     assert outcomes["fd"][1] == ("mean:x#wiggle",)
 
 
-def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> None:
-    """TweedieLSS has no analytic direction; the finite-difference fallback certifies.
+@pytest.mark.parametrize(
+    ("family_type", "authority"),
+    [
+        (_TweedieWithoutDirection, "finite-difference-curvature-direction/v1"),
+        (TweedieLSS, "analytic-observed-curvature-direction/v1"),
+    ],
+)
+def test_tweedie_certifies_a_genuine_infinity(family_type, authority: str) -> None:
+    """A genuine Tweedie infinity certifies through the analytic direction and the fallback.
 
     Either strict stopping label is valid; the endpoint evidence and
     terminal smoothing residual determine correctness.
@@ -319,7 +332,7 @@ def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> No
     y = _tweedie_response(mu, seed=6)
     for practical in (False, True):
         model = model_from_templates(
-            family=TweedieLSS(),
+            family=family_type(),
             predictors=(_mean_predictor(), Predictor("dispersion", {}), Predictor("power", {})),
         )
         model.fit_reml(
@@ -339,7 +352,7 @@ def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> No
         assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
         assert model.exact_face_components_ == ("mean:x#wiggle",)
         evidence = smoothing.terminal_endpoint_directions["mean:x#wiggle"]
-        assert evidence.authority_identifier == "finite-difference-curvature-direction/v1"
+        assert evidence.authority_identifier == authority
         assert evidence.decision == "endpoint"
         assert evidence.numerical_error < 0.01 * abs(evidence.analytic_derivative)
 

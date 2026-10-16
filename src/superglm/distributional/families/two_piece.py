@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +14,7 @@ from numpy.typing import NDArray
 from superglm.distributional.families._base import (
     array_digest,
     immutable,
+    natural_curvature_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -43,10 +45,14 @@ from superglm.distributional.kernels.two_piece import (
 )
 from superglm.distributional.kernels.two_piece import (
     initialize_two_piece,
+    join_crossing_rows,
     location_expected_information,
+    location_hessian_direction,
     location_of_mean,
     location_rows,
+    log_mean_loading,
     mean_expected_information,
+    mean_hessian_direction,
     mean_of_location,
     mean_rows,
     real_line_mean,
@@ -57,9 +63,35 @@ from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
-from superglm.links import IdentityLink, LogLink
+from superglm.links import IdentityLink, Link, LogLink
 
 Parametrisation = Literal["mean", "location"]
+
+
+def _refuse_join_crossing(
+    variate: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    skew: NDArray,
+    moved: NDArray,
+) -> None:
+    """Refuse the analytic direction when it can move a row's location off the join.
+
+    There the Hessian has only one-sided derivatives, so no analytic value
+    carries authority; the caller differences the published curvature, whose
+    certificate records the jump, as v0.40.0 did for every two-piece row.
+    ``moved`` is nonzero on a row whose location the path can move: ``v_mu``
+    in the location form, where the location is linear in the predictor, and
+    any nonzero direction in the mean form, where it is not.
+    """
+    crossing = join_crossing_rows(variate, location, scale, skew, moved)
+    if np.any(crossing):
+        row = int(np.flatnonzero(crossing)[0])
+        raise UnsupportedLikelihoodContractError(
+            f"two-piece curvature has no derivative across its join at row {row}"
+        )
+
+
 TwoPieceRowLaw = Literal[
     "unit-prior-explicitly-equals-frequency/v1",
     "two-piece-epsilon-skew-literal-replication/v1",
@@ -425,6 +457,47 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
             valid=evaluated.valid,
         )
 
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            if self.parametrisation == "mean":
+                # mu = log m - log K(sigma, eps) is not linear in the predictors:
+                # a direction whose first-order change v_m/m - K_s v_s - K_e v_e
+                # vanishes still moves mu at second order through log K, so a
+                # join row is refused whenever the direction moves it at all.
+                logk = log_mean_loading(theta[:, 1], theta[:, 2])[0]
+                _refuse_join_crossing(
+                    np.log(response),
+                    np.log(theta[:, 0]) - logk,
+                    theta[:, 1],
+                    theta[:, 2],
+                    np.any(natural != 0.0, axis=1).astype(np.float64),
+                )
+                return mean_hessian_direction(
+                    response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+                )
+            _refuse_join_crossing(
+                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0]
+            )
+            return location_hessian_direction(
+                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+            )
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
+        )
+
     def expected_information_natural(
         self, theta: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
@@ -646,6 +719,29 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            _refuse_join_crossing(response, theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0])
+            return location_hessian_direction(
+                response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+            )
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
         )
 
     def expected_information_natural(

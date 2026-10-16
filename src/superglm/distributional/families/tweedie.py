@@ -14,6 +14,7 @@ from scipy.special import expit
 from scipy.stats import poisson
 
 from superglm.distributional.families._base import (
+    natural_curvature_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -36,6 +37,7 @@ from superglm.distributional.kernels.tweedie import (
     TweedieNumericalRefusal,
     evaluate_tweedie_rows,
     initialize_tweedie,
+    tweedie_hessian_direction,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -142,6 +144,14 @@ class BoundedPowerLink:
         probability = expit(np.asarray(eta, dtype=np.float64))
         first = (self.upper - self.lower) * probability * (1.0 - probability)
         return first * (1.0 - 2.0 * probability)
+
+    def deriv3_inverse(self, eta: NDArray) -> NDArray[np.float64]:
+        """``span p q (1 - 6 p q)`` with ``q = 1 - p`` formed as ``expit(-eta)``."""
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        product = probability * complement
+        return (self.upper - self.lower) * product * (1.0 - 6.0 * product)
 
 
 _POISSON_TAIL_TOLERANCE = 1.0e-12
@@ -723,6 +733,37 @@ class TweedieLSS(TweediePredictors):
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_curvature_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        eta_direction: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature along one predictor path."""
+
+        response = _validated_response(y)
+        tweedie_plan = _validated_plan(plan, n_observations=len(response))
+
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            try:
+                return tweedie_hessian_direction(
+                    response,
+                    np.ascontiguousarray(theta[:, 0]),
+                    np.ascontiguousarray(theta[:, 1]),
+                    np.ascontiguousarray(theta[:, 2]),
+                    tweedie_plan.weights.values,
+                    tweedie_plan.weights.provenance.contract.semantics,
+                    natural,
+                )
+            except TweedieNumericalRefusal as exc:
+                raise ValueError(f"Tweedie numerical evaluation refused: {exc}") from exc
+
+        return natural_curvature_direction(
+            self, response, eta, eta_direction, links, plan, hessian_direction
         )
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:

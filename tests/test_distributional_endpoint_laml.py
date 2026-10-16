@@ -36,6 +36,9 @@ from superglm.distributional.face_efs import (
 )
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
+from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+from superglm.distributional.families.log_normal import LogNormalLS
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     InitialParameterState,
@@ -57,7 +60,7 @@ from superglm.distributional.result import (
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features import Numeric, RandomEffect, Spline
-from superglm.links import IdentityLink
+from superglm.links import IdentityLink, SqrtLink
 from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
 
@@ -2503,6 +2506,104 @@ def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_c
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="not certified"):
         smoothing.assert_matched_certified()
+
+
+class _LogLinkWithoutThirdDerivative:
+    """A user link that supplies two inverse derivatives, not the optional third."""
+
+    def link(self, mu):
+        return np.log(mu)
+
+    def inverse(self, eta):
+        return np.exp(eta)
+
+    def deriv(self, mu):
+        return 1.0 / mu
+
+    def deriv_inverse(self, eta):
+        return np.exp(eta)
+
+    def deriv2_inverse(self, eta):
+        return np.exp(eta)
+
+
+def _refused_link_case(case: str):
+    rng = np.random.default_rng(3)
+    w = np.tile(np.linspace(-1.0, 1.0, 12), 40)
+    x = np.repeat(np.linspace(-1.0, 1.0, 6), 80)
+    mean = np.exp(1.0 + 0.55 * np.sin(np.pi * w) + 0.15 * w + 0.03 * np.sin(np.pi * x))
+    if case == "negative-binomial-sqrt":
+        family = NegativeBinomialLS()
+        response = rng.negative_binomial(3.0, 3.0 / (3.0 + mean)).astype(np.float64)
+        link = SqrtLink()
+    elif case == "gamma-sqrt":
+        family = GammaLS()
+        response = mean * rng.gamma(4.0, 0.25, size=mean.size)
+        link = SqrtLink()
+    elif case == "log-normal-sqrt":
+        family = LogNormalLS()
+        response = mean * np.exp(0.4 * rng.standard_normal(mean.size) - 0.08)
+        link = SqrtLink()
+    else:
+        family = GeneralizedParetoLSS()
+        response = mean * (rng.uniform(size=mean.size) ** -0.2 - 1.0) / 0.2
+        link = _LogLinkWithoutThirdDerivative()
+    return family, response, link, x, w
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["negative-binomial-sqrt", "gamma-sqrt", "log-normal-sqrt", "pareto-custom-link"],
+)
+def test_exact_face_check_differences_a_family_that_refuses_its_links(case: str) -> None:
+    """A link the analytic direction refuses is differenced; the fit is not aborted.
+
+    NB2, GammaLS and the log-normal differentiate only their built-in links,
+    and every family routed through ``natural_curvature_direction`` needs
+    ``deriv3_inverse``, which the ``Link`` protocol makes optional.  Each
+    refuses with ``UnsupportedLikelihoodContractError``.  At 7305fe25 that
+    escaped ``evaluate_endpoint_laplace_derivative`` and ended the fit the
+    first time a capped component reached its exact-face check (GammaLS
+    already did so on master); the check now differences the family's
+    curvature, as v0.40.0 did for every family without the protocol.
+    """
+    family, response, link, x, w = _refused_link_case(case)
+    weights = resolved_prior(np.ones_like(response))
+    frame = as_eager_frame(pd.DataFrame({"x": x, "w": w}))
+    first, second = (parameter.name for parameter in family.parameters)
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (
+                Predictor(
+                    first,
+                    {"x": Spline(kind="cr", n_knots=5), "w": Spline(kind="cr", n_knots=5)},
+                    link=link,
+                ),
+                Predictor(second, {}),
+            ),
+        )
+    )
+    capped_name, finite_name = layout.penalty_names
+    efs_config = DistributionalEFSConfig(outer="efs", max_iterations=120, tolerance=1.0e-3)
+    smoothing = fit_distributional_efs(
+        family,
+        layout,
+        response,
+        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),
+        lambdas={capped_name: efs_config.maximum_lambda, finite_name: 0.5},
+        solver_config=DenseSolverConfig(max_iterations=150, tolerance=1.0e-9),
+        efs_config=efs_config,
+    )
+
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == (capped_name,)
+    evidence = smoothing.terminal_endpoint_directions[capped_name]
+    assert evidence.authority_identifier == "finite-difference-curvature-direction/v1"
+    assert evidence.decision == "endpoint"
 
 
 def _resolved_quadratic_gap_fit() -> DenseSolverResult:
@@ -6445,3 +6546,98 @@ def test_projected_penalty_result_is_immutable_and_refuses_malformed_values() ->
         ProjectedPenaltyLogDet(component_names=("retained",), rank=0, log_pdet=1.0)
     with pytest.raises((TypeError, ValueError)):
         ProjectedPenaltyLogDet(component_names=("retained",), rank=1, log_pdet=np.nan)
+
+
+class _CertifiedCrossChannel:
+    """GaussianLS whose analytic direction carries a certificate on the cross channel."""
+
+    def __init__(self, bound: float) -> None:
+        self.base = GaussianLS()
+        self.bound = bound
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def certified_predictor_curvature_directional_derivative(self, y, eta, direction, links, plan):
+        values = self.base.predictor_curvature_directional_derivative(
+            y, eta, direction, links, plan
+        )
+        certificate = np.zeros_like(values)
+        certificate[:, 1] = self.bound
+        return values, certificate
+
+
+def test_endpoint_certificate_is_contracted_row_by_row() -> None:
+    """Mixed-sign design rows cannot cancel each other's certified error.
+
+    The drift term is ``sum_i <D_i, G_i>_w`` with ``G_i = X_i B R^-1 B' X_i'``,
+    so a certificate ``c`` on the cross channel admits an error of
+    ``c sum_i 2 |G_i[0, 1]|``, half of it in the derivative.  At 9f1495ef the
+    certificate was assembled into ``sum_i X_i' C_i X_i`` first, where rows whose
+    location and scale design entries differ in sign cancel, and the endpoint
+    error fell below that worst case.  The worst case here is formed directly
+    from the dense design.
+    """
+    from superglm.distributional.solver.solver import _DenseObservedReuseSession
+
+    rng = np.random.default_rng(23)
+    n_rows = 300
+    x = rng.uniform(-1.0, 1.0, n_rows)
+    z = rng.uniform(-1.0, 1.0, n_rows)
+    response = np.sin(np.pi * x) + np.exp(-0.5 + 0.3 * z) * rng.normal(size=n_rows)
+    weights = resolved_prior(np.ones(n_rows))
+    family = GaussianLS()
+    frame = as_eager_frame(pd.DataFrame({"x": x, "z": z}))
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"x": Spline(kind="cr", n_knots=6)}),
+                Predictor("scale", {"z": Spline(kind="cr", n_knots=5)}),
+            ),
+        )
+    )
+    capped, finite = layout.penalty_names
+    face = build_penalty_face(layout, (capped,))
+    lambdas = {capped: 0.0, finite: 1.0}
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    endpoint_fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        layout.penalty_matrix(lambdas),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        coefficient_face=face,
+    )
+    bound = 1.0e-3
+
+    def derivative(of):
+        return evaluate_endpoint_laplace_derivative(
+            of,
+            layout,
+            response,
+            plan,
+            lambdas=lambdas,
+            component_name=capped,
+            finite_face=None,
+            endpoint_face=face,
+            endpoint_fit=endpoint_fit,
+        )
+
+    plain = derivative(family)
+    certified = derivative(_CertifiedCrossChannel(bound))
+    assert certified.derivative == plain.derivative
+
+    dense = _DenseObservedReuseSession().dense_matrices(layout)
+    basis = face.null_basis
+    rank = endpoint_fit.terminal_reduced_rank
+    assert rank is not None
+    projector = basis @ rank.pseudo_inverse() @ basis.T
+    left, right = (state.coefficient_slice for state in layout.predictors)
+    cross = np.einsum("ij,ij->i", dense[0] @ projector[left, right], dense[1])
+    assert np.any(cross > 0.0) and np.any(cross < 0.0)
+    worst = 0.5 * bound * float(np.sum(2.0 * np.abs(cross)))
+    assert certified.numerical_error - plain.numerical_error >= (1.0 - 1e-12) * worst

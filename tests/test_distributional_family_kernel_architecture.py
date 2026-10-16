@@ -101,13 +101,14 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
         "gamma.py": {"kernels._common"},
         "generalized_gamma.py": {
             "kernels._common",
+            "kernels._curvature_direction",
             "kernels.gamma",
             "kernels.log_normal",
         },
         "generalized_pareto.py": {"kernels._common", "kernels._weighted"},
         "log_normal.py": {"kernels._common", "kernels.gaussian"},
-        "negative_binomial.py": {"kernels._common"},
-        "two_piece.py": {"kernels._common", "kernels._weighted"},
+        "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba"},
+        "two_piece.py": {"kernels._common", "kernels._curvature_direction", "kernels._weighted"},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
     }
     offenders = {
@@ -152,7 +153,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
     allowed = {
         ROOT / "family.py": {"weights"},
         ROOT / "weights.py": set(),
-        ADAPTERS / "_base.py": {"weights"},
+        ADAPTERS / "_base.py": {"weights", "kernels._curvature_direction"},
         ADAPTERS / "_predictors.py": {"binding", "family"},
         ROOT / "binding.py": {"family", "predictor"},
         ADAPTERS / "gaussian.py": {

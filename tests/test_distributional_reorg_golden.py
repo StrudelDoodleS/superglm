@@ -59,6 +59,29 @@ lambdas to 1.4e-12 in log. Two lambdas on flat directions moved further,
 ``theta:z#wiggle`` by 1.8e-6 in log, with the fits unmoved. Coefficients and
 covariance are in the SSP basis, whose ridge ``0.1 Omega`` the new scale of
 ``Omega`` changes, so they moved and were re-recorded with the rest.
+
+Re-recorded ``twopiece:reml+newton`` alone on 2026-10-15, when the two-piece
+families gained analytic curvature directions and the Newton endgame stopped
+differencing third derivatives. The new stop is at a higher objective than
+v0.40.0's: the criterion is minimised, and the endgame now certifies
+``stationary`` (|g| 7.4e-8) at V = -1.390557, 0.0157 above the V = -1.406281
+where the finite-difference endgame had ended ``objective_rejected`` with
+gradient (0.089, 0.152); lambdas (7.126, 371.9) against (7.096, 354.8) in the
+fit's own units. Each V reproduces from a fresh fit at its own lambdas. The
+criterion is discontinuous in lambda for this family: the observed Hessian
+jumps by (1 + eps)^2/(1 - eps)^2 = 5.4 (eps = 0.4) in a row whose residual
+changes sign, and log|H| with it, while the coefficients move continuously.
+On the segment between the two stops V falls smoothly to -1.406611, jumps up
+by 0.0159 to -1.390526 within 0.4% of the scale lambda, falls to that piece's
+minimum at the new stop, rises, and jumps up again 1.3% beyond it. From the default
+start the two endgames part at the sixth outer step, both decreasing V; every
+accepted step on either path lowers V, and the new one ends at the interior
+stationary point of its piece, which a lower neighbouring piece does not
+make non-stationary. Started at v0.40.0's lambdas this branch stays on the
+lower piece, lowers V to -1.406637 in two accepted steps and stops
+``objective_rejected``; it does not climb to -1.3906. Every other entry,
+including the other seven ``+newton`` cases, reproduced within the record's
+tolerances (coefficients to 2.4e-14).
 """
 
 from __future__ import annotations

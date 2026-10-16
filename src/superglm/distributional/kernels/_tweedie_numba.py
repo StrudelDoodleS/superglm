@@ -1052,4 +1052,437 @@ def _evaluate_tweedie_batch_parallel_core(
     return values, scores, hessians, terms, valid, status, -1
 
 
-__all__ = ["_evaluate_tweedie_batch_core", "_evaluate_tweedie_batch_parallel_core"]
+# ---------------------------------------------------------------- third derivatives
+#
+# The analytic directional derivative of the natural Hessian.  The series part
+# log W = log sum_j w_j has the joint cumulants of the term derivatives under
+# pi_j ~ w_j as its derivatives; with X = q_rho = -j/r, Y = q_p and
+# q_rho_p = j/r^2, q_rho_pp = -2j/r^3 linear in j, the third-order ones are
+#   W_rrr = -mu3(j)/r^3,
+#   W_rrp = -2 Var(j)/r^3 + E[dj^2 dY]/r^2,
+#   W_rpp = -2 E[j]/r^3 + 2 Cov(j, Y)/r^2 - Cov(q_pp, j)/r - E[dj dY^2]/r,
+#   W_ppp = E[q_ppp] + 3 Cov(q_pp, Y) + E[dY^3],
+# two passes over the series window the Hessian uses: weighted means first,
+# then central moments about them.
+
+
+@njit(cache=True)
+def _polygamma_012(value: float) -> tuple[float, float, float]:
+    """digamma, trigamma and tetragamma of a finite positive scalar."""
+    digamma_result = 0.0
+    trigamma_result = 0.0
+    tetragamma_result = 0.0
+    x = value
+    while x < 12.0:
+        inverse = 1.0 / x
+        digamma_result -= inverse
+        trigamma_result += inverse * inverse
+        tetragamma_result -= 2.0 * inverse * inverse * inverse
+        x += 1.0
+    inverse = 1.0 / x
+    i2 = inverse * inverse
+    digamma = (
+        digamma_result
+        + math.log(x)
+        - 0.5 * inverse
+        - i2
+        * (
+            1.0 / 12.0
+            - i2
+            * (
+                1.0 / 120.0
+                - i2
+                * (1.0 / 252.0 - i2 * (1.0 / 240.0 - i2 * (5.0 / 660.0 - i2 * (691.0 / 32760.0))))
+            )
+        )
+    )
+    trigamma = (
+        trigamma_result
+        + inverse
+        + 0.5 * i2
+        + inverse
+        * i2
+        * (
+            1.0 / 6.0
+            - i2
+            * (
+                1.0 / 30.0
+                - i2 * (1.0 / 42.0 - i2 * (1.0 / 30.0 - i2 * (5.0 / 66.0 - i2 * (691.0 / 2730.0))))
+            )
+        )
+    )
+    tetragamma = tetragamma_result - i2 * (
+        1.0
+        + inverse
+        + 0.5 * i2
+        - i2
+        * i2
+        * (
+            1.0 / 6.0
+            - i2
+            * (
+                1.0 / 6.0
+                - i2 * (3.0 / 10.0 - i2 * (5.0 / 6.0 - i2 * (691.0 / 210.0 - i2 * (35.0 / 2.0))))
+            )
+        )
+    )
+    return digamma, trigamma, tetragamma
+
+
+@njit(cache=True)
+def _third_term_channels(
+    j: int, zeta_p: float, zeta_pp: float, zeta_ppp: float, inverse_r: float
+) -> tuple[float, float, float]:
+    """``(q_p, q_pp, q_ppp)`` of series term ``j``."""
+    j_float = float(j)
+    digamma, trigamma, tetragamma = _polygamma_012((inverse_r - 1.0) * j_float)
+    r2 = inverse_r * inverse_r
+    r3 = r2 * inverse_r
+    r4 = r2 * r2
+    q_p = j_float * (zeta_p + digamma * r2)
+    q_pp = j_float * zeta_pp - j_float * j_float * trigamma * r4 - 2.0 * j_float * digamma * r3
+    q_ppp = (
+        j_float * zeta_ppp
+        + j_float * j_float * j_float * tetragamma * r4 * r2
+        + 6.0 * j_float * j_float * trigamma * r4 * inverse_r
+        + 6.0 * j_float * digamma * r4
+    )
+    return q_p, q_pp, q_ppp
+
+
+@njit(cache=True)
+def _series_third_cumulants(
+    zeta: float,
+    zeta_p: float,
+    zeta_pp: float,
+    zeta_ppp: float,
+    inverse_r: float,
+    alpha: float,
+    max_terms: int,
+    log_cutoff: float,
+    coefficients: NDArray[np.float64],
+):
+    """Status, then ``(W_r, W_p, W_rr, W_rp, W_pp, W_rrr, W_rrp, W_rpp, W_ppp)``."""
+    coefficients[0] = math.nan
+    status, mode, mode_lower_ratio, mode_upper_ratio = _locate_series_mode(
+        zeta, alpha, coefficients
+    )
+    nan9 = (
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+    )
+    if status != KERNEL_OK:
+        return status, nan9
+    anchor_p, anchor_pp, anchor_ppp = _third_term_channels(
+        mode, zeta_p, zeta_pp, zeta_ppp, inverse_r
+    )
+    mode_float = float(mode)
+    # Pass 1: mass and anchored first moments; the window is the Hessian's.
+    mass = 1.0
+    sum_j = 0.0
+    sum_p = 0.0
+    sum_pp = 0.0
+    sum_ppp = 0.0
+    lowest = mode
+    highest = mode
+    terms = 1
+    for direction in (-1, 1):
+        relative_log = 0.0
+        current = mode
+        while True:
+            if direction < 0:
+                if current <= 1:
+                    break
+                ratio_value = (
+                    mode_lower_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
+                )
+                if not math.isfinite(ratio_value) or ratio_value <= 0.0:
+                    return KERNEL_LOWER_RATIO, nan9
+                relative_log -= ratio_value
+                current -= 1
+            else:
+                if current >= _MAX_SAFE_MODE:
+                    return KERNEL_WINDOW_RANGE, nan9
+                ratio_value = (
+                    mode_upper_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                )
+                if not math.isfinite(ratio_value) or ratio_value > 0.0:
+                    return KERNEL_UPPER_RATIO, nan9
+                relative_log += ratio_value
+                current += 1
+            terms += 1
+            if terms > max_terms:
+                return KERNEL_MAX_TERMS, nan9
+            relative = math.exp(relative_log)
+            q_p, q_pp, q_ppp = _third_term_channels(current, zeta_p, zeta_pp, zeta_ppp, inverse_r)
+            mass += relative
+            sum_j += relative * (float(current) - mode_float)
+            sum_p += relative * (q_p - anchor_p)
+            sum_pp += relative * (q_pp - anchor_pp)
+            sum_ppp += relative * (q_ppp - anchor_ppp)
+            if direction < 0:
+                lowest = current
+            else:
+                highest = current
+            if relative_log <= -log_cutoff:
+                break
+    offset_j = sum_j / mass
+    offset_p = sum_p / mass
+    mean_j = mode_float + offset_j
+    mean_p = _sum2(anchor_p, offset_p)
+    mean_pp = _sum2(anchor_pp, sum_pp / mass)
+    mean_ppp = _sum2(anchor_ppp, sum_ppp / mass)
+    # Pass 2: central moments about the pass-1 means, over the same window.
+    v_jj = 0.0
+    c_jy = 0.0
+    v_yy = 0.0
+    m_jjj = 0.0
+    m_jjy = 0.0
+    m_jyy = 0.0
+    m_yyy = 0.0
+    c_2j = 0.0
+    c_2y = 0.0
+    for direction in (-1, 1):
+        relative_log = 0.0
+        current = mode
+        while True:
+            if direction < 0:
+                if current != mode:
+                    ratio_value = (
+                        mode_lower_ratio
+                        if current + 1 == mode
+                        else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                    )
+                    relative_log -= ratio_value
+            else:
+                if current >= highest:
+                    break
+                ratio_value = (
+                    mode_upper_ratio
+                    if current == mode
+                    else _log_adjacent_ratio(current, zeta, alpha, coefficients)
+                )
+                relative_log += ratio_value
+                current += 1
+            relative = math.exp(relative_log)
+            q_p, q_pp, _ = _third_term_channels(current, zeta_p, zeta_pp, zeta_ppp, inverse_r)
+            dj = (float(current) - mode_float) - offset_j
+            dy = (q_p - anchor_p) - offset_p
+            d2 = q_pp - mean_pp
+            v_jj += relative * dj * dj
+            c_jy += relative * dj * dy
+            v_yy += relative * dy * dy
+            m_jjj += relative * dj * dj * dj
+            m_jjy += relative * dj * dj * dy
+            m_jyy += relative * dj * dy * dy
+            m_yyy += relative * dy * dy * dy
+            c_2j += relative * d2 * dj
+            c_2y += relative * d2 * dy
+            if direction < 0:
+                if current <= lowest:
+                    break
+                current -= 1
+    inverse_mass = 1.0 / mass
+    v_jj *= inverse_mass
+    c_jy *= inverse_mass
+    v_yy *= inverse_mass
+    m_jjj *= inverse_mass
+    m_jjy *= inverse_mass
+    m_jyy *= inverse_mass
+    m_yyy *= inverse_mass
+    c_2j *= inverse_mass
+    c_2y *= inverse_mass
+    r2 = inverse_r * inverse_r
+    r3 = r2 * inverse_r
+    w_r = -mean_j * inverse_r
+    w_rr = v_jj * r2
+    w_rp = _sum2(mean_j * r2, -c_jy * inverse_r)
+    w_pp = _sum2(mean_pp, v_yy)
+    w_rrr = -m_jjj * r3
+    w_rrp = _sum2(-2.0 * v_jj * r3, m_jjy * r2)
+    w_rpp = _sum3(-2.0 * mean_j * r3 + 2.0 * c_jy * r2, -c_2j * inverse_r, -m_jyy * inverse_r)
+    w_ppp = _sum3(mean_ppp, 3.0 * c_2y, m_yyy)
+    return KERNEL_OK, (w_r, mean_p, w_rr, w_rp, w_pp, w_rrr, w_rrp, w_rpp, w_ppp)
+
+
+@njit(cache=True)
+def _tweedie_third_row(
+    y: float,
+    mean: float,
+    phi: float,
+    power: float,
+    rho: float,
+    max_terms: int,
+    log_cutoff: float,
+    coefficients: NDArray[np.float64],
+):
+    """Status, then the ten natural third derivatives in ``(mu, phi, p)``.
+
+    Order: ``mmm, mmf, mmp, mff, mfp, mpp, fff, ffp, fpp, ppp``.  The
+    ``(rho, p)`` block converts to ``phi`` by ``d/dphi = (1/phi) d/drho``.
+    """
+    log_mean = math.log(mean)
+    r = power - 1.0
+    s = 2.0 - power
+    inverse_r = 1.0 / r
+    inverse_s = 1.0 / s
+    nan10 = (
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+        math.nan,
+    )
+    scale_mu = math.exp(-rho - power * log_mean)
+    mean_score = (y - mean) * scale_mu
+    scale_mu2 = math.exp(-rho - (power + 1.0) * log_mean)
+    mean_hessian = scale_mu2 * _sum2((power - 1.0) * mean, -power * y)
+    scale_mu3 = math.exp(-rho - (power + 2.0) * log_mean)
+    l_mmm = power * scale_mu3 * _sum2((power + 1.0) * y, -(power - 1.0) * mean)
+    l_mmp = scale_mu2 * _sum3(mean, -y, -log_mean * _sum2((power - 1.0) * mean, -power * y))
+    l_mmr = -mean_hessian
+    l_mrr = mean_score
+    l_mrp = log_mean * mean_score
+    l_mpp = log_mean * log_mean * mean_score
+    l_mr = -mean_score
+    if y == 0.0:
+        lam = math.exp(s * log_mean - rho - math.log(s))
+        h_p = -log_mean + inverse_s
+        h_pp = inverse_s * inverse_s
+        h_ppp = 2.0 * h_pp * inverse_s
+        l_r = lam
+        l_rr = -lam
+        l_rrr = lam
+        l_rp = lam * h_p
+        l_rrp = -lam * h_p
+        l_rpp = lam * (h_p * h_p + h_pp)
+        l_ppp = -lam * (h_p * h_p * h_p + 3.0 * h_p * h_pp + h_ppp)
+    else:
+        log_y = math.log(y)
+        alpha = s * inverse_r
+        a_term = y * math.exp(-r * log_mean)
+        c_term = math.exp(s * log_mean)
+        f_term = math.exp(-rho)
+        canonical = _sum2(-a_term * inverse_r, -c_term * inverse_s)
+        b_value = f_term * canonical
+        r2 = inverse_r * inverse_r
+        r3 = r2 * inverse_r
+        r4 = r2 * r2
+        s2 = inverse_s * inverse_s
+        s3 = s2 * inverse_s
+        s4 = s2 * s2
+        lm2 = log_mean * log_mean
+        lm3 = lm2 * log_mean
+        b_p = f_term * _sum2(
+            a_term * (log_mean * inverse_r + r2), c_term * (log_mean * inverse_s - s2)
+        )
+        b_pp = f_term * _sum2(
+            a_term * (-lm2 * inverse_r - 2.0 * log_mean * r2 - 2.0 * r3),
+            c_term * (-lm2 * inverse_s + 2.0 * log_mean * s2 - 2.0 * s3),
+        )
+        b_ppp = f_term * _sum2(
+            a_term * (lm3 * inverse_r + 3.0 * lm2 * r2 + 6.0 * log_mean * r3 + 6.0 * r4),
+            c_term * (lm3 * inverse_s - 3.0 * lm2 * s2 + 6.0 * log_mean * s3 - 6.0 * s4),
+        )
+        zeta = alpha * (log_y - math.log(r)) - math.log(s) - rho * inverse_r
+        d_value = math.log(r) - log_y + rho
+        zeta_p = (d_value - s) * r2 + inverse_s
+        zeta_pp = (-2.0 * d_value + 2.0 + s) * r3 + s2
+        zeta_ppp = (6.0 * d_value - 9.0 - 2.0 * s) * r4 + 2.0 * s3
+        if not (math.isfinite(b_value) and math.isfinite(zeta) and math.isfinite(zeta_ppp)):
+            return KERNEL_SERIES_BASE, nan10
+        status, w = _series_third_cumulants(
+            zeta, zeta_p, zeta_pp, zeta_ppp, inverse_r, alpha, max_terms, log_cutoff, coefficients
+        )
+        if status != KERNEL_OK:
+            return status, nan10
+        w_r, _, w_rr, w_rp, _, w_rrr, w_rrp, w_rpp, w_ppp = w
+        l_r = _sum2(-b_value, w_r)
+        l_rr = _sum2(b_value, w_rr)
+        l_rrr = _sum2(-b_value, w_rrr)
+        l_rp = _sum2(-b_p, w_rp)
+        l_rrp = _sum2(b_p, w_rrp)
+        l_rpp = _sum2(-b_pp, w_rpp)
+        l_ppp = _sum2(b_ppp, w_ppp)
+    inverse_phi = 1.0 / phi
+    inverse_phi2 = inverse_phi * inverse_phi
+    t_mmf = l_mmr * inverse_phi
+    t_mff = _sum2(l_mrr, -l_mr) * inverse_phi2
+    t_mfp = l_mrp * inverse_phi
+    t_fff = _sum3(l_rrr, -3.0 * l_rr, 2.0 * l_r) * inverse_phi2 * inverse_phi
+    t_ffp = _sum2(l_rrp, -l_rp) * inverse_phi2
+    t_fpp = l_rpp * inverse_phi
+    values = (l_mmm, t_mmf, l_mmp, t_mff, t_mfp, l_mpp, t_fff, t_ffp, t_fpp, l_ppp)
+    for value in values:
+        if not math.isfinite(value):
+            return KERNEL_ROW_DERIVATIVES, nan10
+    return KERNEL_OK, values
+
+
+@njit(cache=True, parallel=True)
+def _tweedie_hessian_direction_core(
+    y: NDArray[np.float64],
+    mean: NDArray[np.float64],
+    dispersion: NDArray[np.float64],
+    power: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    weight_mode: int,
+    direction: NDArray[np.float64],
+    max_terms: int,
+    log_cutoff: float,
+):
+    """Packed ``dH(v)`` in ``(mu, phi, p)`` per row; status and first failing row last."""
+    n_rows = y.size
+    result = np.empty((n_rows, 6), dtype=np.float64)
+    statuses = np.empty(n_rows, dtype=np.int64)
+    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+        coefficients = np.empty(10, dtype=np.float64)
+        rho = math.log(dispersion[row])
+        multiplier = 1.0
+        if weight_mode == 0:
+            rho -= math.log(weight[row])
+        else:
+            multiplier = weight[row]
+        status, t = _tweedie_third_row(
+            y[row], mean[row], dispersion[row], power[row], rho, max_terms, log_cutoff, coefficients
+        )
+        statuses[row] = status
+        if status != KERNEL_OK:
+            continue
+        v_m = direction[row, 0]
+        v_f = direction[row, 1]
+        v_p = direction[row, 2]
+        t_mmm, t_mmf, t_mmp, t_mff, t_mfp, t_mpp, t_fff, t_ffp, t_fpp, t_ppp = t
+        result[row, 0] = multiplier * (t_mmm * v_m + t_mmf * v_f + t_mmp * v_p)
+        result[row, 1] = multiplier * (t_mmf * v_m + t_mff * v_f + t_mfp * v_p)
+        result[row, 2] = multiplier * (t_mmp * v_m + t_mfp * v_f + t_mpp * v_p)
+        result[row, 3] = multiplier * (t_mff * v_m + t_fff * v_f + t_ffp * v_p)
+        result[row, 4] = multiplier * (t_mfp * v_m + t_ffp * v_f + t_fpp * v_p)
+        result[row, 5] = multiplier * (t_mpp * v_m + t_fpp * v_f + t_ppp * v_p)
+    for row in range(n_rows):
+        if statuses[row] != KERNEL_OK:
+            return result, statuses[row], row
+    return result, KERNEL_OK, -1
+
+
+__all__ = [
+    "_evaluate_tweedie_batch_core",
+    "_evaluate_tweedie_batch_parallel_core",
+    "_tweedie_hessian_direction_core",
+]

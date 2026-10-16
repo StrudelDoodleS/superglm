@@ -337,6 +337,32 @@ def test_log_mean_loading_survives_where_the_naive_log_domain_dies(sigma, eps):
         assert _rel(value, reference) <= 5e-11
 
 
+@pytest.mark.parametrize(
+    ("sigma", "eps"),
+    [(401.9326470347693, 0.8703256283654176), (1.1, 0.35), (0.3, -0.6)],
+)
+def test_loading_third_derivatives_survive_a_dominant_piece(sigma, eps):
+    """The direction's loading cumulants are centred, so one dominant piece cannot cancel them.
+
+    At ``sigma = 401.93``, ``eps = 0.8703`` the right piece's weight rounds to
+    one and ``K_eee`` is the one-piece value ``2/(1 + eps)^3 = 0.3057``.  The
+    raw-moment identity ``R - 3 S M + 2 M^3`` at e77c734c formed it from terms
+    of order ``K_e^3 = 2.8e16`` and returned 16.  Each order is held to ``64 u``
+    of its largest derivative in the row; the two interior points, where both
+    pieces carry weight, measure at most ``14 u``.
+    """
+    pytest.importorskip("mpmath")
+    from superglm.distributional.kernels.two_piece import _log_mean_loading_third
+
+    orders = ((1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (3, 0), (2, 1), (1, 2), (0, 3))
+    got = [float(v[0]) for v in _log_mean_loading_third(np.array([sigma]), np.array([eps]))]
+    reference = mp_loading_derivatives(sigma, eps, orders=orders)
+    for block in (slice(0, 2), slice(2, 5), slice(5, 9)):
+        scale = max(abs(value) for value in reference[block])
+        for value, exact in zip(got[block], reference[block], strict=True):
+            assert abs(value - exact) <= 64.0 * 2.0**-53 * scale, (sigma, eps, value, exact)
+
+
 @pytest.mark.parametrize("sigma", [0.3, 1.1, 2.0])
 def test_log_mean_loading_limits_at_zero_skew(sigma):
     logk, k_s, k_e, k_ss, _, _ = (

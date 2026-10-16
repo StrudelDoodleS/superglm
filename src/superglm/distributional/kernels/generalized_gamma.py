@@ -32,6 +32,7 @@ from superglm.distributional.kernels._common import (
     readonly_bool,
     validated_derivative_order,
 )
+from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
 from superglm.distributional.kernels.gamma import gamma_shape_plus_one_log_increment
 from superglm.distributional.kernels.log_normal import log_normal_tail_log_factors
 
@@ -482,6 +483,181 @@ def _location_rows(
     return _placeholders_where_invalid(optimizing, score, hessian, np.isfinite(e))
 
 
+def series_v2(u: NDArray) -> NDArray[np.float64]:
+    """Derivative of ``series_u2``: ``(e^u - 2 U2(u))/u``, ``1/3`` at zero."""
+    return _piecewise(
+        u,
+        _U_SERIES_RADIUS,
+        _series(lambda j: (j + 1) * (j + 2) / math.factorial(j + 3), _U_SERIES_TERMS),
+        lambda a: (np.exp(a) - 2.0 * series_u2(a)) / a,
+    )
+
+
+def series_t3_d2(u: NDArray) -> NDArray[np.float64]:
+    """Second derivative of ``series_t3``, ``-1/20`` at zero.
+
+    Directly ``(2u e^u - u^2 e^u - 2 expm1(u))/u^4 - 4 T3'(u)/u``, the
+    quotient rule on ``T3'`` with its numerator's derivative formed exactly.
+    """
+
+    def direct(a: NDArray[np.float64]) -> NDArray[np.float64]:
+        e = np.exp(a)
+        numerator = 2.0 * a * e - a * a * e - 2.0 * np.expm1(a)
+        return numerator / (a * a * a * a) - 4.0 * series_t3_d1(a) / a
+
+    return _piecewise(
+        u,
+        _U_SERIES_RADIUS,
+        _series(lambda j: -(j + 1) * (j + 2) * (j + 3) / math.factorial(j + 5), _U_SERIES_TERMS),
+        direct,
+    )
+
+
+_STIRLING_D3_SWITCH = 16.0
+_SHAPE_SERIES_K = 30.0
+
+
+def _stirling_d3_series(x: NDArray[np.float64]) -> NDArray[np.float64]:
+    """The Bernoulli series ``-sum_j c_j (2j+1)(2j+2)(2j+3) x^-(2j+4)`` of the third derivative."""
+    inv2 = 1.0 / (x * x)
+    acc = np.zeros_like(x)
+    power = inv2 * inv2
+    for j, coefficient in enumerate(_BERNOULLI):
+        acc = acc - (2 * j + 1) * (2 * j + 2) * (2 * j + 3) * coefficient * power
+        power = power * inv2
+    return acc
+
+
+def stirling_remainder_d3(x: NDArray) -> NDArray[np.float64]:
+    """Third derivative of the Stirling remainder, ``psi''(x) + 1/x^2 + 1/x^3``.
+
+    Below ``x = 16`` the recurrence ``S3(x) = S3(x + 1) - (2x + 1)/(x^3 (x + 1)^3)``
+    (the derivative of the second derivative's) walks onto the series with
+    terms of one sign; at 16 the ten-term series' next term is below ``1e-19``
+    of its leading one.
+    """
+    x = np.asarray(x, dtype=_FLOAT)
+    out = np.empty_like(x)
+    big = x >= _STIRLING_D3_SWITCH
+    if np.any(big):
+        out[big] = _stirling_d3_series(x[big])
+    small = ~big
+    if np.any(small):
+        xs = x[small]
+        steps = np.zeros_like(xs)
+        for j in range(int(_STIRLING_D3_SWITCH)):
+            lower, upper = xs + j, xs + j + 1.0
+            steps = steps - (2.0 * lower + 1.0) / (lower**3 * upper**3)
+        out[small] = _stirling_d3_series(xs + _STIRLING_D3_SWITCH) + steps
+    return out
+
+
+def shape_term_d1(shape: NDArray) -> NDArray[np.float64]:
+    """Derivative in ``Q`` of the Hessian's shape term ``f(Q) = -4 k^3 S2(k) - 6 k^2 S1(k)``.
+
+    Here ``k = Q^-2`` and ``S1, S2, S3`` are the Stirling remainder's
+    derivatives.  In the Bernoulli series ``f = -2 sum_j c_j (2j+1)(4j+1) Q^(4j)``
+    the leading ``O(1/k)`` terms of ``18 k^2 S2 + 4 k^3 S3 + 12 k S1`` cancel
+    exactly, so for ``k >= 30`` the derivative is the series
+    ``-2 sum_{j >= 1} c_j (2j+1)(4j+1)(4j) Q^(4j - 1)``; below, the
+    cancellation is at most a factor ``k^2 < 900`` and
+    ``2 (18 k^2 S2 + 4 k^3 S3 + 12 k S1)/Q^3`` is formed directly.
+    """
+    q = np.asarray(shape, dtype=_FLOAT)
+    out = np.empty_like(q)
+    series = q * q <= 1.0 / _SHAPE_SERIES_K
+    if np.any(series):
+        qs = q[series]
+        q4 = qs**4
+        acc = np.zeros_like(qs)
+        power = qs**3
+        for j, coefficient in enumerate(_BERNOULLI[1:], start=1):
+            acc = acc - 2.0 * coefficient * (2 * j + 1) * (4 * j + 1) * (4 * j) * power
+            power = power * q4
+        out[series] = acc
+    direct = ~series
+    if np.any(direct):
+        qd = q[direct]
+        k = 1.0 / (qd * qd)
+        out[direct] = (
+            2.0
+            * (
+                18.0 * k * k * stirling_remainder_d2(k)
+                + 4.0 * k**3 * stirling_remainder_d3(k)
+                + 12.0 * k * stirling_remainder_d1(k)
+            )
+            / qd**3
+        )
+    return out
+
+
+def location_hessian_direction(
+    response: NDArray,
+    mu: NDArray,
+    sigma: NDArray,
+    shape: NDArray,
+    direction: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed derivative of the ``(mu, sigma, Q)`` Hessian along a natural direction ``v``.
+
+    With ``w = (log y - mu)/sigma``, ``u = Q w``, ``e = e^u``, ``e1 = expm1(u)/u``,
+    ``U2 = e1'``, ``V2 = U2'``, ``T4`` the second derivative of the score's
+    ``T3`` and ``s = sigma``, the ten third derivatives are
+
+    * ``T_mmm = Q e/s^3``, ``T_mms = e (u + 2)/s^3``, ``T_mmQ = -w e/s^2``,
+    * ``T_mss = w (4e + 2 e1 + u e)/s^3``, ``T_msQ = -w^2 (e + U2)/s^2``,
+    * ``T_mQQ = w^3 V2/s``, ``T_sss = (6 w^2 e1 + 6 w^2 e + w^2 u e - 2)/s^3``,
+    * ``T_ssQ = -w^3 (2 U2 + e)/s^2``, ``T_sQQ = w^4 V2/s``,
+    * ``T_QQQ = f'(Q) + w^5 T4(u)`` with ``f`` the Hessian's shape term.
+
+    Rows whose ``e^u`` overflows are invalid in the Hessian and return zero.
+    """
+    y = _positive_vector(response, name="response")
+    mu_values = _vector(mu, name="mu")
+    sigma_values = _positive_vector(sigma, name="sigma")
+    q = _vector(shape, name="shape")
+    m = _positive_vector(multiplier, name="multiplier")
+    if any(values.shape != y.shape for values in (mu_values, sigma_values, q, m)):
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    nu = np.asarray(direction, dtype=_FLOAT)
+    if nu.shape != (len(y), 3) or not np.all(np.isfinite(nu)):
+        raise GeneralizedGammaDomainError("natural direction must be a finite n-by-3 array")
+    w = (np.log(y) - mu_values) / sigma_values
+    u = q * w
+    with np.errstate(over="ignore", invalid="ignore"):
+        e = np.exp(u)
+        e1 = series_e1(u)
+        u2 = series_u2(u)
+        v2 = series_v2(u)
+        t4 = series_t3_d2(u)
+        s1, s2, s3 = sigma_values, sigma_values**2, sigma_values**3
+        w2 = w * w
+        t_mmm = q * e / s3
+        t_mms = e * (u + 2.0) / s3
+        t_mmq = -w * e / s2
+        t_mss = w * (4.0 * e + 2.0 * e1 + u * e) / s3
+        t_msq = -w2 * (e + u2) / s2
+        t_mqq = w2 * w * v2 / s1
+        t_sss = (6.0 * w2 * e1 + 6.0 * w2 * e + w2 * u * e - 2.0) / s3
+        t_ssq = -w2 * w * (2.0 * u2 + e) / s2
+        t_sqq = w2 * w2 * v2 / s1
+        t_qqq = shape_term_d1(q) + w2 * w2 * w * t4
+        vm, vs, vq = nu[:, 0], nu[:, 1], nu[:, 2]
+        result = np.empty((len(y), 6), dtype=_FLOAT)
+        result[:, 0] = t_mmm * vm + t_mms * vs + t_mmq * vq
+        result[:, 1] = t_mms * vm + t_mss * vs + t_msq * vq
+        result[:, 2] = t_mmq * vm + t_msq * vs + t_mqq * vq
+        result[:, 3] = t_mss * vm + t_sss * vs + t_ssq * vq
+        result[:, 4] = t_msq * vm + t_ssq * vs + t_sqq * vq
+        result[:, 5] = t_mqq * vm + t_sqq * vs + t_qqq * vq
+        result *= m[:, None]
+    # Only the rows the Hessian flags invalid (``e^u`` overflows) publish zero;
+    # a valid row that overflows stays non-finite so the caller refuses it.
+    result[~np.isfinite(e)] = 0.0
+    return result
+
+
 def _placeholders_where_invalid(
     optimizing: NDArray[np.float64],
     score: NDArray[np.float64] | None,
@@ -874,6 +1050,193 @@ def mean_rows(
                 hessian[exists, 4] = h_sq - h_ms * c_q - h_mq * c_s + h_mm * c_s * c_q - s_mu * c_sq
                 hessian[exists, 5] = h_qq - 2.0 * h_mq * c_q + h_mm * c_q * c_q - s_mu * c_qq
     return _placeholders_where_invalid(optimizing, score, hessian, valid)
+
+
+_PHI_SERIES_RADIUS = 0.5
+_PHI_SERIES_TERMS = 80
+
+
+def _phi_derivatives(
+    v: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """``Phi', Phi'', Phi'''`` for ``Phi(v) = ((1 + v) log1p(v) - v)/v^2 = L2(v) + L1(v)``.
+
+    Inside ``|v| < 1/2`` the series ``Phi = sum_j (-1)^j v^j/((j+1)(j+2))``
+    (80 terms leave under ``1e-21``); outside, the recursions from
+    ``v^2 Phi = (1 + v) log1p(v) - v`` differentiated once, twice and three
+    times, which cancel by at most a small factor there.
+    """
+    first, second, third = (np.empty_like(v) for _ in range(3))
+    inner = np.abs(v) < _PHI_SERIES_RADIUS
+    if np.any(inner):
+        a = v[inner]
+        coefficients = [(-1.0) ** j / ((j + 1) * (j + 2)) for j in range(_PHI_SERIES_TERMS)]
+        first[inner] = _horner(a, tuple(j * coefficients[j] for j in range(1, _PHI_SERIES_TERMS)))
+        second[inner] = _horner(
+            a, tuple(j * (j - 1) * coefficients[j] for j in range(2, _PHI_SERIES_TERMS))
+        )
+        third[inner] = _horner(
+            a, tuple(j * (j - 1) * (j - 2) * coefficients[j] for j in range(3, _PHI_SERIES_TERMS))
+        )
+    outer = ~inner
+    if np.any(outer):
+        a = v[outer]
+        a2 = a * a
+        one = 1.0 + a
+        phi = (one * np.log1p(a) - a) / a2
+        d1 = (np.log1p(a) - 2.0 * a * phi) / a2
+        d2 = (1.0 / one - 2.0 * phi - 4.0 * a * d1) / a2
+        d3 = (-1.0 / (one * one) - 6.0 * d1 - 6.0 * a * d2) / a2
+        first[outer], second[outer], third[outer] = d1, d2, d3
+    return first, second, third
+
+
+def _log_mean_loading_third(
+    sigma: NDArray[np.float64], q: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], ...]:
+    """``(C_sss, C_ssQ, C_sQQ, C_QQQ)`` for ``log C = sigma^2 Phi(v) - log1p(v)/2 + S(x) - S(k)``.
+
+    ``v = sigma Q``, ``x = (1 + v)/Q^2``, ``k = 1/Q^2``.  The ``Phi`` and
+    ``log1p`` part is differentiated through ``v``.  The Stirling difference is
+    the Bernoulli series ``sum_j c_j Q^(4j+2) g_j(v)``, ``g_j = (1+v)^-(2j+1) - 1``
+    (formed as ``expm1``), whenever ``k`` and ``x`` are both at least 30; there
+    every term is differentiated exactly and nothing cancels, including at
+    ``Q = 0``.  Otherwise the difference's derivatives are the remainders
+    ``S1, S2, S3`` at ``x`` and ``k`` through ``x_sigma = 1/Q`` and
+    ``x_Q = -(2 + v)/Q^3``, which cancel by about ``1/v``, the same as the
+    kernel's own ``C_QQ``.
+    """
+    v = sigma * q
+    one = 1.0 + v
+    _, phi2, phi3 = _phi_derivatives(v)
+    b2 = 0.5 / (one * one)
+    b3 = -1.0 / (one * one * one)
+    c_sss = -q / (one * one) + q**3 * b3
+    c_ssq = -sigma / (one * one) + 2.0 * q * b2 + q * v * b3
+    c_sqq = sigma**3 * (4.0 * phi2 + v * phi3) + sigma * (2.0 * b2 + v * b3)
+    c_qqq = sigma**5 * phi3 + sigma**3 * b3
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        k = 1.0 / (q * q)
+        x = one * k
+    series = (k >= _SHAPE_SERIES_K) & (x >= _SHAPE_SERIES_K)
+    if np.any(series):
+        qs, ss, vs = q[series], sigma[series], v[series]
+        log_one = np.log1p(vs)
+        totals = [np.zeros_like(qs) for _ in range(4)]
+        for j, coefficient in enumerate(_BERNOULLI):
+            n = 4 * j + 2
+            power = 2 * j + 1
+            g0 = np.expm1(-power * log_one)
+            g1 = -power * np.exp(-(power + 1) * log_one)
+            g2 = power * (power + 1) * np.exp(-(power + 2) * log_one)
+            g3 = -power * (power + 1) * (power + 2) * np.exp(-(power + 3) * log_one)
+            q_n3 = qs ** (n - 3) if n >= 3 else np.zeros_like(qs)
+            totals[0] += coefficient * qs ** (n + 3) * g3
+            totals[1] += coefficient * ((n + 2) * qs ** (n + 1) * g2 + ss * qs ** (n + 2) * g3)
+            totals[2] += coefficient * (
+                n * (n + 1) * qs ** (n - 1) * g1
+                + 2.0 * (n + 1) * ss * qs**n * g2
+                + ss * ss * qs ** (n + 1) * g3
+            )
+            totals[3] += coefficient * (
+                n * (n - 1) * (n - 2) * q_n3 * g0
+                + 3.0 * n * (n - 1) * ss * qs ** (n - 2) * g1
+                + 3.0 * n * ss * ss * qs ** (n - 1) * g2
+                + ss**3 * qs**n * g3
+            )
+        c_sss[series] += totals[0]
+        c_ssq[series] += totals[1]
+        c_sqq[series] += totals[2]
+        c_qqq[series] += totals[3]
+    direct = ~series
+    if np.any(direct):
+        qd, sd, vd, xd, kd = q[direct], sigma[direct], v[direct], x[direct], k[direct]
+        s1x, s2x, s3x = (
+            stirling_remainder_d1(xd),
+            stirling_remainder_d2(xd),
+            stirling_remainder_d3(xd),
+        )
+        s1k, s2k, s3k = (
+            stirling_remainder_d1(kd),
+            stirling_remainder_d2(kd),
+            stirling_remainder_d3(kd),
+        )
+        two_v = 2.0 + vd
+        half_v = 1.0 + 0.5 * vd
+        d_s1 = s1x - s1k
+        p_term = two_v * s2x - 2.0 * s2k
+        c_sss[direct] += s3x / qd**3
+        c_ssq[direct] += -two_v * s3x / qd**5 - 2.0 * s2x / qd**3
+        c_sqq[direct] += (
+            two_v * two_v * s3x / qd**7
+            - sd * s2x / qd**4
+            + 5.0 * two_v * s2x / qd**5
+            + 2.0 * s1x / qd**3
+        )
+        c_qqq[direct] += (
+            6.0 * sd * d_s1 / qd**4
+            - 24.0 * half_v * d_s1 / qd**5
+            - 18.0 * half_v * p_term / qd**7
+            + 2.0 * sd * p_term / qd**6
+            + 2.0 * half_v * sd * s2x / qd**6
+            + 2.0 * half_v * (-two_v * two_v * s3x + 4.0 * s3k) / qd**9
+            - 4.0 * sd * s3k / qd**8
+            - 14.0 * sd * s2k / qd**6
+            - 6.0 * sd * s1k / qd**4
+        )
+    return c_sss, c_ssq, c_sqq, c_qqq
+
+
+def mean_hessian_direction(
+    response: NDArray,
+    mean: NDArray,
+    sigma: NDArray,
+    shape: NDArray,
+    direction: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed derivative of the mean-form ``(m, sigma, Q)`` Hessian along ``v``.
+
+    The location-form direction chained through ``mu = log m - log C(sigma, Q)``
+    (see ``mean_form_hessian_direction``); rows whose mean does not exist are
+    invalid in the Hessian and return zero.
+    """
+    y = _positive_vector(response, name="response")
+    m = _positive_vector(mean, name="mean")
+    sigma_values = _positive_vector(sigma, name="sigma")
+    q = _vector(shape, name="shape")
+    weight = _positive_vector(multiplier, name="multiplier")
+    if any(values.shape != y.shape for values in (m, sigma_values, q, weight)):
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    nu = np.asarray(direction, dtype=_FLOAT)
+    if nu.shape != (len(y), 3) or not np.all(np.isfinite(nu)):
+        raise GeneralizedGammaDomainError("natural direction must be a finite n-by-3 array")
+    result = np.zeros((len(y), 6), dtype=_FLOAT)
+    exists = mean_exists(sigma_values, q)
+    if not np.any(exists):
+        return result
+    ye, me, se, qe, we = (values[exists] for values in (y, m, sigma_values, q, weight))
+    loading, stirling = _log_mean_loading_and_stirling(se, qe)
+    logc, c_s, c_q, c_ss, c_sq, c_qq = loading
+    location = np.log(me) - logc
+    unit = np.ones_like(we)
+    base = _location_rows(ye, location, se, qe, unit, derivative_order=2, stirling=stirling)
+    assert base.score is not None and base.hessian_packed is not None
+    with np.errstate(over="ignore", invalid="ignore"):
+        direction_exists = mean_form_hessian_direction(
+            me,
+            base.score[:, 0],
+            base.hessian_packed,
+            lambda w: location_hessian_direction(ye, location, se, qe, w, unit),
+            (c_s, c_q),
+            (c_ss, c_sq, c_qq),
+            _log_mean_loading_third(se, qe),
+            nu[exists],
+        )
+        direction_exists *= we[:, None]
+    direction_exists[~np.asarray(base.valid)] = 0.0
+    result[exists] = direction_exists
+    return result
 
 
 def mean_expected_information(
