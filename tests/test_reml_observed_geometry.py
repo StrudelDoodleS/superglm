@@ -422,7 +422,9 @@ def test_custom_second_observed_derivative_requires_exact_fourth_order_protocol(
         pass
 
     class CustomIdentity(IdentityLink):
-        pass
+        # The built-in links carry deriv4_inverse; a custom link without it is
+        # what this test refuses.
+        deriv4_inverse = None
 
     eta = np.array([-0.7, 0.2, 0.8])
     link = CustomIdentity()
@@ -3034,6 +3036,8 @@ def test_custom_order2_observed_capability_fails_before_first_pirls(
             return "observed"
 
     class CustomIdentity(IdentityLink):
+        deriv4_inverse = None  # a custom link without the fourth-order protocol
+
         def reml_curvature(self, distribution):
             return "observed"
 
