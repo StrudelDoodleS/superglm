@@ -481,10 +481,13 @@ def join_crossing_rows(
     """Rows on the join ``z = 0`` whose Hessian has no derivative along the path.
 
     With nonzero skew the Hessian jumps at ``z = 0`` (``s`` changes from
-    ``1 + eps`` to ``1 - eps``), so a path that moves the location there has
-    only one-sided derivatives, the right piece's when ``mu`` falls and the
-    left piece's when it rises; a path that keeps ``mu`` fixed keeps ``z = 0``
-    and the right piece, and is differentiable.  ``moved`` is nonzero where
+    ``1 + eps`` to ``1 - eps``), and at zero skew its ``(mu, eps)`` entry
+    ``-2 (t - mu) e / (sigma^2 s^3)`` is ``-2 |t - mu| / sigma^2``, a kink:
+    ``T_mme = 2e/(sigma^2 s^3)`` changes sign across the join at every skew.
+    So a path that moves the location there has only one-sided derivatives,
+    the right piece's when ``mu`` falls and the left piece's when it rises,
+    whatever the skew; a path that keeps ``mu`` fixed keeps ``z = 0`` and the
+    right piece, and is differentiable.  ``moved`` is nonzero where
     the path can move ``mu``; the caller decides that, since only a location
     linear in the predictor is held fixed by a zero first-order change.  ``z``
     is formed exactly as the Hessian's piece selection forms it.
@@ -495,7 +498,7 @@ def join_crossing_rows(
     eps = _skew_vector(skew)
     moved = np.asarray(moved, dtype=_FLOAT)
     _same_shape(t, mu, sigma, eps, moved)
-    return ((t - mu) / sigma == 0.0) & (eps != 0.0) & (moved != 0.0)
+    return ((t - mu) / sigma == 0.0) & (moved != 0.0)
 
 
 def _log_mean_loading_third(

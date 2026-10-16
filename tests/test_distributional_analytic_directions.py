@@ -567,7 +567,11 @@ def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
     exact.  The refusal sends the caller to the Richardson difference, which
     v0.40.0 used for every two-piece row and whose certificate records the
     jump.  Directions that leave ``mu`` fixed keep ``z = 0`` on the right piece
-    and are still analytic, as is a zero-skew row, where nothing jumps.
+    and are still analytic.  A zero-skew row is refused too: its Hessian does
+    not jump, but its ``(mu, eps)`` entry is ``-2 |t - mu| / sigma^2``, a kink,
+    and before the refusal covered it the analytic path returned the right
+    piece's ``2 v_mu / sigma^2`` there, about 0.42 from the stencil in the
+    predictor channel.
     """
     from superglm.distributional.smoothing.derivatives import _analytic_first_derivative
     from superglm.distributional.smoothing.endpoint_direction import (
@@ -596,7 +600,10 @@ def test_two_piece_refuses_the_analytic_direction_across_its_join() -> None:
 
     symmetric = eta.copy()
     symmetric[:, 2] = links[2].link(np.zeros(3))
-    family.predictor_curvature_directional_derivative(y, symmetric, moving, links, plan)
+    assert np.all(links[2].inverse(symmetric[:, 2]) == 0.0)
+    with pytest.raises(UnsupportedLikelihoodContractError, match="join at row 0"):
+        family.predictor_curvature_directional_derivative(y, symmetric, moving, links, plan)
+    family.predictor_curvature_directional_derivative(y, symmetric, fixed, links, plan)
 
 
 def test_two_piece_mean_form_refuses_any_path_through_its_join(monkeypatch) -> None:
