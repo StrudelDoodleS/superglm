@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -52,16 +51,6 @@ if TYPE_CHECKING:
     from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
-
-
-@contextmanager
-def _joint_scope(*scopes: AbstractContextManager) -> Iterator[None]:
-    """Enter ``scopes`` in order and leave them in reverse, as one ``with``."""
-    if not scopes:
-        yield
-        return
-    with scopes[0], _joint_scope(*scopes[1:]):
-        yield
 
 
 class SuperGLM:
@@ -350,7 +339,7 @@ class SuperGLM:
         )
 
     def _parallel_scope(self):
-        """The fit's thread and memory limits (``_parallel.estimator_scope``) and certification dial.
+        """The fit's thread and memory limits (``_parallel.estimator_scope``).
 
         ``fit``, ``fit_path``, ``fit_reml`` and every public method that can
         refit, build a Gram or factor the design enter it in their own
@@ -359,14 +348,10 @@ class SuperGLM:
         wrapper: an extra frame would move the caller every warning's
         ``stacklevel`` points at.
         """
-        from superglm._certify import certification_scope
         from superglm._parallel import estimator_scope
 
-        # The certification dial (``superglm._certify``): off unless the
-        # model asks, as a pickle from before the dial existed does not.
-        return _joint_scope(
-            estimator_scope(getattr(self, "_n_jobs", "auto"), getattr(self, "_max_memory", "auto")),
-            certification_scope(getattr(self, "_certify", False)),
+        return estimator_scope(
+            getattr(self, "_n_jobs", "auto"), getattr(self, "_max_memory", "auto")
         )
 
     def __setstate__(self, state: dict) -> None:

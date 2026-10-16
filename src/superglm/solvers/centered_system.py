@@ -38,6 +38,8 @@ from superglm.solvers.mode_score import (
 )
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
+_GREY_LEAF_ROWS = 2048
+_GREY_SPAN_ROWS = 65536
 _FACTOR_CHUNK_ROWS = 8192
 
 
@@ -715,7 +717,7 @@ def grouped_projected_factor(
     so a row costs one ``k``-vector add per group, ``n T k`` in all, against
     ``2 n p^2`` for the TSQR of ``A`` itself; another group writes its dense
     rows a block at a time, as a TSQR leaf does.  ``A'B`` sums each block's
-    weighted rows of ``B`` per support row, one block at a time, and multiplies
+    weighted rows of ``B`` per support row, one span of rows at a time, and multiplies
     the sums by the centred support once.  A spline-by-level block is zero
     off its level: its raw support's table is added on the level's rows and
     its centre on every row (``_leverage_rows``' support route), so its
@@ -728,7 +730,7 @@ def grouped_projected_factor(
     scaled once, so every entry of ``B`` lies within ``gamma_(p + T + 3)``
     of ``|a_r|' |basis|``; the TSQR of ``B`` is columnwise backward stable
     (``rank._tsqr_weighted_factor``).  ``A'B`` adds a sum over the rows of one
-    support row's sum over a block's ``b`` rows, one add per block and a
+    support row's sum over a span's rows, one add per span and a
     product of length ``s_g``; the third value returned counts every rounding
     an entry of ``A'B`` carries, so ``gamma`` of it times ``|A|' |B|`` bounds
     its error (``rank.decompose_gram_deflated``).
@@ -803,7 +805,12 @@ def grouped_projected_factor(
         plans.append((columns, "full", table, np.zeros((support.shape[0], width)), codes, None))
     cross = np.zeros((p, width))
     weighted_total = np.zeros(width)
-    block_rows = tsqr_leaf_rows(width)
+    # Narrow blocks: a leaf of a few thousand rows keeps LAPACK's panel in
+    # cache (measured 1.5x to 2.6x faster than ``tsqr_leaf_rows`` at k = 55
+    # to 330, 540,000 rows); the reduction tree is the same TSQR's.
+    block_rows = min(tsqr_leaf_rows(width), max(_GREY_LEAF_ROWS, 2 * width))
+    span_rows = max(block_rows, _GREY_SPAN_ROWS)
+    locals_ = {id(plan[3]): np.zeros_like(plan[3]) for plan in plans if plan[3] is not None}
 
     def blocks() -> Iterator[tuple[int, int, NDArray]]:
         for start in range(0, n, block_rows):
@@ -833,18 +840,21 @@ def grouped_projected_factor(
             weighted = projected * sqrt_weights[start:stop, None]
             weighted_total[:] += weighted.sum(axis=0)
             level = iter(spans)
+            flush = stop == n or stop // span_rows != start // span_rows
             for _, kind, _, accumulator, first, second in plans:
                 if kind == "rows":
                     continue
-                # A block's own sums first, so a support row's total
-                # rounds over one block's rows plus one add per block.
-                local = np.zeros_like(accumulator)
+                # A span's own sums first, so a support row's total rounds
+                # over one span's rows plus one add per span.
+                local = locals_[id(accumulator)]
                 if kind == "full":
                     _scatter_table_rows(local, weighted, first, start)
                 else:
                     low, high = next(level)
                     _scatter_table_rows_at(local, weighted, first, second, low, high, start)
-                accumulator += local
+                if flush:
+                    accumulator += local
+                    local[...] = 0.0
             for columns, values in dense:
                 cross[columns] += values.T @ weighted
             yield start, stop, projected
@@ -861,10 +871,13 @@ def grouped_projected_factor(
     factor = streamed_weighted_factor(blocks(), np.ones(n))
     # Roundings an entry of ``A'B`` can carry beyond ``|A|' |B|``'s scale:
     # the centring and table product (``p + 2``), at most ``T`` group adds and
-    # two scalings per row of ``B``, one block's rows plus one add per block,
-    # and the product with the widest support.
+    # two scalings per row of ``B``, one span's rows plus one add per span
+    # (one add per block for the dense rows and the weighted total), and the
+    # product with the widest support.
     widest = max((plan[2].shape[0] for plan in plans if plan[2] is not None), default=0)
-    roundings = (p + 2) + len(plans) + 3 + block_rows + -(-n // block_rows) + widest + 1
+    roundings = (
+        (p + 2) + len(plans) + 3 + span_rows + -(-n // span_rows) + -(-n // block_rows) + widest + 1
+    )
     return factor, cross, roundings, magnitudes
 
 

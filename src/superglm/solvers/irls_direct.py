@@ -31,7 +31,6 @@ from numpy.typing import NDArray
 import superglm.solvers.scop_exact_support as scop_exact_support
 from superglm import _held_warnings as held_warnings
 from superglm._blas_threads import keep_narrow_cap
-from superglm._certify import certification_requested
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
 from superglm._group_matrix._group_matrix_tabmat import (
@@ -4795,7 +4794,6 @@ def _fit_irls_direct_once(
                 W=W,
                 augmented_rank=augmented_rank,
                 feature_edf=feature_edf,
-                certify=certification_requested(),
             ) -> RankInfo:
                 """The data-subspace metadata only retained-fit inference reads.
 
@@ -4850,8 +4848,6 @@ def _fit_irls_direct_once(
                             )
                         )
 
-                    # The certification dial (``superglm._certify``) as it
-                    # stood when this fit was solved, also for a deferred run.
                     # Unpenalized, the data Gram is the Hessian, whose factor
                     # certificate the fit already holds for its standard
                     # errors (``reml_slope_rank``); reading it costs nothing.
@@ -4863,7 +4859,7 @@ def _fit_irls_direct_once(
                         ),
                         rows=dm.n,
                         psd_by_construction=not _return_working_system,
-                        certify=certify or not np.any(centered_final.penalty),
+                        certify=not np.any(centered_final.penalty),
                     )
                 group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
                 selected_columns = np.arange(p, dtype=int)
