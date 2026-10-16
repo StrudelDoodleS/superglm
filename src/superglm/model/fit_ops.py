@@ -1437,6 +1437,27 @@ def _install_deferred_rank_info(model) -> None:
             result.rank_info = rank_info
 
 
+def _disclose_data_rank_route(model) -> None:
+    """Record in the REML profile which route decided the published data rank.
+
+    ``data_rank_route`` is ``"gram"`` (the Gram certified itself),
+    ``"grey_subspace"`` (the Gram plus a row factor of its ``k`` grey
+    directions, ``data_rank_grey_k``; ``rank.decompose_gram_deflated``) or
+    ``"row_factor"`` (a TSQR of every row).
+    """
+    profile = getattr(model, "_reml_profile", None)
+    rank_info = getattr(getattr(model, "_result", None), "rank_info", None)
+    if not isinstance(profile, dict) or rank_info is None:
+        return
+    data = rank_info.data
+    grey = getattr(data, "grey_subspace", None)
+    if grey is not None:
+        profile["data_rank_route"] = "grey_subspace"
+        profile["data_rank_grey_k"] = int(grey["k"])
+    else:
+        profile["data_rank_route"] = "row_factor" if data.method == "qr_svd" else "gram"
+
+
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
     """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
     # The constrained QP solver path ignores lambda1 — reject explicitly.
@@ -1989,6 +2010,7 @@ def fit_reml(
         if not durable_retain:
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)
+    _disclose_data_rank_route(workspace.model)
     candidate = capture_fit_state(
         workspace,
         model,

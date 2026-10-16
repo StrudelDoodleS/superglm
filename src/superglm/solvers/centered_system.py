@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -673,6 +674,198 @@ def grouped_augmented_factor_rhs(
     smooth_joint = np.column_stack((smooth_factor, np.zeros(smooth_factor.shape[0])))
     joint_factor = np.linalg.qr(np.vstack((joint, smooth_joint)), mode="r")
     return np.asarray(joint_factor[:, :-1]), np.asarray(joint_factor[:, -1])
+
+
+def _centred_support(values: NDArray, center, center_lo, columns: slice) -> NDArray:
+    """``(values - c) - c_lo`` on ``columns``: a support's rows centred as a TSQR leaf centres them."""
+    centred = values - (0.0 if center is None else center[columns])
+    if center_lo is not None:
+        centred = centred - center_lo[columns]
+    return centred
+
+
+def _is_plain_level(group, level_type) -> bool:
+    """A spline-by-level block whose rows are its support's rows on its level, and zero elsewhere."""
+    kind = type(group)
+    return (
+        isinstance(group, level_type)
+        and kind.toarray is level_type.toarray
+        and kind.row_subset is level_type.row_subset
+    )
+
+
+def grouped_projected_factor(
+    dm: DesignMatrix,
+    W: NDArray,
+    basis: NDArray,
+    *,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> tuple[NDArray, NDArray, int, NDArray]:
+    """``R`` of ``B = A basis`` (a TSQR), ``A'B``, its rounding count and column magnitudes.
+
+    ``A = sqrt(W) ((X - c) - c_lo)``.
+
+    One pass over the rows.
+
+    ``basis`` is ``p x k``.  Each group block of the design writes its part of
+    ``X basis`` from its compact form (``_design_leaf_parts``): a categorical
+    and an indexed support form one table ``((S - c) - c_lo) basis_g`` of
+    their support rows ``S`` and add the row of it each observation indexes,
+    so a row costs one ``k``-vector add per group, ``n T k`` in all, against
+    ``2 n p^2`` for the TSQR of ``A`` itself; another group writes its dense
+    rows a block at a time, as a TSQR leaf does.  ``A'B`` sums each block's
+    weighted rows of ``B`` per support row, one block at a time, and multiplies
+    the sums by the centred support once.  A spline-by-level block is zero
+    off its level: its raw support's table is added on the level's rows and
+    its centre on every row (``_leverage_rows``' support route), so its
+    entries are bounded by ``(|x| + |c|)' |basis|`` rather than ``|x - c|'
+    |basis|``.
+
+    **Error.**  A table entry is a centring and a dot product of length
+    ``w_g`` (``gamma_(w_g + 2)`` of ``|S - c|' |basis_g|``, Higham 2002,
+    secs. 3.1 and 3.5) and a row of ``B`` sums at most ``T`` groups and is
+    scaled once, so every entry of ``B`` lies within ``gamma_(p + T + 3)``
+    of ``|a_r|' |basis|``; the TSQR of ``B`` is columnwise backward stable
+    (``rank._tsqr_weighted_factor``).  ``A'B`` adds a sum over the rows of one
+    support row's sum over a block's ``b`` rows, one add per block and a
+    product of length ``s_g``; the third value returned counts every rounding
+    an entry of ``A'B`` carries, so ``gamma`` of it times ``|A|' |B|`` bounds
+    its error (``rank.decompose_gram_deflated``).
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_kernels import (
+        _gather_table_rows,
+        _gather_table_rows_at,
+        _scatter_table_rows,
+        _scatter_table_rows_at,
+    )
+    from superglm.solvers.rank import streamed_weighted_factor, tsqr_leaf_rows
+
+    basis = np.ascontiguousarray(basis, dtype=np.float64)
+    n, p = dm.n, dm.p
+    width = basis.shape[1]
+    sqrt_weights = np.sqrt(np.asarray(W, dtype=np.float64))
+    # Each plan: (columns, kind, table, accumulator, a, b).  "full": every row
+    # indexes a centred support row (a: codes).  "level": a spline-by-level
+    # block, zero outside its level; its raw support table is added on the
+    # level's rows (a: rows, b: codes, both in row order) and its centre
+    # enters every row once through ``base``.  "rows": dense rows a block at
+    # a time (a: the group matrix).
+    plans: list[tuple] = []
+    supports: dict[int, NDArray] = {}
+    magnitudes = np.zeros(p)
+    base = np.zeros(width)
+    level_type = DiscretizedSplineCategoricalGroupMatrix
+    parts = _design_leaf_parts(dm).parts
+    groups = dm.group_matrices if len(parts) == len(dm.group_matrices) else [None] * len(parts)
+    for (column, kind, first, second), group in zip(parts, groups, strict=True):
+        if kind == "rows" and _is_plain_level(group, level_type):
+            columns = slice(column, column + int(group.shape[1]))
+            raw = np.asarray(group.B_unique, dtype=np.float64) @ np.asarray(
+                group.R_inv, dtype=np.float64
+            )
+            order = np.argsort(group.row_idx, kind="stable")
+            rows = np.ascontiguousarray(np.asarray(group.row_idx)[order], dtype=np.intp)
+            codes = np.ascontiguousarray(np.asarray(group.bin_idx_level)[order], dtype=np.intp)
+            centre = _centred_support(np.zeros((1, raw.shape[1])), center, center_lo, columns)
+            base += (centre @ basis[columns])[0]
+            level_weight = np.bincount(
+                codes, weights=np.asarray(W, dtype=np.float64)[rows], minlength=raw.shape[0]
+            )
+            magnitudes[columns] = np.sqrt(level_weight @ (raw * raw)) + np.abs(
+                centre[0]
+            ) * math.sqrt(float(np.sum(W)))
+            table = np.ascontiguousarray(raw @ basis[columns])
+            supports[column] = raw
+            plans.append((columns, "level", table, np.zeros((raw.shape[0], width)), rows, codes))
+            continue
+        if kind == "rows":
+            columns = slice(column, column + int(first.shape[1]))
+            plans.append((columns, "rows", None, None, first, None))
+            continue
+        if kind == "one_hot":
+            levels = int(second)
+            columns = slice(column, column + levels)
+            # code ``levels`` is no level: the centred zero row
+            support = _centred_support(
+                np.vstack((np.eye(levels), np.zeros((1, levels)))), center, center_lo, columns
+            )
+            codes = first
+        else:
+            columns = slice(column, column + first.shape[1])
+            support = _centred_support(first, center, center_lo, columns)
+            codes = second
+        table = np.ascontiguousarray(support @ basis[columns])
+        supports[column] = support
+        plans.append((columns, "full", table, np.zeros((support.shape[0], width)), codes, None))
+    cross = np.zeros((p, width))
+    weighted_total = np.zeros(width)
+    block_rows = tsqr_leaf_rows(width)
+
+    def blocks() -> Iterator[tuple[int, int, NDArray]]:
+        for start in range(0, n, block_rows):
+            stop = min(start + block_rows, n)
+            projected = np.zeros((stop - start, width))
+            projected += base
+            dense = []
+            spans = []
+            for columns, kind, table, _, first, second in plans:
+                if kind == "full":
+                    _gather_table_rows(projected, table, first, start)
+                elif kind == "level":
+                    low, high = np.searchsorted(first, (start, stop))
+                    spans.append((int(low), int(high)))
+                    _gather_table_rows_at(projected, table, first, second, low, high, start)
+                else:
+                    rows = np.arange(start, stop, dtype=np.intp)
+                    values = _centred_support(
+                        np.asarray(first.row_subset(rows).toarray(), dtype=np.float64),
+                        center,
+                        center_lo,
+                        columns,
+                    )
+                    projected += values @ basis[columns]
+                    dense.append((columns, values))
+            projected *= sqrt_weights[start:stop, None]
+            weighted = projected * sqrt_weights[start:stop, None]
+            weighted_total[:] += weighted.sum(axis=0)
+            level = iter(spans)
+            for _, kind, _, accumulator, first, second in plans:
+                if kind == "rows":
+                    continue
+                # A block's own sums first, so a support row's total
+                # rounds over one block's rows plus one add per block.
+                local = np.zeros_like(accumulator)
+                if kind == "full":
+                    _scatter_table_rows(local, weighted, first, start)
+                else:
+                    low, high = next(level)
+                    _scatter_table_rows_at(local, weighted, first, second, low, high, start)
+                accumulator += local
+            for columns, values in dense:
+                cross[columns] += values.T @ weighted
+            yield start, stop, projected
+        for columns, kind, _, accumulator, _, _ in plans:
+            if kind == "full":
+                cross[columns] += supports[columns.start].T @ accumulator
+            elif kind == "level":
+                cross[columns] += supports[columns.start].T @ accumulator
+                centre = _centred_support(
+                    np.zeros((1, columns.stop - columns.start)), center, center_lo, columns
+                )
+                cross[columns] += centre.T @ weighted_total[None, :]
+
+    factor = streamed_weighted_factor(blocks(), np.ones(n))
+    # Roundings an entry of ``A'B`` can carry beyond ``|A|' |B|``'s scale:
+    # the centring and table product (``p + 2``), at most ``T`` group adds and
+    # two scalings per row of ``B``, one block's rows plus one add per block,
+    # and the product with the widest support.
+    widest = max((plan[2].shape[0] for plan in plans if plan[2] is not None), default=0)
+    roundings = (p + 2) + len(plans) + 3 + block_rows + -(-n // block_rows) + widest + 1
+    return factor, cross, roundings, magnitudes
 
 
 def refresh_centered_rhs(

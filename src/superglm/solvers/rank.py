@@ -258,6 +258,7 @@ _HALF_MAX = float(np.finfo(float).max) / 2.0
 # This rounds down to 2**-1024, whose reciprocal still overflows. Include the
 # endpoint when deciding whether to defer inverse coordinate scales.
 _MIN_RECIPROCAL_SCALE = 1.0 / float(np.finfo(float).max)
+_MIN_POSITIVE = float(np.finfo(float).tiny)
 
 
 def _symmetric_part(values: NDArray) -> NDArray:
@@ -918,6 +919,10 @@ class RankDecomposition:
     # formation bound explains (``decompose_gram(formation_error=...)``): the
     # matrix was taken as the semidefinite one it was formed from.
     formation_limited: bool = False
+    # ``decide_data_rank``'s certificate when the observation rows decided only
+    # the Gram's grey subspace (``decompose_gram_deflated``); ``None`` for a
+    # Gram or full-factor decomposition.
+    grey_subspace: Mapping[str, float] | None = None
 
     @property
     def width(self) -> int:
@@ -2479,6 +2484,207 @@ def decompose_gram_if_authoritative(
     if decomposition is None or needs_factor_certification(decomposition, policy=policy):
         return None
     return decomposition
+
+
+# Grey-subspace certification (``decompose_gram_deflated``): the split sits
+# where the Gram's eigenvalues clear this many times their own error bound,
+# and below this share of the largest; within those it takes the first
+# eigenvalue at least ``_GREY_GAP`` times its predecessor, else the widest gap.
+_GREY_FLOOR = 64.0
+_GREY_CEILING = 1e-4
+_GREY_GAP = 2.0
+
+
+def _gamma_up(count: float) -> float:
+    """``gamma_k = k u / (1 - k u)`` (Higham 2002, sec. 3.1), rounded up."""
+    product = float(count) * (_EPS / 2.0)
+    if product >= 1.0:
+        return float("inf")
+    return float(np.nextafter(product / (1.0 - product), np.inf))
+
+
+def decompose_gram_deflated(
+    gram: NDArray,
+    project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]],
+    *,
+    rows: int,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> tuple[RankDecomposition | None, dict[str, float]]:
+    """The factor-route decision from the formed Gram plus one pass over the rows on its grey subspace.
+
+    **The problem.**  The data rank is the numerical rank of the weighted,
+    centred design ``A`` (``n x p``) at ``factor_rcond`` on its
+    Jacobi-equilibrated singular values.  The Gram ``A'A`` is formed already,
+    but its eigenvalues are resolved only to its error bound ``e`` (the
+    eigensolver's ``n_a eps lambda_max``, *LAPACK Users' Guide* sec. 4.7, plus
+    the formation error ``gamma_n |A|'|A|``, Higham 2002 sec. 3.5, at most
+    ``gamma_n n_a`` after equilibration), which is above the boundary ``eps
+    lambda_max`` itself.  The factor route answers at the resolution of a row
+    QR (``u ||A||``) by a TSQR of every row, ``2 n p^2`` flops.
+
+    **The method: deflation onto the grey subspace, with a Rayleigh-Ritz
+    certificate.**  Let ``V = [V1 V2]`` be the Gram's eigenvectors, ``V2`` the
+    ``k`` below a split ``w_k``.  In those coordinates ``A'A`` is
+    ``[[H1, E], [E', H2]]``: ``H1 = V1'A'AV1`` has eigenvalues at least ``L1 =
+    w_k - e`` (Weyl), ``H2 = B'B`` with ``B = A V2`` is factored by a TSQR of
+    the ``n x k`` block (``project``; row-QR resolution, ``n T k + 2 n k^2``),
+    and ``E = V1'A'B`` is formed from ``A'B``, the same pass's cross product.
+    By Li & Li (*Linear Algebra Appl.* 2005, arXiv 2508.08203) each
+    eigenvalue of the full matrix lies within ``2||E||^2 / (eta + sqrt(eta^2 +
+    4 ||E||^2))`` of the block-diagonal matrix's, ``eta = L1 - ||H2||`` the
+    gap between the blocks; ``E`` is small because ``V2`` is an invariant
+    subspace of a matrix within ``e`` of ``A'A``, and the shift is quadratic
+    in it.  So the grey block's singular values decide the rank at row-QR
+    resolution whenever every one of them clears the cut by more than the
+    shift, the certificate checked here; the directions above the split clear
+    it by construction.  ``E`` is bounded with its own rounding, ``gamma_m
+    sqrt(n_a) ||B||_F`` (``project`` counts ``m``), scaled up where the
+    projection added a column's centre after its product.  The decomposition is then
+    :func:`decompose_factor` of the surrogate factor ``[Lambda1^(1/2) V1';
+    R2 V2'] D``, whose singular values are ``sqrt(w)`` above the split and the
+    grey block's below it, so the representatives, the null basis and every
+    other field follow the factor route's own rules.
+
+    Returns ``(None, info)`` whenever the certificate fails (no split, no gap,
+    a grey singular value within the shift of the cut): the caller then runs
+    the full factor, so this changes cost, never a certified decision.  A
+    shifted CholeskyQR3 (Fukaya, Kannan, Nakatsukasa, Yamamoto & Yanagisawa,
+    *SIAM J. Sci. Comput.* 42(1), 2020) would also give a row-resolution
+    factor, but in three ``O(n p^2)`` passes and for full column rank only.
+    """
+    info: dict[str, float] = {"certified": 0.0}
+    gram = np.asarray(gram, dtype=np.float64)
+    diagonal = np.diag(gram)
+    if not np.all(np.isfinite(gram)) or np.any(diagonal < 0.0):
+        return None, info
+    scale = np.sqrt(diagonal)
+    active = np.flatnonzero(scale > 0.0)
+    n_active = int(active.size)
+    if n_active < 2:
+        return None, info
+    d = scale[active]
+    equilibrated = _symmetric_part(gram[np.ix_(active, active)] / d[:, None] / d[None, :])
+    values, vectors = np.linalg.eigh(equilibrated)
+    largest = float(values[-1])
+    if not (largest > 0.0 and math.isfinite(largest)):
+        return None, info
+    # The computed Gram's spectral error, equilibrated: the eigensolver's bar
+    # and the formation bound gamma_n |A|'|A|, whose entries are at most
+    # gamma_n after Jacobi scaling (Cauchy-Schwarz), so ||dG||_2 <= gamma_n n_a.
+    error = float(
+        np.nextafter(
+            _eigensolver_relative_bar(n_active + 1) * largest + _gamma_up(rows + 2) * n_active,
+            np.inf,
+        )
+    )
+    floor = _GREY_FLOOR * error
+    candidates = np.flatnonzero((values >= floor) & (values <= _GREY_CEILING * largest))
+    candidates = candidates[candidates >= 1]
+    if candidates.size == 0:
+        return None, info
+    below = values[candidates - 1]
+    with np.errstate(divide="ignore"):
+        ratio = np.where(below > 0.0, values[candidates] / np.maximum(below, _MIN_POSITIVE), np.inf)
+    wide = np.flatnonzero(ratio >= _GREY_GAP)
+    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(ratio))])
+    grey = vectors[:, :split]
+    basis = np.zeros((gram.shape[0], split))
+    basis[active] = grey / d[:, None]
+    factor, cross, roundings, magnitudes = project(basis)
+    factor = np.asarray(factor, dtype=np.float64)
+    # The cross product's rows are bounded by |A|'|B|, a column's weighted
+    # norm times ||B||: d itself where rows were centred first, the
+    # projection's (|x| + |c|) norm where they were not.
+    inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
+    singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
+    if singular.size < split:
+        singular = np.concatenate((singular, np.zeros(split - singular.size)))
+    coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
+    coupling_norm = float(
+        np.nextafter(
+            float(np.linalg.norm(coupling, 2))
+            + _gamma_up(roundings + n_active)
+            * inflation
+            * math.sqrt(n_active)
+            * float(np.linalg.norm(factor))
+            + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
+            np.inf,
+        )
+    )
+    gap = float(values[split]) - error - float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+    info.update(
+        k=float(split),
+        split_low=float(values[split - 1]) / largest,
+        split_high=float(values[split]) / largest,
+        gap=gap / largest,
+        coupling=coupling_norm / largest,
+        error=error / largest,
+        inflation=inflation,
+    )
+    if not gap > 0.0:
+        return None, info
+    shift = 2.0 * coupling_norm**2 / (gap + math.sqrt(gap * gap + 4.0 * coupling_norm**2))
+    shift = float(np.nextafter(shift, np.inf))
+    boundary = policy.factor_rcond**2
+    cut_low, cut_high = boundary * (largest - error), boundary * (largest + error)
+    squared = singular**2
+    margin = np.minimum(np.abs(squared - cut_low), np.abs(squared - cut_high))
+    straddles = (squared >= cut_low) & (squared <= cut_high)
+    nearest = float(np.min(np.where(straddles, 0.0, margin)))
+    info.update(shift=shift / largest, margin=nearest / largest, rotation=coupling_norm / gap)
+    if not nearest > shift:
+        return None, info
+    surrogate = np.zeros((n_active, gram.shape[0]))
+    surrogate[:, active] = (
+        np.vstack(
+            (
+                np.sqrt(values[split:])[:, None] * vectors[:, split:].T,
+                factor @ grey.T,
+            )
+        )
+        * d[None, :]
+    )
+    info["certified"] = 1.0
+    decomposition = decompose_factor(surrogate, policy=policy)
+    return replace(decomposition, grey_subspace=dict(info)), info
+
+
+def decide_data_rank(
+    gram: NDArray,
+    factor_decomposition: Callable[[], RankDecomposition],
+    *,
+    project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]] | None = None,
+    rows: int = 0,
+    psd_by_construction: bool = False,
+    certify: bool | None = None,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> RankDecomposition:
+    """The published data-subspace rank, at the factor route's resolution, without a full row factor when it can.
+
+    ``gram`` is a fit's centred data Gram ``X_c'WX_c``, already formed,
+    ``factor_decomposition`` returns :func:`decompose_factor` of the
+    observation factor of the same rows (a TSQR over every row, ``O(n
+    p^2)``), and ``project`` the grey-subspace pass that
+    :func:`decompose_gram_deflated` reads.  The order is the Gram when it
+    certifies itself (:func:`decompose_gram_if_authoritative`), then the
+    deflated certificate, then the full factor.  ``certify`` (default: the
+    model's dial, ``superglm._certify``) skips the deflated step, so the
+    decision is today's full-factor route bit for bit.
+    """
+    if certify is None:
+        from superglm._certify import certification_requested
+
+        certify = certification_requested()
+    decomposition = decompose_gram_if_authoritative(
+        gram, policy=policy, psd_by_construction=psd_by_construction
+    )
+    if decomposition is not None:
+        return decomposition
+    if not certify and project is not None:
+        deflated, _ = decompose_gram_deflated(gram, project, rows=rows, policy=policy)
+        if deflated is not None:
+            return deflated
+    return factor_decomposition()
 
 
 def decompose_symmetric(

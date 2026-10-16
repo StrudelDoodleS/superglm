@@ -1155,6 +1155,44 @@ def _weighted_centred_one_hot(out, column, codes, n_levels, first, center, cente
             out[i, column + j] = value * scale
 
 
+@njit(cache=True, nogil=True)
+def _gather_table_rows(out, table, codes, first):
+    """``out[i, :] += table[codes[first + i], :]``: one support's projected rows into a block."""
+    for i in range(out.shape[0]):
+        source = table[codes[first + i]]
+        for j in range(out.shape[1]):
+            out[i, j] += source[j]
+
+
+@njit(cache=True, nogil=True)
+def _scatter_table_rows(accumulator, block, codes, first):
+    """``accumulator[codes[first + i], :] += block[i, :]``: a block's rows summed per support row."""
+    for i in range(block.shape[0]):
+        target = accumulator[codes[first + i]]
+        for j in range(block.shape[1]):
+            target[j] += block[i, j]
+
+
+@njit(cache=True, nogil=True)
+def _gather_table_rows_at(out, table, rows, codes, first, last, offset):
+    """``out[rows[i] - offset, :] += table[codes[i], :]`` for ``i`` in ``[first, last)``."""
+    for i in range(first, last):
+        source = table[codes[i]]
+        target = out[rows[i] - offset]
+        for j in range(out.shape[1]):
+            target[j] += source[j]
+
+
+@njit(cache=True, nogil=True)
+def _scatter_table_rows_at(accumulator, block, rows, codes, first, last, offset):
+    """``accumulator[codes[i], :] += block[rows[i] - offset, :]`` for ``i`` in ``[first, last)``."""
+    for i in range(first, last):
+        source = block[rows[i] - offset]
+        target = accumulator[codes[i]]
+        for j in range(block.shape[1]):
+            target[j] += source[j]
+
+
 _POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
 """The kernels a TSQR leaf (``rank._tsqr_leaf``) runs on its pool worker: ``nogil`` too."""
 
