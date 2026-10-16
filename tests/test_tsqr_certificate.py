@@ -739,10 +739,11 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     """Only the published state certifies its data rank with observation rows.
 
     Two aliased factors leave the unpenalised data Gram unable to certify its
-    own rank, so the fit needs the O(n p^2) data-rank factor.  The REML
-    optimizer's terminal refit used to build it as well, for a ``rank_info``
-    that ``finalize_reml_fit`` replaced unread; now only the terminal refit
-    that is published builds it, and its decomposition is the factor's.
+    own rank, so the fit reads the observation rows for its data rank (the
+    grey-subspace pass, else the O(n p^2) factor).  The REML optimizer's
+    terminal refit used to do so as well, for a ``rank_info`` that
+    ``finalize_reml_fit`` replaced unread; now only the terminal refit that is
+    published does, and its decomposition is on the factor route's rule.
     """
     import superglm.solvers.irls_direct as irls_direct
 
@@ -760,12 +761,20 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     y = rng.poisson(np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)).astype(float)
     calls: list[int] = []
     original = irls_direct.grouped_weighted_factor
+    original_projection = irls_direct.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
         return original(dm, W, **kwargs)
 
+    def projected(dm, W, basis, **kwargs):
+        calls.append(len(W))
+        return original_projection(dm, W, basis, **kwargs)
+
+    # The data rank reads the rows once, through its grey subspace
+    # (``rank.decompose_gram_deflated``) or, failing that, the full factor.
     monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
@@ -846,9 +855,10 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     A ``RandomEffect`` on the cells of two factors beside both factors'
     main effects: each factor level is the sum of its cells, so the data
     Gram is singular by construction and the published ``rank_info.data``
-    needs the O(n p^2) data-rank factor.  The bootstrap fit built one as
-    well, which nothing read (the candidates and trials already skip it), so
-    against it the factor below is built twice.
+    reads the observation rows (the grey-subspace pass, else the O(n p^2)
+    factor).  The bootstrap fit did so as well, which nothing read (the
+    candidates and trials already skip it), so against it the rows below
+    are read twice.
     """
     import superglm.solvers.irls_direct as irls_direct
     from superglm import RandomEffect, Tweedie
@@ -869,12 +879,20 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
     calls: list[int] = []
     original = irls_direct.grouped_weighted_factor
+    original_projection = irls_direct.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
         return original(dm, W, **kwargs)
 
+    def projected(dm, W, basis, **kwargs):
+        calls.append(len(W))
+        return original_projection(dm, W, basis, **kwargs)
+
+    # The data rank reads the rows once, through its grey subspace
+    # (``rank.decompose_gram_deflated``) or, failing that, the full factor.
     monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",

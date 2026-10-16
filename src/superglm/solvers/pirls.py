@@ -37,6 +37,8 @@ from superglm.solvers.centered_system import (
     build_centered_system,
     dense_anchor,
     grouped_augmented_factor,
+    grouped_projected_factor,
+    grouped_structural_nulls,
     grouped_weighted_factor,
     two_pass_centred_gram,
 )
@@ -61,6 +63,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
+    decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
 )
@@ -2016,19 +2019,29 @@ def _fit_pirls_inner(
     # column about its exact pair (issue #430).  About the one-float mean a
     # column at 1e16 certified a rank one above the Gram's.
     centre, centre_lo = centered.centre_pair()
-    data_rank = decompose_gram_if_authoritative(centered.data_gram)
-    if data_rank is None:
-        certified = decompose_factor(
+    # Unpenalized, the data rank is also the Hessian's, whose decomposition
+    # the standard errors read: it keeps the full factor route, as before.
+    data_rank = decide_data_rank(
+        centered.data_gram,
+        lambda: decompose_factor(
             grouped_weighted_factor(
                 selected_dm,
                 W_final,
                 center=centre,
                 center_lo=centre_lo,
             )
-        )
-        data_rank = certified
-    # Reusing ``data_rank`` cannot need certifying: it is either a factor
-    # certificate or a Gram the predicate already accepted.
+        ),
+        project=lambda basis: grouped_projected_factor(
+            selected_dm, W_final, basis, center=centre, center_lo=centre_lo
+        ),
+        structural=lambda: grouped_structural_nulls(
+            selected_dm, W_final, center=centre, center_lo=centre_lo
+        ),
+        rows=selected_dm.n,
+        certify=not np.any(selected_penalty),
+    )
+    # Reusing ``data_rank`` cannot need certifying: unpenalized, it is either
+    # a factor certificate or a Gram the predicate already accepted.
     augmented_rank = (
         data_rank
         if not np.any(selected_penalty)

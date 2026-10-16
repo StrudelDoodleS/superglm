@@ -5,8 +5,9 @@ Gram cannot certify itself) is read only by retained-fit inference.  The
 Tweedie power search's candidate fits and the NB2 auto-theta mean fits are
 never published, and an auto-theta REML refit is published only if no later
 refit replaces it, so only the published fit may pay for it.  The tests
-force the factor route and count the data-rank factorisations; master paid
-one per candidate and per mean fit, and fails both counts.
+force the factor route (no Gram, no grey-subspace certificate) and count the
+data-rank factorisations; master paid one per candidate and per mean fit, and
+fails both counts.
 """
 
 import dataclasses
@@ -18,6 +19,7 @@ import pytest
 
 import superglm.model.reml_finalize as reml_finalize
 import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.rank as rank
 from superglm import NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
@@ -35,14 +37,15 @@ def _without_condition_estimate(rank_info):
 
 
 def _force_factor_route(patch):
-    """Send every fit's data rank to its TSQR route (the Gram is not taken as authoritative)."""
-    decide = irls_direct.decompose_gram_if_authoritative
+    """Send every fit's data rank to its TSQR route (neither the Gram nor its grey subspace decides)."""
+    decide = rank.decompose_gram_if_authoritative
 
     def factor_route(matrix, **kwargs):
-        # Only the data-rank call passes ``psd_by_construction``.
+        # Only the data-rank call (``rank.decide_data_rank``) passes ``psd_by_construction``.
         return None if "psd_by_construction" in kwargs else decide(matrix, **kwargs)
 
-    patch.setattr(irls_direct, "decompose_gram_if_authoritative", factor_route)
+    patch.setattr(rank, "decompose_gram_if_authoritative", factor_route)
+    patch.setattr(rank, "decompose_gram_deflated", lambda *args, **kwargs: (None, {}))
 
 
 def _record_terminal_refits(patch, *, inline=False):
