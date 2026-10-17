@@ -1019,6 +1019,95 @@ class TestDirectSolverBasic:
         assert "irls_observed_newton_rescues" not in profile
         assert "irls_observed_newton_iters" not in profile
 
+    def test_gamma_log_mode_score_solve_that_reaches_the_bar_keeps_fisher_and_one_gram(
+        self, monkeypatch
+    ):
+        """A ``mode_score`` Gamma/log solve whose Fisher score reaches the bar never switches.
+
+        The switch to Newton is for a Fisher iteration measured to stall or
+        to contract too slowly for its budget.  One that reaches the bar
+        keeps Fisher steps, and with them its constant-weight Gram, built
+        once.  Mutation check: a rate test that fired on every resolved,
+        unconverged score (``rate_exhausts_budget`` returning True) switched
+        this solve and rebuilt the Gram on each Newton iteration.
+        """
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+
+        rng = np.random.default_rng(458)
+        n = 120
+        X_raw = rng.normal(size=(n, 3))
+        y = rng.gamma(shape=2.0, scale=np.exp(0.2 + X_raw @ np.array([0.1, -0.2, 0.3])) / 2.0)
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+        profile: dict = {}
+        latch = [False]
+        result, _ = irls_direct.fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=3)],
+            lambda2=0.1,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+            _newton_latch=latch,
+        )
+        assert result.converged
+        assert result.n_iter > 2
+        assert "irls_fisher_newton_switches" not in profile
+        assert "irls_observed_newton_iters" not in profile
+        assert latch == [False]
+        assert centered_calls == 1
+
+    def test_exact_reml_passes_one_newton_latch_to_every_pirls_solve(self, monkeypatch):
+        """One exact Gamma/log REML fit shares a single ``_newton_latch`` across its PIRLS solves.
+
+        The latch is what carries a Newton switch from one solve of the fit
+        to the next (bootstrap, candidates, line-search trials), so every
+        solve the optimizer makes must hold the same list.  Mutation check:
+        dropping ``_newton_latch=newton_latch`` at any call site in
+        ``reml.direct`` leaves that solve with ``None``.
+        """
+        import superglm.reml.direct as reml_direct
+        from superglm.features.spline import Spline
+
+        real = reml_direct.fit_irls_direct
+        latches: list = []
+
+        def spy(*args, **kwargs):
+            latches.append(kwargs.get("_newton_latch"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(reml_direct, "fit_irls_direct", spy)
+        rng = np.random.default_rng(11)
+        n = 600
+        x = rng.uniform(0.0, 1.0, n)
+        level = rng.choice(["a", "b", "c"], n)
+        mu = np.exp(0.5 + np.sin(4.0 * x) + 0.3 * (level == "b"))
+        y = rng.gamma(2.0, mu / 2.0)
+        model = SuperGLM(
+            family="gamma",
+            link="log",
+            features={"x": Spline(n_knots=8), "c": Categorical()},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(pd.DataFrame({"x": x, "c": level}), y)
+        assert len(latches) >= 3
+        assert latches[0] is not None
+        assert all(latch is latches[0] for latch in latches)
+
     def test_gamma_log_switches_to_newton_when_fisher_cannot_reach_the_bar(self):
         """Fisher scoring that contracts too slowly for the budget finishes on Newton steps.
 
