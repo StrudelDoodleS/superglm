@@ -567,13 +567,16 @@ def test_every_fit_path_reports_whether_the_design_has_a_structured_term(monkeyp
         seen.clear()
         model.fit_reml(X, y)
         assert seen == [name != "dense"], name
-    # The profile search serves its design from a cache, through its own call.
-    model = designs["random effect"]
-    model._profile_design_cache = {}
-    seen.clear()
-    model.fit_reml(X, y)
-    model.fit_reml(X, y)
-    assert seen == [True, True]
+    # The profile search serves its design from a cache, through its own call;
+    # the dense design pins that call's keyword, which the default would hide.
+    for name in ("random effect", "dense"):
+        model = designs[name]
+        model._profile_design_cache = {}
+        seen.clear()
+        model.fit_reml(X, y)
+        assert model._profile_design_cache, name
+        model.fit_reml(X, y)
+        assert seen == [name != "dense"] * 2, name
 
 
 def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):

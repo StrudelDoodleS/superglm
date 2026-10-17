@@ -255,8 +255,9 @@ def _leverage_derivative_terms(
     blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
     if blocks.block_bytes is None:
         # The chunked route reads one stream of chunks on this thread: no pool
-        # runs, so the fit's BLAS policy applies to its products.
-        parts = [contributions(job()) for job in blocks.jobs]
+        # runs, so the fit's BLAS policy applies to its products.  A generator,
+        # so each chunk's cross matrix is reduced before the next is formed.
+        parts = (contributions(job()) for job in blocks.jobs)
     else:
         parts = pooled_map(lambda job: contributions(job()), list(blocks.jobs), blocks.block_bytes)
     for part in parts:
