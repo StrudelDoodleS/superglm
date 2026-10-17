@@ -73,9 +73,12 @@ backend actually dispatched; a microbenchmark alone does not establish a fit
 improvement. Use the existing diagnostics, such as `SuperLSS.diagnose()`, to
 attribute the time to phases, iterations, retries and refits, and keep
 profiling runs separate from the timing runs you report.
-Compare against benchboard baselines (`benchmarks/books.py`) for the same
-dataset, spec, master commit, environment, machine and thread setting; do not
-re-time the baseline.
+Reuse a stored benchboard baseline (`benchmarks/books.py`) for work counts,
+numerical outputs and backend when the dataset, spec, master commit,
+environment, machine and thread setting match; do not re-time it for those.
+A wall-time claim needs the baseline timed in the same session, or a stored
+case re-run as a same-session control with its drift reported beside the
+result.
 
 Before adding a cache, look for reuse the code already misses: discarded or
 recomputed results, repeated factorizations or products, and matrices

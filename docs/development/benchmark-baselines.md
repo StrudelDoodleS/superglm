@@ -6,7 +6,14 @@ branch. The baselines live in benchboard, the machine coordinator: its
 `run-timed --record` store holds the wall time per case, commit and hardware,
 and its fit history (`history.sqlite3`) holds the full record of each fit. A
 commit that has been timed for a dataset, case spec, environment, machine and
-thread setting is never timed again.
+thread setting is not timed again for its work counts, numerical outputs and
+backend.
+
+Wall time drifts between sessions on a shared machine: the same commit and
+case have measured 15-18% apart on different evenings, with identical work
+counts. A wall-time claim therefore needs the baseline timed in the same
+session as the branch, or a stored case re-run in that session as a control,
+with the drift reported beside the result.
 
 ## Cases
 
@@ -129,7 +136,9 @@ but the SHA:
 - the dataset hash, computed from the prepared train and test frames, so a
   change to the data files or to their preparation invalidates it;
 - the case-spec hash: family, link, features, interactions, binning, fit method
-  and options, the warm-up and the metric definitions;
+  and options, the warm-up, and the source of the harness code that builds the
+  response, weights and offsets and computes the held-out metrics, so editing
+  that code retires the baselines stored under the old version;
 - the environment: a numpy, scipy, numba, pandas or BLAS upgrade, or a different
   OpenBLAS core type, needs a new baseline;
 - the machine: CPU model, core count and RAM;

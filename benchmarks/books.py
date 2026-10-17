@@ -28,6 +28,7 @@ import functools
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import json
 import os
 import platform
@@ -291,8 +292,35 @@ def digest(obj) -> str:
     return hashlib.sha256(canonical(obj).encode()).hexdigest()
 
 
+# The harness code that turns a spec into a problem and its metrics; its source is part of
+# every spec hash, so a change to how y, weights, offsets or a metric are computed retires
+# the baselines stored under the old code.
+_SEMANTICS = (
+    "_fremtpl2_book",
+    "_synthetic",
+    "_response",
+    "_column",
+    "_glm_inputs",
+    "_lss_inputs",
+    "_glm_model",
+    "_lss_model",
+    "_warm_up",
+    "_fit",
+    "_deciles",
+    "_gini",
+    "_ae",
+    "_nb2_deviance",
+    "glm_results",
+    "lss_results",
+)
+
+
+def harness_hash() -> str:
+    return digest([inspect.getsource(globals()[name]) for name in _SEMANTICS])
+
+
 def spec_hash(case: str) -> str:
-    return digest({"schema": SCHEMA, "case": case, "spec": CASES[case]})
+    return digest({"schema": SCHEMA, "case": case, "spec": CASES[case], "harness": harness_hash()})
 
 
 # --------------------------------------------------------------------------- data
@@ -424,10 +452,14 @@ def _git(tree, *args) -> str | None:
     return out.stdout.strip()
 
 
-def tree_state(path: Path, paths=("src", "pyproject.toml", "uv.lock")) -> dict:
-    """The commit a path belongs to; dirty when ``paths`` carry changes, untracked files included."""
+def tree_state(path: Path, paths=("src", "pyproject.toml", "uv.lock"), package=False) -> dict:
+    """The commit a path belongs to; dirty when ``paths`` carry changes, untracked files included.
+
+    ``package=True``: ``path`` is an imported superglm, which names a commit only when it is
+    ``<top>/src/superglm`` of a checkout, not a copy installed inside another repository.
+    """
     top = _git(path, "rev-parse", "--show-toplevel")
-    if top is None:
+    if top is None or (package and Path(top) / "src" / "superglm" != Path(path).resolve()):
         return {"tree": None, "sha": None, "dirty": None}
     status = _git(top, "status", "--porcelain", "--", *paths)
     return {"tree": top, "sha": _git(top, "rev-parse", "HEAD"), "dirty": bool(status)}
@@ -759,12 +791,23 @@ def glm_results(spec, model, test) -> dict:
         except Exception as exc:  # noqa: BLE001 - a family without a density says why
             out["test_nll"] = None
             out["test_nll_unavailable"] = f"{type(exc).__name__}: {exc}"[:200]
+    # A log-exposure offset carries the policy mass: rank by predicted rate and cut the deciles
+    # by exposure, as the rate-response cases do through their weights.
+    mass = _column(test, "exposure") if spec["offset"] == "log_exposure" else w
     actual, expected = w * y, w * mu
-    out["gini"] = _gini(actual, expected, w)
-    ae = _ae(actual, expected, _deciles(mu, w))
+    out["gini"] = _gini(actual, expected, mass)
+    ae = _ae(actual, expected, _deciles(expected / mass, mass))
     out["ae_deciles"] = ae
     out["ae_worst_dev"] = float(max(abs(v - 1.0) for v in ae))
     return out
+
+
+def _nb2_deviance(y, mu, theta) -> float:
+    """NB2 deviance, each row at its own theta: 2 sum[y log(y/mu) - (y+theta) log((y+theta)/(mu+theta))]."""
+    import numpy as np
+
+    t = np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0)
+    return float(2.0 * np.sum(t - (y + theta) * np.log((y + theta) / (mu + theta))))
 
 
 def lss_results(spec, model, test) -> dict:
@@ -782,8 +825,7 @@ def lss_results(spec, model, test) -> dict:
     pit = None
     if family == "NegativeBinomialLS":
         theta = params["theta"].to_numpy(np.float64)
-        t = np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0)
-        out["test_deviance"] = float(2.0 * np.sum(t - (y - mu)))
+        out["test_deviance"] = _nb2_deviance(y, mu, theta)
         expo = X["Exposure"].to_numpy(np.float64)
         bins = _deciles(mu / expo, expo)
         prob = theta / (theta + mu)
@@ -897,7 +939,7 @@ def key_of(case, threads, sha, data_hash, env, mach) -> dict:
 def case_key(case, threads) -> dict:
     import superglm
 
-    sha = tree_state(Path(superglm.__file__).parent)["sha"]
+    sha = tree_state(Path(superglm.__file__).parent, package=True)["sha"]
     key = key_of(case, threads, sha, dataset_hash(CASES[case]["dataset"]), environment(), machine())
     return {"case": case, "key": key, "key_hash": digest(key)}
 
@@ -922,7 +964,7 @@ def run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict]
     problem = threads_honoured(threads, seen)
     if problem and not counts_only:
         raise SystemExit(f"refused: {problem}")
-    provenance = tree_state(Path(superglm.__file__).parent)
+    provenance = tree_state(Path(superglm.__file__).parent, package=True)
     provenance.update(superglm_file=superglm.__file__, superglm_version=superglm.__version__)
     harness = tree_state(HERE, paths=("benchmarks/books.py", "examples/fremtpl2_data.py"))
     train, test = load_book(spec["dataset"])
@@ -1014,7 +1056,9 @@ def _append_index(out: Path, entry: dict) -> None:
 def write_record(record: dict, out: Path) -> Path:
     """One JSON file per run plus a line in the append-only index."""
     sha = record["provenance"]["sha"] or "unknown"
-    stamp = record["written"].replace(":", "").replace("-", "")
+    import uuid
+
+    stamp = record["written"].replace(":", "").replace("-", "") + "-" + uuid.uuid4().hex[:8]
     suffix = "__counts" if record["counts_only"] else ""
     path = out / sha[:12] / f"{record['case']}__{record['threads']}__{stamp}{suffix}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

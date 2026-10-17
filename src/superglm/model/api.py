@@ -1634,19 +1634,20 @@ class SuperGLM:
             with ``{"profile_trace": [row]}`` for each alternation step, then
             ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
         """
-        with self._parallel_scope():
-            return profile_ops.estimate_theta(
-                self,
-                X,
-                y,
-                sample_weight,
-                offset,
-                fit_mode=fit_mode,
-                theta_bounds=theta_bounds,
-                xatol=xatol,
-                ci_alpha=ci_alpha,
-                progress_callback=progress_callback,
-            )
+        with fit_record(self, "estimate_theta", locals()):
+            with self._parallel_scope():
+                return profile_ops.estimate_theta(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    fit_mode=fit_mode,
+                    theta_bounds=theta_bounds,
+                    xatol=xatol,
+                    ci_alpha=ci_alpha,
+                    progress_callback=progress_callback,
+                )
 
     # ── Plotting ──────────────────────────────────────────────────
 

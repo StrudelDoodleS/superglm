@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 from benchmarks import books
@@ -100,3 +101,52 @@ def test_compare_refuses_without_a_usable_baseline(run):
     for stored in ([], [counts_only]):
         table, refusals = books.compare([record], base_sha, lambda *_, s=stored: s)
         assert table is None and "no stored baseline" in refusals[0]
+
+
+def test_nb2_deviance_is_twice_the_log_likelihood_gap_to_the_saturated_model():
+    import numpy as np
+    from scipy import stats
+
+    rng = np.random.default_rng(5)
+    y = rng.negative_binomial(2.0, 0.6, 400).astype(float)
+    mu = rng.uniform(0.3, 3.0, 400)
+    theta = rng.uniform(0.5, 4.0, 400)
+
+    def loglik(mean):
+        return stats.nbinom.logpmf(y, theta, theta / (theta + mean)).sum()
+
+    saturated = np.where(y > 0, y, 1e-300)
+    expected = 2.0 * (loglik(saturated) - loglik(mu))
+    assert books._nb2_deviance(y, mu, theta) == pytest.approx(expected, rel=1e-10)
+
+
+def test_offset_exposure_count_metrics_rank_by_rate_and_cut_deciles_by_exposure():
+    import numpy as np
+    import pandas as pd
+
+    from superglm import families
+
+    rng = np.random.default_rng(9)
+    n = 500
+    expo = rng.uniform(0.05, 1.0, n)
+    rate = rng.uniform(0.05, 0.4, n)
+    test = pd.DataFrame({"Exposure": expo, "ClaimNb": rng.poisson(rate * expo).astype(float)})
+    spec = dict(books.CASES["fam_nb_fixed_exact"])
+    mu = rate * expo
+    model = SimpleNamespace(
+        predict=lambda X, offset=None: mu,
+        _distribution=families.nb2(theta=1.0),
+        result=SimpleNamespace(phi=1.0),
+    )
+    out = books.glm_results(spec, model, test)
+    y = test["ClaimNb"].to_numpy()
+    assert out["gini"] == pytest.approx(books._gini(y, mu, expo))
+    assert out["gini"] != pytest.approx(books._gini(y, mu, np.ones(n)))  # the unfixed count ranking
+    assert out["ae_deciles"] == pytest.approx(books._ae(y, mu, books._deciles(rate, expo)))
+
+
+def test_the_spec_hash_covers_the_harness_metric_code(monkeypatch):
+    before = books.spec_hash("smoke_poisson")
+    monkeypatch.setattr(books, "harness_hash", lambda: "edited")
+    assert books.spec_hash("smoke_poisson") != before
+    assert "glm_results" in books._SEMANTICS and "_response" in books._SEMANTICS

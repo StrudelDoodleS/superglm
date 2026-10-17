@@ -1,7 +1,8 @@
 """Fit records for benchboard: one worker-protocol-v1 spool file per fit.
 
-Imported only by ``superglm._fit_gate`` and only while ``BENCHBOARD_FIT_DIR``
-is set, which benchboard does for the jobs it runs.  Every function here is
+Imported only by ``superglm._fit_gate``, and only when recording is on: inside
+a benchboard job (``BENCHBOARD_FIT_DIR``) or on a machine with benchboard's
+state directory (the ``fits/unowned`` spool).  Every function here is
 best effort: a failure drops the record (or one of its fields) and never
 reaches the fit.  Rows, responses and coefficients are summarised, never
 written.  The payload has the shape ``benchmarks/books.py`` writes: a
@@ -194,14 +195,17 @@ def _process_facts() -> dict:
 
     root = Path(__file__).resolve().parents[1]
     commit = {"sha": None, "dirty": None}
-    try:
-        top = _git(root, "rev-parse", "--show-toplevel")
-        commit = {
-            "sha": _git(top, "rev-parse", "HEAD"),
-            "dirty": bool(_git(top, "status", "--porcelain", "--", "src")),
-        }
-    except Exception:  # noqa: BLE001 - an installed wheel has no git tree
-        pass
+    # Only a superglm source checkout (<top>/src/superglm with <top>/.git) names a commit: an
+    # installed copy inside another project's checkout must not record that project's HEAD.
+    top = root.parent.parent
+    if root == top / "src" / "superglm" and (top / ".git").exists():
+        try:
+            commit = {
+                "sha": _git(top, "rev-parse", "HEAD"),
+                "dirty": bool(_git(top, "status", "--porcelain", "--", "src")),
+            }
+        except Exception:  # noqa: BLE001, S110 - no git on PATH leaves the commit unknown
+            pass
     packages = {}
     for name in ("superglm", "numpy", "scipy", "numba", "pandas", "tabmat", "threadpoolctl"):
         try:
@@ -303,22 +307,42 @@ def _gm_facts(gm, y_nonzero=None) -> dict:
     codes = getattr(gm, "codes", None)
     if codes is not None and hasattr(gm, "n_levels"):
         L = int(gm.n_levels)
-        counts = np.bincount(np.asarray(codes), minlength=L + 1)
+        # Only a treatment-coded categorical sends its base level to the sink code L; random
+        # effects and factor smooths code every level 0..L-1.
+        sink = type(gm).__name__ == "CategoricalGroupMatrix"
+        k = L + 1 if sink else L
+        counts = np.bincount(np.asarray(codes), minlength=k)[:k]
         out.update(
-            cardinality=L + 1,
-            nnz_per_row=float(counts[:L].sum() / n),
-            empty_cells=int(np.count_nonzero(counts[: L + 1] == 0)),
-            min_level_count=int(counts[: L + 1].min()),
+            cardinality=k,
+            empty_cells=int(np.count_nonzero(counts == 0)),
+            min_level_count=int(counts.min()),
         )
         if y_nonzero is not None and len(y_nonzero) == n:
-            hits = np.bincount(np.asarray(codes), weights=y_nonzero, minlength=L + 1)
+            hits = np.bincount(np.asarray(codes), weights=y_nonzero, minlength=k)[:k]
             out["zero_response_cells"] = int(np.count_nonzero((counts > 0) & (hits == 0)))
+        B, unique, bins = (
+            getattr(gm, "B", None),
+            getattr(gm, "B_unique", None),
+            getattr(gm, "bin_idx", None),
+        )
+        if sink:
+            nnz = counts[:L].sum() / n
+        elif B is not None and hasattr(B, "nnz"):  # factor smooth, exact: its spline basis
+            nnz = B.nnz / n
+        elif unique is not None and bins is not None:  # factor smooth, binned
+            nnz = np.count_nonzero(unique, axis=1)[np.asarray(bins)].mean()
+        else:  # random effect: one indicator per row
+            nnz = 1.0
+        out["nnz_per_row"] = float(nnz)
         return out
     rows = getattr(gm, "row_idx", None)
     if rows is not None and y_nonzero is not None and len(y_nonzero) == n:
         rows = np.asarray(rows)
         out["zero_response_cells"] = int(rows.size > 0 and not y_nonzero[rows].any())
-    B = getattr(gm, "B", None)
+    # An exact spline-by-factor level holds the full basis in B and its own rows in B_level.
+    B = getattr(gm, "B_level", None)
+    if B is None:
+        B = getattr(gm, "B", None)
     if B is not None and hasattr(B, "nnz"):
         out.update(nnz_per_row=float(B.nnz / n), basis_width=int(B.shape[1]))
         return out
@@ -351,7 +375,7 @@ def _gm_facts(gm, y_nonzero=None) -> dict:
     return out
 
 
-def _terms(groups, design, kinds, y_nonzero=None) -> list[dict]:
+def _terms(groups, design, kinds, y_nonzero=None, pairs=None) -> list[dict]:
     """Per term (feature or pair): kind, width, cardinality, nnz per row, empty cells."""
     terms: dict[str, dict] = {}
     for group, gm in zip(groups, design.group_matrices, strict=False):
@@ -362,7 +386,9 @@ def _terms(groups, design, kinds, y_nonzero=None) -> list[dict]:
             {
                 "name": name,
                 "kind": kinds.get(name),
-                "pair": ":" in name,
+                "pair": (name in pairs)
+                if pairs is not None
+                else (isinstance(name, str) and ":" in name),
                 "width": 0,
                 "groups": [],
                 "nnz_per_row": 0.0,
@@ -419,11 +445,8 @@ def _data(params, lss) -> dict:
     out["weights"] = _safe(_vector_stats, w)
     out["offset_present"] = off is not None
     if off is not None and not lss:
-        import numpy as np
-
-        out["exposure_from_offset"] = _safe(
-            _vector_stats, np.exp(np.asarray(off, dtype=np.float64))
-        )
+        # an offset adds to the linear predictor; what it means (log exposure or not) is unknown
+        out["offset"] = _safe(_vector_stats, off)
     elif off is not None:
         out["offset_predictors"] = sorted(off)
     return out
@@ -447,7 +470,7 @@ def _numeric_shape(X, names) -> dict:
             if column.dtype.kind not in "fiub":
                 continue
             n = column.shape[0]
-            x = column[:: max(1, n // _SAMPLE_ROWS)].astype(np.float64)
+            x = column[:: max(1, -(-n // _SAMPLE_ROWS))].astype(np.float64)  # ceil: at most the cap
             x = x[np.isfinite(x)]
             if x.size == 0:
                 continue
@@ -468,20 +491,21 @@ def _numeric_shape(X, names) -> dict:
 
 def _family_params(model, method, parent_method) -> dict:
     """What the family was asked for before the fit: NB theta (fixed or "auto"), Tweedie
-    power, and whether the power is being estimated."""
+    power, and whether the power or theta is being estimated."""
     family = model._config.family if hasattr(model, "_config") else getattr(model, "_family", None)
     out = {"family": family if isinstance(family, str) else type(family).__name__}
     for attr, key in (("theta", "theta"), ("p", "power")):
         if not isinstance(family, str) and hasattr(family, attr):
             out[key] = _plain(getattr(family, attr))
     out["estimate_p"] = "estimate_p" in (method, parent_method)
+    out["estimate_theta"] = "estimate_theta" in (method, parent_method)
     return out
 
 
 # --------------------------------------------------------------------------- the model
 
 
-def _glm(model, params) -> dict:
+def _glm(model, params, design=True) -> dict:
     cfg = model._config
     family = cfg.family if isinstance(cfg.family, str) else type(cfg.family).__name__
     link = cfg.link if isinstance(cfg.link, str) or cfg.link is None else type(cfg.link).__name__
@@ -502,8 +526,11 @@ def _glm(model, params) -> dict:
         "options": _options(params),
     }
     dm = getattr(model, "_dm", None)
+    if not design:  # a failed fit: the model's design may be an earlier fit's, and the scan costs
+        return out
     if dm is not None:
-        terms = _terms(model._groups, dm, kinds, _nonzero(params.get("y")))
+        pairs = set(getattr(model, "_interaction_specs", {}))
+        terms = _terms(model._groups, dm, kinds, _nonzero(params.get("y")), pairs)
         out.update(n_columns=int(dm.p), term_list=terms, design=_design_summary(terms, dm.p))
     numeric = [
         k for k, v in getattr(model, "_specs", {}).items() if type(v).__name__ != "Categorical"
@@ -557,7 +584,7 @@ def _glm_outcome(model, params=None) -> dict:
     return out
 
 
-def _lss(model, params) -> dict:
+def _lss(model, params, design=True) -> dict:
     family = type(model._family).__name__
     out = {
         "model": "SuperLSS",
@@ -585,10 +612,15 @@ def _lss_outcome(model, params) -> dict:
         return out
     state = fitted.fit_state
     terms = []
+    templates = {tp.name: tp for tp in model._predictors}
+    yn = _nonzero(params.get("y"))
     for p in state.layout.predictors:
-        kinds = {}
-        yn = _nonzero(params.get("y"))
-        terms += [dict(t, predictor=p.name) for t in _terms(p.groups, p.design, kinds, yn)]
+        tp = templates.get(p.name)
+        kinds = {k: type(v).__name__ for k, v in getattr(tp, "features", {}).items()}
+        pairs = {f"{a}:{b}" for a, b in getattr(tp, "interactions", ())} | set(
+            getattr(tp, "interaction_specs", {})
+        )
+        terms += [dict(t, predictor=p.name) for t in _terms(p.groups, p.design, kinds, yn, pairs)]
     out.update(
         n_columns=int(state.layout.n_coefficients),
         term_list=terms,
@@ -716,7 +748,7 @@ def end(token, model, error) -> None:
         pass
     try:
         facts = _process_facts()
-        before = _safe(_lss if token["lss"] else _glm, model, token["params"])
+        before = _safe(_lss if token["lss"] else _glm, model, token["params"], error is None)
         outcome = (
             {}
             if error is not None
