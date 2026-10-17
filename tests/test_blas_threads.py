@@ -509,16 +509,71 @@ def test_a_pooled_section_runs_blas_on_one_thread_under_every_policy(monkeypatch
     assert _blas_thread_counts() == before
 
 
-def test_a_design_the_structured_backend_cannot_take_keeps_the_cap_at_any_width(monkeypatch):
+def test_a_design_the_structured_backend_cannot_take_keeps_the_cap_below_2500(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     before = _native_blas_counts()
     with solver_blas_threads():
-        allow_wide_design(50_000, structured=False)
+        allow_wide_design(2_499, structured=False)
         assert all(count == 1 for count in _blas_thread_counts())
-        allow_wide_design(50_000)
+        allow_wide_design(1_600)
         assert _blas_thread_counts() == before
+    with solver_blas_threads():
+        # Not yet measured as a complete dense fit: the release is kept there.
+        allow_wide_design(2_500, structured=False)
+        assert _blas_thread_counts() == before
+
+
+def test_every_fit_path_reports_whether_the_design_has_a_structured_term(monkeypatch):
+    """The release's dispatch, no thread counts: True for a RandomEffect and a
+    FactorSmooth design, False for a dense one, on the build and the cached-design path."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    from superglm import Categorical, FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
+
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        blas, "allow_wide_design", lambda p, *, structured=True: seen.append(structured)
+    )
+    rng = np.random.default_rng(5)
+    n = 600
+    X = pd.DataFrame(
+        {
+            "x": rng.uniform(-1.0, 1.0, n),
+            "g": rng.choice([f"l{k}" for k in range(8)], n),
+        }
+    )
+    y = 1.0 + 0.3 * X["x"] + rng.normal(scale=0.2, size=n)
+    designs = {
+        "random effect": SuperGLM(
+            family="gaussian", features={"x": Numeric(), "g": RandomEffect()}, selection_penalty=0
+        ),
+        "factor smooth": SuperGLM(
+            family="gaussian",
+            features={"z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", k=5)],
+            selection_penalty=0,
+        ),
+        "dense": SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5), "g": Categorical()},
+            selection_penalty=0,
+        ),
+    }
+    X["z"] = rng.normal(size=n)
+    for name, model in designs.items():
+        seen.clear()
+        model.fit_reml(X, y)
+        assert seen == [name != "dense"], name
+    # The profile search serves its design from a cache, through its own call.
+    model = designs["random effect"]
+    model._profile_design_cache = {}
+    seen.clear()
+    model.fit_reml(X, y)
+    model.fit_reml(X, y)
+    assert seen == [True, True]
 
 
 def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
@@ -532,7 +587,8 @@ def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     before = _native_blas_counts()
-    # Every design counts as wide, so only the structured test keeps the cap.
+    # Every design counts as wide (this one stays below the dense threshold),
+    # so only the structured test keeps the cap.
     monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
     seen: list[list[int]] = []
     decompose = rank._decompose_gram
@@ -553,3 +609,4 @@ def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
     ).fit_reml(X, y)
     assert seen and all(all(count == 1 for count in counts) for counts in seen)
     assert _blas_thread_counts() == before
+
