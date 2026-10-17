@@ -9,6 +9,7 @@ repository under [`notes/`](https://github.com/StrudelDoodleS/superglm/tree/mast
 
 releases
 cost-and-timing
+benchmark-baselines
 migrations/group-pricing-rank
 migrations/weight-semantics-prior
 migrations/family-bound-predictors

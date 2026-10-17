@@ -19,6 +19,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._blas_threads import solver_blas_threads
+from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
 from superglm.diagnostics.fit_report import FitDiagnosticReport
@@ -771,20 +772,21 @@ class SuperLSS:
         --------
         fit_reml : Estimate smoothing parameters as part of the fit.
         """
-        return self._fit(
-            X,
-            y,
-            sample_weight=sample_weight,
-            offsets=offsets,
-            lambdas=lambdas,
-            solver_config=DenseSolverConfig(
-                max_iterations=max_inner_iter,
-                tolerance=inner_tol,
-                coefficient_curvature=self._coefficient_curvature,
-            ),
-            efs_config=None,
-            retain_rows=retain_rows,
-        )
+        with fit_record(self, "fit", locals()):
+            return self._fit(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offsets=offsets,
+                lambdas=lambdas,
+                solver_config=DenseSolverConfig(
+                    max_iterations=max_inner_iter,
+                    tolerance=inner_tol,
+                    coefficient_curvature=self._coefficient_curvature,
+                ),
+                efs_config=None,
+                retain_rows=retain_rows,
+            )
 
     def fit_reml(
         self,
@@ -848,48 +850,49 @@ class SuperLSS:
         both. The smoothing result retains the numeric starts for replay.
         Stops can depend on the starting values, so vary them when comparing fits.
         """
-        if method != "efs":
-            raise NotImplementedError("SuperLSS currently supports only method='efs'")
-        if outer not in ("efs", "efs+newton"):
-            raise ValueError("outer must be 'efs' or 'efs+newton'")
-        if initial_lambda is not None and (
-            isinstance(initial_lambda, bool)
-            or not isinstance(initial_lambda, int | float)
-            or not math.isfinite(initial_lambda)
-            or initial_lambda <= 0.0
-        ):
-            raise ValueError("initial_lambda must be None or a finite positive number")
-        return self._fit(
-            X,
-            y,
-            sample_weight=sample_weight,
-            offsets=offsets,
-            lambdas=lambdas,
-            solver_config=DenseSolverConfig(
-                max_iterations=max_inner_iter,
-                tolerance=inner_tol,
-                coefficient_curvature=self._coefficient_curvature,
-            ),
-            efs_config=DistributionalEFSConfig(
-                max_iterations=max_reml_iter,
-                tolerance=reml_tol,
-                max_log_step=max_log_step,
-                maximum_lambda=max_lambda,
-                initial_lambda=(
-                    None if initial_lambda is None else min(float(initial_lambda), max_lambda)
+        with fit_record(self, "fit_reml", locals()):
+            if method != "efs":
+                raise NotImplementedError("SuperLSS currently supports only method='efs'")
+            if outer not in ("efs", "efs+newton"):
+                raise ValueError("outer must be 'efs' or 'efs+newton'")
+            if initial_lambda is not None and (
+                isinstance(initial_lambda, bool)
+                or not isinstance(initial_lambda, int | float)
+                or not math.isfinite(initial_lambda)
+                or initial_lambda <= 0.0
+            ):
+                raise ValueError("initial_lambda must be None or a finite positive number")
+            return self._fit(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offsets=offsets,
+                lambdas=lambdas,
+                solver_config=DenseSolverConfig(
+                    max_iterations=max_inner_iter,
+                    tolerance=inner_tol,
+                    coefficient_curvature=self._coefficient_curvature,
                 ),
-                acceleration=acceleration,
-                acceleration_history=acceleration_history,
-                acceleration_max_amplification=acceleration_max_amplification,
-                practical_convergence=practical_reml,
-                retain_history_rows=retain_history_rows,
-                practical_parameter_tolerance=practical_reml_parameter_tol,
-                plateau_tolerance=reml_plateau_tol,
-                outer=outer,
-            ),
-            retain_rows=retain_rows,
-            phase_recorder=phase_recorder,
-        )
+                efs_config=DistributionalEFSConfig(
+                    max_iterations=max_reml_iter,
+                    tolerance=reml_tol,
+                    max_log_step=max_log_step,
+                    maximum_lambda=max_lambda,
+                    initial_lambda=(
+                        None if initial_lambda is None else min(float(initial_lambda), max_lambda)
+                    ),
+                    acceleration=acceleration,
+                    acceleration_history=acceleration_history,
+                    acceleration_max_amplification=acceleration_max_amplification,
+                    practical_convergence=practical_reml,
+                    retain_history_rows=retain_history_rows,
+                    practical_parameter_tolerance=practical_reml_parameter_tol,
+                    plateau_tolerance=reml_plateau_tol,
+                    outer=outer,
+                ),
+                retain_rows=retain_rows,
+                phase_recorder=phase_recorder,
+            )
 
     def _require_fitted(self) -> DenseDistributionalModel:
         if self._model is None:
