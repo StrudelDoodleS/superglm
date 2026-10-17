@@ -141,6 +141,58 @@ def test_a_converging_discrete_gamma_log_fit_keeps_its_fisher_iteration():
     assert model._reml_result.curvature_source == "fisher"
 
 
+@pytest.mark.parametrize("family", ["gamma", "tweedie"])
+def test_a_forced_newton_switch_runs_the_observed_discrete_path_to_convergence(family, monkeypatch):
+    """A discrete Gamma/log or Tweedie/log fit whose iteration switches to Newton rows converges
+    and publishes the observed criterion it optimized.
+
+    The switch is forced (``poi_stalled`` reads True from the second
+    iteration), so no trajectory decides it and ordinary CI runs the
+    switched path: Newton working rows, then the observed terminal refit and
+    objective on a discretized design.  The published objective is not the
+    Fisher criterion at the same smoothing parameters, which a fit with them
+    held fixed evaluates.  Which criterion a switched fit should publish is
+    an open decision (review of PR #498); this pins today's.
+    """
+    import superglm.reml.discrete as discrete
+    from superglm.distributions import Tweedie
+    from superglm.types import LambdaPolicy
+
+    monkeypatch.setattr(discrete, "poi_stalled", lambda ratios, *, rose, done, max_iter: done >= 2)
+    rng = np.random.default_rng(3)
+    n = 4000
+    x = rng.integers(0, 40, n) / 40.0
+    mu = np.exp(1.0 + np.sin(5.0 * x))
+    if family == "gamma":
+        y = rng.gamma(0.7, mu / 0.7)
+        fam = "gamma"
+    else:
+        counts = rng.poisson(mu**0.5 / 1.5)
+        y = np.array([rng.gamma(2.0, 1.5 * m**0.5 / 2.0, k).sum() for k, m in zip(counts, mu)])
+        fam = Tweedie(p=1.5)
+
+    def model(spline):
+        return SuperGLM(family=fam, link="log", features={"x": spline}, discrete=True)
+
+    frame = pd.DataFrame({"x": x})
+    switched = model(Spline(n_knots=8))
+    switched.fit_reml(frame, y)
+    assert switched.reml_diagnostics()["converged"]
+    assert switched._reml_profile["reml_poi_newton_switch_iter"] == 2
+    assert switched._reml_result.curvature_source == "observed"
+    assert np.all(np.isfinite(switched.predict(frame)))
+    (lam,) = switched._reml_result.lambdas.values()
+
+    held = model(Spline(n_knots=8, lambda_policy=LambdaPolicy.fixed(lam)))
+    held.fit_reml(frame, y)
+    assert held._reml_result.curvature_source == "fisher"
+    objective = switched._reml_result.objective
+    fisher = held._reml_result.objective
+    # ten times the search's own stop resolution, reml_tol (1 + |V|)
+    resolution = switched._reml_profile["reml_tol_resolved"] * (1.0 + abs(fisher))
+    assert abs(objective - fisher) > 10.0 * resolution
+
+
 @pytest.mark.parametrize(
     ("ratios", "rose", "done", "stalled"),
     [
