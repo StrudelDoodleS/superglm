@@ -580,13 +580,15 @@ def test_every_fit_path_reports_whether_the_design_has_a_structured_term(monkeyp
 
 
 def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
-    """threadpoolctl probe: a wide design without a RandomEffect or FactorSmooth term
-    factors its Grams on one BLAS thread, and the process's pools come back after."""
+    """threadpoolctl probe: a wide design without a RandomEffect or FactorSmooth term, whose
+    passes run on the pool (a lookup design: its Grams come from term-pair tables), factors its
+    Grams on one BLAS thread, and the process's pools come back after.  A design with a serial
+    n·p² pass releases instead (``test_the_chunked_row_route_releases_a_dense_fit``)."""
     import pandas as pd
 
     import superglm._blas_threads as blas
     import superglm.solvers.rank as rank
-    from superglm import Categorical, Spline, SuperGLM
+    from superglm import Categorical, SuperGLM
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     before = _native_blas_counts()
@@ -603,12 +605,12 @@ def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
     monkeypatch.setattr(rank, "_decompose_gram", probe)
     rng = np.random.default_rng(3)
     n = 2_000
-    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "g": rng.choice(list("pqr"), n)})
-    y = rng.poisson(np.exp(0.3 * np.sin(4.0 * X["a"]))).astype(float)
+    X = pd.DataFrame({"g": rng.choice(list("pqr"), n), "h": rng.choice(list("uvwxyz"), n)})
+    y = rng.poisson(np.exp(0.3 * (X["g"] == "q") - 0.2 * (X["h"] == "u"))).astype(float)
     SuperGLM(
         family="poisson",
-        features={"a": Spline(n_knots=6), "g": Categorical()},
-        interactions=[("a", "g")],
+        features={"g": Categorical(), "h": Categorical()},
+        interactions=[("g", "h")],
     ).fit_reml(X, y)
     assert seen and all(all(count == 1 for count in counts) for counts in seen)
     assert _blas_thread_counts() == before
@@ -650,15 +652,20 @@ def test_the_pool_releases_each_result_once_it_is_yielded():
 
 
 def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
-    """A dense design keeps the cap because its row passes run on the pool; both passes that run
-    on the calling thread instead (the chunked solved-row route and the gradient-only pass)
-    release it for the rest of the fit, as before the dense threshold."""
+    """A dense design keeps the cap because its row passes run on the pool; every pass that runs
+    on the calling thread instead (the chunked solved-row route, the gradient-only pass and the
+    serial centred Grams) releases it for the rest of the fit, as before the dense threshold, while
+    the pooled support route keeps it."""
     import pandas as pd
 
     import superglm._blas_threads as blas
     import superglm.reml._leverage_rows as leverage_rows
     import superglm.reml.w_derivatives as w_derivatives
     from superglm import Categorical, Spline, SuperGLM
+    from superglm._group_matrix._group_matrix_centered import (
+        centered_gram_rhs,
+        centered_signed_grams,
+    )
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     rng = np.random.default_rng(3)
@@ -668,6 +675,10 @@ def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     model = SuperGLM(family="poisson", features={"a": Spline(n_knots=6), "g": Categorical()})
     model.fit(X, y)
     dm = model._dm
+    lookup = SuperGLM(family="poisson", features={"g": Categorical(), "h": Categorical()})
+    lookup.fit(X.assign(h=rng.choice(list("uvw"), n)), y)
+    ldm = lookup._dm
+    real_plan = leverage_rows._support_plan
     released = []
     monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
     monkeypatch.setattr(blas, "_release_current_scope", lambda: released.append(True))
@@ -677,6 +688,18 @@ def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     assert released == [True]
     w_derivatives._leverage_gradient_rhs(dm, inverse, centre, np.ones(dm.n), float(dm.n))
     assert released == [True, True]
+    ones = np.ones(dm.n)
+    centered_gram_rhs(dm=dm, W=ones, mean_x=centre, z_centered=ones)
+    centered_signed_grams(dm=dm, weights=[ones], mean_x=centre)
+    assert released == [True] * 4
+    # The pooled support route runs on the pool and keeps the cap.
+    monkeypatch.setattr(leverage_rows, "_support_plan", real_plan)
+    assert real_plan(ldm, np.eye(ldm.p), np.zeros(ldm.p), None) is not None
+    leverage_rows.solved_row_blocks(
+        ldm, np.eye(ldm.p), np.zeros(ldm.p), None, np.ones(ldm.n, dtype=bool)
+    )
+    assert released == [True] * 4
+    monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
     monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 10**9)  # a narrow design keeps the cap
     leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
-    assert released == [True, True]
+    assert released == [True] * 4

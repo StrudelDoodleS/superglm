@@ -157,10 +157,11 @@ def allow_wide_design(p: int, *, structured: bool = True) -> None:
 
     ``structured`` is False for a design the structured backend cannot take
     (no RandomEffect or FactorSmooth term): such a design keeps the cap below
-    ``_DENSE_WIDE_DESIGN_THRESHOLD``.  Its row passes, the Gram, the
+    ``_DENSE_WIDE_DESIGN_THRESHOLD`` while its row passes, the Gram, the
     leverages and the factor run on the worker pool, the one parallelism
     level, and its dense kernels at the widths fitted measured faster on one
-    thread: the 10-pair freMTPL2 fit
+    thread (a pass that runs on the fit's thread releases it,
+    ``release_for_serial_row_passes``): the 10-pair freMTPL2 fit
     (1,535 coefficients, the dense Gram route) took 92 s with BLAS on one
     thread and 124-137 s with it released, at a seventh of the CPU time,
     while pg17 step E (16,850 coefficients, the structured route) took 745 s
@@ -176,10 +177,14 @@ def release_for_serial_row_passes(p: int) -> None:
     """Release the automatic cap for the rest of a fit whose row passes run on one thread.
 
     A dense design keeps the cap below ``_DENSE_WIDE_DESIGN_THRESHOLD`` because
-    its row passes run on the worker pool.  A pass that falls back to the
-    chunked route (``reml._leverage_rows``, a design whose groups are not all
-    lookups or whose tables exceed the budget) has nothing running beside its
-    n·p² products, and a design takes that route on every pass.  From
+    its row passes run on the worker pool.  A pass that runs on the fit's own
+    thread instead has nothing beside its n·p² products: the chunked
+    solved-row route (``reml._leverage_rows``, a design whose groups are not
+    all lookups or whose tables exceed the budget), the gradient-only pass,
+    and the serial centred Grams (``centered_gram_rhs``,
+    ``centered_signed_grams``: signed observed weights, the stable derivative
+    Grams, PIRLS's last rung).  A design takes such a pass on every iteration.
+    On a pool worker there is no fit scope, and this does nothing.  From
     ``_WIDE_DESIGN_THRESHOLD`` such a fit is released for its remaining work,
     as before the dense threshold: the 10-pair freMTPL2 fit (1,535
     coefficients) forced onto that route took 206 s capped and 171 s released
