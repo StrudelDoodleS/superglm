@@ -1115,12 +1115,23 @@ def write_record(record: dict, out: Path) -> Path:
     return path
 
 
+# Read in the process that runs the fit, so the `key` step (another process, another wrapper)
+# need not see the same widths: reuse and benchboard's case name leave them out, and `compare`,
+# whose two sides both come from a fit's own process, still refuses on them.
+_PER_PROCESS = ("threads_observed",)
+
+
+def reuse_part(key: dict) -> dict:
+    """The key without its commit and its per-process thread observation."""
+    return {k: v for k, v in key.items() if k != "sha" and k not in _PER_PROCESS}
+
+
 def bench_case(record_or_key: dict) -> str:
     """benchboard's case name: benchboard keys a baseline by (case, commit, hardware), so the
     case carries everything else in this harness's key -- dataset, spec, environment, machine
     and thread setting -- as one hash."""
     key = record_or_key.get("key", record_or_key)
-    rest = {k: v for k, v in key.items() if k != "sha"}
+    rest = reuse_part(key)
     case = record_or_key.get("case") or "?"
     return f"books/{case}/{key['threads']}/{digest(rest)[:12]}"
 
@@ -1472,7 +1483,9 @@ def cmd_baseline(args) -> int:
             stored = [
                 r
                 for r in stored_records(sha, case, threads)
-                if usable_baseline(r) and r["key"] == key
+                if usable_baseline(r)
+                and reuse_part(r["key"]) == reuse_part(key)
+                and r["key"]["sha"] == sha
             ]
             if stored and not args.force:
                 print(f"reused  {case} [{threads}] {bench_case(entry)} at {sha[:12]}", flush=True)

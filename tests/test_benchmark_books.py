@@ -240,3 +240,19 @@ def test_the_key_carries_the_observed_pool_widths(run):
     observed = record["key"]["threads_observed"]
     assert observed["numba"] == record["threads_observed"]["numba"]
     assert observed["pools"] == record["threads_observed"]["pools"]
+
+
+def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run):
+    """The key step runs in another process under another wrapper, so its observed widths may
+    differ from the timed run's: reuse and the benchboard case name match without them, while
+    compare, whose two sides both come from a fit's process, still refuses on them."""
+    record, _ = run
+    narrowed = copy.deepcopy(record["key"])
+    narrowed["threads_observed"] = {"pools": [["openblas", 3]], "numba": 3}
+    assert books.reuse_part(narrowed) == books.reuse_part(record["key"])
+    assert books.bench_case({"case": "smoke_poisson", "key": narrowed}) == books.bench_case(record)
+    stored = copy.deepcopy(record)
+    stored.update(key=narrowed, counts_only=False, status="ok", warmup_error=None)
+    stored["provenance"] = {**stored["provenance"], "dirty": False}
+    _, reason = books.match_baseline(record, [stored], record["key"]["sha"])
+    assert reason is not None and "threads_observed" in reason

@@ -149,7 +149,10 @@ but the SHA:
   OpenBLAS core type, needs a new baseline;
 - the machine: CPU model, core count and RAM;
 - the thread setting, and the BLAS and numba pool widths observed under it,
-  since affinity, cgroups or a library can narrow a "default" pool.
+  since affinity, cgroups or a library can narrow a "default" pool. The widths
+  are read in the fit's own process, so `baseline` reuse and benchboard's case
+  name leave them out (the `key` step runs in another process), while
+  `compare` refuses on them.
 
 superglm's own fit recorder is off during a `books.py` run, which records the
 fit itself, so the timed fit carries no recorder work.
