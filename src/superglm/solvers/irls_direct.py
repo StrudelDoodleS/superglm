@@ -3801,6 +3801,7 @@ def _fit_irls_direct_once(
                     and min(_mode_ratios[-_stagnation_window:])
                     > 0.5 * min(_mode_ratios[:-_stagnation_window])
                 )
+                switched_curvature = False
                 if (
                     _stagnation_newton_available
                     and not _observed_newton_active
@@ -3824,6 +3825,7 @@ def _fit_irls_direct_once(
                     _observed_newton_active = True
                     _can_reuse_weighted_gram = False
                     score_stagnated = False
+                    switched_curvature = True
                     _mode_ratios.clear()
                     if _newton_latch is not None:
                         _newton_latch[0] = True
@@ -3833,6 +3835,7 @@ def _fit_irls_direct_once(
                         )
                 if (
                     not converged_this_iter
+                    and not switched_curvature
                     and not step_rejected
                     and not _has_scop
                     and not has_constraints
@@ -3848,9 +3851,11 @@ def _fit_irls_direct_once(
                     # ``(alpha, beta)``, and the raw intercept only its
                     # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
                     # and can hold still while ``alpha`` moves, so ``alpha``
-                    # is compared too (``None`` on both sides otherwise).  It
-                    # ends here.  The
-                    # floors are resolved whatever the relative score: where
+                    # is compared too (``None`` on both sides otherwise).  An
+                    # iteration that has just changed the map (the Newton
+                    # switch above) is not one: the next iteration takes the
+                    # other step.  A fixed point ends the solve, with the
+                    # floors resolved whatever the relative score: where
                     # the residuals are at the rounding of the fitted values
                     # (a model that fits its response exactly, as a linear
                     # model can) the score's own scale ``sum |s|`` is

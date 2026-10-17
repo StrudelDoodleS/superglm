@@ -1181,6 +1181,53 @@ class TestDirectSolverBasic:
         assert warm.converged
         assert floor_verdicts and max(floor_verdicts) <= 1.0
 
+    def test_a_newton_switch_and_a_fixed_point_in_one_iteration_take_the_newton_step(
+        self, monkeypatch
+    ):
+        """The iteration that switches Gamma/log to Newton is not a fixed point of the new map.
+
+        The working rows are forced constant, so the second iteration repeats
+        the first bit for bit, and the rate test is forced to fire on that
+        same iteration.  The switch clears the score history; the fixed-point
+        stop then wrote its last entry (before the fix: ``IndexError``), and
+        would have ended the solve before the Newton map it chose ran.  The
+        solve now takes the Newton iteration and stops at its fixed point.
+        """
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(5)
+        n = 120
+        x = np.linspace(-1.0, 1.0, n)
+        y = np.exp(0.5 + 0.3 * x) * rng.gamma(50.0, 1.0 / 50.0, n)
+        _force_constant_working_rows(monkeypatch, np.log(y), weights=np.ones(n))
+        floor_verdicts = _force_unresolved_score(monkeypatch, resolved=True)
+        monkeypatch.setattr(
+            irls_direct,
+            "rate_exhausts_budget",
+            lambda ratios, window, done, max_iter: done >= 2,
+        )
+        profile: dict = {}
+        result, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert profile["irls_fisher_newton_switches"] == 1
+        assert profile["irls_observed_newton_iters"] == 1
+        assert result.n_iter == 3
+        assert result.converged
+        assert floor_verdicts and max(floor_verdicts) <= 1.0
+
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""
         from superglm.distributions import Gamma
