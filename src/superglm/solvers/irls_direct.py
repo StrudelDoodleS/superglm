@@ -1331,14 +1331,17 @@ def _fit_irls_direct_once(
             y=y,
             sample_weight=weights,
         )
-    # Whether the default start below was lowered into the family's mean space.
+    # Whether the default start below was lowered into the family's mean space
+    # (binomial/log; a start raised into an inverse link's domain is not).
     _start_lowered = False
-    if intercept_init is None and mean_space_violation(family, link) is not None:
-        # The domain guard below keeps every accepted state inside the mean
-        # space only from a start inside it, and the default intercept is
-        # chosen before the offset: lower it until the start is inside
-        # (``irls_state.interior_start_intercept``).  A caller's warm start is
-        # left as it is.
+    if intercept_init is None and (
+        mean_space_violation(family, link) is not None or link_domain_violation(link) is not None
+    ):
+        # The domain guards below keep every accepted state inside the mean
+        # space and the link's domain only from a start inside them, and the
+        # default intercept is chosen before the offset: move it until the
+        # start is inside (``irls_state.interior_start_intercept``).  A
+        # caller's warm start is left as it is.
         start_intercept = interior_start_intercept(
             family,
             link,
@@ -1350,7 +1353,7 @@ def _fit_irls_direct_once(
         if start_intercept != intercept:
             intercept = start_intercept
             _deviance_init = None
-            _start_lowered = True
+            _start_lowered = mean_space_violation(family, link) is not None
 
     # Dense paths retain the existing p x p penalty oracle. Structured paths
     # add each penalty directly to A or d, unless a caller already supplied a

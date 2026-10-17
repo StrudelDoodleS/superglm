@@ -1228,6 +1228,65 @@ class TestDirectSolverBasic:
         assert result.converged
         assert floor_verdicts and max(floor_verdicts) <= 1.0
 
+    def test_inverse_link_default_start_is_raised_inside_the_domain(self):
+        """A negative offset that puts the default start at eta <= 0 has its intercept raised.
+
+        The default intercept ``1 / mean(y)`` is chosen before the offset, so
+        an offset of -10 on 30% of the rows starts them at eta < 0, outside
+        the inverse link's domain, where the domain guard is not installed:
+        the clipped rows (mean 1e12) are accepted and the state crawls back
+        from the clip (before the fix: ``max_iter`` at 20 iterations, every
+        such row at eta ~ 1e-6; 45 iterations to converge without a cap).
+        The start is now raised until the smallest eta is the default
+        intercept, as the log-binomial start is lowered.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink, LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.irls_state import interior_start_intercept
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        offset = np.where(rng.uniform(size=n) < 0.3, -10.0, 0.0)
+        y = rng.gamma(0.5, (1.0 / (10.5 + x + offset)) / 0.5)
+        start = 1.0 / float(np.mean(y))
+        assert np.any(start + offset <= 0.0)
+        raised = interior_start_intercept(
+            Gamma(), InverseLink(), start + offset, np.ones(n), start, level=start
+        )
+        assert raised == start + 10.0
+        # a start already inside, and a link without the domain, are left alone
+        assert (
+            interior_start_intercept(
+                Gamma(), InverseLink(), start + 0 * offset, np.ones(n), start, level=start
+            )
+            == start
+        )
+        assert (
+            interior_start_intercept(
+                Gamma(), LogLink(), start + offset, np.ones(n), start, level=start
+            )
+            == start
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=InverseLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                offset=offset,
+                max_iter=20,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        assert result.converged
+        assert np.all(result.intercept + x * result.beta[0] + offset > 0.0)
+
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""
         from superglm.distributions import Gamma
