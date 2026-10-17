@@ -140,9 +140,11 @@ but the SHA:
 - the dataset hash, computed from the prepared train and test frames, so a
   change to the data files or to their preparation invalidates it;
 - the case-spec hash: family, link, features, interactions, binning, fit method
-  and options, the warm-up, and the source of the harness code that builds the
-  response, weights and offsets and computes the held-out metrics, so editing
-  that code retires the baselines stored under the old version;
+  and options, the warm-up, and the harness hash;
+- the harness hash: the source of the harness code that builds the response,
+  weights and offsets, computes the held-out metrics, counts the work and reads
+  the fit's fields, with the counter tables, so editing that code retires the
+  baselines stored under the old version, and `compare` names it as the cause;
 - the environment: an upgrade of any of those packages or of BLAS, or a different
   OpenBLAS core type, needs a new baseline;
 - the machine: CPU model, core count and RAM;
