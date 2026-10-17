@@ -120,9 +120,23 @@ def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A smoothing-parameter trial that carries a row to eta <= 0 under the inverse link is
-    refused, as a rejected trial, instead of being scored on clipped means of about 1e12 and
-    becoming the next solve's warm start."""
+    refused, as a rejected trial, instead of being scored on clipped means of about 1e12: no
+    trial the line search scores has a positive-weight row outside the domain."""
     from superglm.reml import discrete
+    from superglm.solvers.mode_score import centred_matvec
+
+    scored_outside = []
+    real_objective = discrete.reml_laml_objective
+
+    def checked_objective(dm, distribution, link, groups, y, pirls, lambdas, weights, offset, **kw):
+        if pirls.n_iter == 0 and pirls.state_center is not None:  # a line-search trial
+            eta = pirls.centred_intercept + centred_matvec(dm, pirls.beta, pirls.state_center)
+            scored_outside.append(bool(np.any((eta + offset <= 0.0) & (weights > 0.0))))
+        return real_objective(
+            dm, distribution, link, groups, y, pirls, lambdas, weights, offset, **kw
+        )
+
+    monkeypatch.setattr(discrete, "reml_laml_objective", checked_objective)
 
     real = discrete._solve_cached_profiled_system
     crossed = {"n": 0}
@@ -146,6 +160,7 @@ def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
     model.fit_reml(X, y, sample_weight=weights, max_reml_iter=6, runtime_validation="skip")
 
     assert crossed["n"] == 1
+    assert scored_outside and not any(scored_outside)
     assert model._reml_profile["reml_n_domain_refused_trials"] >= 1
     mu = model.predict(X)
     assert np.all(np.isfinite(mu)) and mu.max() < 1e3 * y.max()

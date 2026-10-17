@@ -628,10 +628,11 @@ def optimize_discrete_reml_cached_w(
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
     # A trial whose unclipped predictor leaves the link's domain (eta <= 0 under
-    # an inverse link) would be scored on clipped means of about 1e12, and once
-    # accepted it would warm-start the next solve outside the domain, where the
-    # PIRLS guard is off.  It is refused like any other trial; the retained state
-    # starts inside the domain and is only ever replaced by an accepted trial.
+    # an inverse link) has no REML objective: ``stabilize_eta`` would score it on
+    # clipped means of about 1e12, and accepting it would move the smoothing
+    # parameters on a number that is not the criterion.  It is refused like any
+    # other trial.  No trial state warm-starts a solve: each iteration ends by
+    # replacing the warm state with the candidate's own PIRLS state.
     domain_violation = link_domain_violation(link)
     _n_domain_refused_trials = 0
     # score-test stops refused because a concave shoulder was live
