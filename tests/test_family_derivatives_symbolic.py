@@ -715,8 +715,11 @@ def test_nb2_theta_fourth_derivative_is_inside_its_certified_bound() -> None:
     The row-scale oracle above cannot see this channel near Poisson, where
     ``l_aaaa ~ mu`` dwarfs ``l_bbbb ~ mu^2 / theta``; this holds the channel
     to its own bound, the certificate the LAML Hessian's trust test reads.
-    The grid adds two rows at the series' widest ratio, ``x = 0.06`` against
-    the switch at ``1/16``.  Mutation check: a zero bound fails every row.
+    The grid adds rows where the series is chosen near its widest ratio
+    (the switch is at ``x = 1/16``).  Mutation checks: a zero bound fails
+    every row; dropping the series tail fails the ``x = 0.06`` rows, and the
+    ``m^2`` tail moment in place of ``m^3`` fails ``(8, 97.2, 3039)``, where
+    the series then wins with its truncation outside the bound.
     """
     from superglm.distributional.kernels.negative_binomial import (
         negative_binomial_log_fourth_derivatives,
@@ -732,6 +735,7 @@ def test_nb2_theta_fourth_derivative_is_inside_its_certified_bound() -> None:
         (40.0, 35.0, 1e4),
         (0.0, 6.0, 100.0),
         (5.0, 6.0, 100.0),
+        (8.0, 97.2, 3039.0),
     ]:
         mu, size = sp.exp(a), sp.exp(b)
         density = (
