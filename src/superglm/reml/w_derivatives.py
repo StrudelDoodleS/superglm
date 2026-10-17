@@ -17,7 +17,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._blas_threads import pooled_blas_threads
 from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
@@ -255,8 +254,9 @@ def _leverage_derivative_terms(
     # the same at every worker count (``_parallel.pooled_map``).
     blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
     if blocks.block_bytes is None:
-        with pooled_blas_threads():
-            parts = [contributions(job()) for job in blocks.jobs]
+        # The chunked route reads one stream of chunks on this thread: no pool
+        # runs, so the fit's BLAS policy applies to its products.
+        parts = [contributions(job()) for job in blocks.jobs]
     else:
         parts = pooled_map(lambda job: contributions(job()), list(blocks.jobs), blocks.block_bytes)
     for part in parts:

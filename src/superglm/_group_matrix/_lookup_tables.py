@@ -549,18 +549,28 @@ def _read_tables(plan: LookupPlan, centre: NDArray) -> tuple[list[NDArray], NDAr
 
 
 def _pool_run(jobs: list, job_bytes: int) -> None:
-    """Run ``jobs`` (callables writing disjoint outputs) on ``pool_workers`` threads, else serially."""
+    """Run ``jobs`` (callables writing disjoint outputs) on ``pool_workers`` threads, else serially.
+
+    BLAS runs on one thread for the whole run, serial or pooled, under every
+    policy, so a job's arithmetic does not depend on the worker count; each
+    pooled job runs in a copy of the caller's context, which carries its
+    ``np.errstate`` (as ``_parallel.pooled_map`` does).
+    """
+    import contextvars
+
     from superglm._blas_threads import pooled_blas_threads
     from superglm._parallel import pool_workers
 
     workers = pool_workers(len(jobs), job_bytes)
-    if workers <= 1:
-        for job in jobs:
-            job()
-        return
-    with pooled_blas_threads(), ThreadPoolExecutor(max_workers=workers) as pool:
-        for future in [pool.submit(job) for job in jobs]:
-            future.result()
+    with pooled_blas_threads():
+        if workers <= 1:
+            for job in jobs:
+                job()
+            return
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-tables") as pool:
+            futures = [pool.submit(contextvars.copy_context().run, job) for job in jobs]
+            for future in futures:
+                future.result()
 
 
 # --------------------------------------------------------------------------- Gram
@@ -719,6 +729,10 @@ def _pair_table(ta: _Term, A: NDArray, tb: _Term, B: NDArray, X: NDArray) -> NDA
 # every worker count; a design of at most this many rows sweeps in one range,
 # exactly as a single pass.
 _SWEEP_ROWS = 1 << 17
+# At most this many ranges: past 16 * _SWEEP_ROWS rows a range grows with the
+# design instead, so a split sweep holds at most 16 copies of its outputs at any
+# row count (still a function of the design alone).
+_MAX_SWEEP_RANGES = 16
 # A sweep splits only while its outputs are this small: each range then holds
 # and adds one copy of them, which a table of many cells (a tensor's
 # occupied cells against another's) would make cost more than the split buys.
@@ -732,7 +746,8 @@ class _Sweeps:
     sweeps rows ``lo:hi`` into ``parts``, arrays shaped as ``outputs``.  A
     design of one range sweeps straight into ``outputs``; otherwise every
     range sweeps into its own zeroed partials, and :meth:`run` sums them into
-    ``outputs`` in range order once the pool has run them, largest estimated
+    ``outputs`` in range order once the pool has run them (at most
+    ``_MAX_SWEEP_RANGES`` ranges, so at most that many copies), largest estimated
     cost (``cost`` per row) first.  A sweep whose outputs exceed
     ``_SPLIT_MAX_ENTRIES`` runs whole.  Each partial has one owner, and
     whether a sweep splits depends on the design alone, so the sums are
@@ -741,7 +756,8 @@ class _Sweeps:
 
     def __init__(self, n: int) -> None:
         self.n = n
-        self.ranges = [(lo, min(lo + _SWEEP_ROWS, n)) for lo in range(0, n, _SWEEP_ROWS)]
+        rows = max(_SWEEP_ROWS, -(-n // _MAX_SWEEP_RANGES))
+        self.ranges = [(lo, min(lo + rows, n)) for lo in range(0, n, rows)]
         self.jobs: list[tuple[float, Callable[[], None]]] = []
         self.reductions: list[tuple[list[NDArray], list[list[NDArray]]]] = []
 

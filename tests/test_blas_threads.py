@@ -610,3 +610,16 @@ def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
     assert seen and all(all(count == 1 for count in counts) for counts in seen)
     assert _blas_thread_counts() == before
 
+
+def test_table_jobs_run_on_one_blas_thread_at_any_worker_count(monkeypatch):
+    """Serial or pooled, a lookup-table job runs on one BLAS thread under an explicit policy too."""
+    from superglm._group_matrix import _lookup_tables as lookup_tables
+    from superglm._parallel import parallel_config
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
+    _native_blas_counts()
+    for workers in (1, 3):
+        seen: list[list[int]] = []
+        with parallel_config(n_jobs=workers):
+            lookup_tables._pool_run([lambda: seen.append(_blas_thread_counts())] * 3, 8)
+        assert seen and all(all(count == 1 for count in counts) for counts in seen), workers

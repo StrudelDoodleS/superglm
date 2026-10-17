@@ -118,6 +118,24 @@ def test_table_gram_is_bitwise_identical_for_any_worker_count(monkeypatch, sweep
     assert (max(split) > 0) == (sweep_rows < dm.n)
 
 
+def test_sweep_ranges_are_capped_whatever_the_row_count():
+    """At most _MAX_SWEEP_RANGES ranges, so a split sweep holds a bounded number of partials."""
+    for n in (1, 131_072, 131_073, 5_000_000, 40_000_000):
+        ranges = lookup_tables._Sweeps(n).ranges
+        assert len(ranges) <= lookup_tables._MAX_SWEEP_RANGES
+        assert ranges[0][0] == 0 and ranges[-1][1] == n
+        assert all(stop == start for (_, stop), (start, _) in zip(ranges, ranges[1:]))
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_pooled_table_jobs_see_the_callers_errstate(workers):
+    """A table job runs in a copy of the caller's context, so np.errstate reaches it."""
+    seen = []
+    with parallel_config(n_jobs=workers), np.errstate(divide="raise"):
+        lookup_tables._pool_run([lambda: seen.append(np.geterr()["divide"])] * 4, 8)
+    assert seen == ["raise"] * 4
+
+
 def test_a_lookup_fit_takes_every_centred_gram_from_the_tables(monkeypatch):
     """The dispatch: past the row threshold every centred Gram the fit forms is a table Gram.
 
