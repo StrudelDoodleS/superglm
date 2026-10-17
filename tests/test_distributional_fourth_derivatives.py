@@ -569,10 +569,10 @@ def test_two_piece_join_reach_includes_the_locations_curvature() -> None:
 def test_mean_form_join_reach_takes_the_locations_hessian() -> None:
     """The default log-normal mean form: mu = log theta_0 - log K(theta_1, theta_2), so
     d^2 mu / d eta^2 has H_00 = (g0'' - g0'^2/theta_0)/theta_0, H_qq = -(K_qq gq'^2 + K_q gq'')
-    and H_12 = -K_se g1' g2'.  Each row sits in the band its pair's second-order term adds
-    (at 3/4 of it, so dropping any one term of that entry leaves the row outside): the
-    (1, 1), (2, 2) and (1, 2) pairs are certified; under the log link H_00 = 0, so a row
-    just past the first-order reach on (0, 0) is not."""
+    and H_12 = -K_se g1' g2'.  Each pair's second-order band is bracketed: a row at 0.9 of
+    it is certified and a row at 1.1 is not, so a change of more than a tenth in that
+    entry's term, of either sign, moves one of them; under the log link H_00 = 0, so a row
+    just past the first-order reach on (0, 0) is not certified."""
     from superglm.distributional.families._base import link_derivative_columns
     from superglm.distributional.kernels.two_piece import JOIN_REACH, log_mean_loading
 
@@ -609,17 +609,19 @@ def test_mean_form_join_reach_takes_the_locations_hessian() -> None:
         others = [rates(u)[1] for u in units[:-1]] if pair == (1, 2) else []
         low = max([low, *others])
         assert high > low
-        band[pair] = h * (low + 0.75 * (high - low))
-    distances = np.array([h * rates(e[0])[0] * (1.0 + 2.5e-4), *band.values()])
+        band[pair] = [h * (low + share * (high - low)) for share in (0.9, 1.1)]
+    distances = np.array([h * rates(e[0])[0] * (1.0 + 2.5e-4), *np.ravel(list(band.values()))])
     location = np.log(theta[0]) - log_k
     y = np.exp(location + distances)
     pairs, first, second = _stacked_axis_pairs(3)
     _, certificate = family.certified_predictor_curvature_second_directional_derivative(
-        y, np.repeat(eta, 4, axis=0), first, second, links, _plan(family, y)
+        y, np.repeat(eta, len(y), axis=0), first, second, links, _plan(family, y)
     )
     assert np.all(certificate[pairs.index((0, 0)), 0] == 0.0)
-    for row, pair in enumerate(band, start=1):
-        assert certificate[pairs.index(pair), row].max() > 0.0, pair
+    for index, pair in enumerate(band):
+        inner, outer = 1 + 2 * index, 2 + 2 * index
+        assert certificate[pairs.index(pair), inner].max() > 0.0, pair
+        assert np.all(certificate[pairs.index(pair), outer] == 0.0), pair
 
 
 def test_a_near_stationary_location_link_at_the_join_differences_instead() -> None:
