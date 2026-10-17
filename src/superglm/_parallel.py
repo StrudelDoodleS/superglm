@@ -38,7 +38,7 @@ import math
 import os
 import sys
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -322,7 +322,7 @@ def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))
 
 
-def pooled_map(fn: Callable, items: list, item_bytes: int) -> Iterator:
+def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     """``fn(item)`` for every item, yielded in item order, on ``pool_workers`` threads.
 
     One parallelism level: BLAS runs on one thread for the whole map, serial

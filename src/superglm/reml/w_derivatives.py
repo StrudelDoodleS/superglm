@@ -260,17 +260,22 @@ def _leverage_derivative_terms(
         parts = (contributions(job()) for job in blocks.jobs)
     else:
         parts = pooled_map(lambda job: contributions(job()), list(blocks.jobs), blocks.block_bytes)
-    for part in parts:
-        if part is None:
-            continue
-        for total, compensation, contribution in (
-            (grad, grad_compensation, part[0]),
-            (cross, cross_compensation, part[1]),
-        ):
-            corrected = contribution - compensation
-            updated = total + corrected
-            compensation[...] = (updated - total) - corrected
-            total[...] = updated
+    try:
+        for part in parts:
+            if part is None:
+                continue
+            for total, compensation, contribution in (
+                (grad, grad_compensation, part[0]),
+                (cross, cross_compensation, part[1]),
+            ):
+                corrected = contribution - compensation
+                updated = total + corrected
+                compensation[...] = (updated - total) - corrected
+                total[...] = updated
+    finally:
+        # A raise in the loop leaves the generator parked inside the pool's
+        # BLAS scope; closing it restores the BLAS policy and stops the pool.
+        parts.close()
     return grad, cross
 
 

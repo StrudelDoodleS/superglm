@@ -732,86 +732,91 @@ def compile_predictor_design(
     # own, so they build on the pool (``_parallel.pooled_map``); the design
     # is assembled from them in interaction order, as the serial loop did.
     built = pooled_map(build_interaction, list(interaction_order), build_row_bytes * n)
-    for iname, term in zip(interaction_order, built, strict=True):
-        ispec, result = term.spec, term.result
-        separation_records.extend(term.records)
-        if isinstance(result, list):
-            if any(info.subgroup_name is not None for info in result):
-                r_inv_parts_i: list[NDArray] = []
-                for _, info, gm, r_inv, n_cols in term.processed:
-                    if r_inv is not None:
-                        r_inv_parts_i.append(r_inv)
+    try:
+        for iname, term in zip(interaction_order, built, strict=True):
+            ispec, result = term.spec, term.result
+            separation_records.extend(term.records)
+            if isinstance(result, list):
+                if any(info.subgroup_name is not None for info in result):
+                    r_inv_parts_i: list[NDArray] = []
+                    for _, info, gm, r_inv, n_cols in term.processed:
+                        if r_inv is not None:
+                            r_inv_parts_i.append(r_inv)
 
-                    group_matrices.append(gm)
-                    subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
-                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
-                    groups.append(
-                        GroupSlice(
-                            name=f"{iname}{subgroup_suffix}",
-                            start=col_offset,
-                            end=col_offset + n_cols,
-                            weight=np.sqrt(priced),
-                            penalty_dim=penalty_dim,
-                            penalized=info.penalized,
-                            feature_name=iname,
-                            subgroup_type=info.subgroup_name,
-                            constraints=info.constraints,
-                            monotone_engine=info.monotone_engine,
+                        group_matrices.append(gm)
+                        subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
+                        priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
+                        groups.append(
+                            GroupSlice(
+                                name=f"{iname}{subgroup_suffix}",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(priced),
+                                penalty_dim=penalty_dim,
+                                penalized=info.penalized,
+                                feature_name=iname,
+                                subgroup_type=info.subgroup_name,
+                                constraints=info.constraints,
+                                monotone_engine=info.monotone_engine,
+                            )
                         )
-                    )
-                    col_offset += n_cols
+                        col_offset += n_cols
 
-                if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
+                    if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
+                else:
+                    r_inv_dict: dict[str, NDArray] = {}
+                    for level, info, gm, r_inv, n_cols in term.processed:
+                        if r_inv is not None:
+                            r_inv_dict[level] = r_inv
+
+                        group_matrices.append(gm)
+                        priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
+                        groups.append(
+                            GroupSlice(
+                                name=f"{iname}[{level}]",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(priced),
+                                penalty_dim=penalty_dim,
+                                penalized=True,
+                                feature_name=iname,
+                                constraints=info.constraints,
+                                monotone_engine=info.monotone_engine,
+                            )
+                        )
+                        col_offset += n_cols
+
+                    if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(r_inv_dict)
             else:
-                r_inv_dict: dict[str, NDArray] = {}
-                for level, info, gm, r_inv, n_cols in term.processed:
-                    if r_inv is not None:
-                        r_inv_dict[level] = r_inv
+                # Single group (CategoricalInteraction, NumericCategorical,
+                # NumericInteraction, PolynomialInteraction, TensorInteraction)
+                _, _, gm, r_inv, n_cols = term.processed[0]
+                priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
+                g_new = GroupSlice(
+                    name=iname,
+                    start=col_offset,
+                    end=col_offset + n_cols,
+                    weight=np.sqrt(priced),
+                    penalty_dim=penalty_dim,
+                    penalized=True,
+                    feature_name=iname,
+                    constraints=result.constraints,
+                    monotone_engine=result.monotone_engine,
+                )
+                if hasattr(ispec, "set_reparametrisation") and hasattr(gm, "R_inv"):
+                    ispec.set_reparametrisation(gm.R_inv)
+                elif r_inv is not None and hasattr(ispec, "set_reparametrisation"):
+                    ispec.set_reparametrisation(r_inv)
 
-                    group_matrices.append(gm)
-                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
-                    groups.append(
-                        GroupSlice(
-                            name=f"{iname}[{level}]",
-                            start=col_offset,
-                            end=col_offset + n_cols,
-                            weight=np.sqrt(priced),
-                            penalty_dim=penalty_dim,
-                            penalized=True,
-                            feature_name=iname,
-                            constraints=info.constraints,
-                            monotone_engine=info.monotone_engine,
-                        )
-                    )
-                    col_offset += n_cols
-
-                if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(r_inv_dict)
-        else:
-            # Single group (CategoricalInteraction, NumericCategorical,
-            # NumericInteraction, PolynomialInteraction, TensorInteraction)
-            _, _, gm, r_inv, n_cols = term.processed[0]
-            priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
-            g_new = GroupSlice(
-                name=iname,
-                start=col_offset,
-                end=col_offset + n_cols,
-                weight=np.sqrt(priced),
-                penalty_dim=penalty_dim,
-                penalized=True,
-                feature_name=iname,
-                constraints=result.constraints,
-                monotone_engine=result.monotone_engine,
-            )
-            if hasattr(ispec, "set_reparametrisation") and hasattr(gm, "R_inv"):
-                ispec.set_reparametrisation(gm.R_inv)
-            elif r_inv is not None and hasattr(ispec, "set_reparametrisation"):
-                ispec.set_reparametrisation(r_inv)
-
-            group_matrices.append(gm)
-            groups.append(g_new)
-            col_offset = g_new.end
+                group_matrices.append(gm)
+                groups.append(g_new)
+                col_offset = g_new.end
+    finally:
+        # A raise in the loop leaves the generator parked inside the pool's
+        # BLAS scope; closing it restores the BLAS policy and stops the pool.
+        built.close()
 
     validate_term_name_namespace(specs, interaction_specs)
     validate_fitted_group_names(groups)

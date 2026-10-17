@@ -2372,3 +2372,30 @@ def test_a_tensor_knot_override_is_priced_by_its_own_margins(interaction_data, m
     built = model._interaction_specs["age:bm"]
     assert isinstance(built, TensorInteraction)
     assert charged and charged[0] >= 32 * built._p1 * built._p2 * len(y)
+
+
+def test_a_failed_design_assembly_releases_the_pool(interaction_data, monkeypatch):
+    """A raise while the design is assembled from pooled builds closes the pool's generator: with
+    the traceback still alive, no pooled BLAS section is left open."""
+    import superglm._blas_threads as blas
+    import superglm.dm_builder as builder
+    from superglm._parallel import parallel_config
+
+    X, y, w = interaction_data
+    real = builder._priced_group_dimension
+
+    def fail_inside_the_pool(*args, **kwargs):
+        if blas._pooled_sections > 0:
+            raise RuntimeError("assembly failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "_priced_group_dimension", fail_inside_the_pool)
+    model = SuperGLM(
+        family="poisson",
+        features={"age": Spline(n_knots=5), "bm": Spline(n_knots=5)},
+        interactions=[("age", "bm")],
+    )
+    with parallel_config(n_jobs=2), pytest.raises(RuntimeError, match="assembly failed") as excinfo:
+        model.fit(X, y, sample_weight=w)
+    assert excinfo.traceback  # the failed frames are still referenced
+    assert blas._pooled_sections == 0
