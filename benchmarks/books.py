@@ -478,6 +478,14 @@ def tree_state(path: Path, paths=("src", "pyproject.toml", "uv.lock"), package=F
 _FIT_DEPENDENCIES = ("tabmat", "narwhals", "scikit-learn", "joblib", "threadpoolctl")
 
 
+def _installed_version(name: str) -> str | None:
+    """A distribution's version, or None when it is not installed (still a distinct key)."""
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def environment() -> dict:
     import numba
     import numpy
@@ -504,7 +512,7 @@ def environment() -> dict:
         "scipy": scipy.__version__,
         "numba": numba.__version__,
         "pandas": pandas.__version__,
-        **{name: importlib.metadata.version(name) for name in _FIT_DEPENDENCIES},
+        **{name: _installed_version(name) for name in _FIT_DEPENDENCIES},
         "blas": sorted(blas, key=canonical),
     }
 
@@ -1296,7 +1304,12 @@ def stored_records(sha: str, case: str, threads: str) -> list[dict]:
 
 
 def usable_baseline(rec: dict) -> bool:
-    return rec["status"] == "ok" and not rec["counts_only"] and rec["provenance"]["dirty"] is False
+    return (
+        rec["status"] == "ok"
+        and not rec["counts_only"]
+        and rec["provenance"]["dirty"] is False
+        and rec.get("warmup_error") is None  # a failed warm-up times compilation too
+    )
 
 
 # --------------------------------------------------------------------------- baseline
@@ -1340,6 +1353,19 @@ def prepare_tree(sha: str) -> Path:
 
 def _clean_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "VIRTUAL_ENV")}
+
+
+def _child_argv(argv: list[str], out: str) -> list[str]:
+    """``argv`` without ``--tree`` and with ``--out`` resolved, either option in either form."""
+    kept, skip = [], False
+    for token in argv:
+        if skip:
+            skip = False
+        elif token in ("--tree", "--out"):
+            skip = True
+        elif not token.startswith(("--tree=", "--out=")):
+            kept.append(token)
+    return [*kept, "--out", out]
 
 
 def _child(python: Path, tree: Path, args: list[str], timeout: float) -> int:
@@ -1684,8 +1710,7 @@ def main(argv=None) -> int:
         return cmd_compare(args)
     if args.cmd == "run" and args.tree:
         tree = Path(args.tree).resolve()
-        i = argv.index("--tree")
-        return _child(_venv_python(tree), tree, argv[:i] + argv[i + 2 :], 24 * 3600)
+        return _child(_venv_python(tree), tree, _child_argv(argv, args.out), 24 * 3600)
     apply_threads(args.threads)
     if args.cmd == "key":
         text = json.dumps([case_key(c, args.threads) for c in args.cases], indent=1, default=str)

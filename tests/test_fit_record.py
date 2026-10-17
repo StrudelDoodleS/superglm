@@ -277,3 +277,21 @@ def test_estimate_theta_is_recorded(monkeypatch, tmp_path):
     records = [p["fits"][0] for p in _records(tmp_path)]
     (record,) = [r for r in records if r["method"] == "estimate_theta"]
     assert record["config"]["family_params"]["estimate_theta"] is True
+
+
+def test_a_power_search_records_its_call_not_its_candidates(monkeypatch, tmp_path):
+    """estimate_p under REML fits each candidate power through fit_reml, and a later interval()
+    fits more; only the estimate_p call is recorded."""
+    from superglm import families
+
+    monkeypatch.setenv("BENCHBOARD_FIT_DIR", str(tmp_path))
+    monkeypatch.setenv("BENCHBOARD_TASK_ID", "task-11")
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame({"a": rng.uniform(0, 1, 1500)})
+    mu = np.exp(0.5 + np.sin(3 * X.a.to_numpy()))
+    y = rng.gamma(1.5, mu / 1.5) * (rng.uniform(size=1500) < 0.6)
+    model = SuperGLM(family=families.tweedie(p=1.5), features={"a": Spline(n_knots=5)})
+    result = model.estimate_p(X, y, fit_mode="reml")
+    assert [p["fits"][0]["method"] for p in _records(tmp_path)] == ["estimate_p"]
+    result.interval(0.05)
+    assert len(_records(tmp_path)) == 1

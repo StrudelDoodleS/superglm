@@ -132,6 +132,9 @@ def _peak_rss_mib():
     return raw / 2**20 if sys.platform == "darwin" else raw / 1024.0
 
 
+_PROCESS_TOKEN = uuid.uuid4().hex[:12]
+
+
 def _proc_start(pid):
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
@@ -683,7 +686,8 @@ def begin(model, method, params, place) -> dict:
     spool, task = place
     facts = _process_facts()
     if task is None:  # outside a benchboard job: one synthetic task per process
-        task = f"unowned-{facts['machine']['host']}-{os.getpid()}-{facts['process_start']}"
+        start = facts["process_start"] or _PROCESS_TOKEN  # no /proc: PIDs are reused
+        task = f"unowned-{facts['machine']['host']}-{os.getpid()}-{start}"
     parent = _parent.get() or (None, None)
     _compile.install()
     token = {
@@ -746,6 +750,7 @@ def end(token, model, error) -> None:
     wall = time.perf_counter() - token["t0"]
     cpu = time.process_time() - token["c0"]
     compile_s = _compile.total - token["compile0"]
+    peak_rss = _safe(_peak_rss_mib)  # before the descriptors below allocate
     ended = time.time()
     try:
         _parent.reset(token["reset"])
@@ -809,7 +814,7 @@ def end(token, model, error) -> None:
             "work": outcome.get("work"),
             "cpu_s": cpu,
             "numba_compile_s": compile_s,
-            "peak_rss_mib": _safe(_peak_rss_mib),
+            "peak_rss_mib": peak_rss,
             "load_end": _load(),
             "cpu_end": _safe(_cpu_now),
             "steal_percent": steal,

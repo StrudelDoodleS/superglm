@@ -184,3 +184,41 @@ def test_the_spec_hash_covers_the_work_counter_tables(monkeypatch):
     before = books.spec_hash("smoke_poisson")
     monkeypatch.setattr(books, "PROFILE_WORK", {**books.PROFILE_WORK, "edited": "edited"})
     assert books.spec_hash("smoke_poisson") != before
+
+
+def test_a_baseline_whose_warm_up_failed_is_not_reused():
+    record = {"status": "ok", "counts_only": False, "provenance": {"dirty": False}}
+    assert books.usable_baseline({**record, "warmup_error": None})
+    assert not books.usable_baseline({**record, "warmup_error": "RuntimeError: compile"})
+
+
+def test_a_missing_fit_path_package_is_keyed_as_absent(monkeypatch):
+    import importlib.metadata
+
+    real = importlib.metadata.version
+
+    def version(name):
+        if name == "tabmat":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return real(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", version)
+    assert books.environment()["tabmat"] is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "smoke_poisson", "--tree", "../base", "--out", "records"],
+        ["run", "smoke_poisson", "--tree=../base", "--out=records"],
+    ],
+)
+def test_a_run_in_another_tree_writes_where_this_checkout_reads(argv, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(books, "_venv_python", lambda tree: tree / "python")
+    monkeypatch.setattr(books, "_child", lambda python, tree, args, timeout: seen.append(args) or 0)
+    assert books.main(argv) == 0
+    (child,) = seen
+    assert not any(token.startswith("--tree") for token in child)
+    assert child[child.index("--out") + 1] == str(tmp_path / "records")

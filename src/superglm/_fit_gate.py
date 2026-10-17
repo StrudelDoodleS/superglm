@@ -71,6 +71,8 @@ class _Recording:
 
 def fit_record(model, method: str, params: dict):
     place = destination()
-    if place is None:
+    # A power-search candidate (estimate_p under REML, and a later interval()) is ranked and
+    # discarded; the estimate_p call that runs it is the record.
+    if place is None or getattr(model, "_in_power_search", False):
         return _OFF
     return _Recording(model, method, params, place)
