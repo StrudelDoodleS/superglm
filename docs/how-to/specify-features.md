@@ -509,9 +509,16 @@ toward the portfolio prediction than thick levels.
 
 ```python
 RandomEffect()                              # unseen levels use the population prediction
+RandomEffect(unseen="weighted")             # unseen levels use the exposure-weighted average
 RandomEffect(unseen="error")                # fail on an unseen level
 RandomEffect(levels=df["Region"].unique())  # bind the level universe
 ```
+
+An unseen level gets zero by default, the prediction for the average level.
+`unseen="weighted"` gives it the average of the fitted levels weighted by
+their training exposure instead, which is the average policy rather than the
+average level. `model.random_effects(name)` reports that value as
+`unseen_effect` and its standard error as `unseen_se`.
 
 It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
 `Categorical`, it retains every level rather than choosing a reference level,
@@ -528,6 +535,142 @@ declared level unless the term has `select=True`, because its sum-to-zero
 contrast stops identifying the deviations once a level carries nothing. With
 `select=True` every level's line is penalized, and an empty level is predicted
 at the population curve.
+
+## Hierarchy
+
+Use `Hierarchy` when one factor sits inside another: a vehicle model inside
+its make, a model year inside its model. It fits a random effect for each
+level, each with its own variance chosen by REML, so a thinly observed model
+is pulled toward its make and a thin make toward the whole book. It is the
+SuperGLM spelling of lme4's `(1 | make/model/year)` and of hierarchical
+credibility (Jewell 1975; Ohlsson 2008).
+
+```python
+from superglm import Hierarchy
+
+# One column that joins the parts, such as "Ford-Focus-2019":
+Hierarchy(names=("make", "model", "year"), sep="-")
+
+# One column per level, with no joining:
+Hierarchy(columns=("make", "model", "year"))
+```
+
+Put either under one name in `features=`, for example
+`features={"vehicle": Hierarchy(columns=("make", "model", "year"))}`, and fit
+with `fit_reml()`. What you get:
+
+- **One term per level.** The levels are named `vehicle:make`,
+  `vehicle:model` and `vehicle:year`. `model.random_effects("vehicle:model")`
+  reports that level's variance and credibility, and the summary shows one
+  row per level.
+- **One relativity per vehicle.** `model.relativities()["vehicle"]` has a row
+  for each make, model and year seen in training, with the combined
+  relativity of all three levels. `model.reconstruct_feature("vehicle")` also
+  lists each level's own effects under `"level_effects"`.
+- **A model belongs to its make.** Two makes that both sell a "Sport" have two
+  different models. Labels are kept as the parts themselves, `("ford",
+  "focus")`, so make `"A-B"` with model `"C"` never merges with make `"A"` with
+  model `"B-C"`.
+- **The separator is never guessed.** With `sep=`, every value must split into
+  exactly one part per level. If a name contains the separator, as in
+  `"Mercedes-Benz-C-Class-2019"`, the fit stops and lists the values that do
+  not split. Keep the parts in separate columns and use `columns=`, or join
+  them with a character that no name contains.
+- **New vehicles at prediction.** A model the fit never saw, under a make it
+  did see, gets that make's effect. A make it never saw gets the book average.
+  `unseen="weighted"` prices each new level at the exposure-weighted average
+  of the levels it would sit beside: a new model gets the average model of its
+  make, weighted by each model's exposure, and a new make gets the average of
+  the whole book. `unseen="error"` refuses any new combination instead.
+- **Missing parts are an error,** at fit and at prediction.
+
+### Cleaning labels with `normalize=True`
+
+```python
+Hierarchy(columns=("make", "model", "year"), normalize=True)
+```
+
+Text is compared after ignoring case, full-width characters and extra spaces,
+so `"FORD "`, `"Ford"` and `"ford"` are one make. Prediction cleans its labels
+the same way. The fit warns with every set of spellings it merged, and
+`model.reconstruct_feature("vehicle")["merged_labels"]` lists them. Reports
+show the spelling most rows use, such as `"Ford"`, so a column that is
+already clean reads exactly as it did. Values that are not text, such as a
+numeric year, are used as they are.
+
+### Splitting a vehicle's price by level
+
+`model.term_contributions(X)` returns one column per term and one per
+hierarchy level, so each row's price splits into its parts:
+
+```python
+parts = model.term_contributions(X)
+parts[["vehicle:make", "vehicle:model", "vehicle:year"]]  # log relativities
+np.exp(parts.sum(axis=1))  # the prediction at one unit of exposure (log link)
+```
+
+Each column is that level's log relativity for the row. A level the row's
+vehicle does not share with the training data shows the value its `unseen=`
+rule gives it.
+
+### Crossed effects that share a level
+
+Some factors do not fit in the chain. In an extended-warranty book, one engine
+family goes into several models and one model comes with several engines, so
+engine is crossed with model rather than a level below it: a level below model
+would make each engine belong to a single model. Add the engine effects as
+their own terms that continue a level of the chain:
+
+```python
+from superglm import Hierarchy, Spline, SuperGLM
+
+model = SuperGLM(
+    family="poisson",
+    features={
+        "age": Spline(kind="ps", k=8),
+        "vehicle": Hierarchy(columns=("make", "model", "year")),
+        # engine within make, lme4's (1 | make:engine)
+        "make_engine": Hierarchy(columns=("make", "engine"), nested_in="vehicle:make"),
+        # engine within model, lme4's (1 | make:model:engine)
+        "model_engine": Hierarchy(
+            columns=("make", "model", "engine"), nested_in="vehicle:model"
+        ),
+    },
+)
+model.fit_reml(X, y, offset=log_exposure)
+```
+
+`nested_in=` names a level that another term already fits. The new term's
+first columns must group the rows exactly as that level does (`make` for
+`vehicle:make`; `make` and `model` for `vehicle:model`), and the fit checks
+this on every training row. Those levels are not fitted again, so
+`make_engine` fits only `make_engine:engine`.
+
+Fitting make twice would give one effect two variances that the data cannot
+tell apart, so a fit stops when a hierarchy level groups the rows exactly as
+another term's level does, and names the `nested_in=` that shares it. A
+`RandomEffect` can name a hierarchy level the same way:
+`RandomEffect(nested_in="vehicle:make")`.
+
+Declare an engine-within-model effect as `model_engine` above, not as a
+`RandomEffect(nested_in="vehicle:model")` on a key column you join yourself
+from make, model and engine. The `Hierarchy` form keeps what a hand-built key
+loses:
+
+- the same `normalize=` cleaning as the levels it continues, so `"FORD"` in
+  the key cannot miss the make `"Ford"`;
+- keys that cannot collide when a name contains your separator;
+- labels reported as `(make, model, engine)`;
+- under `unseen="weighted"`, a new engine of a known model priced at that
+  model's average engine rather than the book's.
+
+Current limits:
+
+- **Rating tables.** `export_rating_tables` does not support a `Hierarchy`
+  yet, as for `RandomEffect`.
+- **Distributional models.** `SuperLSS` predictors do not accept a
+  `Hierarchy` yet; declare each level as a `RandomEffect` on a column that
+  identifies it, with `nested_in=` naming the level above.
 
 ## OrderedCategorical
 
@@ -683,6 +826,13 @@ the shared IRLS weights change and the ordered curve moves a little — measured
 at around 1e-3 in log relativity with one imbalanced factor at a 5% special
 share — and it moves again if `fit_reml()` re-selects the smoothing parameter,
 which the default path does. Expect small differences rather than none.
+
+A special whose rows carry exposure but no claims (under a log link with a
+Poisson, Tweedie or similar family) has no finite estimate: its effect runs
+toward zero relativity. The fit warns with a `SeparationWarning` naming the
+level, as it does for a `Categorical` level. Drop such a level from
+`specials=`, so that the smooth carries it, or a `grouping=` that joins it to a
+neighbouring band.
 
 A declared special that the training data does not carry — no rows at all, or
 only zero-weight rows — is **pinned** rather than rejected: no indicator column

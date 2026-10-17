@@ -3,8 +3,8 @@
 Feature specifications turn raw columns into model terms. `Spline` is the
 public factory for smooth terms; the concrete spline classes are what it
 returns. Categorical, ordered-categorical, numeric, polynomial and piecewise
-terms cover the rest of a rating structure; `FactorSmooth` and
-`RandomEffect` add credibility-style shrinkage; `Constraint` requests
+terms cover the rest of a rating structure; `FactorSmooth`, `RandomEffect`
+and `Hierarchy` add credibility-style shrinkage; `Constraint` requests
 monotone or curvature constraints. The interaction types the constructor
 builds from a pair of columns are on the [Internals](internals.md) page.
 
@@ -27,6 +27,7 @@ builds from a pair of columns are on the [Internals](internals.md) page.
    superglm.Polynomial
    superglm.FactorSmooth
    superglm.RandomEffect
+   superglm.Hierarchy
    superglm.LevelGrouping
    superglm.collapse_levels
    superglm.Constraint

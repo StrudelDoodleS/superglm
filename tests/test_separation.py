@@ -149,6 +149,45 @@ def test_main_effect_level_detected():
     assert "'c6'" in message
 
 
+def test_a_special_level_without_claims_is_named_as_separated():
+    """A ``specials=`` level is a free indicator, so a claim-free one separates.
+
+    Its coefficient walks toward ``-inf`` (the fit prices the level at zero),
+    and the build scan names it as it names a Categorical level.  Mutation:
+    without the specials scan only the Categorical record is scanned and the
+    fit stays silent.
+    """
+    from superglm import OrderedCategorical
+
+    rng = np.random.default_rng(11)
+    n = 3000
+    bands = [f"b{i}" for i in range(8)]
+    band = np.array([*bands, "EV"])[rng.integers(0, 9, n)]
+    w = rng.uniform(0.3, 1.5, size=n)
+    y = np.where(band == "EV", 0.0, np.maximum(_tweedie_response(rng, n), 0.3))
+    df = pd.DataFrame({"band": band})
+
+    def model(**kwargs):
+        term = OrderedCategorical(
+            values={b: float(i) for i, b in enumerate(bands)},
+            basis=Spline(kind="cr", k=5),
+            specials=["EV"],
+        )
+        return SuperGLM(
+            family=Tweedie(p=1.5), features={"band": term}, selection_penalty=0, **kwargs
+        )
+
+    sep = fit_catching(model(), df, y, w)
+    assert len(sep) == 1
+    message = str(sep[0].message)
+    assert "'band': 1 of 1 occupied special levels" in message and "'EV'" in message
+    assert "drop it from specials=" in message
+    with pytest.raises(SeparationError, match="'EV'"):
+        model(separation="error").fit(df, y, sample_weight=w)
+    anchored = np.where((band == "EV") & (np.arange(n) % 7 == 0), 0.5, y)
+    assert fit_catching(model(), df, anchored, w) == []
+
+
 def test_gaussian_identity_never_fires():
     df, y, w, _ = separated_crossed_design()
     model = SuperGLM(

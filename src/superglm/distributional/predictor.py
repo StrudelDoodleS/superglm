@@ -17,6 +17,7 @@ from superglm._parallel import parallel_config
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features.hierarchy import Hierarchy
 from superglm.features.random_effect import validate_declared_nesting
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
@@ -75,6 +76,15 @@ class Predictor:
                 raise ValueError("feature names must be non-empty strings")
             if not isinstance(feature, FeatureSpec):
                 raise TypeError(f"feature {name!r} does not implement FeatureSpec")
+            if isinstance(feature, Hierarchy):
+                # Its term reports and surfaces sweep one column per term,
+                # which a hierarchy's paths are not; refused until they can.
+                raise NotImplementedError(
+                    f"feature {name!r} is a Hierarchy, which SuperGLM fits but a "
+                    "distributional predictor does not support yet; declare each level as a "
+                    "RandomEffect on a column that identifies it, with nested_in= naming "
+                    "the level above."
+                )
 
         interactions: list[tuple[str, str]] = []
         for pair in self.interactions:

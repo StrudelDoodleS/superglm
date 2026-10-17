@@ -63,7 +63,7 @@ class SeparatedTerm:
     """Separated cells found in one categorical or crossed-categorical term."""
 
     term: str
-    kind: str  # "levels" (main effect) or "cells" (crossed)
+    kind: str  # "levels" (main effect), "cells" (crossed) or "specials"
     boundary: str  # "zero" or "one"
     labels: list[Any]  # level names, or (level1, level2) pairs
     n_occupied: int  # occupied levels/cells scanned in this term
@@ -175,6 +175,44 @@ def scan_categorical_term(
     return findings
 
 
+def scan_special_levels(
+    name: str,
+    spec: Any,
+    x: NDArray,
+    y: NDArray,
+    sample_weight: NDArray,
+    boundaries: tuple[str, ...],
+) -> list[SeparatedTerm]:
+    """Scan one OrderedCategorical's ``specials=`` levels for separation.
+
+    Each fitted special is a free, unpenalized indicator that no other column
+    of its term touches, so a special whose rows carry exposure but only
+    boundary responses has its coordinate as a direction of recession, as a
+    non-base Categorical level does.  A special pinned for want of rows has
+    no column and is not scanned.
+    """
+    active = list(getattr(spec, "_active_specials", ()))
+    if not active:
+        return []
+    mask = spec._special_mask(x)[:, active]
+    codes = np.where(mask.any(axis=1), mask.argmax(axis=1), -1).astype(np.intp)
+    labels = [spec._special_display[j] for j in active]
+    findings: list[SeparatedTerm] = []
+    for boundary in boundaries:
+        flags, n_occupied = _separated_flags(codes, len(labels), y, sample_weight, boundary)
+        if flags.any():
+            findings.append(
+                SeparatedTerm(
+                    term=name,
+                    kind="specials",
+                    boundary=boundary,
+                    labels=[labels[i] for i in np.flatnonzero(flags)],
+                    n_occupied=n_occupied,
+                )
+            )
+    return findings
+
+
 def scan_interaction_term(
     name: str,
     spec1: Any,
@@ -248,7 +286,9 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
     ]
     for f in findings:
         response = "no positive response" if f.boundary == "zero" else "all-one response"
-        unit = "occupied cells" if f.kind == "cells" else "occupied levels"
+        unit = {"cells": "occupied cells", "specials": "occupied special levels"}.get(
+            f.kind, "occupied levels"
+        )
         lines.append(
             f"  {f.term!r}: {len(f.labels)} of {f.n_occupied} {unit} have exposure "
             f"but {response}: {_format_labels(f.labels)}"
@@ -260,6 +300,12 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
         "a selection penalty. Pass separation='error' to refuse such designs, or "
         "separation='ignore' to disable this check."
     )
+    if any(f.kind == "specials" for f in findings):
+        lines.append(
+            "A special level is a free effect that no penalty bounds, so as fitted its "
+            "relativity is near zero: drop it from specials= so the smooth, or a "
+            "grouping= with a neighbouring band, carries it."
+        )
     return "\n".join(lines)
 
 

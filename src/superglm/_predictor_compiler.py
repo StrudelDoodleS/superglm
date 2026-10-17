@@ -26,6 +26,7 @@ from superglm._frame import EagerFrame
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.hierarchy import bind_hierarchies, feature_column
 from superglm.features.interaction import (
     CategoricalInteraction,
     SplineCategorical,
@@ -209,6 +210,9 @@ def compile_predictor_design(
     col_offset = 0
     groups: list[GroupSlice] = []
     separation_records: list[tuple] = []
+    # A Hierarchy names its levels after its feature and reads its nested_in
+    # level's depth from the other specs, so it is bound before any build.
+    bind_hierarchies(specs)
 
     for name in feature_order:
         spec = specs[name]
@@ -220,18 +224,24 @@ def compile_predictor_design(
         # callers intentionally assign its learned QR to different geometries.
         if isinstance(spec, OrderedCategorical):
             spec._inner_geometry_physical_rows = physical_rows
-        x_col = X.column_array(name)
+        x_col = feature_column(X.column_array, name, spec)
         if separation_boundaries and isinstance(spec, Categorical):
             # Scanned after the loops, once the spec has learned its levels
             # and the GroupSlices exist for the penalty exemption.
             separation_records.append(("cat", name, spec, x_col))
+        elif separation_boundaries and isinstance(spec, OrderedCategorical) and spec.has_specials:
+            # A special is a free indicator, scanned as a Categorical level is.
+            separation_records.append(("special", name, spec, x_col))
         # Supply level universes the feature cannot discover from its observed
         # rows. A column's declared categorical dtype takes precedence over a
         # caller's full-frame binding. Both hooks decline when the feature
         # already owns a universe; terms without one never gain these hooks.
-        declared_categories = X.column_declared_categories(name)
-        if declared_categories is not None and hasattr(spec, "adopt_dtype_categories"):
-            spec.adopt_dtype_categories(declared_categories)
+        if hasattr(spec, "adopt_dtype_categories"):
+            # Asked only of a term that can adopt it: a Hierarchy may read
+            # several columns, none of them named for the feature.
+            declared_categories = X.column_declared_categories(name)
+            if declared_categories is not None:
+                spec.adopt_dtype_categories(declared_categories)
         if level_bindings is not None and hasattr(spec, "apply_level_binding"):
             binding = level_bindings.get(name)
             if binding is not None:
