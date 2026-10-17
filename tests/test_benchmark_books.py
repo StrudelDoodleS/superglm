@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -222,3 +223,20 @@ def test_a_run_in_another_tree_writes_where_this_checkout_reads(argv, monkeypatc
     (child,) = seen
     assert not any(token.startswith("--tree") for token in child)
     assert child[child.index("--out") + 1] == str(tmp_path / "records")
+
+
+def test_a_run_keeps_superglms_own_recorder_out_of_the_timed_fit(monkeypatch, tmp_path):
+    monkeypatch.setenv("BENCHBOARD_FIT_DIR", str(tmp_path))
+    monkeypatch.setenv("BENCHBOARD_TASK_ID", "task-books")
+    monkeypatch.delenv("SUPERGLM_FIT_RECORD", raising=False)
+    record, _ = books.run_case("smoke_poisson", "pinned", counts_only=True)
+    assert record["status"] == "ok"
+    assert not list(tmp_path.iterdir())
+    assert "SUPERGLM_FIT_RECORD" not in os.environ
+
+
+def test_the_key_carries_the_observed_pool_widths(run):
+    record, _ = run
+    observed = record["key"]["threads_observed"]
+    assert observed["numba"] == record["threads_observed"]["numba"]
+    assert observed["pools"] == record["threads_observed"]["pools"]

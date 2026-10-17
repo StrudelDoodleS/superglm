@@ -148,7 +148,11 @@ but the SHA:
 - the environment: an upgrade of any of those packages or of BLAS, or a different
   OpenBLAS core type, needs a new baseline;
 - the machine: CPU model, core count and RAM;
-- the thread setting.
+- the thread setting, and the BLAS and numba pool widths observed under it,
+  since affinity, cgroups or a library can narrow a "default" pool.
+
+superglm's own fit recorder is off during a `books.py` run, which records the
+fit itself, so the timed fit carries no recorder work.
 
 `compare` refuses when any of these differs, and names the component and both
 values. Store a new baseline at the same commit in the new environment rather

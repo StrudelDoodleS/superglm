@@ -947,7 +947,7 @@ def lss_state(model, calls) -> dict:
 # --------------------------------------------------------------------------- one run
 
 
-def key_of(case, threads, sha, data_hash, env, mach) -> dict:
+def key_of(case, threads, sha, data_hash, env, mach, seen) -> dict:
     return {
         "sha": sha,
         "dataset_hash": data_hash,
@@ -956,6 +956,8 @@ def key_of(case, threads, sha, data_hash, env, mach) -> dict:
         "environment": env,
         "machine": mach,
         "threads": threads,
+        # "default" names no width: affinity, cgroups or a library can narrow a pool
+        "threads_observed": {"pools": seen["pools"], "numba": seen["numba"]},
     }
 
 
@@ -963,7 +965,8 @@ def case_key(case, threads) -> dict:
     import superglm
 
     sha = tree_state(Path(superglm.__file__).parent, package=True)["sha"]
-    key = key_of(case, threads, sha, dataset_hash(CASES[case]["dataset"]), environment(), machine())
+    data_hash = dataset_hash(CASES[case]["dataset"])
+    key = key_of(case, threads, sha, data_hash, environment(), machine(), observed_threads())
     return {"case": case, "key": key, "key_hash": digest(key)}
 
 
@@ -977,7 +980,23 @@ def _peak_rss_bytes() -> int:
 
 
 def run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict]:
-    """One complete fit of ``case``; returns its record and the fit's clock (for benchboard).  ``main`` applies the thread setting."""
+    """One complete fit of ``case``; returns its record and the fit's clock (for benchboard).  ``main`` applies the thread setting.
+
+    superglm's own fit recorder is off for the run: this harness records the fit itself, and
+    the recorder's scans would otherwise sit inside the timed fit.
+    """
+    previous = os.environ.get("SUPERGLM_FIT_RECORD")
+    os.environ["SUPERGLM_FIT_RECORD"] = "0"
+    try:
+        return _run_case(case, threads, counts_only=counts_only)
+    finally:
+        if previous is None:
+            os.environ.pop("SUPERGLM_FIT_RECORD", None)
+        else:
+            os.environ["SUPERGLM_FIT_RECORD"] = previous
+
+
+def _run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict]:
     import numpy as np  # noqa: F401 - BLAS loads before the pools are read
 
     import superglm
@@ -1062,7 +1081,7 @@ def run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict]
         )
     else:
         record["work"] = calls
-    record["key"] = key_of(case, threads, provenance["sha"], data_hash, env, mach)
+    record["key"] = key_of(case, threads, provenance["sha"], data_hash, env, mach, seen)
     record["key_hash"] = digest(record["key"])
     return record, clock
 
