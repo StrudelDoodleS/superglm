@@ -66,12 +66,23 @@ def concave_observed_rows(distribution: object, link: object) -> bool:
     (``supports_observed_newton``), for NB2/log (``-d2l/deta2 = w theta mu
     (y + theta) / (mu + theta)^2``), and for the binomial probit and cloglog
     links (log-concave cumulative distribution functions; Pratt 1981, JASA
-    76(373)), so their observed information is a valid weight for a
-    working linear model.  Binomial/log and Gaussian/log are not: their
-    observed rows go negative (``1 - y/(1 - mu)`` and ``2 mu - y``).  The
-    binned REML route takes observed curvature only for these pairs
-    (``reml.observed_geometry.classify_binned_reml_curvature``).  Exact types,
-    as ``supports_observed_newton``: a subclass must not inherit the claim.
+    76(373)), and each has rows formed in ``eta`` that stay non-negative in
+    floating point, so its observed information is a valid weight for a
+    working linear model.  Probit and cloglog use closed forms in ``eta``
+    (``_probit_observed_rows``, ``_cloglog_observed_rows``): the generic
+    observed row reads the clipped mean (``clip_mu``) beside derivatives of
+    the unclipped ``eta``, and goes negative in the tails past the clip.
+
+    Other concave pairs are not declared, and stay on Fisher rows:
+    binomial/log (``w mu (1 - y) / (1 - mu)^2 >= 0``) because its maximum
+    can sit on the mean-space boundary, where the clip holds rows and an
+    event row has no curvature at all; Poisson/sqrt (``w (2 + 2 y / eta^2)``)
+    because it is not yet declared.  Gaussian/log (``w mu (2 mu - y)``) and
+    binomial/cauchit (a CDF that is not log-concave) have rows that go
+    negative.  The binned REML route takes observed curvature only for the
+    declared pairs (``reml.observed_geometry.classify_binned_reml_curvature``).
+    Exact types, as ``supports_observed_newton``: a subclass must not inherit
+    the claim.
     """
     if supports_observed_newton(distribution, link):
         return True
@@ -348,6 +359,61 @@ def _gamma_log_observed_rows(
     return observed_weights, response
 
 
+def _probit_observed_rows(
+    *, y: NDArray, eta: NDArray, sample_weight: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Binomial/probit rows in ``eta``: ``w [y l1 (l1 + eta) + (1 - y) l0 (l0 - eta)]``.
+
+    ``l1 = phi / Phi`` and ``l0 = phi / (1 - Phi)`` are the inverse Mills
+    ratios, formed as ``exp(log phi - log_ndtr(+-eta))`` so neither tail
+    underflows.  Each factor is non-negative (``l1 > -eta`` and
+    ``l0 > eta``, the Mills inequalities), so every row is, and the score
+    is ``w [y l1 - (1 - y) l0]``.  Both read ``eta`` alone, never the clipped
+    mean.
+    """
+    from scipy.special import log_ndtr
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        log_phi = -0.5 * eta * eta - 0.5 * np.log(2.0 * np.pi)
+        l1 = np.exp(log_phi - log_ndtr(eta))
+        l0 = np.exp(log_phi - log_ndtr(-eta))
+        curvature = sample_weight * (y * l1 * (l1 + eta) + (1.0 - y) * l0 * (l0 - eta))
+        score = sample_weight * (y * l1 - (1.0 - y) * l0)
+    return curvature, score
+
+
+def _cloglog_observed_rows(
+    *, y: NDArray, eta: NDArray, sample_weight: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Binomial/cloglog rows in ``eta``, with ``t = exp(eta)``, so ``1 - mu = exp(-t)``.
+
+    The non-event term is ``t``; the event term is ``r (s - 1)`` with
+    ``r = t / expm1(t)`` and ``s = t / -expm1(-t)`` (``s >= 1``).  ``s - 1``
+    is formed as ``(t + expm1(-t)) / -expm1(-t)``, with the series
+    ``t^2/2 - t^3/6 + ...`` for its numerator below ``t = 0.1``, where the
+    difference would cancel.  So the curvature is
+    ``w [y r (s - 1) + (1 - y) t] >= 0`` and the score ``w [y r - (1 - y) t]``,
+    both read from ``eta`` alone, never the clipped mean.
+    """
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        t = np.exp(eta)
+        survival_gap = -np.expm1(-t)  # mu = 1 - exp(-t)
+        r = np.where(t > 0.0, t / np.expm1(t), 1.0)
+        small = t < 0.1
+        series = np.zeros_like(t)
+        term = np.ones_like(t)
+        ts = np.where(small, t, 0.0)
+        for k in range(1, 13):
+            term = term * (-ts) / k
+            if k >= 2:
+                series = series + term
+        numerator = np.where(small, series, t + np.expm1(-t))
+        event = np.where(t > 0.0, r * numerator / survival_gap, 0.0)
+        curvature = sample_weight * (y * event + (1.0 - y) * t)
+        score = sample_weight * (y * r - (1.0 - y) * t)
+    return curvature, score
+
+
 def _concave_observed_rows(
     distribution: object,
     link: object,
@@ -359,28 +425,44 @@ def _concave_observed_rows(
 ) -> tuple[NDArray, NDArray]:
     """Observed rows of NB2/log and binomial probit and cloglog: ``eta + score / curvature``.
 
-    The curvature is the REML geometry's own observed information
-    (``compute_observed_information_weights``), so the binned working model
-    and the exact route's criterion read the same rows.  The score is the
-    Fisher rows' ``W (z - eta)``, which does not depend on the curvature.  A
-    row whose curvature is zero (a zero weight, or underflow far in a tail)
-    keeps ``z = eta``: it adds nothing to the update.
+    Probit and cloglog take their closed forms in ``eta``.  NB2/log takes
+    the REML geometry's own observed information
+    (``compute_observed_information_weights``, itself the closed form
+    ``w theta mu (y + theta) / (mu + theta)^2``) and the Fisher rows'
+    score ``W (z - eta)``, which does not depend on the curvature.  Rows that
+    geometry refuses (``ObservedGeometryInfeasibleError``: a non-finite
+    input or row) come back non-finite, so the caller sets
+    ``rejection_reason`` as it does for Gamma and Tweedie.  A row whose
+    curvature is zero (a zero weight, or underflow far in a tail) keeps
+    ``z = eta``: it adds nothing to the update.
     """
-    from superglm.reml.observed_geometry import compute_observed_information_weights
+    if type(link) is ProbitLink:
+        observed_weights, score = _probit_observed_rows(y=y, eta=eta, sample_weight=sample_weight)
+    elif type(link) is CloglogLink:
+        observed_weights, score = _cloglog_observed_rows(y=y, eta=eta, sample_weight=sample_weight)
+    else:
+        from superglm.reml.observed_geometry import (
+            ObservedGeometryInfeasibleError,
+            compute_observed_information_weights,
+        )
 
-    fisher = _fisher_rows(
-        distribution=distribution,
-        link=link,
-        y=y,
-        mu=mu,
-        eta=eta,
-        sample_weight=sample_weight,
-    )
-    observed_weights = compute_observed_information_weights(
-        distribution, link, y, mu, eta, sample_weight
-    )
+        fisher = _fisher_rows(
+            distribution=distribution,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=sample_weight,
+        )
+        try:
+            observed_weights = compute_observed_information_weights(
+                distribution, link, y, mu, eta, sample_weight
+            )
+        except ObservedGeometryInfeasibleError:
+            return np.full_like(eta, np.inf), eta.copy()
+        with np.errstate(over="ignore", invalid="ignore"):
+            score = fisher.weights * (fisher.response - eta)
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-        score = fisher.weights * (fisher.response - eta)
         step = np.zeros_like(score)
         np.divide(score, observed_weights, out=step, where=observed_weights > 0.0)
     return np.asarray(observed_weights, dtype=np.float64), eta + step
@@ -405,7 +487,8 @@ def coefficient_working_rows(
     Which one a fit takes is chosen by the caller from the family and link
     (``prefer_observed`` with a pair ``supports_observed_newton`` declares),
     never from the rows' values (one-engine design §3.11): an observed row may
-    be zero, and the solver accepts signed rows.  Only finiteness remains a
+    be zero.  The structured solver accepts signed rows; the dense working
+    system needs non-negative ones, which every declared pair supplies.  Only finiteness remains a
     condition: a non-finite observed row or total sets ``rejection_reason``,
     and the caller rejects the step rather than mix in another curvature.
     """

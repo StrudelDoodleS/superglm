@@ -220,7 +220,10 @@ def _binned_curvature_cases():
         (Gaussian(), IdentityLink(), "fisher"),
         (Gamma(), InverseLink(), "fisher"),
         (NegativeBinomial(theta=1.0), NegativeBinomialLink(theta=1.0), "fisher"),
-        # observed on the exact route, but observed rows that go negative
+        # observed on the exact route, not declared on the binned one:
+        # binomial/log for its mean-space boundary (the clip, and no
+        # curvature on event rows), Poisson/sqrt not yet; Gaussian/log and
+        # cauchit have observed rows that go negative
         (Binomial(), LogLink(), "fisher"),
         (Gaussian(), LogLink(), "fisher"),
         (Binomial(), CauchitLink(), "fisher"),
@@ -252,42 +255,130 @@ def test_binned_reml_curvature_is_a_function_of_family_and_link():
 @pytest.mark.parametrize(
     "name", ["gamma/log", "tweedie/log", "nb2/log", "binomial/probit", "binomial/cloglog"]
 )
-def test_a_binned_observed_pair_converges_on_the_exact_routes_criterion(name):
+def test_a_binned_observed_pair_converges_on_the_exact_routes_criterion(name, monkeypatch):
     """Each pair the rule makes observed is observed throughout on the binned route.
 
-    Its performance iteration takes observed working rows, it converges, and
-    it publishes the exact route's objective: this fixture's binning loses
-    nothing, so the two routes optimize the same criterion on the same rows,
-    and agree to the REML tolerance's reach.  Mutation check: on the base
-    the binned route was Fisher throughout, and its objective differed from
-    the exact route's by 1e-3 to 2e-2.
+    Every performance-iteration solve (bootstrap and candidates) asks for
+    observed working rows and takes them, the fit converges, and it publishes
+    the exact route's criterion: the exact route with its smoothing
+    parameters held at the binned fit's publishes the same objective.  This
+    fixture's binning loses nothing, so the two objectives are the same
+    function at the same smoothing parameters, evaluated at two certified
+    modes; the mode certificate's bar is set so a certified mode moves the
+    objective by less than the REML stop's resolution, ``reml_tol (1 + |V|)``
+    (``mode_score.mode_certification_bar``).  The two optima are not
+    compared: performance iteration leaves out the ``dW/drho`` term, so its
+    stationary point differs from the exact route's.  Mutation checks: on the
+    base the binned route was Fisher throughout and its objective differed
+    from the exact route's at the same smoothing parameters by 1e-3 to
+    2e-2; without ``_working_newton`` on the performance-iteration solves
+    their observed counters stay at zero.
     """
+    import superglm.reml.discrete as discrete
+    from superglm.types import LambdaPolicy
+
+    real = discrete.fit_irls_direct
+    iteration_solves: list[tuple[bool, int]] = []
+
+    def spy(*args, **kwargs):
+        profile = kwargs.get("profile")
+        before = 0 if profile is None else profile.get("irls_observed_newton_iters", 0)
+        out = real(*args, **kwargs)
+        if kwargs.get("trace_purpose") in {"reml_bootstrap", "reml_candidate"}:
+            after = 0 if profile is None else profile.get("irls_observed_newton_iters", 0)
+            iteration_solves.append((bool(kwargs.get("_working_newton")), after - before))
+        return out
+
+    monkeypatch.setattr(discrete, "fit_irls_direct", spy)
     X, y, family, link = _curvature_pair_fixture(name)
-    fits = {}
-    for discrete in (True, False):
-        model = SuperGLM(
-            family=family,
-            link=link,
-            features={"x": Spline(n_knots=8), "c": Categorical()},
-            discrete=discrete,
-        )
-        model.fit_reml(X, y)
-        fits[discrete] = model
-    binned, exact = fits[True], fits[False]
+    binned = SuperGLM(
+        family=family,
+        link=link,
+        features={"x": Spline(n_knots=8), "c": Categorical()},
+        discrete=True,
+    )
+    binned.fit_reml(X, y)
     assert binned.reml_diagnostics()["converged"]
     assert binned._reml_result.curvature_source == "observed"
-    assert binned._reml_profile.get("irls_observed_newton_iters", 0) > 0
-    assert exact._reml_result.curvature_source == "observed"
-    np.testing.assert_allclose(
-        binned._reml_result.objective, exact._reml_result.objective, rtol=1e-7
+    assert len(iteration_solves) >= 2
+    assert all(asked and observed > 0 for asked, observed in iteration_solves)
+
+    (lam,) = binned._reml_result.lambdas.values()
+    held = SuperGLM(
+        family=family,
+        link=link,
+        features={
+            "x": Spline(n_knots=8, lambda_policy=LambdaPolicy.fixed(lam)),
+            "c": Categorical(),
+        },
     )
+    held.fit_reml(X, y)
+    assert held._reml_result.termination_reason == "fixed_lambdas"
+    assert held._reml_result.curvature_source == "observed"
+    objective = held._reml_result.objective
+    resolution = binned._reml_profile["reml_tol_resolved"] * (1.0 + abs(objective))
+    assert abs(binned._reml_result.objective - objective) <= resolution
+
+
+def test_probit_and_cloglog_observed_rows_stay_non_negative_past_the_mean_clip():
+    """Probit and cloglog working rows are formed in eta, so the clip cannot make them negative.
+
+    ``clip_mu`` holds a binomial mean inside ``[1e-7, 1 - 1e-7]`` while the
+    probit link lets eta reach +-20.  The generic observed row reads that
+    clipped mean beside derivatives of the unclipped eta: probit eta = +-6
+    against the opposite response gives -0.361 where the curvature is
+    +0.976, and cloglog eta = -17 with an event -0.243 where it is 2.07e-8.
+    Inside the band the closed forms agree with the generic row.  Mutation
+    check: taking the generic row for these links (as the first version of
+    this branch did) fails the sign assertions.
+    """
+    from scipy.special import ndtr
+
+    from superglm.distributions import Binomial, clip_mu
+    from superglm.links import CloglogLink, ProbitLink
+    from superglm.reml.observed_geometry import compute_observed_information_weights
+    from superglm.solvers.working_rows import coefficient_working_rows
+
+    def rows(link, inverse, eta, y):
+        eta, y = np.asarray(eta, dtype=float), np.asarray(y, dtype=float)
+        mu = clip_mu(inverse(eta), Binomial())
+        out = coefficient_working_rows(
+            distribution=Binomial(),
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=np.ones(eta.size),
+            prefer_observed=True,
+        )
+        generic = compute_observed_information_weights(
+            Binomial(), link, y, mu, eta, np.ones(eta.size)
+        )
+        return out, generic
+
+    def cloglog_inverse(eta):
+        return -np.expm1(-np.exp(eta))
+
+    probit, _ = rows(ProbitLink(), ndtr, [6.0, -6.0], [0.0, 1.0])
+    assert probit.rejection_reason is None
+    assert np.all(probit.weights > 0.0)
+    np.testing.assert_allclose(probit.weights, 0.976012, rtol=1e-6)
+    cloglog, _ = rows(CloglogLink(), cloglog_inverse, [-17.0, -6.0, 2.0], [1.0, 1.0, 0.0])
+    assert cloglog.rejection_reason is None
+    assert np.all(cloglog.weights > 0.0)
+    np.testing.assert_allclose(cloglog.weights[0], 0.5 * np.exp(-17.0), rtol=1e-6)
+    for link, inverse in ((ProbitLink(), ndtr), (CloglogLink(), cloglog_inverse)):
+        eta = np.linspace(-1.5, 1.5, 7)
+        inside, generic = rows(link, inverse, eta, np.linspace(0.0, 1.0, 7))
+        np.testing.assert_allclose(inside.weights, generic, rtol=1e-12)
 
 
 def test_binned_binomial_log_at_the_boundary_returns_and_discloses_it():
     """A binned log-binomial whose maximum holds probabilities of 1 returns, as before.
 
-    Binomial/log stays Fisher on the binned route: its observed rows go
-    negative.  The fit ends unconverged with its final refit on the
+    Binomial/log stays Fisher on the binned route: its maximum can sit on
+    the mean-space boundary, where the clip holds rows and event rows carry
+    no curvature.  The fit ends unconverged with its final refit on the
     mean-space boundary, and the statement says so.  Mutation check: with
     the published curvature taken from the exact route's rule (commit
     a80d264c) the observed terminal refit raised
