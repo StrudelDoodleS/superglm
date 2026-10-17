@@ -83,12 +83,13 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             f"certificate (termination_reason={refit_reason!r})"
         )
     # The penalized maximum on the mean-space boundary at the published
-    # smoothing parameters, or at some the search tried: the model has no
-    # interior optimum there, which no iteration budget changes.
-    boundary = refit_reason == "mean_space_boundary" or bool(
-        getattr(reml_result, "mean_space_restorations", 0)
-    )
-    if refit_reason == "mean_space_boundary":
+    # smoothing parameters: the model has no interior optimum there, which
+    # no iteration budget changes.  Smoothing parameters the search tried and
+    # left (the exact engine's restorations) say nothing of the ones it
+    # selected, so they are reported beside the advice, never instead of it.
+    boundary = refit_reason == "mean_space_boundary"
+    restorations = int(getattr(reml_result, "mean_space_restorations", 0) or 0)
+    if boundary:
         refit = (
             "the final coefficient fit at the selected smoothing parameters holds fitted "
             "means on the boundary of the family's mean space "
@@ -118,10 +119,18 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             " Its last Newton step on the smoothing parameters improved nothing, and no "
             "iteration was left to restart the search with smaller steps."
         )
+    if restorations and not boundary:
+        message += (
+            f" At {restorations} smoothing parameter{'s' if restorations != 1 else ''} the "
+            "search tried, the penalized maximum held fitted means on the boundary of the "
+            "family's mean space (a fitted probability of 1 under the binomial log link); "
+            "the search raised the penalties there until the maximum was interior, and "
+            "selects only among smoothing parameters that have one."
+        )
     if boundary:
         message += (
             " The penalized maximum lies on the boundary of the family's mean space (a "
-            "fitted probability of 1 under the binomial log link) at some smoothing "
+            "fitted probability of 1 under the binomial log link) at the selected smoothing "
             "parameters: the model has no interior optimum there, so more iterations will "
             "not make it converge. A link whose means stay inside (0, 1), such as logit, "
             "has one."

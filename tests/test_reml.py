@@ -2687,13 +2687,15 @@ class TestREMLNonConvergenceDisclosure:
         assert "max_pirls_iter" not in message
 
     def test_a_maximum_on_the_mean_space_boundary_is_named_not_given_more_budget(self):
-        """A log-binomial whose penalized maximum holds a probability of 1 has no
-        interior optimum: the statement says so, and does not advise a larger
-        budget, whether the boundary held the final refit (the discrete
-        path) or smoothing parameters the search tried (the exact engine's
-        restorations).  Mutation check: before, the capped fit was told to
-        refit with a larger max_reml_iter, and the restored one heard nothing
-        of the boundary."""
+        """A log-binomial whose final refit holds a probability of 1 has no
+        interior optimum at the selected smoothing parameters: the statement
+        says so, and does not advise a larger budget.  Smoothing parameters
+        the search tried and left (the exact engine's restorations) are not
+        that claim: such a fit keeps the advice its own stop calls for, with
+        the restorations reported beside it.  Mutation checks: before the
+        boundary statement the capped fit was told to refit with a larger
+        max_reml_iter; on 37865bd9 a restored fit that ran out of iterations
+        was told more iterations would not help, and lost that advice."""
         from superglm.diagnostics.convergence import reml_nonconvergence_message
 
         capped = REMLResult(
@@ -2719,7 +2721,24 @@ class TestREMLNonConvergenceDisclosure:
         )
         message = reml_nonconvergence_message(restored)
         assert "no smoothing step improved" in message
-        assert "no interior optimum" in message
+        assert "At 4 smoothing parameters the search tried" in message
+        assert "no interior optimum" not in message
+        assert "model.reml_diagnostics() holds the iteration history" in message
+
+        restored_capped = REMLResult(
+            lambdas={},
+            pirls_result=None,
+            n_reml_iter=20,
+            converged=False,
+            termination_reason="max_reml_iter",
+            mean_space_restorations=1,
+        )
+        restored_capped.terminal_refit_termination = "max_iter"
+        message = reml_nonconvergence_message(restored_capped)
+        assert "At 1 smoothing parameter the search tried" in message
+        assert "no interior optimum" not in message
+        assert "Refit with a larger max_reml_iter and a larger max_pirls_iter" in message
+        assert "lambda2_init" in message
 
     def test_both_budgets_are_named_when_both_ran_out(self):
         """A capped search whose final refit also stopped on its iteration cap
