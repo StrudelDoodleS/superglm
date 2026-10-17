@@ -72,6 +72,7 @@ from superglm.solvers.irls_direct import (
     _structured_solver_errors,
     fit_irls_direct,
 )
+from superglm.solvers.irls_state import link_domain_violation
 from superglm.solvers.mode_score import (
     centred_matvec,
     centred_warm_start,
@@ -626,6 +627,13 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
+    # A trial whose unclipped predictor leaves the link's domain (eta <= 0 under
+    # an inverse link) would be scored on clipped means of about 1e12, and once
+    # accepted it would warm-start the next solve outside the domain, where the
+    # PIRLS guard is off.  It is refused like any other trial; the retained state
+    # starts inside the domain and is only ever replaced by an accepted trial.
+    domain_violation = link_domain_violation(link)
+    _n_domain_refused_trials = 0
     # score-test stops refused because a concave shoulder was live
     _n_concave_stop_refusals = 0
     # cached trials whose Hessian was negative only within its formation
@@ -1592,10 +1600,17 @@ def optimize_discrete_reml_cached_w(
                     _n_block_structured_cache_solves += 1
 
             # Only the true objective can accept this trial.
-            eta_trial = stabilize_eta(
-                centred_intercept_trial + centred_matvec(dm, beta_trial, cand_centre) + offset_arr,
-                link,
+            eta_unclipped_trial = (
+                centred_intercept_trial + centred_matvec(dm, beta_trial, cand_centre) + offset_arr
             )
+            if domain_violation is not None and domain_violation(
+                eta_unclipped_trial, sample_weight
+            ):
+                _n_domain_refused_trials += 1
+                step *= 0.5
+                halving_count += 1
+                continue
+            eta_trial = stabilize_eta(eta_unclipped_trial, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = weighted_row_sum(sample_weight, distribution.deviance_unit, y, mu_trial)
             trial_pirls = PIRLSResult(
@@ -2048,6 +2063,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_refused_structured_trials"] = _n_refused_structured_trials
+        profile["reml_n_domain_refused_trials"] = _n_domain_refused_trials
         profile["reml_n_concave_stop_refusals"] = _n_concave_stop_refusals
         profile["reml_n_formation_limited_trials"] = _cached_solve_disclosure.get(
             "formation_limited", 0

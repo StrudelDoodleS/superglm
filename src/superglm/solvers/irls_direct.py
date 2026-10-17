@@ -1206,7 +1206,9 @@ def _fit_irls_direct_once(
     _use_observed_newton : bool
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
-        fit keeps Fisher scoring; no rejected step switches the curvature
+        fit starts on Fisher scoring, switching to Newton only when its
+        resolved score is measured to stall (``_observed_newton_active``) or
+        when ``_newton_latch`` is set; no rejected step switches the curvature
         (one-engine design §3.11). Unsupported, constrained, SCOP, and
         cached-working-system routes retain Fisher scoring. Public callers
         should leave this True.

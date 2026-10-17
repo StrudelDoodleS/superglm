@@ -114,3 +114,38 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
 
     assert prepare_calls == 1
     assert hessian_checks >= 2
+
+
+def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A smoothing-parameter trial that carries a row to eta <= 0 under the inverse link is
+    refused, as a rejected trial, instead of being scored on clipped means of about 1e12 and
+    becoming the next solve's warm start."""
+    from superglm.reml import discrete
+
+    real = discrete._solve_cached_profiled_system
+    crossed = {"n": 0}
+
+    def crossing_first(*args, **kwargs):
+        beta, intercept, log_det_h, rank = real(*args, **kwargs)
+        if crossed["n"] == 0:
+            crossed["n"] += 1
+            beta = beta * 1e3  # far enough to put rows on both sides of eta = 0
+        return beta, intercept, log_det_h, rank
+
+    monkeypatch.setattr(discrete, "_solve_cached_profiled_system", crossing_first)
+    X, y, weights = _gamma_data()
+    model = SuperGLM(
+        family="gamma",
+        link="inverse",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+    model.fit_reml(X, y, sample_weight=weights, max_reml_iter=6, runtime_validation="skip")
+
+    assert crossed["n"] == 1
+    assert model._reml_profile["reml_n_domain_refused_trials"] >= 1
+    mu = model.predict(X)
+    assert np.all(np.isfinite(mu)) and mu.max() < 1e3 * y.max()
