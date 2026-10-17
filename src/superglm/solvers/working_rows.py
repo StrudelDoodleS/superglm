@@ -20,7 +20,15 @@ from superglm.distributions import (
     _weighted_residual_square,
     initial_mean,
 )
-from superglm.links import IdentityLink, Link, LogitLink, LogLink, SqrtLink
+from superglm.links import (
+    CloglogLink,
+    IdentityLink,
+    Link,
+    LogitLink,
+    LogLink,
+    ProbitLink,
+    SqrtLink,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,28 @@ def supports_observed_newton(distribution: object, link: object) -> bool:
     # Exact types are intentional: a subclass can change either likelihood or
     # inverse-link derivatives and must not inherit an unproved Hessian.
     return type(link) is LogLink and type(distribution) in (Gamma, Tweedie)
+
+
+def concave_observed_rows(distribution: object, link: object) -> bool:
+    """Whether the pair's observed working rows exist and are never negative.
+
+    The row log-likelihood is concave in ``eta`` for Gamma/log and Tweedie/log
+    (``supports_observed_newton``), for NB2/log (``-d2l/deta2 = w theta mu
+    (y + theta) / (mu + theta)^2``), and for the binomial probit and cloglog
+    links (log-concave cumulative distribution functions; Pratt 1981, JASA
+    76(373)), so their observed information is a valid weight for a
+    working linear model.  Binomial/log and Gaussian/log are not: their
+    observed rows go negative (``1 - y/(1 - mu)`` and ``2 mu - y``).  The
+    binned REML route takes observed curvature only for these pairs
+    (``reml.observed_geometry.classify_binned_reml_curvature``).  Exact types,
+    as ``supports_observed_newton``: a subclass must not inherit the claim.
+    """
+    if supports_observed_newton(distribution, link):
+        return True
+    family, link_type = type(distribution), type(link)
+    if family is Binomial and link_type in (ProbitLink, CloglogLink):
+        return True
+    return family is NegativeBinomial and link_type is LogLink
 
 
 def coefficient_initial_intercept(
@@ -318,6 +348,44 @@ def _gamma_log_observed_rows(
     return observed_weights, response
 
 
+def _concave_observed_rows(
+    distribution: object,
+    link: object,
+    *,
+    y: NDArray,
+    mu: NDArray,
+    eta: NDArray,
+    sample_weight: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Observed rows of NB2/log and binomial probit and cloglog: ``eta + score / curvature``.
+
+    The curvature is the REML geometry's own observed information
+    (``compute_observed_information_weights``), so the binned working model
+    and the exact route's criterion read the same rows.  The score is the
+    Fisher rows' ``W (z - eta)``, which does not depend on the curvature.  A
+    row whose curvature is zero (a zero weight, or underflow far in a tail)
+    keeps ``z = eta``: it adds nothing to the update.
+    """
+    from superglm.reml.observed_geometry import compute_observed_information_weights
+
+    fisher = _fisher_rows(
+        distribution=distribution,
+        link=link,
+        y=y,
+        mu=mu,
+        eta=eta,
+        sample_weight=sample_weight,
+    )
+    observed_weights = compute_observed_information_weights(
+        distribution, link, y, mu, eta, sample_weight
+    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        score = fisher.weights * (fisher.response - eta)
+        step = np.zeros_like(score)
+        np.divide(score, observed_weights, out=step, where=observed_weights > 0.0)
+    return np.asarray(observed_weights, dtype=np.float64), eta + step
+
+
 def coefficient_working_rows(
     *,
     distribution: object,
@@ -345,7 +413,7 @@ def coefficient_working_rows(
     mu = np.asarray(mu, dtype=np.float64)
     eta = np.asarray(eta, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    if not prefer_observed or not supports_observed_newton(distribution, link):
+    if not prefer_observed or not concave_observed_rows(distribution, link):
         return _fisher_rows(
             distribution=distribution,
             link=link,
@@ -356,13 +424,17 @@ def coefficient_working_rows(
         )
 
     active = sample_weight > 0.0
-    if type(distribution) is Tweedie:
+    if type(distribution) is Tweedie and type(link) is LogLink:
         observed_weights, response = _tweedie_log_observed_rows(
             distribution.p, y=y, mu=mu, eta=eta, sample_weight=sample_weight
         )
-    else:
+    elif type(distribution) is Gamma and type(link) is LogLink:
         observed_weights, response = _gamma_log_observed_rows(
             y=y, mu=mu, eta=eta, sample_weight=sample_weight, active=active
+        )
+    else:
+        observed_weights, response = _concave_observed_rows(
+            distribution, link, y=y, mu=mu, eta=eta, sample_weight=sample_weight
         )
     with np.errstate(over="ignore", invalid="ignore"):
         total_observed_weight = float(np.sum(observed_weights, dtype=np.float64))
