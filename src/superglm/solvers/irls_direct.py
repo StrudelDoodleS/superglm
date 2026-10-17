@@ -182,6 +182,7 @@ from superglm.solvers.structured import (
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
     coefficient_working_rows,
+    concave_observed_rows,
     fisher_working_weights,
     pearson_chi2,
     supports_observed_newton,
@@ -980,6 +981,7 @@ def fit_irls_direct(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _working_newton: bool = False,
     _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
@@ -1041,6 +1043,7 @@ def fit_irls_direct(
             _compute_reml_geometry=_compute_reml_geometry,
             _retain_reml_decomposition=_retain_reml_decomposition,
             _use_observed_newton=_use_observed_newton,
+            _working_newton=_working_newton,
             _newton_latch=_newton_latch,
             _deviance_init=_deviance_init,
             trace_run=trace_run,
@@ -1096,6 +1099,7 @@ def _fit_irls_direct_once(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _working_newton: bool = False,
     _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
@@ -1203,6 +1207,14 @@ def _fit_irls_direct_once(
         solve that switched from Fisher to Newton sets it, and a later solve
         of the fit that finds it set starts on Newton steps.  ``None`` (the
         default) shares nothing.
+    _working_newton : bool
+        Internal, read only with ``_return_working_system``: the fREML
+        performance iteration's update takes observed (Newton) rows instead
+        of Fisher's, for a pair whose observed rows are never negative
+        (``working_rows.concave_observed_rows``).  The discrete optimizer
+        asks for it when the pair's binned REML curvature is observed
+        (``classify_binned_reml_curvature``), so its working model is the
+        criterion it publishes.
     _use_observed_newton : bool
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
@@ -2101,13 +2113,20 @@ def _fit_irls_direct_once(
     # positive definite takes a Levenberg shift inside the same curvature
     # (``_levenberg_shifted_operator``), and a trial whose observed rows are
     # not finite is rejected by the line search.
+    # The fREML performance iteration (``_return_working_system``) takes
+    # Newton rows when its optimizer asks (``_working_newton``): the discrete
+    # route's working model then carries the observed curvature its REML
+    # criterion is (``reml.discrete``).
     _observed_newton_active = bool(
         _use_observed_newton
         and not has_constraints
         and not _has_scop
-        and not _return_working_system
-        and supports_observed_newton(family, link)
-        and not _has_constant_irls_weights(family, link)
+        and (
+            (_working_newton and concave_observed_rows(family, link))
+            if _return_working_system
+            else supports_observed_newton(family, link)
+            and not _has_constant_irls_weights(family, link)
+        )
     )
     # A declared Newton pair kept on Fisher rows for its constant weights
     # (Gamma/log), which switches to Newton if its Fisher score stagnates,
