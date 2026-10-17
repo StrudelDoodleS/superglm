@@ -731,10 +731,11 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
 2. **Endgame.** Newton using the full LAML gradient and Hessian formulas in log λ,
    the construction of Wood, Pya and Säfken (2016): the implicit derivative of
    the coefficient mode through the observed penalised Hessian, the derivative
-   of `log|H|` through the third derivatives of the row log-likelihood
-   (analytic for `GaussianLS` and `GammaLS`, finite differences of the packed
-   row curvature otherwise, each carrying a certificate), and the fourth
-   derivatives by second differences of the same rows. The Hessian is made
+   of `log|H|` through the third derivatives of the row log-likelihood, and
+   the Hessian through its fourth derivatives. Every built-in family supplies
+   both analytically; a family or link without them, or a two-piece row on its
+   kink, falls back to finite differences of the packed row curvature, and
+   each carries a certificate. The Hessian is made
    positive definite by a growing ridge, the step is capped at `max_log_step`
    and accepted by Armijo backtracking; when the Hessian's certificate exceeds
    a tenth of its smallest active diagonal the iteration steps by damped BFGS
@@ -1216,8 +1217,9 @@ endgame exists for them. A family is a candidate for the analytic hook exactly
 when its row log-likelihood is `C³` in every natural parameter over the whole
 support the links can reach.
 
-Two-piece rows close enough to the kink that a step of `1e-3` along either
-direction could carry them across it keep their analytic fourth derivatives,
+Two-piece rows close enough to the kink that one derivative step
+(`derivative_step`, `1e-3` by default) along either direction or their sum
+could carry them across it keep their analytic fourth derivatives,
 but report a certificate scaled by the curvature jump there, so the endgame
 trusts that Hessian no more than a differenced one.
 
