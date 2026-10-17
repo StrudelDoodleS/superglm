@@ -44,6 +44,7 @@ from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
 )
+from superglm.reml.observed_geometry import classify_binned_reml_curvature
 from superglm.reml.penalty_algebra import (
     build_penalty_context,
     build_penalty_matrix,
@@ -546,6 +547,15 @@ def optimize_discrete_reml_cached_w(
         sample_weight,
         weight_semantics=weight_semantics,
     )
+    # The REML curvature is a function of the family and link
+    # (``classify_binned_reml_curvature``): observed where the exact route's
+    # is and the observed rows are never negative, Fisher otherwise.  The
+    # performance iteration's working model carries it (Newton rows,
+    # ``fit_irls_direct``'s ``_working_newton``), the result reports it, and
+    # the terminal refit and objective (``reml_finalize``) score it, so the
+    # criterion the optimizer steps on is the one published.
+    reml_curvature = classify_binned_reml_curvature(distribution, link)
+    working_newton = reml_curvature == "observed"
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
@@ -693,6 +703,7 @@ def optimize_discrete_reml_cached_w(
         return_xtwx=True,
         compute_rank_info=False,
         _return_working_system=True,
+        _working_newton=working_newton,
         _compute_fit_statistics=False,
         profile=profile,
         cache_out=cache,
@@ -913,6 +924,7 @@ def optimize_discrete_reml_cached_w(
             return_xtwx=True,
             compute_rank_info=False,
             _return_working_system=True,
+            _working_newton=working_newton,
             _compute_fit_statistics=False,
             _deviance_init=warm_deviance,
             profile=profile,
@@ -1881,7 +1893,7 @@ def optimize_discrete_reml_cached_w(
             converged=converged,
             lambda_history=lambda_history,
             objective=float(obj),
-            curvature_source="fisher",
+            curvature_source=reml_curvature,
             termination_reason=termination_reason,
             reml_penalties=penalties,
         )
@@ -2082,7 +2094,7 @@ def optimize_discrete_reml_cached_w(
         converged=converged,
         lambda_history=lambda_history,
         objective=float(best_obj),
-        curvature_source="fisher",
+        curvature_source=reml_curvature,
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_scale_data,
         reml_penalties=penalties,

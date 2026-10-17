@@ -481,6 +481,30 @@ def classify_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
     )
 
 
+def classify_binned_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
+    """The REML curvature of the binned (``discrete=True``) route: a function of family and link.
+
+    Observed where the exact route's is (``classify_reml_curvature``) and the
+    pair's observed rows are never negative (``concave_observed_rows``:
+    Gamma/log, Tweedie/log, NB2/log, binomial probit and cloglog).  The
+    performance iteration fits a working linear model, which needs positive
+    weights, so the observed criterion is optimized there only where the
+    observed information supplies them; PQL works with the expected
+    information for that reason, and the two coincide only for canonical
+    links (Wood, Pya & Saefken 2016, JASA 111(516)).  Every other pair is
+    Fisher in the optimizer and in the published criterion: canonical
+    pairs, where the two are equal; binomial/log and Gaussian/log, whose
+    observed rows go negative; and custom families and links, by default.
+    """
+    from superglm.solvers.working_rows import concave_observed_rows
+
+    if concave_observed_rows(distribution, link) and (
+        classify_reml_curvature(distribution, link) == "observed"
+    ):
+        return "observed"
+    return "fisher"
+
+
 def validate_observed_derivative_capability(
     distribution: Any,
     link: Any,
