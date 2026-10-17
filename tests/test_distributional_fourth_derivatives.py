@@ -566,6 +566,62 @@ def test_two_piece_join_reach_includes_the_locations_curvature() -> None:
     assert np.all(certificate[pairs.index((0, 0))] == 0.0)
 
 
+def test_mean_form_join_reach_takes_the_locations_hessian() -> None:
+    """The default log-normal mean form: mu = log theta_0 - log K(theta_1, theta_2), so
+    d^2 mu / d eta^2 has H_00 = (g0'' - g0'^2/theta_0)/theta_0, H_qq = -(K_qq gq'^2 + K_q gq'')
+    and H_12 = -K_se g1' g2'.  Each row sits in the band its pair's second-order term adds
+    (at 3/4 of it, so dropping any one term of that entry leaves the row outside): the
+    (1, 1), (2, 2) and (1, 2) pairs are certified; under the log link H_00 = 0, so a row
+    just past the first-order reach on (0, 0) is not."""
+    from superglm.distributional.families._base import link_derivative_columns
+    from superglm.distributional.kernels.two_piece import JOIN_REACH, log_mean_loading
+
+    h = JOIN_REACH
+
+    family = TwoPieceLogNormalLSS()
+    links = _links(family)
+    eta = np.column_stack(
+        (
+            links[0].link(np.full(1, 100.0)),
+            links[1].link(np.full(1, 0.6)),
+            links[2].link(np.full(1, 0.3)),
+        )
+    )
+    theta, g1, g2 = (column[0] for column in link_derivative_columns(eta, links, 2))
+    log_k, k_s, k_e, k_ss, k_se, k_ee = (v[0] for v in log_mean_loading(theta[1:2], theta[2:3]))
+    gradient = np.array([g1[0] / theta[0], -k_s * g1[1], -k_e * g1[2]])
+    hessian = np.zeros((3, 3))
+    hessian[0, 0] = (g2[0] - g1[0] ** 2 / theta[0]) / theta[0]
+    hessian[1, 1] = -(k_ss * g1[1] ** 2 + k_s * g2[1])
+    hessian[2, 2] = -(k_ee * g1[2] ** 2 + k_e * g2[2])
+    hessian[1, 2] = hessian[2, 1] = -k_se * g1[1] * g1[2]
+
+    def rates(unit):
+        first = abs(gradient @ unit)
+        return first, first + 0.5 * h * abs(unit @ hessian @ unit)
+
+    e = np.eye(3)
+    combined = (e[1] + e[2]) / np.sqrt(2.0)
+    band = {}
+    for pair, units in (((1, 1), [e[1]]), ((2, 2), [e[2]]), ((1, 2), [e[1], e[2], combined])):
+        low = max(rates(u)[0] for u in units)
+        high = max(rates(u)[1] for u in units)
+        others = [rates(u)[1] for u in units[:-1]] if pair == (1, 2) else []
+        low = max([low, *others])
+        assert high > low
+        band[pair] = h * (low + 0.75 * (high - low))
+    distances = np.array([h * rates(e[0])[0] * (1.0 + 2.5e-4), *band.values()])
+    location = np.log(theta[0]) - log_k
+    y = np.exp(location + distances)
+    pairs, first, second = _stacked_axis_pairs(3)
+    _, certificate = family.certified_predictor_curvature_second_directional_derivative(
+        y, np.repeat(eta, 4, axis=0), first, second, links, _plan(family, y)
+    )
+    assert np.all(certificate[pairs.index((0, 0)), 0] == 0.0)
+    for row, pair in enumerate(band, start=1):
+        assert certificate[pairs.index(pair), row].max() > 0.0, pair
+
+
 def test_a_near_stationary_location_link_at_the_join_differences_instead() -> None:
     """Under a square-root location link at ``eta = 0`` the link's slope is zero, so the
     jumps composed at the row are zero, while ``eta +- JOIN_REACH`` carry the location to
