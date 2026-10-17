@@ -626,3 +626,24 @@ def test_table_jobs_run_on_one_blas_thread_at_any_worker_count(monkeypatch):
         with parallel_config(n_jobs=workers):
             lookup_tables._pool_run([lambda: seen.append(_blas_thread_counts())] * 3, 8)
         assert seen and all(all(count == 1 for count in counts) for counts in seen), workers
+
+
+def test_the_pool_releases_each_result_once_it_is_yielded():
+    """A caller that reduces as results arrive holds one at a time: once the next result is
+    yielded, the pool no longer references any earlier one."""
+    import gc
+    import weakref
+
+    from superglm._parallel import parallel_config, pooled_map
+
+    class Part:
+        pass
+
+    refs = []
+    with parallel_config(n_jobs=3, max_memory=2**30):
+        for part in pooled_map(lambda _: Part(), list(range(6)), 1):
+            refs.append(weakref.ref(part))
+            del part
+            gc.collect()
+            assert all(ref() is None for ref in refs[:-1]), len(refs)
+    assert len(refs) == 6

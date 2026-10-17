@@ -331,7 +331,7 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Iterator:
     results in the order they are yielded gets the same bits at every worker
     count.  Each task runs in a copy of the caller's context, which carries
     ``np.errstate`` as the serial loop has it.  Every item is submitted at
-    once and its result is held until it is yielded; ``item_bytes`` is the
+    once and its result is held until it is yielded, not after; ``item_bytes`` is the
     working set one item holds while it runs, and a result the caller keeps
     anyway (a built design term) adds nothing over the serial loop.
     """
@@ -349,8 +349,11 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Iterator:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-map") as pool:
             futures = [pool.submit(contextvars.copy_context().run, fn, item) for item in items]
             try:
-                for future in futures:
-                    yield future.result()
+                for index, future in enumerate(futures):
+                    result = future.result()
+                    futures[index] = None  # a yielded result is the caller's to keep or drop
+                    yield result
             finally:
                 for future in futures:
-                    future.cancel()
+                    if future is not None:
+                        future.cancel()
