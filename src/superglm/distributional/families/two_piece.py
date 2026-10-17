@@ -137,8 +137,9 @@ def _certified_second_direction(
     single = np.ndim(direction_a) == 2
     predictors, first, second = second_direction_arrays(response, eta, direction_a, direction_b, 3)
     theta, g1, g2, g3 = link_derivative_columns(predictors, tuple(links), 3)
+    hessian = np.zeros((theta.shape[0], 3, 3), dtype=np.float64)
     if mean_form:
-        logk, k_s, k_e = log_mean_loading(theta[:, 1], theta[:, 2])[:3]
+        logk, k_s, k_e, k_ss, k_se, k_ee = log_mean_loading(theta[:, 1], theta[:, 2])
         location = np.log(theta[:, 0]) - logk
         jumps = mean_join_jumps(theta[:, 0], theta[:, 1], theta[:, 2], multiplier)
         gradient = np.column_stack(
@@ -148,14 +149,27 @@ def _certified_second_direction(
                 -k_e * g1[:, 2],
             )
         )
+        # d^2 mu / d eta^2 for mu = log theta_0 - log K(theta_1, theta_2), each theta its own link.
+        hessian[:, 0, 0] = (g2[:, 0] - g1[:, 0] ** 2 / theta[:, 0]) / theta[:, 0]
+        hessian[:, 1, 1] = -k_ss * g1[:, 1] ** 2 - k_s * g2[:, 1]
+        hessian[:, 2, 2] = -k_ee * g1[:, 2] ** 2 - k_e * g2[:, 2]
+        hessian[:, 1, 2] = hessian[:, 2, 1] = -k_se * g1[:, 1] * g1[:, 2]
     else:
         location = theta[:, 0]
         jumps = location_join_jumps(theta[:, 1], theta[:, 2], multiplier)
         zero = np.zeros_like(location)
         gradient = np.column_stack((g1[:, 0], zero, zero))
+        hessian[:, 0, 0] = g2[:, 0]
     with np.errstate(over="ignore", invalid="ignore"):
         certificate = join_certificate(
-            np.abs(variate - location), gradient, jumps, (g1, g2, g3), first, second, reach=reach
+            np.abs(variate - location),
+            gradient,
+            jumps,
+            (g1, g2, g3),
+            first,
+            second,
+            reach=reach,
+            location_hessian=hessian,
         )
     if not np.all(np.isfinite(certificate)):
         raise ValueError("the two-piece join certificate is not representable at this state")

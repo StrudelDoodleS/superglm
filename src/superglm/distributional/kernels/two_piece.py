@@ -888,6 +888,7 @@ def join_certificate(
     second: NDArray,
     *,
     reach: float = JOIN_REACH,
+    location_hessian: NDArray | None = None,
 ) -> NDArray[np.float64]:
     """The analytic second curvature direction's trust signal on rows near the join.
 
@@ -905,6 +906,14 @@ def join_certificate(
     ``reach`` record across a kink; elsewhere it is zero.  Directions as for the second direction,
     ``(m, n, K)`` or ``(m, 1, K)``.  The jumps reach the predictors through
     the links' first three derivatives.
+
+    ``location_hessian`` (``(n, K, K)``, ``d^2 mu / d eta^2``) adds the
+    second-order displacement ``reach |u' H u| / 2`` to each rate, so a row
+    the location's curvature carries across is near too.  A near row on
+    which a link is close to stationary (``|g''| reach > |g'|``) is refused
+    with ``ValueError``: the jumps composed through its derivatives at the
+    row miss what the step meets, so the caller differences instead, as for
+    a row on the join.
     """
     g1, g2, g3 = link_derivatives
     n_rows, k_parameters = g1.shape
@@ -923,10 +932,18 @@ def join_certificate(
     combined = unit_a + unit_b
     norm_c = np.linalg.norm(combined, axis=-1)
     unit_c = combined / np.where(norm_c > 0.0, norm_c, 1.0)[..., None]
-    rate = np.maximum.reduce(
-        [np.abs(np.sum(location_gradient * unit, axis=-1)) for unit in (unit_a, unit_b, unit_c)]
-    )
+    rates = []
+    for unit in (unit_a, unit_b, unit_c):
+        rate_u = np.abs(np.sum(location_gradient * unit, axis=-1))
+        if location_hessian is not None:
+            curvature = np.sum(unit * np.matmul(location_hessian, unit[..., None])[..., 0], axis=-1)
+            rate_u = rate_u + 0.5 * reach * np.abs(curvature)
+        rates.append(rate_u)
+    rate = np.maximum.reduce(rates)
     near = (rate > 0.0) & (np.asarray(distance, dtype=_FLOAT) <= reach * rate)
+    stationary = np.any(np.abs(g2) * reach > np.abs(g1), axis=-1)
+    if np.any(near & stationary):
+        raise ValueError("a link is near stationary on a row near the two-piece join")
     pairs = packed_tuples(k_parameters, 2)
     triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
     reach_a = np.maximum.reduce([np.abs(unit_a), np.abs(unit_b), np.abs(unit_c)])

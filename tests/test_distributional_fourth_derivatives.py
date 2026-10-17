@@ -515,3 +515,74 @@ def test_two_piece_join_certificate_follows_the_engine_derivative_step() -> None
     )
     assert resolved is not None and resolved[1] is not None
     np.testing.assert_array_equal(resolved[1], wide)
+
+
+def test_the_engine_passes_its_derivative_step_to_the_join_certificate() -> None:
+    """``_analytic_second_derivatives`` hands its ``step`` to the family: the row ``5e-3``
+    from the join is certified at a ``1e-2`` step, which the default step would miss."""
+    from superglm.distributional.kernels.two_piece import location_join_jumps
+    from superglm.distributional.smoothing.derivatives import _analytic_second_derivatives
+
+    family = TwoPieceNormalLSS()
+    links = _links(family)
+    y = np.array([1.0 + 5e-3])
+    sigma, skew, step = 0.8, 0.3, 1e-2
+    eta = np.column_stack(
+        (np.ones(1), links[1].link(np.full(1, sigma)), links[2].link(np.full(1, skew)))
+    )
+    resolved = _analytic_second_derivatives(family, y, eta, links, _plan(family, y), step=step)
+    assert resolved is not None
+    hessian_jump, _ = location_join_jumps(np.full(1, sigma), np.full(1, skew), np.ones(1))
+    assert resolved[1][(0, 0)][0, 0] >= hessian_jump[0, 0] / step**2 * (1.0 - 1e-12)
+
+
+def test_two_piece_join_reach_includes_the_locations_curvature() -> None:
+    """A row beyond the first-order reach that the location's curvature carries across the
+    join is near: along ``e_1`` the location moves at rate 0.1 with curvature 2, so a step
+    of ``JOIN_REACH`` reaches ``0.101 JOIN_REACH`` and the row at ``0.1005 JOIN_REACH`` is
+    certified on the ``(1, 1)`` pair."""
+    from superglm.distributional.kernels.two_piece import (
+        JOIN_REACH,
+        join_certificate,
+        location_join_jumps,
+    )
+
+    jumps = location_join_jumps(np.array([0.8]), np.array([0.3]), np.ones(1))
+    ones, zeros = np.ones((1, 3)), np.zeros((1, 3))
+    hessian = np.zeros((1, 3, 3))
+    hessian[0, 1, 1] = 2.0
+    pairs, first, second = _stacked_axis_pairs(3)
+    arguments = (
+        np.array([0.1005 * JOIN_REACH]),
+        np.array([[0.0, 0.1, 0.0]]),
+        jumps,
+        (ones, zeros, zeros),
+        first,
+        second,
+    )
+    assert np.all(join_certificate(*arguments) == 0.0)  # first order alone misses it
+    certificate = join_certificate(*arguments, location_hessian=hessian)
+    assert certificate[pairs.index((1, 1)), 0, :].max() > 0.0
+    assert np.all(certificate[pairs.index((0, 0))] == 0.0)
+
+
+def test_a_near_stationary_location_link_at_the_join_differences_instead() -> None:
+    """Under a square-root location link at ``eta = 0`` the link's slope is zero, so the
+    jumps composed at the row are zero, while ``eta +- JOIN_REACH`` carry the location to
+    ``1e-6``, across a response at ``5e-7``.  The row is refused and the engine differences."""
+    from superglm.distributional.smoothing.derivatives import _analytic_second_derivatives
+    from superglm.links import SqrtLink
+
+    family = TwoPieceNormalLSS()
+    links = (SqrtLink(), *_links(family)[1:])
+    y = np.array([5e-7])
+    plan = _plan(family, y)
+    eta = np.column_stack(
+        (np.zeros(1), links[1].link(np.full(1, 0.8)), links[2].link(np.full(1, 0.3)))
+    )
+    _, first, second = _stacked_axis_pairs(3)
+    with pytest.raises(ValueError, match="near stationary"):
+        family.certified_predictor_curvature_second_directional_derivative(
+            y, eta, first, second, links, plan
+        )
+    assert _analytic_second_derivatives(family, y, eta, links, plan, step=1e-3) is None
