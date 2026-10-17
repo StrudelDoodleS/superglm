@@ -82,6 +82,7 @@ def test_compare_pairs_a_record_with_the_baseline_of_the_same_key(run):
         ("environment.numpy", lambda key: key["environment"].update(numpy="0.0.0")),
         ("machine.cpu_model", lambda key: key["machine"].update(cpu_model="another CPU")),
         ("dataset_hash", lambda key: key.update(dataset_hash="0" * 64)),
+        ("harness_hash", lambda key: key.update(harness_hash="0" * 64)),
     ],
 )
 def test_compare_refuses_a_key_that_differs(run, component, change):
@@ -256,3 +257,4 @@ def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run):
     stored["provenance"] = {**stored["provenance"], "dirty": False}
     _, reason = books.match_baseline(record, [stored], record["key"]["sha"])
     assert reason is not None and "threads_observed" in reason
+    assert "--force" in reason  # only the widths differ: the refusal names the remedy

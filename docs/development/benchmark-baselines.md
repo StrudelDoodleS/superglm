@@ -152,7 +152,9 @@ but the SHA:
   since affinity, cgroups or a library can narrow a "default" pool. The widths
   are read in the fit's own process, so `baseline` reuse and benchboard's case
   name leave them out (the `key` step runs in another process), while
-  `compare` refuses on them.
+  `compare` refuses on them. When the widths are all that differs, `compare`'s
+  refusal names the remedy: re-time the baseline with `--force`. A record whose
+  key predates the widths is never reused.
 
 superglm's own fit recorder is off during a `books.py` run, which records the
 fit itself, so the timed fit carries no recorder work.

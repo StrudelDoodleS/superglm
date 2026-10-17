@@ -1486,6 +1486,7 @@ def cmd_baseline(args) -> int:
                 if usable_baseline(r)
                 and reuse_part(r["key"]) == reuse_part(key)
                 and r["key"]["sha"] == sha
+                and "threads_observed" in r["key"]  # an older key can never pass compare
             ]
             if stored and not args.force:
                 print(f"reused  {case} [{threads}] {bench_case(entry)} at {sha[:12]}", flush=True)
@@ -1524,9 +1525,15 @@ def match_baseline(record: dict, candidates: list[dict], base_sha: str):
         if c["key"] == want:
             return c, None
     strip = lambda k: {n: v for n, v in k.items() if n != "sha"}  # noqa: E731
-    return None, "key differs from the stored baseline: " + "; ".join(
+    reason = "key differs from the stored baseline: " + "; ".join(
         _diff(strip(usable[-1]["key"]), strip(want))
     )
+    if reuse_part(usable[-1]["key"]) == reuse_part(want):
+        # Only the pool widths differ, which `baseline` reuse does not see.
+        reason += (
+            f"; re-time it: books.py baseline {base_sha[:12]} --threads {record['threads']} --force"
+        )
+    return None, reason
 
 
 def _fmt(v, digits=1):
