@@ -27,6 +27,7 @@ import argparse
 import functools
 import hashlib
 import importlib
+import importlib.metadata
 import importlib.util
 import inspect
 import json
@@ -292,9 +293,10 @@ def digest(obj) -> str:
     return hashlib.sha256(canonical(obj).encode()).hexdigest()
 
 
-# The harness code that turns a spec into a problem and its metrics; its source is part of
-# every spec hash, so a change to how y, weights, offsets or a metric are computed retires
-# the baselines stored under the old code.
+# The harness code that turns a spec into a problem, its metrics and its work counts; its
+# source, with the counter tables, is part of every spec hash, so a change to how y, weights,
+# offsets, a metric, a count or a fit field is computed retires the baselines stored under
+# the old code.
 _SEMANTICS = (
     "_fremtpl2_book",
     "_synthetic",
@@ -312,11 +314,17 @@ _SEMANTICS = (
     "_nb2_deviance",
     "glm_results",
     "lss_results",
+    "Counters",
+    "glm_state",
+    "lss_state",
+    "_is_time",
 )
 
 
 def harness_hash() -> str:
-    return digest([inspect.getsource(globals()[name]) for name in _SEMANTICS])
+    return digest(
+        [inspect.getsource(globals()[name]) for name in _SEMANTICS] + [COUNTERS, PROFILE_WORK]
+    )
 
 
 def spec_hash(case: str) -> str:
@@ -465,6 +473,11 @@ def tree_state(path: Path, paths=("src", "pyproject.toml", "uv.lock"), package=F
     return {"tree": top, "sha": _git(top, "rev-parse", "HEAD"), "dirty": bool(status)}
 
 
+# Runtime dependencies on the fit path beyond the four imported below; tabmat backs the group
+# matrices, joblib the parallel candidate fits, threadpoolctl the thread pinning.
+_FIT_DEPENDENCIES = ("tabmat", "narwhals", "scikit-learn", "joblib", "threadpoolctl")
+
+
 def environment() -> dict:
     import numba
     import numpy
@@ -491,6 +504,7 @@ def environment() -> dict:
         "scipy": scipy.__version__,
         "numba": numba.__version__,
         "pandas": pandas.__version__,
+        **{name: importlib.metadata.version(name) for name in _FIT_DEPENDENCIES},
         "blas": sorted(blas, key=canonical),
     }
 
@@ -930,6 +944,7 @@ def key_of(case, threads, sha, data_hash, env, mach) -> dict:
         "sha": sha,
         "dataset_hash": data_hash,
         "spec_hash": spec_hash(case),
+        "harness_hash": harness_hash(),  # names a harness edit as the cause of a mismatch
         "environment": env,
         "machine": mach,
         "threads": threads,
@@ -1226,12 +1241,23 @@ def record_to_benchboard(record: dict, clock: dict) -> str:
             "capture_enabled": True,
         }
     )
-    with tempfile.TemporaryDirectory() as folder:
-        payload = fit_payload(record, clock, own)
-        (Path(folder) / "books.json.gz").write_bytes(
-            gzip.compress(canonical(payload).encode(), mtime=0)
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            payload = fit_payload(record, clock, own)
+            (Path(folder) / "books.json.gz").write_bytes(
+                gzip.compress(canonical(payload).encode(), mtime=0)
+            )
+            imported = db.import_spools(own, folder)
+    except Exception:
+        # The task is already running in benchboard's history; never leave it so.
+        db.finish_task(
+            own,
+            status="failed",
+            ended_at=time.time(),
+            wall_s=clock["wall_s"],
+            capture_status="import_errors",
         )
-        imported = db.import_spools(own, folder)
+        raise
     ok = imported["fits"] == 1 and not imported["errors"]
     db.finish_task(
         own,
@@ -1646,6 +1672,8 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=str(DEFAULT_OUT))
 
     args = parser.parse_args(argv)
+    if getattr(args, "out", None):  # child processes run in another tree's directory
+        args.out = str(Path(args.out).resolve())
     if args.cmd == "cases":
         for name, members in SETS.items():
             print(f"{name}: {', '.join(members)}")

@@ -28,7 +28,7 @@ def test_counts_only_record_has_every_field_and_no_timing(run, tmp_path):
     assert saved["provenance"]["sha"] and saved["provenance"]["dirty"] in (True, False)
     assert saved["dataset"]["hash"] == books.dataset_hash(books.SYNTHETIC)
     assert saved["spec_hash"] == books.spec_hash("smoke_poisson")
-    assert {"python", "numpy", "scipy", "numba", "blas"} <= set(saved["environment"])
+    assert {"python", "numpy", "scipy", "numba", "tabmat", "blas"} <= set(saved["environment"])
     assert {"cpu_model", "physical_cores", "ram_gib"} <= set(saved["machine"])
     assert saved["threads"] == "pinned"
     for count in ("gram_builds", "pirls_solves", "outer_iterations", "irls_iterations"):
@@ -147,6 +147,40 @@ def test_offset_exposure_count_metrics_rank_by_rate_and_cut_deciles_by_exposure(
 
 def test_the_spec_hash_covers_the_harness_metric_code(monkeypatch):
     before = books.spec_hash("smoke_poisson")
-    monkeypatch.setattr(books, "harness_hash", lambda: "edited")
+
+    def edited_gini(actual, expected, weights):  # different source, same signature
+        return 0.0
+
+    monkeypatch.setattr(books, "_gini", edited_gini)
     assert books.spec_hash("smoke_poisson") != before
-    assert "glm_results" in books._SEMANTICS and "_response" in books._SEMANTICS
+
+
+def test_a_failed_import_finishes_the_benchboard_task(monkeypatch):
+    finished = []
+
+    class History:
+        def __init__(self, folder):
+            pass
+
+        def start_task(self, task):
+            pass
+
+        def import_spools(self, task_id, folder):
+            raise OSError("history database unavailable")
+
+        def finish_task(self, task_id, **fields):
+            finished.append(fields["status"])
+
+    monkeypatch.delenv("BENCHBOARD_FIT_DIR", raising=False)
+    monkeypatch.setattr(books, "_benchboard_history", lambda: type("m", (), {"History": History}))
+    monkeypatch.setattr(books, "fit_payload", lambda record, clock, task_id: {})
+    record = {"case": "smoke_poisson", "threads": "pinned"}
+    with pytest.raises(OSError, match="unavailable"):
+        books.record_to_benchboard(record, {"started_at": 0.0, "wall_s": 1.0})
+    assert finished == ["failed"]
+
+
+def test_the_spec_hash_covers_the_work_counter_tables(monkeypatch):
+    before = books.spec_hash("smoke_poisson")
+    monkeypatch.setattr(books, "PROFILE_WORK", {**books.PROFILE_WORK, "edited": "edited"})
+    assert books.spec_hash("smoke_poisson") != before

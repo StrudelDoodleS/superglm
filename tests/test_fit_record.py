@@ -218,6 +218,7 @@ def test_a_non_string_feature_name_keeps_its_descriptor(monkeypatch, tmp_path):
     (payload,) = _records(tmp_path)
     config = payload["fits"][0]["config"]
     assert config["n_features"] == 2 and config["n_pairs"] == 0 and len(config["terms"]) == 2
+    assert all(term["kind"] is not None for term in config["terms"])  # 0 is a name, not a gap
 
 
 def test_an_offset_is_summarised_as_an_offset(monkeypatch, tmp_path):
@@ -247,6 +248,22 @@ def test_a_superlss_fit_is_recorded_with_its_predictors(monkeypatch, tmp_path):
     assert fit["summary"]["n_columns"] > 0 and fit["summary"]["n_iter"] >= 1
     assert {t["predictor"] for t in fit["config"]["terms"]} >= {"location"}
     assert fit["phases"] and fit["phases"][0]["source"] == "exclusive"
+
+
+def test_an_eager_frame_input_keeps_its_numeric_shape(monkeypatch, tmp_path):
+    from superglm import GaussianLS, SuperLSS, s
+    from superglm._frame import as_eager_frame
+
+    monkeypatch.setenv("BENCHBOARD_FIT_DIR", str(tmp_path))
+    monkeypatch.setenv("BENCHBOARD_TASK_ID", "task-10")
+    rng = np.random.default_rng(4)
+    X = pd.DataFrame({"a": rng.uniform(0, 1, 400)})
+    y = np.sin(3 * X.a.to_numpy()) + rng.normal(0, 0.3, 400)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("a", kind="cr", k=5)), family.scale())
+    model.fit_reml(as_eager_frame(X), y)
+    (payload,) = _records(tmp_path)
+    assert payload["fits"][0]["config"]["numeric_inputs"]["a"]["distinct"] == 400
 
 
 def test_estimate_theta_is_recorded(monkeypatch, tmp_path):

@@ -49,7 +49,8 @@ The record holds:
 
 - provenance: the git SHA and dirty flag of the tree superglm was imported
   from, the dataset content hash, the case-spec hash, the environment (Python,
-  numpy, scipy, numba, pandas and every BLAS threadpoolctl reports), the machine
+  numpy, scipy, numba, pandas, tabmat, narwhals, scikit-learn, joblib,
+  threadpoolctl and every BLAS threadpoolctl reports), the machine
   (CPU model, physical cores, RAM) and the thread setting;
 - measurements: wall and CPU time of the fit, peak RSS, the REML profile's phase
   seconds, work counts (Gram builds, table and leverage passes, solved-row and
@@ -82,9 +83,12 @@ benchboard case name is `books/<case>/<threads>/<hash>`, where the hash covers
 every part of the key except the commit, which benchboard keys itself.
 
 A key whose successful timed record is already in benchboard's history is
-reported as `reused` and not run. `--force` re-times it, which is only right
-when the stored record is known to be bad. `--prepare` creates and syncs the
-worktree without fitting.
+reported as `reused` and not run. Work counts, numerical outputs and backend
+may be compared against it. A wall-time claim needs the baseline timed in the
+same session (AGENTS.md, *Performance evidence*): `--force` re-times the key, and
+`compare` pairs with the most recent usable stored record, so it picks up that
+run. `--force` also replaces a stored record known to be bad. `--prepare`
+creates and syncs the worktree without fitting.
 
 ## Compare
 
@@ -102,7 +106,7 @@ the same benchboard case name kills a run that passes the factor.
 
 ## Every fit on a benchboard machine is recorded
 
-`SuperGLM.fit`, `fit_path`, `fit_reml` and `estimate_p`, and `SuperLSS.fit` and
+`SuperGLM.fit`, `fit_path`, `fit_reml`, `estimate_p` and `estimate_theta`, and `SuperLSS.fit` and
 `fit_reml`, each write one record as they end, on any machine where
 benchboard's state directory exists (`BENCHBOARD_DIR`, default
 `~/.cache/benchboard`). Inside a benchboard job the record goes to the job's
@@ -113,7 +117,7 @@ killed as a censored one.
 
 A record describes the problem (rows, coefficients, terms and pairs, each
 term's kind, width, cardinality and non-zeros per row, empty and
-all-zero-response cells, the smallest level count, weight, exposure and
+all-zero-response cells, the smallest level count, weight, offset and
 response spread, per numeric input its distinct values, skew, ties at the mode
 and share beyond 5 sd, family and family parameters such as a negative
 binomial theta or Tweedie power, link, binning and the fit's options), the
@@ -139,7 +143,7 @@ but the SHA:
   and options, the warm-up, and the source of the harness code that builds the
   response, weights and offsets and computes the held-out metrics, so editing
   that code retires the baselines stored under the old version;
-- the environment: a numpy, scipy, numba, pandas or BLAS upgrade, or a different
+- the environment: an upgrade of any of those packages or of BLAS, or a different
   OpenBLAS core type, needs a new baseline;
 - the machine: CPU model, core count and RAM;
 - the thread setting.

@@ -379,7 +379,9 @@ def _terms(groups, design, kinds, y_nonzero=None, pairs=None) -> list[dict]:
     """Per term (feature or pair): kind, width, cardinality, nnz per row, empty cells."""
     terms: dict[str, dict] = {}
     for group, gm in zip(groups, design.group_matrices, strict=False):
-        name = getattr(group, "feature_name", None) or group.name
+        name = getattr(group, "feature_name", None)
+        if name is None:  # a feature may be named 0, the first column of a NumPy-built frame
+            name = group.name
         facts = _safe(_gm_facts, gm, y_nonzero)
         term = terms.setdefault(
             name,
@@ -466,7 +468,10 @@ def _numeric_shape(X, names) -> dict:
     out = {}
     for name in names:
         try:
-            column = np.asarray(X[name].to_numpy() if hasattr(X[name], "to_numpy") else X[name])
+            if hasattr(X, "column_array"):  # EagerFrame has no subscript
+                column = X.column_array(name)
+            else:
+                column = np.asarray(X[name].to_numpy() if hasattr(X[name], "to_numpy") else X[name])
             if column.dtype.kind not in "fiub":
                 continue
             n = column.shape[0]
