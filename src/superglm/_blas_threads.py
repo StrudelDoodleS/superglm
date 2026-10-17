@@ -172,6 +172,24 @@ def allow_wide_design(p: int, *, structured: bool = True) -> None:
     _release_current_scope()
 
 
+def release_for_serial_row_passes(p: int) -> None:
+    """Release the automatic cap for the rest of a fit whose row passes run on one thread.
+
+    A dense design keeps the cap below ``_DENSE_WIDE_DESIGN_THRESHOLD`` because
+    its row passes run on the worker pool.  A pass that falls back to the
+    chunked route (``reml._leverage_rows``, a design whose groups are not all
+    lookups or whose tables exceed the budget) has nothing running beside its
+    n·p² products, and a design takes that route on every pass.  From
+    ``_WIDE_DESIGN_THRESHOLD`` such a fit is released for its remaining work,
+    as before the dense threshold: the 10-pair freMTPL2 fit (1,535
+    coefficients) forced onto that route took 206 s capped and 171 s released
+    at defaults (16 cores, 2026-10-17).
+    """
+    if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
+        return
+    _release_current_scope()
+
+
 def keep_narrow_cap(width: int) -> None:
     """Re-arm the automatic cap in a wide fit whose dense kernels all act on ``width`` (perf F7).
 

@@ -647,3 +647,36 @@ def test_the_pool_releases_each_result_once_it_is_yielded():
             gc.collect()
             assert all(ref() is None for ref in refs[:-1]), len(refs)
     assert len(refs) == 6
+
+
+def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
+    """A dense design keeps the cap because its row passes run on the pool; both passes that run
+    on the calling thread instead (the chunked solved-row route and the gradient-only pass)
+    release it for the rest of the fit, as before the dense threshold."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    import superglm.reml._leverage_rows as leverage_rows
+    import superglm.reml.w_derivatives as w_derivatives
+    from superglm import Categorical, Spline, SuperGLM
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    rng = np.random.default_rng(3)
+    n = 400
+    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "g": rng.choice(list("pqr"), n)})
+    y = rng.poisson(np.exp(0.3 * np.sin(4.0 * X["a"]))).astype(float)
+    model = SuperGLM(family="poisson", features={"a": Spline(n_knots=6), "g": Categorical()})
+    model.fit(X, y)
+    dm = model._dm
+    released = []
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
+    monkeypatch.setattr(blas, "_release_current_scope", lambda: released.append(True))
+    monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
+    inverse, centre = np.eye(dm.p), np.zeros(dm.p)
+    leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
+    assert released == [True]
+    w_derivatives._leverage_gradient_rhs(dm, inverse, centre, np.ones(dm.n), float(dm.n))
+    assert released == [True, True]
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 10**9)  # a narrow design keeps the cap
+    leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
+    assert released == [True, True]

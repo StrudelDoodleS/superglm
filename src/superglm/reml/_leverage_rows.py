@@ -45,6 +45,7 @@ import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._blas_threads import release_for_serial_row_passes
 from superglm.group_matrix import DesignMatrix
 from superglm.solvers.centered_system import iter_grouped_design_chunks
 
@@ -382,6 +383,7 @@ def solved_row_blocks(
     inverse = np.ascontiguousarray(inverse, dtype=np.float64)
     plan = _support_plan(dm, inverse, centre_hi, centre_lo)
     if plan is None:
+        release_for_serial_row_passes(dm.p)
         chunks = _chunked_blocks(dm, inverse, centre_hi, centre_lo, active)
         return RowBlocks(jobs=((lambda block=block: block) for block in chunks), block_bytes=None)
     n, p = dm.n, dm.p

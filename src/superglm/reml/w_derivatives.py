@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._blas_threads import release_for_serial_row_passes
 from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
@@ -85,6 +86,7 @@ def _leverage_gradient_rhs(
     pair (``centered_system.weighted_mean_pair``): a dense column at an offset
     centred about its rounded mean carried ``u |c|`` into every row.
     """
+    release_for_serial_row_passes(dm.p)
     result = np.zeros(dm.p, dtype=np.float64)
     compensation = np.zeros(dm.p, dtype=np.float64)
     for start, stop, design in iter_grouped_design_chunks(dm):
