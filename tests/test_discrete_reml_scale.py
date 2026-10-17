@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
-from superglm.features import Categorical, Spline
+from superglm.features import Spline
 from superglm.reml.scale import (
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
@@ -114,99 +114,3 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
 
     assert prepare_calls == 1
     assert hessian_checks >= 2
-
-
-def test_a_converging_discrete_gamma_log_fit_keeps_its_fisher_iteration():
-    """A discrete Gamma/log fit whose Fisher performance iteration converges never switches.
-
-    The switch to Newton rows is for an iteration measured to cycle or stall
-    (``reml.discrete.poi_stalled``); one that converges keeps Fisher rows and
-    their Gram reuse, and reports the Fisher curvature it optimized.
-    Mutation check: Newton rows from the start reported ``"observed"``.
-    """
-    rng = np.random.default_rng(3)
-    n = 4000
-    x = rng.integers(0, 40, n) / 40.0
-    level = rng.integers(0, 4, n).astype(str)
-    y = rng.gamma(0.7, np.exp(1.0 + np.sin(5.0 * x) + 0.2 * (level == "1")) / 0.7)
-    model = SuperGLM(
-        family="gamma",
-        link="log",
-        features={"x": Spline(n_knots=8), "c": Categorical()},
-        discrete=True,
-    )
-    model.fit_reml(pd.DataFrame({"x": x, "c": level}), y)
-    assert model.reml_diagnostics()["converged"]
-    assert "reml_poi_newton_switch_iter" not in model._reml_profile
-    assert model._reml_result.curvature_source == "fisher"
-
-
-@pytest.mark.parametrize("family", ["gamma", "tweedie"])
-def test_a_forced_newton_switch_runs_the_observed_discrete_path_to_convergence(family, monkeypatch):
-    """A discrete Gamma/log or Tweedie/log fit whose iteration switches to Newton rows converges
-    and publishes the observed criterion it optimized.
-
-    The switch is forced (``poi_stalled`` reads True from the second
-    iteration), so no trajectory decides it and ordinary CI runs the
-    switched path: Newton working rows, then the observed terminal refit and
-    objective on a discretized design.  The published objective is not the
-    Fisher criterion at the same smoothing parameters, which a fit with them
-    held fixed evaluates.  Which criterion a switched fit should publish is
-    an open decision (review of PR #498); this pins today's.
-    """
-    import superglm.reml.discrete as discrete
-    from superglm.distributions import Tweedie
-    from superglm.types import LambdaPolicy
-
-    monkeypatch.setattr(discrete, "poi_stalled", lambda ratios, *, rose, done, max_iter: done >= 2)
-    rng = np.random.default_rng(3)
-    n = 4000
-    x = rng.integers(0, 40, n) / 40.0
-    mu = np.exp(1.0 + np.sin(5.0 * x))
-    if family == "gamma":
-        y = rng.gamma(0.7, mu / 0.7)
-        fam = "gamma"
-    else:
-        counts = rng.poisson(mu**0.5 / 1.5)
-        y = np.array([rng.gamma(2.0, 1.5 * m**0.5 / 2.0, k).sum() for k, m in zip(counts, mu)])
-        fam = Tweedie(p=1.5)
-
-    def model(spline):
-        return SuperGLM(family=fam, link="log", features={"x": spline}, discrete=True)
-
-    frame = pd.DataFrame({"x": x})
-    switched = model(Spline(n_knots=8))
-    switched.fit_reml(frame, y)
-    assert switched.reml_diagnostics()["converged"]
-    assert switched._reml_profile["reml_poi_newton_switch_iter"] == 2
-    assert switched._reml_result.curvature_source == "observed"
-    assert np.all(np.isfinite(switched.predict(frame)))
-    (lam,) = switched._reml_result.lambdas.values()
-
-    held = model(Spline(n_knots=8, lambda_policy=LambdaPolicy.fixed(lam)))
-    held.fit_reml(frame, y)
-    assert held._reml_result.curvature_source == "fisher"
-    objective = switched._reml_result.objective
-    fisher = held._reml_result.objective
-    # ten times the search's own stop resolution, reml_tol (1 + |V|)
-    resolution = switched._reml_profile["reml_tol_resolved"] * (1.0 + abs(fisher))
-    assert abs(objective - fisher) > 10.0 * resolution
-
-
-@pytest.mark.parametrize(
-    ("ratios", "rose", "done", "stalled"),
-    [
-        # converging: the stop score falls fast enough to stop in the budget
-        ([np.inf, 1.7e5, 5.6e4, 2.8e4, 3.9e3], False, 5, False),
-        # stalling: three iterations barely move a score far above the stop
-        ([np.inf, 3.1e5, 1.9e5, 1.15e5, 1.9e5], False, 5, True),
-        # cycling: the objective rose near the stop
-        ([np.inf, 1.3e6, 6.8e5, 285.0], True, 4, True),
-        # a rise far from the stop is the working model still moving
-        ([np.inf, 1.3e6, 6.8e5], True, 3, False),
-    ],
-)
-def test_poi_stalled_reads_cycles_and_stalls_near_the_stop(ratios, rose, done, stalled):
-    from superglm.reml.discrete import poi_stalled
-
-    assert poi_stalled(ratios, rose=rose, done=done, max_iter=20) is stalled

@@ -76,7 +76,6 @@ from superglm.solvers.mode_score import (
     centred_matvec,
     centred_warm_start,
     prior_weighted_centre,
-    rate_exhausts_budget,
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
@@ -88,7 +87,6 @@ from superglm.solvers.structured import (
     resolve_structured_backend,
     solve_cached_structured,
 )
-from superglm.solvers.working_rows import supports_observed_newton
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -423,38 +421,6 @@ def _damped_tensor_newton_step(
     return delta, mu_hi, binding(delta)
 
 
-# The stop score within which a rise of the objective reads as a cycle: a
-# thousand times the tolerance.  Farther out the working model is still
-# moving, and a rise there is not one.
-_POI_NEAR_STOP = 1e3
-# Iterations over which the stop score's rate is measured.
-_POI_RATE_WINDOW = 3
-
-
-def poi_stalled(ratios: list[float], *, rose: bool, done: int, max_iter: int) -> bool:
-    """Whether a Fisher performance iteration cycles or stalls.
-
-    ``ratios`` are the iterations' stop scores over the tolerance (the larger
-    of the projected gradient and the objective change, each over
-    ``tol (1 + |V|)``; at most 1 stops; the first is ``inf``), ``rose``
-    whether the last iteration raised the REML objective by more than the
-    tolerance and ``done`` the iterations taken.  The iteration cycles when
-    an iteration within ``_POI_NEAR_STOP`` of the stop raises the objective
-    it minimizes, and stalls when the score's rate over the last
-    ``_POI_RATE_WINDOW`` iterations cannot reach the stop in the iterations
-    left (``mode_score.rate_exhausts_budget``): performance iteration
-    "diverges, or cycles" (Wood 2008, JRSSB 70(3), section 2.1).  On the
-    four 200k-row synthetic Gamma/log and Tweedie/log fits it converges on,
-    the rate test projects at most 15 of 20 iterations; on the book's
-    Gamma/log and Tweedie fits it projects more than 20 by the eighth.
-    """
-    if not ratios:
-        return False
-    if rose and ratios[-1] <= _POI_NEAR_STOP:
-        return True
-    return rate_exhausts_budget(ratios, _POI_RATE_WINDOW, done, max_iter)
-
-
 def bootstrap_seed_lambdas(
     penalties: list[PenaltyComponent],
     warm_lambdas: Mapping[str, float] | None,
@@ -549,18 +515,6 @@ def optimize_discrete_reml_cached_w(
     # positive-row count under `"prior"`. The objective, its gradient and its
     # Hessian all read it, so a row count in any one of them makes the Newton
     # step inconsistent with the surface it is stepping on.
-    # The working model's curvature, which is the criterion's.  The
-    # performance iteration updates on Fisher (PQL) rows.  A family and link
-    # that declare Newton rows (``supports_observed_newton``: Gamma/log,
-    # Tweedie/log) switch to them for the rest of the run once the Fisher
-    # iteration is measured to cycle or stall (``poi_stalled``);
-    # the working-model REML is then the observed-information Laplace REML
-    # the exact path optimizes, and the result reports that curvature.  A run
-    # whose Fisher iteration converges never switches.
-    newton_switch_available = bool(supports_observed_newton(distribution, link))
-    poi_newton = False
-    poi_ratios: list[float] = []
-
     _contract_size_cache: list[float] = []
 
     def _contract_size() -> float:
@@ -950,7 +904,6 @@ def optimize_discrete_reml_cached_w(
             return_xtwx=True,
             compute_rank_info=False,
             _return_working_system=True,
-            _working_newton=poi_newton,
             _compute_fit_statistics=False,
             _deviance_init=warm_deviance,
             profile=profile,
@@ -1170,20 +1123,6 @@ def optimize_discrete_reml_cached_w(
         score_scale_d = candidate_convergence.score_scale
         proj_grad_norm = candidate_convergence.projected_gradient_norm
         obj_change = candidate_convergence.objective_change
-        if newton_switch_available and not poi_newton and not candidate_convergence.converged:
-            stop_ratio = max(proj_grad_norm, obj_change if poi_iter > 0 else np.inf) / (
-                _tol * score_scale_d
-            )
-            poi_ratios.append(stop_ratio)
-            if poi_stalled(
-                poi_ratios,
-                rose=poi_iter > 0 and obj - prev_obj > _tol * score_scale_d,
-                done=poi_iter + 1,
-                max_iter=max_reml_iter,
-            ):
-                poi_newton = True
-                if profile is not None:
-                    profile["reml_poi_newton_switch_iter"] = poi_iter + 1
         if (
             start_out is not None
             and start_objective_tol is not None
@@ -1926,7 +1865,7 @@ def optimize_discrete_reml_cached_w(
             converged=converged,
             lambda_history=lambda_history,
             objective=float(obj),
-            curvature_source="observed" if poi_newton else "fisher",
+            curvature_source="fisher",
             termination_reason=termination_reason,
             reml_penalties=penalties,
         )
@@ -2126,7 +2065,7 @@ def optimize_discrete_reml_cached_w(
         converged=converged,
         lambda_history=lambda_history,
         objective=float(best_obj),
-        curvature_source="observed" if poi_newton else "fisher",
+        curvature_source="fisher",
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_scale_data,
         reml_penalties=penalties,
