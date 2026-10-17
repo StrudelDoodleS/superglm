@@ -331,8 +331,9 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Iterator:
     results in the order they are yielded gets the same bits at every worker
     count.  Each task runs in a copy of the caller's context, which carries
     ``np.errstate`` as the serial loop has it.  Every item is submitted at
-    once and its result is held until it is yielded, so a result should be
-    small beside ``item_bytes``, the working set one item holds while it runs.
+    once and its result is held until it is yielded; ``item_bytes`` is the
+    working set one item holds while it runs, and a result the caller keeps
+    anyway (a built design term) adds nothing over the serial loop.
     """
     import contextvars
     from concurrent.futures import ThreadPoolExecutor

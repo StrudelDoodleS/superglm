@@ -93,9 +93,26 @@ def _clone_specification_graph(
     )
 
 
-# Transient bytes per data row one interaction's build may hold: its basis
-# products and the group matrix it forms (a pool sizing estimate only).
+# Transient bytes per data row an interaction's build holds beyond its
+# products: weights, gathers and small per-row temporaries (a pool sizing
+# estimate, never a result).
 _INTERACTION_BUILD_ROW_BYTES = 256
+
+
+def _interaction_build_row_bytes(ispec: Any, a: int, b: int, binned: bool) -> int:
+    """Bytes per data row one interaction's build may hold, from its parents' widths ``a`` and ``b``.
+
+    A binned build forms tables over bins, not rows.  A by-level or
+    categorical term holds a basis row per parent.  Any other term (a tensor,
+    a numeric or polynomial product) can hold ``a b`` entries a row: the row
+    Kronecker's indices and values (12 bytes each) and the weighted copy the
+    projection forms (12 more), with room to spare.
+    """
+    if binned:
+        return _INTERACTION_BUILD_ROW_BYTES
+    if isinstance(ispec, CategoricalInteraction | SplineCategorical | FactorSmooth):
+        return _INTERACTION_BUILD_ROW_BYTES + 32 * (a + b)
+    return _INTERACTION_BUILD_ROW_BYTES + 32 * a * b + 8 * (a + b)
 
 
 @dataclass
@@ -561,12 +578,27 @@ def compile_predictor_design(
     # Discrete tensors are numbered in interaction order before any term
     # builds, and every parent column is read here, once, on this thread.
     tensor_ids: dict[str, int] = {}
+    # Each build is priced from its parents' main-effect widths; the pool is
+    # sized by the largest (``_interaction_build_row_bytes``).
+    widths: dict = {}
+    for g in groups:
+        widths[g.feature_name] = widths.get(g.feature_name, 0) + (g.end - g.start)
+    build_row_bytes = _INTERACTION_BUILD_ROW_BYTES
     for iname in interaction_order:
-        for parent in interaction_specs[iname].parent_names:
+        ispec = interaction_specs[iname]
+        for parent in ispec.parent_names:
             X.column_array(parent)
-        if should_discretize_tensor_interaction(interaction_specs[iname], specs, model_discrete):
+        binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
+        if binned_tensor:
             tensor_ids[iname] = _next_tensor_id
             _next_tensor_id += 1
+        binned = (
+            binned_tensor
+            or should_discretize_spline_categorical_interaction(ispec, specs, model_discrete)
+            or should_discretize_factor_smooth(ispec, model_discrete)
+        )
+        a, b = (max(widths.get(parent, 1), 1) for parent in ispec.parent_names)
+        build_row_bytes = max(build_row_bytes, _interaction_build_row_bytes(ispec, a, b, binned))
 
     def build_interaction(iname: str) -> _BuiltInteraction:
         """One interaction's groups: its spec's build and each group matrix (no shared state)."""
@@ -689,7 +721,7 @@ def compile_predictor_design(
     # Interactions read their parents' learned state and write only their
     # own, so they build on the pool (``_parallel.pooled_map``); the design
     # is assembled from them in interaction order, as the serial loop did.
-    built = pooled_map(build_interaction, list(interaction_order), _INTERACTION_BUILD_ROW_BYTES * n)
+    built = pooled_map(build_interaction, list(interaction_order), build_row_bytes * n)
     for iname, term in zip(interaction_order, built, strict=True):
         ispec, result = term.spec, term.result
         separation_records.extend(term.records)

@@ -1801,12 +1801,11 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     _row_kron_counts(*args, counts)
     indptr = np.cumsum(counts)
     index_dtype = np.int32 if max(int(indptr[-1]), k1 * k2) <= np.iinfo(np.int32).max else np.int64
-    indices = np.empty(int(indptr[-1]), dtype=np.int64)
+    # The fill writes the final index dtype: no int64 copy at the build's peak.
+    indices = np.empty(int(indptr[-1]), dtype=index_dtype)
     data = np.empty(int(indptr[-1]), dtype=np.float64)
     _row_kron_fill(*args, k2, indptr, indices, data)
-    T = sp.csr_matrix(
-        (data, indices.astype(index_dtype), indptr.astype(index_dtype)), shape=(n, k1 * k2)
-    )
+    T = sp.csr_matrix((data, indices, indptr.astype(index_dtype)), shape=(n, k1 * k2))
     T.has_sorted_indices = True
     return T
 

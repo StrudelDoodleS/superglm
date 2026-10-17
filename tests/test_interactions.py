@@ -2322,3 +2322,30 @@ def test_interactions_build_on_the_pool_and_match_the_serial_design(interaction_
             np.asarray(model.result.beta).tobytes(),
         )
     assert designs[3] == designs[1]
+
+
+def test_a_tensor_build_is_priced_by_its_margins(interaction_data, monkeypatch):
+    """The pool is sized by each interaction's width: a tensor of a and b columns can hold a b
+    entries a row, so its builds are charged at least 32 a b bytes a row."""
+    import superglm._predictor_compiler as compiler
+
+    X, y, w = interaction_data
+    charged = []
+    pooled = compiler.pooled_map
+
+    def recorded(fn, items, item_bytes):
+        charged.append(item_bytes)
+        return pooled(fn, items, item_bytes)
+
+    monkeypatch.setattr(compiler, "pooled_map", recorded)
+    model = SuperGLM(
+        family="poisson",
+        features={"age": Spline(n_knots=9), "bm": Spline(n_knots=9)},
+        interactions=[("age", "bm")],
+    )
+    model.fit(X, y, sample_weight=w)
+    widths = {
+        name: sum(g.end - g.start for g in model._groups if g.feature_name == name)
+        for name in ("age", "bm")
+    }
+    assert charged and charged[0] >= 32 * widths["age"] * widths["bm"] * len(y)
