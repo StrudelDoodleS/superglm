@@ -175,6 +175,29 @@ def stagnation_window(max_iter: int, bar: float = MODE_CERTIFICATION_BAR) -> int
     return max(2, math.ceil(math.log(2.0) * max(int(max_iter), 1) / ratio))
 
 
+def rate_exhausts_budget(ratios: list[float], window: int, done: int, max_iter: int) -> bool:
+    """Whether the score's measured linear rate cannot reach the bar in the iterations left.
+
+    ``ratios`` are the iterations' scores over their bar (``ModeResidual.ratio``,
+    at most 1 meets it), ``done`` the iterations taken.  A linearly convergent
+    iteration (Fisher scoring under a non-canonical link) contracts its score
+    by a fixed rate ``rho``, the spectral radius of ``I - F^-1 H`` (Green
+    1984, JRSSB 46, section 2.3).  Measured over the last ``window``
+    iterations, ``rho = (r_k / r_{k-window})^(1/window)``, the bar is reached
+    after ``ln r_k / -ln rho`` more: ``True`` when that passes ``max_iter``
+    or ``rho >= 1``, as ``stagnation_window`` reasons from the budget too.
+    """
+    if len(ratios) <= window:
+        return False
+    now, then = ratios[-1], ratios[-1 - window]
+    if not (math.isfinite(now) and math.isfinite(then) and now > 1.0 and then > 0.0):
+        return False
+    rate = (now / then) ** (1.0 / window)
+    if rate >= 1.0:
+        return True
+    return done + math.log(now) / -math.log(rate) > max_iter
+
+
 def _gamma(count: int) -> float:
     """Higham's ``gamma_k = k u / (1 - k u)`` for ``k`` roundings, ``u = 2^-53``."""
     product = count * _UNIT_ROUNDOFF

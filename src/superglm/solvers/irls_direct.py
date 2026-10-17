@@ -93,6 +93,7 @@ from superglm.solvers.irls_state import (
     _stable_penalized_deviance_delta,
     _state_is_finite,
     interior_start_intercept,
+    link_domain_violation,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
     mean_space_first_halving,
@@ -116,6 +117,7 @@ from superglm.solvers.mode_score import (
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
+    rate_exhausts_budget,
     row_set_quadratics,
     row_set_residual,
     row_sets,
@@ -978,6 +980,7 @@ def fit_irls_direct(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1038,6 +1041,7 @@ def fit_irls_direct(
             _compute_reml_geometry=_compute_reml_geometry,
             _retain_reml_decomposition=_retain_reml_decomposition,
             _use_observed_newton=_use_observed_newton,
+            _newton_latch=_newton_latch,
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
@@ -1092,6 +1096,7 @@ def _fit_irls_direct_once(
     _compute_reml_geometry: bool = True,
     _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
+    _newton_latch: list[bool] | None = None,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
@@ -1193,10 +1198,17 @@ def _fit_irls_direct_once(
         with one joint latent-coordinate LAML geometry. This requires both
         retained rank metadata and fit statistics to be disabled. Public and
         terminal fits must leave this True.
+    _newton_latch : list of one bool, optional
+        Internal, shared by the PIRLS solves of one REML fit.  A Gamma/log
+        solve that switched from Fisher to Newton sets it, and a later solve
+        of the fit that finds it set starts on Newton steps.  ``None`` (the
+        default) shares nothing.
     _use_observed_newton : bool
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
-        fit keeps Fisher scoring; no rejected step switches the curvature
+        fit starts on Fisher scoring, switching to Newton only when its
+        resolved score is measured to stall (``_observed_newton_active``) or
+        when ``_newton_latch`` is set; no rejected step switches the curvature
         (one-engine design §3.11). Unsupported, constrained, SCOP, and
         cached-working-system routes retain Fisher scoring. Public callers
         should leave this True.
@@ -1313,14 +1325,17 @@ def _fit_irls_direct_once(
             y=y,
             sample_weight=weights,
         )
-    # Whether the default start below was lowered into the family's mean space.
+    # Whether the default start below was lowered into the family's mean space
+    # (binomial/log; a start raised into an inverse link's domain is not).
     _start_lowered = False
-    if intercept_init is None and mean_space_violation(family, link) is not None:
-        # The domain guard below keeps every accepted state inside the mean
-        # space only from a start inside it, and the default intercept is
-        # chosen before the offset: lower it until the start is inside
-        # (``irls_state.interior_start_intercept``).  A caller's warm start is
-        # left as it is.
+    if intercept_init is None and (
+        mean_space_violation(family, link) is not None or link_domain_violation(link) is not None
+    ):
+        # The domain guards below keep every accepted state inside the mean
+        # space and the link's domain only from a start inside them, and the
+        # default intercept is chosen before the offset: move it until the
+        # start is inside (``irls_state.interior_start_intercept``).  A
+        # caller's warm start is left as it is.
         start_intercept = interior_start_intercept(
             family,
             link,
@@ -1332,7 +1347,7 @@ def _fit_irls_direct_once(
         if start_intercept != intercept:
             intercept = start_intercept
             _deviance_init = None
-            _start_lowered = True
+            _start_lowered = mean_space_violation(family, link) is not None
 
     # Dense paths retain the existing p x p penalty oracle. Structured paths
     # add each penalty directly to A or d, unless a caller already supplied a
@@ -1412,6 +1427,7 @@ def _fit_irls_direct_once(
         mu_values: NDArray,
         eta_values: NDArray,
         centred_intercept: float | None = None,
+        resolve_cap: float = MODE_RESOLVE_CAP,
     ) -> ModeResidual:
         """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
 
@@ -1467,7 +1483,7 @@ def _fit_irls_direct_once(
             sum_w=sum_w,
             bar=mode_bar,
             excluded=excluded,
-            resolve_cap=MODE_RESOLVE_CAP,
+            resolve_cap=resolve_cap,
             penalty_rounding=penalty_rounding(),
         )
 
@@ -2068,10 +2084,19 @@ def _fit_irls_direct_once(
     # Fisher weights reuse one weighted Gram that Newton would rebuild every
     # iteration; the mode certificate's bar is set by the REML tolerance
     # (``mode_score.mode_certification_bar``), which Fisher's linear rate
-    # reaches.  The exported geometry is Fisher either way (``export_rows``),
-    # and the weighted-Gram cache is off while Newton runs.  The curvature is
-    # decided here, once, from the family, the link and the route (one-engine
-    # design §3.11): no iterate switches it.
+    # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
+    # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
+    # information ``w y / mu`` exceeds twice the Fisher information ``w``
+    # along a direction, as heavy-tailed severities give, and there the score
+    # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
+    # it in the budget.  Such a solve switches to Newton once its resolved
+    # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
+    # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
+    # reaches the bar in time never switches.
+    # The exported geometry is Fisher either way (``export_rows``), and the
+    # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
+    # is decided here, once, from the family, the link and the route
+    # (one-engine design §3.11).
     # An observed iterate whose Hessian the structured factor refuses as not
     # positive definite takes a Levenberg shift inside the same curvature
     # (``_levenberg_shifted_operator``), and a trial whose observed rows are
@@ -2084,6 +2109,20 @@ def _fit_irls_direct_once(
         and supports_observed_newton(family, link)
         and not _has_constant_irls_weights(family, link)
     )
+    # A declared Newton pair kept on Fisher rows for its constant weights
+    # (Gamma/log), which switches to Newton if its Fisher score stagnates,
+    # and starts on Newton when an earlier solve of the same REML fit
+    # switched (``_newton_latch``).
+    _stagnation_newton_available = bool(
+        _use_observed_newton
+        and not has_constraints
+        and not _has_scop
+        and not _return_working_system
+        and supports_observed_newton(family, link)
+        and not _observed_newton_active
+    )
+    if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
+        _observed_newton_active = True
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -2593,6 +2632,8 @@ def _fit_irls_direct_once(
     # The family's mean space, when the link's inverse can leave it (declared
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
+    # The link inverse's own domain (``irls_state.link_domain_violation``).
+    _link_domain_invalid = link_domain_violation(link)
     # A warm start's centred state carried to this fit's centre (one-engine
     # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
     # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -3596,6 +3637,17 @@ def _fit_irls_direct_once(
                         return True
                     return other is not None and other(candidate)
 
+            if _link_domain_invalid is not None and not _link_domain_invalid(
+                committed.eta_unclipped, weights
+            ):
+                # A committed state inside the link's domain keeps every
+                # accepted trial inside it (``link_domain_violation``).
+                def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
+                    assert _link_domain_invalid is not None
+                    if _link_domain_invalid(candidate.eta_unclipped, weights):
+                        return True
+                    return other is not None and other(candidate)
+
             decision = _select_irls_trial(
                 committed=committed,
                 proposal=proposal,
@@ -3738,6 +3790,81 @@ def _fit_irls_direct_once(
                     and min(_mode_ratios[-_stagnation_window:])
                     > 0.5 * min(_mode_ratios[:-_stagnation_window])
                 )
+                switched_curvature = False
+                if (
+                    _stagnation_newton_available
+                    and not _observed_newton_active
+                    and not converged_this_iter
+                    and (
+                        score_stagnated
+                        or (
+                            residual.resolved
+                            and rate_exhausts_budget(
+                                _mode_ratios, _stagnation_window, it + 1, max_iter
+                            )
+                        )
+                    )
+                ):
+                    # Fisher scoring near the mode contracts too slowly to
+                    # meet the bar in the budget, or not at all (the comment
+                    # at ``_observed_newton_active``): the iterations left
+                    # take Newton steps on the observed information, positive
+                    # for Gamma/log (``w y / mu``), so the penalized Hessian
+                    # stays positive definite.
+                    _observed_newton_active = True
+                    _can_reuse_weighted_gram = False
+                    score_stagnated = False
+                    switched_curvature = True
+                    _mode_ratios.clear()
+                    if _newton_latch is not None:
+                        _newton_latch[0] = True
+                    if profile is not None:
+                        profile["irls_fisher_newton_switches"] = (
+                            profile.get("irls_fisher_newton_switches", 0) + 1
+                        )
+                if (
+                    not converged_this_iter
+                    and not switched_curvature
+                    and not step_rejected
+                    and not _has_scop
+                    and not has_constraints
+                    and intercept == intercept_prev
+                    and retained.centred_intercept == committed.centred_intercept
+                    and np.array_equal(beta, beta_prev)
+                ):
+                    # The full step left the state bitwise where it was: the
+                    # iteration is a deterministic map at a float64 fixed
+                    # point, and every further iteration repeats this one
+                    # (the step-tolerance stop of Dennis & Schnabel 1996,
+                    # section 7.2, at its strictest).  A centred state is
+                    # ``(alpha, beta)``, and the raw intercept only its
+                    # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
+                    # and can hold still while ``alpha`` moves, so ``alpha``
+                    # is compared too (``None`` on both sides otherwise).  An
+                    # iteration that has just changed the map (the Newton
+                    # switch above) is not one: the next iteration takes the
+                    # other step.  A fixed point ends the solve, with the
+                    # floors resolved whatever the relative score: where
+                    # the residuals are at the rounding of the fitted values
+                    # (a model that fits its response exactly, as a linear
+                    # model can) the score's own scale ``sum |s|`` is
+                    # rounding too, the relative score sits near 1 and the
+                    # resolve cap would never let the floor be read.  A score
+                    # within its floor is certified; one above it is the
+                    # limiting accuracy, published as not converged.
+                    residual = mode_residual(
+                        beta,
+                        intercept,
+                        mu,
+                        eta,
+                        centred_intercept=retained.centred_intercept,
+                        resolve_cap=math.inf,
+                    )
+                    convergence_value = mode_bar * residual.ratio()
+                    converged_this_iter = residual.ratio() <= 1.0
+                    score_stagnated = not converged_this_iter
+                    _last_mode_residual = residual
+                    _mode_ratios[-1] = residual.ratio()
             elif convergence in ("coefficients", "mode_score"):
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))

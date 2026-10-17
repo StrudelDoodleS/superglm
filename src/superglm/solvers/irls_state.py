@@ -12,7 +12,15 @@ from numpy.typing import NDArray
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import _BINOMIAL_CLIP_MU_EPS, Link, LogLink, SqrtLink, stabilize_eta
+from superglm.links import (
+    _BINOMIAL_CLIP_MU_EPS,
+    InverseLink,
+    InverseSquaredLink,
+    Link,
+    LogLink,
+    SqrtLink,
+    stabilize_eta,
+)
 
 _MAX_FLOAT64_HALVING_DEPTH = 1074
 
@@ -148,6 +156,30 @@ def mean_space_violation(
 
         def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
             return bool(np.any((eta_unclipped >= 0.0) & (weights > 0.0)))
+
+        return violates
+    return None
+
+
+def link_domain_violation(link: Link) -> Callable[[NDArray, NDArray], bool] | None:
+    """The test that a linear predictor leaves the link inverse's domain, or ``None``.
+
+    The inverse and inverse-squared links map only ``eta > 0`` to a positive
+    mean.  ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
+    row that crosses zero gets a mean of ``1e12`` whose Gamma or inverse
+    Gaussian deviance grows only like ``log mu``: a line search reading that
+    clipped deviance accepts the crossing, and the row is then pinned at the
+    clip with a Fisher weight ``mu^2 = 1e24`` from which no later step moves
+    it.  R's ``glm.fit`` and ``glm2`` halve a step whose linear predictor or
+    mean is invalid for the family (``valideta``, ``validmu``; Marschner
+    2011, R Journal 3(2), "inner loop 2").  The set ``{beta : X beta +
+    offset > 0}`` is convex, so halving from a state inside it finds a step
+    inside it.
+    """
+    if isinstance(link, InverseLink | InverseSquaredLink):
+
+        def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
+            return bool(np.any((eta_unclipped <= 0.0) & (weights > 0.0)))
 
         return violates
     return None
@@ -293,30 +325,40 @@ def interior_start_intercept(
     intercept: float,
     level: float,
 ) -> float:
-    """An intercept that puts a starting state inside the mean space.
+    """An intercept that puts a starting state inside the mean space and the link's domain.
 
     ``intercept`` unchanged when the family and link cannot leave their mean
-    space or every positive-weight row starts inside it (``eta < 0`` for
-    binomial/log, ``mean_space_violation``).  Otherwise it is lowered until
-    the largest positive-weight ``eta`` is ``level``, the intercept-only
-    start's own ``log(mean) < 0``.  Every log-binomial solver but the
-    augmented-Lagrangian ones needs a start inside the parameter space, and
-    with an intercept the simple one is ``(a, 0, ..., 0)`` with ``a < 0``
-    (Schwendinger, Gruen & Hornik 2021, Comput. Stat. 36, section 4.2); an
-    offset moves that bound to ``a < -max(offset)``, which the default
-    intercept, chosen before the offset, ignores.  A constant offset ``c``
-    then starts at ``intercept - c``, the no-offset start shifted with the
+    space or the link inverse's domain, or every positive-weight row starts
+    inside both.  A binomial/log start outside its mean space (``eta < 0``,
+    ``mean_space_violation``) is lowered until the largest positive-weight
+    ``eta`` is ``level``, the intercept-only start's own ``log(mean) < 0``.
+    Every log-binomial solver but the augmented-Lagrangian ones needs a start
+    inside the parameter space, and with an intercept the simple one is
+    ``(a, 0, ..., 0)`` with ``a < 0`` (Schwendinger, Gruen & Hornik 2021,
+    Comput. Stat. 36, section 4.2); an offset moves that bound to
+    ``a < -max(offset)``, which the default intercept, chosen before the
+    offset, ignores.  An inverse or inverse-squared start outside the link's
+    domain (``eta <= 0``, ``link_domain_violation``) is raised, the same way,
+    until the smallest positive-weight ``eta`` is ``level``, that link's
+    intercept-only start ``g(mean) > 0``.  A constant offset ``c`` then
+    starts at ``intercept - c``, the no-offset start shifted with the
     optimum.  A start already inside is left alone, so a fit without an
     offset starts exactly as before.
     """
-    violates = mean_space_violation(family, link)
     eta = np.asarray(eta_unclipped, dtype=float)
-    if violates is None or not violates(eta, weights):
-        return float(intercept)
-    top = float(np.max(eta[weights > 0.0]))
-    if not math.isfinite(top):
-        return float(intercept)
-    return float(intercept) - (top - float(level))
+    violates = mean_space_violation(family, link)
+    if violates is not None and violates(eta, weights):
+        top = float(np.max(eta[weights > 0.0]))
+        if not math.isfinite(top):
+            return float(intercept)
+        return float(intercept) - (top - float(level))
+    outside = link_domain_violation(link)
+    if outside is not None and outside(eta, weights) and float(level) > 0.0:
+        bottom = float(np.min(eta[weights > 0.0]))
+        if not math.isfinite(bottom):
+            return float(intercept)
+        return float(intercept) + (float(level) - bottom)
+    return float(intercept)
 
 
 StateInvalid = Callable[[_IRLSState], bool]

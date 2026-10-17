@@ -114,3 +114,53 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
 
     assert prepare_calls == 1
     assert hessian_checks >= 2
+
+
+def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A smoothing-parameter trial that carries a row to eta <= 0 under the inverse link is
+    refused, as a rejected trial, instead of being scored on clipped means of about 1e12: no
+    trial the line search scores has a positive-weight row outside the domain."""
+    from superglm.reml import discrete
+    from superglm.solvers.mode_score import centred_matvec
+
+    scored_outside = []
+    real_objective = discrete.reml_laml_objective
+
+    def checked_objective(dm, distribution, link, groups, y, pirls, lambdas, weights, offset, **kw):
+        if pirls.n_iter == 0 and pirls.state_center is not None:  # a line-search trial
+            eta = pirls.centred_intercept + centred_matvec(dm, pirls.beta, pirls.state_center)
+            scored_outside.append(bool(np.any((eta + offset <= 0.0) & (weights > 0.0))))
+        return real_objective(
+            dm, distribution, link, groups, y, pirls, lambdas, weights, offset, **kw
+        )
+
+    monkeypatch.setattr(discrete, "reml_laml_objective", checked_objective)
+
+    real = discrete._solve_cached_profiled_system
+    crossed = {"n": 0}
+
+    def crossing_first(*args, **kwargs):
+        beta, intercept, log_det_h, rank = real(*args, **kwargs)
+        if crossed["n"] == 0:
+            crossed["n"] += 1
+            beta = beta * 1e3  # far enough to put rows on both sides of eta = 0
+        return beta, intercept, log_det_h, rank
+
+    monkeypatch.setattr(discrete, "_solve_cached_profiled_system", crossing_first)
+    X, y, weights = _gamma_data()
+    model = SuperGLM(
+        family="gamma",
+        link="inverse",
+        selection_penalty=0.0,
+        discrete=True,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+    model.fit_reml(X, y, sample_weight=weights, max_reml_iter=6, runtime_validation="skip")
+
+    assert crossed["n"] == 1
+    assert scored_outside and not any(scored_outside)
+    assert model._reml_profile["reml_n_domain_refused_trials"] >= 1
+    mu = model.predict(X)
+    assert np.all(np.isfinite(mu)) and mu.max() < 1e3 * y.max()

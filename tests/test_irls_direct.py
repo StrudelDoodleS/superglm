@@ -1,5 +1,7 @@
 """Tests for the direct IRLS solver (no BCD)."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -51,6 +53,60 @@ class _LevelTwoRecorder:
     def append_jsonl(self, name: str, payload: dict[str, object]) -> None:
         assert name == "pirls"
         self.rows.append(payload)
+
+
+def _force_constant_working_rows(monkeypatch, response, weights=None):
+    """Every PIRLS solve sees the same working rows, whatever the state.
+
+    The solve is then a function of ``(W, z)`` alone, so its second iteration
+    returns the first one's coefficients bit for bit on any BLAS: a forced
+    float64 fixed point.  For Gaussian/identity ``z = y`` is the working
+    response ``eta + (y - eta)`` without its rounding.
+    """
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct as irls_direct
+
+    real = irls_direct.coefficient_working_rows
+
+    def constant_rows(**kwargs):
+        rows = real(**kwargs)
+        return replace(
+            rows,
+            response=np.array(response, dtype=np.float64),
+            weights=rows.weights if weights is None else np.array(weights, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(irls_direct, "coefficient_working_rows", constant_rows)
+
+
+def _force_unresolved_score(monkeypatch, *, resolved=False):
+    """The capped score reads twice the bar (a fit to rounding), the floor-resolved one is real.
+
+    Returns the list of the real verdicts read at ``resolve_cap = inf``.
+    """
+    import math
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct as irls_direct
+
+    real = irls_direct.penalized_mode_residual
+    floor_verdicts: list[float] = []
+
+    def residual(**kwargs):
+        result = real(**kwargs)
+        if math.isinf(kwargs["resolve_cap"]):
+            floor_verdicts.append(result.ratio())
+            return result
+        return replace(
+            result,
+            relative=np.full_like(result.relative, 2.0 * result.bar),
+            bar_effective=np.full_like(result.bar_effective, result.bar),
+            resolved=resolved,
+        )
+
+    monkeypatch.setattr(irls_direct, "penalized_mode_residual", residual)
+    return floor_verdicts
 
 
 # ── Basic solver tests ─────────────────────────────────────────
@@ -963,6 +1019,449 @@ class TestDirectSolverBasic:
         assert "irls_observed_newton_rescues" not in profile
         assert "irls_observed_newton_iters" not in profile
 
+    def test_gamma_log_mode_score_solve_that_reaches_the_bar_keeps_fisher_and_one_gram(
+        self, monkeypatch
+    ):
+        """A ``mode_score`` Gamma/log solve whose Fisher score reaches the bar never switches.
+
+        The switch to Newton is for a Fisher iteration measured to stall or
+        to contract too slowly for its budget.  One that reaches the bar
+        keeps Fisher steps, and with them its constant-weight Gram, built
+        once.  Mutation check: a rate test that fired on every resolved,
+        unconverged score (``rate_exhausts_budget`` returning True) switched
+        this solve and rebuilt the Gram on each Newton iteration.
+        """
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+
+        rng = np.random.default_rng(458)
+        n = 120
+        X_raw = rng.normal(size=(n, 3))
+        y = rng.gamma(shape=2.0, scale=np.exp(0.2 + X_raw @ np.array([0.1, -0.2, 0.3])) / 2.0)
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+        profile: dict = {}
+        latch = [False]
+        result, _ = irls_direct.fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=3),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=3)],
+            lambda2=0.1,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+            _newton_latch=latch,
+        )
+        assert result.converged
+        assert result.n_iter > 2
+        assert "irls_fisher_newton_switches" not in profile
+        assert "irls_observed_newton_iters" not in profile
+        assert latch == [False]
+        assert centered_calls == 1
+
+    def test_exact_reml_passes_one_newton_latch_to_every_pirls_solve(self, monkeypatch):
+        """One exact Gamma/log REML fit shares a single ``_newton_latch`` across its PIRLS solves.
+
+        The latch is what carries a Newton switch from one solve of the fit
+        to the next (bootstrap, candidates, line-search trials), so every
+        solve the optimizer makes must hold the same list.  Mutation check:
+        dropping ``_newton_latch=newton_latch`` at any call site in
+        ``reml.direct`` leaves that solve with ``None``.
+        """
+        import superglm.reml.direct as reml_direct
+        from superglm.features.spline import Spline
+
+        real = reml_direct.fit_irls_direct
+        latches: list = []
+
+        def spy(*args, **kwargs):
+            latches.append(kwargs.get("_newton_latch"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(reml_direct, "fit_irls_direct", spy)
+        rng = np.random.default_rng(11)
+        n = 600
+        x = rng.uniform(0.0, 1.0, n)
+        level = rng.choice(["a", "b", "c"], n)
+        mu = np.exp(0.5 + np.sin(4.0 * x) + 0.3 * (level == "b"))
+        y = rng.gamma(2.0, mu / 2.0)
+        model = SuperGLM(
+            family="gamma",
+            link="log",
+            features={"x": Spline(n_knots=8), "c": Categorical()},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(pd.DataFrame({"x": x, "c": level}), y)
+        assert len(latches) >= 3
+        assert latches[0] is not None
+        assert all(latch is latches[0] for latch in latches)
+
+    def test_gamma_log_switches_to_newton_when_fisher_cannot_reach_the_bar(self):
+        """Fisher scoring that contracts too slowly for the budget finishes on Newton steps.
+
+        The response is built so the mode is known (beta = 0.2) and the
+        observed information ``y / mu`` is 0.01 on the six high-leverage rows:
+        along the slope it is about 0.14 of the Fisher information, so
+        Fisher's error map ``1 - F^-1 H`` contracts at about 0.86 an
+        iteration and its 100-iteration budget ends short of the bar (before
+        the fix: ``max_iter``, not converged).  The resolved score's measured
+        rate shows it, and the iterations left take Newton steps.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        n, far = 200, 6
+        x = np.zeros(n)
+        x[:far] = 8.0
+        x[far:] = np.linspace(-1.0, 1.0, n - far)
+        design = np.column_stack([np.ones(n), x])
+        ratio = np.ones(n)
+        ratio[:far] = 0.01
+        # the near rows take the correction that makes the mode exact
+        correction = np.linalg.lstsq(
+            design[far:].T, -design[:far].T @ (ratio[:far] - 1.0), rcond=None
+        )[0]
+        ratio[far:] = 1.0 + correction
+        assert np.all(ratio > 0.0)
+        y = ratio * np.exp(1.0 + 0.2 * x)
+        profile: dict = {}
+        result, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert result.converged
+        assert profile["irls_fisher_newton_switches"] == 1
+        np.testing.assert_allclose(result.beta, [0.2], rtol=1e-7)
+
+        # One REML fit's later solves start where the switch left them: a set
+        # latch begins on Newton steps, and a switching solve sets it.
+        def solve(latch, profile):
+            return fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=LogLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                convergence="mode_score",
+                profile=profile,
+                weight_semantics="frequency",
+                _newton_latch=latch,
+            )[0]
+
+        latch = [False]
+        solve(latch, {})
+        assert latch == [True]
+        latched: dict = {}
+        started = solve(latch, latched)
+        assert started.converged
+        assert "irls_fisher_newton_switches" not in latched
+        assert latched["irls_observed_newton_iters"] == started.n_iter < result.n_iter
+
+    def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
+        """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
+
+        ``stabilize_eta`` would turn a crossing row into a mean of 1e12 whose
+        deviance grows only like ``log mu``, so the line search accepted it
+        and the row stayed pinned there (before the fix: two rows at
+        eta < 0, ``step_rejected``).  Every accepted state now keeps
+        ``eta > 0`` on every row, and the fit converges.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        y = rng.gamma(0.3, (1.0 / (0.05 + 2.0 * x)) / 0.3)
+        columns = np.column_stack([x, x**2])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(columns)], n=n, p=2),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=InverseLink(),
+                groups=[GroupSlice(name="x", start=0, end=2)],
+                lambda2=0.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        eta = result.intercept + columns @ result.beta
+        assert np.all(eta > 0.0)
+        assert result.converged
+
+    def test_the_fixed_point_stop_reads_the_centred_intercept(self, monkeypatch):
+        """A step that moves ``alpha`` but not the raw intercept's reading is not a fixed point.
+
+        A column at 1e8 puts ``|c' beta|`` near 5e7, where the raw intercept
+        ``alpha - c' beta`` has a spacing of 7.5e-9, so a start whose
+        ``alpha`` is 1e-9 off the solve's own reads the same raw intercept.
+        The solve is forced to one answer and the score above its bar, so
+        the first iteration moves ``alpha`` by that 1e-9 and leaves ``beta``
+        and the raw intercept bitwise unchanged; only the second repeats
+        itself.  Mutation check: comparing the raw intercept alone stopped
+        on the first iteration.
+        """
+        import math
+
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import centred_warm_start
+
+        n = 64
+        x = 1e8 + np.random.default_rng(1).uniform(0.0, 1.0, n)
+        y = 2.0 + 0.5 * (x - 1e8)
+        _force_constant_working_rows(monkeypatch, y)
+        floor_verdicts = _force_unresolved_score(monkeypatch)
+
+        def solve(**start):
+            return fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gaussian(),
+                link=IdentityLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+                **start,
+            )[0]
+
+        cold = solve()
+        assert cold.converged and cold.n_iter == 2
+        alpha, centre = centred_warm_start(cold)
+        moved = alpha + 1e-9
+        assert moved != alpha
+        assert moved - math.fsum(centre * cold.beta) == cold.intercept
+        warm = solve(
+            beta_init=cold.beta.copy(),
+            intercept_init=cold.intercept,
+            _centred_init=(moved, centre),
+        )
+        assert warm.centred_intercept == alpha
+        assert warm.n_iter == 2
+        assert warm.converged
+        assert floor_verdicts and max(floor_verdicts) <= 1.0
+
+    def test_a_newton_switch_and_a_fixed_point_in_one_iteration_take_the_newton_step(
+        self, monkeypatch
+    ):
+        """The iteration that switches Gamma/log to Newton is not a fixed point of the new map.
+
+        The working rows are forced constant, so the second iteration repeats
+        the first bit for bit, and the rate test is forced to fire on that
+        same iteration.  The switch clears the score history; the fixed-point
+        stop then wrote its last entry (before the fix: ``IndexError``), and
+        would have ended the solve before the Newton map it chose ran.  The
+        solve now takes the Newton iteration and stops at its fixed point.
+        """
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(5)
+        n = 120
+        x = np.linspace(-1.0, 1.0, n)
+        y = np.exp(0.5 + 0.3 * x) * rng.gamma(50.0, 1.0 / 50.0, n)
+        _force_constant_working_rows(monkeypatch, np.log(y), weights=np.ones(n))
+        floor_verdicts = _force_unresolved_score(monkeypatch, resolved=True)
+        monkeypatch.setattr(
+            irls_direct,
+            "rate_exhausts_budget",
+            lambda ratios, window, done, max_iter: done >= 2,
+        )
+        profile: dict = {}
+        result, _ = fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert profile["irls_fisher_newton_switches"] == 1
+        assert profile["irls_observed_newton_iters"] == 1
+        assert result.n_iter == 3
+        assert result.converged
+        assert floor_verdicts and max(floor_verdicts) <= 1.0
+
+    def test_a_zero_crossing_proposal_takes_the_first_halving_inside_the_domain(self):
+        """The line search accepts the first halving that keeps every weighted row at eta > 0.
+
+        The committed state has eta = 1 on every row and the proposal
+        ``1 - 3x`` crosses zero for x > 1/3.  The merit is made to accept
+        every trial, so only the domain test decides: without it the
+        crossing full step is taken; with it alpha = 1/2 (``1 - 1.5x``, still
+        crossing for x > 2/3) is refused and alpha = 1/4 accepted.  A row
+        with zero weight may sit outside.  Only the two inverse links
+        declare the domain.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import (
+            CauchitLink,
+            CloglogLink,
+            IdentityLink,
+            InverseLink,
+            InverseSquaredLink,
+            LogitLink,
+            LogLink,
+            NegativeBinomialLink,
+            ProbitLink,
+            SqrtLink,
+        )
+        from superglm.solvers.irls_state import (
+            _evaluate_irls_state,
+            _select_irls_trial,
+            link_domain_violation,
+        )
+
+        n = 41
+        x = np.linspace(0.0, 1.0, n)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        y = np.full(n, 0.8)
+        weights = np.ones(n)
+        weights[-1] = 0.0
+        offset = np.zeros(n)
+        offset[-1] = -5.0  # a zero-weight row outside the domain throughout
+
+        def state(slope: float):
+            return _evaluate_irls_state(
+                dm, y, weights, Gamma(), InverseLink(), offset, np.array([slope]), 1.0
+            )
+
+        committed, proposal = state(0.0), state(-3.0)
+        outside = link_domain_violation(InverseLink())
+        assert outside is not None
+        assert not outside(committed.eta_unclipped, weights)
+        assert outside(proposal.eta_unclipped, weights)
+        evaluated: list[float] = []
+
+        def evaluate(alpha: float):
+            evaluated.append(alpha)
+            return state(-3.0 * alpha)
+
+        def select(invalid_state):
+            evaluated.clear()
+            return _select_irls_trial(
+                committed=committed,
+                proposal=proposal,
+                evaluate_state=evaluate,
+                invalid_state=invalid_state,
+                merit_delta=lambda candidate, base: -1.0,
+            )
+
+        assert select(None).alpha == 1.0
+        decision = select(lambda candidate: outside(candidate.eta_unclipped, weights))
+        assert decision.alpha == 0.25 and decision.step_halvings == 2
+        assert not decision.step_rejected
+        assert evaluated == [0.5, 0.25]
+        assert outside(state(-1.5).eta_unclipped, weights)
+        assert not outside(state(-0.75).eta_unclipped, weights)
+
+        assert link_domain_violation(InverseSquaredLink()) is not None
+        for link in (
+            LogLink(),
+            IdentityLink(),
+            LogitLink(),
+            ProbitLink(),
+            CloglogLink(),
+            CauchitLink(),
+            SqrtLink(),
+            NegativeBinomialLink(theta=1.0),
+        ):
+            assert link_domain_violation(link) is None
+
+    def test_inverse_link_default_start_is_raised_inside_the_domain(self):
+        """A negative offset that puts the default start at eta <= 0 has its intercept raised.
+
+        The default intercept ``1 / mean(y)`` is chosen before the offset, so
+        an offset of -10 on 30% of the rows starts them at eta < 0, outside
+        the inverse link's domain, where the domain guard is not installed:
+        the clipped rows (mean 1e12) are accepted and the state crawls back
+        from the clip (before the fix: ``max_iter`` at 20 iterations, every
+        such row at eta ~ 1e-6; 45 iterations to converge without a cap).
+        The start is now raised until the smallest eta is the default
+        intercept, as the log-binomial start is lowered.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink, LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.irls_state import interior_start_intercept
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        offset = np.where(rng.uniform(size=n) < 0.3, -10.0, 0.0)
+        y = rng.gamma(0.5, (1.0 / (10.5 + x + offset)) / 0.5)
+        start = 1.0 / float(np.mean(y))
+        assert np.any(start + offset <= 0.0)
+        raised = interior_start_intercept(
+            Gamma(), InverseLink(), start + offset, np.ones(n), start, level=start
+        )
+        assert raised == start + 10.0
+        # a start already inside, and a link without the domain, are left alone
+        assert (
+            interior_start_intercept(
+                Gamma(), InverseLink(), start + 0 * offset, np.ones(n), start, level=start
+            )
+            == start
+        )
+        assert (
+            interior_start_intercept(
+                Gamma(), LogLink(), start + offset, np.ones(n), start, level=start
+            )
+            == start
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=InverseLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                offset=offset,
+                max_iter=20,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        assert result.converged
+        assert np.all(result.intercept + x * result.beta[0] + offset > 0.0)
+
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""
         from superglm.distributions import Gamma
@@ -1631,3 +2130,61 @@ class TestREMLDirect:
 
         assert hasattr(m, "_reml_lambdas")
         assert "DrivAge" in m._reml_lambdas
+
+    def test_exact_fit_gaussian_stops_at_its_fixed_point(self, monkeypatch):
+        """A response the model fits to rounding ends each PIRLS solve in two iterations.
+
+        Gaussian/identity is one penalised least-squares solve.  When the
+        model reproduces its response exactly (a level effect plus the
+        rounding a log-ratio leaves, |noise| <= 2.2e-16) the residuals and so
+        the score's own scale are rounding, the relative score sits near 1,
+        and the floors that would read it are never evaluated.  Both events
+        are forced, so no BLAS or libm rounding decides them: the working
+        response is ``y`` itself (``eta + (y - eta)`` without its rounding),
+        so the second iteration of every solve returns the first one's
+        coefficients bit for bit, and the capped score reads twice its bar.
+        That second iteration is a fixed point: the solve stops there, with
+        the floors resolved (``resolve_cap = inf``), instead of running every
+        iteration of its budget at each smoothing parameter (2,802 iterations
+        over 29 solves before the fix).
+        """
+        from superglm.features.numeric import Numeric
+        from superglm.features.random_effect import RandomEffect
+
+        rng = np.random.default_rng(0)
+        n = 48
+        level = np.tile(["x", "y"], n // 2)
+        base = rng.uniform(1.0, 2.0, n)
+        noise = np.log(base * 3.0) - np.log(3.0) - np.log(base)
+        y = np.where(level == "y", np.log(0.6), 0.0) + noise
+        assert np.max(np.abs(noise)) <= 4 * np.finfo(float).eps
+        _force_constant_working_rows(monkeypatch, y)
+        floor_verdicts = _force_unresolved_score(monkeypatch)
+        X = pd.DataFrame(
+            {
+                "num": np.tile([4.0, 5.5, 6.5], n // 3),
+                "a": level,
+                "fam": np.repeat(["f1", "f2"], n // 2),
+            }
+        )
+        m = SuperGLM(
+            family="gaussian",
+            features={"num": Numeric(), "a": Categorical(), "fam": RandomEffect()},
+        )
+        with warnings.catch_warnings():
+            # the smoothing parameter of a family with no effect is not
+            # identified by rounding residuals; its disclosure is not tested here
+            warnings.simplefilter("ignore")
+            m.fit_reml(X, y)
+        profile = m._reml_profile
+        # every solve ended at its fixed point, at most two iterations in (a
+        # solve warm-started at its own fixed point stops on the first)
+        assert len(floor_verdicts) == profile["irls_calls"]
+        assert profile["irls_iters"] <= 2 * profile["irls_calls"]
+        # the published verdict is the floor-resolved one: certified within
+        # the floor, the limiting accuracy (not converged) above it
+        np.testing.assert_allclose(
+            profile["irls_mode_score"], profile["irls_mode_bar"] * floor_verdicts[-1], rtol=1e-15
+        )
+        stagnated = m._reml_result.terminal_refit_termination == "score_stagnated"
+        assert stagnated == (floor_verdicts[-1] > 1.0)
