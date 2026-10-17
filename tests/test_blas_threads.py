@@ -507,3 +507,199 @@ def test_a_pooled_section_runs_blas_on_one_thread_under_every_policy(monkeypatch
             assert all(count == 1 for count in _blas_thread_counts())
         assert all(count == explicit for count in _blas_thread_counts())
     assert _blas_thread_counts() == before
+
+
+def test_a_design_the_structured_backend_cannot_take_keeps_the_cap_below_2500(monkeypatch):
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    with solver_blas_threads():
+        allow_wide_design(2_499, structured=False)
+        assert all(count == 1 for count in _blas_thread_counts())
+        allow_wide_design(1_600)
+        assert _blas_thread_counts() == before
+    with solver_blas_threads():
+        # Not yet measured as a complete dense fit: the release is kept there.
+        allow_wide_design(2_500, structured=False)
+        assert _blas_thread_counts() == before
+
+
+def test_every_fit_path_reports_whether_the_design_has_a_structured_term(monkeypatch):
+    """The release's dispatch, no thread counts: True for a RandomEffect and a
+    FactorSmooth design, False for a dense one, on the build and the cached-design path."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    from superglm import Categorical, FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
+
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        blas, "allow_wide_design", lambda p, *, structured=True: seen.append(structured)
+    )
+    rng = np.random.default_rng(5)
+    n = 600
+    X = pd.DataFrame(
+        {
+            "x": rng.uniform(-1.0, 1.0, n),
+            "g": rng.choice([f"l{k}" for k in range(8)], n),
+        }
+    )
+    y = 1.0 + 0.3 * X["x"] + rng.normal(scale=0.2, size=n)
+    designs = {
+        "random effect": SuperGLM(
+            family="gaussian", features={"x": Numeric(), "g": RandomEffect()}, selection_penalty=0
+        ),
+        "factor smooth": SuperGLM(
+            family="gaussian",
+            features={"z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", k=5)],
+            selection_penalty=0,
+        ),
+        "dense": SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5), "g": Categorical()},
+            selection_penalty=0,
+        ),
+    }
+    X["z"] = rng.normal(size=n)
+    for name, model in designs.items():
+        seen.clear()
+        model.fit_reml(X, y)
+        assert seen == [name != "dense"], name
+    # The profile search serves its design from a cache, through its own call;
+    # the dense design pins that call's keyword, which the default would hide.
+    for name in ("random effect", "dense"):
+        model = designs[name]
+        model._profile_design_cache = {}
+        seen.clear()
+        model.fit_reml(X, y)
+        assert model._profile_design_cache, name
+        model.fit_reml(X, y)
+        assert seen == [name != "dense"] * 2, name
+
+
+def test_a_dense_fit_holds_blas_at_one_thread_throughout(monkeypatch):
+    """threadpoolctl probe: a wide design without a RandomEffect or FactorSmooth term, whose
+    passes run on the pool (a lookup design: its Grams come from term-pair tables), factors its
+    Grams on one BLAS thread, and the process's pools come back after.  A design with a serial
+    n·p² pass releases instead (``test_the_chunked_row_route_releases_a_dense_fit``)."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    import superglm.solvers.rank as rank
+    from superglm import Categorical, SuperGLM
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _native_blas_counts()
+    # Every design counts as wide (this one stays below the dense threshold),
+    # so only the structured test keeps the cap.
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
+    seen: list[list[int]] = []
+    decompose = rank._decompose_gram
+
+    def probe(*args, **kwargs):
+        seen.append(_blas_thread_counts())
+        return decompose(*args, **kwargs)
+
+    monkeypatch.setattr(rank, "_decompose_gram", probe)
+    rng = np.random.default_rng(3)
+    n = 2_000
+    X = pd.DataFrame({"g": rng.choice(list("pqr"), n), "h": rng.choice(list("uvwxyz"), n)})
+    y = rng.poisson(np.exp(0.3 * (X["g"] == "q") - 0.2 * (X["h"] == "u"))).astype(float)
+    SuperGLM(
+        family="poisson",
+        features={"g": Categorical(), "h": Categorical()},
+        interactions=[("g", "h")],
+    ).fit_reml(X, y)
+    assert seen and all(all(count == 1 for count in counts) for counts in seen)
+    assert _blas_thread_counts() == before
+
+
+def test_table_jobs_run_on_one_blas_thread_at_any_worker_count(monkeypatch):
+    """Serial or pooled, a lookup-table job runs on one BLAS thread under an explicit policy too."""
+    from superglm._group_matrix import _lookup_tables as lookup_tables
+    from superglm._parallel import parallel_config
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
+    _native_blas_counts()
+    for workers in (1, 3):
+        seen: list[list[int]] = []
+        with parallel_config(n_jobs=workers):
+            lookup_tables._pool_run([lambda: seen.append(_blas_thread_counts())] * 3, 8)
+        assert seen and all(all(count == 1 for count in counts) for counts in seen), workers
+
+
+def test_the_pool_releases_each_result_once_it_is_yielded():
+    """A caller that reduces as results arrive holds one at a time: once the next result is
+    yielded, the pool no longer references any earlier one."""
+    import gc
+    import weakref
+
+    from superglm._parallel import parallel_config, pooled_map
+
+    class Part:
+        pass
+
+    refs = []
+    with parallel_config(n_jobs=3, max_memory=2**30):
+        for part in pooled_map(lambda _: Part(), list(range(6)), 1):
+            refs.append(weakref.ref(part))
+            del part
+            gc.collect()
+            assert all(ref() is None for ref in refs[:-1]), len(refs)
+    assert len(refs) == 6
+
+
+def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
+    """A dense design keeps the cap because its row passes run on the pool; every pass that runs
+    on the calling thread instead (the chunked solved-row route, the gradient-only pass and the
+    serial centred Grams) releases it for the rest of the fit, as before the dense threshold, while
+    the pooled support route keeps it."""
+    import pandas as pd
+
+    import superglm._blas_threads as blas
+    import superglm.reml._leverage_rows as leverage_rows
+    import superglm.reml.w_derivatives as w_derivatives
+    from superglm import Categorical, Spline, SuperGLM
+    from superglm._group_matrix._group_matrix_centered import (
+        centered_gram_rhs,
+        centered_signed_grams,
+    )
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    rng = np.random.default_rng(3)
+    n = 400
+    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "g": rng.choice(list("pqr"), n)})
+    y = rng.poisson(np.exp(0.3 * np.sin(4.0 * X["a"]))).astype(float)
+    model = SuperGLM(family="poisson", features={"a": Spline(n_knots=6), "g": Categorical()})
+    model.fit(X, y)
+    dm = model._dm
+    lookup = SuperGLM(family="poisson", features={"g": Categorical(), "h": Categorical()})
+    lookup.fit(X.assign(h=rng.choice(list("uvw"), n)), y)
+    ldm = lookup._dm
+    real_plan = leverage_rows._support_plan
+    released = []
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 2)
+    monkeypatch.setattr(blas, "_release_current_scope", lambda: released.append(True))
+    monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
+    inverse, centre = np.eye(dm.p), np.zeros(dm.p)
+    leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
+    assert released == [True]
+    w_derivatives._leverage_gradient_rhs(dm, inverse, centre, np.ones(dm.n), float(dm.n))
+    assert released == [True, True]
+    ones = np.ones(dm.n)
+    centered_gram_rhs(dm=dm, W=ones, mean_x=centre, z_centered=ones)
+    centered_signed_grams(dm=dm, weights=[ones], mean_x=centre)
+    assert released == [True] * 4
+    # The pooled support route runs on the pool and keeps the cap.
+    monkeypatch.setattr(leverage_rows, "_support_plan", real_plan)
+    assert real_plan(ldm, np.eye(ldm.p), np.zeros(ldm.p), None) is not None
+    leverage_rows.solved_row_blocks(
+        ldm, np.eye(ldm.p), np.zeros(ldm.p), None, np.ones(ldm.n, dtype=bool)
+    )
+    assert released == [True] * 4
+    monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
+    monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 10**9)  # a narrow design keeps the cap
+    leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
+    assert released == [True] * 4

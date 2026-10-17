@@ -4,7 +4,9 @@ The W(rho) gradient and the outer Hessian's first-order W terms read, for
 each row ``r`` of the centred design ``x_r = (x - c) - c_lo``, the solved row
 ``y_r = H^-1 x_r`` and the leverage ``h_r = x_r' y_r``
 (``w_derivatives._leverage_derivative_terms``).  :func:`solved_row_blocks`
-yields them in row blocks by one of two routes.
+returns them as row-block jobs by one of two routes; the support route's
+blocks are independent, so the caller forms them on a pool and sums their
+terms in row order (bitwise the same at every worker count).
 
 **Support route.**  A design whose groups are dense columns or indexed
 supports (a group's rows are rows of a small table, ``values[codes] @ R``)
@@ -36,20 +38,21 @@ centre.  ``h_r`` adds ``gamma_p |x_r|' |y_r|``.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._blas_threads import release_for_serial_row_passes
 from superglm.group_matrix import DesignMatrix
 from superglm.solvers.centered_system import iter_grouped_design_chunks
 
 _BLOCK_BYTES = 32 * 1024 * 1024
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _solved_rows_and_leverages(
     solved,
     leverage,
@@ -123,6 +126,11 @@ class _SupportPlan:
     dense: list  # (column, width, matrix)
     dense_columns: NDArray
     dense_inverse: NDArray
+
+
+_POOLED_ROW_KERNELS = (_solved_rows_and_leverages,)
+"""The kernel a pooled solved-row block runs on its worker: ``nogil``, never ``prange``,
+writing only the block's own arrays."""
 
 
 def _support_plan(
@@ -264,59 +272,62 @@ def _support_plan(
     )
 
 
-def _support_blocks(
+def _support_block_rows(p: int) -> int:
+    """Rows per support-route block: ``_BLOCK_BYTES`` of solved rows, at least 256, at most 8192."""
+    return max(256, min(8192, _BLOCK_BYTES // (8 * max(p, 1))))
+
+
+def _support_block(
     plan: _SupportPlan,
-    n: int,
+    start: int,
+    stop: int,
     p: int,
     centre_hi: NDArray,
     centre_lo: NDArray | None,
     active: NDArray,
-) -> Iterator[tuple[NDArray, NDArray, NDArray]]:
-    block_rows = max(256, min(8192, _BLOCK_BYTES // (8 * max(p, 1))))
-    n_groups = len(plan.offsets)
-    for start in range(0, n, block_rows):
-        stop = min(start + block_rows, n)
-        local = np.flatnonzero(active[start:stop])
-        if local.size == 0:
-            continue
-        codes = np.empty((n_groups, stop - start), dtype=np.intp)
-        for position, full in plan.full_codes:
-            codes[position] = full[start:stop]
-        for position, level_rows, level_bins, zero in plan.level_codes:
-            first = int(np.searchsorted(level_rows, start, side="left"))
-            last = int(np.searchsorted(level_rows, stop, side="left"))
-            codes[position] = zero
-            codes[position, level_rows[first:last] - start] = level_bins[first:last]
-        local = np.ascontiguousarray(local, dtype=np.intp)
-        dense_values = np.empty((local.size, plan.dense_columns.size), dtype=np.float64)
-        filled = 0
-        for column, width, matrix in plan.dense:
-            cols = slice(column, column + width)
-            values = np.asarray(matrix[start:stop], dtype=np.float64)[local] - centre_hi[cols]
-            if centre_lo is not None:
-                values -= centre_lo[cols]
-            dense_values[:, filled : filled + width] = values
-            filled += width
-        solved = np.empty((local.size, p), dtype=np.float64)
-        leverage = np.empty(local.size, dtype=np.float64)
-        _solved_rows_and_leverages(
-            solved,
-            leverage,
-            local,
-            codes,
-            plan.base,
-            plan.table,
-            plan.offsets,
-            plan.zero_codes,
-            plan.supports,
-            plan.support_offsets,
-            plan.widths,
-            plan.columns,
-            dense_values,
-            plan.dense_columns,
-            plan.dense_inverse,
-        )
-        yield start + local, solved, leverage
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Rows ``start:stop``'s ``(rows, y, h)`` on the support route, ``None`` when none is active."""
+    local = np.flatnonzero(active[start:stop])
+    if local.size == 0:
+        return None
+    codes = np.empty((len(plan.offsets), stop - start), dtype=np.intp)
+    for position, full in plan.full_codes:
+        codes[position] = full[start:stop]
+    for position, level_rows, level_bins, zero in plan.level_codes:
+        first = int(np.searchsorted(level_rows, start, side="left"))
+        last = int(np.searchsorted(level_rows, stop, side="left"))
+        codes[position] = zero
+        codes[position, level_rows[first:last] - start] = level_bins[first:last]
+    local = np.ascontiguousarray(local, dtype=np.intp)
+    dense_values = np.empty((local.size, plan.dense_columns.size), dtype=np.float64)
+    filled = 0
+    for column, width, matrix in plan.dense:
+        cols = slice(column, column + width)
+        values = np.asarray(matrix[start:stop], dtype=np.float64)[local] - centre_hi[cols]
+        if centre_lo is not None:
+            values -= centre_lo[cols]
+        dense_values[:, filled : filled + width] = values
+        filled += width
+    solved = np.empty((local.size, p), dtype=np.float64)
+    leverage = np.empty(local.size, dtype=np.float64)
+    _solved_rows_and_leverages(
+        solved,
+        leverage,
+        local,
+        codes,
+        plan.base,
+        plan.table,
+        plan.offsets,
+        plan.zero_codes,
+        plan.supports,
+        plan.support_offsets,
+        plan.widths,
+        plan.columns,
+        dense_values,
+        plan.dense_columns,
+        plan.dense_inverse,
+    )
+    return start + local, solved, leverage
 
 
 def _chunked_blocks(
@@ -339,23 +350,50 @@ def _chunked_blocks(
         yield start + local, solved, leverage
 
 
+@dataclass(frozen=True)
+class RowBlocks:
+    """The row blocks of one solved-row pass, in row order.
+
+    ``jobs`` are callables, each returning one block's ``(rows, y, h)`` or
+    ``None`` when no row in it is active.  On the support route they are
+    independent (``block_bytes`` is one job's working set) and may run on a
+    pool; on the chunked route ``block_bytes`` is ``None`` and the jobs read
+    one stream of design chunks, so they run in order on the calling thread.
+    """
+
+    jobs: Iterable[Callable[[], tuple[NDArray, NDArray, NDArray] | None]]
+    block_bytes: int | None
+
+
 def solved_row_blocks(
     dm: DesignMatrix,
     inverse: NDArray,
     centre_hi: NDArray,
     centre_lo: NDArray | None,
     active: NDArray,
-) -> Iterator[tuple[NDArray, NDArray, NDArray]]:
-    """Yield ``(rows, y, h)``: the active rows' solved centred rows and leverages, in row order.
+) -> RowBlocks:
+    """The active rows' solved centred rows and leverages ``(rows, y, h)``, block by block.
 
     ``rows`` indexes the design; ``y[k] = H^-1 x_rows[k]`` and ``h[k] =
     x_rows[k]' y[k]`` for the centred row ``x = (x - centre_hi) - centre_lo``.
     Rows outside ``active`` are skipped and never formed, so a row that
-    carries no weight cannot overflow into the sums.
+    carries no weight cannot overflow into the sums.  A block's values do not
+    depend on which thread forms it or on any other block.
     """
     inverse = np.ascontiguousarray(inverse, dtype=np.float64)
     plan = _support_plan(dm, inverse, centre_hi, centre_lo)
     if plan is None:
-        yield from _chunked_blocks(dm, inverse, centre_hi, centre_lo, active)
-    else:
-        yield from _support_blocks(plan, dm.n, dm.p, centre_hi, centre_lo, active)
+        release_for_serial_row_passes(dm.p)
+        chunks = _chunked_blocks(dm, inverse, centre_hi, centre_lo, active)
+        return RowBlocks(jobs=((lambda block=block: block) for block in chunks), block_bytes=None)
+    n, p = dm.n, dm.p
+    rows = _support_block_rows(p)
+
+    def job(start: int):
+        return lambda: _support_block(
+            plan, start, min(start + rows, n), p, centre_hi, centre_lo, active
+        )
+
+    # A job holds its solved rows and the caller's products of them, a few
+    # copies of ``rows x p`` at once.
+    return RowBlocks(jobs=[job(start) for start in range(0, n, rows)], block_bytes=4 * 8 * rows * p)

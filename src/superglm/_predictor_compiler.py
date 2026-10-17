@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._parallel import pooled_map
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
@@ -90,6 +91,38 @@ def _clone_specification_graph(
         list(owned_interaction_order),
         list(pending),
     )
+
+
+# Transient bytes per data row an interaction's build holds beyond its
+# products: weights, gathers and small per-row temporaries (a pool sizing
+# estimate, never a result).
+_INTERACTION_BUILD_ROW_BYTES = 256
+
+
+def _interaction_build_row_bytes(ispec: Any, a: int, b: int, binned: bool) -> int:
+    """Bytes per data row one interaction's build may hold, from its parents' widths ``a`` and ``b``.
+
+    A binned build forms tables over bins, not rows.  A by-level or
+    categorical term holds a basis row per parent.  Any other term (a tensor,
+    a numeric or polynomial product) can hold ``a b`` entries a row: the row
+    Kronecker's indices and values (12 bytes each) and the weighted copy the
+    projection forms (12 more), with room to spare.
+    """
+    if binned:
+        return _INTERACTION_BUILD_ROW_BYTES
+    if isinstance(ispec, CategoricalInteraction | SplineCategorical | FactorSmooth):
+        return _INTERACTION_BUILD_ROW_BYTES + 32 * (a + b)
+    return _INTERACTION_BUILD_ROW_BYTES + 32 * a * b + 8 * (a + b)
+
+
+@dataclass
+class _BuiltInteraction:
+    """One interaction's build: its spec, the spec's groups, each group's matrix, its records."""
+
+    spec: Any
+    result: Any
+    processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]]
+    records: list[tuple]
 
 
 def compile_predictor_design(
@@ -542,7 +575,43 @@ def compile_predictor_design(
     _next_tensor_id = first_tensor_id
     scan_curves = separation_response is not None and bool(separation_boundaries)
 
+    # Discrete tensors are numbered in interaction order before any term
+    # builds, and every parent column is read here, once, on this thread.
+    tensor_ids: dict[str, int] = {}
+    # Each build is priced from its parents' main-effect widths, or a tensor's
+    # override margins; the pool is sized by the largest
+    # (``_interaction_build_row_bytes``).
+    widths: dict = {}
+    for g in groups:
+        widths[g.feature_name] = widths.get(g.feature_name, 0) + (g.end - g.start)
+    build_row_bytes = _INTERACTION_BUILD_ROW_BYTES
     for iname in interaction_order:
+        ispec = interaction_specs[iname]
+        for parent in ispec.parent_names:
+            X.column_array(parent)
+        binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
+        if binned_tensor:
+            tensor_ids[iname] = _next_tensor_id
+            _next_tensor_id += 1
+        binned = (
+            binned_tensor
+            or should_discretize_spline_categorical_interaction(ispec, specs, model_discrete)
+            or should_discretize_factor_smooth(ispec, model_discrete)
+        )
+        a, b = (max(widths.get(parent, 1), 1) for parent in ispec.parent_names)
+        if isinstance(ispec, TensorInteraction) and ispec._n_knots is not None:
+            # An n_knots override builds its margins at that knot count, whose
+            # B-spline basis has at most n_knots + degree + 1 columns.
+            a, b = (
+                max(width, knots + getattr(specs.get(parent), "degree", 3) + 1)
+                for width, knots, parent in zip(
+                    (a, b), ispec._n_knots, ispec.parent_names, strict=True
+                )
+            )
+        build_row_bytes = max(build_row_bytes, _interaction_build_row_bytes(ispec, a, b, binned))
+
+    def build_interaction(iname: str) -> _BuiltInteraction:
+        """One interaction's groups: its spec's build and each group matrix (no shared state)."""
         ispec = interaction_specs[iname]
         interaction_build_weight = (
             geometry_weight
@@ -552,8 +621,9 @@ def compile_predictor_design(
         p1, p2 = ispec.parent_names
         spec1, x1 = resolve_interaction_parent_of(ispec, specs.get(p1), X.column_array(p1))
         spec2, x2 = resolve_interaction_parent_of(ispec, specs.get(p2), X.column_array(p2))
+        records: list[tuple] = []
         if separation_boundaries and isinstance(ispec, CategoricalInteraction):
-            separation_records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
+            records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
         if spec1 is specs.get(p1) and spec2 is specs.get(p2):
             parent_specs = specs
         else:
@@ -585,7 +655,7 @@ def compile_predictor_design(
         bin_idx_inter = None
         exposure_agg_inter = None
         tensor_build: DiscreteTensorBuildResult | None = None
-        tensor_id = -1
+        tensor_id = tensor_ids.get(iname, -1)
         if use_discrete_factor_smooth:
             n_bins_factor_smooth = resolve_discrete_n_bins(p1, ispec, n_bins_config)
             result = ispec.build_discrete(
@@ -613,8 +683,6 @@ def compile_predictor_design(
                 weights=sample_weight,
                 minlength=B_unique_inter.shape[0],
             )
-            tensor_id = _next_tensor_id
-            _next_tensor_id += 1
         elif use_discrete_spline_cat:
             n_bins_spline = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
             result = ispec.build_discrete(
@@ -633,7 +701,7 @@ def compile_predictor_design(
                 build_kwargs["separation"] = curve_separation
             result = ispec.build(x1, x2, parent_specs, **build_kwargs)
         if isinstance(ispec, SplineCategorical) and ispec._separated_curves:
-            separation_records.append(("curve", iname, ispec._separated_curves))
+            records.append(("curve", iname, ispec._separated_curves))
 
         pi_kwargs: dict[str, Any] = dict(
             B_unique=B_unique_inter,
@@ -644,90 +712,111 @@ def compile_predictor_design(
             tensor_build=tensor_build,
             tensor_id=tensor_id,
         )
-
-        if isinstance(result, list):
-            has_subgroups = any(info.subgroup_name is not None for info in result)
-            if has_subgroups:
-                r_inv_parts_i: list[NDArray] = []
-                # A decomposed tensor's subgroups share one basis and its support.
-                ssp_supports: dict = {}
-                for info in result:
-                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs, ssp_supports=ssp_supports)
-                    if r_inv is not None:
-                        r_inv_parts_i.append(r_inv)
-
-                    group_matrices.append(gm)
-                    subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
-                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
-                    groups.append(
-                        GroupSlice(
-                            name=f"{iname}{subgroup_suffix}",
-                            start=col_offset,
-                            end=col_offset + n_cols,
-                            weight=np.sqrt(priced),
-                            penalty_dim=penalty_dim,
-                            penalized=info.penalized,
-                            feature_name=iname,
-                            subgroup_type=info.subgroup_name,
-                            constraints=info.constraints,
-                            monotone_engine=info.monotone_engine,
-                        )
-                    )
-                    col_offset += n_cols
-
-                if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
-            else:
-                # Per-level groups (SplineCategorical, PolynomialCategorical)
-                r_inv_dict: dict[str, NDArray] = {}
-                for level, info in zip(ispec._non_base, result):
-                    gm, r_inv, n_cols = _process_info(info, **pi_kwargs)
-                    if r_inv is not None:
-                        r_inv_dict[level] = r_inv
-
-                    group_matrices.append(gm)
-                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
-                    groups.append(
-                        GroupSlice(
-                            name=f"{iname}[{level}]",
-                            start=col_offset,
-                            end=col_offset + n_cols,
-                            weight=np.sqrt(priced),
-                            penalty_dim=penalty_dim,
-                            penalized=True,
-                            feature_name=iname,
-                            constraints=info.constraints,
-                            monotone_engine=info.monotone_engine,
-                        )
-                    )
-                    col_offset += n_cols
-
-                if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
-                    ispec.set_reparametrisation(r_inv_dict)
+        processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]] = []
+        if not isinstance(result, list):
+            processed.append((None, result, *_process_info(result, **pi_kwargs)))
+        elif any(info.subgroup_name is not None for info in result):
+            # A decomposed tensor's subgroups share one basis and its support.
+            ssp_supports: dict = {}
+            for info in result:
+                processed.append(
+                    (None, info, *_process_info(info, **pi_kwargs, ssp_supports=ssp_supports))
+                )
         else:
-            # Single group (CategoricalInteraction, NumericCategorical,
-            # NumericInteraction, PolynomialInteraction, TensorInteraction)
-            gm, r_inv, n_cols = _process_info(result, **pi_kwargs)
-            priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
-            g_new = GroupSlice(
-                name=iname,
-                start=col_offset,
-                end=col_offset + n_cols,
-                weight=np.sqrt(priced),
-                penalty_dim=penalty_dim,
-                penalized=True,
-                feature_name=iname,
-                constraints=result.constraints,
-                monotone_engine=result.monotone_engine,
-            )
-            if hasattr(ispec, "set_reparametrisation") and hasattr(gm, "R_inv"):
-                ispec.set_reparametrisation(gm.R_inv)
-            elif r_inv is not None and hasattr(ispec, "set_reparametrisation"):
-                ispec.set_reparametrisation(r_inv)
+            # Per-level groups (SplineCategorical, PolynomialCategorical)
+            for level, info in zip(ispec._non_base, result):
+                processed.append((level, info, *_process_info(info, **pi_kwargs)))
+        return _BuiltInteraction(ispec, result, processed, records)
 
-            group_matrices.append(gm)
-            groups.append(g_new)
-            col_offset = g_new.end
+    # Interactions read their parents' learned state and write only their
+    # own, so they build on the pool (``_parallel.pooled_map``); the design
+    # is assembled from them in interaction order, as the serial loop did.
+    built = pooled_map(build_interaction, list(interaction_order), build_row_bytes * n)
+    try:
+        for iname, term in zip(interaction_order, built, strict=True):
+            ispec, result = term.spec, term.result
+            separation_records.extend(term.records)
+            if isinstance(result, list):
+                if any(info.subgroup_name is not None for info in result):
+                    r_inv_parts_i: list[NDArray] = []
+                    for _, info, gm, r_inv, n_cols in term.processed:
+                        if r_inv is not None:
+                            r_inv_parts_i.append(r_inv)
+
+                        group_matrices.append(gm)
+                        subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
+                        priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
+                        groups.append(
+                            GroupSlice(
+                                name=f"{iname}{subgroup_suffix}",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(priced),
+                                penalty_dim=penalty_dim,
+                                penalized=info.penalized,
+                                feature_name=iname,
+                                subgroup_type=info.subgroup_name,
+                                constraints=info.constraints,
+                                monotone_engine=info.monotone_engine,
+                            )
+                        )
+                        col_offset += n_cols
+
+                    if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
+                else:
+                    r_inv_dict: dict[str, NDArray] = {}
+                    for level, info, gm, r_inv, n_cols in term.processed:
+                        if r_inv is not None:
+                            r_inv_dict[level] = r_inv
+
+                        group_matrices.append(gm)
+                        priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
+                        groups.append(
+                            GroupSlice(
+                                name=f"{iname}[{level}]",
+                                start=col_offset,
+                                end=col_offset + n_cols,
+                                weight=np.sqrt(priced),
+                                penalty_dim=penalty_dim,
+                                penalized=True,
+                                feature_name=iname,
+                                constraints=info.constraints,
+                                monotone_engine=info.monotone_engine,
+                            )
+                        )
+                        col_offset += n_cols
+
+                    if r_inv_dict and hasattr(ispec, "set_reparametrisation"):
+                        ispec.set_reparametrisation(r_inv_dict)
+            else:
+                # Single group (CategoricalInteraction, NumericCategorical,
+                # NumericInteraction, PolynomialInteraction, TensorInteraction)
+                _, _, gm, r_inv, n_cols = term.processed[0]
+                priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
+                g_new = GroupSlice(
+                    name=iname,
+                    start=col_offset,
+                    end=col_offset + n_cols,
+                    weight=np.sqrt(priced),
+                    penalty_dim=penalty_dim,
+                    penalized=True,
+                    feature_name=iname,
+                    constraints=result.constraints,
+                    monotone_engine=result.monotone_engine,
+                )
+                if hasattr(ispec, "set_reparametrisation") and hasattr(gm, "R_inv"):
+                    ispec.set_reparametrisation(gm.R_inv)
+                elif r_inv is not None and hasattr(ispec, "set_reparametrisation"):
+                    ispec.set_reparametrisation(r_inv)
+
+                group_matrices.append(gm)
+                groups.append(g_new)
+                col_offset = g_new.end
+    finally:
+        # A raise in the loop leaves the generator parked inside the pool's
+        # BLAS scope; closing it restores the BLAS policy and stops the pool.
+        built.close()
 
     validate_term_name_namespace(specs, interaction_specs)
     validate_fitted_group_names(groups)

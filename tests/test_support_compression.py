@@ -118,6 +118,42 @@ def test_hashed_grouping_matches_byte_keyed_grouping():
     )
 
 
+def test_compiled_row_scan_is_the_dense_scan_bit_for_bit():
+    """The hashes and the verification read from stored entries equal the densified rows'.
+
+    Stored -0.0 entries densify to +0.0 and NaN keeps its bits; a non-canonical
+    matrix (duplicate entries) takes the dense scan.
+    """
+    from superglm._group_matrix import _group_matrix_support as mod
+
+    special = np.array([[np.nan, 1.0, 0.0], [0.5, -0.0, 2.0], [0.0, 2.0, -3.0], [0.5, 0.0, 2.0]])
+    index = np.tile(np.arange(4), 250)
+    data, rows, cols = [], [], []
+    for r, g in enumerate(index):
+        for c in range(3):
+            if special[g, c] != 0.0 or np.signbit(special[g, c]) or (g == 2 and c == 0):
+                data.append(special[g, c])
+                rows.append(r)
+                cols.append(c)
+    stored = sp.csr_matrix((data, (rows, cols)), shape=(len(index), 3))
+    assert stored.has_canonical_format and np.signbit(stored.data).any()
+    dense = stored.copy()
+    dense.has_canonical_format = False  # takes the densified scan
+    hashes = mod._row_hashes(stored, 64)
+    assert np.array_equal(hashes, mod._row_hashes(dense, 64))
+    _, first, row_index = np.unique(hashes, return_index=True, return_inverse=True)
+    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+    compiled = mod._verified_representatives(stored, first, row_index, 64)
+    densified = mod._verified_representatives(dense, first, row_index, 64)
+    assert compiled is not None and densified is not None
+    assert compiled.tobytes() == densified.tobytes()
+    # A grouping the rows contradict fails on both scans.
+    wrong = row_index.copy()
+    wrong[5] = (wrong[5] + 1) % (wrong.max() + 1)
+    assert mod._verified_representatives(stored, first, wrong, 64) is None
+    assert mod._verified_representatives(dense, first, wrong, 64) is None
+
+
 def test_hash_collision_falls_back_to_byte_keyed_grouping(monkeypatch):
     """With a degenerate hash every row collides; the PRODUCTION path must
     detect it, regroup byte-keyed, re-run the gates on the true support, and
@@ -488,6 +524,11 @@ def test_declined_scan_never_densifies_the_support_block(monkeypatch):
     calls = []
     _count_row_densifies(monkeypatch, calls)
 
+    # A canonical CSR basis is hashed from its stored entries: nothing densifies.
+    assert detect_row_support(basis) is None
+    assert calls == []
+    # Any other basis takes the chunked dense scan.
+    basis.has_canonical_format = False
     assert detect_row_support(basis) is None
     assert calls, "expected the chunked hash scan to densify bounded blocks"
     assert max(calls) <= 65_536  # pre-fix: one 70_000-row representative block
@@ -519,6 +560,9 @@ def test_hash_scan_chunks_honor_the_byte_ceiling(monkeypatch):
     _count_row_densifies(monkeypatch, calls)
 
     budget = 1 << 20  # 1 MiB => 512 rows per chunk at p_b=256
+    assert detect_row_support(basis, max_support_bytes=budget) is None
+    assert calls == []  # the compiled scan of a canonical CSR basis densifies nothing
+    basis.has_canonical_format = False
     assert detect_row_support(basis, max_support_bytes=budget) is None
     assert calls
     assert max(calls) <= budget // (p_b * 8)

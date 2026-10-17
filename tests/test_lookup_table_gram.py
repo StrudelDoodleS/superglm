@@ -32,9 +32,12 @@ def _working_rows(n: int, seed: int = 3) -> tuple[np.ndarray, np.ndarray]:
     return rng.uniform(0.1, 2.0, n), rng.normal(size=n)
 
 
+@pytest.mark.parametrize("sweep_rows", [1 << 17, 256])
 @pytest.mark.parametrize("pair_form", [None, "table", "accumulate"])
 @pytest.mark.parametrize("offset", [1.0e3, 1.0e9])
-def test_table_gram_matches_the_chunked_route_within_its_bound(monkeypatch, offset, pair_form):
+def test_table_gram_matches_the_chunked_route_within_its_bound(
+    monkeypatch, offset, pair_form, sweep_rows
+):
     """``X_c' W X_c``, ``X_c' W z`` and the centre against the chunked exact route.
 
     Bound: the tables are within ``gamma_(n + 2m + 2) sum_r W_r M_r M_r'``
@@ -47,6 +50,8 @@ def test_table_gram_matches_the_chunked_route_within_its_bound(monkeypatch, offs
     model = _poisson_model(offset)
     dm = model._dm
     monkeypatch.setattr(lookup_tables, "_FORCE_PAIR_FORM", pair_form)
+    # 256-row ranges sweep the 1,500 rows in six partial tables, summed in order.
+    monkeypatch.setattr(lookup_tables, "_SWEEP_ROWS", sweep_rows)
     dm._structured_layout_cache.pop("lookup_tables", None)
     W, z = _working_rows(dm.n)
     penalty = np.zeros((dm.p, dm.p))
@@ -74,8 +79,22 @@ def test_table_gram_matches_the_chunked_route_within_its_bound(monkeypatch, offs
     assert np.max(gram_bound) < 1e-8 * np.max(np.abs(reference.data_gram))
 
 
-def test_table_gram_is_bitwise_identical_for_any_worker_count(monkeypatch):
-    """One owner per table, rows in order: the pooled Gram is the serial one, bit for bit."""
+@pytest.mark.parametrize("sweep_rows", [1 << 17, 256])
+def test_table_gram_is_bitwise_identical_for_any_worker_count(monkeypatch, sweep_rows):
+    """One owner per table and per partial, summed in range order: the same bits at any count.
+
+    At 256 rows a range, each sweep with small tables runs as six partial
+    tables on the pool, and every coefficient block's product runs there too.
+    """
+    monkeypatch.setattr(lookup_tables, "_SWEEP_ROWS", sweep_rows)
+    split = []
+    sweep_run = lookup_tables._Sweeps.run
+
+    def counted_run(self, job_bytes):
+        split.append(len(self.reductions))
+        return sweep_run(self, job_bytes)
+
+    monkeypatch.setattr(lookup_tables._Sweeps, "run", counted_run)
     started = []
     pool = lookup_tables.ThreadPoolExecutor
 
@@ -96,6 +115,25 @@ def test_table_gram_is_bitwise_identical_for_any_worker_count(monkeypatch):
     # pooled at every worker count above one (capped by the jobs available)
     assert started and min(started) >= 2
     assert len(results) == 1
+    assert (max(split) > 0) == (sweep_rows < dm.n)
+
+
+def test_sweep_ranges_are_capped_whatever_the_row_count():
+    """At most _MAX_SWEEP_RANGES ranges, so a split sweep holds a bounded number of partials."""
+    for n in (1, 131_072, 131_073, 5_000_000, 40_000_000):
+        ranges = lookup_tables._Sweeps(n).ranges
+        assert len(ranges) <= lookup_tables._MAX_SWEEP_RANGES
+        assert ranges[0][0] == 0 and ranges[-1][1] == n
+        assert all(stop == start for (_, stop), (start, _) in zip(ranges, ranges[1:]))
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_pooled_table_jobs_see_the_callers_errstate(workers):
+    """A table job runs in a copy of the caller's context, so np.errstate reaches it."""
+    seen = []
+    with parallel_config(n_jobs=workers), np.errstate(divide="raise"):
+        lookup_tables._pool_run([lambda: seen.append(np.geterr()["divide"])] * 4, 8)
+    assert seen == ["raise"] * 4
 
 
 def test_a_lookup_fit_takes_every_centred_gram_from_the_tables(monkeypatch):

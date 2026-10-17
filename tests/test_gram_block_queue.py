@@ -185,7 +185,13 @@ def _kernel_calls():
     values1, values2 = rng.normal(size=(n2, 3)), rng.normal(size=(n1, 4))
     support = rng.uniform(size=(n1, 4))
     raw_coefficients = rng.normal(size=(levels, 6))
+    level_rows = np.flatnonzero(codes == 0)
+    rows_a, rows_b = np.flatnonzero(idx1 % 2 == 0), np.flatnonzero(idx2 % 3 == 0)
     return {
+        "_sorted_intersection": lambda: kernels._sorted_intersection(rows_a, rows_b),
+        "_level_tensor_channels": lambda: kernels._level_tensor_channels(
+            level_rows, idx1, idx2, idx2[level_rows], W, table2, n1, n2
+        ),
         "_tensor_operand_in_reassociation_range": lambda: (
             kernels._tensor_operand_in_reassociation_range(dense)
         ),
@@ -353,10 +359,17 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 
 
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
+    from superglm._group_matrix import _group_matrix_support
+    from superglm.features import interaction
+    from superglm.reml import _leverage_rows
+
     pooled_kernels = (
         kernels._POOLED_BLOCK_KERNELS
         + kernels._POOLED_LEAF_KERNELS
         + lookup_tables._POOLED_ROW_KERNELS
+        + _leverage_rows._POOLED_ROW_KERNELS
+        + interaction._POOLED_BUILD_KERNELS
+        + _group_matrix_support._POOLED_SUPPORT_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
@@ -801,3 +814,75 @@ def test_pooled_gram_under_default_thread_pools_holds_blas_at_one_thread(monkeyp
         # Accelerate (the macOS ARM64 wheels' BLAS) has no threadpoolctl pool.
         pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
     assert blas_threads == {1}
+
+
+def test_level_intersection_is_intersect1d():
+    """The merge gives ``np.intersect1d``'s rows and positions; unsorted rows take ``intersect1d``."""
+    from superglm._group_matrix._group_matrix_algebra import _level_intersection
+
+    rng = np.random.default_rng(41)
+    for trial in range(20):
+        a = np.flatnonzero(rng.random(5_000) < rng.uniform(0.0, 0.6))
+        b = np.flatnonzero(rng.random(5_000) < rng.uniform(0.0, 0.6))
+        if trial == 19:
+            a = a[::-1].copy()  # not increasing: the merge declines
+        got = _level_intersection(a, b)
+        want = np.intersect1d(a, b, assume_unique=True, return_indices=True)
+        for g, w in zip(got, want, strict=True):
+            assert np.array_equal(g, w)
+
+
+def test_binned_spline_by_category_blocks_are_the_per_channel_blocks_bitwise(monkeypatch):
+    """The fused level-tensor histogram and the merged level rows give the old blocks, bit for bit.
+
+    ``_FUSED_LEVEL_CHANNELS = False`` sends a tensor-by-level block back to
+    the per-channel histograms, and the patched merge back to ``np.intersect1d``.
+    """
+    import superglm._group_matrix._group_matrix_algebra as algebra
+
+    rng = np.random.default_rng(13)
+    n = 8_000
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(-1.0, 1.0, n),
+            "b": rng.uniform(-1.0, 1.0, n),
+            "g": pd.Categorical(rng.choice(list("pqrs"), n)),
+            "h": pd.Categorical(rng.choice(list("xyz"), n)),
+        }
+    )
+    y = rng.poisson(np.exp(-1.0 + 0.4 * np.sin(2.0 * X["a"]))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        discrete=True,
+        n_bins=32,
+        features={
+            "a": Spline(kind="ps", k=6),
+            "b": Spline(kind="ps", k=6),
+            "g": Categorical(),
+            "h": Categorical(),
+        },
+        interactions=[("a", "b"), ("a", "g"), ("b", "h")],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model._build_design_matrix(X, y, None, None)
+    plan = model._dm.execution_plan
+    W = rng.uniform(0.05, 3.0, plan.n)
+    z = rng.normal(size=plan.n)
+    fused = algebra._level_tensor_channels
+    calls = []
+    monkeypatch.setattr(
+        algebra, "_level_tensor_channels", lambda *args: calls.append(1) or fused(*args)
+    )
+    new, _ = _moments(plan, W, z, workers=1)
+    pooled, _ = _moments(plan, W, z, workers=3, min_cost=0)
+    assert calls  # the fused route ran
+    monkeypatch.setattr(algebra, "_FUSED_LEVEL_CHANNELS", False)
+    monkeypatch.setattr(
+        algebra,
+        "_level_intersection",
+        lambda a, b: np.intersect1d(a, b, assume_unique=True, return_indices=True),
+    )
+    old, _ = _moments(plan, W, z, workers=1)
+    _assert_bitwise(new.gram, old.gram)
+    _assert_bitwise(pooled.gram, old.gram)

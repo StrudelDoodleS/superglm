@@ -25,7 +25,11 @@ process default.  The process default comes from ``SUPERGLM_N_JOBS`` and
 for one context, which is how tests pin the worker count.
 
 The pooled kernels are the data-rank factor's TSQR leaves
-(``solvers.rank``) and the Gram's blocks (``_group_matrix._block_queue``).
+(``solvers.rank``), the Gram's blocks (``_group_matrix._block_queue``), the
+lookup tables' sweeps, block products and leverages
+(``_group_matrix._lookup_tables``), the solved-row stop passes
+(``reml.w_derivatives``) and the interaction terms' builds
+(``_predictor_compiler``); :func:`pooled_map` serves the last two.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ import math
 import os
 import sys
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -316,3 +320,40 @@ def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     charged = max(int(held), retained_bytes())
     by_memory = max(resolve_max_memory() - charged, 0) // max(int(task_bytes), 1)
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))
+
+
+def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
+    """``fn(item)`` for every item, yielded in item order, on ``pool_workers`` threads.
+
+    One parallelism level: BLAS runs on one thread for the whole map, serial
+    or pooled (``_blas_threads.pooled_blas_threads``), so an item's arithmetic
+    is the same whichever worker runs it, and a caller that reduces the
+    results in the order they are yielded gets the same bits at every worker
+    count.  Each task runs in a copy of the caller's context, which carries
+    ``np.errstate`` as the serial loop has it.  Every item is submitted at
+    once and its result is held until it is yielded, not after; ``item_bytes`` is the
+    working set one item holds while it runs, and a result the caller keeps
+    anyway (a built design term) adds nothing over the serial loop.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from superglm._blas_threads import pooled_blas_threads
+
+    workers = pool_workers(len(items), item_bytes)
+    with pooled_blas_threads():
+        if workers <= 1:
+            for item in items:
+                yield fn(item)
+            return
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-map") as pool:
+            futures = [pool.submit(contextvars.copy_context().run, fn, item) for item in items]
+            try:
+                for index, future in enumerate(futures):
+                    result = future.result()
+                    futures[index] = None  # a yielded result is the caller's to keep or drop
+                    yield result
+            finally:
+                for future in futures:
+                    if future is not None:
+                        future.cancel()

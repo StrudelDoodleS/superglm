@@ -10,6 +10,8 @@ import numpy as np
 import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._blas_threads import release_for_serial_row_passes
+
 from ._group_matrix_algebra import _BlockWeightCache
 from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
@@ -1230,6 +1232,7 @@ def centered_gram_rhs(
     (``centered_system.two_pass_centred_gram``).
     """
     n, p = dm.shape
+    release_for_serial_row_passes(p)  # a serial n·p² pass: nothing runs beside it
     W = np.asarray(W, dtype=float)
     mean_x = np.asarray(mean_x, dtype=float)
     z_centered = np.asarray(z_centered, dtype=float)
@@ -1283,6 +1286,7 @@ def centered_signed_grams(
     centred about its anchor exactly and then by the small remainder.
     """
     n, p = dm.shape
+    release_for_serial_row_passes(p)  # a serial n·p² pass: nothing runs beside it
     weights = [np.asarray(channel, dtype=float) for channel in weights]
     mean_x = np.asarray(mean_x, dtype=float)
     if any(channel.shape != (n,) for channel in weights):
