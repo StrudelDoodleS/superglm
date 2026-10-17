@@ -406,9 +406,15 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         direction_b: NDArray,
         links: Sequence[Link],
         plan: FamilyLikelihoodPlan,
+        *,
+        step: float = 1.0e-3,
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """The second curvature direction and the bounded error of its ``l_bbbb`` channel."""
+        """The second curvature direction and the bounded error of its ``l_bbbb`` channel.
 
+        The series bound does not depend on the derivative ``step``.
+        """
+
+        del step
         link_tuple = tuple(links)
         if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
             raise UnsupportedLikelihoodContractError(

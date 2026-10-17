@@ -44,9 +44,7 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels.two_piece import (
-    TwoPieceDomainError as TwoPieceDomainError,
-)
-from superglm.distributional.kernels.two_piece import (
+    JOIN_REACH,
     initialize_two_piece,
     join_certificate,
     join_crossing_rows,
@@ -66,6 +64,9 @@ from superglm.distributional.kernels.two_piece import (
     real_line_mean,
     two_piece_cdf,
     two_piece_quantile,
+)
+from superglm.distributional.kernels.two_piece import (
+    TwoPieceDomainError as TwoPieceDomainError,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -120,13 +121,14 @@ def _certified_second_direction(
     multiplier: NDArray,
     *,
     mean_form: bool,
+    reach: float = JOIN_REACH,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The second curvature direction with its trust signal near the join.
 
     The values are the analytic ones (a row on the join is refused, as
-    before); the certificate is ``join_certificate`` on rows a step of the
-    engine's derivative reach would carry across the join, scaled by the
-    curvature's jump there, so the LAML endgame treats the Hessian as it
+    before); the certificate is ``join_certificate`` on rows a step of
+    ``reach`` (the engine's derivative step) would carry across the join,
+    scaled by the curvature's jump there, so the LAML endgame treats the Hessian as it
     treated second differences across the kink.
     """
     values = family.predictor_curvature_second_directional_derivative(
@@ -153,7 +155,7 @@ def _certified_second_direction(
         gradient = np.column_stack((g1[:, 0], zero, zero))
     with np.errstate(over="ignore", invalid="ignore"):
         certificate = join_certificate(
-            np.abs(variate - location), gradient, jumps, (g1, g2, g3), first, second
+            np.abs(variate - location), gradient, jumps, (g1, g2, g3), first, second, reach=reach
         )
     if not np.all(np.isfinite(certificate)):
         raise ValueError("the two-piece join certificate is not representable at this state")
@@ -619,8 +621,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
         direction_b: NDArray,
         links: Sequence[Link],
         plan: FamilyLikelihoodPlan,
+        *,
+        step: float = JOIN_REACH,
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """The second curvature direction and its certificate on rows near the join."""
+        """The second curvature direction and its certificate on rows within ``step`` of the join."""
 
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
@@ -635,6 +639,7 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
             plan,
             bound.multiplier,
             mean_form=self.parametrisation == "mean",
+            reach=step,
         )
 
     def expected_information_natural(
@@ -921,8 +926,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         direction_b: NDArray,
         links: Sequence[Link],
         plan: FamilyLikelihoodPlan,
+        *,
+        step: float = JOIN_REACH,
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """The second curvature direction and its certificate on rows near the join."""
+        """The second curvature direction and its certificate on rows within ``step`` of the join."""
 
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
@@ -937,6 +944,7 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
             plan,
             bound.multiplier,
             mean_form=False,
+            reach=step,
         )
 
     def expected_information_natural(

@@ -400,3 +400,73 @@ def test_two_piece_mean_form_certifies_a_row_near_its_join_on_every_pair() -> No
     )
     assert np.all(np.max(certificate[:, 0, :], axis=-1) > 0.0)
     assert np.all(certificate[:, 1, :] == 0.0)
+
+
+def test_two_piece_join_reach_covers_a_mixed_pair_along_its_combined_direction() -> None:
+    """A mixed pair's second differences step along ``(a + b) / |a + b|``.
+
+    So a row that direction carries across the join is certified on that
+    pair even when neither axis alone reaches it: here both axes move the
+    location at unit rate and the row sits ``1.2`` reaches from the join,
+    beyond either axis and within ``sqrt 2``.  The diagonal pairs stay
+    uncertified.
+    """
+    from superglm.distributional.kernels.two_piece import (
+        JOIN_REACH,
+        join_certificate,
+        location_join_jumps,
+    )
+
+    jumps = location_join_jumps(np.array([0.8]), np.array([0.3]), np.ones(1))
+    ones, zeros = np.ones((1, 3)), np.zeros((1, 3))
+    pairs, first, second = _stacked_axis_pairs(3)
+    certificate = join_certificate(
+        np.array([1.2 * JOIN_REACH]),
+        np.array([[1.0, 1.0, 0.0]]),
+        jumps,
+        (ones, zeros, zeros),
+        first,
+        second,
+    )
+    floor = jumps[0][0, 0] / JOIN_REACH**2
+    assert certificate[pairs.index((0, 1)), 0, 0] >= floor * (1.0 - 1e-12)
+    assert np.all(certificate[pairs.index((0, 0))] == 0.0)
+    assert np.all(certificate[pairs.index((1, 1))] == 0.0)
+
+
+def test_two_piece_join_certificate_follows_the_engine_derivative_step() -> None:
+    """The near-join reach is the derivative step the engine differences with.
+
+    A row ``5e-3`` from the join is outside the default step's reach and
+    inside a ``1e-2`` step's, where its certificate is at least the Hessian
+    jump over that step squared; the engine passes its step through
+    :func:`analytic_curvature_second_direction`.
+    """
+    from superglm.distributional.kernels.two_piece import JOIN_REACH, location_join_jumps
+    from superglm.distributional.smoothing.endpoint_direction import DEFAULT_STEP
+
+    assert JOIN_REACH == DEFAULT_STEP
+    family = TwoPieceNormalLSS()
+    links = _links(family)
+    y = np.array([1.0 + 5e-3])
+    plan = _plan(family, y)
+    sigma, skew = 0.8, 0.3
+    eta = np.column_stack(
+        (np.ones(1), links[1].link(np.full(1, sigma)), links[2].link(np.full(1, skew)))
+    )
+    pairs, first, second = _stacked_axis_pairs(3)
+    _, default = family.certified_predictor_curvature_second_directional_derivative(
+        y, eta, first, second, links, plan
+    )
+    assert np.all(default == 0.0)
+    step = 1e-2
+    _, wide = family.certified_predictor_curvature_second_directional_derivative(
+        y, eta, first, second, links, plan, step=step
+    )
+    hessian_jump, _ = location_join_jumps(np.full(1, sigma), np.full(1, skew), np.ones(1))
+    assert wide[pairs.index((0, 0)), 0, 0] >= hessian_jump[0, 0] / step**2 * (1.0 - 1e-12)
+    resolved = analytic_curvature_second_direction(
+        family, y, eta, first, second, links, plan, step=step
+    )
+    assert resolved is not None and resolved[1] is not None
+    np.testing.assert_array_equal(resolved[1], wide)

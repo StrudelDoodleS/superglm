@@ -279,6 +279,8 @@ def analytic_curvature_second_direction(
     direction_b: NDArray,
     links: Sequence[Link],
     plan: FamilyLikelihoodPlan,
+    *,
+    step: float = DEFAULT_STEP,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64] | None] | None:
     """The family's analytic second curvature direction and its certified error, if any.
 
@@ -286,13 +288,17 @@ def analytic_curvature_second_direction(
     of :func:`finite_difference_curvature_second_direction`: ``None`` when the
     family does not implement the protocol or refuses these links or rows
     with :class:`UnsupportedLikelihoodContractError`, so the caller
-    differences.  ``a`` and ``b`` may be stacked ``(m, n, K)`` pairs.
+    differences.  ``a`` and ``b`` may be stacked ``(m, n, K)`` pairs.  ``step``
+    is the derivative step differences would use, passed to a certified
+    family whose certificate depends on it.
     """
     certified = getattr(family, "certified_predictor_curvature_second_directional_derivative", None)
     plain = getattr(family, "predictor_curvature_second_directional_derivative", None)
     try:
         if isinstance(family, CertifiedCurvatureSecondDirectionalFamily) and callable(certified):
-            values, certificate = certified(y, eta, direction_a, direction_b, links, plan)
+            values, certificate = certified(
+                y, eta, direction_a, direction_b, links, plan, step=step
+            )
             return (
                 np.asarray(values, dtype=np.float64),
                 np.asarray(certificate, dtype=np.float64),

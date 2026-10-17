@@ -494,6 +494,8 @@ def _analytic_second_derivatives(
     eta: NDArray[np.float64],
     links: tuple,
     likelihood_plan: FamilyLikelihoodPlan,
+    *,
+    step: float,
 ) -> (
     tuple[
         dict[tuple[int, int], NDArray[np.float64]],
@@ -504,7 +506,9 @@ def _analytic_second_derivatives(
     """The family's analytic second derivatives of the curvature along every axis pair.
 
     One call with the ``K(K+1)/2`` axis pairs stacked, so the family evaluates
-    its fourth derivatives once.  Returns ``(D2, C2)`` as
+    its fourth derivatives once; ``step`` is the derivative step the
+    differenced pass would use, which a certified family's near-kink
+    certificate takes as its reach.  Returns ``(D2, C2)`` as
     :func:`_second_derivatives` does, the certificate the family's certified
     error (zero for closed forms), or ``None`` when the family does not
     implement the protocol, refuses these links or a row (a two-piece join),
@@ -525,7 +529,7 @@ def _analytic_second_derivatives(
         second[index, 0, r] = 1.0
     try:
         analytic = analytic_curvature_second_direction(
-            family, y, eta, first, second, links, likelihood_plan
+            family, y, eta, first, second, links, likelihood_plan, step=step
         )
     except (TypeError, ValueError, FloatingPointError, OverflowError):
         return None
@@ -894,7 +898,9 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     one pass over the rows or ``O(m P^3)`` once.
     """
     p = gradient_pass
-    analytic_second = _analytic_second_derivatives(p.family, p.y, p.eta, p.links, p.likelihood_plan)
+    analytic_second = _analytic_second_derivatives(
+        p.family, p.y, p.eta, p.links, p.likelihood_plan, step=p.step
+    )
     if analytic_second is not None:
         second, second_certificate = analytic_second
         evaluations = 0

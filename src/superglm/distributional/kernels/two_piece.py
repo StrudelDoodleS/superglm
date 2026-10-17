@@ -898,10 +898,11 @@ def join_certificate(
     ``|jump of C| / r^2 + |jump of dC| / r`` on a row whose location the
     displacement carries across the join.  A row is near when ``|t - mu|``
     (``distance``) is at most ``reach`` times the location's rate along
-    either unit direction (``location_gradient`` is ``d mu / d eta``); there
-    its certificate is that error at ``r = reach`` times ``|a| |b|``, which
-    is the size of what second differences over ``reach`` record across a
-    kink; elsewhere it is zero.  Directions as for the second direction,
+    either unit direction or their normalised sum, the direction a mixed
+    pair's second differences step along (``location_gradient`` is
+    ``d mu / d eta``); there its certificate is that error at ``r = reach``
+    times ``|a| |b|``, which is the size of what second differences over
+    ``reach`` record across a kink; elsewhere it is zero.  Directions as for the second direction,
     ``(m, n, K)`` or ``(m, 1, K)``.  The jumps reach the predictors through
     the links' first three derivatives.
     """
@@ -919,14 +920,16 @@ def join_certificate(
     norm_b = np.linalg.norm(second, axis=-1)
     unit_a = first / np.where(norm_a > 0.0, norm_a, 1.0)[..., None]
     unit_b = second / np.where(norm_b > 0.0, norm_b, 1.0)[..., None]
-    rate = np.maximum(
-        np.abs(np.sum(location_gradient * unit_a, axis=-1)),
-        np.abs(np.sum(location_gradient * unit_b, axis=-1)),
+    combined = unit_a + unit_b
+    norm_c = np.linalg.norm(combined, axis=-1)
+    unit_c = combined / np.where(norm_c > 0.0, norm_c, 1.0)[..., None]
+    rate = np.maximum.reduce(
+        [np.abs(np.sum(location_gradient * unit, axis=-1)) for unit in (unit_a, unit_b, unit_c)]
     )
     near = (rate > 0.0) & (np.asarray(distance, dtype=_FLOAT) <= reach * rate)
     pairs = packed_tuples(k_parameters, 2)
     triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
-    reach_a = np.maximum(np.abs(unit_a), np.abs(unit_b))
+    reach_a = np.maximum.reduce([np.abs(unit_a), np.abs(unit_b), np.abs(unit_c)])
     certificate = np.zeros((*near.shape, len(pairs)), dtype=_FLOAT)
     for column, (i, j) in enumerate(pairs):
         slope = np.zeros(near.shape, dtype=_FLOAT)

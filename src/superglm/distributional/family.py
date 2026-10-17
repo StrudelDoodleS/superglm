@@ -652,8 +652,11 @@ class CertifiedCurvatureSecondDirectionalFamily(Protocol):
     Returns ``(values, certificate)``: ``values`` as
     ``predictor_curvature_second_directional_derivative`` and ``certificate``
     an entrywise non-negative absolute bound on the error of a channel the
-    family computes only to a bound (a series or recurrence).  A family whose
-    fourth derivatives are closed forms leaves this out.
+    family computes only to a bound (a series or recurrence), or a trust
+    signal where the curvature jumps within reach of a row.  ``step`` is the
+    engine's derivative step (``DistributionalEFSConfig.derivative_step``),
+    the reach a near-kink certificate uses; a series bound ignores it.  A
+    family whose fourth derivatives are closed forms leaves this out.
     """
 
     def certified_predictor_curvature_second_directional_derivative(
@@ -664,6 +667,8 @@ class CertifiedCurvatureSecondDirectionalFamily(Protocol):
         direction_b: NDArray,
         links: Sequence[Link],
         plan: FamilyLikelihoodPlan,
+        *,
+        step: float = 1.0e-3,
     ) -> tuple[NDArray, NDArray]: ...
 
 
