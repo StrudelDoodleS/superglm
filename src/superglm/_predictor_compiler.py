@@ -578,8 +578,9 @@ def compile_predictor_design(
     # Discrete tensors are numbered in interaction order before any term
     # builds, and every parent column is read here, once, on this thread.
     tensor_ids: dict[str, int] = {}
-    # Each build is priced from its parents' main-effect widths; the pool is
-    # sized by the largest (``_interaction_build_row_bytes``).
+    # Each build is priced from its parents' main-effect widths, or a tensor's
+    # override margins; the pool is sized by the largest
+    # (``_interaction_build_row_bytes``).
     widths: dict = {}
     for g in groups:
         widths[g.feature_name] = widths.get(g.feature_name, 0) + (g.end - g.start)
@@ -598,6 +599,15 @@ def compile_predictor_design(
             or should_discretize_factor_smooth(ispec, model_discrete)
         )
         a, b = (max(widths.get(parent, 1), 1) for parent in ispec.parent_names)
+        if isinstance(ispec, TensorInteraction) and ispec._n_knots is not None:
+            # An n_knots override builds its margins at that knot count, whose
+            # B-spline basis has at most n_knots + degree + 1 columns.
+            a, b = (
+                max(width, knots + getattr(specs.get(parent), "degree", 3) + 1)
+                for width, knots, parent in zip(
+                    (a, b), ispec._n_knots, ispec.parent_names, strict=True
+                )
+            )
         build_row_bytes = max(build_row_bytes, _interaction_build_row_bytes(ispec, a, b, binned))
 
     def build_interaction(iname: str) -> _BuiltInteraction:

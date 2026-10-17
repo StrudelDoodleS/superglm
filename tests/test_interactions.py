@@ -2349,3 +2349,26 @@ def test_a_tensor_build_is_priced_by_its_margins(interaction_data, monkeypatch):
         for name in ("age", "bm")
     }
     assert charged and charged[0] >= 32 * widths["age"] * widths["bm"] * len(y)
+
+
+def test_a_tensor_knot_override_is_priced_by_its_own_margins(interaction_data, monkeypatch):
+    """A TensorInteraction(n_knots=...) builds its margins at the override, which can be wider
+    than the main effects: the charge covers the built margins, not the parents' widths."""
+    import superglm._predictor_compiler as compiler
+    from superglm.features.interaction import TensorInteraction
+
+    X, y, w = interaction_data
+    charged = []
+    pooled = compiler.pooled_map
+
+    def recorded(fn, items, item_bytes):
+        charged.append(item_bytes)
+        return pooled(fn, items, item_bytes)
+
+    monkeypatch.setattr(compiler, "pooled_map", recorded)
+    model = SuperGLM(family="poisson", features={"age": Spline(n_knots=5), "bm": Spline(n_knots=5)})
+    model._add_interaction("age", "bm", n_knots=(15, 15))
+    model.fit(X, y, sample_weight=w)
+    built = model._interaction_specs["age:bm"]
+    assert isinstance(built, TensorInteraction)
+    assert charged and charged[0] >= 32 * built._p1 * built._p2 * len(y)
