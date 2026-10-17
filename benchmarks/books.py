@@ -1531,7 +1531,8 @@ def match_baseline(record: dict, candidates: list[dict], base_sha: str):
     if reuse_part(usable[-1]["key"]) == reuse_part(want):
         # Only the pool widths differ, which `baseline` reuse does not see.
         reason += (
-            f"; re-time it: books.py baseline {base_sha[:12]} --threads {record['threads']} --force"
+            f"; re-time it: books.py baseline {base_sha[:12]} --set {record['case']}"
+            f" --threads {record['threads']} --force"
         )
     return None, reason
 

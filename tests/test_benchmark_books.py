@@ -243,7 +243,7 @@ def test_the_key_carries_the_observed_pool_widths(run):
     assert observed["pools"] == record["threads_observed"]["pools"]
 
 
-def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run):
+def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run, monkeypatch):
     """The key step runs in another process under another wrapper, so its observed widths may
     differ from the timed run's: reuse and the benchboard case name match without them, while
     compare, whose two sides both come from a fit's process, still refuses on them."""
@@ -258,3 +258,10 @@ def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run):
     _, reason = books.match_baseline(record, [stored], record["key"]["sha"])
     assert reason is not None and "threads_observed" in reason
     assert "--force" in reason  # only the widths differ: the refusal names the remedy
+    # ... and the remedy re-times exactly the refused case
+    remedy = reason.split("re-time it: books.py ", 1)[1].split()
+    seen = []
+    monkeypatch.setattr(
+        books, "cmd_baseline", lambda args: seen.append(books._case_list(args)) or 0
+    )
+    assert books.main(remedy) == 0 and seen == [["smoke_poisson"]]
