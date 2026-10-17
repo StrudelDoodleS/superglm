@@ -709,6 +709,52 @@ def test_nb2_theta_third_derivative_is_inside_its_certified_bound() -> None:
         assert abs(_mpf(computed[0, 3]) - third[1, 1, 1]) <= _mpf(bound[0])
 
 
+def test_nb2_theta_fourth_derivative_is_inside_its_certified_bound() -> None:
+    """``l_bbbb`` cancels like ``l_bbb`` near Poisson; its error stays inside the bound it returns.
+
+    The row-scale oracle above cannot see this channel near Poisson, where
+    ``l_aaaa ~ mu`` dwarfs ``l_bbbb ~ mu^2 / theta``; this holds the channel
+    to its own bound, the certificate the LAML Hessian's trust test reads.
+    The grid adds two rows at the series' widest ratio, ``x = 0.06`` against
+    the switch at ``1/16``.  Mutation check: a zero bound fails every row.
+    """
+    from superglm.distributional.kernels.negative_binomial import (
+        negative_binomial_log_fourth_derivatives,
+    )
+
+    a, b = sp.symbols("a b", real=True)
+    for y_value, mean, theta in [
+        (0.0, 0.3, 1e12),
+        (3.0, 0.5, 1e9),
+        (5.0, 1.0, 2.0**40),
+        (2.0, 0.07, 1.5),
+        (7.0, 4.0, 0.3),
+        (40.0, 35.0, 1e4),
+        (0.0, 6.0, 100.0),
+        (5.0, 6.0, 100.0),
+    ]:
+        mu, size = sp.exp(a), sp.exp(b)
+        density = (
+            sp.loggamma(y_value + size)
+            - sp.loggamma(size)
+            + size * sp.log(size)
+            + y_value * sp.log(mu)
+            - (y_value + size) * sp.log(mu + size)
+        )
+        fourth = _SymbolicRow(density, (a, b), fourth=True).evaluate_fourth(
+            (np.log(mean), np.log(theta))
+        )
+        computed, bound = negative_binomial_log_fourth_derivatives(
+            np.array([y_value]),
+            np.exp(np.array([np.log(mean)])),
+            np.exp(np.array([np.log(theta)])),
+            np.ones(1),
+            "prior",
+        )
+        error = abs(_mpf(computed[0, 4]) - fourth[(1, 1, 1, 1)])
+        assert error <= _mpf(bound[0]), (y_value, mean, theta, float(error), float(bound[0]))
+
+
 # ---------------------------------------------------------------- single-predictor families
 
 

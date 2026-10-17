@@ -3903,6 +3903,102 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert residual <= observed_mode_certification_bar()
 
 
+def _removed_table_deriv4(link, eta):
+    """The fourth inverse derivatives ``_deriv4_inverse`` tabulated before it called the link."""
+    from scipy.special import expit
+    from scipy.stats import norm
+
+    from superglm.links import (
+        InverseLink,
+        InverseSquaredLink,
+        LogitLink,
+        NegativeBinomialLink,
+        PowerLink,
+    )
+
+    kind = type(link)
+    if kind is LogLink:
+        return np.exp(eta)
+    if kind is IdentityLink or kind is SqrtLink:
+        return np.zeros_like(eta)
+    if kind is LogitLink:
+        p = expit(eta)
+        return p * (1.0 - p) * (1.0 - 14.0 * p + 36.0 * p**2 - 24.0 * p**3)
+    if kind is ProbitLink:
+        return (3.0 * eta - eta**3) * norm.pdf(eta)
+    if kind is CloglogLink:
+        e = np.exp(eta)
+        return e * np.exp(-e) * (1.0 - 7.0 * e + 6.0 * e**2 - e**3)
+    if kind is CauchitLink:
+        return 24.0 * eta * (1.0 - eta**2) / (np.pi * (1.0 + eta**2) ** 4)
+    if kind is InverseLink:
+        return 24.0 / eta**5
+    if kind is InverseSquaredLink:
+        return 6.5625 * eta ** (-4.5)
+    if kind is PowerLink:
+        a = 1.0 / float(link.power)
+        return a * (a - 1.0) * (a - 2.0) * (a - 3.0) * np.maximum(eta, 1e-15) ** (a - 4.0)
+    assert kind is NegativeBinomialLink
+    e = np.exp(np.clip(eta, -30.0, -1e-10))
+    return float(link.theta) * e * (1.0 + 11.0 * e + 11.0 * e**2 + e**3) / (1.0 - e) ** 5
+
+
+def _table_cases():
+    from superglm.links import (
+        InverseLink,
+        InverseSquaredLink,
+        LogitLink,
+        NegativeBinomialLink,
+        PowerLink,
+    )
+
+    positive = np.linspace(1e-3, 50.0, 4001)
+    return {
+        "log": (LogLink(), np.linspace(-30.0, 30.0, 4001)),
+        "identity": (IdentityLink(), np.linspace(-30.0, 30.0, 401)),
+        "sqrt": (SqrtLink(), positive),
+        "logit": (LogitLink(), np.linspace(-40.0, 40.0, 4001)),
+        "probit": (ProbitLink(), np.linspace(-38.0, 38.0, 4001)),
+        "cloglog": (CloglogLink(), np.linspace(-40.0, 4.0, 4001)),
+        "cauchit": (
+            CauchitLink(),
+            np.r_[np.linspace(-1e3, 1e3, 4001), 1.0 + 1e-9, -1.0 - 1e-9, 1.5, -7.25],
+        ),
+        "inverse": (InverseLink(), positive),
+        "inverse_squared": (InverseSquaredLink(), positive),
+        "power_0.5": (PowerLink(0.5), positive),
+        "power_1.5": (PowerLink(1.5), positive),
+        "power_-2": (PowerLink(-2.0), positive),
+        "negative_binomial": (
+            NegativeBinomialLink(theta=2.0),
+            np.r_[np.linspace(-29.99, -1e-3, 4001), -35.0],
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_table_cases()))
+def test_link_fourth_derivatives_reproduce_the_removed_observed_geometry_table(name):
+    """The order-2 observed weights read ``link.deriv4_inverse``; their values are the old table's.
+
+    Bit for bit on every built-in link but one: cauchit beyond ``|eta| = 1``
+    takes the ``1/eta`` form its third derivative already uses, which agrees
+    to within ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 +
+    eta^2)^4)`` (the symbolic oracle's tolerance for every link).
+    """
+    from superglm.reml.observed_geometry import _deriv4_inverse
+
+    link, eta = _table_cases()[name]
+    computed = _deriv4_inverse(link, eta)
+    reference = _removed_table_deriv4(link, eta)
+    if name != "cauchit":
+        np.testing.assert_array_equal(computed.view(np.uint64), reference.view(np.uint64))
+        return
+    inner = np.abs(eta) <= 1.0
+    np.testing.assert_array_equal(computed[inner].view(np.uint64), reference[inner].view(np.uint64))
+    scale = 24.0 * np.abs(eta) * (1.0 + eta**2) / (np.pi * (1.0 + eta**2) ** 4)
+    assert np.all(np.abs(computed - reference) <= 64 * 2.0**-53 * scale)
+
+
 def test_an_inherited_fourth_inverse_derivative_below_a_new_inverse_is_refused():
     """A subclass that redefines the inverse but inherits ``deriv4_inverse`` is refused.
 
