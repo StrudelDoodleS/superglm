@@ -1,9 +1,12 @@
 """Exact gradient and Hessian of the negative LAML in log smoothing parameters.
 
 Wood, Pya and Säfken (2016) §3.1.3–3.2 with the third and fourth derivatives of
-the row log-likelihood supplied by finite differences of the packed row
-curvature along the K parameter directions (``endpoint_direction``), recombined
-by linearity.  Every quantity is for ``F(rho) = joint_laplace_objective`` at the
+the row log-likelihood along the K parameter directions, recombined by
+linearity: from the family's analytic curvature directions where it has them
+(``predictor_curvature_directional_derivative`` and
+``predictor_curvature_second_directional_derivative``), otherwise by finite
+differences of the packed row curvature (``endpoint_direction``).  Every
+quantity is for ``F(rho) = joint_laplace_objective`` at the
 fit's own penalised curvature ``H``, and the packed curvature is the negated
 row Hessian in the linear predictors.
 
@@ -32,9 +35,11 @@ from superglm.distributional._row_design import (
 )
 from superglm.distributional.family import (
     CertifiedCurvatureDirectionalFamily,
+    CertifiedCurvatureSecondDirectionalFamily,
     DistributionalFamily,
     FamilyLikelihoodPlan,
     PredictorCurvatureDirectionalFamily,
+    PredictorCurvatureSecondDirectionalFamily,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import ANALYTIC_DIRECTION_AUTHORITY, DenseSolverResult
@@ -46,6 +51,7 @@ from superglm.distributional.smoothing.endpoint_direction import (
     _second_difference,
     _unit_directions,
     analytic_curvature_direction,
+    analytic_curvature_second_direction,
 )
 from superglm.distributional.smoothing.endpoint_laml import (
     EndpointLaplaceError,
@@ -482,6 +488,71 @@ def _analytic_first_derivative(
     return _AnalyticFirst(axes=tuple(axes))
 
 
+def _analytic_second_derivatives(
+    family: DistributionalFamily,
+    y: NDArray,
+    eta: NDArray[np.float64],
+    links: tuple,
+    likelihood_plan: FamilyLikelihoodPlan,
+    *,
+    step: float,
+) -> (
+    tuple[
+        dict[tuple[int, int], NDArray[np.float64]],
+        dict[tuple[int, int], NDArray[np.float64]],
+    ]
+    | None
+):
+    """The family's analytic second derivatives of the curvature along every axis pair.
+
+    One call with the ``K(K+1)/2`` axis pairs stacked, so the family evaluates
+    its fourth derivatives once; ``step`` is the derivative step the
+    differenced pass would use, which a certified family's near-kink
+    certificate takes as its reach.  Returns ``(D2, C2)`` as
+    :func:`_second_derivatives` does, the certificate the family's certified
+    error (zero for closed forms), or ``None`` when the family does not
+    implement the protocol, refuses these links or a row (a two-piece join),
+    or returns something unusable; the caller then differences.
+    """
+    if not isinstance(
+        family,
+        (PredictorCurvatureSecondDirectionalFamily, CertifiedCurvatureSecondDirectionalFamily),
+    ):
+        return None
+    n_observations, k_parameters = eta.shape
+    pairs = [(q, r) for q in range(k_parameters) for r in range(q, k_parameters)]
+    # Axis pairs are the same on every row, so they broadcast over the rows.
+    first = np.zeros((len(pairs), 1, k_parameters), dtype=np.float64)
+    second = np.zeros_like(first)
+    for index, (q, r) in enumerate(pairs):
+        first[index, 0, q] = 1.0
+        second[index, 0, r] = 1.0
+    try:
+        analytic = analytic_curvature_second_direction(
+            family, y, eta, first, second, links, likelihood_plan, step=step
+        )
+    except (TypeError, ValueError, FloatingPointError, OverflowError):
+        return None
+    if analytic is None:
+        return None
+    values, certificate = analytic
+    expected = (len(pairs), n_observations, k_parameters * (k_parameters + 1) // 2)
+    if values.shape != expected or not np.all(np.isfinite(values)):
+        return None
+    if certificate is None:
+        certificate = np.zeros_like(values)
+    elif (
+        certificate.shape != expected
+        or not np.all(np.isfinite(certificate))
+        or np.any(certificate < 0.0)
+    ):
+        return None
+    return (
+        {pair: values[index] for index, pair in enumerate(pairs)},
+        {pair: certificate[index] for index, pair in enumerate(pairs)},
+    )
+
+
 @dataclass
 class _GradientPass:
     """Everything one gradient pass computed, for a Hessian pass at the same fit.
@@ -499,6 +570,8 @@ class _GradientPass:
     family: DistributionalFamily
     likelihood_plan: FamilyLikelihoodPlan
     fit: DenseSolverResult
+    y: NDArray
+    links: tuple
     lambdas: dict[str, float]
     step: float
     source_matrices: tuple[object, ...]
@@ -757,6 +830,8 @@ def _gradient_pass(
         family=family,
         likelihood_plan=likelihood_plan,
         fit=fit,
+        y=y,
+        links=links,
         lambdas=dict(lambdas),
         step=step,
         source_matrices=tuple(dense_matrices),
@@ -792,6 +867,11 @@ def _gradient_pass(
 def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivatives:
     """The Hessian on top of a gradient pass; ``reused`` means its stencils came from an earlier call.
 
+    The fourth derivatives come from one stacked call of the family's
+    analytic second curvature direction when it implements one and accepts
+    these links and rows (``_analytic_second_derivatives``), which evaluates
+    no packed curvature; otherwise from the second differences.
+
     The certificate is a norm bound from scalars, taken in the ``H`` metric so
     the row leverage survives: with ``Y_i = X_i H^-1/2`` (``||Y_i||_F^2 =
     tr(G_i)``, the leverage blocks' diagonal) and ``C_k[i]`` the
@@ -818,12 +898,19 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     one pass over the rows or ``O(m P^3)`` once.
     """
     p = gradient_pass
-    try:
-        second, second_certificate, evaluations = _second_derivatives(
-            p.rows, p.eta, p.step, p.stencils
-        )
-    except (ValueError, FloatingPointError, OverflowError) as exc:
-        raise LamlDerivativeError("the row curvature could not be differentiated") from exc
+    analytic_second = _analytic_second_derivatives(
+        p.family, p.y, p.eta, p.links, p.likelihood_plan, step=p.step
+    )
+    if analytic_second is not None:
+        second, second_certificate = analytic_second
+        evaluations = 0
+    else:
+        try:
+            second, second_certificate, evaluations = _second_derivatives(
+                p.rows, p.eta, p.step, p.stencils
+            )
+        except (ValueError, FloatingPointError, OverflowError) as exc:
+            raise LamlDerivativeError("the row curvature could not be differentiated") from exc
     if not reused:
         evaluations += p.result.evaluations
     n_observations, k_parameters = p.eta.shape

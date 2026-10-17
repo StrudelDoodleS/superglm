@@ -15,12 +15,27 @@ along ``v``, the one family-specific input.  The packed curvature is
 most ``K + 4`` products of at most four rounded factors, so it carries a
 relative error of ``gamma_{2K + 12}`` of its absolute-term scale on top of
 the inputs' own errors.
+
+One order up, the curvature's second directional derivative is the
+negated fourth derivative of the predictor log-likelihood contracted with
+two directions.  :func:`compose_derivatives` forms any order of a
+composition by the set-partition chain rule (Hardy 2006; for one univariate
+link, Wood, Pya and Saefken 2016, Appendix A, eq. 14), which serves both the
+links and a mean form's reparametrisation; :func:`curvature_second_direction`
+contracts the result.
 """
 
 from __future__ import annotations
 
+import itertools
+from collections.abc import Callable, Mapping
+
 import numpy as np
 from numpy.typing import NDArray
+
+#: ``inner[m][(c, idx)]`` is ``d^m phi_c / d x_idx`` for a sorted index tuple
+#: ``idx`` of length ``m``; entries left out are structurally zero.
+InnerDerivatives = Mapping[int, Mapping[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]]
 
 
 def _pairs(k_parameters: int) -> tuple[tuple[int, int], ...]:
@@ -141,4 +156,192 @@ def mean_form_hessian_direction(
     return np.column_stack([full[:, left, right] for left, right in pairs])
 
 
-__all__ = ["mean_form_hessian_direction", "predictor_curvature_direction"]
+def packed_tuples(k_parameters: int, order: int) -> tuple[tuple[int, ...], ...]:
+    """Sorted index tuples of a symmetric tensor's distinct entries, in packed order.
+
+    Order two is the canonical upper-triangular packing of the Hessian; every
+    order lists ``itertools.combinations_with_replacement`` order, so the
+    third derivatives of three parameters are ``000, 001, 002, 011, ..., 222``.
+    """
+    return tuple(itertools.combinations_with_replacement(range(k_parameters), order))
+
+
+def _set_partitions(positions: list[int]) -> list[list[list[int]]]:
+    if not positions:
+        return [[]]
+    first, rest = positions[0], positions[1:]
+    partitions = []
+    for partition in _set_partitions(rest):
+        for index in range(len(partition)):
+            partitions.append(
+                partition[:index] + [[first, *partition[index]]] + partition[index + 1 :]
+            )
+        partitions.append([[first], *partition])
+    return partitions
+
+
+def compose_derivatives(
+    outer: Mapping[int, NDArray[np.float64]],
+    inner: InnerDerivatives,
+    order: int,
+    k_parameters: int,
+    *,
+    components: int | None = None,
+) -> NDArray[np.float64]:
+    """Packed ``order``-th derivatives of ``L(phi(x))`` by the set-partition chain rule.
+
+    ``outer[m]`` (``m = 1..order``) holds the packed ``m``-th derivatives of
+    ``L`` at ``phi(x)``, ``(n, C(K + m - 1, m))`` in :func:`packed_tuples`
+    order, and ``inner`` the structurally nonzero derivatives of ``phi``.  For
+    each distinct entry ``(i_1..i_order)`` of the result and each partition of
+    its positions into blocks ``B``, the term is the outer derivative over one
+    component ``c_B`` per block times ``prod_B d^|B| phi_{c_B} / d x_B``
+    (Hardy, *Combinatorics of partial derivatives*, Electron. J. Combin. 13,
+    2006, R1; for one univariate link this is Wood, Pya and Saefken 2016,
+    Appendix A).  Only the structural nonzeros are visited, so a separable
+    link map costs at most one term per partition.  ``components`` is the
+    number of ``phi``'s components when it differs from its ``K`` inputs.
+    """
+    n_components = k_parameters if components is None else components
+    columns = {
+        m: {key: column for column, key in enumerate(packed_tuples(n_components, m))}
+        for m in range(1, order + 1)
+    }
+    targets = packed_tuples(k_parameters, order)
+    n_rows = outer[1].shape[0]
+    result = np.zeros((n_rows, len(targets)), dtype=np.float64)
+    partitions = _set_partitions(list(range(order)))
+    for column, target in enumerate(targets):
+        for partition in partitions:
+            options = []
+            for block in partition:
+                key = tuple(sorted(target[position] for position in block))
+                level = inner.get(len(block), {})
+                choices = [
+                    (component, level[(component, key)])
+                    for component in range(n_components)
+                    if (component, key) in level
+                ]
+                if not choices:
+                    break
+                options.append(choices)
+            else:
+                for choice in itertools.product(*options):
+                    chosen = tuple(sorted(component for component, _ in choice))
+                    term = outer[len(chosen)][:, columns[len(chosen)][chosen]]
+                    for _, factor in choice:
+                        term = term * factor
+                    result[:, column] += term
+    return result
+
+
+def stack_columns(values, n_rows: int) -> NDArray[np.float64]:
+    """Column-stack generated outputs, broadcasting the scalar zeros, as ``(n, len(values))``."""
+    result = np.empty((n_rows, len(values)), dtype=np.float64)
+    for column, value in enumerate(values):
+        result[:, column] = value
+    return result
+
+
+def separable_inner_derivatives(
+    *derivatives: NDArray[np.float64],
+) -> dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64]]]:
+    """``inner`` for ``theta_k = g_k(eta_k)`` from the link derivatives, each ``(n, K)``."""
+    k_parameters = derivatives[0].shape[1]
+    return {
+        order: {(k, (k,) * order): values[:, k] for k in range(k_parameters)}
+        for order, values in enumerate(derivatives, start=1)
+    }
+
+
+def third_from_hessian_direction(
+    hessian_direction: Callable[[NDArray[np.float64]], NDArray[np.float64]],
+    n_rows: int,
+    k_parameters: int,
+) -> NDArray[np.float64]:
+    """Packed natural third derivatives from a family's ``dH(v)`` on the natural axes.
+
+    ``dH(e_k)[i, j]`` is ``L_ijk``, so ``K`` evaluations of the existing
+    direction give every distinct third derivative.
+    """
+    pairs = packed_tuples(k_parameters, 2)
+    triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
+    third = np.empty((n_rows, len(triples)), dtype=np.float64)
+    for k in range(k_parameters):
+        axis = np.zeros((n_rows, k_parameters), dtype=np.float64)
+        axis[:, k] = 1.0
+        packed = np.asarray(hessian_direction(axis), dtype=np.float64)
+        for column, (i, j) in enumerate(pairs):
+            if j <= k:
+                third[:, triples[(i, j, k)]] = packed[:, column]
+    return third
+
+
+def curvature_second_direction(
+    fourth: NDArray[np.float64],
+    direction_a: NDArray[np.float64],
+    direction_b: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Packed ``-sum_kl l_ijkl a_k b_l`` from the packed fourth derivatives ``l``.
+
+    The directions are ``(n, K)``, or ``(m, n, K)`` for ``m`` pairs at once,
+    where a pair the same on every row may be ``(m, 1, K)``; the result is
+    ``(n, C)`` or ``(m, n, C)`` with ``C = K(K+1)/2`` packed channels.
+    """
+    k_parameters = direction_a.shape[-1]
+    quadruples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 4))}
+    pairs = packed_tuples(k_parameters, 2)
+    leading = (*direction_a.shape[:-2], fourth.shape[0])
+    result = np.zeros((*leading, len(pairs)), dtype=np.float64)
+    if direction_a.ndim == 3 and direction_a.shape[1] == 1:
+        # Pairs the same on every row (the LAML Hessian's axis pairs): only the
+        # (k, l) whose coefficient a_k b_l is nonzero touch the rows.
+        for index in range(direction_a.shape[0]):
+            weights = np.outer(direction_a[index, 0], direction_b[index, 0])
+            terms = [(k, ell) for k in range(k_parameters) for ell in range(k_parameters)]
+            live = [(k, ell) for k, ell in terms if weights[k, ell] != 0.0]
+            for column, (i, j) in enumerate(pairs):
+                for k, ell in live:
+                    entry = fourth[:, quadruples[tuple(sorted((i, j, k, ell)))]]
+                    result[index, :, column] -= weights[k, ell] * entry
+        return result
+    for column, (i, j) in enumerate(pairs):
+        for k in range(k_parameters):
+            for ell in range(k_parameters):
+                entry = fourth[:, quadruples[tuple(sorted((i, j, k, ell)))]]
+                result[..., column] -= entry * direction_a[..., k] * direction_b[..., ell]
+    return result
+
+
+def predictor_curvature_second_direction(
+    natural: tuple[NDArray[np.float64], ...],
+    links: tuple[NDArray[np.float64], ...],
+    direction_a: NDArray[np.float64],
+    direction_b: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Packed second directional derivative of predictor curvature from natural derivatives.
+
+    ``natural`` is ``(score, hessian, third, fourth)``, packed, and ``links``
+    the inverse links' first four derivatives, each ``(n, K)``.  The
+    predictor log-likelihood's fourth derivatives are the natural ones
+    composed with the separable links (:func:`compose_derivatives`); the
+    curvature is their negation contracted with ``a`` and ``b``.
+    """
+    k_parameters = links[0].shape[1]
+    outer = dict(enumerate(natural, start=1))
+    fourth = compose_derivatives(outer, separable_inner_derivatives(*links), 4, k_parameters)
+    return curvature_second_direction(fourth, direction_a, direction_b)
+
+
+__all__ = [
+    "InnerDerivatives",
+    "compose_derivatives",
+    "curvature_second_direction",
+    "mean_form_hessian_direction",
+    "packed_tuples",
+    "predictor_curvature_direction",
+    "predictor_curvature_second_direction",
+    "separable_inner_derivatives",
+    "stack_columns",
+    "third_from_hessian_direction",
+]

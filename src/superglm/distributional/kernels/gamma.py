@@ -1202,3 +1202,138 @@ def gamma_predictor_curvature_directional(
         weight_semantics,
     )
     return readonly(result)
+
+
+@njit(cache=True, fastmath=False)
+def _small_shape_jdd_series(values: NDArray) -> NDArray[np.float64]:
+    """``a d/da[a d/da J]`` near the origin, ``J = a (a psi'(a) - 1)``.
+
+    ``J = 1 - a + sum_{n >= 2} (-1)^n (n - 1) zeta(n) a^n``, so two log-shape
+    derivatives multiply each term by ``n^2``; the tail is bounded as the
+    sibling channels' are, with one more power of ``n``.
+    """
+    result = np.empty_like(values)
+    for row in range(len(values)):
+        a = values[row]
+        total = -a
+        power = a * a
+        sign = 1.0
+        for order in range(2, 82):
+            total += sign * (order - 1.0) * order * order * _ORIGIN_ZETA[order - 2] * power
+            power *= a
+            sign = -sign
+            tail = 2.0 * (order + 1.0) ** 3 * abs(power) / (1.0 - a) ** 4
+            if tail <= _EPS * max(1.0, abs(total)) / 8.0:
+                result[row] = total
+                break
+        else:
+            raise ValueError("small-shape Gamma series did not reach float64 accuracy")
+    return result
+
+
+# Bernoulli numbers B_2..B_20 for the large-shape expansion
+# J(a) = 1/2 + sum_k B_2k a^-(2k-1) (DLMF 5.15.8).
+_TRIGAMMA_BERNOULLI = (
+    1.0 / 6.0,
+    -1.0 / 30.0,
+    1.0 / 42.0,
+    -1.0 / 30.0,
+    5.0 / 66.0,
+    -691.0 / 2730.0,
+    7.0 / 6.0,
+    -3617.0 / 510.0,
+    43867.0 / 798.0,
+    -174611.0 / 330.0,
+)
+
+
+def _scaled_trigamma_log_second_derivative(shape: NDArray) -> NDArray[np.float64]:
+    """Return ``Jdd = a d/da[a dJ/da]`` for ``J = a (a psi'(a) - 1)``.
+
+    Near the origin the zeta series; for large shape the Bernoulli expansion
+    ``sum_k (2k - 1)^2 B_2k a^-(2k-1)`` once its next term is below
+    ``eps/8`` of the value; between, ``2 Jd + a + 3 a^3 psi''(a) + a^4 psi'''(a)``,
+    which cancels by about ``6 a^2`` (below 2.5e3 where it is used).
+    """
+    values = _as_positive_vector(shape, name="shape")
+    result = np.empty_like(values)
+    small = values < 0.25
+    if np.any(small):
+        result[small] = _small_shape_jdd_series(values[small])
+    large = values >= 20.0
+    if np.any(large):
+        a = values[large]
+        inverse = 1.0 / a
+        inverse2 = inverse * inverse
+        total = np.zeros_like(a)
+        power = inverse
+        for k, coefficient in enumerate(_TRIGAMMA_BERNOULLI[:-1], start=1):
+            total += (2 * k - 1) ** 2 * coefficient * power
+            power = power * inverse2
+        next_term = np.abs(19.0**2 * _TRIGAMMA_BERNOULLI[-1] * power)
+        accurate = next_term <= _EPS * np.abs(total) / 8.0
+        large_rows = np.flatnonzero(large)
+        result[large_rows[accurate]] = total[accurate]
+        large[large_rows[~accurate]] = False
+    direct = ~(small | large)
+    if np.any(direct):
+        a = values[direct]
+        jd = _scaled_trigamma_log_derivative(a)
+        result[direct] = (
+            2.0 * jd + a + 3.0 * a**3 * special.polygamma(2, a) + a**4 * special.polygamma(3, a)
+        )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Gamma shape-curvature second derivative is not representable")
+    return result
+
+
+def gamma_predictor_fourth_derivatives(
+    response: NDArray,
+    eta: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> NDArray[np.float64]:
+    """Packed fourth derivatives ``(aaaa, ..., bbbb)`` of the Gamma row in ``(log mean, log scale)``.
+
+    ``-az, -2 az, -4 az, -8 at, -16 (b + J + Jd + Jdd)`` times the multiplier
+    (generated, ``gamma_log_fourth``): each ``log scale`` derivative of a term
+    linear in the shape doubles it with a sign, and the shape residuals take
+    one more log-shape derivative each.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import gamma_log_fourth
+
+    response_values = _as_positive_vector(response, name="response")
+    weight_semantics = validated_semantics(semantics)
+    weight_values = positive_weights(_as_positive_vector(weights, name="weights"), weight_semantics)
+    predictors = np.asarray(eta, dtype=_FLOAT)
+    if predictors.shape != (len(response_values), 2) or not np.all(np.isfinite(predictors)):
+        raise ValueError("Gamma predictor state must be a finite n-by-2 array")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        mean = np.exp(predictors[:, 0])
+        scale = np.exp(predictors[:, 1])
+    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(scale)):
+        raise ValueError("mean and scale parameters must be finite and strictly positive")
+    if np.any(mean <= 0.0) or np.any(scale <= 0.0):
+        raise ValueError("mean and scale parameters must be finite and strictly positive")
+    shape, multiplier = _shape_from_scale(scale, weight_values, weight_semantics)
+    az, at, ad = _scaled_ratio_terms(response_values, mean, shape, derivative_order=2)
+    assert az is not None and at is not None
+    b = _stable_row_sum(_scaled_digamma_residual(shape), ad)
+    with np.errstate(over="ignore", invalid="ignore"):
+        fourth = stack_columns(
+            gamma_log_fourth(
+                az,
+                at,
+                0.0,
+                b,
+                _scaled_trigamma_residual(shape),
+                _scaled_trigamma_log_derivative(shape),
+                _scaled_trigamma_log_second_derivative(shape),
+            ),
+            len(response_values),
+        )
+        fourth *= multiplier[:, None]
+    if not np.all(np.isfinite(fourth)):
+        raise ValueError("Gamma fourth derivatives are not representable")
+    return fourth

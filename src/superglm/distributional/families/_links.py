@@ -113,5 +113,13 @@ class BoundedLogitLink:
             * (1.0 - 6.0 * probability + 6.0 * probability * probability)
         )
 
+    def deriv4_inverse(self, eta: NDArray) -> NDArray[np.float64]:
+        """``d^4 mu / d eta^4 = span p q (q - p)(1 - 12 p q)`` with ``q = expit(-eta)``."""
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        product = probability * complement
+        return self._span * product * (complement - probability) * (1.0 - 12.0 * product)
+
 
 __all__ = ["BoundedLogitLink"]

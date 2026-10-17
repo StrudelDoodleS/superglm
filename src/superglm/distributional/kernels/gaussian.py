@@ -395,3 +395,55 @@ def gaussian_predictor_curvature_directional(
         floor,
     )
     return readonly(result)
+
+
+def gaussian_predictor_fourth_derivatives(
+    response: NDArray,
+    eta: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+    *,
+    scale_floor: float,
+) -> NDArray[np.float64]:
+    """Packed fourth derivatives ``(aaaa, aaab, aabb, abbb, bbbb)`` of the Gaussian row.
+
+    In ``(a, b) = (location, log(scale - floor))``, generated
+    (``gaussian_predictor_fourth``) in ``u = (scale - floor)/scale`` and
+    ``c = floor/scale``, homogenised so that no constant cancels as the floor
+    vanishes.  The normalizer and residual masses follow the weight semantics
+    as the score's do.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import gaussian_predictor_fourth
+
+    response_values, weight_values = _aligned_vectors(
+        (response, "response"),
+        (weights, "weights"),
+    )
+    weight_semantics = validated_semantics(semantics)
+    weight_values = positive_weights(weight_values, weight_semantics)
+    floor = _scale_floor(scale_floor)
+    predictors = np.asarray(eta, dtype=np.float64)
+    if predictors.shape != (len(response_values), 2) or not np.all(np.isfinite(predictors)):
+        raise ValueError("Gaussian predictor state must be a finite n-by-2 array")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        scale_increment = np.exp(predictors[:, 1])
+        scale = floor + scale_increment
+    if not np.all(np.isfinite(scale)) or np.any(scale <= floor):
+        raise ValueError("scale parameter must be finite and strictly above scale_floor")
+    normalizer = np.ones_like(weight_values) if weight_semantics == "prior" else weight_values
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        fourth = stack_columns(
+            gaussian_predictor_fourth(
+                response_values - predictors[:, 0],
+                normalizer,
+                weight_values,
+                scale,
+                scale_increment / scale,
+                floor / scale,
+            ),
+            len(response_values),
+        )
+    if not np.all(np.isfinite(fourth)):
+        raise ValueError("Gaussian fourth derivatives are not representable")
+    return fourth

@@ -14,8 +14,11 @@ from numpy.typing import NDArray
 from superglm.distributional.families._base import (
     array_digest,
     immutable,
+    link_derivative_columns,
     natural_curvature_direction,
+    natural_curvature_second_direction,
     readonly,
+    second_direction_arrays,
     typed_plan,
     validated_float_response,
 )
@@ -41,23 +44,29 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels.two_piece import (
-    TwoPieceDomainError as TwoPieceDomainError,
-)
-from superglm.distributional.kernels.two_piece import (
+    JOIN_REACH,
     initialize_two_piece,
+    join_certificate,
     join_crossing_rows,
     location_expected_information,
     location_hessian_direction,
+    location_join_jumps,
     location_of_mean,
     location_rows,
+    location_third_fourth,
     log_mean_loading,
     mean_expected_information,
     mean_hessian_direction,
+    mean_join_jumps,
     mean_of_location,
     mean_rows,
+    mean_third_fourth,
     real_line_mean,
     two_piece_cdf,
     two_piece_quantile,
+)
+from superglm.distributional.kernels.two_piece import (
+    TwoPieceDomainError as TwoPieceDomainError,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -90,6 +99,81 @@ def _refuse_join_crossing(
         raise UnsupportedLikelihoodContractError(
             f"two-piece curvature has no derivative across its join at row {row}"
         )
+
+
+def _moved_by_pair(natural_a: NDArray, natural_b: NDArray, columns: slice) -> NDArray:
+    """Rows where some stacked pair's direction moves the given natural columns."""
+    moved = np.any(natural_a[..., columns] != 0.0, axis=(0, 2)) | np.any(
+        natural_b[..., columns] != 0.0, axis=(0, 2)
+    )
+    return moved.astype(np.float64)
+
+
+def _certified_second_direction(
+    family,
+    variate: NDArray,
+    response: NDArray,
+    eta: NDArray,
+    direction_a: NDArray,
+    direction_b: NDArray,
+    links: Sequence[Link],
+    plan: FamilyLikelihoodPlan,
+    multiplier: NDArray,
+    *,
+    mean_form: bool,
+    reach: float = JOIN_REACH,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The second curvature direction with its trust signal near the join.
+
+    The values are the analytic ones (a row on the join is refused, as
+    before); the certificate is ``join_certificate`` on rows a step of
+    ``reach`` (the engine's derivative step) would carry across the join,
+    scaled by the curvature's jump there, so the LAML endgame treats the Hessian as it
+    treated second differences across the kink.
+    """
+    values = family.predictor_curvature_second_directional_derivative(
+        response, eta, direction_a, direction_b, links, plan
+    )
+    single = np.ndim(direction_a) == 2
+    predictors, first, second = second_direction_arrays(response, eta, direction_a, direction_b, 3)
+    theta, g1, g2, g3 = link_derivative_columns(predictors, tuple(links), 3)
+    hessian = np.zeros((theta.shape[0], 3, 3), dtype=np.float64)
+    if mean_form:
+        logk, k_s, k_e, k_ss, k_se, k_ee = log_mean_loading(theta[:, 1], theta[:, 2])
+        location = np.log(theta[:, 0]) - logk
+        jumps = mean_join_jumps(theta[:, 0], theta[:, 1], theta[:, 2], multiplier)
+        gradient = np.column_stack(
+            (
+                g1[:, 0] / theta[:, 0],
+                -k_s * g1[:, 1],
+                -k_e * g1[:, 2],
+            )
+        )
+        # d^2 mu / d eta^2 for mu = log theta_0 - log K(theta_1, theta_2), each theta its own link.
+        hessian[:, 0, 0] = (g2[:, 0] - g1[:, 0] ** 2 / theta[:, 0]) / theta[:, 0]
+        hessian[:, 1, 1] = -k_ss * g1[:, 1] ** 2 - k_s * g2[:, 1]
+        hessian[:, 2, 2] = -k_ee * g1[:, 2] ** 2 - k_e * g2[:, 2]
+        hessian[:, 1, 2] = hessian[:, 2, 1] = -k_se * g1[:, 1] * g1[:, 2]
+    else:
+        location = theta[:, 0]
+        jumps = location_join_jumps(theta[:, 1], theta[:, 2], multiplier)
+        zero = np.zeros_like(location)
+        gradient = np.column_stack((g1[:, 0], zero, zero))
+        hessian[:, 0, 0] = g2[:, 0]
+    with np.errstate(over="ignore", invalid="ignore"):
+        certificate = join_certificate(
+            np.abs(variate - location),
+            gradient,
+            jumps,
+            (g1, g2, g3),
+            first,
+            second,
+            reach=reach,
+            location_hessian=hessian,
+        )
+    if not np.all(np.isfinite(certificate)):
+        raise ValueError("the two-piece join certificate is not representable at this state")
+    return values, readonly(certificate[0] if single else certificate)
 
 
 TwoPieceRowLaw = Literal[
@@ -498,6 +582,80 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
             self, response, eta, eta_direction, links, plan, hessian_direction
         )
 
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``.
+
+        Refused, as the first direction is, on a join row the pair can move.
+        """
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            if self.parametrisation == "mean":
+                logk = log_mean_loading(theta[:, 1], theta[:, 2])[0]
+                _refuse_join_crossing(
+                    np.log(response),
+                    np.log(theta[:, 0]) - logk,
+                    theta[:, 1],
+                    theta[:, 2],
+                    _moved_by_pair(natural_a, natural_b, slice(0, 3)),
+                )
+                return mean_third_fourth(
+                    response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier
+                )
+            _refuse_join_crossing(
+                np.log(response),
+                theta[:, 0],
+                theta[:, 1],
+                theta[:, 2],
+                _moved_by_pair(natural_a, natural_b, slice(0, 1)),
+            )
+            return location_third_fourth(
+                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier
+            )
+
+        return natural_curvature_second_direction(
+            self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
+        )
+
+    def certified_predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+        *,
+        step: float = JOIN_REACH,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The second curvature direction and its certificate on rows within ``step`` of the join."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+        return _certified_second_direction(
+            self,
+            np.log(response),
+            response,
+            eta,
+            direction_a,
+            direction_b,
+            links,
+            plan,
+            bound.multiplier,
+            mean_form=self.parametrisation == "mean",
+            reach=step,
+        )
+
     def expected_information_natural(
         self, theta: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
@@ -742,6 +900,65 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
 
         return natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
+        )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+
+        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            _refuse_join_crossing(
+                response,
+                theta[:, 0],
+                theta[:, 1],
+                theta[:, 2],
+                _moved_by_pair(natural_a, natural_b, slice(0, 1)),
+            )
+            return location_third_fourth(
+                response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier
+            )
+
+        return natural_curvature_second_direction(
+            self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
+        )
+
+    def certified_predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+        *,
+        step: float = JOIN_REACH,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The second curvature direction and its certificate on rows within ``step`` of the join."""
+
+        response = self._validated_response(y)
+        bound = self._plan(plan, len(response))
+        return _certified_second_direction(
+            self,
+            response,
+            response,
+            eta,
+            direction_a,
+            direction_b,
+            links,
+            plan,
+            bound.multiplier,
+            mean_form=False,
+            reach=step,
         )
 
     def expected_information_natural(

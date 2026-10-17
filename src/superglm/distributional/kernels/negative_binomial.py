@@ -939,6 +939,123 @@ def negative_binomial_certified_predictor_curvature_directional(
     )
 
 
+def negative_binomial_log_fourth_derivatives(
+    counts: NDArray,
+    mean: NDArray,
+    theta: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Fourth derivatives of the NB2 row log-likelihood in ``(log mean, log theta)``.
+
+    Returns ``(fourth, error)``: ``fourth[:, k]`` is ``l_aaaa, l_aaab, l_aabb,
+    l_abbb, l_bbbb`` and ``error`` a bound on the series truncation and
+    recurrence rounding of ``l_bbbb``.  The first four never touch the
+    log-gamma difference and are closed forms in ``q = mu/(mu + theta)`` and
+    ``p = theta/(mu + theta)`` (generated, homogenised in ``(q, p)``);
+    ``l_bbbb`` cancels like ``l_bbb`` near Poisson and takes the series or the
+    recurrence as ``l_bbb`` does, one log-theta derivative further.  Inputs
+    and domain are the row kernel's.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import (
+        negative_binomial_log_fourth_closed,
+    )
+
+    arrays, integer_counts, _ = _inputs(counts, mean, theta, weights, semantics, 2)
+    _, _, _, weight_values = arrays
+    _, multiplier, effective_mean, effective_theta, total = _domain(
+        arrays[1], arrays[2], weight_values, semantics
+    )
+    remainder, remainder_error, remainder_scale = _ratio_remainder(effective_mean / effective_theta)
+    bbbb, error = _compiled.log_fourth_derivative(
+        np.ascontiguousarray(integer_counts, dtype=np.int64),
+        np.ascontiguousarray(effective_mean, dtype=_FLOAT),
+        np.ascontiguousarray(effective_theta, dtype=_FLOAT),
+        np.ascontiguousarray(remainder, dtype=_FLOAT),
+        np.ascontiguousarray(remainder_error, dtype=_FLOAT),
+        np.ascontiguousarray(remainder_scale, dtype=_FLOAT),
+        _SERIES_RATIO,
+        _SERIES_ORDER,
+        _SERIES_EXPONENTS,
+        _SERIES_BERNOULLI,
+    )
+    n_rows = len(effective_mean)
+    fourth = np.empty((n_rows, 5), dtype=_FLOAT)
+    with np.errstate(over="ignore", invalid="ignore"):
+        fourth[:, :4] = stack_columns(
+            negative_binomial_log_fourth_closed(
+                arrays[0], effective_theta, effective_mean / total, effective_theta / total
+            ),
+            n_rows,
+        )
+        fourth[:, 4] = bbbb
+        fourth *= multiplier[:, None]
+        error = (1.0 + _gamma(2)) * (error * multiplier)
+    _finite_output(fourth, "fourth derivative", NegativeBinomialDerivativeRepresentationError)
+    _finite_output(error, "fourth-derivative bound", NegativeBinomialDerivativeRepresentationError)
+    return fourth, error
+
+
+def negative_binomial_certified_predictor_curvature_second_directional(
+    counts: NDArray,
+    eta: NDArray,
+    direction_a: NDArray,
+    direction_b: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The packed second curvature direction and an entrywise bound on its error.
+
+    ``-sum_kl l_ijkl a_k b_l`` under the two log links; directions ``(n, 2)``
+    or stacked ``(m, n, 2)``.  ``l_bbbb`` enters only the ``bb`` channel, times
+    ``a_b b_b``, so the certificate is ``|a_b b_b| e`` there, rounded upward
+    once, and zero on ``aa`` and ``ab``.
+    """
+    from superglm.distributional.kernels._curvature_direction import curvature_second_direction
+
+    predictors = np.asarray(eta, dtype=_FLOAT)
+    first = np.asarray(direction_a, dtype=_FLOAT)
+    second = np.asarray(direction_b, dtype=_FLOAT)
+    expected = (len(np.asarray(counts)), 2)
+    if (
+        predictors.shape != expected
+        or first.shape != second.shape
+        or first.shape[-1] != 2
+        or first.ndim not in (2, 3)
+        or first.shape[-2] not in ((expected[0],) if first.ndim == 2 else (expected[0], 1))
+        or not np.all(np.isfinite(predictors))
+        or not np.all(np.isfinite(first))
+        or not np.all(np.isfinite(second))
+    ):
+        raise ValueError(
+            "NB2 predictor state must be a finite n-by-2 array and the directions finite "
+            "n-by-2 or m-by-n-by-2 arrays of one shape"
+        )
+    with np.errstate(over="ignore", under="ignore"):
+        mean = np.exp(predictors[:, 0])
+        theta = np.exp(predictors[:, 1])
+    fourth, error = negative_binomial_log_fourth_derivatives(
+        counts, mean, theta, weights, semantics
+    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = curvature_second_direction(fourth, first, second)
+        certificate = np.zeros_like(result)
+        certificate[..., 2] = np.nextafter(np.abs(first[..., 1] * second[..., 1]) * error, np.inf)
+    _finite_output(
+        result, "curvature second direction", NegativeBinomialDerivativeRepresentationError
+    )
+    _finite_output(
+        certificate,
+        "curvature-second-direction bound",
+        NegativeBinomialDerivativeRepresentationError,
+    )
+    return (
+        readonly(result, dtype=np.dtype(np.float64), shape=result.shape),
+        readonly(certificate, dtype=np.dtype(np.float64), shape=certificate.shape),
+    )
+
+
 __all__ = [
     "NegativeBinomialDerivativeRepresentationError",
     "NegativeBinomialInitializationError",
@@ -949,6 +1066,8 @@ __all__ = [
     "has_resolved_poisson_boundary",
     "initialize_negative_binomial",
     "negative_binomial_certified_predictor_curvature_directional",
+    "negative_binomial_certified_predictor_curvature_second_directional",
+    "negative_binomial_log_fourth_derivatives",
     "negative_binomial_log_third_derivatives",
     "negative_binomial_predictor_curvature_directional",
     "recurrence_cells",

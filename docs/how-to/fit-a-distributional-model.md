@@ -731,10 +731,11 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
 2. **Endgame.** Newton using the full LAML gradient and Hessian formulas in log λ,
    the construction of Wood, Pya and Säfken (2016): the implicit derivative of
    the coefficient mode through the observed penalised Hessian, the derivative
-   of `log|H|` through the third derivatives of the row log-likelihood
-   (analytic for `GaussianLS` and `GammaLS`, finite differences of the packed
-   row curvature otherwise, each carrying a certificate), and the fourth
-   derivatives by second differences of the same rows. The Hessian is made
+   of `log|H|` through the third derivatives of the row log-likelihood, and
+   the Hessian through its fourth derivatives. Every built-in family supplies
+   both analytically; a family or link without them, or a two-piece row on its
+   kink, falls back to finite differences of the packed row curvature, and
+   each carries a certificate. The Hessian is made
    positive definite by a growing ridge, the step is capped at `max_log_step`
    and accepted by Armijo backtracking; when the Hessian's certificate exceeds
    a tenth of its smallest active diagonal the iteration steps by damped BFGS
@@ -1186,24 +1187,28 @@ Hessian in its natural parameters, chained through the links by the solver).
 Order 3 is optional (`PredictorCurvatureDirectionalFamily`, the directional
 derivative of the packed curvature along a predictor direction); when a family
 does not implement it the endgame differences the packed rows with a
-four-point stencil per axis and carries a certificate. Order 4 is always
-obtained by second differences of the packed rows today, on top of an analytic
-or differenced third. So the analytic hook makes the gradient exact and saves
-the third-order stencils, but the fourth-order stencils remain.
+four-point stencil per axis and carries a certificate. Order 4 is optional in
+the same way (`PredictorCurvatureSecondDirectionalFamily`, the curvature's
+second directional derivative from the row's fourth derivatives); every
+built-in family supplies it, so the endgame's Hessian evaluates no packed rows
+beyond the gradient's. A family without it, a link without a fourth inverse
+derivative, or a two-piece row on its join falls back to second differences of
+the packed rows.
 
 | Family | Row log-likelihood | Fused order-2 kernel | Analytic order 3 | Order 4 |
 |---|---|---|---|---|
-| `GaussianLS` | smooth to every order | yes | yes | differenced |
-| `GammaLS` | smooth to every order | yes | yes (built-in log links only) | differenced |
-| `NegativeBinomialLS` | smooth to every order in mean and size (log-gamma and its derivatives) | yes | not implemented; possible | differenced |
-| `TweedieLSS` | smooth in mean, dispersion and power on `1 < p < 2` (Wright function series) | yes | not implemented; possible but the power derivatives are series | differenced |
-| `LogNormalLS` | smooth to every order | yes | not implemented; short | differenced |
-| `GeneralizedGammaLSS` | smooth to every order; `Q = 0` is removable and the kernel's series cover it | yes | not implemented; needs the tetragamma remainder and one more derivative of each series function, and the mean form's third-order chain | differenced |
-| `GeneralizedParetoLSS` | smooth to every order on `0 < ξ < 1` | yes | not implemented; short | differenced |
-| `TwoPieceNormalLSS`, `TwoPieceLogNormalLSS` | `C¹` only: the curvature jumps at the mode `w = 0` | yes, away from the kink | **not possible**: the third derivative at the kink is a point mass, and the LAML gradient's true value includes the density at the kink times the curvature jump, which a pointwise formula drops | differenced |
+| `GaussianLS` | smooth to every order | yes | yes (built-in links only) | yes (built-in links only) |
+| `GammaLS` | smooth to every order | yes | yes (built-in log links only) | yes (built-in log links only) |
+| `NegativeBinomialLS` | smooth to every order in mean and size (log-gamma and its derivatives) | yes | yes (built-in log links only) | yes (built-in log links only) |
+| `TweedieLSS` | smooth in mean, dispersion and power on `1 < p < 2` (Wright function series) | yes | yes | yes |
+| `LogNormalLS` | smooth to every order | yes | yes (built-in links only) | yes (built-in links only) |
+| `GeneralizedGammaLSS` | smooth to every order; `Q = 0` is removable and the kernel's series cover it | yes | yes | yes |
+| `GeneralizedParetoLSS` | smooth to every order on `0 < ξ < 1` | yes | yes | yes |
+| `TwoPieceNormalLSS`, `TwoPieceLogNormalLSS` | `C¹` only: the curvature jumps at the mode `w = 0` | yes, away from the kink | yes away from the kink; a path through the kink is refused and differenced, because there the third derivative is a point mass | yes away from the kink, with a certificate near it; refused and differenced on it |
 
-For the two-piece families the differenced route with its certificate is the
-correct method, not a shortcut: the engine sees rows cross the kink and the
+For the two-piece families a path through the kink takes the differenced
+route with its certificate, which is the correct method there, not a
+shortcut: the engine sees rows cross the kink and the
 certificate reports when it cannot resolve the gradient (`gradient_unresolved`,
 seen at small `n`). The same holds for any likelihood with a kink or a
 boundary, the Laplace, quantile and Huber losses among them: they fit on the
@@ -1211,6 +1216,12 @@ Fellner–Schall route and are certified by differences, and no analytic
 endgame exists for them. A family is a candidate for the analytic hook exactly
 when its row log-likelihood is `C³` in every natural parameter over the whole
 support the links can reach.
+
+Two-piece rows close enough to the kink that one derivative step
+(`derivative_step`, `1e-3` by default) along either direction or their sum
+could carry them across it keep their analytic fourth derivatives,
+but report a certificate scaled by the curvature jump there, so the endgame
+trusts that Hessian no more than a differenced one.
 
 ## Telemetry and serialization
 

@@ -76,7 +76,9 @@ def test_the_density_is_within_its_rounding_bound_of_the_exact_value():
             assert abs(Decimal(observed) - exact) <= Decimal(bound) * exact, value
 
 
-@pytest.mark.parametrize("method", ["inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse"])
+@pytest.mark.parametrize(
+    "method", ["inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse", "deriv4_inverse"]
+)
 def test_an_extended_argument_is_evaluated_in_binary64(method):
     """``np.longdouble`` is cast to float64, never carried through (``AGENTS.md``).
 
@@ -99,6 +101,9 @@ def test_an_extended_argument_is_evaluated_in_binary64(method):
         ("deriv_inverse", lambda eta: scipy.stats.norm.pdf(eta)),
         ("deriv2_inverse", lambda eta: -eta * scipy.stats.norm.pdf(eta)),
         ("deriv3_inverse", lambda eta: (eta**2 - 1) * scipy.stats.norm.pdf(eta)),
+        # The expression ``reml.observed_geometry`` tabulated for probit before
+        # it called ``link.deriv4_inverse``.
+        ("deriv4_inverse", lambda eta: (3.0 * eta - eta**3) * scipy.stats.norm.pdf(eta)),
     ],
 )
 def test_probit_eta_kernels_keep_parity_with_the_scipy_stats_master_used(method, reference):
@@ -141,6 +146,12 @@ def test_probit_eta_kernels_do_not_route_through_scipy_stats(monkeypatch):
     monkeypatch.setattr(scipy.stats.norm, "cdf", refused)
     monkeypatch.setattr(scipy.stats.norm, "pdf", refused)
     link, eta = ProbitLink(), np.linspace(-6.0, 6.0, 13)
-    for method in ("inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse"):
+    for method in (
+        "inverse",
+        "deriv_inverse",
+        "deriv2_inverse",
+        "deriv3_inverse",
+        "deriv4_inverse",
+    ):
         getattr(link, method)(eta)
     assert math.isfinite(float(link.inverse(0.0)))

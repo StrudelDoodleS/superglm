@@ -40,6 +40,7 @@ from superglm.links import (
     PowerLink,
     ProbitLink,
     SqrtLink,
+    _own_deriv4_inverse,
     stabilize_eta,
 )
 from superglm.reml.penalty_algebra import (
@@ -126,62 +127,21 @@ def _validate_rows(
 
 
 def _deriv4_inverse(link: Any, eta: NDArray) -> NDArray:
-    """Return an exact fourth inverse-link derivative for built-ins or protocols."""
-    link_type = type(link)
-    if link_type is LogLink:
-        result = np.exp(eta)
-    elif link_type is IdentityLink or link_type is SqrtLink:
-        result = np.zeros_like(eta)
-    elif link_type is LogitLink:
-        from scipy.special import expit
+    """Return the link's exact fourth inverse derivative (``link.deriv4_inverse``).
 
-        probability = expit(eta)
-        result = (
-            probability
-            * (1.0 - probability)
-            * (1.0 - 14.0 * probability + 36.0 * probability**2 - 24.0 * probability**3)
+    Every built-in link supplies it; a custom link must implement the
+    protocol, and a subclass that overrides ``inverse`` or a lower derivative
+    must override it as well (``links._own_deriv4_inverse``).
+    """
+    protocol = _own_deriv4_inverse(link)
+    if protocol is None:
+        raise NotImplementedError(
+            "exact second observed-weight derivatives require link.deriv4_inverse"
         )
-    elif link_type is ProbitLink:
-        from scipy.stats import norm
-
-        result = (3.0 * eta - eta**3) * norm.pdf(eta)
-    elif link_type is CloglogLink:
-        exp_eta = np.exp(eta)
-        result = exp_eta * np.exp(-exp_eta) * (1.0 - 7.0 * exp_eta + 6.0 * exp_eta**2 - exp_eta**3)
-    elif link_type is CauchitLink:
-        result = 24.0 * eta * (1.0 - eta**2) / (np.pi * (1.0 + eta**2) ** 4)
-    elif link_type is InverseLink:
-        result = 24.0 / eta**5
-    elif link_type is InverseSquaredLink:
-        result = 6.5625 * eta ** (-4.5)
-    elif link_type is PowerLink:
-        exponent = 1.0 / float(link.power)
-        result = (
-            exponent
-            * (exponent - 1.0)
-            * (exponent - 2.0)
-            * (exponent - 3.0)
-            * np.maximum(eta, 1e-15) ** (exponent - 4.0)
-        )
-    elif link_type is NegativeBinomialLink:
-        exp_eta = np.exp(np.clip(eta, -30.0, -1e-10))
-        result = (
-            float(link.theta)
-            * exp_eta
-            * (1.0 + 11.0 * exp_eta + 11.0 * exp_eta**2 + exp_eta**3)
-            / (1.0 - exp_eta) ** 5
-        )
-    else:
-        protocol = getattr(link, "deriv4_inverse", None)
-        if not callable(protocol):
-            raise NotImplementedError(
-                "exact second observed-weight derivatives require link.deriv4_inverse"
-            )
-        result = protocol(eta)
+    result = protocol(eta)
     result = np.asarray(result, dtype=np.float64)
-    # Only the custom-protocol branch can hand back the wrong shape -- every
-    # built-in above is elementwise in eta -- so a shape mismatch is a bug in
-    # the caller's link rather than a condition this iterate reached.
+    # Every built-in link is elementwise in eta, so a shape mismatch is a bug
+    # in a custom link rather than a condition this iterate reached.
     if result.shape != eta.shape:
         raise ValueError("link.deriv4_inverse must return an array shaped like eta")
     if not np.all(np.isfinite(result)):
@@ -550,9 +510,7 @@ def validate_observed_derivative_capability(
 
     missing = [label for owner, name, label in required if not callable(getattr(owner, name, None))]
     if derivative_order >= 2:
-        if type(link) not in _BUILTIN_REML_LINKS and not callable(
-            getattr(link, "deriv4_inverse", None)
-        ):
+        if type(link) not in _BUILTIN_REML_LINKS and _own_deriv4_inverse(link) is None:
             missing.append("link.deriv4_inverse")
         if type(distribution) not in _BUILTIN_REML_DISTRIBUTIONS and not callable(
             getattr(distribution, "variance_third_derivative", None)

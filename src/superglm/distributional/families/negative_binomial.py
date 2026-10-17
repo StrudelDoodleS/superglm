@@ -41,6 +41,7 @@ from superglm.distributional.kernels.negative_binomial import (
     has_resolved_poisson_boundary,
     initialize_negative_binomial,
     negative_binomial_certified_predictor_curvature_directional,
+    negative_binomial_certified_predictor_curvature_second_directional,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -377,6 +378,54 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             candidate.exact_count,
             eta,
             eta_direction,
+            candidate.weights.values,
+            candidate.weights.provenance.contract.semantics,
+        )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        values, _certificate = self.certified_predictor_curvature_second_directional_derivative(
+            y, eta, direction_a, direction_b, links, plan
+        )
+        return values
+
+    def certified_predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+        *,
+        step: float = 1.0e-3,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The second curvature direction and the bounded error of its ``l_bbbb`` channel.
+
+        The series bound does not depend on the derivative ``step``.
+        """
+
+        del step
+        link_tuple = tuple(links)
+        if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
+            raise UnsupportedLikelihoodContractError(
+                "NB2 endpoint curvature derivatives require the built-in log links"
+            )
+        candidate = _typed_plan(plan, response_row_count(y))
+        return negative_binomial_certified_predictor_curvature_second_directional(
+            candidate.exact_count,
+            eta,
+            direction_a,
+            direction_b,
             candidate.weights.values,
             candidate.weights.provenance.contract.semantics,
         )

@@ -95,20 +95,25 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     assert KERNELS.is_dir()
     assert expected <= {path.name for path in KERNELS.glob("*.py")}
 
+    # ``_curvature_direction`` (the shared chain rule) and ``_fourth_generated``
+    # (the generated fourth-derivative closed forms) are primitives like
+    # ``_common``: they import no distributional module themselves.
+    chain = {"kernels._curvature_direction", "kernels._fourth_generated"}
     allowed = {
         "_weighted.py": {"kernels.gamma"},
-        "gaussian.py": {"kernels._common", "kernels._weighted"},
-        "gamma.py": {"kernels._common"},
+        "_tweedie_numba.py": {"kernels._fourth_generated"},
+        "gaussian.py": {"kernels._common", "kernels._weighted", *chain},
+        "gamma.py": {"kernels._common", *chain},
         "generalized_gamma.py": {
             "kernels._common",
-            "kernels._curvature_direction",
             "kernels.gamma",
             "kernels.log_normal",
+            *chain,
         },
-        "generalized_pareto.py": {"kernels._common", "kernels._weighted"},
-        "log_normal.py": {"kernels._common", "kernels.gaussian"},
-        "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba"},
-        "two_piece.py": {"kernels._common", "kernels._curvature_direction", "kernels._weighted"},
+        "generalized_pareto.py": {"kernels._common", "kernels._weighted", *chain},
+        "log_normal.py": {"kernels._common", "kernels.gaussian", *chain},
+        "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba", *chain},
+        "two_piece.py": {"kernels._common", "kernels._weighted", *chain},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
     }
     offenders = {

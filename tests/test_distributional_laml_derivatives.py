@@ -390,6 +390,44 @@ class _GammaNoDirection(GammaLS):
     """GammaLS on the finite-difference path (the retained Tweedie cell's authority)."""
 
     predictor_curvature_directional_derivative = None  # type: ignore[assignment]
+    predictor_curvature_second_directional_derivative = None  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "gamma"])
+def test_analytic_fourth_derivatives_replace_the_second_difference(kind) -> None:
+    """The Hessian's fourth-derivative term from the family's second curvature direction.
+
+    One stacked call of ``predictor_curvature_second_directional_derivative``
+    replaces the ``1 + 4K + 4K(K-1)/2`` packed-curvature evaluations of the
+    second difference, so a Hessian pass after its gradient pass evaluates
+    none; the Hessian agrees with the differenced one within the two
+    certificates.
+    """
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeWorkspace
+
+    family, layout, y, plan, lambdas, fit, config, session = _interior_case(kind, "observed")
+    dense = session.dense_matrices(layout)
+    workspace = LamlDerivativeWorkspace()
+    common = dict(lambdas=lambdas, fit=fit, dense_matrices=dense)
+    laml_derivatives(family, layout, y, plan, want_hessian=False, reuse=workspace, **common)
+    analytic = laml_derivatives(family, layout, y, plan, reuse=workspace, **common)
+    assert analytic.evaluations == 0
+
+    class _Differenced(type(family)):
+        predictor_curvature_second_directional_derivative = None  # type: ignore[assignment]
+
+    differenced_family = (
+        _Differenced(scale_floor=family.scale_floor) if kind == "gaussian" else _Differenced()
+    )
+    numeric = laml_derivatives(differenced_family, layout, y, plan, **common)
+    k = fit.eta.shape[1]
+    assert numeric.evaluations == 1 + 4 * k + 4 * k * (k - 1) // 2
+    scale = np.max(np.abs(numeric.hessian))
+    assert np.all(
+        np.abs(analytic.hessian - numeric.hessian)
+        <= numeric.hessian_certificate + analytic.hessian_certificate + 1e-10 * scale
+    )
+    assert np.max(analytic.hessian_certificate) < np.max(numeric.hessian_certificate)
 
 
 def _legacy_case(kind: str, authority: str):

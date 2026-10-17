@@ -15,6 +15,7 @@ from superglm.distributional.families._base import (
     array_digest,
     immutable,
     natural_curvature_direction,
+    natural_curvature_second_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -53,11 +54,13 @@ from superglm.distributional.kernels.generalized_gamma import (
     location_hessian_direction,
     location_of_mean,
     location_rows,
+    location_third_fourth,
     mean_exists,
     mean_expected_information,
     mean_hessian_direction,
     mean_of_location,
     mean_rows,
+    mean_third_fourth,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -417,6 +420,28 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
 
         return natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
+        )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = _validated_response(y)
+        bound = self._plan(plan, len(response))
+        rows = mean_third_fourth if self.parametrisation == "mean" else location_third_fourth
+
+        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            return rows(response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier)
+
+        return natural_curvature_second_direction(
+            self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
         )
 
     def expected_information_natural(

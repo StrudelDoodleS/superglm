@@ -382,6 +382,109 @@ def scale_hessian_direction(
     return result
 
 
+def series_g(z: NDArray) -> NDArray[np.float64]:
+    """``F'(z) = (6/(1 + z)^4 - 4 F(z))/z``, ``-24/5`` at zero.
+
+    The pure-shape fourth derivative is ``t^5 F'(z) + 6 v^4`` below the tail
+    split, as the third is ``t^4 F(z) - 2 v^3``; ``F'`` takes the series of
+    ``F`` differentiated term by term inside ``|z| < 1/2``.
+    """
+
+    def direct(a):
+        return (6.0 / ((1.0 + a) ** 4) - 4.0 * series_f(a)) / a
+
+    return _piecewise(
+        z, lambda j: (-1.0) ** (j + 1) * (j + 1) * (j + 2) * (j + 3) * (j + 4) / (j + 5), direct
+    )
+
+
+def _tail_fourth_numerator(log_support: NDArray, u: NDArray) -> NDArray[np.float64]:
+    """``24 L - 24 u - 12 u^2 - 8 u^3 - 6 u^4 = 24 sum_{k >= 5} u^k / k``.
+
+    The tail's pure-shape fourth derivative is ``-N5/xi^5 + 6 v^4``, the
+    derivative of ``N4/xi^4 - 2 v^3`` (``dN4/dxi = 6 u^4/xi``).  Summed below
+    ``u = 0.8`` like ``N4``, where the direct form would cancel.
+    """
+    result = 24.0 * log_support - 24.0 * u - 12.0 * u * u - 8.0 * u**3 - 6.0 * u**4
+    inner = u < _TAIL_SERIES_LIMIT
+    if np.any(inner):
+        base = u[inner]
+        power = base**5
+        total = np.zeros_like(base)
+        for k in range(5, 5 + _TAIL_SERIES_TERMS):
+            total = total + power / k
+            power = power * base
+        result[inner] = 24.0 * total
+    return result
+
+
+def scale_fourth(
+    response: NDArray,
+    scale: NDArray,
+    shape: NDArray,
+    multiplier: NDArray,
+) -> NDArray[np.float64]:
+    """Packed natural fourth derivatives ``(pppp, pppx, ppxx, pxxx, xxxx)`` in ``(psi, xi)``.
+
+    The four with a ``psi`` are polynomials in ``v`` and ``a`` over powers of
+    ``psi`` (generated, ``generalized_pareto_fourth_closed``); ``T_xxxx`` is
+    ``t^5 F'(z) + 6 v^4`` below ``z = 1/2`` and ``-N5/xi^5 + 6 v^4`` in the
+    positive tail, the Hessian's own split.  Rows outside the support (published
+    as zero) return zero.
+    """
+    from superglm.distributional.kernels._curvature_direction import stack_columns
+    from superglm.distributional.kernels._fourth_generated import (
+        generalized_pareto_fourth_closed,
+    )
+
+    y = _nonnegative_vector(response, name="response")
+    psi = _positive_vector(scale, name="scale")
+    xi = _vector(shape, name="shape")
+    weight = _positive_vector(multiplier, name="multiplier")
+    _matching(y, psi, xi, weight)
+    with np.errstate(over="ignore", invalid="ignore"):
+        t = y / psi
+        z = xi * t
+    support = 1.0 + z
+    positive_tail = (xi > 0.0) & (z >= _Z_SERIES_RADIUS)
+    ordinary = np.isfinite(support) & (support > 0.0) & ~positive_tail
+    result = np.zeros((len(y), 5), dtype=_FLOAT)
+    for rows in (ordinary, positive_tail):
+        if not np.any(rows):
+            continue
+        yi, pi, xi_i, wi = y[rows], psi[rows], xi[rows], weight[rows]
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            if rows is ordinary:
+                ti, zi = t[rows], z[rows]
+                a = 1.0 / (1.0 + zi)
+                v = ti * a
+                t_xxxx = ti**5 * series_g(zi) + 6.0 * v**4
+            else:
+                inverse_t = pi / yi
+                zi = z[rows]
+                log_support = np.log1p(zi)
+                overflowed = ~np.isfinite(zi)
+                if np.any(overflowed):
+                    log_support[overflowed] = (
+                        np.log(xi_i[overflowed])
+                        + np.log(yi[overflowed])
+                        - np.log(pi[overflowed])
+                        + np.log1p(inverse_t[overflowed] / xi_i[overflowed])
+                    )
+                v = 1.0 / (xi_i + inverse_t)
+                a = inverse_t * v
+                u = xi_i * v
+                t_xxxx = -_tail_fourth_numerator(log_support, u) / xi_i**5 + 6.0 * v**4
+            closed = stack_columns(generalized_pareto_fourth_closed(v, a, pi), len(yi))
+            result[rows, :4] = closed * wi[:, None]
+            result[rows, 4] = wi * t_xxxx
+    if not np.all(np.isfinite(result)):
+        raise GeneralizedParetoDomainError(
+            "generalized Pareto fourth derivatives are not representable"
+        )
+    return result
+
+
 def expected_information(
     scale: NDArray,
     shape: NDArray,

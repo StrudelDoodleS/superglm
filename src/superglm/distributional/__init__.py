@@ -88,6 +88,10 @@ _EXPORTS = {
         "superglm.distributional.family",
         "PredictorCurvatureDirectionalFamily",
     ),
+    "PredictorCurvatureSecondDirectionalFamily": (
+        "superglm.distributional.family",
+        "PredictorCurvatureSecondDirectionalFamily",
+    ),
     "ResponseBoundaryFamily": ("superglm.distributional.family", "ResponseBoundaryFamily"),
     "LegacyPowerWeightArtifactError": (
         "superglm.distributional.weights",

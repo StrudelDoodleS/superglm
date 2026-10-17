@@ -621,6 +621,58 @@ class CertifiedCurvatureDirectionalFamily(Protocol):
 
 
 @runtime_checkable
+class PredictorCurvatureSecondDirectionalFamily(Protocol):
+    """Optional exact second directional derivative of observed predictor curvature.
+
+    ``predictor_curvature_second_directional_derivative(y, eta, a, b, links,
+    plan)`` returns the packed ``-sum_kl l_ijkl a_k b_l``, the curvature's
+    derivative along ``a`` and then ``b``, from the row log-likelihood's
+    fourth derivatives in the predictors.  ``a`` and ``b`` are ``(n, K)``, or
+    ``(m, n, K)`` for ``m`` pairs that share one evaluation; the result has
+    their leading shape.  A family refuses links or rows it cannot
+    differentiate four times with ``UnsupportedLikelihoodContractError``, and
+    the caller then differences the curvature instead.
+    """
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray: ...
+
+
+@runtime_checkable
+class CertifiedCurvatureSecondDirectionalFamily(Protocol):
+    """Optional analytic second curvature direction that carries an error bound.
+
+    Returns ``(values, certificate)``: ``values`` as
+    ``predictor_curvature_second_directional_derivative`` and ``certificate``
+    an entrywise non-negative absolute bound on the error of a channel the
+    family computes only to a bound (a series or recurrence), or a trust
+    signal where the curvature jumps within reach of a row.  ``step`` is the
+    engine's derivative step (``DistributionalEFSConfig.derivative_step``),
+    the reach a near-kink certificate uses; a series bound ignores it.  A
+    family whose fourth derivatives are closed forms leaves this out.
+    """
+
+    def certified_predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+        *,
+        step: float = 1.0e-3,
+    ) -> tuple[NDArray, NDArray]: ...
+
+
+@runtime_checkable
 class ResponseBoundaryFamily(Protocol):
     """Optional declaration of the response boundaries a predictor can escape to.
 

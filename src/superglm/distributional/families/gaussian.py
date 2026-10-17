@@ -14,8 +14,10 @@ from scipy import special
 
 from superglm.distributional.families._base import (
     array_digest,
+    contract_second_direction,
     immutable,
     readonly,
+    second_direction_arrays,
     typed_plan,
     validated_float_response,
 )
@@ -41,6 +43,7 @@ from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
     gaussian_predictor_curvature_directional,
+    gaussian_predictor_fourth_derivatives,
     initialize_gaussian,
 )
 from superglm.distributional.weights import (
@@ -131,6 +134,10 @@ class LowerBoundedLogLink:
             return np.exp(np.asarray(eta, dtype=np.float64))
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.exp(np.asarray(eta, dtype=np.float64))
+
+    def deriv4_inverse(self, eta: NDArray) -> NDArray:
         with np.errstate(over="ignore", invalid="ignore"):
             return np.exp(np.asarray(eta, dtype=np.float64))
 
@@ -527,6 +534,47 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             gaussian_plan.weights.provenance.contract.semantics,
             scale_floor=self.scale_floor,
         )
+
+    def predictor_curvature_second_directional_derivative(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        direction_a: NDArray,
+        direction_b: NDArray,
+        links: Sequence[Link],
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
+
+        response = _validated_response(y)
+        self._require_builtin_links(links)
+        gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
+        single = np.ndim(direction_a) == 2
+        predictors, first, second = second_direction_arrays(
+            response, eta, direction_a, direction_b, 2
+        )
+        fourth = gaussian_predictor_fourth_derivatives(
+            response,
+            predictors,
+            gaussian_plan.weights.values,
+            gaussian_plan.weights.provenance.contract.semantics,
+            scale_floor=self.scale_floor,
+        )
+        result = contract_second_direction(fourth, first, second)
+        return readonly(result[0] if single else result)
+
+    def _require_builtin_links(self, links: Sequence[Link]) -> None:
+        link_tuple = tuple(links)
+        if (
+            len(link_tuple) != 2
+            or type(link_tuple[0]) is not IdentityLink
+            or type(link_tuple[1]) is not LowerBoundedLogLink
+            or link_tuple[1].floor != self.scale_floor
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "Gaussian endpoint curvature derivatives require the built-in identity and "
+                "configured lower-bounded log links"
+            )
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
         parameters = _validated_parameter_matrix(
