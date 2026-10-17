@@ -3901,3 +3901,51 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert all(reason == "converged" for _, reason in records), records
         residual = model._reml_profile["reml_terminal_observed_mode_residual"]
         assert residual <= observed_mode_certification_bar()
+
+
+def test_an_inherited_fourth_inverse_derivative_below_a_new_inverse_is_refused():
+    """A subclass that redefines the inverse but inherits ``deriv4_inverse`` is refused.
+
+    Before the links carried ``deriv4_inverse`` such a subclass had none and
+    order-2 observed REML refused it; inheriting the base class's formula for
+    a different curve would be a silently wrong weight derivative.  A
+    subclass that overrides the fourth derivative too, or nothing, is served.
+    """
+    from superglm.links import LogitLink
+    from superglm.reml.observed_geometry import (
+        _deriv4_inverse,
+        validate_observed_derivative_capability,
+    )
+
+    class ShiftedLogit(LogitLink):
+        def inverse(self, eta):
+            return super().inverse(np.asarray(eta) + 1.0)
+
+        def deriv_inverse(self, eta):
+            return super().deriv_inverse(np.asarray(eta) + 1.0)
+
+        def deriv2_inverse(self, eta):
+            return super().deriv2_inverse(np.asarray(eta) + 1.0)
+
+        def deriv3_inverse(self, eta):
+            return super().deriv3_inverse(np.asarray(eta) + 1.0)
+
+    class CompleteShiftedLogit(ShiftedLogit):
+        def deriv4_inverse(self, eta):
+            return super().deriv4_inverse(np.asarray(eta) + 1.0)
+
+    class PlainLogit(LogitLink):
+        pass
+
+    eta = np.linspace(-3.0, 3.0, 7)
+    with pytest.raises(NotImplementedError, match="deriv4_inverse"):
+        _deriv4_inverse(ShiftedLogit(), eta)
+    with pytest.raises(NotImplementedError, match="deriv4_inverse"):
+        validate_observed_derivative_capability(Binomial(), ShiftedLogit(), 2)
+    np.testing.assert_array_equal(
+        _deriv4_inverse(CompleteShiftedLogit(), eta), LogitLink().deriv4_inverse(eta + 1.0)
+    )
+    np.testing.assert_array_equal(
+        _deriv4_inverse(PlainLogit(), eta), LogitLink().deriv4_inverse(eta)
+    )
+    validate_observed_derivative_capability(Binomial(), CompleteShiftedLogit(), 2)

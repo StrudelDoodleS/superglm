@@ -11,6 +11,7 @@ from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
+from superglm.links import _own_deriv4_inverse
 
 FLOAT = np.float64
 
@@ -211,14 +212,18 @@ def link_derivative_columns(
     """``(theta, g', ..., g^(order))`` column-stacked from each link, each ``(n, K)``.
 
     A link without the derivative a family needs is refused with
-    ``UnsupportedLikelihoodContractError``, so the caller differences instead.
+    ``UnsupportedLikelihoodContractError``, so the caller differences instead;
+    so is an inherited ``deriv4_inverse`` below an overridden ``inverse`` or
+    lower derivative (``links._own_deriv4_inverse``).
     """
     names = ("deriv_inverse", "deriv2_inverse", "deriv3_inverse", "deriv4_inverse")
     columns = []
     for index, link in enumerate(links):
         methods = [link.inverse]
         for name in names[:order]:
-            method = getattr(link, name, None)
+            method = (
+                _own_deriv4_inverse(link) if name == "deriv4_inverse" else getattr(link, name, None)
+            )
             if not callable(method):
                 raise UnsupportedLikelihoodContractError(f"link {index} has no {name}")
             methods.append(method)

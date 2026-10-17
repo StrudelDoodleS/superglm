@@ -40,6 +40,7 @@ from superglm.links import (
     PowerLink,
     ProbitLink,
     SqrtLink,
+    _own_deriv4_inverse,
     stabilize_eta,
 )
 from superglm.reml.penalty_algebra import (
@@ -128,10 +129,12 @@ def _validate_rows(
 def _deriv4_inverse(link: Any, eta: NDArray) -> NDArray:
     """Return the link's exact fourth inverse derivative (``link.deriv4_inverse``).
 
-    Every built-in link supplies it; a custom link must implement the protocol.
+    Every built-in link supplies it; a custom link must implement the
+    protocol, and a subclass that overrides ``inverse`` or a lower derivative
+    must override it as well (``links._own_deriv4_inverse``).
     """
-    protocol = getattr(link, "deriv4_inverse", None)
-    if not callable(protocol):
+    protocol = _own_deriv4_inverse(link)
+    if protocol is None:
         raise NotImplementedError(
             "exact second observed-weight derivatives require link.deriv4_inverse"
         )
@@ -507,9 +510,7 @@ def validate_observed_derivative_capability(
 
     missing = [label for owner, name, label in required if not callable(getattr(owner, name, None))]
     if derivative_order >= 2:
-        if type(link) not in _BUILTIN_REML_LINKS and not callable(
-            getattr(link, "deriv4_inverse", None)
-        ):
+        if type(link) not in _BUILTIN_REML_LINKS and _own_deriv4_inverse(link) is None:
             missing.append("link.deriv4_inverse")
         if type(distribution) not in _BUILTIN_REML_DISTRIBUTIONS and not callable(
             getattr(distribution, "variance_third_derivative", None)

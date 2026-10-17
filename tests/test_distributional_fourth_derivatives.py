@@ -254,6 +254,51 @@ def test_a_link_without_a_fourth_derivative_is_differenced() -> None:
     assert np.all(np.isfinite(differenced.values))
 
 
+def test_an_inherited_fourth_derivative_below_a_new_inverse_is_differenced() -> None:
+    """A link subclass that redefines the inverse but inherits ``deriv4_inverse`` is refused.
+
+    Its base class's fourth derivative belongs to another curve, so the
+    family refuses it and the caller differences; a subclass that overrides
+    the fourth derivative too, or nothing, keeps the analytic route.
+    """
+
+    class ShiftedLog(LogLink):
+        def inverse(self, eta):
+            return np.exp(np.asarray(eta) + 1.0)
+
+        def deriv_inverse(self, eta):
+            return self.inverse(eta)
+
+        deriv2_inverse = deriv_inverse
+        deriv3_inverse = deriv_inverse
+
+    class CompleteShiftedLog(ShiftedLog):
+        deriv4_inverse = ShiftedLog.deriv_inverse
+
+    class PlainLog(LogLink):
+        pass
+
+    family = GeneralizedParetoLSS()
+    y = np.array([3.0, 40.0])
+    eta = np.array([[1.0, 0.2], [2.0, -0.3]])
+    plan = _plan(family, y)
+    shape_link = _links(family)[1]
+    a = np.ones_like(eta)
+    with pytest.raises(UnsupportedLikelihoodContractError, match="deriv4_inverse"):
+        family.predictor_curvature_second_directional_derivative(
+            y, eta, a, a, (ShiftedLog(), shape_link), plan
+        )
+    assert (
+        analytic_curvature_second_direction(family, y, eta, a, a, (ShiftedLog(), shape_link), plan)
+        is None
+    )
+    for link in (CompleteShiftedLog(), PlainLog()):
+        values = family.predictor_curvature_second_directional_derivative(
+            y, eta, a, a, (link, shape_link), plan
+        )
+        assert np.all(np.isfinite(values))
+
+
 def test_two_piece_second_direction_refuses_a_path_through_its_join() -> None:
     """At ``t == mu`` the second direction is refused whenever either direction moves ``mu``."""
     y = np.array([1.0, 1.3, 0.7])

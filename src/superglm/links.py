@@ -31,7 +31,9 @@ class Link(Protocol):
         to the fixed-W Laplace approximation.
         deriv4_inverse — d⁴μ/dη⁴, used by the distributional families'
         analytic fourth derivatives (Wood, Pya and Säfken 2016, Appendix A);
-        without it those derivatives are differenced.
+        without it those derivatives are differenced. A subclass that
+        overrides ``inverse`` or a lower derivative must override it too,
+        or it is treated as absent (:func:`_own_deriv4_inverse`).
     """
 
     def link(self, mu: NDArray) -> NDArray:
@@ -49,6 +51,35 @@ class Link(Protocol):
     def deriv_inverse(self, eta: NDArray) -> NDArray:
         """d_mu/d_eta — derivative of inverse link w.r.t. eta."""
         ...
+
+
+_LOWER_INVERSE_METHODS = ("inverse", "deriv_inverse", "deriv2_inverse", "deriv3_inverse")
+
+
+def _own_deriv4_inverse(link: object) -> Callable[[NDArray], NDArray] | None:
+    """``link.deriv4_inverse`` when it differentiates the link's own inverse, else ``None``.
+
+    Every built-in link defines ``inverse`` and its four derivatives in one
+    class. A subclass that overrides ``inverse`` or a lower derivative but
+    inherits ``deriv4_inverse`` would hand its base class's formula to a
+    different curve, so the method counts only when it is defined at least
+    as far down the class hierarchy (or on the instance) as each of those.
+    """
+    method = getattr(link, "deriv4_inverse", None)
+    if not callable(method):
+        return None
+    instance = getattr(link, "__dict__", {})
+    mro = type(link).__mro__
+
+    def depth(name: str) -> int:
+        if name in instance:
+            return -1
+        return next((index for index, klass in enumerate(mro) if name in vars(klass)), len(mro))
+
+    supplied = depth("deriv4_inverse")
+    if any(depth(name) < supplied for name in _LOWER_INVERSE_METHODS):
+        return None
+    return method
 
 
 class LogLink:
