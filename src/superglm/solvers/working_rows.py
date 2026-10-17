@@ -485,12 +485,15 @@ def coefficient_working_rows(
     ``z = eta + (y - mu) g' / alpha``, with
     ``alpha = 1 + (y - mu) (V'/V + g''/g')``; Fisher scoring is ``alpha = 1``.
     Which one a fit takes is chosen by the caller from the family and link
-    (``prefer_observed`` with a pair ``supports_observed_newton`` declares),
-    never from the rows' values (one-engine design §3.11): an observed row may
-    be zero.  The structured solver accepts signed rows; the dense working
-    system needs non-negative ones, which every declared pair supplies.  Only finiteness remains a
-    condition: a non-finite observed row or total sets ``rejection_reason``,
-    and the caller rejects the step rather than mix in another curvature.
+    (``prefer_observed`` with a pair ``concave_observed_rows`` declares; the
+    exact route's PIRLS asks only for ``supports_observed_newton`` pairs, the
+    binned performance iteration for every declared pair), never from the
+    rows' values (one-engine design §3.11).  An observed row may be zero, and
+    every declared pair's rows are non-negative: the dense working system
+    requires that, and only the structured route would accept signed rows.
+    Only finiteness remains a condition: a non-finite observed row or total
+    sets ``rejection_reason``, and the caller rejects the step rather than mix
+    in another curvature.
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)
