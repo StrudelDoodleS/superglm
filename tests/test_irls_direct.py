@@ -1956,17 +1956,22 @@ class TestREMLDirect:
         assert hasattr(m, "_reml_lambdas")
         assert "DrivAge" in m._reml_lambdas
 
-    def test_exact_fit_gaussian_stops_at_its_fixed_point(self):
+    def test_exact_fit_gaussian_stops_at_its_fixed_point(self, monkeypatch):
         """A response the model fits to rounding ends each PIRLS solve in two iterations.
 
         Gaussian/identity is one penalised least-squares solve.  When the
         model reproduces its response exactly (a level effect plus the
         rounding a log-ratio leaves, |noise| <= 2.2e-16) the residuals and so
         the score's own scale are rounding, the relative score sits near 1,
-        and the second solve returns the coefficients bit for bit.  That
-        iteration is a fixed point: the solve stops there instead of running
-        every iteration of its budget at each smoothing parameter (2,802
-        iterations over 29 solves before the fix).
+        and the floors that would read it are never evaluated.  Both events
+        are forced, so no BLAS or libm rounding decides them: the working
+        response is ``y`` itself (``eta + (y - eta)`` without its rounding),
+        so the second iteration of every solve returns the first one's
+        coefficients bit for bit, and the capped score reads twice its bar.
+        That second iteration is a fixed point: the solve stops there, with
+        the floors resolved (``resolve_cap = inf``), instead of running every
+        iteration of its budget at each smoothing parameter (2,802 iterations
+        over 29 solves before the fix).
         """
         from superglm.features.numeric import Numeric
         from superglm.features.random_effect import RandomEffect
@@ -1977,6 +1982,9 @@ class TestREMLDirect:
         base = rng.uniform(1.0, 2.0, n)
         noise = np.log(base * 3.0) - np.log(3.0) - np.log(base)
         y = np.where(level == "y", np.log(0.6), 0.0) + noise
+        assert np.max(np.abs(noise)) <= 4 * np.finfo(float).eps
+        _force_constant_working_rows(monkeypatch, y)
+        floor_verdicts = _force_unresolved_score(monkeypatch)
         X = pd.DataFrame(
             {
                 "num": np.tile([4.0, 5.5, 6.5], n // 3),
@@ -1994,5 +2002,14 @@ class TestREMLDirect:
             warnings.simplefilter("ignore")
             m.fit_reml(X, y)
         profile = m._reml_profile
-        assert np.max(np.abs(noise)) <= 4 * np.finfo(float).eps
+        # every solve ended at its fixed point, at most two iterations in (a
+        # solve warm-started at its own fixed point stops on the first)
+        assert len(floor_verdicts) == profile["irls_calls"]
         assert profile["irls_iters"] <= 2 * profile["irls_calls"]
+        # the published verdict is the floor-resolved one: certified within
+        # the floor, the limiting accuracy (not converged) above it
+        np.testing.assert_allclose(
+            profile["irls_mode_score"], profile["irls_mode_bar"] * floor_verdicts[-1], rtol=1e-15
+        )
+        stagnated = m._reml_result.terminal_refit_termination == "score_stagnated"
+        assert stagnated == (floor_verdicts[-1] > 1.0)
