@@ -1317,6 +1317,92 @@ class TestDirectSolverBasic:
         assert result.converged
         assert floor_verdicts and max(floor_verdicts) <= 1.0
 
+    def test_a_zero_crossing_proposal_takes_the_first_halving_inside_the_domain(self):
+        """The line search accepts the first halving that keeps every weighted row at eta > 0.
+
+        The committed state has eta = 1 on every row and the proposal
+        ``1 - 3x`` crosses zero for x > 1/3.  The merit is made to accept
+        every trial, so only the domain test decides: without it the
+        crossing full step is taken; with it alpha = 1/2 (``1 - 1.5x``, still
+        crossing for x > 2/3) is refused and alpha = 1/4 accepted.  A row
+        with zero weight may sit outside.  Only the two inverse links
+        declare the domain.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import (
+            CauchitLink,
+            CloglogLink,
+            IdentityLink,
+            InverseLink,
+            InverseSquaredLink,
+            LogitLink,
+            LogLink,
+            NegativeBinomialLink,
+            ProbitLink,
+            SqrtLink,
+        )
+        from superglm.solvers.irls_state import (
+            _evaluate_irls_state,
+            _select_irls_trial,
+            link_domain_violation,
+        )
+
+        n = 41
+        x = np.linspace(0.0, 1.0, n)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        y = np.full(n, 0.8)
+        weights = np.ones(n)
+        weights[-1] = 0.0
+        offset = np.zeros(n)
+        offset[-1] = -5.0  # a zero-weight row outside the domain throughout
+
+        def state(slope: float):
+            return _evaluate_irls_state(
+                dm, y, weights, Gamma(), InverseLink(), offset, np.array([slope]), 1.0
+            )
+
+        committed, proposal = state(0.0), state(-3.0)
+        outside = link_domain_violation(InverseLink())
+        assert outside is not None
+        assert not outside(committed.eta_unclipped, weights)
+        assert outside(proposal.eta_unclipped, weights)
+        evaluated: list[float] = []
+
+        def evaluate(alpha: float):
+            evaluated.append(alpha)
+            return state(-3.0 * alpha)
+
+        def select(invalid_state):
+            evaluated.clear()
+            return _select_irls_trial(
+                committed=committed,
+                proposal=proposal,
+                evaluate_state=evaluate,
+                invalid_state=invalid_state,
+                merit_delta=lambda candidate, base: -1.0,
+            )
+
+        assert select(None).alpha == 1.0
+        decision = select(lambda candidate: outside(candidate.eta_unclipped, weights))
+        assert decision.alpha == 0.25 and decision.step_halvings == 2
+        assert not decision.step_rejected
+        assert evaluated == [0.5, 0.25]
+        assert outside(state(-1.5).eta_unclipped, weights)
+        assert not outside(state(-0.75).eta_unclipped, weights)
+
+        assert link_domain_violation(InverseSquaredLink()) is not None
+        for link in (
+            LogLink(),
+            IdentityLink(),
+            LogitLink(),
+            ProbitLink(),
+            CloglogLink(),
+            CauchitLink(),
+            SqrtLink(),
+            NegativeBinomialLink(theta=1.0),
+        ):
+            assert link_domain_violation(link) is None
+
     def test_inverse_link_default_start_is_raised_inside_the_domain(self):
         """A negative offset that puts the default start at eta <= 0 has its intercept raised.
 
