@@ -55,6 +55,60 @@ class _LevelTwoRecorder:
         self.rows.append(payload)
 
 
+def _force_constant_working_rows(monkeypatch, response, weights=None):
+    """Every PIRLS solve sees the same working rows, whatever the state.
+
+    The solve is then a function of ``(W, z)`` alone, so its second iteration
+    returns the first one's coefficients bit for bit on any BLAS: a forced
+    float64 fixed point.  For Gaussian/identity ``z = y`` is the working
+    response ``eta + (y - eta)`` without its rounding.
+    """
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct as irls_direct
+
+    real = irls_direct.coefficient_working_rows
+
+    def constant_rows(**kwargs):
+        rows = real(**kwargs)
+        return replace(
+            rows,
+            response=np.array(response, dtype=np.float64),
+            weights=rows.weights if weights is None else np.array(weights, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(irls_direct, "coefficient_working_rows", constant_rows)
+
+
+def _force_unresolved_score(monkeypatch, *, resolved=False):
+    """The capped score reads twice the bar (a fit to rounding), the floor-resolved one is real.
+
+    Returns the list of the real verdicts read at ``resolve_cap = inf``.
+    """
+    import math
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct as irls_direct
+
+    real = irls_direct.penalized_mode_residual
+    floor_verdicts: list[float] = []
+
+    def residual(**kwargs):
+        result = real(**kwargs)
+        if math.isinf(kwargs["resolve_cap"]):
+            floor_verdicts.append(result.ratio())
+            return result
+        return replace(
+            result,
+            relative=np.full_like(result.relative, 2.0 * result.bar),
+            bar_effective=np.full_like(result.bar_effective, result.bar),
+            resolved=resolved,
+        )
+
+    monkeypatch.setattr(irls_direct, "penalized_mode_residual", residual)
+    return floor_verdicts
+
+
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
     def test_working_sums_reject_nonfinite_inputs_before_moment_assembly(self):
@@ -1071,6 +1125,61 @@ class TestDirectSolverBasic:
         eta = result.intercept + columns @ result.beta
         assert np.all(eta > 0.0)
         assert result.converged
+
+    def test_the_fixed_point_stop_reads_the_centred_intercept(self, monkeypatch):
+        """A step that moves ``alpha`` but not the raw intercept's reading is not a fixed point.
+
+        A column at 1e8 puts ``|c' beta|`` near 5e7, where the raw intercept
+        ``alpha - c' beta`` has a spacing of 7.5e-9, so a start whose
+        ``alpha`` is 1e-9 off the solve's own reads the same raw intercept.
+        The solve is forced to one answer and the score above its bar, so
+        the first iteration moves ``alpha`` by that 1e-9 and leaves ``beta``
+        and the raw intercept bitwise unchanged; only the second repeats
+        itself.  Mutation check: comparing the raw intercept alone stopped
+        on the first iteration.
+        """
+        import math
+
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import centred_warm_start
+
+        n = 64
+        x = 1e8 + np.random.default_rng(1).uniform(0.0, 1.0, n)
+        y = 2.0 + 0.5 * (x - 1e8)
+        _force_constant_working_rows(monkeypatch, y)
+        floor_verdicts = _force_unresolved_score(monkeypatch)
+
+        def solve(**start):
+            return fit_irls_direct(
+                X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+                y=y,
+                weights=np.ones(n),
+                family=Gaussian(),
+                link=IdentityLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+                **start,
+            )[0]
+
+        cold = solve()
+        assert cold.converged and cold.n_iter == 2
+        alpha, centre = centred_warm_start(cold)
+        moved = alpha + 1e-9
+        assert moved != alpha
+        assert moved - math.fsum(centre * cold.beta) == cold.intercept
+        warm = solve(
+            beta_init=cold.beta.copy(),
+            intercept_init=cold.intercept,
+            _centred_init=(moved, centre),
+        )
+        assert warm.centred_intercept == alpha
+        assert warm.n_iter == 2
+        assert warm.converged
+        assert floor_verdicts and max(floor_verdicts) <= 1.0
 
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""

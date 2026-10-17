@@ -3837,13 +3837,19 @@ def _fit_irls_direct_once(
                     and not _has_scop
                     and not has_constraints
                     and intercept == intercept_prev
+                    and retained.centred_intercept == committed.centred_intercept
                     and np.array_equal(beta, beta_prev)
                 ):
-                    # The full step left every coefficient bitwise where it
-                    # was: the iteration is a deterministic map at a float64
-                    # fixed point, and every further iteration repeats this
-                    # one (the step-tolerance stop of Dennis & Schnabel 1996,
-                    # section 7.2, at its strictest).  It ends here.  The
+                    # The full step left the state bitwise where it was: the
+                    # iteration is a deterministic map at a float64 fixed
+                    # point, and every further iteration repeats this one
+                    # (the step-tolerance stop of Dennis & Schnabel 1996,
+                    # section 7.2, at its strictest).  A centred state is
+                    # ``(alpha, beta)``, and the raw intercept only its
+                    # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
+                    # and can hold still while ``alpha`` moves, so ``alpha``
+                    # is compared too (``None`` on both sides otherwise).  It
+                    # ends here.  The
                     # floors are resolved whatever the relative score: where
                     # the residuals are at the rounding of the fitted values
                     # (a model that fits its response exactly, as a linear
