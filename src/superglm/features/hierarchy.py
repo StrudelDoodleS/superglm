@@ -437,7 +437,7 @@ class Hierarchy:
         """The fitted term name of one level, ``"<feature>:<level>"``."""
         return f"{self._name}:{self.names[depth]}"
 
-    def level_view(self, level: str) -> HierarchyLevel:
+    def _level_view(self, level: str) -> HierarchyLevel:
         """The fitted level named *level* (its bare name, such as ``"model"``)."""
         depth = self.names.index(level)
         if depth not in self._paths:

@@ -436,7 +436,7 @@ def build_coef_rows(
                 structured_kind = "random_effect"
             else:
                 structured_kind = f"factor_smooth_{spec.basis}"
-            level_spec = spec.level_view(g.subgroup_type) if isinstance(spec, Hierarchy) else spec
+            level_spec = spec._level_view(g.subgroup_type) if isinstance(spec, Hierarchy) else spec
             rows.append(
                 _CoefRow(
                     name=g.name,

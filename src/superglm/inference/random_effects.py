@@ -197,7 +197,7 @@ def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, Any]:
         if isinstance(spec, RandomEffect):
             matches.append((group, spec))
         elif isinstance(spec, Hierarchy):
-            matches.append((group, spec.level_view(group.subgroup_type)))
+            matches.append((group, spec._level_view(group.subgroup_type)))
     if not matches:
         raise KeyError(f"No fitted RandomEffect term named {name!r}.")
     if len(matches) > 1:
