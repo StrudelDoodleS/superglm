@@ -255,6 +255,10 @@ class ModelConfig:
             "weight_semantics": self.weight_semantics,
             "n_jobs": self.n_jobs,
             "max_memory": self.max_memory,
+            # A model declared with ``terms=`` holds the same feature and
+            # interaction templates as one declared with ``features=``, so it is
+            # rebuilt through ``features=`` and the installed templates.
+            "terms": None,
         }
 
     def materialize(self, model_type):

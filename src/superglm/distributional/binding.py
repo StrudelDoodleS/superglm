@@ -84,9 +84,11 @@ def bind_predictor(
     name : str
         A name from ``family.parameters``. This is also the name used in
         model results and offsets.
-    *terms : str or BoundTerm or BoundInteraction
-        Numeric column names or declarations made by the term helpers.
-        Supply no terms for an intercept-only predictor.
+    *terms : str or BoundTerm or BoundInteraction or mapping
+        Numeric column names or declarations made by the term helpers. A
+        ``{column: spec}`` mapping adds ``term(column, spec)`` for each entry,
+        in the mapping's order. Supply no terms for an intercept-only
+        predictor.
     intercept : bool, default=True
         Include an intercept in this predictor.
     link : str or Link, optional

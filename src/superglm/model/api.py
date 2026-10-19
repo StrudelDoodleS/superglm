@@ -18,6 +18,7 @@ from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
+from superglm.terms import TermInput
 from superglm.types import FeatureSpec
 
 from . import (
@@ -93,6 +94,8 @@ class SuperGLM:
         # Threads
         n_jobs: int | Literal["auto"] = "auto",
         max_memory: int | str = "auto",
+        *,
+        terms: Sequence[TermInput] | None = None,
     ):
         """
         Parameters
@@ -124,7 +127,9 @@ class SuperGLM:
         features : mapping[hashable, FeatureSpec], optional
             Explicit feature specifications mapping hashable column labels to feature
             objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
-            Mutually exclusive with *splines*.
+            Mutually exclusive with *splines* and *terms*. A list of term
+            declarations belongs in *terms*; ``features=`` refuses one with a
+            ``TypeError``.
         splines : list[str], optional
             Deprecated auto-detection shorthand. Column names in this list are
             treated as splines and all other columns are inferred as categorical
@@ -139,7 +144,26 @@ class SuperGLM:
         interactions : list[tuple[str, str] or interaction spec], optional
             Pairs of feature names to interact, or explicit interaction
             specifications such as ``FactorSmooth``. Tuple interaction types
-            are auto-detected from their parent feature specs.
+            are auto-detected from their parent feature specs. Mutually
+            exclusive with *terms*.
+        terms : list of str, BoundTerm, BoundInteraction or mapping, optional
+            Keyword only. The model's terms as one list, in the form the
+            ``SuperLSS`` family helpers such as ``family.location`` take: a
+            column name for a numeric linear term; ``s``, ``cat``, ``re`` and
+            ``term`` for main effects; ``ti`` and ``interaction`` for
+            interactions; and ``{column: spec}`` mappings, each standing for
+            one ``term(column, spec)`` per entry, in the mapping's order. For
+            example, ``terms=[s("age", k=10), s("value", k=8), cat("region"),
+            "density", ti("age", "value")]``. A list gives the same model as the
+            equivalent ``features=`` and ``interactions=``, bit for bit: the
+            design holds the main effects in the order declared, then the
+            interactions in the order declared, so declaration order sets
+            the column order. Cannot be combined with *features*, *splines*
+            or *interactions*. Like ``features=``, it does not read
+            *n_knots*, *degree* or *categorical_base*, which configure only
+            *splines* auto-detection; a value other than the default for
+            any of them raises ``ValueError``. Set those options on each term
+            instead, as in ``s("age", n_knots=8)``.
         active_set : bool
             Use active-set cycling in the BCD solver.
         direct_solve : {"auto", "gram", "qr", "structured"}
@@ -311,6 +335,7 @@ class SuperGLM:
             weight_semantics=weight_semantics,
             n_jobs=n_jobs,
             max_memory=max_memory,
+            terms=terms,
         )
 
     def _parallel_scope(self):

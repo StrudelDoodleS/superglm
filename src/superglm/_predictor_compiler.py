@@ -199,6 +199,7 @@ def compile_predictor_design(
         _priced_group_dimension,
         _process_info,
         add_interaction,
+        refuse_unsupported_interaction_parents,
         resolve_discrete_n_bins,
         should_discretize,
         should_discretize_factor_smooth,
@@ -587,6 +588,11 @@ def compile_predictor_design(
     build_row_bytes = _INTERACTION_BUILD_ROW_BYTES
     for iname in interaction_order:
         ispec = interaction_specs[iname]
+        if not isinstance(ispec, FactorSmooth):
+            # A declared spec skips the refusals a (left, right) pair meets in
+            # add_interaction, so they run here before any interaction builds.
+            left, right = ispec.parent_names
+            refuse_unsupported_interaction_parents(left, right, specs)
         for parent in ispec.parent_names:
             X.column_array(parent)
         binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)

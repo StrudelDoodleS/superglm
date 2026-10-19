@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -21,6 +21,7 @@ from superglm.features.interaction import (
     SplineCategorical,
     TensorInteraction,
 )
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
 from superglm.types import FeatureSpec, LambdaPolicy
 
@@ -104,7 +105,7 @@ class BoundInteraction:
         return deepcopy(self._spec)
 
 
-type TermInput = str | BoundTerm | BoundInteraction
+type TermInput = str | BoundTerm | BoundInteraction | Mapping[str, FeatureSpec]
 
 
 @dataclass(frozen=True)
@@ -447,15 +448,62 @@ def ti(
     )
 
 
+def _expand_mappings(terms: Sequence[TermInput]) -> tuple[object, ...]:
+    """Replace each ``{column: spec}`` mapping by ``term(column, spec)`` in its order.
+
+    ``term`` copies each specification on its own, so one specification object
+    placed under several columns gives each column an independent term, as
+    ``SuperGLM(features=...)`` does.
+    """
+    expanded: list[object] = []
+    for declaration in terms:
+        if isinstance(declaration, Mapping):
+            expanded.extend(term(column, spec) for column, spec in declaration.items())
+        else:
+            expanded.append(declaration)
+    return tuple(expanded)
+
+
+def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str]) -> str:
+    """Why ``ti`` refuses ``parent``, and what declares the intended interaction."""
+    if isinstance(spec, OrderedCategorical) and spec.basis_kind == "spline":
+        left, right = parents
+        return (
+            f"ti takes two s(...) splines; parent {parent!r} is an OrderedCategorical "
+            "with a spline basis, so declare its tensor as "
+            f"interaction(TensorInteraction({left!r}, {right!r}))"
+        )
+    if isinstance(spec, OrderedCategorical):
+        return (
+            f"ti takes two s(...) splines; parent {parent!r} is an OrderedCategorical "
+            "without a spline basis, which cannot parent a tensor"
+        )
+    return f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
+
+
 def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
-    """Resolve declarations without reading data or constructing row designs."""
+    """Resolve declarations without reading data or constructing row designs.
+
+    A ``{column: spec}`` mapping among the declarations stands for
+    ``term(column, spec)`` for each entry, in the mapping's order. Main terms
+    keep their declaration order, and interactions keep theirs.
+    """
+    if isinstance(terms, Mapping):
+        raise TypeError(
+            "terms must be a sequence of term declarations; put a {column: spec} "
+            "mapping inside it, as in [features, 'density']"
+        )
     if isinstance(terms, str | bytes) or not isinstance(terms, Sequence):
         raise TypeError("terms must be a sequence of term declarations")
     features: dict[str, FeatureSpec] = {}
     interactions: dict[str, InteractionSpec] = {}
     spline_parent_interactions: set[str] = set()
+    # One interaction of a class per unordered parent pair: ti("x", "z") and
+    # ti("z", "x") span one column space, as the (left, right) tuple form,
+    # which keeps the first pair, already assumes.
+    pair_owners: dict[tuple[type, frozenset[str]], str] = {}
     # Copy the complete graph once, retaining aliases within the owned graph.
-    for declaration in deepcopy(tuple(terms)):
+    for declaration in deepcopy(_expand_mappings(terms)):
         if isinstance(declaration, str):
             _validate_name(declaration)
             name, spec = declaration, Numeric()
@@ -464,6 +512,14 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
         elif isinstance(declaration, BoundInteraction):
             if declaration.name in interactions:
                 raise ValueError(f"Duplicate interaction declaration: {declaration.name!r}")
+            pair = (type(declaration._spec), frozenset(declaration._spec.parent_names))
+            if pair in pair_owners:
+                raise ValueError(
+                    f"Interactions {pair_owners[pair]!r} and {declaration.name!r} are both "
+                    f"{pair[0].__name__} over the same two columns, in either order; "
+                    "declare one"
+                )
+            pair_owners[pair] = declaration.name
             interactions[declaration.name] = declaration._spec
             if declaration._requires_spline_parents:
                 spline_parent_interactions.add(declaration.name)
@@ -482,8 +538,7 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
         for parent in ispec.parent_names:
             if parent not in features:
                 raise ValueError(f"Interaction {name!r} requires declared parent {parent!r}")
-            if name in spline_parent_interactions and not isinstance(features[parent], _SplineBase):
-                raise TypeError(
-                    f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
-                )
+            parent_spec = features[parent]
+            if name in spline_parent_interactions and not isinstance(parent_spec, _SplineBase):
+                raise TypeError(_ti_parent_message(parent, parent_spec, ispec.parent_names))
     return NormalizedTerms(features, interactions, tuple(interactions))

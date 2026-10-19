@@ -11,6 +11,7 @@ import pytest
 import superglm.distributional.api as distributional_api
 from superglm import (
     BoundPredictor,
+    Categorical,
     GammaLS,
     GaussianLS,
     GeneralizedGammaLSS,
@@ -25,6 +26,7 @@ from superglm import (
     TwoPieceLogNormalLSS,
     TwoPieceNormalLSS,
     bind_predictor,
+    cat,
     s,
     term,
     ti,
@@ -427,6 +429,41 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
     )
     np.testing.assert_array_equal(restored.covariance_, model.covariance_)
     assert restored.predictors[0].interaction_order == ("x:z",)
+
+
+@pytest.mark.filterwarnings("ignore::superglm.diagnostics.convergence.ConvergenceWarning")
+def test_feature_mapping_and_term_list_fit_bit_identically():
+    """Three smoothing steps suffice: both forms must take the same steps."""
+    frame, response, weights, _ = _fixture(n=160)
+    frame = frame.assign(g=np.where(np.arange(len(frame)) % 3 == 0, "a", "b"))
+    declarations = (
+        (
+            ({"x": Spline(n_knots=4), "z": Spline(n_knots=4), "g": Categorical()},),
+            ({"z": Numeric()},),
+        ),
+        ((s("x", n_knots=4), s("z", n_knots=4), cat("g")), ("z",)),
+    )
+    fits = []
+    for location, scale in declarations:
+        family = GaussianLS(scale_floor=0.02)
+        model = SuperLSS(
+            family,
+            family.location(*location, ti("x", "z", n_knots=(4, 4))),
+            family.scale(*scale),
+        )
+        fits.append(model.fit_reml(frame, response, sample_weight=weights, max_reml_iter=3))
+    left, right = fits
+    for mapped, listed in zip(left.predictors, right.predictors, strict=True):
+        assert tuple(mapped.features) == tuple(listed.features)
+        assert mapped.interaction_order == listed.interaction_order
+    assert np.array_equal(left.result_.coefficients, right.result_.coefficients)
+    assert dict(left.smoothing_parameters_) == dict(right.smoothing_parameters_)
+    assert left.result_.log_likelihood == right.result_.log_likelihood
+    restored = SuperLSS.from_bytes(left.to_bytes())
+    for model in (restored, left):
+        pd.testing.assert_frame_equal(
+            model.predict_parameters(frame), right.predict_parameters(frame)
+        )
 
 
 def test_trusted_032_artifact_preserves_predictions_and_covariance():

@@ -31,6 +31,27 @@ predictions = model.predict(df)
 print(model.summary())
 ```
 
+The same model can be declared as one list of terms, the form that `SuperLSS`
+predictors take. Main effects keep the order you list them in.
+
+```python
+from superglm import SuperGLM, cat, s
+
+terms = [
+    s("DrivAge", kind="ps", k=14, knot_strategy="quantile_rows"),
+    s("VehAge", kind="cr", k=10, knot_strategy="quantile_rows"),
+    s("BonusMalus", kind="cr", k=12, knot_strategy="quantile_tempered"),
+    cat("Area", base="most_exposed"),
+    "LogDensity",
+]
+
+model = SuperGLM(family="poisson", selection_penalty=0.0, terms=terms)
+model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
+```
+
+[Declaring terms](../how-to/specify-features.md#declaring-terms) shows both
+forms side by side, with interactions.
+
 ## Large-`n` REML
 
 If the dataset is large, keep the same workflow but turn on discrete REML:

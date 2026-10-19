@@ -147,6 +147,22 @@ def test_explicit_factor_smooth_retains_its_configured_name():
     assert normalized.interaction_order == ("by_group",)
 
 
+@pytest.mark.parametrize(
+    "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
+)
+def test_one_interaction_of_a_class_per_column_pair(second):
+    from superglm.features.interaction import TensorInteraction
+    from superglm.terms import interaction, normalize_terms, s, ti
+
+    other = (
+        ti("z", "x")
+        if second == "transposed"
+        else interaction(TensorInteraction("x", "z"), name="x_by_z")
+    )
+    with pytest.raises(ValueError, match="same two columns"):
+        normalize_terms([s("x"), s("z"), ti("x", "z"), other])
+
+
 def test_generic_main_term_refuses_an_interaction_spec():
     from superglm.features.interaction import NumericInteraction
     from superglm.terms import term
@@ -207,6 +223,7 @@ def test_numeric_conversion_preserves_convertible_strings():
 
 
 def test_explicit_tensor_preserves_ordered_spline_parent_support():
+    from superglm import Polynomial
     from superglm.features import OrderedCategorical, Spline
     from superglm.features.interaction import TensorInteraction
     from superglm.terms import interaction, normalize_terms, s, term, ti
@@ -220,5 +237,50 @@ def test_explicit_tensor_preserves_ordered_spline_parent_support():
     )
     built = _compile((*parents, interaction(TensorInteraction("band", "x"))), data)
     assert built.interaction_specs["band:x"]._p1 > 0
-    with pytest.raises(TypeError, match="spline"):
+    with pytest.raises(TypeError, match=r"interaction\(TensorInteraction\('band', 'x'\)\)"):
         normalize_terms((*parents, ti("band", "x")))
+    stepped = term("band", OrderedCategorical(order=["a", "b", "c"], basis=Polynomial(degree=1)))
+    with pytest.raises(TypeError, match="without a spline basis"):
+        normalize_terms((stepped, s("x", k=5), ti("band", "x")))
+    with pytest.raises(TypeError, match=r"use s\('x'\)"):
+        normalize_terms(("x", s("z", k=5), ti("x", "z")))
+
+
+def test_a_feature_mapping_expands_to_terms_in_its_order():
+    from superglm.features import Categorical, Numeric, Spline
+    from superglm.terms import normalize_terms, s, ti
+
+    shared = Spline(kind="cr", k=6)
+    mapping = {"x": shared, "z": shared, "area": Categorical()}
+    result = normalize_terms(("w", mapping, ti("x", "z"), s("v", k=5)))
+    assert tuple(result.features) == ("w", "x", "z", "area", "v")
+    assert result.interaction_order == ("x:z",)
+    assert isinstance(result.features["w"], Numeric)
+    # One spec object under two columns gives two independent terms.
+    assert result.features["x"] is not result.features["z"]
+    assert result.features["x"] is not shared
+    declared = shared.n_knots
+    shared.n_knots = declared + 5
+    assert result.features["x"].n_knots == result.features["z"].n_knots == declared
+
+
+@pytest.mark.parametrize("case", ["duplicate", "repeated", "interaction", "column", "bare"])
+def test_invalid_feature_mappings_are_refused(case):
+    from superglm.features import Numeric, Spline
+    from superglm.features.interaction import TensorInteraction
+    from superglm.terms import normalize_terms, s
+
+    cases = {
+        "duplicate": (({"x": Spline()}, s("x")), ValueError, "Duplicate main term"),
+        "repeated": (({"x": Numeric()}, {"x": Numeric()}), ValueError, "Duplicate main term"),
+        "interaction": (
+            ({"x": Spline(), "z": Spline(), "x:z": TensorInteraction("x", "z")},),
+            TypeError,
+            "interaction",
+        ),
+        "column": (({0: Numeric()},), ValueError, "non-empty strings"),
+        "bare": ({"x": Numeric()}, TypeError, "inside"),
+    }
+    terms, error, message = cases[case]
+    with pytest.raises(error, match=message):
+        normalize_terms(terms)

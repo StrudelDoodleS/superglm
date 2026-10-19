@@ -12,7 +12,7 @@ model.py focused on orchestration.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -511,26 +511,19 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     )
 
 
-def add_interaction(
-    feat1: str,
-    feat2: str,
-    specs: dict[str, FeatureSpec],
-    interaction_specs: dict[str, Any],
-    interaction_order: list[str],
-    name: str | None = None,
-    **kwargs: Any,
+def refuse_unsupported_interaction_parents(
+    feat1: str, feat2: str, specs: Mapping[str, FeatureSpec]
 ) -> None:
-    """Register an interaction between two already-registered features.
+    """Refuse a main-effect spec that cannot parent an interaction.
 
-    Mutates ``interaction_specs`` and ``interaction_order`` in place.
+    ``add_interaction`` runs this when it resolves a ``(left, right)`` pair,
+    and the design compiler runs it for every interaction declared as a spec
+    (``terms=``, the family helpers' ``ti`` and ``interaction``), except a
+    ``FactorSmooth``, which builds its own marginal and reads its group as
+    labels.  A parent absent from ``specs`` is left to the caller's own check.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
-
-    if feat1 not in specs:
-        raise ValueError(f"Parent feature not found: {feat1}")
-    if feat2 not in specs:
-        raise ValueError(f"Parent feature not found: {feat2}")
 
     # An OrderedCategorical without an inner spline can only be a pre-0.24
     # pickle of the removed step mode; every spec this version constructs has
@@ -540,7 +533,7 @@ def add_interaction(
     # at registration; otherwise the pair only fails much later, mid
     # design-matrix build, after the caller has already committed a fit.
     for parent in (feat1, feat2):
-        spec = specs[parent]
+        spec = specs.get(parent)
         if isinstance(spec, OrderedCategorical) and (
             spec.basis != "spline" or spec._spline is None
         ):
@@ -580,6 +573,26 @@ def add_interaction(
                 "polynomial_ranges, which shape a main effect only in this version; "
                 "declare the interaction on a spline without them."
             )
+
+
+def add_interaction(
+    feat1: str,
+    feat2: str,
+    specs: dict[str, FeatureSpec],
+    interaction_specs: dict[str, Any],
+    interaction_order: list[str],
+    name: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """Register an interaction between two already-registered features.
+
+    Mutates ``interaction_specs`` and ``interaction_order`` in place.
+    """
+    if feat1 not in specs:
+        raise ValueError(f"Parent feature not found: {feat1}")
+    if feat2 not in specs:
+        raise ValueError(f"Parent feature not found: {feat2}")
+    refuse_unsupported_interaction_parents(feat1, feat2, specs)
 
     kind1 = _spec_kind(specs[feat1])
     kind2 = _spec_kind(specs[feat2])

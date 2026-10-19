@@ -6,7 +6,7 @@ import copy
 import logging
 import math
 import warnings
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -48,6 +48,7 @@ from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
+from superglm.terms import TermInput, normalize_terms
 from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -926,6 +927,50 @@ def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> N
             )
 
 
+# The shorthand defaults that only `splines=` auto-detection reads.
+_SHORTHAND_DEFAULTS: dict[str, object] = {
+    "n_knots": 10,
+    "degree": 3,
+    "categorical_base": "most_exposed",
+}
+
+
+def _check_terms_arguments(
+    *,
+    features: object,
+    splines: object,
+    interactions: object,
+    shorthand: dict[str, object],
+) -> None:
+    """Refuse the arguments ``terms=`` replaces, and shorthand defaults it never reads.
+
+    ``n_knots``, ``degree`` and ``categorical_base`` configure only ``splines=``
+    auto-detection, so ``features=`` does not read them either; with
+    ``terms=`` a value other than the default is refused rather than ignored.
+    """
+    for name, value in (
+        ("features", features),
+        ("splines", splines),
+        ("interactions", interactions),
+    ):
+        if value is not None:
+            raise ValueError(
+                f"Cannot set both 'terms' and '{name}'. Declare every main effect and "
+                "interaction in terms=[...], or use features= and interactions= instead."
+            )
+    changed = [
+        f"{name}={value!r}"
+        for name, value in shorthand.items()
+        if value != _SHORTHAND_DEFAULTS[name]
+    ]
+    if changed:
+        raise ValueError(
+            f"Cannot set both 'terms' and {', '.join(changed)}. These defaults apply only "
+            "to splines= auto-detection; set the option on the term itself, as in "
+            "s('age', n_knots=8) or cat('region', base='first')."
+        )
+
+
 def init_model(
     model,
     family: str | Distribution = "poisson",
@@ -953,8 +998,33 @@ def init_model(
     weight_semantics: str = "prior",
     n_jobs: int | str = "auto",
     max_memory: int | str = "auto",
+    terms: Sequence[TermInput] | None = None,
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
+    if isinstance(features, list | tuple):
+        raise TypeError(
+            "features= takes a {column: spec} mapping. Pass a list of term "
+            "declarations such as [s('age'), cat('region')] as terms=[...]."
+        )
+    # Declarations from `terms=` resolve into the same feature mapping and named
+    # interaction specs that `features=` and `interactions=` produce.
+    declared_interactions: list[tuple[str, Any]] = []
+    if terms is not None:
+        _check_terms_arguments(
+            features=features,
+            splines=splines,
+            interactions=interactions,
+            shorthand={
+                "n_knots": n_knots,
+                "degree": degree,
+                "categorical_base": categorical_base,
+            },
+        )
+        normalized = normalize_terms(terms)
+        features = cast("Mapping[Hashable, FeatureSpec]", normalized.features)
+        declared_interactions = [
+            (name, normalized.interaction_specs[name]) for name in normalized.interaction_order
+        ]
     if features is not None and splines is not None:
         raise ValueError(
             "Cannot set both 'features' and 'splines'. "
@@ -1047,7 +1117,7 @@ def init_model(
     model._interaction_specs: dict[str, Any] = {}
     model._interaction_order: list[str] = []
     pending_interactions: list[tuple[str, str]] = []
-    explicit_interactions: list[Any] = []
+    explicit_interactions: list[tuple[str, Any]] = declared_interactions
     for interaction in interactions or ():
         if (
             isinstance(interaction, tuple)
@@ -1070,10 +1140,10 @@ def init_model(
                 "interaction specs with parent_names and name"
             )
         if interaction_name in model._interaction_specs or any(
-            existing.name == interaction_name for existing in explicit_interactions
+            name == interaction_name for name, _ in explicit_interactions
         ):
             raise ValueError(f"Interaction already added: {interaction_name}")
-        explicit_interactions.append(interaction)
+        explicit_interactions.append((interaction_name, interaction))
     model._pending_interactions = tuple(pending_interactions)
 
     # Register explicit features dict
@@ -1082,10 +1152,9 @@ def init_model(
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
 
-    for interaction in explicit_interactions:
-        owned = copy.deepcopy(interaction)
-        model._interaction_specs[owned.name] = owned
-        model._interaction_order.append(owned.name)
+    for interaction_name, interaction in explicit_interactions:
+        model._interaction_specs[interaction_name] = copy.deepcopy(interaction)
+        model._interaction_order.append(interaction_name)
 
     validate_term_name_namespace(model._specs, model._interaction_specs)
     validate_factor_smooth_configuration(
@@ -1122,14 +1191,23 @@ def clone_without_features(
     from superglm.features.factor_smooth import FactorSmooth
 
     keep_interactions: list[tuple[str, str] | object] = []
+    # An interaction declared as a spec under its own name (``terms=``) is
+    # copied as declared: a tuple would rebuild it with default options and
+    # the default name.
+    declared = dict(getattr(getattr(model, "_config", None), "interaction_templates", ()))
+    kept_declarations: list[tuple[str, Any]] = []
     # Check resolved interactions (fitted model)
     for iname in model._interaction_order:
         ispec = model._interaction_specs[iname]
         p1, p2 = ispec.parent_names
-        if p1 not in drop and p2 not in drop:
-            keep_interactions.append(
-                copy.deepcopy(ispec) if isinstance(ispec, FactorSmooth) else (p1, p2)
-            )
+        if p1 in drop or p2 in drop:
+            continue
+        if isinstance(ispec, FactorSmooth):
+            keep_interactions.append(copy.deepcopy(ispec))
+        elif iname in declared:
+            kept_declarations.append((iname, copy.deepcopy(declared[iname])))
+        else:
+            keep_interactions.append((p1, p2))
     # Check pending interactions (unfitted model)
     for p1, p2 in model._pending_interactions:
         if p1 not in drop and p2 not in drop:
@@ -1185,6 +1263,20 @@ def clone_without_features(
         separation=getattr(model, "_separation", "warn"),
         group_pricing=getattr(model, "_group_pricing", "spanned"),
     )
+    if kept_declarations:
+        for iname, ispec in kept_declarations:
+            new_model._interaction_specs[iname] = ispec
+        # Declaration order is design column order.
+        new_model._interaction_order = [
+            iname for iname in model._interaction_order if iname in new_model._interaction_specs
+        ]
+        new_model._config = new_model._config.with_value(
+            interaction_templates=tuple(
+                (iname, new_model._interaction_specs[iname])
+                for iname in new_model._interaction_order
+            ),
+            interaction_order=tuple(new_model._interaction_order),
+        )
     # The universes `bind_levels` bound, for the features kept.
     bindings = {
         name: binding
