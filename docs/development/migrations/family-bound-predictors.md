@@ -60,7 +60,9 @@ model = SuperLSS(
 ```
 
 The dict adds `term(column, spec)` for each entry, in the dict's order, and it
-can sit beside other terms, as in `family.location(features, ti("age", "value"))`.
+can sit beside other terms. With `features = {"age": Spline(k=8), "value": Numeric()}`,
+`family.location(features, s("vehicle_age", k=8), ti("age", "vehicle_age"))`
+adds a smooth and a tensor to the two terms the dict declares.
 `SuperGLM` takes the list form too, as `SuperGLM(terms=[...])`; see
 [Declaring terms](../../how-to/specify-features.md#declaring-terms).
 

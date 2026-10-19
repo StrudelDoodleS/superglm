@@ -153,8 +153,8 @@ class SuperGLM:
             ``term`` for main effects; ``ti`` and ``interaction`` for
             interactions; and ``{column: spec}`` mappings, each standing for
             one ``term(column, spec)`` per entry, in the mapping's order. For
-            example, ``terms=[s("age", k=10), cat("region"), "density",
-            ti("age", "density")]``. A list gives the same model as the
+            example, ``terms=[s("age", k=10), s("value", k=8), cat("region"),
+            "density", ti("age", "value")]``. A list gives the same model as the
             equivalent ``features=`` and ``interactions=``, bit for bit: the
             design holds the main effects in the order declared, then the
             interactions in the order declared, so declaration order sets

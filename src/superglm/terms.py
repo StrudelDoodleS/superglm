@@ -473,7 +473,7 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
     if isinstance(terms, Mapping):
         raise TypeError(
             "terms must be a sequence of term declarations; put a {column: spec} "
-            "mapping inside it, as in [features, ti('a', 'b')]"
+            "mapping inside it, as in [features, 'density']"
         )
     if isinstance(terms, str | bytes) or not isinstance(terms, Sequence):
         raise TypeError("terms must be a sequence of term declarations")
