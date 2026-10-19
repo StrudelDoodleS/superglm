@@ -3,6 +3,97 @@
 Choose the simplest feature type that matches the shape you want in the final
 pricing model.
 
+## Declaring terms
+
+`SuperGLM` and `SuperLSS` take the same terms in two forms: a dict keyed by
+column, or a list of term helpers. Use whichever reads better. The same model
+written either way gives the same fit, bit for bit.
+
+```python
+from superglm import Categorical, GammaLS, Spline, SuperGLM, SuperLSS, cat, s
+
+spline_feats = ["DrivAge", "VehAge", "BonusMalus"]
+cat_feats = ["Area", "VehBrand"]
+
+# A dict, keyed by column
+features = {c: Spline(k=10) for c in spline_feats} | {c: Categorical() for c in cat_feats}
+# A list of term helpers
+terms = [s(c, k=10) for c in spline_feats] + [cat(c) for c in cat_feats]
+
+glm = SuperGLM(family="poisson", features=features)
+glm = SuperGLM(family="poisson", terms=terms)
+
+family = GammaLS()
+lss = SuperLSS(family, family.mean(features), family.scale())
+lss = SuperLSS(family, family.mean(*terms), family.scale())
+```
+
+To change one entry, build the dict and then replace that entry. It keeps its
+place, so the other columns stay where they were.
+
+```python
+spline_feats = ["DrivAge", "VehAge", "BonusMalus"]
+cat_feats = ["Area", "VehBrand"]
+
+features = {c: Spline(k=10) for c in spline_feats} | {c: Categorical() for c in cat_feats}
+features["BonusMalus"] = Spline(k=12, knot_strategy="quantile_tempered")
+```
+
+A list holds interactions next to the main effects. `ti` joins two smooths,
+and `interaction(spec)` takes any other interaction class. A family helper
+takes the dict and interactions together.
+
+```python
+from superglm import SplineCategorical, interaction, ti
+
+terms = [
+    s("DrivAge", k=10),
+    s("VehAge", k=10),
+    cat("Area"),
+    ti("DrivAge", "VehAge"),
+    interaction(SplineCategorical("DrivAge", "Area")),
+]
+glm = SuperGLM(family="poisson", terms=terms)
+
+features = {"DrivAge": Spline(k=10), "VehAge": Spline(k=10), "Area": Categorical()}
+glm = SuperGLM(
+    family="poisson",
+    features=features,
+    interactions=[("DrivAge", "VehAge"), ("DrivAge", "Area")],
+)
+family = GammaLS()
+lss = SuperLSS(family, family.mean(features, ti("DrivAge", "VehAge")), family.scale())
+```
+
+One list can declare a frequency model and the mean of a severity model:
+
+```python
+terms = [s("DrivAge", k=10), s("VehAge", k=8), cat("Area"), ti("DrivAge", "VehAge")]
+
+frequency = SuperGLM(family="poisson", terms=terms)
+family = GammaLS()
+severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8)))
+```
+
+- Declaration order is design column order: the main effects in the order you
+  declare them, then the interactions in theirs.
+- A bare column name, such as `"Density"`, declares a numeric linear term. Use
+  `cat("Area")` for a categorical.
+- A dict passed to a family helper adds `term(column, spec)` for each entry,
+  in the dict's order.
+- A column can be declared once. A second declaration, in a dict or as a term,
+  raises an error.
+- An interaction cannot go in a dict. Put it in the list as `ti(...)` or
+  `interaction(spec)`.
+- `terms=` replaces `features=` and `interactions=`, so a model takes one or
+  the other.
+- `n_knots=`, `degree=` and `categorical_base=` configure only the old
+  `splines=` shorthand. With `terms=`, set them on each term, as in
+  `s("DrivAge", n_knots=8)`.
+- In `SuperGLM`, declare a factor smooth with `features=` and `interactions=`.
+  Through `terms=` its group must be declared as a term, and `SuperGLM` refuses
+  a categorical or random effect on a factor smooth's group.
+
 ## Splines
 
 `Spline(kind, k)` is the main public spline API. `k` is the public basis size

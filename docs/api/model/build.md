@@ -1,7 +1,8 @@
 # Build
 
-{py:class}`~superglm.SuperGLM` is built from a family, a feature specification
-and a penalty policy, with every constructor argument described on its page.
+{py:class}`~superglm.SuperGLM` is built from a family, its terms (a `features=`
+dict or a `terms=` list) and a penalty policy, with every constructor argument
+described on its page.
 Once the model exists, the properties below hold that configuration, and the
 trailing-underscore attributes are filled in by the fit.
 

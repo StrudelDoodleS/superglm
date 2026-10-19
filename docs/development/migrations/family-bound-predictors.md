@@ -43,6 +43,27 @@ The old constructor keywords raise `TypeError`. Lower-level `Predictor`
 templates remain available for inspecting model configuration and for
 numerical interfaces; the public constructor takes family-bound declarations.
 
+## Pass a feature dict to a helper
+
+A helper also takes a `{column: spec}` dict, so the mapping from a `Predictor`
+template, or a `features` dict written for `SuperGLM`, carries over as it is:
+
+```python
+from superglm import GaussianLS, Numeric, Spline, SuperLSS
+
+family = GaussianLS()
+model = SuperLSS(
+    family,
+    family.location({"age": Spline(kind="cr", k=8), "value": Numeric()}),
+    family.scale(),
+)
+```
+
+The dict adds `term(column, spec)` for each entry, in the dict's order, and it
+can sit beside other terms, as in `family.location(features, ti("age", "value"))`.
+`SuperGLM` takes the list form too, as `SuperGLM(terms=[...])`; see
+[Declaring terms](../../how-to/specify-features.md#declaring-terms).
+
 ## Unpack a sequence when building declarations programmatically
 
 ```python

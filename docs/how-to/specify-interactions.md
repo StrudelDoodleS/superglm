@@ -16,6 +16,20 @@ model = SuperGLM(
 model.fit(df, y, sample_weight=exposure)
 ```
 
+The same model as one list of terms names the interaction class itself: `ti`
+joins two smooths, and `interaction(spec)` takes any class in the table below.
+See [Declaring terms](specify-features.md#declaring-terms).
+
+```python
+from superglm import SplineCategorical, SuperGLM, cat, interaction, s
+
+model = SuperGLM(
+    terms=[s("age", k=14), cat("region"), interaction(SplineCategorical("age", "region"))],
+    selection_penalty=0.01,
+)
+model.fit(df, y, sample_weight=exposure)
+```
+
 ## Auto-detected interaction types
 
 | Parent types | Interaction class | Geometry |

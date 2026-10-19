@@ -75,7 +75,11 @@ The model snapshots the declarations and family configuration at construction.
 A bare string means a numeric linear term: `family.location("age")`. It never
 infers categories from the data. Use `cat("region")` for categorical encoding,
 `s("age")` for a spline, and `re("broker")` for a random effect. Existing feature
-specifications can be bound with `term("age", Numeric())`.
+specifications can be bound with `term("age", Numeric())`. A `{column: spec}`
+dict, such as a `features` dict written for `SuperGLM`, can stand among the
+terms: `family.location(features, ti("age", "vehicle_age"))` adds one term per
+entry, in the dict's order. See
+[Declaring terms](specify-features.md#declaring-terms).
 
 ```python
 from superglm import GaussianLS, Numeric, SuperLSS, cat, re, s, term, ti
