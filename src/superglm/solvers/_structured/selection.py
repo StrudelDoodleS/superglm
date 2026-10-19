@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Literal
@@ -502,11 +502,13 @@ def _declared_ancestors(
 ) -> frozenset[int]:
     """The RandomEffect terms the leaf is declared nested in, transitively (§3.13).
 
-    Follows ``RandomEffect(nested_in=)`` from the leaf through each declared
-    parent's own declaration, by feature name; a name that is not a
-    RandomEffect term of this design ends the walk.
+    Follows ``RandomEffect(nested_in=)`` and ``Hierarchy`` levels from the
+    leaf through each declared parent's own declaration, by fitted level
+    name: a ``RandomEffect`` feature's group is named for the feature, and a
+    hierarchy level's ``"<feature>:<level>"``.  A name that is not a
+    random-effect level of this design ends the walk.
     """
-    by_name = {groups[index].feature_name: index for index in random_effects}
+    by_name: dict[Hashable, int] = {groups[index].name: index for index in random_effects}
     ancestors: list[int] = []
     parent = random_effects[leaf_index].declared_parent
     while parent is not None and parent in by_name and by_name[parent] not in ancestors:

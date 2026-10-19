@@ -14,9 +14,13 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm._reporting_state import ReportingSupportState
 from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
+from superglm.features.hierarchy import Hierarchy, feature_column
 from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
-from superglm.inference.covariance import covariance_selected_diagonal
+from superglm.inference.covariance import (
+    covariance_quadratic_form,
+    covariance_selected_diagonal,
+)
 from superglm.links import LogLink, stabilize_eta
 from superglm.model.fit_data_guard import FitGeometryGuard, require_unchanged_fit_data
 from superglm.model.retired_state import retained_linear_state
@@ -34,7 +38,22 @@ _LAMBDA_UPPER_BOUND = 1.0e10
 
 @dataclass(frozen=True)
 class RandomEffectResult:
-    """Variance-component summary and one row per fitted factor level."""
+    """Variance-component summary and one row per fitted factor level.
+
+    ``unseen_effect`` is the effect a level the fit never saw is predicted
+    with (for a ``Hierarchy`` level, a path new from its top level): ``0.0``
+    under ``unseen="population"``, ``nan`` under ``unseen="error"``, which
+    refuses such a level.  Under ``unseen="weighted"`` it is ``a'b``, the
+    fitted level effects ``b`` averaged with ``a``, each level's share of the
+    training weight, and ``unseen_se`` is its posterior standard error
+    ``sqrt(a' V a)`` over the levels' posterior covariance ``V``: the
+    uncertainty in the book's weighted mean effect.  A new level's own
+    deviation is not estimated: drawn as the rule assumes, about that mean
+    with the fitted variance ``tau_squared``, its effect spreads about
+    ``unseen_effect`` with standard deviation ``sqrt(tau_squared +
+    unseen_se**2)``.  Under ``"population"`` the mean is the model's zero,
+    ``unseen_se`` is ``0.0`` and the spread is ``sqrt(tau_squared)``.
+    """
 
     name: str
     lambda_value: float
@@ -47,6 +66,8 @@ class RandomEffectResult:
     at_upper_boundary: bool
     table: pd.DataFrame
     diagnostics: dict[str, Any]
+    unseen_effect: float = 0.0
+    unseen_se: float = 0.0
 
     @property
     def variance_component(self) -> float:
@@ -162,18 +183,29 @@ def vectorized_conditional_unpooled_effect(
     return effects
 
 
-def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, RandomEffect]:
-    matches: list[tuple[GroupSlice, RandomEffect]] = []
+def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, Any]:
+    """The fitted group named *name* and the spec that reads its levels.
+
+    A ``Hierarchy`` level is read through its ``HierarchyLevel`` view, which
+    answers ``_levels`` and ``_prediction_codes`` as a ``RandomEffect`` does.
+    """
+    matches: list[tuple[GroupSlice, Any]] = []
     for group in model._groups:
         if group.name != name and group.feature_name != name:
             continue
         spec = model._specs.get(group.feature_name)
         if isinstance(spec, RandomEffect):
             matches.append((group, spec))
+        elif isinstance(spec, Hierarchy):
+            matches.append((group, spec._level_view(group.subgroup_type)))
     if not matches:
         raise KeyError(f"No fitted RandomEffect term named {name!r}.")
     if len(matches) > 1:
-        raise ValueError(f"RandomEffect name {name!r} is ambiguous.")
+        names = ", ".join(repr(group.name) for group, _ in matches)
+        raise ValueError(
+            f"RandomEffect name {name!r} is ambiguous: it names the levels {names}; "
+            "ask for one of them."
+        )
     return matches[0]
 
 
@@ -236,7 +268,7 @@ def _stored_support(model, group: GroupSlice) -> StructuredLevelSupport | None:
 def _reporting_rows(
     model,
     group: GroupSlice,
-    spec: RandomEffect,
+    spec: Any,
     *,
     X,
     y,
@@ -258,7 +290,9 @@ def _reporting_rows(
 
     frame = as_eager_frame(X)
     feature_name = group.feature_name
-    codes = spec._prediction_codes(frame.column_array(feature_name))
+    codes = spec._prediction_codes(
+        feature_column(frame.column_array, feature_name, model._specs[feature_name])
+    )
     if np.any(codes < 0):
         raise ValueError("random-effect reporting rows contain unseen fitted levels")
     y_values = np.asarray(y, dtype=np.float64)
@@ -443,6 +477,9 @@ def random_effect_result(
             "collapsed": np.full(len(effect), collapsed, dtype=bool),
         }
     )
+    unseen_effect, unseen_se = _unseen_estimate(
+        spec, effect, inference["XtWX_inv_aug"], augmented_indices, phi
+    )
     group_edf = model._group_edf or {}
     diagnostics = {
         "credibility_out_of_bounds": credibility_violation,
@@ -466,7 +503,24 @@ def random_effect_result(
         at_upper_boundary=at_upper_boundary,
         table=table,
         diagnostics=diagnostics,
+        unseen_effect=unseen_effect,
+        unseen_se=unseen_se,
     )
+
+
+def _unseen_estimate(
+    spec, effect: NDArray, covariance, augmented_indices: NDArray, phi: float
+) -> tuple[float, float]:
+    """``(a'b, sqrt(a' V a))`` for the weights ``a`` an unseen level takes (``RandomEffectResult``)."""
+    if spec.unseen == "error":
+        return float("nan"), float("nan")
+    weights = spec.unseen_contrast()
+    if not np.any(weights):
+        return 0.0, 0.0
+    contrast = np.zeros(covariance.shape[0], dtype=np.float64)
+    contrast[augmented_indices] = weights
+    variance = phi * covariance_quadratic_form(covariance, contrast)
+    return float(weights @ effect), float(np.sqrt(max(variance, 0.0)))
 
 
 __all__ = [

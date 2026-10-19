@@ -214,11 +214,13 @@ def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
 def _reject_random_effect_selection_fit(model, method: str) -> None:
     """Keep structured variance components out of selection-penalty fit paths."""
     from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.random_effect import RandomEffect
 
     random_effect_names = [
         name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)
     ]
+    hierarchy_names = [name for name, spec in model._specs.items() if isinstance(spec, Hierarchy)]
     factor_smooth_names = [
         name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
     ]
@@ -226,6 +228,11 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
         joined = ", ".join(repr(name) for name in random_effect_names)
         raise NotImplementedError(
             f"RandomEffect feature(s) {joined} are only supported with fit_reml(), not {method}()."
+        )
+    if hierarchy_names:
+        joined = ", ".join(repr(name) for name in hierarchy_names)
+        raise NotImplementedError(
+            f"Hierarchy feature(s) {joined} are only supported with fit_reml(), not {method}()."
         )
     if factor_smooth_names:
         joined = ", ".join(repr(name) for name in factor_smooth_names)
@@ -307,6 +314,7 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     """
     from superglm.distributions import Poisson
     from superglm.features.categorical import Categorical
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.random_effect import RandomEffect
     from superglm.links import LogLink, resolve_link
 
@@ -324,7 +332,7 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     random_effect_names = [
         name
         for name, spec in model._specs.items()
-        if isinstance(spec, RandomEffect)
+        if isinstance(spec, RandomEffect | Hierarchy)
         and (spec._lambda_policy is None or spec._lambda_policy.mode == "estimate")
     ]
     if not random_effect_names:
@@ -645,9 +653,18 @@ def _auto_detect_specs_if_needed(model, X, sample_weight) -> None:
 
 def _required_fit_columns(model) -> tuple[str, ...]:
     """Return configured columns that must exist before feature construction."""
+    from superglm.features.hierarchy import feature_source_columns
+
     config = model._config
     configured_feature_names = [name for name, _ in config.feature_templates]
-    names = [*configured_feature_names, *(config.splines or ())]
+    names = [
+        *(
+            column
+            for name, spec in config.feature_templates
+            for column in feature_source_columns(name, spec)
+        ),
+        *(config.splines or ()),
+    ]
     for _, interaction in config.interaction_templates:
         names.extend(interaction.parent_names)
     # Preserve the interaction API's more specific configuration error for an
@@ -1148,9 +1165,14 @@ def _prime_fit_caches(
     null_mu: NDArray | None = None,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
+    from superglm.features.hierarchy import feature_source_columns
     from superglm.model.fit_data_guard import FitDataGuard, FitGeometryGuard
 
-    guard_columns = list(model._feature_order)
+    guard_columns = [
+        column
+        for name in model._feature_order
+        for column in feature_source_columns(name, model._specs[name])
+    ]
     for name in model._interaction_order:
         guard_columns.extend(model._interaction_specs[name].parent_names)
     guard_columns = list(dict.fromkeys(guard_columns))

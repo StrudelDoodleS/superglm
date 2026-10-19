@@ -148,6 +148,7 @@ def term_inference(
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
 
     from superglm.features.categorical import Categorical
+    from superglm.features.hierarchy import Hierarchy
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
@@ -205,8 +206,11 @@ def term_inference(
 
     z_alpha = float(__import__("scipy").stats.norm.ppf(1.0 - alpha / 2.0))
 
-    # ── RandomEffect ─────────────────────────────────────────────
-    if isinstance(spec, RandomEffect):
+    # ── RandomEffect, and a Hierarchy's combined path effects ─────
+    if isinstance(spec, RandomEffect | Hierarchy):
+        if isinstance(spec, Hierarchy):
+            # Every block is a fitted level; none is a special to leave out.
+            edf = _compute_term_edf(name, feature_groups, group_edf)
         raw = spec.reconstruct(beta_combined)
         levels = raw["levels"]
         log_rels = np.asarray([raw["effects"][level] for level in levels])
