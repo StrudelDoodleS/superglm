@@ -22,6 +22,7 @@ import textwrap
 from fractions import Fraction
 
 import numpy as np
+import pytest
 
 
 def _stream(seed):
@@ -279,16 +280,22 @@ def _cold_run(script: str, tmp_path) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.slow
 def test_first_tweedie_fit_compiles_each_kernel_once(tmp_path):
     """On an empty cache, a first SuperGLM Tweedie fit and summary compile 14 superglm
     specialisations of 14 kernels: no kernel twice (master compiled 18, with ``_merge``,
     its two helpers and ``_csr_weighted_gram`` each compiled for a second argument type).
+
+    The ``n != 1`` check is the regression guard. The cap of 14 is a budget: when
+    a change puts a new kernel on this fit's path on purpose, raise it in the same
+    change and say why.
     """
     compiled = _cold_run(_FIRST_FIT, tmp_path)
     assert not {name: n for name, n in compiled.items() if n != 1}
     assert sum(compiled.values()) <= 14, compiled
 
 
+@pytest.mark.slow
 def test_tweedie_lss_kernels_compile_one_specialisation_each(tmp_path):
     """Status codes and seeds that reach a compiled helper are int64, not literals.
 
@@ -307,6 +314,13 @@ def test_tweedie_lss_kernels_compile_one_specialisation_each(tmp_path):
     y = rng.gamma(1.5, 1.0, n) * (rng.uniform(size=n) < 0.6)
     ones = np.ones(n)
     evaluate_tweedie_rows(y, ones * 1.2, ones * 0.9, ones * 1.5, ones, "prior", derivative_order=2)
+    # Below the parallel threshold: the serial core passes the row kernel an
+    # int64 row, so an unsigned prange index would show as a second signature.
+    head = slice(0, 100)
+    evaluate_tweedie_rows(
+        y[head], ones[head] * 1.2, ones[head] * 0.9, ones[head] * 1.5, ones[head], "prior",
+        derivative_order=2,
+    )
     print(json.dumps({
         name: len(value.signatures)
         for name, value in vars(compiled).items()

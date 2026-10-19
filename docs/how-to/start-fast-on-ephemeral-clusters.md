@@ -74,19 +74,24 @@ pay the compile before anyone fits, call `superglm.warmup()` once in the
 cluster's init script. Outside cluster start-up, an image build or a
 benchmark, there is no reason to call it.
 
-A cluster init script that installs superglm, keeps the cache and warms it:
+A cluster init script that installs superglm, keeps the cache and warms it.
+It must use the Python that notebooks and jobs run, so that they import this
+install and Numba finds the cache under the same path. On Databricks Runtime
+that is `/databricks/python/bin/python`, the interpreter Databricks' own
+init-script examples install into:
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 VERSION=<version>
-# The cluster's own Python, so every cluster installs to the same path.
-python -m pip install "superglm==$VERSION"
+# The Python notebooks and jobs run, so they see this install at this path.
+PY=/databricks/python/bin/python
+"$PY" -m pip install "superglm==$VERSION"
 export NUMBA_CACHE_DIR=/Volumes/<catalog>/<schema>/<volume>/numba-cache/superglm-$VERSION
 # Numba 0.67 and earlier only: give the installed files a fixed time.
-SUPERGLM_DIR=$(python -c "import os, superglm; print(os.path.dirname(superglm.__file__))")
+SUPERGLM_DIR=$("$PY" -c "import os, superglm; print(os.path.dirname(superglm.__file__))")
 find "$SUPERGLM_DIR" -name '*.py' -exec touch -d '2000-01-01 00:00:00' {} +
-python -c "import superglm; superglm.warmup()"
+"$PY" -c "import superglm; superglm.warmup()"
 ```
 
 Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so

@@ -101,6 +101,19 @@ dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
 )
 for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
     dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
+# The SuperLSS gamma and NB2 series kernels and the exact sums, by name: their
+# modules also hold kernels that compile on first use.
+import superglm.distributional.kernels._negative_binomial_numba as nb_numba
+import superglm.distributional.kernels.gamma as gamma_kernels
+import superglm.solvers._exact_sums as exact_sums
+
+for module, names in (
+    (gamma_kernels, ("_small_shape_series",)),
+    (nb_numba, ("theta_series_serial", "theta_series_parallel")),
+    (exact_sums, ("unscaled_exact_sum", "scaled_exact_sum", "weighted_residual_sum")),
+):
+    for name in names:
+        dispatchers[f"{module.__name__}.{name}"] = getattr(module, name)
 # The LAML endgame's Tweedie third-derivative kernels compile on a Tweedie
 # fit's first use, not in every process's warmup.
 from superglm.distributional.kernels.tweedie import _FIRST_USE_DISPATCHERS
