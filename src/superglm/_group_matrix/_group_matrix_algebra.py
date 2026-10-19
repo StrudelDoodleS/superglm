@@ -24,15 +24,18 @@ from ._group_matrix_kernels import (
     _csr_weighted_gram_channels,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
+    _float64_operand_exponent_bounds,
     _fused_2d_bincount_2,
     _gather_cell_order,
     _level_tensor_channels,
-    _operand_exponent_bounds,
     _sorted_intersection,
     _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
     _weighted_hist_channels,
+)
+from ._group_matrix_kernels import (
+    _operand_exponent_bounds as _generic_operand_exponent_bounds,
 )
 
 if TYPE_CHECKING:
@@ -94,6 +97,17 @@ def _profile_count(profile: dict[str, Any] | None, key: str, value: int = 1) -> 
 def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> None:
     if profile is not None:
         _profile_add(profile, key, perf_counter() - start)
+
+
+def _operand_exponent_bounds(values: NDArray) -> tuple[int, int]:
+    """``_group_matrix_kernels._operand_exponent_bounds``, calling the float64 scan directly.
+
+    The generic kernel delegates a float64 operand to the float64 scan; calling
+    that scan here spares a fit compiling the generic kernel as well.
+    """
+    if values.dtype == np.float64:
+        return _float64_operand_exponent_bounds(values)
+    return _generic_operand_exponent_bounds(values)
 
 
 def _cross_operand_bounds(operand: NDArray) -> tuple[int, int]:
