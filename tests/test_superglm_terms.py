@@ -169,6 +169,7 @@ def test_clones_keep_declared_interaction_options_and_names(data):
     table = model.drop1(X, y).set_index("feature")
     assert table.loc["g", "deviance_reduced"] == reduced.result.deviance
     applied = Structure(features={}).apply(model).fit(X, y)
+    assert [g.name for g in applied._groups] == [g.name for g in model._groups]
     assert np.array_equal(applied.result.beta, model.result.beta)
     assert applied.result.deviance == model.result.deviance
 
