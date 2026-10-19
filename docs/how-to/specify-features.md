@@ -87,7 +87,7 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
   `interaction(spec)`.
 - `terms=` replaces `features=` and `interactions=`, so a model takes one or
   the other.
-- `n_knots=`, `degree=` and `categorical_base=` configure only the old
+- `n_knots=`, `degree=` and `categorical_base=` configure only the
   `splines=` shorthand. With `terms=`, set them on each term, as in
   `s("DrivAge", n_knots=8)`.
 - In `SuperGLM`, declare a factor smooth with `features=` and `interactions=`.

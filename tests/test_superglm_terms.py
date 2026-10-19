@@ -11,6 +11,7 @@ from sklearn.model_selection import KFold
 import superglm.model.base as model_base
 from superglm import (
     Categorical,
+    FactorSmooth,
     RandomEffect,
     Spline,
     Structure,
@@ -137,6 +138,12 @@ def test_terms_is_keyword_only_and_takes_a_list_holding_any_mapping():
         SuperGLM(terms={"x": Spline()})
     model = SuperGLM(terms=[{"x": Spline(k=6), "g": Categorical()}, "z"])
     assert list(model.features) == ["x", "g", "z"]
+
+
+def test_a_factor_smooth_group_declared_as_a_term_is_refused():
+    """The docs send factor smooths to features= and interactions= for this reason."""
+    with pytest.raises(ValueError, match="FactorSmooth"):
+        SuperGLM(terms=[s("x"), cat("g"), interaction(FactorSmooth("x", group="g"))])
 
 
 def test_clones_keep_declared_interaction_options_and_names():
