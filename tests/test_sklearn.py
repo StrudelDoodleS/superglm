@@ -965,8 +965,9 @@ class TestNativeTerms:
         with pytest.raises(ValueError, match="terms= keys.*not found"):
             SuperGLMRegressor(terms=["age", "nonexistent"]).fit(X, y)
 
-    def test_estimator_pickled_before_terms_existed_restores_none(self):
-        model = SuperGLMRegressor()
+    @pytest.mark.parametrize("estimator_type", [SuperGLMRegressor, SuperGLMClassifier])
+    def test_estimator_pickled_before_terms_existed_restores_none(self, estimator_type):
+        model = estimator_type()
         del model.__dict__["terms"]
         restored = pickle.loads(pickle.dumps(model))
         assert restored.get_params()["terms"] is None
