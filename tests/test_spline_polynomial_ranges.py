@@ -758,9 +758,14 @@ def test_an_unknown_band_in_a_range_is_refused_by_name():
 # ── Interactions: ranges shape main effects only ─────────────────────────
 
 
-def _crossed(age, pair):
-    """A fit with interaction ``pair`` beside a ranged ``age`` and ranged bands."""
-    from superglm import Categorical
+def _crossed(age, pair, form="tuple"):
+    """A fit with interaction ``pair`` beside a ranged ``age`` and ranged bands.
+
+    ``form="terms"`` declares the same model as ``SuperGLM(terms=[...])``, the
+    pair as ``ti`` for two splines and as ``interaction(SplineCategorical)``
+    otherwise.
+    """
+    from superglm import Categorical, SplineCategorical, interaction, ti
 
     rng = np.random.default_rng(11)
     n = 2_000
@@ -778,24 +783,28 @@ def _crossed(age, pair):
         "region": Categorical(),
         "band": _ordered([PolynomialRange("B", "E", 1)]),
     }
-    model = SuperGLM(
-        family="poisson",
-        selection_penalty=0.0,
-        features=features,
-        interactions=[pair],
-    )
+    if form == "tuple":
+        declared = {"features": features, "interactions": [pair]}
+    else:
+        tensor = pair == ("age", "veh")
+        declared = {
+            "terms": [features, ti(*pair) if tensor else interaction(SplineCategorical(*pair))]
+        }
+    model = SuperGLM(family="poisson", selection_penalty=0.0, **declared)
     return model, X, rng.poisson(1.0, n)
 
 
+@pytest.mark.parametrize("form", ["tuple", "terms"])
 @pytest.mark.parametrize("pair", [("age", "region"), ("age", "veh"), ("band", "region")])
 @pytest.mark.parametrize("kind", ["bs", "cr"])
-def test_a_ranged_spline_cannot_parent_an_interaction(kind, pair):
+def test_a_ranged_spline_cannot_parent_an_interaction(kind, pair, form):
     # Neither margin was certified: a cr parent's interaction was rebuilt as a
     # cardinal spline without the ranges (the age curve along a level bent
     # 0.026 inside a Line range), and a bs parent's kept them unpenalised in
-    # every level and cross-section.
+    # every level and cross-section. A declared interaction skips the pair's
+    # registration, so the design compiler refuses it too.
     ranged = Spline(kind=kind, k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
-    model, X, y = _crossed(ranged, pair)
+    model, X, y = _crossed(ranged, pair, form)
     with pytest.raises(NotImplementedError, match=f"'{pair[0]}' has polynomial_ranges"):
         model.fit(X, y)
 
@@ -806,3 +815,22 @@ def test_an_interaction_beside_ranged_terms_still_fits():
     model, X, y = _crossed(ranged, ("veh", "region"))
     model.fit(X, y)
     assert "veh:region" in model._interaction_specs
+
+
+def test_a_ranged_spline_cannot_parent_a_superlss_tensor():
+    # The family helpers declare interactions as specs, so SuperLSS reaches
+    # the same refusal through the design compiler.
+    from superglm import GaussianLS, SuperLSS, s, term, ti
+
+    rng = np.random.default_rng(12)
+    n = 400
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "veh": rng.uniform(0.0, 20.0, n)})
+    ranged = Spline(kind="bs", k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(term("age", ranged), s("veh", k=6), ti("age", "veh")),
+        family.scale(),
+    )
+    with pytest.raises(NotImplementedError, match="'age' has polynomial_ranges"):
+        model.fit_reml(X, rng.normal(size=n))
