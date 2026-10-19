@@ -18,6 +18,7 @@ from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
+from superglm.terms import TermInput
 from superglm.types import FeatureSpec
 
 from . import (
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     from superglm.inference.random_effects import RandomEffectResult
     from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
-    from superglm.terms import TermInput
     from superglm.types import GroupSlice
 
 
