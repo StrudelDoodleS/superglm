@@ -103,8 +103,9 @@ about 1.5 seconds against a filled cache. Numba keys its cache to the
 CPU model, so a cache built on one node type compiles again on another; the
 entries for both are kept side by side. After `warmup()`, a first
 fit compiled nothing on any of the freMTPL2 benchmark books (every GLM
-family, exact and binned, and the SuperLSS families). The one exception is
-by design: the third- and fourth-derivative kernels of a SuperLSS Tweedie or
-negative binomial fit's final iterations compile on the first fit that
-reaches them, so a process that never fits those families does not pay for
-them.
+family, exact and binned, and the SuperLSS families). Two sets of kernels
+are left to the first fit that uses them, by design, so a process that never
+fits those models does not pay for them: the third- and fourth-derivative
+kernels of a SuperLSS Tweedie or negative binomial fit's final iterations,
+and the structured engine's kernels, which serve `RandomEffect` and
+`FactorSmooth` terms.

@@ -190,9 +190,10 @@ def warmup() -> None:
     later sessions load them from there.
 
     It compiles the kernels of every family and route (about 50 seconds on an
-    empty cache, under 2 seconds against a filled one); a SuperLSS Tweedie or
-    negative binomial fit's third- and fourth-derivative kernels still compile
-    on the first fit that reaches them. Numba keys its cache to
+    empty cache, under 2 seconds against a filled one). Two sets still compile
+    on the first fit that reaches them: a SuperLSS Tweedie or negative
+    binomial fit's third- and fourth-derivative kernels, and the structured
+    engine's kernels for ``RandomEffect`` and ``FactorSmooth`` terms. Numba keys its cache to
     the CPU model, so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """
