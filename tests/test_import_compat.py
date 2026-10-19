@@ -106,11 +106,13 @@ for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
 import superglm.distributional.kernels._negative_binomial_numba as nb_numba
 import superglm.distributional.kernels.gamma as gamma_kernels
 import superglm.solvers._exact_sums as exact_sums
+import superglm.solvers.scop_newton as scop_newton
 
 for module, names in (
     (gamma_kernels, ("_small_shape_series",)),
     (nb_numba, ("theta_series_serial", "theta_series_parallel")),
     (exact_sums, ("unscaled_exact_sum", "scaled_exact_sum", "weighted_residual_sum")),
+    (scop_newton, ("_scop_bin_aggregates",)),
 ):
     for name in names:
         dispatchers[f"{module.__name__}.{name}"] = getattr(module, name)
