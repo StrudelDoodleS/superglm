@@ -233,6 +233,11 @@ def _validate_wrapper_feature_config(
     terms=None,
 ) -> None:
     """Raise if ``features`` or ``terms`` is mixed with shorthand wrapper arguments."""
+    if isinstance(features, list | tuple):
+        raise TypeError(
+            "features= takes a {column: spec} mapping. Pass a list of term "
+            "declarations such as [s('age'), cat('region')] as terms=[...]."
+        )
     if terms is not None and features is not None:
         raise ValueError("Pass either features=... or terms=[...], not both.")
     if terms is not None:

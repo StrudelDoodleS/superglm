@@ -147,6 +147,22 @@ def test_explicit_factor_smooth_retains_its_configured_name():
     assert normalized.interaction_order == ("by_group",)
 
 
+@pytest.mark.parametrize(
+    "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
+)
+def test_one_interaction_of_a_class_per_column_pair(second):
+    from superglm.features.interaction import TensorInteraction
+    from superglm.terms import interaction, normalize_terms, s, ti
+
+    other = (
+        ti("z", "x")
+        if second == "transposed"
+        else interaction(TensorInteraction("x", "z"), name="x_by_z")
+    )
+    with pytest.raises(ValueError, match="same two columns"):
+        normalize_terms([s("x"), s("z"), ti("x", "z"), other])
+
+
 def test_generic_main_term_refuses_an_interaction_spec():
     from superglm.features.interaction import NumericInteraction
     from superglm.terms import term

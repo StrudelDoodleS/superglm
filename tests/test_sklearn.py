@@ -965,6 +965,15 @@ class TestNativeTerms:
         with pytest.raises(ValueError, match="terms= keys.*not found"):
             SuperGLMRegressor(terms=["age", "nonexistent"]).fit(X, y)
 
+    @pytest.mark.parametrize("features", ["terms", "mapping_inside"])
+    def test_features_given_a_list_points_to_terms(self, sample_data, features):
+        from superglm import Spline, s
+
+        X, y, _ = sample_data
+        declarations = [s("age")] if features == "terms" else [{"age": Spline()}]
+        with pytest.raises(TypeError, match=r"as terms=\[\.\.\.\]"):
+            SuperGLMRegressor(features=declarations).fit(X, y)
+
     @pytest.mark.parametrize("estimator_type", [SuperGLMRegressor, SuperGLMClassifier])
     def test_estimator_pickled_before_terms_existed_restores_none(self, estimator_type):
         model = estimator_type()

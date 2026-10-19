@@ -83,6 +83,9 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
   in the dict's order.
 - A column can be declared once. A second declaration, in a dict or as a term,
   raises an error.
+- Declare each interaction once per pair of columns. `ti("DrivAge", "VehAge")`
+  and `ti("VehAge", "DrivAge")` are the same term, and a second one raises an
+  error.
 - An interaction cannot go in a dict. Put it in the list as `ti(...)` or
   `interaction(spec)`.
 - `ti` takes two `s(...)` terms. For an `OrderedCategorical` with a spline

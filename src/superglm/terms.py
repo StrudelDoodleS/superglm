@@ -498,6 +498,10 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
     features: dict[str, FeatureSpec] = {}
     interactions: dict[str, InteractionSpec] = {}
     spline_parent_interactions: set[str] = set()
+    # One interaction of a class per unordered parent pair: ti("x", "z") and
+    # ti("z", "x") span one column space, as the (left, right) tuple form,
+    # which keeps the first pair, already assumes.
+    pair_owners: dict[tuple[type, frozenset[str]], str] = {}
     # Copy the complete graph once, retaining aliases within the owned graph.
     for declaration in deepcopy(_expand_mappings(terms)):
         if isinstance(declaration, str):
@@ -508,6 +512,14 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
         elif isinstance(declaration, BoundInteraction):
             if declaration.name in interactions:
                 raise ValueError(f"Duplicate interaction declaration: {declaration.name!r}")
+            pair = (type(declaration._spec), frozenset(declaration._spec.parent_names))
+            if pair in pair_owners:
+                raise ValueError(
+                    f"Interactions {pair_owners[pair]!r} and {declaration.name!r} are both "
+                    f"{pair[0].__name__} over the same two columns, in either order; "
+                    "declare one"
+                )
+            pair_owners[pair] = declaration.name
             interactions[declaration.name] = declaration._spec
             if declaration._requires_spline_parents:
                 spline_parent_interactions.add(declaration.name)
