@@ -17,4 +17,5 @@ deploy-a-fitted-model
 screen-interactions
 fit-a-distributional-model
 check-a-distributional-fit
+start-fast-on-ephemeral-clusters
 ```
