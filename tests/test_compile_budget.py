@@ -291,6 +291,7 @@ def test_first_tweedie_fit_compiles_each_kernel_once(tmp_path):
     change and say why.
     """
     compiled = _cold_run(_FIRST_FIT, tmp_path)
+    assert compiled, "the compile listener saw no superglm kernel: nothing was measured"
     assert not {name: n for name, n in compiled.items() if n != 1}
     assert sum(compiled.values()) <= 14, compiled
 

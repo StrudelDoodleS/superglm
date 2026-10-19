@@ -141,6 +141,17 @@ compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
 assert not any(dispatcher.nopython_signatures for dispatcher in first_use.values())
 
+# The row Kronecker build and the support scans, through their production entry
+# points: a first interaction fit must reuse the signatures warmup compiled.
+import scipy.sparse as sp
+
+basis = sp.csr_matrix(np.array([[1.0, 0.0], [0.0, 2.0], [1.0, 0.0]]))
+interaction._row_kron(basis, basis)
+row_hashes = support_scans._row_hashes(basis, 2)
+_, first_rows, row_groups = np.unique(row_hashes, return_index=True, return_inverse=True)
+assert support_scans._verified_representatives(basis, first_rows, row_groups, 2) is not None
+assert signatures() == compiled, "an interaction build or support scan compiled after public warmup"
+
 # The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
 from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
 
