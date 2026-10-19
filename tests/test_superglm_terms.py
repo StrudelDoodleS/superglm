@@ -146,29 +146,31 @@ def test_a_factor_smooth_group_declared_as_a_term_is_refused():
         SuperGLM(terms=[s("x"), cat("g"), interaction(FactorSmooth("x", group="g"))])
 
 
-def test_clones_keep_declared_interaction_options_and_names():
-    """drop1, refit_unpenalised, Structure.apply and the editor refit clone here.
+def test_clones_keep_declared_interaction_options_and_names(data):
+    """drop1, refit_unpenalised, Structure.apply and the editor refit clone the model.
 
     Rebuilt from a ``(left, right)`` pair, the tensor lost its margins and
-    ``decompose`` and the named interaction its name.
+    ``decompose`` and the named interaction its name, so drop1 tested a
+    different reduced model and Structure.apply refitted a different model.
     """
+    X, y = data
+    # Margins smaller than the parents' four knots, so the options move the fit.
+    tensor = ti("x", "z", n_knots=(2, 2), decompose=True)
     model = SuperGLM(
         terms=[
             s("x", k=6),
             s("z", k=6),
             cat("g"),
-            ti("x", "z", n_knots=(4, 4), decompose=True),
+            tensor,
             interaction(SplineCategorical("x", "g"), name="x_by_g"),
         ]
-    )
-    applied = Structure(features={}).apply(model)
-    assert applied._interaction_order == ["x:z", "x_by_g"]
-    tensor = applied._interaction_specs["x:z"]
-    assert (tensor._n_knots, tensor._decompose) == ((4, 4), True)
-    assert isinstance(applied._interaction_specs["x_by_g"], SplineCategorical)
-    reduced = model._clone_without_features({"g"})
-    assert [name for name, _ in reduced._config.interaction_templates] == ["x:z"]
-    assert reduced._config.interaction_templates[0][1]._n_knots == (4, 4)
+    ).fit(X, y)
+    reduced = SuperGLM(terms=[s("x", k=6), s("z", k=6), tensor]).fit(X, y)
+    table = model.drop1(X, y).set_index("feature")
+    assert table.loc["g", "deviance_reduced"] == reduced.result.deviance
+    applied = Structure(features={}).apply(model).fit(X, y)
+    assert np.array_equal(applied.result.beta, model.result.beta)
+    assert applied.result.deviance == model.result.deviance
 
 
 def test_terms_model_round_trips_and_reports_like_the_dict_model(data):
