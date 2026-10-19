@@ -11,7 +11,7 @@ first Tweedie `fit_reml` and `summary` on 20,000 rows:
 | | Empty cache | Cache from an earlier cluster |
 |---|---|---|
 | First Tweedie fit and summary | 4.7 s | 0.6 s |
-| `superglm.warmup()` | 44 s | 1.3 s |
+| `superglm.warmup()` | 50 s | 1.5 s |
 
 A larger model compiles a few more kernels: a first fit on the freMTPL2 book
 with four interactions spent 4.6 to 7.7 seconds compiling, depending on family
@@ -68,18 +68,38 @@ temporary file and renames it into place.
 
 ## Optionally, warm up in the init script
 
-The cache fills as fits run, so a cluster needs nothing more than the
-directory above. To pay the compile before anyone fits, run the warm-up once
-in the cluster's init script, after superglm is installed:
+The cache fills as fits run: a first fit compiles only the kernels it needs
+and saves them, so a cluster needs nothing more than the directory above. To
+pay the compile before anyone fits, call `superglm.warmup()` once in the
+cluster's init script. Outside cluster start-up, an image build or a
+benchmark, there is no reason to call it.
+
+A cluster init script that installs superglm, keeps the cache and warms it:
 
 ```bash
+#!/bin/bash
+set -euo pipefail
+VERSION=<version>
+# The cluster's own Python, so every cluster installs to the same path.
+python -m pip install "superglm==$VERSION"
+export NUMBA_CACHE_DIR=/Volumes/<catalog>/<schema>/<volume>/numba-cache/superglm-$VERSION
+# Numba 0.67 and earlier only: give the installed files a fixed time.
+SUPERGLM_DIR=$(python -c "import os, superglm; print(os.path.dirname(superglm.__file__))")
+find "$SUPERGLM_DIR" -name '*.py' -exec touch -d '2000-01-01 00:00:00' {} +
 python -c "import superglm; superglm.warmup()"
 ```
 
-`warmup()` compiles the optional kernels of every family and route, so on an
-empty cache it costs about 44 seconds once; against a filled cache it loads
-them in about 1.3 seconds. After it, a first fit compiled
-two or three kernels (under half a second) on the binned route and on
-SuperLSS. On the exact route of a large book, the term-table kernels that
-fits above 20,000 rows use are not part of `warmup()`; they compiled on the
-first fit, in about 3 seconds.
+Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so
+notebooks and jobs read the cache the script filled.
+
+`warmup()` compiles the kernels of every family and route: about 50
+seconds on an empty cache, once per superglm version and node type, and
+about 1.5 seconds against a filled cache. Numba keys its cache to the
+CPU model, so a cache built on one node type compiles again on another; the
+entries for both are kept side by side. After `warmup()`, a first
+fit compiled nothing on any of the freMTPL2 benchmark books (every GLM
+family, exact and binned, and the SuperLSS families). The one exception is
+by design: the third- and fourth-derivative kernels of a SuperLSS Tweedie or
+negative binomial fit's final iterations compile on the first fit that
+reaches them, so a process that never fits those families does not pay for
+them.

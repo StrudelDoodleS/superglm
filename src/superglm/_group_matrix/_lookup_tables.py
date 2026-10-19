@@ -1311,3 +1311,29 @@ def table_rmatvec(
     if n_d:
         out[plan.dense_columns] = dense_total + dense_comp
     return out
+
+
+def _warmup_lookup_tables() -> None:
+    """Compile the table sweeps and gathers for the operands an exact-path fit passes.
+
+    Empty operands of the fit's dtypes, layouts and flags: the kernels compile
+    without reading a row.  Term codes are int32.
+    """
+    i32, i64 = np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int64)
+    f64 = np.zeros(0, dtype=np.float64)
+    codes, f64_2d = np.zeros((0, 0), dtype=np.int32), np.zeros((0, 0), dtype=np.float64)
+    i64_2d = np.zeros((0, 0), dtype=np.int64)
+    frozen = np.zeros((0, 0), dtype=np.float64)
+    frozen.setflags(write=False)
+    _margins_sweep(i32, f64, f64, f64, f64)
+    _hist_sweep(i32, i32, f64, 0, f64)
+    _acc_sweep(i32, i32, f64, f64, i32, i32, 0, f64)
+    # Dense blocks arrive read-only from the design, writable from estimate_p's refits.
+    for block in (frozen, f64_2d):
+        _dense_term_sweep(i32, f64, block, f64, f64)
+        _dense_moments_sweep(f64, f64, block, f64, block, f64, f64_2d, f64, f64, True)
+    _gather_leverages(
+        0, 0, codes, np.zeros(0, dtype=np.bool_), 0.0, f64, i64, i64_2d, f64, i64_2d, f64,
+        f64, i64, i32, i32, i64, f64_2d, f64, i64, f64, f64_2d, f64,
+    )  # fmt: skip
+    _scatter_margins(0, 0, codes, f64, i64, f64, f64, f64_2d, f64, f64)

@@ -1337,3 +1337,8 @@ def gamma_predictor_fourth_derivatives(
     if not np.all(np.isfinite(fourth)):
         raise ValueError("Gamma fourth derivatives are not representable")
     return fourth
+
+
+def _warmup_gamma() -> None:
+    """Compile the small-shape series a SuperLSS gamma fit calls (empty operand)."""
+    _small_shape_series(np.zeros(0, dtype=np.float64), 0)

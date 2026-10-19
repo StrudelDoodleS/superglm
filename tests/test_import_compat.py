@@ -76,7 +76,16 @@ from numba.core.registry import CPUDispatcher
 from superglm.reml import multi_penalty
 
 dispatchers = {}
-for module in (tweedie_numba, group_kernels):
+# The exact path's term tables, leverage rows, support scans and row
+# Kronecker builds: a large book's first fit compiled 14 of them after warmup.
+import superglm._group_matrix._group_matrix_support as support_scans
+import superglm._group_matrix._lookup_tables as lookup_tables
+import superglm.features.interaction as interaction
+import superglm.reml._leverage_rows as leverage_rows
+
+for module in (
+    tweedie_numba, group_kernels, lookup_tables, leverage_rows, support_scans, interaction
+):
     dispatchers.update(
         {
             f"{module.__name__}.{name}": value
