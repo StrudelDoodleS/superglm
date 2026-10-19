@@ -255,6 +255,10 @@ class ModelConfig:
             "weight_semantics": self.weight_semantics,
             "n_jobs": self.n_jobs,
             "max_memory": self.max_memory,
+            # Declarations given as ``terms=`` live in the feature and
+            # interaction templates, which ``features=`` and the clone's
+            # interaction install reproduce.
+            "terms": None,
         }
 
     def materialize(self, model_type):

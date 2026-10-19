@@ -27,31 +27,31 @@ def _resolve(family, predictors):
     return binding.resolve_predictors(family, predictors)
 
 
-@pytest.mark.parametrize(
-    "family,helpers,names",
-    [
-        (GaussianLS(), ("location", "scale"), ("location", "scale")),
-        (GammaLS(), ("mean", "scale"), ("mean", "scale")),
-        (TweedieLSS(), ("mu", "phi", "p"), ("mean", "dispersion", "power")),
-        (NegativeBinomialLS(), ("mean", "theta"), ("mean", "theta")),
-        (GeneralizedParetoLSS(), ("scale", "shape"), ("scale", "shape")),
-        (GeneralizedGammaLSS(), ("mean", "scale", "shape"), ("mean", "scale", "shape")),
-        (
-            GeneralizedGammaLSS(parametrisation="location"),
-            ("location", "scale", "shape"),
-            ("location", "scale", "shape"),
-        ),
-        (LogNormalLS(), ("mean", "scale"), ("mean", "scale")),
-        (LogNormalLS(parametrisation="location"), ("location", "scale"), ("location", "scale")),
-        (TwoPieceLogNormalLSS(), ("mean", "scale", "skew"), ("mean", "scale", "skew")),
-        (
-            TwoPieceLogNormalLSS(parametrisation="location"),
-            ("location", "scale", "skew"),
-            ("location", "scale", "skew"),
-        ),
-        (TwoPieceNormalLSS(), ("location", "scale", "skew"), ("location", "scale", "skew")),
-    ],
-)
+_FAMILY_HELPERS = [
+    (GaussianLS(), ("location", "scale"), ("location", "scale")),
+    (GammaLS(), ("mean", "scale"), ("mean", "scale")),
+    (TweedieLSS(), ("mu", "phi", "p"), ("mean", "dispersion", "power")),
+    (NegativeBinomialLS(), ("mean", "theta"), ("mean", "theta")),
+    (GeneralizedParetoLSS(), ("scale", "shape"), ("scale", "shape")),
+    (GeneralizedGammaLSS(), ("mean", "scale", "shape"), ("mean", "scale", "shape")),
+    (
+        GeneralizedGammaLSS(parametrisation="location"),
+        ("location", "scale", "shape"),
+        ("location", "scale", "shape"),
+    ),
+    (LogNormalLS(), ("mean", "scale"), ("mean", "scale")),
+    (LogNormalLS(parametrisation="location"), ("location", "scale"), ("location", "scale")),
+    (TwoPieceLogNormalLSS(), ("mean", "scale", "skew"), ("mean", "scale", "skew")),
+    (
+        TwoPieceLogNormalLSS(parametrisation="location"),
+        ("location", "scale", "skew"),
+        ("location", "scale", "skew"),
+    ),
+    (TwoPieceNormalLSS(), ("location", "scale", "skew"), ("location", "scale", "skew")),
+]
+
+
+@pytest.mark.parametrize("family,helpers,names", _FAMILY_HELPERS)
 def test_every_family_resolves_helpers_in_canonical_order(family, helpers, names):
     assert all(callable(getattr(family, name, None)) for name in helpers)
     declarations = [getattr(family, helper)("x") for helper in reversed(helpers)]
@@ -60,6 +60,18 @@ def test_every_family_resolves_helpers_in_canonical_order(family, helpers, names
     assert tuple(template.name for template in templates) == names
     assert tuple(parameter.name for parameter in owned.parameters) == names
     assert all(tuple(template.features) == ("x",) for template in templates)
+
+
+@pytest.mark.parametrize("family,helpers,names", _FAMILY_HELPERS)
+def test_every_helper_takes_a_feature_mapping_among_its_terms(family, helpers, names):
+    from superglm import Categorical, Spline, s, ti
+
+    features = {"x": Spline(k=6), "region": Categorical()}
+    for helper in helpers:
+        template = getattr(family, helper)(features, ti("x", "z"), "w", s("z", k=5)).template
+        assert tuple(template.features) == ("x", "region", "w", "z")
+        assert template.interaction_order == ("x:z",)
+        assert isinstance(template.features["region"], Categorical)
 
 
 @pytest.mark.parametrize("family_type", [GeneralizedGammaLSS, LogNormalLS, TwoPieceLogNormalLSS])

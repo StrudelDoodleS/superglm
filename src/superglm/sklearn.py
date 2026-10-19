@@ -45,6 +45,7 @@ from superglm._frame import (
 from superglm.distributions import Distribution
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
+from superglm.terms import TermInput, normalize_terms
 
 # ── Family validation ─────────────────────────────────────────────
 
@@ -229,9 +230,16 @@ def _validate_wrapper_feature_config(
     n_knots,
     degree,
     categorical_base,
+    terms=None,
 ) -> None:
-    """Raise if ``features`` is mixed with shorthand wrapper arguments."""
-    if features is None:
+    """Raise if ``features`` or ``terms`` is mixed with shorthand wrapper arguments."""
+    if terms is not None and features is not None:
+        raise ValueError("Pass either features=... or terms=[...], not both.")
+    if terms is not None:
+        argument, spec_owner = "terms=[...]", "terms"
+    elif features is not None:
+        argument, spec_owner = "features=...", "feature specs"
+    else:
         return
 
     # Check shorthand feature lists
@@ -245,7 +253,7 @@ def _validate_wrapper_feature_config(
 
     if set_lists:
         raise ValueError(
-            f"Pass either features=... or the wrapper shorthand feature "
+            f"Pass either {argument} or the wrapper shorthand feature "
             f"arguments ({', '.join(set_lists)}), not both."
         )
 
@@ -260,10 +268,10 @@ def _validate_wrapper_feature_config(
 
     if changed:
         raise ValueError(
-            f"Pass either features=... or the wrapper shorthand feature "
+            f"Pass either {argument} or the wrapper shorthand feature "
             f"arguments ({', '.join(changed)}), not both. "
-            f"With features=..., configure spline/categorical options "
-            f"directly on the feature specs."
+            f"With {argument}, configure spline/categorical options "
+            f"directly on the {spec_owner}."
         )
 
 
@@ -272,26 +280,27 @@ def _resolve_native_feature_cols(
     columns: list[str],
     offset_cols: list[str],
     synthetic: bool,
+    argument: str = "features",
 ) -> list[str]:
     """Validate and return feature columns for the native ``features=`` path.
 
     Checks that every key in *features* exists in *columns* (after
     excluding offset columns) and returns the keys in their original
-    dict order.
+    dict order. ``argument`` names the constructor argument in errors.
     """
     available = set(columns) - set(offset_cols)
     missing = [k for k in features if k not in available]
     if missing:
         if synthetic:
             raise ValueError(
-                f"features= keys {missing} not found in columns. "
+                f"{argument}= keys {missing} not found in columns. "
                 f"X is an ndarray with auto-generated column names "
                 f"({', '.join(columns[:3])}, …). Pass feature_names= "
-                f"so column names match the features= keys, or use "
+                f"so column names match the {argument}= keys, or use "
                 f"the synthetic names (x0, x1, …) as keys."
             )
         raise ValueError(
-            f"features= keys {missing} not found in X columns. "
+            f"{argument}= keys {missing} not found in X columns. "
             f"Available (non-offset) columns: "
             f"{sorted(available)}."
         )
@@ -415,6 +424,7 @@ def _fit_common(
         n_knots=wrapper.n_knots,
         degree=wrapper.degree,
         categorical_base=wrapper.categorical_base,
+        terms=wrapper.terms,
     )
 
     # ── Normalise inputs ──────────────────────────────────────
@@ -452,7 +462,27 @@ def _fit_common(
         wrapper.spline_penalty,
     )
 
-    if wrapper.features is not None:
+    model_kwargs: dict[str, Any]
+    if wrapper.terms is not None:
+        # ── Native terms= path ───────────────────────────────
+        # The model reads the declared main-term columns; every interaction
+        # parent is one of them.
+        feature_cols = _resolve_native_feature_cols(
+            normalize_terms(wrapper.terms).features,
+            columns,
+            offset_cols,
+            synthetic,
+            argument="terms",
+        )
+        model_kwargs = dict(
+            family=family,
+            penalty=penalty,
+            selection_penalty=resolved_sel,
+            spline_penalty=resolved_spl,
+            terms=wrapper.terms,
+            weight_semantics=wrapper.weight_semantics,
+        )
+    elif wrapper.features is not None:
         # ── Native features= path ────────────────────────────
         feature_cols = _resolve_native_feature_cols(
             wrapper.features,
@@ -461,7 +491,7 @@ def _fit_common(
             synthetic,
         )
 
-        model_kwargs: dict[str, Any] = dict(
+        model_kwargs = dict(
             family=family,
             penalty=penalty,
             selection_penalty=resolved_sel,
@@ -528,7 +558,7 @@ def _fit_common(
         else:
             model_kwargs["splines"] = splines_list or []
 
-    if not feature_cols:
+    if not feature_cols and "terms" not in model_kwargs:
         model_kwargs.pop("splines", None)
         model_kwargs["features"] = {}
 
@@ -629,6 +659,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
         it as a replication count, where an integer weight is exactly a
         repeated row. Passed through to :class:`~superglm.SuperGLM`.
+    terms : list of term declarations or None
+        Keyword only. The model's terms as one list, passed through to
+        :class:`~superglm.SuperGLM` as ``terms=``. Mutually exclusive with
+        ``features`` and with the shorthand wrapper arguments, as
+        ``features`` is. The model reads the declared columns.
     """
 
     def __init__(
@@ -647,6 +682,8 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         categorical_base: str = "most_exposed",
         offset: str | int | list[str | int] | None = None,
         weight_semantics: Literal["prior", "frequency"] = "prior",
+        *,
+        terms: list[TermInput] | None = None,
     ):
         self.family = family
         self.penalty = penalty
@@ -662,6 +699,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.categorical_base = categorical_base
         self.offset = offset
         self.weight_semantics = weight_semantics
+        self.terms = terms
 
     def __setstate__(self, state: dict) -> None:
         """Restore an estimator pickled before ``weight_semantics`` existed.
@@ -670,9 +708,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         missing attribute breaks ``get_params`` and ``clone`` as well as
         refitting. The backfill is the contract the estimator was originally
         fitted under -- the pre-change family rule -- not the new default, so a
-        restored wrapper keeps reproducing what it recorded.
+        restored wrapper keeps reproducing what it recorded. An estimator
+        pickled before ``terms`` existed restores it as ``None``.
         """
         self.__dict__.update(state)
+        self.__dict__.setdefault("terms", None)
         if "weight_semantics" not in self.__dict__:
             from superglm.distributions import resolve_distribution
             from superglm.solvers.dispersion import family_default_weight_semantics
@@ -793,6 +833,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
         it as a replication count, where an integer weight is exactly a
         repeated row. Passed through to :class:`~superglm.SuperGLM`.
+    terms : list of term declarations or None
+        Keyword only. The model's terms as one list, passed through to
+        :class:`~superglm.SuperGLM` as ``terms=``. Mutually exclusive with
+        ``features`` and with the shorthand wrapper arguments, as
+        ``features`` is. The model reads the declared columns.
     """
 
     def __init__(
@@ -811,6 +856,8 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         offset: str | int | list[str | int] | None = None,
         threshold: float = 0.5,
         weight_semantics: Literal["prior", "frequency"] = "prior",
+        *,
+        terms: list[TermInput] | None = None,
     ):
         self.penalty = penalty
         self.selection_penalty = selection_penalty
@@ -826,6 +873,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.offset = offset
         self.threshold = threshold
         self.weight_semantics = weight_semantics
+        self.terms = terms
 
     def __setstate__(self, state: dict) -> None:
         """Restore an estimator pickled before ``weight_semantics`` existed.
@@ -834,9 +882,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         missing attribute breaks ``get_params`` and ``clone`` as well as
         refitting. The backfill is the contract the estimator was originally
         fitted under -- the pre-change family rule -- not the new default, so a
-        restored wrapper keeps reproducing what it recorded.
+        restored wrapper keeps reproducing what it recorded. An estimator
+        pickled before ``terms`` existed restores it as ``None``.
         """
         self.__dict__.update(state)
+        self.__dict__.setdefault("terms", None)
         if "weight_semantics" not in self.__dict__:
             from superglm.distributions import resolve_distribution
             from superglm.solvers.dispersion import family_default_weight_semantics

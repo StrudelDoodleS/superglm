@@ -562,7 +562,7 @@ def test_native_fit_and_profile_examples_configure_features_explicitly() -> None
             feature_keywords = [
                 keyword
                 for keyword in constructor.keywords
-                if keyword.arg == "features"
+                if keyword.arg in ("features", "terms")
                 and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
             ]
             if not feature_keywords:
@@ -570,7 +570,7 @@ def test_native_fit_and_profile_examples_configure_features_explicitly() -> None
 
     assert len(checked) >= 20
     assert {"estimate_p", "estimate_theta", "fit"} <= family_methods
-    assert not offenders, f"native fit/profile examples omit features=: {offenders}"
+    assert not offenders, f"native fit/profile examples omit features= or terms=: {offenders}"
 
 
 def test_families_binomial_example_executes_real_fit_with_features() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -104,7 +104,7 @@ class BoundInteraction:
         return deepcopy(self._spec)
 
 
-type TermInput = str | BoundTerm | BoundInteraction
+type TermInput = str | BoundTerm | BoundInteraction | Mapping[str, FeatureSpec]
 
 
 @dataclass(frozen=True)
@@ -447,15 +447,41 @@ def ti(
     )
 
 
+def _expand_mappings(terms: Sequence[TermInput]) -> tuple[object, ...]:
+    """Replace each ``{column: spec}`` mapping by ``term(column, spec)`` in its order.
+
+    ``term`` copies each specification on its own, so one specification object
+    placed under several columns gives each column an independent term, as
+    ``SuperGLM(features=...)`` does.
+    """
+    expanded: list[object] = []
+    for declaration in terms:
+        if isinstance(declaration, Mapping):
+            expanded.extend(term(column, spec) for column, spec in declaration.items())
+        else:
+            expanded.append(declaration)
+    return tuple(expanded)
+
+
 def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
-    """Resolve declarations without reading data or constructing row designs."""
+    """Resolve declarations without reading data or constructing row designs.
+
+    A ``{column: spec}`` mapping among the declarations stands for
+    ``term(column, spec)`` for each entry, in the mapping's order. Main terms
+    keep their declaration order, and interactions keep theirs.
+    """
+    if isinstance(terms, Mapping):
+        raise TypeError(
+            "terms must be a sequence of term declarations; put a {column: spec} "
+            "mapping inside it, as in [features, ti('a', 'b')]"
+        )
     if isinstance(terms, str | bytes) or not isinstance(terms, Sequence):
         raise TypeError("terms must be a sequence of term declarations")
     features: dict[str, FeatureSpec] = {}
     interactions: dict[str, InteractionSpec] = {}
     spline_parent_interactions: set[str] = set()
     # Copy the complete graph once, retaining aliases within the owned graph.
-    for declaration in deepcopy(tuple(terms)):
+    for declaration in deepcopy(_expand_mappings(terms)):
         if isinstance(declaration, str):
             _validate_name(declaration)
             name, spec = declaration, Numeric()

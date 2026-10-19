@@ -29,6 +29,10 @@ class TweediePredictors:
         Set ``intercept=False`` to omit its intercept, or ``link=`` to supply
         a link supported by the family. Pass the declaration to ``SuperLSS``
         with this same family instance, plus ``phi(...)`` and ``p(...)``.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -49,6 +53,10 @@ class TweediePredictors:
         omits its intercept; ``link=`` overrides the family's default link
         where supported. This declaration is required alongside ``mu`` and
         ``p`` when constructing ``SuperLSS``.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -69,6 +77,10 @@ class TweediePredictors:
         intercept-only predictor. The declaration must be present alongside
         ``mu`` and ``phi``. ``intercept=False`` omits its intercept; a custom
         ``link`` must preserve the family's permitted power range.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -95,6 +107,10 @@ class MeanPredictor:
         This helper is valid when ``mean`` is a parameter of the selected
         family parametrization. Pass its result to ``SuperLSS`` with the
         same family instance and a declaration for every other parameter.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -123,6 +139,10 @@ class LocationPredictor:
         intercept; ``link=`` overrides the default where supported. Families
         with a ``parametrisation`` option require its ``"location"`` form
         for this helper.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -150,6 +170,10 @@ class ScalePredictor:
         an intercept-only predictor. ``intercept=False`` omits its intercept;
         ``link=`` overrides the default where supported. The family's link
         and support determine the permitted scale values.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -175,6 +199,10 @@ class ThetaPredictor:
         Pass numeric column names and bound terms, or call ``theta()`` for
         an intercept-only size predictor. ``intercept=False`` omits its
         intercept; ``link=`` overrides the default where supported.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -200,6 +228,10 @@ class ShapePredictor:
         Pass numeric column names and bound terms, or call ``shape()`` for
         an intercept-only predictor. ``intercept=False`` omits its intercept;
         a custom ``link`` must respect the family's parameter support.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 
@@ -228,6 +260,10 @@ class SkewPredictor:
         intercept-only predictor. ``intercept=False`` omits its intercept.
         The default link keeps values within the family's skew bounds;
         a custom ``link`` must respect that support.
+
+        A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
+        for each entry, in order, so a ``features`` dict written for
+        ``SuperGLM`` can be passed as it is.
         """
         from superglm.distributional.binding import bind_predictor
 

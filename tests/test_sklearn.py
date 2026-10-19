@@ -918,6 +918,60 @@ class TestNativeFeatures:
             m.fit(X, y)
 
 
+class TestNativeTerms:
+    """terms= on the wrappers, the list form of features=."""
+
+    def test_terms_fit_matches_features(self, sample_data):
+        from superglm import Categorical, Spline, cat, s
+
+        X, y, sample_weight = sample_data
+        features = {"age": Spline(k=6), "region": Categorical()}
+        by_dict = SuperGLMRegressor(features=features).fit(X, y, sample_weight=sample_weight)
+        by_list = SuperGLMRegressor(terms=[s("age", k=6), cat("region")])
+        by_list.fit(X, y, sample_weight=sample_weight)
+        np.testing.assert_array_equal(by_list.coef_, by_dict.coef_)
+        np.testing.assert_array_equal(by_list.predict(X), by_dict.predict(X))
+        assert list(by_list.feature_names_in_) == ["age", "region"]
+
+    @pytest.mark.parametrize("estimator_type", [SuperGLMRegressor, SuperGLMClassifier])
+    def test_get_set_params_and_clone_carry_terms(self, estimator_type):
+        from sklearn.base import clone
+
+        from superglm import cat, s
+
+        terms = [s("age", k=6), cat("region")]
+        model = estimator_type(terms=terms)
+        assert model.get_params()["terms"] is terms
+        cloned = clone(model).get_params()["terms"]
+        assert cloned is not terms
+        assert [term.column for term in cloned] == ["age", "region"]
+        replacement = [s("age", k=8)]
+        assert model.set_params(terms=replacement).terms is replacement
+
+    @pytest.mark.parametrize(
+        "conflict",
+        [{"features": {"age": None}}, {"spline_features": ["age"]}, {"n_knots": 8}],
+        ids=["features", "shorthand", "tuning"],
+    )
+    def test_terms_refuses_features_and_shorthand(self, sample_data, conflict):
+        from superglm import s
+
+        X, y, _ = sample_data
+        with pytest.raises(ValueError, match=r"terms=\[\.\.\.\]"):
+            SuperGLMRegressor(terms=[s("age")], **conflict).fit(X, y)
+
+    def test_missing_terms_column_raises(self, sample_data):
+        X, y, _ = sample_data
+        with pytest.raises(ValueError, match="terms= keys.*not found"):
+            SuperGLMRegressor(terms=["age", "nonexistent"]).fit(X, y)
+
+    def test_estimator_pickled_before_terms_existed_restores_none(self):
+        model = SuperGLMRegressor()
+        del model.__dict__["terms"]
+        restored = pickle.loads(pickle.dumps(model))
+        assert restored.get_params()["terms"] is None
+
+
 class TestNativeFeaturesClassifier:
     """Tests for features= on SuperGLMClassifier."""
 
