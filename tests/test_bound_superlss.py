@@ -459,7 +459,11 @@ def test_feature_mapping_and_term_list_fit_bit_identically():
     assert np.array_equal(left.result_.coefficients, right.result_.coefficients)
     assert dict(left.smoothing_parameters_) == dict(right.smoothing_parameters_)
     assert left.result_.log_likelihood == right.result_.log_likelihood
-    pd.testing.assert_frame_equal(left.predict_parameters(frame), right.predict_parameters(frame))
+    restored = SuperLSS.from_bytes(left.to_bytes())
+    for model in (restored, left):
+        pd.testing.assert_frame_equal(
+            model.predict_parameters(frame), right.predict_parameters(frame)
+        )
 
 
 def test_trusted_032_artifact_preserves_predictions_and_covariance():

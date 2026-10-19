@@ -22,6 +22,7 @@ from superglm import (
     s,
     ti,
 )
+from superglm.editor import EditorSession
 from superglm.features.interaction import SplineCategorical
 from superglm.terms import NormalizedTerms
 
@@ -177,6 +178,12 @@ def test_terms_model_round_trips_and_reports_like_the_dict_model(data):
     pd.testing.assert_frame_equal(as_list.drop1(X, y), as_dict.drop1(X, y))
     for name, table in as_dict.relativities().items():
         pd.testing.assert_frame_equal(as_list.relativities()[name], table)
+    for name in ("x", "g", "x:z"):
+        plots = [m.plot_data(name, ci=None) for m in (as_list, as_dict)]
+        effects = [p["effect"] if "effect" in p else p["terms"][0]["effect"] for p in plots]
+        pd.testing.assert_frame_equal(*effects)
+    sessions = [EditorSession.from_model(m) for m in (as_list, as_dict)]
+    assert list(sessions[0].terms) == list(sessions[1].terms)
     tables = [as_list.rating_table_payload(X, y), as_dict.rating_table_payload(X, y)]
     blocks = [[*payload.main_effects, *payload.interactions] for payload in tables]
     assert [b.name for b in blocks[0]] == [b.name for b in blocks[1]]
