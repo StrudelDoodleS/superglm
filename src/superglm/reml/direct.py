@@ -270,8 +270,11 @@ def optimize_direct_reml(
     )
     w_correction_order = validate_w_correction_order(w_correction_order)
     if discrete:
-        # The cached-W branch is the explicit BAM-style approximation boundary:
-        # it does not claim Wood's exact observed-Hessian LAML geometry.
+        # The cached-W branch is the BAM-style performance iteration: it holds
+        # W fixed within a step (no dW/drho term), so it does not reach the
+        # exact route's optimum.  Its criterion is the binned rule's
+        # (``classify_binned_reml_curvature``): Wood's observed-Hessian LAML for
+        # Gamma/log, Tweedie/log, NB2/log, probit and cloglog, Fisher otherwise.
         return optimize_discrete_reml_cached_w(
             dm,
             distribution,

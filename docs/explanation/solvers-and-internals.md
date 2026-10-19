@@ -205,6 +205,43 @@ until λ stabilizes
 by reusing weighted summaries when the IRLS geometry has not changed much.
 ```
 
+```{admonition} Which curvature the binned route uses
+:class: note
+For a family and link whose link is not canonical, the Laplace REML
+criterion uses the observed information, not the expected (Fisher)
+information (Wood 2011). The exact route (`discrete=False`) always does.
+
+The binned route (`discrete=True`) runs mgcv-style performance iteration
+(Wood et al. 2017). Each step fits a weighted working linear model, and a
+weighted model needs non-negative weights. So the binned route uses the
+observed information, in its optimiser, its final refit and the objective
+it reports, only for pairs whose log-likelihood is concave in the linear
+predictor and whose observed rows superglm forms so that they stay
+non-negative in floating point: Gamma/log, Tweedie/log, NB2/log, and
+binomial probit and cloglog. For these pairs the binned and exact routes
+publish the same criterion. They do not reach exactly the same optimum,
+because performance iteration holds the working weights fixed within a
+step and has no term for how they change with the smoothing parameters.
+
+Every other pair uses Fisher information throughout on the binned route:
+
+- For the canonical pairs (Poisson/log, binomial/logit,
+  Gaussian/identity, Gamma/inverse) Fisher and observed are the same.
+- Gaussian/log and binomial/cauchit have observed weights that can go
+  negative, so their binned fits keep the expected information that
+  penalized quasi-likelihood uses (Wood, Pya and Säfken 2016).
+- Binomial/log is concave, but its maximum can sit on the boundary of the
+  mean space, where probabilities are clipped and rows with an event carry
+  no curvature, so its binned fit stays on Fisher.
+- Other non-canonical built-in pairs, such as Poisson/sqrt, Gamma/identity
+  and Tweedie with a non-canonical power link, are not yet declared and
+  stay on Fisher.
+- A custom family or link also uses Fisher on the binned route.
+
+For all of these, the binned route's REML objective is the Fisher one, not
+the exact route's.
+```
+
 ```{admonition} Recommended workflow for spline-based GAM models
 :class: tip
 Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
