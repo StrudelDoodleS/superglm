@@ -266,7 +266,7 @@ _evaluate_tweedie_batch_parallel_core = _compiled._evaluate_tweedie_batch_parall
 
 
 def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) -> None:
-    complete_messages = {
+    complete_messages: dict[int | np.int64, str] = {
         _compiled.KERNEL_COMPLETE_VALUE: "complete row value is not representable",
         _compiled.KERNEL_COMPLETE_SCORE: "complete row score is not representable",
         _compiled.KERNEL_COMPLETE_HESSIAN: "complete row Hessian is not representable",
