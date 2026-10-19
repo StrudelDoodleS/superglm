@@ -10,34 +10,39 @@ from numpy.typing import NDArray
 
 import superglm.distributional.kernels._fourth_generated as _generated
 
-KERNEL_OK = 0
-KERNEL_MODE_RATIO = 1
-KERNEL_MODE_RANGE = 2
-KERNEL_MODE_BRACKET = 3
-KERNEL_MAX_TERMS = 4
-KERNEL_WINDOW_RANGE = 5
-KERNEL_UPPER_RATIO = 6
-KERNEL_LOWER_RATIO = 7
-KERNEL_PEAK = 8
-KERNEL_MASS = 9
-KERNEL_SCORE_MOMENTS = 10
-KERNEL_HESSIAN_MOMENTS = 11
-KERNEL_MEAN_SCORE_SCALE = 12
-KERNEL_MEAN_SCORE = 13
-KERNEL_MEAN_HESSIAN_SCALE = 14
-KERNEL_MEAN_HESSIAN = 15
-KERNEL_ZERO_RATE = 16
-KERNEL_CANONICAL_SCALE = 17
-KERNEL_SERIES_BASE = 18
-KERNEL_ROW_VALUE = 19
-KERNEL_ROW_SCORE = 20
-KERNEL_ROW_DERIVATIVES = 21
-KERNEL_COMPLETE_VALUE = 22
-KERNEL_COMPLETE_SCORE = 23
-KERNEL_COMPLETE_HESSIAN = 24
-KERNEL_REQUIRED_WORK = 25
+# Status codes are int64 values, not Python ints: Numba types a Python int
+# constant passed to a compiled helper as its own literal type and compiles
+# the helper once per code (``_row_failure`` and ``_series_failure`` compiled
+# 16 specialisations on a first SuperLSS Tweedie fit).
+KERNEL_OK = np.int64(0)
+KERNEL_MODE_RATIO = np.int64(1)
+KERNEL_MODE_RANGE = np.int64(2)
+KERNEL_MODE_BRACKET = np.int64(3)
+KERNEL_MAX_TERMS = np.int64(4)
+KERNEL_WINDOW_RANGE = np.int64(5)
+KERNEL_UPPER_RATIO = np.int64(6)
+KERNEL_LOWER_RATIO = np.int64(7)
+KERNEL_PEAK = np.int64(8)
+KERNEL_MASS = np.int64(9)
+KERNEL_SCORE_MOMENTS = np.int64(10)
+KERNEL_HESSIAN_MOMENTS = np.int64(11)
+KERNEL_MEAN_SCORE_SCALE = np.int64(12)
+KERNEL_MEAN_SCORE = np.int64(13)
+KERNEL_MEAN_HESSIAN_SCALE = np.int64(14)
+KERNEL_MEAN_HESSIAN = np.int64(15)
+KERNEL_ZERO_RATE = np.int64(16)
+KERNEL_CANONICAL_SCALE = np.int64(17)
+KERNEL_SERIES_BASE = np.int64(18)
+KERNEL_ROW_VALUE = np.int64(19)
+KERNEL_ROW_SCORE = np.int64(20)
+KERNEL_ROW_DERIVATIVES = np.int64(21)
+KERNEL_COMPLETE_VALUE = np.int64(22)
+KERNEL_COMPLETE_SCORE = np.int64(23)
+KERNEL_COMPLETE_HESSIAN = np.int64(24)
+KERNEL_REQUIRED_WORK = np.int64(25)
 
 _MAX_SAFE_MODE = 2**52
+_ZERO_TERMS = np.int64(0)
 _BERNOULLI = (
     1.0,
     -0.5,
@@ -242,14 +247,15 @@ def _locate_series_mode(
     alpha: float,
     coefficients: NDArray[np.float64],
 ) -> tuple[int, int, float, float]:
-    first = _log_adjacent_ratio(1, zeta, alpha, coefficients)
+    first = _log_adjacent_ratio(np.int64(1), zeta, alpha, coefficients)
     if not math.isfinite(first):
         return KERNEL_MODE_RATIO, 0, math.nan, math.nan
     if first <= 0.0:
         return KERNEL_OK, 1, math.nan, first
 
-    lower = 1
-    upper = 2
+    # int64 seeds, not literals: one specialisation of _log_adjacent_ratio.
+    lower = np.int64(1)
+    upper = np.int64(2)
     while True:
         ratio = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
         if not math.isfinite(ratio):
@@ -343,8 +349,8 @@ def _series_summary(
         coefficients,
     )
     if status != KERNEL_OK:
-        return _series_failure(status, 0)
-    terms = 1
+        return _series_failure(status, _ZERO_TERMS)
+    terms = np.int64(1)
 
     mode_float = float(mode)
     peak = mode_float * zeta - math.lgamma(mode_float + 1.0) - math.lgamma(alpha * mode_float)
@@ -383,13 +389,13 @@ def _series_summary(
     current = mode
     while current > 1:
         if terms >= max_terms:
-            return _series_failure(KERNEL_MAX_TERMS, 0)
+            return _series_failure(KERNEL_MAX_TERMS, _ZERO_TERMS)
         if current == mode:
             ratio_value = mode_lower_ratio
         else:
             ratio_value = _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value <= 0.0:
-            return _series_failure(KERNEL_LOWER_RATIO, 0)
+            return _series_failure(KERNEL_LOWER_RATIO, _ZERO_TERMS)
         relative_log -= ratio_value
         current -= 1
         terms += 1
@@ -424,15 +430,15 @@ def _series_summary(
     current = mode
     while True:
         if terms >= max_terms:
-            return _series_failure(KERNEL_MAX_TERMS, 0)
+            return _series_failure(KERNEL_MAX_TERMS, _ZERO_TERMS)
         if current >= _MAX_SAFE_MODE:
-            return _series_failure(KERNEL_WINDOW_RANGE, 0)
+            return _series_failure(KERNEL_WINDOW_RANGE, _ZERO_TERMS)
         if current == mode:
             ratio_value = mode_upper_ratio
         else:
             ratio_value = _log_adjacent_ratio(current, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value > 0.0:
-            return _series_failure(KERNEL_UPPER_RATIO, 0)
+            return _series_failure(KERNEL_UPPER_RATIO, _ZERO_TERMS)
         relative_log += ratio_value
         current += 1
         terms += 1
@@ -1029,7 +1035,10 @@ def _evaluate_tweedie_batch_parallel_core(
     outputs = _allocate_batch_outputs(y.size, derivative_order)
     values, scores, hessians, terms, valid = outputs
     statuses = np.empty(y.size, dtype=np.int64)
-    for row in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for index in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
+        # prange's index is unsigned: passed as it is, it compiled a second
+        # specialisation of the row kernel beside the serial core's int64 one.
+        row = np.int64(index)
         statuses[row] = _evaluate_tweedie_batch_row(
             y,
             mean,

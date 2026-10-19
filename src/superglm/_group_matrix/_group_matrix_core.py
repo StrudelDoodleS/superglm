@@ -771,7 +771,7 @@ class SparseSSPGroupMatrix:
             if raw_basis.has_canonical_format:
                 raw_gram = _saturated_ssp_gram(raw_basis, W)
         if raw_gram is None:
-            raw_gram = csr_gram(self._data, self._indices, self._indptr, W, self._p_b)
+            raw_gram = csr_gram(self._data, self._indices, self._indptr, W, self._p_b, False)
         else:
             # Match the CSR kernel's upper-triangle orientation and exact
             # raw symmetry; copying adds no rounding to the weighted dots.
@@ -1048,12 +1048,15 @@ class SplineCategoricalGroupMatrix:
             self._dense_level = _dense_if_saturated(self.B_level)
         if self._dense_level is not None:
             return (self._dense_level * W_sub[:, None]).T @ self._dense_level
+        # absolute_weights passed, not defaulted: an omitted argument is its
+        # own Numba signature, compiled beside the algebra path's bool one.
         return _csr_weighted_gram(
             self._data,
             self._indices,
             self._indptr,
             W_sub,
             self._p_b,
+            False,
         )
 
     def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:

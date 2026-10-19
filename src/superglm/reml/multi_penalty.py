@@ -712,7 +712,7 @@ def _dot2_entries(
     if len(selected) * left.shape[1] >= _DOT2_NATIVE_MIN_WORK:
         dots, success = _dot2_selected(
             _native_operand(left),
-            _native_operand(right),
+            _native_operand(np.transpose(right)),
             np.ascontiguousarray(selected, dtype=np.int64),
         )
     else:

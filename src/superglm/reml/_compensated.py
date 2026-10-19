@@ -62,13 +62,17 @@ def _dot2_value(x, y):
         return 0.0, False
     if not len(x):
         return 0.0, True
-    product, correction, success = _two_product_split(x[0], y[0])
-    if not success:
-        return 0.0, False
-    for index in range(1, len(x)):
+    product = 0.0
+    correction = 0.0
+    for index in range(len(x)):
         term, term_error, success = _two_product_split(x[index], y[index])
         if not success:
             return 0.0, False
+        if index == 0:
+            # The recurrence starts from the first product and its error.
+            product = term
+            correction = term_error
+            continue
         updated = product + term
         recovered = updated - product
         addition_error = (product - (updated - recovered)) + (term - recovered)
@@ -81,13 +85,18 @@ def _dot2_value(x, y):
 
 
 @njit(cache=True, fastmath=False)
-def _dot2_selected(left, right, indices):
-    """Batch selected matrix entries through the unchanged scalar recurrence."""
+def _dot2_selected(left, right_t, indices):
+    """Batch selected entries of ``left @ right`` through the unchanged scalar recurrence.
+
+    ``right_t`` is ``right`` transposed and C-contiguous, so each column is a
+    contiguous row and ``_dot2_value`` keeps the one specialisation its other
+    caller compiles (a strided column compiled a second, 0.3-0.4 s cold).
+    """
     values = np.zeros(len(indices), dtype=np.float64)
     success = np.zeros(len(indices), dtype=np.bool_)
     for index in range(len(indices)):
         row, column = indices[index]
-        value, valid = _dot2_value(left[row], right[:, column])
+        value, valid = _dot2_value(left[row], right_t[column])
         if valid:
             values[index] = value
             success[index] = True
@@ -178,14 +187,13 @@ def _dot2_quadratic_form(rows, columns, entries, vector):
         row_value = product + correction
         if not math.isfinite(row_value):
             return 0.0, False
+        term, term_error, success = _two_product_split(vector[row], row_value)
+        if not success:
+            return 0.0, False
         if start == 0:
-            outer_product, outer_correction, success = _two_product_split(vector[row], row_value)
-            if not success:
-                return 0.0, False
+            outer_product = term
+            outer_correction = term_error
         else:
-            term, term_error, success = _two_product_split(vector[row], row_value)
-            if not success:
-                return 0.0, False
             updated = outer_product + term
             recovered = updated - outer_product
             addition_error = (outer_product - (updated - recovered)) + (term - recovered)
