@@ -21,6 +21,7 @@ from superglm.features.interaction import (
     SplineCategorical,
     TensorInteraction,
 )
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
 from superglm.types import FeatureSpec, LambdaPolicy
 
@@ -463,6 +464,23 @@ def _expand_mappings(terms: Sequence[TermInput]) -> tuple[object, ...]:
     return tuple(expanded)
 
 
+def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str]) -> str:
+    """Why ``ti`` refuses ``parent``, and what declares the intended interaction."""
+    if isinstance(spec, OrderedCategorical) and spec.basis_kind == "spline":
+        left, right = parents
+        return (
+            f"ti takes two s(...) splines; parent {parent!r} is an OrderedCategorical "
+            "with a spline basis, so declare its tensor as "
+            f"interaction(TensorInteraction({left!r}, {right!r}))"
+        )
+    if isinstance(spec, OrderedCategorical):
+        return (
+            f"ti takes two s(...) splines; parent {parent!r} is an OrderedCategorical "
+            "without a spline basis, which cannot parent a tensor"
+        )
+    return f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
+
+
 def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
     """Resolve declarations without reading data or constructing row designs.
 
@@ -508,8 +526,7 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
         for parent in ispec.parent_names:
             if parent not in features:
                 raise ValueError(f"Interaction {name!r} requires declared parent {parent!r}")
-            if name in spline_parent_interactions and not isinstance(features[parent], _SplineBase):
-                raise TypeError(
-                    f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
-                )
+            parent_spec = features[parent]
+            if name in spline_parent_interactions and not isinstance(parent_spec, _SplineBase):
+                raise TypeError(_ti_parent_message(parent, parent_spec, ispec.parent_names))
     return NormalizedTerms(features, interactions, tuple(interactions))

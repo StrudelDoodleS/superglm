@@ -85,6 +85,8 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
   raises an error.
 - An interaction cannot go in a dict. Put it in the list as `ti(...)` or
   `interaction(spec)`.
+- `ti` takes two `s(...)` terms. For an `OrderedCategorical` with a spline
+  basis, declare the tensor as `interaction(TensorInteraction("band", "DrivAge"))`.
 - `terms=` replaces `features=` and `interactions=`, so a model takes one or
   the other.
 - `n_knots=`, `degree=` and `categorical_base=` configure only the

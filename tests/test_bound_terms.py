@@ -207,6 +207,7 @@ def test_numeric_conversion_preserves_convertible_strings():
 
 
 def test_explicit_tensor_preserves_ordered_spline_parent_support():
+    from superglm import Polynomial
     from superglm.features import OrderedCategorical, Spline
     from superglm.features.interaction import TensorInteraction
     from superglm.terms import interaction, normalize_terms, s, term, ti
@@ -220,8 +221,13 @@ def test_explicit_tensor_preserves_ordered_spline_parent_support():
     )
     built = _compile((*parents, interaction(TensorInteraction("band", "x"))), data)
     assert built.interaction_specs["band:x"]._p1 > 0
-    with pytest.raises(TypeError, match="spline"):
+    with pytest.raises(TypeError, match=r"interaction\(TensorInteraction\('band', 'x'\)\)"):
         normalize_terms((*parents, ti("band", "x")))
+    stepped = term("band", OrderedCategorical(order=["a", "b", "c"], basis=Polynomial(degree=1)))
+    with pytest.raises(TypeError, match="without a spline basis"):
+        normalize_terms((stepped, s("x", k=5), ti("band", "x")))
+    with pytest.raises(TypeError, match=r"use s\('x'\)"):
+        normalize_terms(("x", s("z", k=5), ti("x", "z")))
 
 
 def test_a_feature_mapping_expands_to_terms_in_its_order():
