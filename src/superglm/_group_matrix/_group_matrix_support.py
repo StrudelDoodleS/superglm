@@ -197,6 +197,15 @@ _POOLED_SUPPORT_KERNELS = (_csr_row_hashes, _csr_rows_match)
 ``prange``, writing only the arrays the call allocates."""
 
 
+def _warmup_support_scans() -> None:
+    """Compile the support scans for a canonical int32 CSR basis (empty)."""
+    indptr = np.zeros(1, dtype=np.int32)
+    indices, data = np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.float64)
+    hashes = np.zeros(0, dtype=np.uint64)
+    _csr_row_hashes(indptr, indices, data, hashes, hashes)
+    _csr_rows_match(indptr, indices, data, np.zeros(0, dtype=np.int64), np.zeros((0, 0), np.uint64))
+
+
 def _canonical_csr(B_csr: sp.spmatrix) -> sp.csr_matrix | None:
     """The matrix as a CSR matrix whose rows hold each column at most once, or ``None``."""
     if not sp.isspmatrix_csr(B_csr) and not isinstance(B_csr, sp.csr_array):

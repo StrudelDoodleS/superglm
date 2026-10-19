@@ -1305,8 +1305,10 @@ def _warmup_group_matrix_kernels() -> None:
     # Two spline-by-category levels' rows, and a level's rows into a tensor's channels.
     _sorted_intersection(codes, codes)
     _level_tensor_channels(codes, codes, codes, codes, values, matrix, 2, 2)
-    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2)
-    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, absolute_weights=True)
+    # A discrete tensor's frozen level rows reach both read-only.
+    _sorted_intersection(frozen_codes, frozen_codes)
+    _level_tensor_channels(frozen_codes, codes, codes, codes, values, matrix, 2, 2)
+    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, False)
     _csr_weighted_cross(
         values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, values, 2, 2
     )
@@ -1379,3 +1381,7 @@ def _warmup_group_matrix_kernels() -> None:
     for level_codes in (codes, frozen_codes):
         for level_weights in (values, frozen_weights):
             _level_sums(level_codes, level_weights, 3)
+    # SuperLSS passes a read-only strided curvature column.
+    strided_weights = np.ones(4, dtype=np.float64)[::2]
+    strided_weights.setflags(write=False)
+    _level_sums(codes, strided_weights, 3)

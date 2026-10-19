@@ -219,7 +219,7 @@ def test_batched_compensation_dispatch_counts_entries_and_fallbacks():
     right = bench.np.ones((2, 1))
     indices = bench.np.array([[0, 0], [1, 0]])
     with driver._kernel_dispatch() as observed:
-        kernels._dot2_selected(left, right, indices)
+        kernels._dot2_selected(left, bench.np.ascontiguousarray(right.T), indices)
     assert kernels._dot2_selected is original
     assert observed["calls"].get("_dot2_selected", 0) == 1
     assert observed["batched_dot2_results"] == {

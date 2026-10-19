@@ -290,7 +290,8 @@ def test_selected_dot2_dispatch_preserves_the_scalar_recurrence_and_status():
     right = np.array([[1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
     left.flags.writeable = right.flags.writeable = False
     indices = np.array([[0, 1], [1, 0], [0, 0]])
-    values, success = _dot2_selected(left, right, indices)
+    # The kernel takes ``right`` transposed, so a column is a contiguous row.
+    values, success = _dot2_selected(left, np.ascontiguousarray(right.T), indices)
     assert isinstance(_dot2_selected, CPUDispatcher)
     assert _dot2_selected.nopython_signatures
     assert _dot2_selected.targetoptions.get("fastmath", False) is False

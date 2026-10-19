@@ -397,3 +397,12 @@ def solved_row_blocks(
     # A job holds its solved rows and the caller's products of them, a few
     # copies of ``rows x p`` at once.
     return RowBlocks(jobs=[job(start) for start in range(0, n, rows)], block_bytes=4 * 8 * rows * p)
+
+
+def _warmup_leverage_rows() -> None:
+    """Compile the solved-row kernel for the operands its exact-path caller passes (empty)."""
+    i64, f64 = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64)
+    f64_2d, i64_2d = np.zeros((0, 0), dtype=np.float64), np.zeros((0, 0), dtype=np.int64)
+    _solved_rows_and_leverages(
+        f64_2d, f64, i64, i64_2d, f64, f64_2d, i64, i64, f64, i64, i64, i64, f64_2d, i64, f64_2d
+    )

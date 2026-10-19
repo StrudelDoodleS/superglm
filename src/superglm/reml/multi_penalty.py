@@ -701,18 +701,26 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
 
 
 def _dot2_entries(
-    left: NDArray, right: NDArray, selected: NDArray, magnitude: NDArray
+    left: NDArray,
+    right: NDArray,
+    selected: NDArray,
+    magnitude: NDArray,
+    native_right_t: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, NDArray]:
     """``_compensated_dot`` of the selected ``left @ right`` entries, batched.
 
     Each value is the scalar recurrence's value. Each enclosure is its formula,
     with ``magnitude`` enclosing ``|left| @ |right|`` for all entries at once.
     Entries flagged False need the scalar ``_compensated_dot`` range fallback.
+    ``native_right_t`` is ``right`` transposed as the native kernel takes it,
+    for a caller that passes the same ``right`` block after block.
     """
     if len(selected) * left.shape[1] >= _DOT2_NATIVE_MIN_WORK:
+        if native_right_t is None:
+            native_right_t = _native_operand(np.transpose(right))
         dots, success = _dot2_selected(
             _native_operand(left),
-            _native_operand(right),
+            native_right_t,
             np.ascontiguousarray(selected, dtype=np.int64),
         )
     else:
@@ -741,14 +749,18 @@ def _refine_product(left: NDArray, right: NDArray, value: NDArray, error: NDArra
     """
     n_rows, n_cols = value.shape
     block_rows = max(1, _DOT2_BATCH_ENTRIES // max(n_cols, 1))
-    # Normalised once: each block then views the same native operand.
+    # Normalised once: each block then views the same native operands, the
+    # transpose included (the native kernel reads ``right`` by columns).
     absolute_right, native_right = np.abs(right), _native_operand(right)
+    native_right_t = _native_operand(np.transpose(native_right))
     for start in range(0, n_rows, block_rows):
         block = left[start : start + block_rows]
         selected = np.argwhere(np.ones((block.shape[0], n_cols), dtype=bool))
         try:
             magnitude = _positive_product(np.abs(block), absolute_right)
-            dots, bounds, success = _dot2_entries(block, native_right, selected, magnitude)
+            dots, bounds, success = _dot2_entries(
+                block, native_right, selected, magnitude, native_right_t
+            )
         except PenaltyNumericalError:
             # The scalar loop below reproduces the entry that cannot be enclosed.
             dots = bounds = np.zeros(len(selected))

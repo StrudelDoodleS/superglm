@@ -20,6 +20,15 @@ falls back to ``scaled_exact_sum``, which scales every piece by the sum's
 largest power of two and streams the rows twice: a floating-point overflow
 fallback, not a value gate.  IEEE rounding must hold for every operation:
 ``fastmath`` would break the error-free transformations.
+
+Compile time.  A row stages its pieces (at most four floats, each tagged
+with its set) and then adds them in the order it formed them, so each kernel
+holds one inlined expansion step per set.  Adding each piece where it was
+formed inlined the step ten times into ``unscaled_exact_sum`` and doubled its
+cold compile (2.4 s against 1.1 s) for the same throughput on the freMTPL2
+books; leaving the step to LLVM instead of Numba's inliner kept a call per
+piece and cost 30-40% of the throughput.  The partials see the same additions
+in the same order either way, so the results are the same to the bit.
 """
 
 from __future__ import annotations
@@ -146,36 +155,40 @@ def _partials_finite(partials, count):
 
 
 @njit(cache=True, fastmath=False, inline="always")
-def _add_value(big, big_count, tiny, tiny_count, value):
-    """Add one float exactly: to ``big`` as it is, or to ``tiny`` scaled up by ``2^1126``."""
-    if value == 0.0:
-        return big_count, tiny_count
-    if abs(value) >= _TINY_PRODUCT:
-        return _add_partial(big, big_count, value), tiny_count
-    return big_count, _add_partial(tiny, tiny_count, math.ldexp(value, _TINY_SHIFT))
+def _stage_product(pieces, sets, staged, left, right):
+    """Stage ``left * right`` exactly as up to two pieces after ``staged``; -1 on overflow.
 
-
-@njit(cache=True, fastmath=False, inline="always")
-def _add_product(big, big_count, tiny, tiny_count, left, right):
-    """Add ``left * right`` exactly; ``ok`` False on overflow or a full partials array."""
+    A product of at least ``2^-969`` is TwoProduct's head and nonzero tail,
+    for the unscaled partials (set 0); a smaller one is formed on the
+    operands' ``frexp`` mantissas and staged scaled up by ``2^1126`` (set 1).
+    A zero operand stages nothing.
+    """
     if left == 0.0 or right == 0.0:
-        return big_count, tiny_count, True
+        return staged
     if abs(left * right) >= _TINY_PRODUCT:
         head, tail, finite = _raw_product(left, right)
         if not finite:
-            return big_count, tiny_count, False
-        big_count = _add_partial(big, big_count, head)
-        if big_count >= 0 and tail != 0.0:
-            big_count = _add_partial(big, big_count, tail)
-        return big_count, tiny_count, big_count >= 0
+            return -1
+        pieces[staged] = head
+        sets[staged] = 0
+        staged += 1
+        if tail != 0.0:
+            pieces[staged] = tail
+            sets[staged] = 0
+            staged += 1
+        return staged
     left_mantissa, left_exponent = math.frexp(left)
     right_mantissa, right_exponent = math.frexp(right)
     head, tail = _mantissa_product(left_mantissa, right_mantissa)
     exponent = left_exponent + right_exponent + _TINY_SHIFT
-    tiny_count = _add_partial(tiny, tiny_count, math.ldexp(head, exponent))
-    if tiny_count >= 0 and tail != 0.0:
-        tiny_count = _add_partial(tiny, tiny_count, math.ldexp(tail, exponent))
-    return big_count, tiny_count, tiny_count >= 0
+    pieces[staged] = math.ldexp(head, exponent)
+    sets[staged] = 1
+    staged += 1
+    if tail != 0.0:
+        pieces[staged] = math.ldexp(tail, exponent)
+        sets[staged] = 1
+        staged += 1
+    return staged
 
 
 @njit(cache=True, fastmath=False)
@@ -193,18 +206,19 @@ def _merge(big, big_count, tiny, tiny_count):
     big_value = _round_partials(big, big_count)
     if not math.isfinite(big_value):
         return 0.0, 0, False
-    if abs(big_value) >= _MERGE_FLOOR:
-        for index in range(tiny_count):
-            big_count = _add_partial(big, big_count, math.ldexp(tiny[index], -_TINY_SHIFT))
-            if big_count < 0:
-                return 0.0, 0, False
-        total = _round_partials(big, big_count)
-        return total, 0, math.isfinite(total)
-    for index in range(big_count):
-        tiny_count = _add_partial(tiny, tiny_count, math.ldexp(big[index], _TINY_SHIFT))
-        if tiny_count < 0:
+    unscaled = abs(big_value) >= _MERGE_FLOOR
+    if unscaled:
+        target, count, source, source_count, shift = big, big_count, tiny, tiny_count, -_TINY_SHIFT
+    else:
+        target, count, source, source_count, shift = tiny, tiny_count, big, big_count, _TINY_SHIFT
+    for index in range(source_count):
+        count = _add_partial(target, count, math.ldexp(source[index], shift))
+        if count < 0:
             return 0.0, 0, False
-    return _round_partials(tiny, tiny_count), -_TINY_SHIFT, True
+    total = _round_partials(target, count)
+    if unscaled:
+        return total, 0, math.isfinite(total)
+    return total, -_TINY_SHIFT, True
 
 
 @njit(cache=True, fastmath=False)
@@ -214,32 +228,55 @@ def unscaled_exact_sum(weights, values, shift, mode):
     ``mode`` 0: ``sum w``; 1: ``sum w v``; 2: ``sum w (v - shift)``, with ``v -
     shift = h + e`` split exactly by TwoSum.  ``ok`` is False when a split,
     product, partial or residual overflows, or the partials fill their arrays.
+    Each row stages its pieces (``_stage_product``) and adds them in the
+    order it formed them, so the expansion step is compiled once per set.
     """
     big = np.empty(_PARTIALS, dtype=np.float64)
     tiny = np.empty(_PARTIALS, dtype=np.float64)
-    big_count = 0
-    tiny_count = 0
+    # np.int64, not a literal 0: a literal seed makes type inference compile
+    # _merge and its helpers a second time for Literal[int](0).
+    big_count = np.int64(0)
+    tiny_count = np.int64(0)
+    pieces = np.empty(4, dtype=np.float64)
+    sets = np.empty(4, dtype=np.int64)
+    parts = np.empty(2, dtype=np.float64)
     for row in range(weights.shape[0]):
         weight = weights[row]
+        staged = 0
         if mode == 0:
-            big_count, tiny_count = _add_value(big, big_count, tiny, tiny_count, weight)
-            if big_count < 0 or tiny_count < 0:
-                return 0.0, 0, False
-            continue
-        if mode == 1:
-            big_count, tiny_count, ok = _add_product(
-                big, big_count, tiny, tiny_count, weight, values[row]
-            )
-            if not ok:
-                return 0.0, 0, False
-            continue
-        residual, residual_error = _two_sum(values[row], -shift)
-        if not math.isfinite(residual):
-            return 0.0, 0, False
-        for part in (residual, residual_error):
-            big_count, tiny_count, ok = _add_product(big, big_count, tiny, tiny_count, weight, part)
-            if not ok:
-                return 0.0, 0, False
+            if weight == 0.0:
+                continue
+            if abs(weight) >= _TINY_PRODUCT:
+                pieces[0] = weight
+                sets[0] = 0
+            else:
+                pieces[0] = math.ldexp(weight, _TINY_SHIFT)
+                sets[0] = 1
+            staged = 1
+        else:
+            n_parts = 1
+            parts[0] = values[row]
+            if mode != 1:
+                residual, residual_error = _two_sum(values[row], -shift)
+                if not math.isfinite(residual):
+                    return 0.0, 0, False
+                parts[0] = residual
+                parts[1] = residual_error
+                n_parts = 2
+            for part in range(n_parts):
+                staged = _stage_product(pieces, sets, staged, weight, parts[part])
+                if staged < 0:
+                    return 0.0, 0, False
+        # The pieces in the order the row formed them: one expansion step per set.
+        for index in range(staged):
+            if sets[index] == 0:
+                big_count = _add_partial(big, big_count, pieces[index])
+                if big_count < 0:
+                    return 0.0, 0, False
+            else:
+                tiny_count = _add_partial(tiny, tiny_count, pieces[index])
+                if tiny_count < 0:
+                    return 0.0, 0, False
     return _merge(big, big_count, tiny, tiny_count)
 
 
@@ -254,8 +291,11 @@ def weighted_residual_sum(weights, response, offset, has_offset, alpha, contribu
     """
     big = np.empty(_PARTIALS, dtype=np.float64)
     tiny = np.empty(_PARTIALS, dtype=np.float64)
-    big_count = 0
-    tiny_count = 0
+    big_count = np.int64(0)
+    tiny_count = np.int64(0)
+    pieces = np.empty(8, dtype=np.float64)
+    sets = np.empty(8, dtype=np.int64)
+    parts = np.empty(4, dtype=np.float64)
     for row in range(weights.shape[0]):
         weight = weights[row]
         if weight == 0.0:
@@ -268,10 +308,25 @@ def weighted_residual_sum(weights, response, offset, has_offset, alpha, contribu
         value, contribution_error = _two_sum(value, -contribution[row])
         if not math.isfinite(value):
             return 0.0, 0, False
-        for part in (value, contribution_error, alpha_error, offset_error):
-            big_count, tiny_count, ok = _add_product(big, big_count, tiny, tiny_count, weight, part)
-            if not ok:
+        parts[0] = value
+        parts[1] = contribution_error
+        parts[2] = alpha_error
+        parts[3] = offset_error
+        staged = 0
+        for part in range(4):
+            staged = _stage_product(pieces, sets, staged, weight, parts[part])
+            if staged < 0:
                 return 0.0, 0, False
+        # The pieces in the order the row formed them: one expansion step per set.
+        for index in range(staged):
+            if sets[index] == 0:
+                big_count = _add_partial(big, big_count, pieces[index])
+                if big_count < 0:
+                    return 0.0, 0, False
+            else:
+                tiny_count = _add_partial(tiny, tiny_count, pieces[index])
+                if tiny_count < 0:
+                    return 0.0, 0, False
     return _merge(big, big_count, tiny, tiny_count)
 
 
@@ -332,7 +387,7 @@ def scaled_exact_sum(weights, values, shift, mode):
     if top == -(2**31):
         return 0.0, 0, True
     partials = np.empty(_PARTIALS, dtype=np.float64)
-    count = 0
+    count = np.int64(0)
     for row in range(weights.shape[0]):
         head, tail, error_head, error_tail, exponent, error_exponent, finite = _row_pieces(
             weights[row], values[row], shift, mode

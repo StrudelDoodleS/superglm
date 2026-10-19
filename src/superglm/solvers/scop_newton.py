@@ -63,6 +63,12 @@ def _scop_bin_aggregates(bin_idx, W, z, eta_bin, n_bins):
     return W_agg, Wz_agg, Wr_agg
 
 
+def _warmup_scop() -> None:
+    """Compile the SCOP bin aggregates for the operands a shape-constrained fit passes."""
+    empty = np.zeros(0, dtype=np.float64)
+    _scop_bin_aggregates(np.zeros(0, dtype=np.int64), empty, empty, empty, 0)
+
+
 """Pya & Wood (2015) §3.2 singular-value cutoff, relative to the largest."""
 
 _NEWTON_CURVATURE_MARGIN = 1e-10

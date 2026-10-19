@@ -1072,3 +1072,19 @@ __all__ = [
     "negative_binomial_predictor_curvature_directional",
     "recurrence_cells",
 ]
+
+
+def _warmup_negative_binomial() -> None:
+    """Compile the theta-series cores a SuperLSS NB2 fit calls, serial and parallel (no rows).
+
+    The LAML endgame's third- and fourth-derivative kernels compile on first
+    use, as the Tweedie family's do.
+    """
+    rows = np.zeros(0, dtype=np.int64)
+    values = np.zeros(0, dtype=_FLOAT)
+    for core in (_compiled.theta_series_serial, _compiled.theta_series_parallel):
+        core(
+            rows, rows, values, values, values, values, values, 2, _SERIES_ORDER,
+            _SERIES_EXPONENTS, _SERIES_BERNOULLI, np.zeros((0, 2), dtype=np.bool_),
+            np.zeros((0, 2), dtype=_FLOAT), np.zeros((0, 2), dtype=_FLOAT),
+        )  # fmt: skip

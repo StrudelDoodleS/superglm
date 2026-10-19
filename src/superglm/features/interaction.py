@@ -1758,6 +1758,17 @@ def _row_kron_fill(p1, i1, d1, p2, i2, d2, k2, indptr, indices, data):  # pragma
                     out += 1
 
 
+def _warmup_row_kron() -> None:
+    """Compile the row Kronecker kernels for the operands an interaction build passes (empty)."""
+    i64, f64 = np.zeros(1, dtype=np.int64), np.zeros(0, dtype=np.float64)
+    empty = np.zeros(0, dtype=np.int64)
+    _row_kron_counts(i64, empty, f64, i64, empty, f64, np.zeros(0, dtype=np.int64))
+    _row_kron_fill(
+        i64, empty, f64, i64, empty, f64, 0, np.zeros(1, dtype=np.int64),
+        np.zeros(0, dtype=np.int32), f64,
+    )  # fmt: skip
+
+
 _POOLED_BUILD_KERNELS = (_row_kron_counts, _row_kron_fill)
 """The kernels an interaction build runs on its pool worker (``_predictor_compiler``):
 ``nogil``, never ``prange``, writing only the arrays the call allocates."""

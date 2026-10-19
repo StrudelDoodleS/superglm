@@ -10,34 +10,43 @@ from numpy.typing import NDArray
 
 import superglm.distributional.kernels._fourth_generated as _generated
 
-KERNEL_OK = 0
-KERNEL_MODE_RATIO = 1
-KERNEL_MODE_RANGE = 2
-KERNEL_MODE_BRACKET = 3
-KERNEL_MAX_TERMS = 4
-KERNEL_WINDOW_RANGE = 5
-KERNEL_UPPER_RATIO = 6
-KERNEL_LOWER_RATIO = 7
-KERNEL_PEAK = 8
-KERNEL_MASS = 9
-KERNEL_SCORE_MOMENTS = 10
-KERNEL_HESSIAN_MOMENTS = 11
-KERNEL_MEAN_SCORE_SCALE = 12
-KERNEL_MEAN_SCORE = 13
-KERNEL_MEAN_HESSIAN_SCALE = 14
-KERNEL_MEAN_HESSIAN = 15
-KERNEL_ZERO_RATE = 16
-KERNEL_CANONICAL_SCALE = 17
-KERNEL_SERIES_BASE = 18
-KERNEL_ROW_VALUE = 19
-KERNEL_ROW_SCORE = 20
-KERNEL_ROW_DERIVATIVES = 21
-KERNEL_COMPLETE_VALUE = 22
-KERNEL_COMPLETE_SCORE = 23
-KERNEL_COMPLETE_HESSIAN = 24
-KERNEL_REQUIRED_WORK = 25
+# Status codes are int64 values, not Python ints: Numba types a Python int
+# constant passed to a compiled helper as its own literal type and compiles
+# the helper once per code (``_row_failure`` and ``_series_failure`` compiled
+# 16 specialisations on a first SuperLSS Tweedie fit).
+KERNEL_OK = np.int64(0)
+KERNEL_MODE_RATIO = np.int64(1)
+KERNEL_MODE_RANGE = np.int64(2)
+KERNEL_MODE_BRACKET = np.int64(3)
+KERNEL_MAX_TERMS = np.int64(4)
+KERNEL_WINDOW_RANGE = np.int64(5)
+KERNEL_UPPER_RATIO = np.int64(6)
+KERNEL_LOWER_RATIO = np.int64(7)
+KERNEL_PEAK = np.int64(8)
+KERNEL_MASS = np.int64(9)
+KERNEL_SCORE_MOMENTS = np.int64(10)
+KERNEL_HESSIAN_MOMENTS = np.int64(11)
+KERNEL_MEAN_SCORE_SCALE = np.int64(12)
+KERNEL_MEAN_SCORE = np.int64(13)
+KERNEL_MEAN_HESSIAN_SCALE = np.int64(14)
+KERNEL_MEAN_HESSIAN = np.int64(15)
+KERNEL_ZERO_RATE = np.int64(16)
+KERNEL_CANONICAL_SCALE = np.int64(17)
+KERNEL_SERIES_BASE = np.int64(18)
+KERNEL_ROW_VALUE = np.int64(19)
+KERNEL_ROW_SCORE = np.int64(20)
+KERNEL_ROW_DERIVATIVES = np.int64(21)
+KERNEL_COMPLETE_VALUE = np.int64(22)
+KERNEL_COMPLETE_SCORE = np.int64(23)
+KERNEL_COMPLETE_HESSIAN = np.int64(24)
+KERNEL_REQUIRED_WORK = np.int64(25)
+
+# The integers compiled helpers pass between them: int from Python callers,
+# int64 for the status codes, counts and indices formed inside.
+type _Int = int | np.int64
 
 _MAX_SAFE_MODE = 2**52
+_ZERO_TERMS = np.int64(0)
 _BERNOULLI = (
     1.0,
     -0.5,
@@ -227,7 +236,7 @@ def _log_gamma_increment(
 
 @njit(cache=True)
 def _log_adjacent_ratio(
-    j: int,
+    j: _Int,
     zeta: float,
     alpha: float,
     coefficients: NDArray[np.float64],
@@ -241,15 +250,16 @@ def _locate_series_mode(
     zeta: float,
     alpha: float,
     coefficients: NDArray[np.float64],
-) -> tuple[int, int, float, float]:
-    first = _log_adjacent_ratio(1, zeta, alpha, coefficients)
+) -> tuple[_Int, _Int, float, float]:
+    first = _log_adjacent_ratio(np.int64(1), zeta, alpha, coefficients)
     if not math.isfinite(first):
         return KERNEL_MODE_RATIO, 0, math.nan, math.nan
     if first <= 0.0:
         return KERNEL_OK, 1, math.nan, first
 
-    lower = 1
-    upper = 2
+    # int64 seeds, not literals: one specialisation of _log_adjacent_ratio.
+    lower = np.int64(1)
+    upper = np.int64(2)
     while True:
         ratio = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
         if not math.isfinite(ratio):
@@ -280,11 +290,11 @@ def _locate_series_mode(
 
 @njit(cache=True)
 def _term_derivative_channels(
-    j: int,
+    j: _Int,
     zeta_p: float,
     zeta_pp: float,
     inverse_r: float,
-    derivative_order: int,
+    derivative_order: _Int,
 ) -> tuple[float, float, float, float]:
     j_float = float(j)
     q_rho = -j_float * inverse_r
@@ -309,7 +319,7 @@ def _term_derivative_channels(
 # Series tuples are (status, log_sum, mean_q_rho, mean_q_p, mean_q_rho_p,
 # mean_q_pp, variance_q_rho, covariance_q_rho_p, variance_q_p, terms).
 @njit(cache=True)
-def _series_failure(status: int, terms: int):
+def _series_failure(status: _Int, terms: _Int):
     return (
         status,
         math.nan,
@@ -331,8 +341,8 @@ def _series_summary(
     zeta_pp: float,
     inverse_r: float,
     alpha: float,
-    derivative_order: int,
-    max_terms: int,
+    derivative_order: _Int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
@@ -343,8 +353,8 @@ def _series_summary(
         coefficients,
     )
     if status != KERNEL_OK:
-        return _series_failure(status, 0)
-    terms = 1
+        return _series_failure(status, _ZERO_TERMS)
+    terms = np.int64(1)
 
     mode_float = float(mode)
     peak = mode_float * zeta - math.lgamma(mode_float + 1.0) - math.lgamma(alpha * mode_float)
@@ -383,13 +393,13 @@ def _series_summary(
     current = mode
     while current > 1:
         if terms >= max_terms:
-            return _series_failure(KERNEL_MAX_TERMS, 0)
+            return _series_failure(KERNEL_MAX_TERMS, _ZERO_TERMS)
         if current == mode:
             ratio_value = mode_lower_ratio
         else:
             ratio_value = _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value <= 0.0:
-            return _series_failure(KERNEL_LOWER_RATIO, 0)
+            return _series_failure(KERNEL_LOWER_RATIO, _ZERO_TERMS)
         relative_log -= ratio_value
         current -= 1
         terms += 1
@@ -424,15 +434,15 @@ def _series_summary(
     current = mode
     while True:
         if terms >= max_terms:
-            return _series_failure(KERNEL_MAX_TERMS, 0)
+            return _series_failure(KERNEL_MAX_TERMS, _ZERO_TERMS)
         if current >= _MAX_SAFE_MODE:
-            return _series_failure(KERNEL_WINDOW_RANGE, 0)
+            return _series_failure(KERNEL_WINDOW_RANGE, _ZERO_TERMS)
         if current == mode:
             ratio_value = mode_upper_ratio
         else:
             ratio_value = _log_adjacent_ratio(current, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value > 0.0:
-            return _series_failure(KERNEL_UPPER_RATIO, 0)
+            return _series_failure(KERNEL_UPPER_RATIO, _ZERO_TERMS)
         relative_log += ratio_value
         current += 1
         terms += 1
@@ -526,7 +536,7 @@ def _series_summary(
 
 
 @njit(cache=True)
-def _mean_score_channel(y: float, mean: float, rho: float, power: float) -> tuple[int, float]:
+def _mean_score_channel(y: float, mean: float, rho: float, power: float) -> tuple[_Int, float]:
     exponent = -rho - power * math.log(mean)
     scale = math.exp(exponent)
     if not math.isfinite(scale):
@@ -547,7 +557,7 @@ def _mean_hessian_channel(
     mean: float,
     rho: float,
     power: float,
-) -> tuple[int, float]:
+) -> tuple[_Int, float]:
     exponent = -rho - (power + 1.0) * math.log(mean)
     scale = math.exp(exponent)
     if not math.isfinite(scale):
@@ -566,7 +576,7 @@ def _mean_hessian_channel(
 # Row tuples are status, value, score (mu, phi, p), packed Hessian
 # (mu-mu, mu-phi, mu-p, phi-phi, phi-p, p-p), then terms.
 @njit(cache=True)
-def _row_failure(status: int):
+def _row_failure(status: _Int):
     return (
         status,
         math.nan,
@@ -605,7 +615,7 @@ def _zero_row(
     modeled_phi: float,
     power: float,
     rho: float,
-    derivative_order: int,
+    derivative_order: _Int,
 ):
     log_mean = math.log(mean)
     s = 2.0 - power
@@ -691,8 +701,8 @@ def _positive_row(
     modeled_phi: float,
     power: float,
     rho: float,
-    derivative_order: int,
-    max_terms: int,
+    derivative_order: _Int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
@@ -872,7 +882,7 @@ def _positive_row(
 
 
 @njit(cache=True)
-def _allocate_batch_outputs(n_rows: int, derivative_order: int):
+def _allocate_batch_outputs(n_rows: _Int, derivative_order: _Int):
     values = np.empty(n_rows, dtype=np.float64)
     if derivative_order >= 1:
         scores = np.empty((n_rows, 3), dtype=np.float64)
@@ -894,16 +904,16 @@ def _evaluate_tweedie_batch_row(
     dispersion: NDArray[np.float64],
     power: NDArray[np.float64],
     weight: NDArray[np.float64],
-    weight_mode: int,
-    derivative_order: int,
-    max_terms: int,
+    weight_mode: _Int,
+    derivative_order: _Int,
+    max_terms: _Int,
     log_cutoff: float,
-    row: int,
+    row: _Int,
     values: NDArray[np.float64],
     scores: NDArray[np.float64],
     hessians: NDArray[np.float64],
     terms: NDArray[np.int64],
-) -> int:
+) -> _Int:
     response = y[row]
     modeled_mean = mean[row]
     modeled_phi = dispersion[row]
@@ -962,8 +972,8 @@ def _complete_batch_status(
     values: NDArray[np.float64],
     scores: NDArray[np.float64],
     hessians: NDArray[np.float64],
-    derivative_order: int,
-) -> int:
+    derivative_order: _Int,
+) -> _Int:
     if not np.all(np.isfinite(values)):
         return KERNEL_COMPLETE_VALUE
     if derivative_order >= 1 and not np.all(np.isfinite(scores)):
@@ -982,9 +992,9 @@ def _evaluate_tweedie_batch_core(
     dispersion: NDArray[np.float64],
     power: NDArray[np.float64],
     weight: NDArray[np.float64],
-    weight_mode: int,
-    derivative_order: int,
-    max_terms: int,
+    weight_mode: _Int,
+    derivative_order: _Int,
+    max_terms: _Int,
     log_cutoff: float,
 ):
     """Evaluate one validated contiguous batch serially."""
@@ -1020,16 +1030,19 @@ def _evaluate_tweedie_batch_parallel_core(
     dispersion: NDArray[np.float64],
     power: NDArray[np.float64],
     weight: NDArray[np.float64],
-    weight_mode: int,
-    derivative_order: int,
-    max_terms: int,
+    weight_mode: _Int,
+    derivative_order: _Int,
+    max_terms: _Int,
     log_cutoff: float,
 ):
     """Evaluate independent rows in parallel, preserving row arithmetic."""
     outputs = _allocate_batch_outputs(y.size, derivative_order)
     values, scores, hessians, terms, valid = outputs
     statuses = np.empty(y.size, dtype=np.int64)
-    for row in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for index in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
+        # prange's index is unsigned: passed as it is, it compiled a second
+        # specialisation of the row kernel beside the serial core's int64 one.
+        row = np.int64(index)
         statuses[row] = _evaluate_tweedie_batch_row(
             y,
             mean,
@@ -1133,7 +1146,7 @@ def _polygamma_012(value: float) -> tuple[float, float, float]:
 
 @njit(cache=True)
 def _third_term_channels(
-    j: int, zeta_p: float, zeta_pp: float, zeta_ppp: float, inverse_r: float
+    j: _Int, zeta_p: float, zeta_pp: float, zeta_ppp: float, inverse_r: float
 ) -> tuple[float, float, float]:
     """``(q_p, q_pp, q_ppp)`` of series term ``j``."""
     j_float = float(j)
@@ -1160,7 +1173,7 @@ def _series_third_cumulants(
     zeta_ppp: float,
     inverse_r: float,
     alpha: float,
-    max_terms: int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
@@ -1325,7 +1338,7 @@ def _tweedie_third_row(
     phi: float,
     power: float,
     rho: float,
-    max_terms: int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
@@ -1444,9 +1457,9 @@ def _tweedie_hessian_direction_core(
     dispersion: NDArray[np.float64],
     power: NDArray[np.float64],
     weight: NDArray[np.float64],
-    weight_mode: int,
+    weight_mode: _Int,
     direction: NDArray[np.float64],
-    max_terms: int,
+    max_terms: _Int,
     log_cutoff: float,
 ):
     """Packed ``dH(v)`` in ``(mu, phi, p)`` per row; status and first failing row last."""
@@ -1549,7 +1562,7 @@ _POLYGAMMA_BERNOULLI = np.array(
 
 @njit(cache=True)
 def _fourth_term_channels(
-    j: int, zeta1: float, zeta2: float, zeta3: float, zeta4: float, r: float
+    j: _Int, zeta1: float, zeta2: float, zeta3: float, zeta4: float, r: float
 ) -> tuple[float, float, float, float]:
     """``(q_p, q_pp, q_ppp, q_pppp)`` of series term ``j`` (generated)."""
     j_float = float(j)
@@ -1566,7 +1579,7 @@ def _series_fourth_cumulants(
     zeta4: float,
     r: float,
     alpha: float,
-    max_terms: int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
@@ -1783,11 +1796,11 @@ def _tweedie_fourth_row(
     mean: float,
     power: float,
     rho: float,
-    max_terms: int,
+    max_terms: _Int,
     log_cutoff: float,
     coefficients: NDArray[np.float64],
     out: NDArray[np.float64],
-) -> int:
+) -> _Int:
     """All 34 derivatives of orders one to four in ``(mu, rho, p)``, ``rho = log phi``.
 
     The closed part (generated) carries every derivative through ``mu``; the
@@ -1836,8 +1849,8 @@ def _tweedie_fourth_core(
     dispersion: NDArray[np.float64],
     power: NDArray[np.float64],
     weight: NDArray[np.float64],
-    weight_mode: int,
-    max_terms: int,
+    weight_mode: _Int,
+    max_terms: _Int,
     log_cutoff: float,
 ):
     """``(n, 34)`` derivatives in ``(mu, rho, p)``, weighted; status and first failing row last."""

@@ -76,7 +76,16 @@ from numba.core.registry import CPUDispatcher
 from superglm.reml import multi_penalty
 
 dispatchers = {}
-for module in (tweedie_numba, group_kernels):
+# The exact path's term tables, leverage rows, support scans and row
+# Kronecker builds: a large book's first fit compiled 14 of them after warmup.
+import superglm._group_matrix._group_matrix_support as support_scans
+import superglm._group_matrix._lookup_tables as lookup_tables
+import superglm.features.interaction as interaction
+import superglm.reml._leverage_rows as leverage_rows
+
+for module in (
+    tweedie_numba, group_kernels, lookup_tables, leverage_rows, support_scans, interaction
+):
     dispatchers.update(
         {
             f"{module.__name__}.{name}": value
@@ -92,6 +101,21 @@ dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
 )
 for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
     dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
+# The SuperLSS gamma and NB2 series kernels and the exact sums, by name: their
+# modules also hold kernels that compile on first use.
+import superglm.distributional.kernels._negative_binomial_numba as nb_numba
+import superglm.distributional.kernels.gamma as gamma_kernels
+import superglm.solvers._exact_sums as exact_sums
+import superglm.solvers.scop_newton as scop_newton
+
+for module, names in (
+    (gamma_kernels, ("_small_shape_series",)),
+    (nb_numba, ("theta_series_serial", "theta_series_parallel")),
+    (exact_sums, ("unscaled_exact_sum", "scaled_exact_sum", "weighted_residual_sum")),
+    (scop_newton, ("_scop_bin_aggregates",)),
+):
+    for name in names:
+        dispatchers[f"{module.__name__}.{name}"] = getattr(module, name)
 # The LAML endgame's Tweedie third-derivative kernels compile on a Tweedie
 # fit's first use, not in every process's warmup.
 from superglm.distributional.kernels.tweedie import _FIRST_USE_DISPATCHERS
@@ -118,6 +142,17 @@ superglm.warmup()
 compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
 assert not any(dispatcher.nopython_signatures for dispatcher in first_use.values())
+
+# The row Kronecker build and the support scans, through their production entry
+# points: a first interaction fit must reuse the signatures warmup compiled.
+import scipy.sparse as sp
+
+basis = sp.csr_matrix(np.array([[1.0, 0.0], [0.0, 2.0], [1.0, 0.0]]))
+interaction._row_kron(basis, basis)
+row_hashes = support_scans._row_hashes(basis, 2)
+_, first_rows, row_groups = np.unique(row_hashes, return_index=True, return_inverse=True)
+assert support_scans._verified_representatives(basis, first_rows, row_groups, 2) is not None
+assert signatures() == compiled, "an interaction build or support scan compiled after public warmup"
 
 # The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
 from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
