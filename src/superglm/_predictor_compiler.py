@@ -591,7 +591,8 @@ def compile_predictor_design(
         if not isinstance(ispec, FactorSmooth):
             # A declared spec skips the refusals a (left, right) pair meets in
             # add_interaction, so they run here before any interaction builds.
-            refuse_unsupported_interaction_parents(*ispec.parent_names, specs)
+            left, right = ispec.parent_names
+            refuse_unsupported_interaction_parents(left, right, specs)
         for parent in ispec.parent_names:
             X.column_array(parent)
         binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
