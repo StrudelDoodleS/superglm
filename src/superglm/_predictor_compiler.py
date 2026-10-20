@@ -38,7 +38,7 @@ from superglm.features.ordered_categorical import (
 )
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import _SplineBase
+from superglm.features.spline import CubicRegressionSpline, _SplineBase
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
@@ -58,6 +58,36 @@ class CompiledPredictorDesign:
     # one; this module only records what it saw while the specs learned their
     # levels.
     separation_records: tuple[tuple, ...] = ()
+
+
+def _kindless_spline_for_column(
+    name: str, spec: FeatureSpec, x: NDArray, sample_weight: NDArray | None
+) -> FeatureSpec:
+    """``spec``, or the ``ps`` spline it builds as when no kind was named and ``x`` has one value.
+
+    A cubic regression spline has no range to place its knots on in a column
+    with one value. A P-spline fits it, and before 0.40 a spline with no kind
+    was one, so such a spline builds as ``kind="ps"`` with a warning.
+    """
+    from superglm.features._spline_factory import kindless_as_ps, kindless_ps_message
+    from superglm.features._spline_runtime import knot_domain
+
+    if not isinstance(spec, CubicRegressionSpline):
+        return spec
+    try:
+        lo, hi = knot_domain(spec, x, sample_weight)
+    except ValueError:
+        return spec  # The build refuses these weights itself, naming the feature.
+    replacement = kindless_as_ps(spec) if lo == hi else None
+    if replacement is None:
+        return spec
+    warnings.warn(
+        f"Feature {name!r}: "
+        + kindless_ps_message(f"has no range on this column, whose every value is {lo:g}"),
+        UserWarning,
+        stacklevel=2,
+    )
+    return cast("FeatureSpec", replacement)
 
 
 def _clone_specification_graph(
@@ -285,6 +315,8 @@ def compile_predictor_design(
             feature_build_weight = categorical_reporting_weight
         else:
             feature_build_weight = sample_weight
+
+        spec = specs[name] = _kindless_spline_for_column(name, spec, x_col, feature_build_weight)
 
         # Check if this feature should use fit-time discretization
         use_discrete = should_discretize(spec, model_discrete)

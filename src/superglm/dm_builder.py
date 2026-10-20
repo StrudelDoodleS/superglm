@@ -993,6 +993,57 @@ class BuildResult:
     compiled: CompiledPredictorDesign
 
 
+def _shape_engine(spec: Any) -> str | None:
+    """The engine a fit-time shape constraint on ``spec`` takes: "scop", "qp" or None."""
+    from superglm.features._spline_build import (
+        _uses_fit_time_qp_constraints,
+        _uses_fit_time_scop_constraints,
+    )
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    if isinstance(spec, OrderedCategorical):
+        spec = spec._spline  # The ordered term's constraint is its basis's.
+    if _uses_fit_time_scop_constraints(spec):
+        return "scop"
+    if _uses_fit_time_qp_constraints(spec):
+        return "qp"
+    return None
+
+
+def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order) -> None:
+    """Build kindless constrained splines as ``ps`` when another term's constraint is on SCOP.
+
+    One model cannot put shape constraints on both SCOP (``ps``) and the QP
+    (``cr``, ``bs``). A spline that names no kind is ``cr`` and goes to the
+    QP; before 0.40 it was ``ps`` and went to SCOP. When every QP term named
+    no kind, they build as ``ps``, as before 0.40, with a warning. A QP term
+    whose kind was named keeps the refusal.
+    """
+    import warnings
+
+    from superglm.features._spline_factory import kindless_as_ps, kindless_ps_message
+
+    engines = {name: _shape_engine(specs[name]) for name in feature_order}
+    scop = [name for name, engine in engines.items() if engine == "scop"]
+    qp = [name for name, engine in engines.items() if engine == "qp"]
+    if not scop or not qp:
+        return
+    replacements = {name: kindless_as_ps(specs[name]) for name in qp}
+    if any(replacement is None for replacement in replacements.values()):
+        return
+    for name, replacement in replacements.items():
+        warnings.warn(
+            f"Feature {name!r}: "
+            + kindless_ps_message(
+                f"would put this shape constraint on the QP while {scop[0]!r} puts its "
+                "constraint on SCOP, and one model cannot use both"
+            ),
+            UserWarning,
+            stacklevel=4,
+        )
+        specs[name] = cast(FeatureSpec, replacement)
+
+
 def build_design_matrix(
     X: EagerFrame,
     y: NDArray,
@@ -1101,6 +1152,7 @@ def build_design_matrix(
     # Tweedie prior fit.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
+    resolve_kindless_shape_engines(specs, feature_order)
 
     compiled = compile_predictor_design(
         X,

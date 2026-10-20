@@ -323,7 +323,8 @@ class TestDefaultKindIsCr:
 
     Every test here fails on the 0.39 factory: its default built a PSpline,
     and it accepted any ``degree`` for a cubic regression spline and ignored
-    it, so a ``degree=2`` request silently fitted a cubic.
+    it, so a ``degree=2`` request silently fitted a cubic. A spline with no
+    kind that ``cr`` cannot take builds as ``ps``, as on 0.39.
     """
 
     def test_default_is_cubic_regression_spline(self):
@@ -363,33 +364,16 @@ class TestDefaultKindIsCr:
         assert f"degree={degree} cannot apply" in message
         assert "kind='ps' or kind='bs'" in message
 
-    def test_default_kind_refuses_a_degree_rather_than_fitting_a_cubic(self):
-        """Under the new default, ``Spline(degree=2)`` (a quadratic P-spline in
-        0.39) must not silently become a cubic regression spline."""
+    @pytest.mark.parametrize("arguments", [{"degree": 2}, {"m": 4}, {"m": (2, 4)}])
+    def test_default_kind_builds_ps_where_cr_cannot_serve(self, arguments):
+        """A degree or penalty order ``cr`` cannot take builds the 0.39 P-spline
+        with a warning (``tests/test_kindless_spline_fallback.py``), never a cubic."""
         from superglm.terms import s
 
-        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
-            Spline(n_knots=8, degree=2)
-        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
-            s("age", n_knots=8, degree=2)
-        assert Spline(kind="ps", n_knots=8, degree=2).degree == 2
-
-    @pytest.mark.parametrize("m", [4, (2, 4)], ids=["int", "tuple"])
-    def test_default_kind_refuses_a_penalty_order_above_its_maximum(self, m):
-        """``Spline(m=4)`` was a valid P-spline in 0.39. The default now names itself,
-        its maximum and the remedy, not the class the caller never wrote."""
-        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3") as excinfo:
-            Spline(m=m)
-        message = str(excinfo.value)
-        assert "so m=4 cannot apply" in message
-        assert "Pass kind='ps' for a penalty of order 4" in message
-        assert "CubicRegressionSpline" not in message
-
-    def test_s_default_refuses_a_penalty_order_above_its_maximum(self):
-        from superglm.terms import s
-
-        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3"):
-            s("age", m=4)
+        with pytest.warns(UserWarning, match="names no kind"):
+            assert isinstance(Spline(n_knots=8, **arguments), PSpline)
+        with pytest.warns(UserWarning, match="names no kind"):
+            assert isinstance(s("age", n_knots=8, **arguments).spec, PSpline)
 
     @pytest.mark.parametrize("kind, cap", [("cr", 3), ("cr_cardinal", 2)])
     def test_cubic_regression_kinds_refuse_a_penalty_order_above_their_maximum(self, kind, cap):
