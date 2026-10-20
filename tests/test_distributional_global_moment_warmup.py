@@ -16,15 +16,12 @@ from superglm.distributional.solver._batched_moments import (
     _accumulate_batched, _accumulate_batched_strided,
 )
 
-kernels = (moments._finite_bounded_1d, moments._finite_bounded_2d,
-           moments._copy_dense_checked, moments._pack_categorical, moments._accumulate_vector,
-           moments._accumulate_histogram, moments._accumulate_directional,
+kernels = (moments._finite_bounded_2d, moments._copy_dense_checked, moments._pack_categorical,
            _accumulate_batched, _accumulate_batched_strided)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-assert all(compiled)
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels[-2:]) == (1, 1)
+assert tuple(map(len, compiled)) == (1, 1, 1, 1, 1)
 from tests.test_distributional_automatic_panels import _problem
 from tests.test_distributional_global_moment_integration import _row_stream
 for companion in ('mixed', 'intercept'):

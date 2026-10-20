@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
-from numba import njit
+from numba import njit, types
+
+from superglm._numba_compile import compile_closed
 
 # Match the original global-moment operand predicate exactly. Zeros, including
 # negative zero, are permitted. Nonzero magnitudes keep the separately bounded
@@ -45,23 +46,31 @@ def _write_categorical_block(panel, codes, start, width):
             panel[row, start + column] = 1.0 if code == column else 0.0
 
 
+# One signature per writer serves every operand form: a dense source is a row
+# span of a stored design block in any layout or writeability, categorical
+# codes a row span of stored codes, and the destination a row span of the
+# plan's panel.
+_ORDINARY_WRITERS = (
+    (
+        _copy_dense_checked,
+        (
+            types.Array(types.float64, 2, "A"),
+            types.Array(types.float64, 2, "A", readonly=True),
+            types.intp,
+        ),
+    ),
+    (
+        _write_categorical_block,
+        (
+            types.Array(types.float64, 2, "A"),
+            types.Array(types.intp, 1, "A", readonly=True),
+            types.intp,
+            types.intp,
+        ),
+    ),
+)
+
+
 def _warmup_ordinary_packing():
-    """Compile C/F/strided destinations and readonly/layout input variants."""
-
-    def matrix(rows, columns, layout):
-        if layout == "A":
-            return np.ones((2 * rows, 2 * columns), dtype=np.float64)[::-2, ::-2]
-        return np.ones((rows, columns), dtype=np.float64, order=layout)
-
-    for destination_layout in ("C", "F", "A"):
-        panel = matrix(3, 4, destination_layout)
-        for source_layout in ("C", "F", "A"):
-            for readonly in (False, True):
-                values = matrix(3, 2, source_layout)
-                values.flags.writeable = not readonly
-                _copy_dense_checked(panel, values, 1)
-        for stride in (1, -2):
-            for readonly in (False, True):
-                codes = np.zeros(3 if stride == 1 else 6, dtype=np.intp)[::stride]
-                codes.flags.writeable = not readonly
-                _write_categorical_block(panel, codes, 1, 2)
+    """Compile the two writers' signatures (``compile_closed``)."""
+    compile_closed(*_ORDINARY_WRITERS)

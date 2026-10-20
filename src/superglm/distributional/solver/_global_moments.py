@@ -13,9 +13,10 @@ from itertools import combinations
 from typing import cast
 
 import numpy as np
-from numba import njit
+from numba import njit, types
 
 from superglm._group_matrix._group_matrix_range import _category_rows
+from superglm._numba_compile import compile_closed
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._batched_moments import (
@@ -25,8 +26,8 @@ from superglm.distributional.solver._batched_moments import (
     _warmup_batched_moments,
 )
 from superglm.distributional.solver._ordinary_packing import (
+    _ORDINARY_WRITERS,
     _copy_dense_checked,
-    _warmup_ordinary_packing,
 )
 from superglm.distributional.solver._ordinary_packing import (
     _write_categorical_block as _pack_categorical,
@@ -127,33 +128,20 @@ def _accumulate_directional(out, bins, ordinary, weights):
     return active
 
 
+# One signature serves the solver-support table and every likelihood channel
+# layout a caller passes.
+_CHANNEL_CHECK = (_finite_bounded_2d, (types.Array(types.float64, 2, "A", readonly=True),))
+
+
 def _warmup_global_moments():
-    """Compile bounded writer/reducer signatures without constructing a plan."""
+    """Compile the plan's writers, channel check and batched reducers.
+
+    ``_finite_bounded_1d`` and the serial ``_accumulate_*`` reducers are not
+    warmed: no fit calls them (the batched reducers replaced them; their tests
+    keep them as references).
+    """
     _warmup_batched_moments()
-    _warmup_ordinary_packing()
-    for layout in ("C", "F", "A"):
-        for readonly in (False, True):
-            values = (
-                np.ones((3, 4), dtype=np.float64)[:, ::2]
-                if layout == "A"
-                else np.ones((3, 2), dtype=np.float64, order=layout)
-            )
-            values.flags.writeable = not readonly
-            _finite_bounded_2d(values)
-    bins = np.array([0, -1, 1], dtype=np.intp)
-    panel = np.ones((3, 2), dtype=np.float64)
-    for strided in (False, True):
-        step = 2 if strided else 1
-        for readonly in (False, True):
-            weights = np.ones(3 * step, dtype=np.float64)[::step]
-            codes = np.zeros(3 * step, dtype=np.intp)[::step]
-            weights.flags.writeable = not readonly
-            codes.flags.writeable = not readonly
-            _finite_bounded_1d(weights)
-            _pack_categorical(panel, codes, 0, 2)
-            _accumulate_vector(np.zeros(2), bins, weights)
-            _accumulate_histogram(np.zeros((2, 2)), bins, bins, weights)
-            _accumulate_directional(np.zeros((2, 2)), bins, panel, weights)
+    compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
 
 
 @dataclass
@@ -551,6 +539,7 @@ class GlobalMomentPlan:
         ordinary_specs,
         accounting,
     ):
+        compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
         self._n, self._width, self._chunk_size = n, width, chunk_size
         self._predictors = tuple(
             _Predictor(m[0], m[1], np.array(m[2], dtype=np.intp), m[3], m[4])

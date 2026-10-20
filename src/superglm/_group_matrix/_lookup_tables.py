@@ -829,7 +829,10 @@ def table_centred_system(plan: LookupPlan, dm, W: NDArray, z_centered: NDArray, 
         np.ascontiguousarray(terms[y].raw if terms[y].raw_read else centred[y]).ravel()
         for _, y in plan.acc_pairs
     ]
-    dense_values = [np.asarray(values, dtype=np.float64) for (_, _, values) in plan.dense]
+    # One operand form for the dense sweeps, whatever the design stores (frozen
+    # blocks, estimate_p's writable refits, or both in one pair): a read-only
+    # C-contiguous view, which copies nothing for a C-contiguous float64 block.
+    dense_values = [_frozen_c(values) for (_, _, values) in plan.dense]
     dense_out = [
         [np.zeros(term.raw.shape[0] * width) for (_, width, _) in plan.dense] for term in terms
     ]
@@ -1166,6 +1169,12 @@ _POOLED_ROW_KERNELS = (
 the output its job owns."""
 
 
+def _frozen_c(values) -> NDArray:
+    view = np.ascontiguousarray(values, dtype=np.float64).view()
+    view.flags.writeable = False
+    return view
+
+
 def _dense_block(plan: LookupPlan, start: int, stop: int, centre_hi, centre_lo) -> NDArray:
     """The block's centred dense values ``(x - c) - c_lo``, as ``_leverage_rows`` forms them."""
     out = np.empty((stop - start, plan.dense_columns.size), dtype=np.float64)
@@ -1328,10 +1337,9 @@ def _warmup_lookup_tables() -> None:
     _margins_sweep(i32, f64, f64, f64, f64)
     _hist_sweep(i32, i32, f64, 0, f64)
     _acc_sweep(i32, i32, f64, f64, i32, i32, 0, f64)
-    # Dense blocks arrive read-only from the design, writable from estimate_p's refits.
-    for block in (frozen, f64_2d):
-        _dense_term_sweep(i32, f64, block, f64, f64)
-        _dense_moments_sweep(f64, f64, block, f64, block, f64, f64_2d, f64, f64, True)
+    # Dense blocks reach the sweeps as read-only C views (``_frozen_c``).
+    _dense_term_sweep(i32, f64, frozen, f64, f64)
+    _dense_moments_sweep(f64, f64, frozen, f64, frozen, f64, f64_2d, f64, f64, True)
     _gather_leverages(
         0, 0, codes, np.zeros(0, dtype=np.bool_), 0.0, f64, i64, i64_2d, f64, i64_2d, f64,
         f64, i64, i32, i32, i64, f64_2d, f64, i64, f64, f64_2d, f64,

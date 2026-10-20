@@ -282,83 +282,17 @@ def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) ->
     raise TweedieNumericalRefusal(f"row {failing_row}: {message}")
 
 
-def _warmup_compiled_tweedie_dispatchers(
-    arrays: tuple[NDArray[np.float64], ...],
-) -> None:
-    coefficients = np.empty(10, dtype=np.float64)
-    rho = math.log(float(arrays[2][0]))
-    values, scores, hessians, terms, _ = _compiled._allocate_batch_outputs(1, 2)
-    limits = (_DEFAULT_MAX_TERMS, _DEFAULT_LOG_CUTOFF)
-    series_point = (0.0, 1.0, coefficients)
-    calls = (
-        (_compiled._digamma_positive, (1.0,)),
-        (_compiled._digamma_trigamma_positive, (1.0,)),
-        (_compiled._compensated_add, (0.0, 0.0, 1.0)),
-        (_compiled._sum2, (1.0, 2.0)),
-        (_compiled._sum3, (1.0, 2.0, 3.0)),
-        (_compiled._bernoulli_polynomial, (2, 1.0)),
-        (_compiled._fill_log_gamma_increment_coefficients, (1.0, coefficients)),
-        (_compiled._log_gamma_increment, (1.0, 1.0, coefficients)),
-        (_compiled._log_adjacent_ratio, (1, *series_point)),
-        (_compiled._locate_series_mode, series_point),
-        (_compiled._term_derivative_channels, (1, 0.0, 0.0, 2.0, 2)),
-        (_compiled._series_failure, (_compiled.KERNEL_MAX_TERMS, 0)),
-        (
-            _compiled._series_summary,
-            (0.0, 0.0, 0.0, 2.0, 1.0, 2, *limits, coefficients),
-        ),
-        (_compiled._mean_score_channel, (1.0, 1.2, rho, 1.5)),
-        (_compiled._mean_hessian_channel, (1.0, 1.2, rho, 1.5)),
-        (_compiled._natural_scale_hessian, (-1.0, 1.0, 0.7)),
-        (_compiled._row_failure, (_compiled.KERNEL_MAX_TERMS,)),
-        (_compiled._zero_row, (1.2, 0.7, 1.5, rho, 2)),
-        (
-            _compiled._positive_row,
-            (1.0, 1.2, 0.7, 1.5, rho, 2, *limits, coefficients),
-        ),
-        (
-            _compiled._evaluate_tweedie_batch_row,
-            (
-                *arrays,
-                0,
-                2,
-                *limits,
-                0,
-                values,
-                scores,
-                hessians,
-                terms,
-            ),
-        ),
-        (_compiled._complete_batch_status, (values, scores, hessians, 2)),
-    )
-    for dispatcher, arguments in calls:
-        cast(Callable[..., object], dispatcher)(*arguments)
-
-
 # The LAML endgame's third- and fourth-derivative kernels
 # (``_tweedie_hessian_direction_core``, ``_tweedie_fourth_core`` and the helpers
 # they call) compile, or load from numba's cache, on a Tweedie fit's first
-# endgame call, not here: warming the third-order set cost every
-# ``superglm.warmup()`` about 0.4 s with a warm cache and 5.6 s cold, whether or
-# not the process fits a Tweedie SuperLSS model.
-_FIRST_USE_DISPATCHERS = (
-    "_polygamma_012",
-    "_third_term_channels",
-    "_series_third_cumulants",
-    "_tweedie_third_row",
-    "_tweedie_hessian_direction_core",
-    "_polygamma_0123",
-    "_fourth_term_channels",
-    "_series_fourth_cumulants",
-    "_tweedie_fourth_row",
-    "_tweedie_fourth_core",
-)
+# endgame call, not in ``superglm.warmup()``: they cost 9 s to compile and
+# only a fit whose smoothing parameter reaches its endpoint calls them (the
+# first-use list in tests/test_import_compat.py records the measurements).
 
 
 def _warmup_tweedie() -> None:
+    """Compile the two batch cores; every helper they call compiles with them."""
     arrays = tuple(np.array([value], dtype=np.float64) for value in (1.0, 1.2, 0.7, 1.5, 1.0))
-    _warmup_compiled_tweedie_dispatchers(arrays)
     for dispatcher in (
         _evaluate_tweedie_batch_core,
         _evaluate_tweedie_batch_parallel_core,

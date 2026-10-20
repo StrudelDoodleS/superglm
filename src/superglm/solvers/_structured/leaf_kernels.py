@@ -245,3 +245,19 @@ def _distinct_level_rows(data, indices, indptr, starts, weights, cap):  # pragma
                     break
         out[level] = count
     return out
+
+
+def _warmup_leaf_kernels() -> None:
+    """Compile the four kernels a RandomEffect leaf pass calls (no rows).
+
+    A RandomEffect large enough for the structured engine (one with a few
+    hundred levels, nested or not) reaches these four, exact or binned; the
+    engine's other kernels serve FactorSmooth and compile on first use.
+    """
+    f1, i64 = np.zeros(0), np.zeros(0, dtype=np.int64)
+    f2 = np.zeros((0, 0))
+    one = np.zeros(1, dtype=np.int64)
+    _coded_rows(f2, np.zeros((0, 0), dtype=np.int32), f1, i64, i64, i64, i64, i64, f1)
+    _segment_means(f2, f1, one, i64, f1, f2)
+    _center_rows(f2, f2, f2, f1, f1, one, f2, f1, f2, f2)
+    _shifted_sums(f2, f1, f1, f1)

@@ -191,12 +191,13 @@ def warmup() -> None:
     compiles only the kernels it needs and saves them to Numba's cache, and
     later sessions load them from there.
 
-    It compiles the kernels of every family and route (about 50 seconds on an
-    empty cache, under 2 seconds against a filled one). Some kernels still
-    compile on the first fit that reaches them, so that a process that never
-    fits those models does not pay for them: the higher-derivative kernels of
-    a SuperLSS fit's final iterations, and the structured engine's kernels for
-    ``RandomEffect`` and ``FactorSmooth`` terms. Each then joins the cache like
+    It compiles the kernels of every family and route, ``RandomEffect`` terms
+    included (about 40 seconds on an empty cache, under a second against a
+    filled one). Three groups of kernels compile on the first fit that reaches
+    them instead, because few fits do and they take seconds to compile: the
+    third and fourth derivatives a ``SuperLSS`` fit needs only when a smoothing
+    parameter reaches its endpoint, the structured engine's ``FactorSmooth``
+    kernels, and a diagnostic plot's smoother. Each then joins the cache like
     the rest. Numba keys its cache to the CPU model, so a cache built on one
     node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
@@ -214,6 +215,7 @@ def warmup() -> None:
     from superglm.reml._compensated import _warmup_compensated
     from superglm.reml._leverage_rows import _warmup_leverage_rows
     from superglm.solvers._exact_sums import _warmup_exact_sums
+    from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
     from superglm.solvers.scop_newton import _warmup_scop
 
     _warmup_tweedie()
@@ -230,6 +232,7 @@ def warmup() -> None:
     _warmup_gamma()
     _warmup_negative_binomial()
     _warmup_scop()
+    _warmup_leaf_kernels()
     from superglm._numba_compile import forget_compiles
 
     forget_compiles()

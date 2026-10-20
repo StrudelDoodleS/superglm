@@ -1303,16 +1303,15 @@ def _warmup_group_matrix_kernels() -> None:
     frozen_codes.setflags(write=False)
     # Maps and packed curvature columns also supply Fortran and strided
     # operands. Cover both mutabilities so their first fit need not compile,
-    # and call the float64 scan directly: a caller loaded from numba's
-    # on-disk cache links it without compiling its dispatcher.
+    # and call the float64 scan as fits do: directly, never through the
+    # generic ``_operand_exponent_bounds``, which only a non-float64 operand
+    # reaches.
     for operand in (matrix, np.asfortranarray(matrix), np.ones((3, 4))[:, ::2]):
         _tensor_operand_in_reassociation_range(operand)
-        _operand_exponent_bounds(operand)
         _float64_operand_exponent_bounds(operand)
         frozen_operand = operand.view()
         frozen_operand.setflags(write=False)
         _tensor_operand_in_reassociation_range(frozen_operand)
-        _operand_exponent_bounds(frozen_operand)
         _float64_operand_exponent_bounds(frozen_operand)
     for support in (matrix, frozen_matrix):
         for indices in (codes, frozen_codes):
@@ -1346,10 +1345,8 @@ def _warmup_group_matrix_kernels() -> None:
     ):
         array.setflags(write=False)
 
-    # Two spline-by-category levels' rows, and a level's rows into a tensor's channels.
-    _sorted_intersection(codes, codes)
-    _level_tensor_channels(codes, codes, codes, codes, values, matrix, 2, 2)
-    # A discrete tensor's frozen level rows reach both read-only.
+    # Two spline-by-category levels' rows, and a level's rows into a tensor's
+    # channels: every group freezes its level rows (``row_idx``) when built.
     _sorted_intersection(frozen_codes, frozen_codes)
     _level_tensor_channels(frozen_codes, codes, codes, codes, values, matrix, 2, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, False)
@@ -1388,9 +1385,6 @@ def _warmup_group_matrix_kernels() -> None:
     _cell_hist_raw_kron(
         cell_ptr, bin1, bin2, w, starts, matrix, starts, matrix, 2, np.empty((4, 4))
     )
-    # Inlined into the cell kernel at the IR level, so the row helper acquires
-    # a signature of its own only through a direct call.
-    _add_raw_row(np.zeros(4), 1.0, 0, 0, starts, matrix, starts, matrix, 2)
     _fused_bincount_2(codes, values, values, 2)
     _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)
     _factor_smooth_support_matvec(matrix, codes, codes, matrix)
@@ -1425,7 +1419,20 @@ def _warmup_group_matrix_kernels() -> None:
     for level_codes in (codes, frozen_codes):
         for level_weights in (values, frozen_weights):
             _level_sums(level_codes, level_weights, 3)
-    # SuperLSS passes a read-only strided curvature column.
+    # SuperLSS hands over its packed curvature and score channels as they are:
+    # read-only columns (binned), read-only strided ones (exact), and writable
+    # strided score columns.  Copying them into SuperGLM's form at the predictor
+    # boundary changed the last bit of two mixed-layout SuperLSS fits (the
+    # dense columns' BLAS products read the same operand), so warmup compiles
+    # these forms instead.
     strided_weights = np.ones(4, dtype=np.float64)[::2]
     strided_weights.setflags(write=False)
     _level_sums(codes, strided_weights, 3)
+    _level_sums(codes, np.ones(4, dtype=np.float64)[::2], 3)
+    for channel in (frozen_values, strided_weights):
+        _cat_weighted_bincount(codes, codes, channel, 2, 2)
+        _cat_cat_weighted_crosstab(codes, codes, channel, 2, 2)
+        _disc_disc_2d_hist(codes, codes, channel, 2, 2)
+        _fused_bincount_2(codes, channel, channel, 2)
+    _weighted_bincount_2d(codes, frozen_values, frozen_matrix, 2)
+    _csr_weighted_gram(values, csr_indices, csr_indptr, strided_weights, 2, False)

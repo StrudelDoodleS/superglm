@@ -748,6 +748,9 @@ def test_every_renderer_certifies_output_without_a_full_panel_postpass(monkeypat
 def test_checked_writers_preserve_range_predicate_and_strided_outputs(writer, layout, readonly):
     import superglm.distributional.solver._small_group_panels as panels
 
+    # The writers' closed signatures, as a render reaches them: an open call
+    # first would compile specialisations that make the closed call ambiguous.
+    panels.compile_closed(*panels._WRITERS, panels._FACTOR_WRITER)
     edges = [
         0.0,
         -0.0,
