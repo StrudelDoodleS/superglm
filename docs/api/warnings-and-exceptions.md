@@ -23,4 +23,7 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.NBThetaBoundWarning
    superglm.FractionalFrequencyWeightWarning
    superglm.PriorWeightLatticeWarning
+   superglm.FactorSmoothGroupTermWarning
+   superglm.RedundantInteractionWarning
+   superglm.SplineOptionWarning
 ```
