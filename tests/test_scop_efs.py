@@ -8211,16 +8211,23 @@ class TestSCOPReferenceMode:
 
     @pytest.mark.filterwarnings("ignore:fit_reml did not converge")
     @pytest.mark.parametrize("max_reml_iter", [2, 20], ids=["at the cap", "within 31 of it"])
-    def test_no_reference_check_without_the_budget_for_a_restart(self, forced_check, max_reml_iter):
+    def test_no_reference_check_without_the_budget_for_a_restart(
+        self, monkeypatch, forced_check, max_reml_iter
+    ):
         """At the cap a restart gets ``max_reml_iter=0`` and would publish its bootstrap
         step in place of the search's last iterate; near it, an unconverged early cold
-        iterate. The search stops as it otherwise would, without the check. Fails
-        without the budget condition at the check (the check is then called)."""
+        iterate. The search stops as it otherwise would, without the check: it is the
+        fit with the check unable to fire. Fails without the budget condition at the
+        check (the check is then called)."""
         calls, check = forced_check
         check(True)
         capped = self._increasing_gaussian_fit(max_reml_iter=max_reml_iter)
         assert calls == []
-        assert capped.n_reml_iter == min(max_reml_iter, 5)
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", 10**6)
+        unchecked = self._increasing_gaussian_fit(max_reml_iter=max_reml_iter)
+        assert capped.n_reml_iter == unchecked.n_reml_iter
+        assert capped.lambdas == unchecked.lambdas
+        assert capped.objective_history == unchecked.objective_history
 
     def test_the_reference_check_runs_when_the_budget_covers_a_restart(self, forced_check):
         calls, check = forced_check

@@ -532,12 +532,10 @@ def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
     reference = _noise_spline_fit(52, max_reml_iter=200, w_correction_order=2)._reml_result
     assert reference.converged
 
-    model = _noise_spline_fit(52)
-    fit = model._reml_result
-    # The fit escalated: nothing else sets the order to 2 here. The gates are tested
-    # on forced inputs below, because whether this trajectory reverses twice at a slow
-    # rate depends on how the BLAS build rounds.
-    assert model._reml_profile["reml_w_correction_order"] == 2
+    # Whether this trajectory reverses twice at a slow rate, so that the fit escalates by
+    # itself, depends on how the BLAS build rounds, so only the outcome is asserted here;
+    # the wiring is tested on a forced escalation below.
+    fit = _noise_spline_fit(52)._reml_result
     assert fit.converged
     assert fit.termination_reason == "score_objective_tolerance"
     # Both stop at the same optimum: the objective agrees to the REML stop's own
@@ -547,6 +545,27 @@ def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
     capped = _noise_spline_fit(52, max_reml_iter=5)._reml_result
     assert not capped.converged
     assert capped.termination_reason == "max_reml_iter"
+
+
+def test_an_escalation_switches_the_fit_to_the_exact_hessian(monkeypatch) -> None:
+    """Wiring, on a forced event: once the gate says escalate, the order becomes 2 and
+    the fit goes on to the reference optimum. Mutation check: dropping the
+    ``w_correction_order = 2`` at the gate's call leaves the order at 1."""
+    from superglm.reml import direct
+
+    reference = _noise_spline_fit(52, max_reml_iter=200, w_correction_order=2)._reml_result
+    calls = []
+
+    def escalate_from_the_third_step(*args):
+        calls.append(args)
+        return len(calls) >= 3
+
+    monkeypatch.setattr(direct, "_escalates_to_exact_hessian", escalate_from_the_third_step)
+    model = _noise_spline_fit(52)
+    assert model._reml_profile["reml_w_correction_order"] == 2
+    assert len(calls) == 3  # the gate is not asked again once the exact Hessian is in use
+    assert model._reml_result.converged
+    assert model._reml_result.objective == pytest.approx(reference.objective, rel=1e-9)
 
 
 class TestExactHessianEscalationGates:
