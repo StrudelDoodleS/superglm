@@ -423,7 +423,7 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
             # the screenable features would send the caller hunting for a
             # misspelling that isn't there.  The reason quoted here is the same
             # string the result table reports.
-            deferred_names = sorted(name for name in pair if name in deferred_features)
+            deferred_names = sorted((name for name in pair if name in deferred_features), key=repr)
             if deferred_names:
                 detail = "; ".join(f"{n} — {deferred_features[n]}" for n in deferred_names)
                 raise ValueError(
@@ -1417,6 +1417,9 @@ def screen_interactions(
                         for n, name in ((n_l, left), (n_r, right))
                         if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
                     ),
+                    # A size tie breaks on the label's text, which is the label
+                    # for a str one, so str-only models bin as before.
+                    key=lambda item: (item[0], str(item[1])),
                     reverse=True,
                 )
                 if not binnable:

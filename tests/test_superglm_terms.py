@@ -566,3 +566,7 @@ def test_screening_reads_a_model_with_mixed_int_and_str_labels(labelled):
     table = model.screen_interactions(X, y)
     pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}
     assert pairs == {frozenset((0, "z")), frozenset((0, 1)), frozenset(("z", 1))}
+    # A small cell budget forces the binning branch, whose size tie-break
+    # compared 0 with "z" on 7f5f1e62.
+    binned = model.screen_interactions(X, y, max_cells=100_000)
+    assert len(binned) == 3

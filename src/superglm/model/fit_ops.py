@@ -461,7 +461,7 @@ def _reject_structured_fit_constraints(model) -> None:
     # effect, and a factor smooth sharing neither parent states nothing twice.
     constrained_set = set(scop_constrained)
     duplicated = [
-        (sorted(set(spec.parent_names) & constrained_set), name)
+        (sorted(set(spec.parent_names) & constrained_set, key=repr), name)
         for name, spec in model._interaction_specs.items()
         if isinstance(spec, FactorSmooth)
         and spec.basis == "fs"
