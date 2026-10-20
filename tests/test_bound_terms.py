@@ -72,7 +72,6 @@ def test_interactions_resolve_later_parents_and_keep_partition_order():
         "missing",
         "numeric_parent",
         "invalid",
-        "unnamed",
         "same_text",
         "duplicate_interaction",
     ],
@@ -87,7 +86,6 @@ def test_invalid_declarations_are_refused(case):
         "missing": (s("x"), ti("x", "z")),
         "numeric_parent": ("x", s("z"), ti("x", "z")),
         "invalid": (42,),
-        "unnamed": ({None: Numeric()},),
         "same_text": (term(0, Numeric()), "0"),
         "duplicate_interaction": (s("x"), s("z"), ti("x", "z"), ti("x", "z")),
     }
@@ -248,8 +246,6 @@ def test_invalid_helper_names_and_types_fail_at_declaration():
     from superglm.terms import cat, interaction, re, s, term, ti
 
     for helper in (cat, re, s):
-        with pytest.raises(TypeError, match="None cannot name a column"):
-            helper(None)
         with pytest.raises(TypeError, match="hashable"):
             helper(["x"])
     with pytest.raises(ValueError, match="non-empty strings"):
@@ -333,7 +329,7 @@ def test_invalid_feature_mappings_are_refused(case):
             TypeError,
             "interaction",
         ),
-        "column": (({None: Numeric()},), TypeError, "None cannot name a column"),
+        "column": (({0: Numeric(), "0": Numeric()},), ValueError, "both read as '0'"),
         "bare": ({"x": Numeric()}, TypeError, "inside"),
     }
     terms, error, message = cases[case]

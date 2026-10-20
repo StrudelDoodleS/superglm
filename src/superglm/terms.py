@@ -60,8 +60,8 @@ def _validate_name(name: str) -> None:
 def check_column_label(label: object) -> None:
     """Refuse a main-term column label that cannot name a column.
 
-    A label is any hashable value but ``None``, as a ``features=`` key is: a
-    string, or an integer or tuple a pandas frame names its columns by.
+    A label is any hashable value, as a ``features=`` key is: a string, or an
+    integer, tuple or even ``None`` a pandas frame names its columns by.
     """
     try:
         hash(label)
@@ -69,8 +69,6 @@ def check_column_label(label: object) -> None:
         raise TypeError(
             f"A column label must be hashable, as a dict key is; got {type(label).__name__}"
         ) from None
-    if label is None:
-        raise TypeError("None cannot name a column; give the column a label")
 
 
 def check_column_texts(labels: Iterable[Hashable]) -> None:

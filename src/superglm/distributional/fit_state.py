@@ -81,8 +81,6 @@ def _frozen_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
         # Keyed by column label: any label a predictor's term takes.
         result: dict[str, int] = {}
         for name, count in value.items():
-            if name is None:
-                raise ValueError("requested_n_bins keys must be feature column labels")
             result[name] = _positive_integer(
                 count,
                 name=f"requested_n_bins[{name!r}]",

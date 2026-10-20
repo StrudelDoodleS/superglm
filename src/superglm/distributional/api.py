@@ -435,8 +435,6 @@ def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
         # Keyed by column label: any label a predictor's term takes, as in SuperGLM.
         result: dict[str, int] = {}
         for name, count in value.items():
-            if name is None:
-                raise ValueError("n_bins keys must be feature column labels")
             result[name] = _positive_n_bins(count, name=f"n_bins[{name!r}]")
         return MappingProxyType(result)
     return _positive_n_bins(value, name="n_bins")

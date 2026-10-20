@@ -368,12 +368,15 @@ def test_two_labels_with_one_text_are_refused_where_declared(declared):
         SuperGLM(**declared)
 
 
-def test_none_cannot_label_a_column_in_either_form():
-    """Master's features= took it and failed at fit for a missing column."""
-    with pytest.raises(TypeError, match="None cannot name a column"):
-        SuperGLM(features={None: Spline()})
-    with pytest.raises(TypeError, match="None cannot name a column"):
-        SuperGLM(terms=[s(None)])
+def test_none_and_unhashable_labels_are_treated_alike_in_both_forms(data):
+    """None labels a column under features= (master pinned it), so terms= takes it too."""
+    X, y = data
+    frame = pd.DataFrame({None: X["x"]})
+    as_dict = SuperGLM(features={None: Spline(k=6)}, selection_penalty=0.0).fit(frame, y)
+    as_list = SuperGLM(terms=[s(None, k=6)], selection_penalty=0.0).fit(frame, y)
+    assert np.array_equal(as_list.result.beta, as_dict.result.beta)
+    with pytest.raises(TypeError, match="hashable"):
+        s(["x"])
 
 
 def test_a_bare_entry_that_is_not_a_string_names_the_declaration_to_write():
