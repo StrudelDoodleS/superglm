@@ -1129,38 +1129,29 @@ class _IndefiniteObservedGaussianLS:
 def fisher_fallback_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     """A stationary smoothing result whose terminal curvature fell back to Fisher.
 
-    The smoothing search differentiates observed curvature only, so a fit that
-    falls back never reaches a stationary stop on its own; here its Newton
-    endgame differentiates the accepted substitute, as the corrected
-    covariance does, so the search can certify stationarity.
+    The Newton endgame differentiates the curvature the fit accepted, so a fit
+    that falls back can certify a stationary stop on its own. The parent's
+    endgame differentiated observed curvature only, refused this fit, and it
+    never stopped stationary.
     """
-    from superglm.distributional.smoothing import newton as newton_module
-
     rng = np.random.default_rng(7351)
     x = rng.uniform(-1.0, 1.0, 320)
     frame = pd.DataFrame({"x": x})
     response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0 + 0.5 * np.cos(1.8 * x)) * rng.standard_normal(
         len(x)
     )
-    with pytest.MonkeyPatch.context() as patch:
-        endgame_derivatives = newton_module.laml_derivatives
-        patch.setattr(
-            newton_module,
-            "laml_derivatives",
-            lambda *args, **kwargs: endgame_derivatives(*args, **kwargs, curvature="terminal"),
+    fitted = (
+        model_from_templates(
+            family=_IndefiniteObservedGaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=7)}),
+                Predictor("scale", {"x": Spline("cr", k=5)}),
+            ],
+            coefficient_curvature="fisher",
         )
-        fitted = (
-            model_from_templates(
-                family=_IndefiniteObservedGaussianLS(),
-                predictors=[
-                    Predictor("location", {"x": Spline("cr", k=7)}),
-                    Predictor("scale", {"x": Spline("cr", k=5)}),
-                ],
-                coefficient_curvature="fisher",
-            )
-            .fit_reml(frame, response, outer="efs+newton")
-            ._require_fitted()
-        )
+        .fit_reml(frame, response, outer="efs+newton")
+        ._require_fitted()
+    )
     assert fitted.smoothing is not None
     assert fitted.smoothing.convergence_reason == "stationary"
     assert fitted.result.terminal_curvature.actual_source == "fisher"

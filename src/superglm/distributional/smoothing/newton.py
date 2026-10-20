@@ -784,6 +784,9 @@ def run_newton_endgame(
                 step=config.derivative_step,
                 want_hessian=want_hessian,
                 reuse=workspace,
+                # A fit whose final curvature fell back is differentiated with
+                # the curvature it accepted, the one its Laplace objective uses.
+                curvature="terminal",
             )
 
     while True:
@@ -1255,6 +1258,7 @@ def bracket_refused_component(
                 dense_matrices=dense,
                 step=efs_config.derivative_step,
                 want_hessian=False,
+                curvature="terminal",
             ).gradient
         return -float(gradient[index]) * lambdas[name]
 
