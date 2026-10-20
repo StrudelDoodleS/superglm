@@ -573,9 +573,12 @@ def refuse_unsupported_interaction_parents(
                 "with; use basis=Spline(...) for an interactable ordinal parent, or "
                 "a Categorical feature for level-by-level structure."
             )
-        # A cr margin is rebuilt as a cardinal spline without the ranges and a
-        # bs margin keeps them, unpenalised, in every level or cross-section;
-        # neither is certified, so ranges stay on main effects in this version.
+        # Both margins keep the ranges in an interaction (a ranged cr parent
+        # keeps its constrained basis). SuperGLM still refuses a ranged parent,
+        # as it always did: allowing it would be new behaviour, and the
+        # interaction screen's probe (keep_ranges=False) would then need the
+        # constrained basis too. SuperLSS, which always fitted them, passes
+        # ranged_margins.
         spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
         if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
             if ranged_margins:

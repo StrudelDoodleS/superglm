@@ -215,7 +215,8 @@ def configure_knots(
     if knots is None and knot_strategy not in KNOT_STRATEGIES:
         warnings.warn(
             f"knot_strategy={knot_strategy!r} is not one of {KNOT_STRATEGIES}; it was "
-            "treated as 'uniform': uniform knots.",
+            "treated as 'uniform': uniform knots everywhere, including a cr spline's "
+            "interaction margins, where 'uniform' itself places quantile knots.",
             SplineOptionWarning,
             skip_file_prefixes=(_PACKAGE_DIRECTORY,),
         )

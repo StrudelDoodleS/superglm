@@ -307,7 +307,7 @@ def _resolve_native_feature_cols(
         raise ValueError(
             f"{argument}= keys {missing} not found in X columns. "
             f"Available (non-offset) columns: "
-            f"{sorted(available)}."
+            f"{sorted(available, key=repr)}."
         )
     return list(features.keys())
 

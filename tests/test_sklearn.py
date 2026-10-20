@@ -1021,6 +1021,15 @@ class TestNativeTerms:
         with pytest.raises(ValueError, match="smoothing must be one of"):
             SuperGLMRegressor(smoothing="REML").fit(X, y)
 
+    def test_a_missing_column_among_mixed_labels_names_it(self, sample_data):
+        """Integer and string labels together: the error lists them, not a sort TypeError."""
+        from superglm import cat, s
+
+        X, y, _ = sample_data
+        X = X.rename(columns={"age": 0})
+        with pytest.raises(ValueError, match=r"terms= keys \['nonexistent'\] not found"):
+            SuperGLMRegressor(terms=[s(0), cat("region"), "nonexistent"]).fit(X, y)
+
     def test_missing_terms_column_raises(self, sample_data):
         X, y, _ = sample_data
         with pytest.raises(ValueError, match="terms= keys.*not found"):
