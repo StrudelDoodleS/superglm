@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
-from numba import njit, prange  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    # The type checker reads Numba's loop primitive as the range it compiles to.
+    from builtins import range as prange
+else:
+    from numba import prange
 
 import superglm.distributional.kernels._fourth_generated as _generated
 
@@ -1039,7 +1046,7 @@ def _evaluate_tweedie_batch_parallel_core(
     outputs = _allocate_batch_outputs(y.size, derivative_order)
     values, scores, hessians, terms, valid = outputs
     statuses = np.empty(y.size, dtype=np.int64)
-    for index in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for index in prange(y.size):
         # prange's index is unsigned: passed as it is, it compiled a second
         # specialisation of the row kernel beside the serial core's int64 one.
         row = np.int64(index)
@@ -1466,7 +1473,7 @@ def _tweedie_hessian_direction_core(
     n_rows = y.size
     result = np.empty((n_rows, 6), dtype=np.float64)
     statuses = np.empty(n_rows, dtype=np.int64)
-    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for row in prange(n_rows):
         coefficients = np.empty(10, dtype=np.float64)
         rho = math.log(dispersion[row])
         multiplier = 1.0
@@ -1857,7 +1864,7 @@ def _tweedie_fourth_core(
     n_rows = y.size
     result = np.empty((n_rows, 34), dtype=np.float64)
     statuses = np.empty(n_rows, dtype=np.int64)
-    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for row in prange(n_rows):
         coefficients = np.empty(10, dtype=np.float64)
         rho = math.log(dispersion[row])
         multiplier = 1.0

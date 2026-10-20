@@ -16,10 +16,17 @@ count.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import numpy as np
-from numba import njit, prange  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    # The type checker reads Numba's loop primitive as the range it compiles to.
+    from builtins import range as prange
+else:
+    from numba import prange
 
 _EPS = 2.220446049250313e-16
 _TINY = 5e-324
@@ -255,7 +262,7 @@ def theta_series_parallel(
 ) -> None:
     """The serial core's rows in blocks across threads; each row's arithmetic is unchanged."""
     n_blocks = (rows.shape[0] + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for chunk in prange(n_blocks):
         sums = np.empty(series_order)
         sum_errors = np.empty(series_order)
         coefficients = np.empty(series_order)
@@ -439,7 +446,7 @@ def log_third_derivatives(
     error = np.empty(n_rows)
     used_series = np.zeros(n_rows, dtype=np.bool_)
     n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for chunk in prange(n_blocks):
         sums = np.empty(series_order)
         sum_errors = np.empty(series_order)
         coefficients = np.empty(series_order)
@@ -613,7 +620,7 @@ def log_fourth_derivative(
     fourth = np.empty(n_rows)
     error = np.empty(n_rows)
     n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for chunk in prange(n_blocks):
         sums = np.empty(series_order)
         sum_errors = np.empty(series_order)
         coefficients = np.empty(series_order)
@@ -723,7 +730,7 @@ def expected_size_information(
     information = np.empty(n_rows)
     terms = np.empty(n_rows, dtype=np.int64)
     n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
+    for chunk in prange(n_blocks):
         stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
         for row in range(chunk * _PARALLEL_BLOCK, stop):
             information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
