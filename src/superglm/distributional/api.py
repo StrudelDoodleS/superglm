@@ -116,7 +116,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.links import Link, resolve_link
-from superglm.terms import resolve_label
+from superglm.terms import check_column_texts, resolve_label
 
 
 @dataclass(frozen=True)
@@ -357,6 +357,9 @@ def _owned_predictors(
     if not values or not all(isinstance(predictor, Predictor) for predictor in values):
         raise TypeError("predictors must contain only Predictor values")
     _predictor_error(parameters, values)
+    # Results name a term by its label's text, and every predictor's terms share
+    # one namespace, so one text may not name two different labels.
+    check_column_texts(label for predictor in values for label in predictor.features)
     for parameter, predictor in zip(parameters, values, strict=True):
         _validate_link_support(parameter, predictor)
     return _clone_predictor_templates(values)
@@ -1943,11 +1946,19 @@ class SuperLSS:
             if parameter is None
             else (parameter,)
         )
+        # A tuple can be one column label, as SuperGLM.plot reads it: it names
+        # one term when its text is a term of the selected parameters.
+        texts = {
+            qualified[len(name) + 1 :]
+            for name in names
+            for qualified in fitted.layout.term_slices
+            if qualified.startswith(f"{name}:")
+        }
         asked = (
             None
             if terms is None
             else (str(terms),)
-            if isinstance(terms, str) or not isinstance(terms, Iterable)
+            if isinstance(terms, str) or not isinstance(terms, Iterable) or str(terms) in texts
             else tuple(str(term) for term in terms)
         )
         selections: dict[str, tuple[str, ...]] = {}

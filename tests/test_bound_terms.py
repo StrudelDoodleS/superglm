@@ -401,12 +401,34 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     assert list(by_rows.by_segment["segment"]) == ["a", "b", "c"]
 
 
+def test_superlss_plot_reads_a_tuple_selector_as_one_label():
+    """``terms=("a", "b")`` names the tuple-labelled term, as SuperGLM.plot reads it."""
+    from superglm import GaussianLS, Numeric, SuperLSS
+
+    rng = np.random.default_rng(17)
+    n = 300
+    frame = pd.DataFrame({"x": rng.uniform(size=n), "a": rng.uniform(size=n)})
+    frame = frame.rename(columns={"x": ("a", "b")})
+    y = frame[("a", "b")].to_numpy() + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(
+        family, family.location({("a", "b"): Numeric(), "a": Numeric()}), family.scale()
+    )
+    model.fit_reml(frame, y)
+    one = model.plot("location", terms=[("a", "b")], n_sim=16)
+    assert len(model.plot("location", terms=("a", "b"), n_sim=16).axes) == len(one.axes)
+
+
 def test_superlss_refuses_two_labels_with_one_text():
-    from superglm import GaussianLS, Numeric
+    from superglm import GaussianLS, Numeric, SuperLSS
 
     family = GaussianLS()
     with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
         family.location({0: Numeric(), "0": Numeric()})
+    # The text is how results name a term, so it must be unique across predictors too.
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        SuperLSS(family, family.location({0: Numeric()}), family.scale({"0": Numeric()}))
+    SuperLSS(family, family.location({0: Numeric()}), family.scale({0: Numeric()}))
 
 
 @pytest.mark.parametrize("basis", ["fs", "sz"])
