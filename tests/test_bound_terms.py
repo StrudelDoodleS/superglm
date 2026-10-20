@@ -395,6 +395,10 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     assert by_label.by == by_text.by == "1"
     assert by_label.by_segment.equals(by_text.by_segment)
     assert list(by_label.by_segment["segment"]) == ["a", "b", "c"]
+    # Per-row labels in a polars Series stay per-row labels, as before.
+    pl = pytest.importorskip("polars")
+    by_rows = model.portfolio(frame, n_draws=16, by=pl.Series(frame[1].to_numpy()), seed=5)
+    assert list(by_rows.by_segment["segment"]) == ["a", "b", "c"]
 
 
 def test_superlss_refuses_two_labels_with_one_text():

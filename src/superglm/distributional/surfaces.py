@@ -845,7 +845,11 @@ class _SegmentTotals:
 
 def _segment_column(by: object, frame: EagerFrame) -> Any:
     """The column of ``frame`` that ``by`` names, by its label or its text, else ``None``."""
-    if by is None or isinstance(by, np.ndarray | pd.Series | list):
+    try:
+        hash(by)
+    except TypeError:
+        return None  # per-row labels: an array, a pandas or polars Series, a list
+    if by is None:
         return None
     column = resolve_label(by, frame.columns)
     return column if column in frame.columns else None
