@@ -4806,7 +4806,8 @@ def test_rank_matched_comparison_leaves_discarded_spaces_at_30_degrees_unrestric
     The current curvature ``diag(0, 2, 5, 3)`` discards its first coordinate;
     the trial discards ``(cos 30, sin 30, 0, 0)`` and the third coordinate.
     Both decompositions resolve their discarded spaces to rounding, so a
-    principal sine of one half shows the spaces are not nested and the fits
+    principal sine of one half (0.756 in the current fit's equilibrated
+    coordinates, where it is measured) shows the spaces are not nested and the fits
     compare as computed. The 45-degree test of b7039ba6 restricted them, to
     the log-determinant over a rotated complement: 0.8959 where the current
     curvature over the trial's retained space gives log(4.5) / 2 = 0.7520.
@@ -4860,3 +4861,83 @@ def test_rank_matched_comparison_restricts_spaces_nested_within_their_resolution
     assert reference != current_objective
     assert abs(reference - expected) <= resolution + tilt
     assert candidate == trial_objective
+
+
+def _turned_pair(tilt: float, scale: float) -> tuple[SimpleNamespace, SimpleNamespace, float]:
+    """A current fit (rank 4 of 5) and a trial (rank 3) whose null is the current's, turned.
+
+    The trial discards the current null direction turned by ``tilt`` toward a
+    retained one, plus a second direction. It keeps an eigenvalue of 1e-7, so
+    its discarded space is resolved only to about 1e-8, and its third
+    coordinate is scaled by ``scale``, which no discarded direction touches:
+    the null is unchanged in parameter coordinates while the two fits'
+    equilibrations differ by ``k`` of about ``scale``. Returns both fits and
+    half the current curvature's log-determinant over the complement of the
+    trial's discarded span, computed independently.
+    """
+    rng = np.random.default_rng(13)
+    basis = np.zeros((5, 5))
+    basis[[0, 1, 3, 4], :4] = np.linalg.qr(rng.standard_normal((4, 4)))[0]
+    basis[2, 4] = 1.0
+    coupled = np.column_stack([basis[:, 3], basis[:, 4]]) @ np.array([[0.8, -0.6], [0.6, 0.8]])
+    current = _rank_fit(
+        np.column_stack([basis[:, :2], coupled])
+        @ np.diag([3.0, 1.5, 0.7, 0.4])
+        @ np.column_stack([basis[:, :2], coupled]).T
+    )
+    turned = math.cos(tilt) * basis[:, 2] + math.sin(tilt) * basis[:, 0]
+    complement = np.linalg.qr(np.column_stack([turned, basis[:, 1]]), mode="complete")[0][:, 2:]
+    stretch = np.array([1.0, 1.0, scale, 1.0, 1.0])
+    trial = _rank_fit(
+        stretch[:, None] * (complement @ np.diag([3.0, 1.5, 1.0e-7]) @ complement.T) * stretch
+    )
+    assert (current.terminal_rank.rank, trial.terminal_rank.rank) == (4, 3)
+    curvature = current.terminal_penalized_curvature
+    return current, trial, 0.5 * np.linalg.slogdet(complement.T @ curvature @ complement)[1]
+
+
+def test_rank_matched_comparison_widens_containment_by_the_other_fits_resolution():
+    """The lower-rank fit's resolution, stretched by ``k``, decides the restriction.
+
+    The current fit resolves its null direction to rounding; the trial, which
+    keeps a 1e-7 eigenvalue, resolves its discarded span only to about 1e-8,
+    and its equilibration differs from the current's by about 8e3. A turn of
+    1e-6 is well outside the current fit's resolution and the trial's own,
+    and inside ``k`` times the trial's. The pair is restricted, to the
+    independent log-determinant within the trial's resolution. Dropping the
+    ``k e_other`` term, or taking ``k`` as 1, compares it as computed.
+    """
+    current, trial, expected = _turned_pair(1.0e-6, 1.0e3)
+    own_error = smoothing_objective._discarded_space_error(current.terminal_rank)
+    other_error = smoothing_objective._discarded_space_error(trial.terminal_rank)
+    assert own_error + other_error < 1.0e-7
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    reference, candidate = smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    assert reference != current_objective
+    assert abs(reference - expected) <= other_error
+    assert candidate == trial_objective
+
+
+def test_rank_matched_restriction_is_exact_at_an_admitted_tilt():
+    """A pair admitted at 30 degrees is restricted to the other fit's retained space.
+
+    With the equilibrations 1e10 apart the containment bound exceeds one, so
+    any angle is admitted, as on the 20k freMTPL NB2 sample's 86-to-85
+    comparison. Jacobi's identity then gives the log-determinant over a
+    complement turned by the principal angle, ``-log cos 30 = 0.1438`` too
+    high in the half log-determinant at 88829a74. With the angle's
+    correction it matches the independent log-determinant over the
+    complement of the trial's discarded span, within the trial's resolution.
+    """
+    current, trial, expected = _turned_pair(math.radians(30.0), 1.0e9)
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    reference, _ = smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    assert reference != current_objective
+    other_error = smoothing_objective._discarded_space_error(trial.terminal_rank)
+    assert abs(reference - expected) <= other_error

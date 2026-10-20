@@ -123,10 +123,25 @@ def _restricted_objective(
     and ``B`` is formed from the columns of ``N``, so a coefficient whose
     curvature is ``1e-30`` beside ``1e9`` (a size near its Poisson limit) keeps
     the exact zeros the rotated ``Q'CQ`` would fill with rounding.
+
+    Within the tolerance ``own`` may still be turned out of ``span(N)``, by
+    principal angles ``theta_i`` in parameter coordinates (the coordinates
+    of ``log pdet``). Write its principal vectors as
+    ``u_i = cos theta_i n_i + sin theta_i r_i``, with ``n_i`` in ``span(N)``
+    and ``r_i`` in ``R = span(N)^perp``. The identity covers
+    ``(own + B)^perp``, which is ``R`` with each ``r_i`` replaced by
+    ``w_i = r_i / cos theta_i - tan theta_i u_i``; ``C u_i = 0`` gives
+    ``C w_i = C r_i / cos theta_i``, so its log-determinant exceeds the one
+    over ``R`` by ``-2 sum log cos theta_i``. Adding ``sum log cos theta_i``
+    to the half log-determinant makes the value exact at any admitted angle,
+    including those a vacuous bound admits. The cosines are the singular
+    values of ``Q_own' Q_N`` (Bjorck and Golub, Math. Comp. 27, 1973); their
+    absolute error of order ``u`` is one of ``u / cos theta_i`` in the log.
     """
     null = np.asarray(other.parameter_null_basis, dtype=np.float64)
     rank = result.terminal_rank
     own = rank.parameter_null_basis
+    alignment = 0.0
     if own is not None and own.shape[1]:
         own = np.asarray(own, dtype=np.float64)
         scale, other_scale = rank.column_scale, other.column_scale
@@ -141,11 +156,13 @@ def _restricted_objective(
         sines = np.linalg.svd(own_basis - basis @ (basis.T @ own_basis), compute_uv=False)
         if sines.max() > tolerance:
             return None
+        cosines = np.linalg.svd(np.linalg.qr(own)[0].T @ np.linalg.qr(null)[0], compute_uv=False)
+        alignment = float(np.sum(np.log(cosines)))
         null = null @ np.linalg.svd(own.T @ null)[2][own.shape[1] :].T
     inverse = np.column_stack([rank.solve(column) for column in null.T])
     sign, log_det = np.linalg.slogdet(null.T @ inverse)
     _, log_gram = np.linalg.slogdet(null.T @ null)
-    value = objective + 0.5 * (log_det - log_gram)
+    value = objective + 0.5 * (log_det - log_gram) + alignment
     return value if sign > 0 and math.isfinite(value) else None
 
 
