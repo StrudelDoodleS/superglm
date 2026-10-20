@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,6 +43,7 @@ from superglm.distributional.kernels.negative_binomial import (
     initialize_negative_binomial,
     negative_binomial_certified_predictor_curvature_directional,
     negative_binomial_certified_predictor_curvature_second_directional,
+    negative_binomial_expected_information,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -194,7 +196,7 @@ def _factorial_carrier(count, weights, semantics) -> NDArray[np.float64]:
     return np.asarray(carrier, dtype=_FLOAT)
 
 
-_CAPABILITIES = FamilyCapabilities(2, False, False, False, False, True)
+_CAPABILITIES = FamilyCapabilities(2, True, False, False, False, True)
 _PARAMETERS = (
     ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed"),
     ParameterSpec("theta", LogLink(), "size", ParameterSupport(lower=0.0), "observed"),
@@ -223,6 +225,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     parameters = _PARAMETERS
     default_prediction_name = "conditional_mean"
     capabilities = _CAPABILITIES
+    # The expected information arrived as the terminal curvature fallback; the
+    # starting penalties stay at the 0.1 start NB2 fits were calibrated on.
+    information_scaled_start: ClassVar[bool] = False
 
     def to_config(self) -> dict[str, object]:
         return {"type": "NegativeBinomialLS", "parameterization": "nb2_mean_theta"}
@@ -308,6 +313,26 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         return NegativeBinomialPoissonBoundaryError(
             "The negative-binomial fit could not establish a stable finite theta and is "
             "Poisson-like at the diagnostic boundary"
+        )
+
+    def expected_information_natural(
+        self,
+        theta: NDArray,
+        plan: FamilyLikelihoodPlan,
+    ) -> NDArray[np.float64]:
+        """Packed natural-scale Fisher information of each row's mean and size."""
+        parameters = _validated_parameter_matrix(
+            theta,
+            n_observations=None,
+            parameters=self.parameters,
+            family_name="NegativeBinomialLS",
+        )
+        candidate = _typed_plan(plan, len(parameters))
+        return negative_binomial_expected_information(
+            parameters[:, 0],
+            parameters[:, 1],
+            candidate.weights.values,
+            candidate.weights.provenance.contract.semantics,
         )
 
     def evaluate_natural(

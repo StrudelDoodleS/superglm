@@ -437,7 +437,7 @@ def test_both_chunk_routes_accept_ordinary_ordered_children() -> None:
 
 @pytest.mark.parametrize("curvature", ["observed", "fisher"])
 def test_nb2_discrete_fit_checks_only_requested_information(curvature: str) -> None:
-    """Observed chunks work without Fisher; explicit Fisher remains unavailable."""
+    """Observed and, since NB2 has expected information, Fisher chunks agree with dense."""
 
     family = NegativeBinomialLS()
     response = np.array([0.0, 1.0, 4.0, 2.0, 7.0, 3.0, 8.0, 5.0])
@@ -484,19 +484,15 @@ def test_nb2_discrete_fit_checks_only_requested_information(curvature: str) -> N
             chunk_size=chunk_size,
         )
 
-    if curvature == "fisher":
-        with pytest.raises(ValueError, match="Fisher coefficient curvature requires expected"):
-            fit(3)
-    else:
-        dense = fit(None)
-        grouped = fit(3)
-        tolerance = np.sqrt(np.finfo(np.float64).eps) * layout.n_coefficients
-        np.testing.assert_allclose(grouped.coefficients, dense.coefficients, rtol=tolerance)
-        np.testing.assert_allclose(
-            compute_joint_inference(layout, grouped).covariance,
-            compute_joint_inference(layout, dense).covariance,
-            rtol=tolerance,
-        )
+    dense = fit(None)
+    grouped = fit(3)
+    tolerance = np.sqrt(np.finfo(np.float64).eps) * layout.n_coefficients
+    np.testing.assert_allclose(grouped.coefficients, dense.coefficients, rtol=tolerance)
+    np.testing.assert_allclose(
+        compute_joint_inference(layout, grouped).covariance,
+        compute_joint_inference(layout, dense).covariance,
+        rtol=tolerance,
+    )
 
 
 @pytest.mark.parametrize("chunk_size", [None, 3], ids=["dense", "chunked"])

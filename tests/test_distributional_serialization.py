@@ -756,7 +756,7 @@ def test_negative_binomial_manifest_pair_and_round_trip_preserve_complete_state(
         _expected_family_manifest(
             "superglm.distributional.families.negative_binomial.NegativeBinomialLS",
             {"type": "NegativeBinomialLS", "parameterization": "nb2_mean_theta"},
-            expected_information=False,
+            expected_information=True,
             distribution_functions=False,
         ),
     )

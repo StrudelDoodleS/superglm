@@ -640,7 +640,98 @@ def log_fourth_derivative(
     return fourth, error
 
 
+# Cody-Waite split of log(2): the high part has trailing zero bits, so an
+# integer multiple of it below 2**20 is exact.
+_LN2_HIGH = 0.6931471803691238
+_LN2_LOW = 1.9082149292705877e-10
+_UNIT_ROUNDOFF = 1.1102230246251565e-16
+_RESCALE_ABOVE = 2.0**300
+_RESCALE_BY = 2.0**-300
+
+
+@njit(cache=True)
+def _size_information_row(mean: float, size: float, max_terms: int) -> tuple[float, int]:
+    """``theta**2 I_theta_theta`` of one NB2 law, and the series terms it took.
+
+    ``I = (1/theta) sum_{j>=1} P(Y > j) j / ((theta + j)**2 (theta + j - 1))``,
+    which equals Lawless's (1987, eq. 2.8) ``sum_j P(Y > j)/(theta + j)**2 -
+    mu/(theta (theta + mu))`` but has only non-negative terms, so the Poisson
+    limit, where both of Lawless's sums approach ``mu/theta**2``, does not
+    cancel. Summed by parts over ``y`` it is ``sum_{y>=2} P(y) C(y-1)``,
+    ``C(k) = sum_{j=1..k} c_j``, ``c_j = j theta/((theta+j)**2 (theta+j-1))``,
+    which one forward pass of the pmf recurrence accumulates.
+
+    The identity is summation by parts with the NB2 recurrence ``(y + 1)
+    P(y + 1) = p (theta + y) P(y)``, which gives ``E[Y/(theta + Y - 1)] = p``,
+    ``p = mu/(mu + theta)``.
+
+    The tail past ``y`` is at most ``P(y) (C(y-1) r/(1-r) + r/(4 (theta+y-1)
+    (1-r)**2))``: every later pmf ratio is at most ``r = p max(1, (theta+y)/
+    (y+1))`` and ``c_j <= 1/(4 (theta+j-1))``. The series stops once that bound
+    is at most ``u`` times the partial sum, so truncation adds at most ``u``
+    relative error to the terms' own rounding. ``P(y)`` is carried as ``v 2**e``
+    (power-of-two rescaling is exact), so a ``P(0)`` below the normal range
+    does not underflow. Returns ``terms = -1`` when ``max_terms`` runs out
+    first.
+    """
+    p = mean / (mean + size)
+    exponent_value = -size * math.log1p(mean / size)
+    exponent = 0
+    if exponent_value < -700.0:
+        exponent = int(math.ceil(exponent_value / 0.6931471805599453))
+        exponent_value = (exponent_value - exponent * _LN2_HIGH) - exponent * _LN2_LOW
+    value = math.exp(exponent_value)
+    cumulative = 0.0
+    partial = 0.0
+    y = 0
+    while y < max_terms:
+        y += 1
+        # P(y) = P(y - 1) p (theta + y - 1) / y, carried as value * 2**exponent.
+        value = value * (p * ((size + (y - 1.0)) / y))
+        if value > _RESCALE_ABOVE:
+            value *= _RESCALE_BY
+            partial *= _RESCALE_BY
+            exponent += 300
+        if y < 2:
+            continue
+        j = y - 1.0
+        shifted = size + j
+        cumulative += j * size / (shifted * shifted * (size + (j - 1.0)))
+        partial += value * cumulative
+        growth = (size + y) / (y + 1.0)
+        ratio = p * growth if growth > 1.0 else p
+        if ratio < 1.0:
+            spare = 1.0 - ratio
+            tail = value * (cumulative * (ratio / spare) + ratio / (4.0 * shifted * spare * spare))
+            if tail <= _UNIT_ROUNDOFF * partial:
+                return math.ldexp(partial, exponent), y
+    return 0.0, -1
+
+
+@njit(cache=True, parallel=True)
+def expected_size_information(
+    mean: NDArray[np.float64],
+    size: NDArray[np.float64],
+    max_terms: int,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """``theta**2 I_theta_theta`` row by row, with each row's series term count.
+
+    Rows are independent and each is one fixed operation sequence, so every
+    thread count gives the same bits.
+    """
+    n_rows = mean.shape[0]
+    information = np.empty(n_rows)
+    terms = np.empty(n_rows, dtype=np.int64)
+    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
+    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
+        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
+        for row in range(chunk * _PARALLEL_BLOCK, stop):
+            information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
+    return information, terms
+
+
 __all__ = [
+    "expected_size_information",
     "log_fourth_derivative",
     "log_third_derivatives",
     "theta_series_parallel",

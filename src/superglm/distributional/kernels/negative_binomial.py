@@ -1056,6 +1056,77 @@ def negative_binomial_certified_predictor_curvature_second_directional(
     )
 
 
+# Per-row term cap of the expected-information series: the series needs about
+# ``mu + 37/log1p(theta/mu)`` terms, and the cap bounds one row's cost.
+_MAX_INFORMATION_TERMS_PER_ROW = 1 << 26
+
+
+def negative_binomial_expected_information(
+    mean: NDArray,
+    theta: NDArray,
+    weights: NDArray,
+    semantics: WeightSemantics,
+) -> NDArray[np.float64]:
+    """Return packed natural-scale NB2 Fisher information, one row per observation.
+
+    Mean and size are information-orthogonal, so the packed ``(mean, size)``
+    entry is zero (Lawless, *Canadian J. Statist.* 15(3), 1987, eqs. 2.7-2.8).
+    Per unit mass ``I_mean = theta / (mu (mu + theta))`` and ``I_size`` is the
+    series of ``_negative_binomial_numba._size_information_row``. Weights
+    enter as the likelihood does: frequency weights multiply a row, prior
+    weights rescale its mean and size. A row whose series would exceed the
+    term budget, or whose information is not representable, raises
+    ``NegativeBinomialNumericalDomainError``.
+    """
+    sources = tuple(
+        _numeric_vector(values, name)
+        for values, name in ((mean, "mean"), (theta, "theta"), (weights, "weights"))
+    )
+    if not sources[0].size or any(values.shape != sources[0].shape for values in sources[1:]):
+        raise ValueError("negative-binomial information rows must be non-empty and aligned")
+    mean_values, theta_values, weight_values = (
+        np.asarray(values, dtype=_FLOAT) for values in sources
+    )
+    for values, name in (
+        (mean_values, "mean"),
+        (theta_values, "theta"),
+        (weight_values, "weights"),
+    ):
+        if np.any(~np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError(f"{name} must be finite and strictly positive")
+    if semantics not in ("prior", "frequency"):
+        raise ValueError("semantics must be 'prior' or 'frequency'")
+    scale, multiplier, effective_mean, effective_theta, total = _domain(
+        mean_values, theta_values, weight_values, semantics
+    )
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        predicted = effective_mean + 37.0 / np.log1p(effective_theta / effective_mean) + 64.0
+    if (
+        not np.all(np.isfinite(predicted))
+        or float(np.max(predicted)) > _MAX_INFORMATION_TERMS_PER_ROW
+        or float(np.sum(predicted)) > _MAX_RECURRENCE_CELLS
+    ):
+        raise NegativeBinomialNumericalDomainError(
+            "NB2 expected information needs more series terms than its budget allows"
+        )
+    size_information, terms = _compiled.expected_size_information(
+        np.ascontiguousarray(effective_mean),
+        np.ascontiguousarray(effective_theta),
+        _MAX_INFORMATION_TERMS_PER_ROW,
+    )
+    if np.any(terms < 0):
+        raise NegativeBinomialNumericalDomainError(
+            "NB2 expected information series did not reach its truncation bound"
+        )
+    information = np.zeros((len(mean_values), 3), dtype=_FLOAT)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        information[:, 0] = multiplier * (scale * (effective_theta / total)) / mean_values
+        information[:, 2] = multiplier * ((size_information / theta_values) / theta_values)
+    if not np.all(np.isfinite(information)):
+        raise NegativeBinomialNumericalDomainError("NB2 expected information is not representable")
+    return readonly(information, dtype=np.dtype(np.float64), shape=(len(mean_values), 3))
+
+
 __all__ = [
     "NegativeBinomialDerivativeRepresentationError",
     "NegativeBinomialInitializationError",
@@ -1067,6 +1138,7 @@ __all__ = [
     "initialize_negative_binomial",
     "negative_binomial_certified_predictor_curvature_directional",
     "negative_binomial_certified_predictor_curvature_second_directional",
+    "negative_binomial_expected_information",
     "negative_binomial_log_fourth_derivatives",
     "negative_binomial_log_third_derivatives",
     "negative_binomial_predictor_curvature_directional",

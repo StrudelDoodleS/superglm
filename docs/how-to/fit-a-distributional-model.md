@@ -311,7 +311,11 @@ distributional fit without substituting a Poisson density. Ratios below this
 range still raise `NegativeBinomialPoissonBoundaryError`.
 
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
-observed curvature. `NegativeBinomialLS` does not supply Fisher information. This family is not zero-inflated and does not claim an exact Poisson
+observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
+1987): the solver falls back to it when the observed curvature at the end of a
+fit is not a proper maximum, and `coefficient_curvature="fisher"` can request
+it. Its starting smoothing parameters stay at the 0.1 start rather than the
+information-scaled one. This family is not zero-inflated and does not claim an exact Poisson
 active face, CDF or quantile methods, random generation, or complete-fit speed.
 
 ## Generalized gamma mean–scale–shape model
@@ -1085,9 +1089,9 @@ preregistered confirmatory result.
 Set `discrete=True, n_bins=256` on `SuperLSS` to compile marginal spline designs
 and use bounded row chunks for joint fitting. This route assembles the coupled
 observed Hessian, including signed cross-predictor blocks, through the existing
-grouped design machinery. It supports observed-only `TweedieLSS` and
-`NegativeBinomialLS`; requesting Fisher curvature still requires the family's
-expected-information capability.
+grouped design machinery. It supports observed-only `TweedieLSS`; requesting
+Fisher curvature requires the family's expected-information capability, which
+`TweedieLSS` lacks.
 
 ```python
 from superglm import GaussianLS, SuperLSS, s
@@ -1141,17 +1145,17 @@ meaning on both execution routes.
 The coefficient solve is Newton's method on the observed Hessian for
 every family. `coefficient_curvature="fisher"` on `SuperLSS` asks for Fisher
 scoring instead and is accepted only for a family that supplies expected
-information. Every current built-in except `NegativeBinomialLS` and
-`TweedieLSS` supplies it; a family implementing that capability does not change
-the default solve. Under either policy the accepted terminal point is
-re-examined with the penalized observed Hessian `A + S`, restricted to the
-active coefficient subspace when needed. If it is materially indefinite the
-solver retries with a tighter tolerance, then falls back to penalized expected
-information `F + S` when the family supplies it. Without usable expected
-information the fit is not refused: each row's observed curvature is replaced
-by its nearest positive semidefinite matrix (Wood and Fasiolo, 2017; Higham,
-1988), the fit warns, and the warning is kept in `result_.warnings`; telemetry
-then reports `actual_source` as `"nearest_semidefinite"`. The requested policy
+information. Every current built-in except `TweedieLSS` supplies it; a family
+implementing that capability does not change the default solve. Under either
+policy the accepted terminal point is re-examined with the penalized observed
+Hessian `A + S`, restricted to the active coefficient subspace when needed. If
+it is materially indefinite the solver retries with a tighter tolerance, then
+falls back to penalized expected information `F + S` when the family supplies
+it. Without usable expected information the fit is not refused: each row's
+observed curvature is replaced by its nearest positive semidefinite matrix
+(Wood and Fasiolo, 2017; Higham, 1988), the fit warns, and the warning is kept
+in `result_.warnings`; telemetry then reports `actual_source` as
+`"nearest_semidefinite"`. The requested policy
 is `training_telemetry().curvature_policy`;
 the terminal source and any fallback are in `training_telemetry().curvature`
 (`actual_source`, `fallback_count`, `matrix_kind`).
@@ -1338,12 +1342,10 @@ order you are likely to meet them.
   `LogNormalLS` is the supported way to make it.
 - **Negative binomial has no zero-inflated variant**, and its size parameter
   cannot run to infinity to become an exact Poisson.
-- **Tweedie and negative binomial fit on exact curvature only.** Dense,
-  chunked and discrete designs all work, but these two families have no
-  Fisher approximation to fall back on: if a fit ends where the exact
-  curvature does not describe a proper maximum, its standard errors and
-  effective degrees of freedom use the nearest positive semidefinite
-  curvature, and the fit warns.
+- **Tweedie has no Fisher approximation.** Dense, chunked and discrete
+  designs all work. If a fit ends where the exact curvature does not describe
+  a proper maximum, its standard errors and effective degrees of freedom use
+  the nearest positive semidefinite curvature, and the fit warns.
 - **`smoothing_certified_` is strict, and `False` is not a defect on its
   own.** It is `True` only for a converged interior stop with every check
   passed: no `practical_plateau` stop (the default `practical_reml=True`
