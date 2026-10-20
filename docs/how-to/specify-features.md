@@ -245,8 +245,8 @@ Spline(kind="bs", k=12, polynomial_ranges=[
 - Ranges cannot be combined with `select=True` or with a shape constraint.
 - In `SuperGLM` a spline with ranges cannot be a parent of an interaction in
   this version. Declare the interaction on a spline without them.
-- In `SuperLSS` an interaction can take a `kind="bs"` parent with ranges, and
-  keeps the ranges. A `kind="cr"` parent with ranges cannot parent one.
+- In `SuperLSS` an interaction can take a parent with ranges, and keeps the
+  ranges: the interaction is a polynomial of the declared degree there too.
 
 On an `OrderedCategorical` with a spline basis, the edges may be band names;
 each name resolves to that band's position on the axis:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -12,6 +14,14 @@ from superglm.features._spline_knots import QUANTILE_STRATEGIES
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
 from superglm.types import LambdaPolicy
+
+
+class SplineOptionWarning(UserWarning):
+    """A spline option outside its accepted values, built as it always was."""
+
+
+# Warnings about a declaration point at the first frame outside the package.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The enumerated spline options as types, for the private helpers between the
 # public signatures (which spell each ``Literal`` out) and the spec.
@@ -161,9 +171,15 @@ def initialize_spec(
     validate_select(spec)
 
     spec.degree = degree
-    # None disables SSP as "none" does; 0.40 built it so, and scripts pass it.
+    # Any other value builds without SSP, as it always has (None among them);
+    # a value outside the accepted ones also says so, since it may be a typo.
     if penalty is not None and penalty not in PENALTIES:
-        raise ValueError(f"penalty must be one of {PENALTIES}, got {penalty!r}")
+        warnings.warn(
+            f"penalty={penalty!r} is not one of {PENALTIES}; it was treated as 'none': "
+            "no SSP reparametrization.",
+            SplineOptionWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
     spec.penalty = penalty
     spec.discrete = discrete
     spec.n_bins = n_bins
@@ -193,10 +209,16 @@ def configure_knots(
     boundary: tuple[float, float] | None,
 ) -> None:
     """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
-    # Stated knots make the rule moot, and it was never read then; a rule that
-    # places knots must be one the placement knows, or a typo places uniform.
+    # Stated knots make the rule moot, and it was never read then. A rule the
+    # placement does not know places uniform knots, as it always has, and says
+    # so, since it may be a typo.
     if knots is None and knot_strategy not in KNOT_STRATEGIES:
-        raise ValueError(f"knot_strategy must be one of {KNOT_STRATEGIES}, got {knot_strategy!r}")
+        warnings.warn(
+            f"knot_strategy={knot_strategy!r} is not one of {KNOT_STRATEGIES}; it was "
+            "treated as 'uniform': uniform knots.",
+            SplineOptionWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
     if knots is not None and _knots_contain_names(knots):
         # Level-name knots: resolvable only against an OrderedCategorical's
         # declared levels, so resolution is deferred to that host (which

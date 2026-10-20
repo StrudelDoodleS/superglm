@@ -516,7 +516,7 @@ def refuse_unsupported_interaction_parents(
     feat2: str,
     specs: Mapping[str, FeatureSpec],
     *,
-    ranged_bs_margins: bool = False,
+    ranged_margins: bool = False,
 ) -> None:
     """Refuse a main-effect spec that cannot parent an interaction.
 
@@ -526,12 +526,11 @@ def refuse_unsupported_interaction_parents(
     ``FactorSmooth``, which builds its own marginal and reads its group as
     labels.  A parent absent from ``specs`` is left to the caller's own check.
 
-    ``ranged_bs_margins`` lets a ``bs`` parent with polynomial ranges through,
-    as SuperLSS's declared interactions always did: its margin keeps the
-    ranges, so the fitted predictor stays polynomial on them. A ``cr`` margin
-    is rebuilt without them and bends the predictor inside a declared range
-    (measured on 0.40: second differences 2e-3 to 7e-3 of its range there,
-    against 1e-15 with the main effect alone), so it stays refused.
+    ``ranged_margins`` lets a parent with polynomial ranges through, as
+    SuperLSS's declared interactions always did. Its margin keeps the ranges
+    (``interaction_spline_spec`` keeps a ranged ``cr`` parent's constrained
+    basis rather than the cardinal one), so the fitted predictor stays
+    polynomial on them.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
@@ -579,19 +578,12 @@ def refuse_unsupported_interaction_parents(
         # neither is certified, so ranges stay on main effects in this version.
         spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
         if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
-            from superglm.features.spline import BSplineSmooth
-
-            if ranged_bs_margins and isinstance(spline, BSplineSmooth):
+            if ranged_margins:
                 continue
             raise NotImplementedError(
                 f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} has "
                 "polynomial_ranges, which shape a main effect only in this version; "
                 "declare the interaction on a spline without them."
-                + (
-                    " A kind='bs' spline keeps its ranges in the interaction."
-                    if ranged_bs_margins
-                    else ""
-                )
             )
 
 

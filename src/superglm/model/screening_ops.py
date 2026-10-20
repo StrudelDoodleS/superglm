@@ -956,7 +956,14 @@ def screen_interactions(
         if key not in marginal_cache:
             s = _support(name, binned)
             m = TensorInteraction._marginal_from_spec(
-                _margin_spec(name), s["x"], None, support=s["uniq"], counts=s["counts"]
+                _margin_spec(name),
+                s["x"],
+                None,
+                support=s["uniq"],
+                counts=s["counts"],
+                # The probe's geometry as it was: SuperGLM refits no
+                # interaction on a ranged parent.
+                keep_ranges=False,
             )
             S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
             basis = m.basis

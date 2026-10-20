@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import warnings
 from dataclasses import replace
 from typing import Any
 
@@ -23,6 +24,7 @@ import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
@@ -104,6 +106,8 @@ def interaction_spline_spec(
     x: NDArray,
     n_knots_override: int | None = None,
     geometry_weight: NDArray | None = None,
+    *,
+    keep_ranges: bool = True,
 ):
     """The spline spec an INTERACTION marginal is built from.
 
@@ -138,7 +142,7 @@ def interaction_spline_spec(
     since a predict-time basis rebuilt from the original spec would disagree
     with the design that was fitted.
     """
-    from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+    from superglm.features.spline import CubicRegressionSpline
 
     if not isinstance(spec, CubicRegressionSpline):
         return spec
@@ -157,11 +161,34 @@ def interaction_spline_spec(
     # penalty for a second-derivative one.
     if getattr(spec, "_m_orders", (2,)) != (2,):
         return spec
+    # Polynomial ranges are equality constraints on the parent's own basis
+    # (``_constraint_rows``); the cardinal basis has no such rows, so a margin
+    # rebuilt there dropped them and bent the interaction inside a declared
+    # range. The parent's constrained basis keeps them, as a bs margin does.
+    # The interaction screen passes ``keep_ranges=False`` and keeps its probe
+    # on the cardinal basis: SuperGLM refits no interaction on a ranged parent.
+    if keep_ranges and getattr(spec, "polynomial_ranges", ()):
+        return spec
 
     knot_strategy = spec.knot_strategy
     if knot_strategy == "uniform" and spec._explicit_knots is None:
         knot_strategy = "quantile"
-    cardinal = CardinalCRSpline(
+    # The parent already warned about any option outside its accepted values.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SplineOptionWarning)
+        cardinal = _cardinal_margin(spec, n_knots_override, knot_strategy)
+    cardinal._place_knots(
+        np.asarray(x, dtype=np.float64).ravel(),
+        geometry_weight,
+    )
+    return cardinal
+
+
+def _cardinal_margin(spec, n_knots_override, knot_strategy):
+    """The ``CardinalCRSpline`` an interaction marginal of cr parent ``spec`` uses."""
+    from superglm.features.spline import CardinalCRSpline
+
+    return CardinalCRSpline(
         n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
         knot_strategy=knot_strategy,
         penalty=spec.penalty,
@@ -176,11 +203,6 @@ def interaction_spline_spec(
         m=spec._m_orders[0],
         lambda_policy=None,
     )
-    cardinal._place_knots(
-        np.asarray(x, dtype=np.float64).ravel(),
-        geometry_weight,
-    )
-    return cardinal
 
 
 def _varying_coefficient_spline_spec(
@@ -2013,8 +2035,12 @@ class TensorInteraction:
         support: NDArray | None = None,
         counts: NDArray | None = None,
         geometry_weight: NDArray | None = None,
+        keep_ranges: bool = True,
     ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
+
+        ``keep_ranges`` keeps a ranged parent's polynomial ranges in the margin
+        (see ``interaction_spline_spec``).
 
         Enforces the mgcv te()/ti() contract on the original spec before
         any cloning, so unsupported configurations (select, multi-m) can't
@@ -2095,6 +2121,7 @@ class TensorInteraction:
             x,
             n_knots_override,
             geometry_weight,
+            keep_ranges=keep_ranges,
         )
         if cardinal is not spec:
             info = marginal_ingredients(cardinal)
@@ -2116,7 +2143,13 @@ class TensorInteraction:
             # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
             if "degree" in inspect.signature(type(spec).__init__).parameters:
                 kwargs["degree"] = spec.degree
-            clone = type(spec)(**kwargs)
+            # The ranges travel with the margin at the new knot count, or the
+            # clone would bend the interaction inside them.
+            if keep_ranges and getattr(spec, "polynomial_ranges", ()):
+                kwargs["polynomial_ranges"] = spec.polynomial_ranges
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SplineOptionWarning)
+                clone = type(spec)(**kwargs)
             clone._place_knots(x, geometry_weight)
             return marginal_ingredients(clone)
         return marginal_ingredients(spec)

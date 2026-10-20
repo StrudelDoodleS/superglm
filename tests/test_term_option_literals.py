@@ -151,15 +151,31 @@ def test_every_factor_smooth_and_link_literal_value_is_taken():
 
 
 @pytest.mark.parametrize(
-    ("option", "typo"), [("knot_strategy", "quantile_row"), ("penalty", "SSP")]
+    ("option", "value", "treated_as"),
+    [
+        ("knot_strategy", "quantile_row", "uniform knots"),
+        ("knot_strategy", "Uniform", "uniform knots"),
+        ("knot_strategy", "explicit", "uniform knots"),
+        ("penalty", "SSP", "no SSP reparametrization"),
+        ("penalty", "off", "no SSP reparametrization"),
+        ("penalty", "", "no SSP reparametrization"),
+    ],
 )
-def test_a_misspelled_spline_option_is_refused_naming_the_accepted_values(option, typo):
-    """Master took any string: a typo fit uniform knots, or no SSP reparametrization."""
+def test_an_unknown_spline_option_builds_as_before_and_says_so(option, value, treated_as):
+    """0.40 built these silently; they build the same and warn (master warned nothing)."""
+    import numpy as np
+
+    from superglm.features._spline_config import SplineOptionWarning
+
     values, _ = _literal_values(_annotation(superglm.Spline, option))
-    for build in (superglm.Spline, lambda **kw: superglm.s("x", **kw), spline.PSpline):
-        with pytest.raises(ValueError, match=rf"{option} must be one of .*got '{typo}'") as caught:
-            build(**{option: typo})
-        assert all(repr(value) in str(caught.value) for value in values)
+    x = np.linspace(0.0, 1.0, 200)
+    for build in (superglm.Spline, lambda **kw: superglm.s("x", **kw).spec, spline.PSpline):
+        with pytest.warns(SplineOptionWarning, match=rf"{option}={value!r}") as caught:
+            spec = build(**{option: value})
+        message = str(caught[0].message)
+        assert treated_as in message
+        assert all(repr(accepted) in message for accepted in values)
+    spec.build(x)
 
 
 def test_what_040_fitted_as_intended_still_builds():

@@ -817,14 +817,16 @@ def test_an_interaction_beside_ranged_terms_still_fits():
     assert "veh:region" in model._interaction_specs
 
 
+@pytest.mark.parametrize("override", [None, (5, 4)], ids=["parent-knots", "n_knots-override"])
 @pytest.mark.parametrize("kind", ["bs", "cr"])
-def test_a_superlss_tensor_on_a_ranged_parent_fits_on_bs_and_is_refused_on_cr(kind):
-    """0.40 fitted both; master refused both. A bs margin keeps the ranges.
+def test_a_superlss_tensor_on_a_ranged_parent_keeps_the_ranges(kind, override):
+    """0.40 fitted it; master refused it. It fits, and the ranges hold in the interaction.
 
-    The fitted location predictor stays linear on the declared Line range at
-    every value of the other margin, so the bs fit keeps fitting, as on 0.40
-    (bit for bit). A cr margin is rebuilt without the ranges and bent the
-    predictor inside the range on 0.40, so it stays refused, naming bs.
+    The location predictor stays a polynomial of the declared degree on the
+    range at every value of the other margin. On 0.40 a cr margin (rebuilt on
+    the cardinal basis) and any margin rebuilt for an n_knots override dropped
+    the ranges and bent the predictor there (second differences 1e-3 of its
+    range against round-off); this asserts the fix, so 0.40 fails it.
     """
     from superglm import GaussianLS, SuperLSS, s, term, ti
 
@@ -836,13 +838,9 @@ def test_a_superlss_tensor_on_a_ranged_parent_fits_on_bs_and_is_refused_on_cr(ki
     family = GaussianLS()
     model = SuperLSS(
         family,
-        family.location(term("age", ranged), s("veh", k=6), ti("age", "veh")),
+        family.location(term("age", ranged), s("veh", k=6), ti("age", "veh", n_knots=override)),
         family.scale(),
     )
-    if kind == "cr":
-        with pytest.raises(NotImplementedError, match="kind='bs' spline keeps its ranges"):
-            model.fit_reml(X, y)
-        return
     model.fit_reml(X, y)
     ages = np.linspace(30.0, 50.0, 21)
     for veh in (1.0, 10.0, 19.0):
