@@ -823,6 +823,13 @@ class _DistributionalPickler(pickle.Pickler):
     dispatch_table[_MAPPING_PROXY_TYPE] = _reduce_mapping_proxy
 
 
+def pickle_state(value: Any) -> bytes:
+    """Pickle ``value`` with the read-only mappings the standard pickler refuses."""
+    stream = io.BytesIO()
+    _DistributionalPickler(stream, protocol=pickle.HIGHEST_PROTOCOL).dump(value)
+    return stream.getvalue()
+
+
 def _pickle_model(model: DenseDistributionalModel) -> bytes:
     stream = io.BytesIO()
     try:

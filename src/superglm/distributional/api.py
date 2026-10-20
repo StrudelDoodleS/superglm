@@ -8,6 +8,7 @@ import importlib
 import json
 import math
 import operator
+import pickle
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -420,6 +421,13 @@ def _positive_n_bins(value: Any, *, name: str) -> int:
     return int(result)
 
 
+def _restore_superlss(cls: type[SuperLSS], state: bytes) -> SuperLSS:
+    """Rebuild a pickled ``SuperLSS`` from the state ``__reduce__`` wrote."""
+    model = cls.__new__(cls)
+    model.__dict__.update(pickle.loads(state))
+    return model
+
+
 def _names_a_column(covariate: object, frame: EagerFrame) -> bool:
     """Whether ``covariate`` is a column label of ``frame`` rather than a row of values."""
     if isinstance(covariate, np.ndarray | pd.Series | list):
@@ -597,6 +605,17 @@ class SuperLSS:
         # saw.  It is kept by reference, not copied, and serialization does not
         # carry it: a restored model is given one through ``X_train=``.
         self._training_frame: FrameLike | EagerFrame | None = None
+
+    def __reduce__(self) -> tuple[Any, tuple[type[SuperLSS], bytes]]:
+        """Pickle (and so deepcopy and joblib) through the artifact pickler.
+
+        The model keeps its configuration in read-only mappings, which the
+        standard pickler refuses; ``to_bytes``'s pickler carries them, so the
+        state goes through it whole and comes back as it was, fitted or not.
+        """
+        from superglm.distributional.serialization import pickle_state
+
+        return _restore_superlss, (type(self), pickle_state(self.__dict__))
 
     @property
     def family(self) -> DistributionalFamily:
