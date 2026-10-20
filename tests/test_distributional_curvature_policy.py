@@ -324,3 +324,22 @@ def test_row_projection_keeps_semidefinite_rows_and_clips_the_rest() -> None:
     np.testing.assert_allclose(
         nearest_semidefinite_curvature(three), [[1.0, 0.0, 0.0, 0.0, 0.0, 2.0]], atol=1e-15
     )
+
+
+def test_zero_diagonal_with_coupling_is_indefinite_not_a_policy_crash() -> None:
+    """A zero diagonal entry beside a nonzero off-diagonal one makes the matrix indefinite.
+
+    The rank decomposition refuses such a matrix outright ("nonzero offdiagonal
+    entry on a zero diagonal"); the policy used to turn that refusal into a
+    CurvaturePolicyError that ended the fit. It is ordinary indefiniteness: a
+    semidefinite matrix with a zero diagonal entry has that whole row zero.
+    """
+    observed = np.array([[1.0, 0.5], [0.5, 0.0]])
+
+    first = resolve_curvature("observed", observed, fisher_matrix=np.eye(2))
+    assert first.retry_required is True
+    assert first.telemetry.reason == "material_indefiniteness_retry_required"
+
+    second = resolve_curvature("observed", observed, fisher_matrix=np.eye(2), state=first.state)
+    assert second.telemetry.actual_source == "fisher"
+    np.testing.assert_array_equal(second.matrix, np.eye(2))

@@ -118,7 +118,10 @@ def _analyze_curvature(
     try:
         decomposition = decompose_gram(symmetric, policy=policy)
     except ValueError as exc:
-        if "materially" not in str(exc).lower():
+        # A zero diagonal with a nonzero off-diagonal entry is indefinite: a
+        # semidefinite matrix with a zero diagonal entry has that row zero.
+        message = str(exc).lower()
+        if "materially" not in message and "zero diagonal" not in message:
             raise CurvaturePolicyError(f"{label} curvature rank analysis failed: {exc}") from exc
         materially_indefinite = True
         try:
