@@ -227,6 +227,10 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     capabilities = _CAPABILITIES
     # The expected information arrived as the terminal curvature fallback; the
     # starting penalties stay at the 0.1 start NB2 fits were calibrated on.
+    # Measured on freMTPL lss_nb: the information-scaled start halves the
+    # full-book EFS iterations (17 -> 8) at the same held-out fit, but leaves
+    # the 20k sample unconverged at a smoothing cap where the 0.1 start
+    # converges, so it stays off.
     information_scaled_start: ClassVar[bool] = False
 
     def to_config(self) -> dict[str, object]:
