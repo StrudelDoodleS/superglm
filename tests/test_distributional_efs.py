@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -4687,3 +4688,53 @@ def test_high_start_boundary_telemetry_never_changes_the_fit() -> None:
     np.testing.assert_array_equal(guarded.coefficients, reference.coefficients)
     for name, reference_value in dict(reference.smoothing.lambdas).items():
         assert dict(guarded.smoothing.lambdas)[name] == float(reference_value)
+
+
+def _rank_fit(matrix: np.ndarray) -> SimpleNamespace:
+    """The three fields the rank-matched comparison reads from a solver result."""
+    return SimpleNamespace(
+        terminal_rank=rank_module.decompose_gram(matrix),
+        terminal_penalized_curvature=matrix,
+        coefficient_face=None,
+    )
+
+
+def test_rank_matched_comparison_restricts_the_higher_rank_fit_to_the_common_subspace():
+    """Forced rank drop: a vanishing direction is compared on the subspace both fits keep.
+
+    Two penalized curvatures share three eigenpairs; the current fit keeps a
+    fourth eigenvalue of 1e-9 along a direction the trial fit has discarded.
+    With equal penalized likelihoods the raw objectives differ by
+    -log(1e-9)/2, about 10.4, against the trial, though nothing but the
+    rank decision changed. Restricted to the complement of the trial's
+    discarded direction, the current fit's log-determinant is the log of the
+    three shared eigenvalues, computed here independently.
+    """
+    rng = np.random.default_rng(3)
+    basis, _ = np.linalg.qr(rng.standard_normal((4, 4)))
+    shared = np.array([3.0, 1.5, 0.7])
+    current = _rank_fit(basis @ np.diag([*shared, 1.0e-9]) @ basis.T)
+    trial = _rank_fit(basis @ np.diag([*shared, 0.0]) @ basis.T)
+    assert (current.terminal_rank.rank, trial.terminal_rank.rank) == (4, 3)
+
+    # -penalized log likelihood + log pseudo-determinant / 2, with equal likelihoods.
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    assert trial_objective > current_objective + 10.0
+
+    common = 0.5 * float(np.sum(np.log(shared)))
+    reference, candidate = smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    assert reference == pytest.approx(common, rel=1.0e-12)
+    assert candidate == trial_objective == pytest.approx(common, rel=1.0e-12)
+    # A trial that re-admits the direction is restricted instead.
+    reference, candidate = smoothing_objective.rank_matched_objectives(
+        trial, trial_objective, current, current_objective
+    )
+    assert reference == trial_objective
+    assert candidate == pytest.approx(common, rel=1.0e-12)
+    # Equal ranks compare as computed.
+    assert smoothing_objective.rank_matched_objectives(
+        current, current_objective, current, current_objective + 1.0
+    ) == (current_objective, current_objective + 1.0)
