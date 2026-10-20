@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -568,12 +570,28 @@ def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str])
     return f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
 
 
-def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
+# Warnings about a declaration point at the first frame outside the package.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+
+class RedundantInteractionWarning(UserWarning):
+    """Two interactions of one class over the same two columns span one column space."""
+
+
+def normalize_terms(
+    terms: Sequence[TermInput],
+    *,
+    repeated_pairs: Literal["refuse", "warn"] = "refuse",
+) -> NormalizedTerms:
     """Resolve declarations without reading data or constructing row designs.
 
     A ``{column: spec}`` mapping among the declarations stands for
     ``term(column, spec)`` for each entry, in the mapping's order. Main terms
     keep their declaration order, and interactions keep theirs.
+
+    Two interactions of one class over the same two columns are refused, or,
+    with ``repeated_pairs="warn"`` (SuperLSS, which always fitted them), kept
+    with a warning that the second is redundant.
     """
     if isinstance(terms, Mapping):
         raise TypeError(
@@ -600,12 +618,19 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
                 raise ValueError(f"Duplicate interaction declaration: {declaration.name!r}")
             pair = (type(declaration._spec), frozenset(declaration._spec.parent_names))
             if pair in pair_owners:
-                raise ValueError(
+                same = (
                     f"Interactions {pair_owners[pair]!r} and {declaration.name!r} are both "
-                    f"{pair[0].__name__} over the same two columns, in either order; "
-                    "declare one"
+                    f"{pair[0].__name__} over the same two columns, in either order"
                 )
-            pair_owners[pair] = declaration.name
+                if repeated_pairs != "warn":
+                    raise ValueError(f"{same}; declare one")
+                warnings.warn(
+                    f"{same}, so the second is redundant: it repeats the first's "
+                    "columns. Declare one.",
+                    RedundantInteractionWarning,
+                    skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+                )
+            pair_owners.setdefault(pair, declaration.name)
             interactions[declaration.name] = declaration._spec
             if declaration._requires_spline_parents:
                 spline_parent_interactions.add(declaration.name)

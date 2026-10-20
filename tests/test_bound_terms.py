@@ -516,3 +516,23 @@ def test_the_group_warning_names_intercept_true_for_sz_without_an_intercept(basi
         family.location(s("x"), cat("g"), smooth, intercept=intercept)
     sentence = "With intercept=False, the same model is intercept=True without the term on 'g'."
     assert (sentence in str(caught[0].message)) is (basis == "sz" and not intercept)
+
+
+@pytest.mark.parametrize(
+    "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
+)
+def test_superlss_keeps_a_repeated_interaction_pair_with_a_warning(second):
+    """0.40 fitted both; #503 refused them. SuperLSS keeps both, and warns (bit for bit with 0.40)."""
+    from superglm import GaussianLS
+    from superglm.features.interaction import TensorInteraction
+    from superglm.terms import RedundantInteractionWarning, interaction, s, ti
+
+    other = (
+        ti("z", "x")
+        if second == "transposed"
+        else interaction(TensorInteraction("x", "z"), name="x_by_z")
+    )
+    family = GaussianLS()
+    with pytest.warns(RedundantInteractionWarning, match="the second is redundant"):
+        location = family.location(s("x"), s("z"), ti("x", "z"), other)
+    assert len(location.template.interaction_order) == 2

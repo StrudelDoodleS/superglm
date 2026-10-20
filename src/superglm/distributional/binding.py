@@ -126,7 +126,9 @@ def bind_predictor(
     >>> family.location("age").name
     'location'
     """
-    normalized = normalize_terms(terms)
+    # SuperLSS fitted two interactions of a class over one column pair before
+    # the declaration language refused them, so they keep fitting, with a warning.
+    normalized = normalize_terms(terms, repeated_pairs="warn")
     # Checked where a predictor is declared. SuperLSS once required a term on
     # the group, so every one keeps fitting, with a warning.
     check_terms_on_factor_smooth_groups(

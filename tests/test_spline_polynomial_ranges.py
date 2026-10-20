@@ -817,20 +817,37 @@ def test_an_interaction_beside_ranged_terms_still_fits():
     assert "veh:region" in model._interaction_specs
 
 
-def test_a_ranged_spline_cannot_parent_a_superlss_tensor():
-    # The family helpers declare interactions as specs, so SuperLSS reaches
-    # the same refusal through the design compiler.
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_superlss_tensor_on_a_ranged_parent_fits_on_bs_and_is_refused_on_cr(kind):
+    """0.40 fitted both; master refused both. A bs margin keeps the ranges.
+
+    The fitted location predictor stays linear on the declared Line range at
+    every value of the other margin, so the bs fit keeps fitting, as on 0.40
+    (bit for bit). A cr margin is rebuilt without the ranges and bent the
+    predictor inside the range on 0.40, so it stays refused, naming bs.
+    """
     from superglm import GaussianLS, SuperLSS, s, term, ti
 
     rng = np.random.default_rng(12)
-    n = 400
+    n = 1200
     X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "veh": rng.uniform(0.0, 20.0, n)})
-    ranged = Spline(kind="bs", k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    y = np.sin(X["age"] / 6.0) * (1.0 + X["veh"] / 10.0) + 0.2 * rng.normal(size=n)
+    ranged = Spline(kind=kind, k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
     family = GaussianLS()
     model = SuperLSS(
         family,
         family.location(term("age", ranged), s("veh", k=6), ti("age", "veh")),
         family.scale(),
     )
-    with pytest.raises(NotImplementedError, match="'age' has polynomial_ranges"):
-        model.fit_reml(X, rng.normal(size=n))
+    if kind == "cr":
+        with pytest.raises(NotImplementedError, match="kind='bs' spline keeps its ranges"):
+            model.fit_reml(X, y)
+        return
+    model.fit_reml(X, y)
+    ages = np.linspace(30.0, 50.0, 21)
+    for veh in (1.0, 10.0, 19.0):
+        eta = np.asarray(model.predict_link(pd.DataFrame({"age": ages, "veh": veh})))[:, 0]
+        # eta sums a few dozen basis products, so its rounding is a small
+        # multiple of u * max|eta|; a second difference triples that.
+        tolerance = 1.0e3 * np.finfo(np.float64).eps * np.max(np.abs(eta))
+        assert np.max(np.abs(np.diff(eta, 2))) <= tolerance

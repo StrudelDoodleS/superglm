@@ -101,10 +101,11 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
 - A column label can be anything a dict key can be, so a frame whose columns
   are numbered takes `s(0)` or `{0: Spline()}`. Results show a term by its
   label's text, so two labels that read alike, such as `0` and `"0"`, raise an
-  error. Interactions name their columns by strings.
+  error. Interactions take the same labels.
 - Declare each interaction once per pair of columns. `ti("DrivAge", "VehAge")`
-  and `ti("VehAge", "DrivAge")` are the same term, and a second one raises an
-  error.
+  and `ti("VehAge", "DrivAge")` are the same term. In `SuperGLM` a second one
+  raises an error; a `SuperLSS` family helper keeps both and warns that the
+  second is redundant.
 - An interaction cannot go in a dict. Put it in the list as `ti(...)` or
   `interaction(spec)`.
 - `ti` takes two `s(...)` terms. For an `OrderedCategorical` with a spline
@@ -242,8 +243,10 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   shrunk towards a line.
 - Only `kind="bs"` and `kind="cr"` take ranges.
 - Ranges cannot be combined with `select=True` or with a shape constraint.
-- A spline with ranges cannot be a parent of an interaction in this version.
-  Declare the interaction on a spline without them.
+- In `SuperGLM` a spline with ranges cannot be a parent of an interaction in
+  this version. Declare the interaction on a spline without them.
+- In `SuperLSS` an interaction can take a `kind="bs"` parent with ranges, and
+  keeps the ranges. A `kind="cr"` parent with ranges cannot parent one.
 
 On an `OrderedCategorical` with a spline basis, the edges may be band names;
 each name resolves to that band's position on the axis:

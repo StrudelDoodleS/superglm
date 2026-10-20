@@ -573,6 +573,9 @@ def compile_predictors(
             lambda2=lambda2,
             separation_boundaries=boundary_tuple[parameter_index],
             first_tensor_id=first_tensor_id,
+            # SuperLSS fitted a tensor on a ranged bs parent before declared
+            # interactions met the pair refusals, and keeps fitting it.
+            ranged_bs_margins=True,
         )
         tensor_ids = [getattr(matrix, "tensor_id", -1) for matrix in compiled.design.group_matrices]
         first_tensor_id = max(first_tensor_id, 1 + max(tensor_ids, default=-1))
