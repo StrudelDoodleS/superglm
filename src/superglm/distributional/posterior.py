@@ -450,17 +450,6 @@ def _replayed_smoothing_hessian(
     )
     if derivatives.provenance != expected_provenance:
         raise RuntimeError("smoothing derivative replay changed the terminal derivative provenance")
-    if _substitute_curvature(terminal) is not None:
-        # The stored stationarity gradient was formed with observed curvature,
-        # the only curvature the smoothing search differentiates, so it cannot
-        # authenticate a replay with the substitute; V_rho needs only the Hessian.
-        return _trusted_smoothing_hessian(
-            derivatives.hessian,
-            derivatives.hessian_certificate,
-            count=len(names),
-            certificate_fraction=smoothing.config.hessian_certificate_fraction,
-            replayed=True,
-        )
     stored_gradient = smoothing.terminal_gradient
     stored_certificate = smoothing.terminal_gradient_certificate
     if stored_gradient is None or stored_certificate is None:
@@ -499,12 +488,10 @@ def _resolved_smoothing_hessian(
 ) -> NDArray[np.float64]:
     """Use trusted published curvature or one authenticated ephemeral replay.
 
-    A published Hessian was formed with observed curvature, so a fit whose
-    terminal curvature fell back is always replayed with its substitute.
+    Both are formed with the curvature the terminal fit accepted: the Newton
+    endgame and the replay differentiate it, observed or substitute.
     """
-    if smoothing.smoothing_hessian is None or (
-        replay_authority is not None and _substitute_curvature(replay_authority[1]) is not None
-    ):
+    if smoothing.smoothing_hessian is None:
         if replay_authority is None:
             raise RuntimeError("corrected covariance has no authenticated terminal replay state")
         state, terminal = replay_authority
@@ -570,10 +557,10 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     indefinite and the fit accepted a substitute (Fisher information, or the
     nearest semidefinite curvature), the correction is formed with that
     substitute throughout, as Wood, Pya and Saefken (2016, section 3.3.1) and
-    Wood and Fasiolo (2017, section 3) substitute it for inference: ``V`` and
-    ``J`` already use it, and ``V_rho`` is replayed from the retained rows
-    with it. That is computed, not refused, and disclosed with a
-    ``ConvergenceWarning`` saying what the result means.
+    Wood and Fasiolo (2017, section 3) substitute it for inference: ``V``,
+    ``J`` and the smoothing Hessian behind ``V_rho`` all use it. That is
+    computed, not refused, and disclosed with a ``ConvergenceWarning`` saying
+    what the result means.
     """
     covariance = np.array(fitted.inference.covariance, dtype=np.float64, copy=True)
     if kind == "fixed":
@@ -589,8 +576,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
         )
     terminal_authority = _authenticated_terminal_fit(fitted, smoothing)
     substitute = _substitute_curvature(terminal_authority[1])
-    replay = smoothing.smoothing_hessian is None or substitute is not None
-    if replay:
+    if smoothing.smoothing_hessian is None:
         names = _smoothing_gradient_names(smoothing)
     else:
         names = _smoothing_hessian_names(smoothing)
@@ -602,7 +588,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
         fitted,
         smoothing,
         names,
-        replay_authority=terminal_authority if replay else None,
+        replay_authority=(terminal_authority if smoothing.smoothing_hessian is None else None),
     )
 
     beta = np.asarray(fitted.result.coefficients, dtype=np.float64)

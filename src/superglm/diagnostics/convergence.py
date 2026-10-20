@@ -271,7 +271,7 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
         "uses it too. V is that curvature's inverse, J = d beta / d rho is the implicit "
         "derivative of the coefficients under it rather than under the observed Hessian, and "
         "V_rho inverts the Hessian in log smoothing parameters of the Laplace objective formed "
-        "with it, replayed from the retained rows. V + J V_rho J' is a first-order correction "
+        "with it. V + J V_rho J' is a first-order correction "
         "for the substitute curvature; model.diagnose() explains the fallback."
     )
 

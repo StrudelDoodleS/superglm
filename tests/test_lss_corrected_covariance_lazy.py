@@ -325,20 +325,20 @@ def test_terminal_face_must_match_the_fit_state_authority(stationary_case) -> No
         posterior_covariance(altered, kind="corrected")
 
 
-@pytest.mark.parametrize(
-    ("source", "disclosure"),
-    [
-        ("fisher", "expected \\(Fisher\\) information"),
-        ("nearest_semidefinite", "nearest positive semidefinite approximation"),
-    ],
-)
-def test_fallback_terminal_curvature_replays_with_its_substitute(
+@pytest.mark.parametrize("source", ["fisher", "nearest_semidefinite"])
+def test_a_substitute_replay_is_authenticated_against_the_stored_gradient(
     stationary_case,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
-    disclosure: str,
 ) -> None:
-    """A substitute terminal curvature is replayed with its own rows and disclosed, not refused."""
+    """A substitute replay must reproduce the stored stationarity gradient, as an observed one does.
+
+    The endgame differentiates the curvature the fit accepted, so a real
+    fallback fit's stored gradient is formed with its substitute. Here an
+    observed fit is relabelled as a fallback after the fact: its replay with
+    the substitute disagrees with the gradient it stored, and is refused. The
+    parent skipped that check for every substitute and returned a covariance.
+    """
     fitted, _ = stationary_case
     curvature = dataclasses.replace(
         fitted.result.terminal_curvature,
@@ -355,12 +355,11 @@ def test_fallback_terminal_curvature_replays_with_its_substitute(
         return real_laml_derivatives(*args, **kwargs)
 
     monkeypatch.setattr(posterior_module, "laml_derivatives", spy, raising=False)
-    with pytest.warns(ConvergenceWarning, match=disclosure):
-        corrected = posterior_covariance(altered, kind="corrected")
+    with pytest.raises(RuntimeError, match="disagree with the stored terminal gradient"):
+        posterior_covariance(altered, kind="corrected")
 
     assert sources == ["terminal"]
-    assert np.all(np.isfinite(corrected))
-    # The smoothing search's own derivative call still refuses the substitute.
+    # A request for observed derivatives (laml_derivatives' default) refuses it outright.
     arguments, options = _terminal_derivative_arguments(altered)
     with pytest.raises(LamlDerivativeError, match="observed terminal curvature"):
         real_laml_derivatives(*arguments, **options, want_hessian=True)
@@ -544,18 +543,36 @@ def test_published_hessian_serves_any_observed_terminal_curvature(
     np.testing.assert_array_equal(actual, posterior_covariance(published, kind="corrected"))
 
 
-def test_published_hessian_is_not_used_for_a_substitute_curvature(
-    published_case,
+def test_a_fallback_fit_serves_its_published_hessian(
+    fisher_fallback_case,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The published Hessian was formed with observed curvature, so a substitute replays."""
-    published, _ = published_case
+    """A smoothing Hessian published for a fallback fit is formed with its substitute; use it.
+
+    The Newton endgame differentiates the curvature the fit accepted, so a
+    published Hessian needs no replay, and a fit without retained rows still
+    gets its corrected covariance. The parent replayed every substitute and
+    refused this fit for having no rows to replay.
+    """
+    fitted, _ = fisher_fallback_case
+    arguments, options = _terminal_derivative_arguments(fitted)
+    derivatives = real_laml_derivatives(
+        *arguments, **options, want_hessian=True, curvature="terminal"
+    )
+    published = _published_model(fitted, derivatives)
+    compact = DenseDistributionalModel(
+        family=published.family,
+        _fit_state=dataclasses.replace(published.fit_state, retained_rows=None),
+    )
+    with pytest.warns(ConvergenceWarning, match="first-order correction"):
+        replayed = posterior_covariance(fitted, kind="corrected")
     calls = _install_derivative_spy(monkeypatch)
 
     with pytest.warns(ConvergenceWarning, match="first-order correction"):
-        posterior_covariance(_published_actual_source_mismatch(published), kind="corrected")
+        served = posterior_covariance(compact, kind="corrected")
 
-    assert calls == [True]
+    assert calls == []
+    np.testing.assert_array_equal(served, replayed)
 
 
 def _forged_names(derivatives: LamlDerivatives) -> LamlDerivatives:
