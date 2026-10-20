@@ -272,3 +272,112 @@ def test_terms_model_round_trips_and_reports_like_the_dict_model(data):
         for m in (as_list, as_dict)
     ]
     pd.testing.assert_frame_equal(*scores)
+
+
+# Column labels that are not strings: features= has always taken any hashable
+# key (pandas names columns by integers too); the term language now does, and
+# both forms refuse the same labels at declaration.
+
+
+@pytest.fixture(scope="module")
+def labelled(data):
+    """The fixture's frame with two columns labelled by integers."""
+    X, y = data
+    return X.rename(columns={"x": 0, "g": 1}), y
+
+
+def _labelled_pair(method: str, discrete: bool) -> tuple[SuperGLM, SuperGLM]:
+    features = {0: Spline(k=6), "z": Spline(k=6), 1: Categorical()}
+    terms = [s(0, k=6), s("z", k=6), cat(1)]
+    if method == "fit_reml":
+        features["b"] = RandomEffect()
+        terms.append(re("b"))
+    n_bins = {0: 32} if discrete else 256
+    options = {"discrete": discrete, "n_bins": n_bins, "selection_penalty": 0.0}
+    return SuperGLM(features=features, **options), SuperGLM(terms=terms, **options)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+@pytest.mark.parametrize("method", ["fit", "fit_reml"])
+def test_integer_column_labels_fit_alike_in_both_forms(labelled, method, discrete):
+    """Master refused s(0) and cat(1) at declaration."""
+    X, y = labelled
+    as_dict, as_list = _labelled_pair(method, discrete)
+    getattr(as_dict, method)(X, y)
+    getattr(as_list, method)(X, y)
+    _assert_same_fit(as_dict, as_list, X, reml=method == "fit_reml")
+    assert [g.name for g in as_list._groups][:2] == ["0", "z"]
+    if method == "fit_reml":
+        assert "0" in as_list.reml_diagnostics()["lambdas"]
+
+
+def test_integer_column_labels_report_alike_in_both_forms(labelled, tmp_path):
+    """Summary, relativities, plots, rating tables, structure files, pickles, wrappers."""
+    from superglm.sklearn import SuperGLMRegressor
+
+    X, y = labelled
+    as_dict, as_list = _labelled_pair("fit", discrete=False)
+    as_dict.fit(X, y)
+    as_list.fit(X, y)
+    assert str(as_list.summary()) == str(as_dict.summary())
+    relativities = as_list.relativities()
+    assert list(relativities) == [0, "z", 1]
+    for name, table in as_dict.relativities().items():
+        pd.testing.assert_frame_equal(relativities[name], table)
+    for name in (0, 1):
+        plots = [m.plot_data(name, ci=None)["terms"][0]["effect"] for m in (as_list, as_dict)]
+        pd.testing.assert_frame_equal(*plots)
+    tables = [m.rating_table_payload(X, y).main_effects for m in (as_list, as_dict)]
+    assert [b.name for b in tables[0]] == [b.name for b in tables[1]] == [0, "z", 1]
+    for left, right in zip(*tables, strict=True):
+        pd.testing.assert_frame_equal(left.table, right.table)
+    as_list.export_rating_tables(tmp_path / "tables.xlsx", X, y)
+
+    # A structure file names a term by its label's text and finds it again.
+    text = Structure.from_model(as_list).to_json()
+    assert text == Structure.from_model(as_dict).to_json()
+    assert set(Structure.from_json(text).features) == {"0", "z", "1"}
+    applied = Structure.from_json(text).apply(as_list).fit(X, y)
+    assert np.array_equal(applied.result.beta, as_list.result.beta)
+
+    restored = pickle.loads(pickle.dumps(as_list))
+    assert np.array_equal(restored.predict(X), as_list.predict(X))
+    wrappers = [
+        SuperGLMRegressor(selection_penalty=0.0, **declared).fit(X, y)
+        for declared in (
+            {"terms": [s(0, k=6), cat(1)]},
+            {"features": {0: Spline(k=6), 1: Categorical()}},
+        )
+    ]
+    assert np.array_equal(wrappers[0].predict(X), wrappers[1].predict(X))
+    assert list(wrappers[0].feature_names_in_) == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"features": {0: Spline(), "0": Spline()}},
+        {"terms": [s(0), "0"]},
+        {"terms": [{0: Spline()}, s("0")]},
+    ],
+    ids=["features", "terms", "mapping"],
+)
+def test_two_labels_with_one_text_are_refused_where_declared(declared):
+    """Results name a term by its text; master refused this features= model only at fit."""
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        SuperGLM(**declared)
+
+
+def test_none_cannot_label_a_column_in_either_form():
+    """Master's features= took it and failed at fit for a missing column."""
+    with pytest.raises(TypeError, match="None cannot name a column"):
+        SuperGLM(features={None: Spline()})
+    with pytest.raises(TypeError, match="None cannot name a column"):
+        SuperGLM(terms=[s(None)])
+
+
+def test_a_bare_entry_that_is_not_a_string_names_the_declaration_to_write():
+    with pytest.raises(TypeError, match=r"term\(0, Numeric\(\)\) or in a mapping, \{0: Numeric"):
+        SuperGLM(terms=[0])
+    with pytest.raises(TypeError, match=r"needs its column: write term\(column, spec\)"):
+        SuperGLM(terms=[Spline()])

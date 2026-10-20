@@ -420,12 +420,23 @@ def _positive_n_bins(value: Any, *, name: str) -> int:
     return int(result)
 
 
+def _names_a_column(covariate: object, frame: EagerFrame) -> bool:
+    """Whether ``covariate`` is a column label of ``frame`` rather than a row of values."""
+    if isinstance(covariate, np.ndarray | pd.Series | list):
+        return False
+    try:
+        return covariate in frame.columns
+    except TypeError:
+        return False
+
+
 def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
     if isinstance(value, Mapping):
+        # Keyed by column label: any label a predictor's term takes, as in SuperGLM.
         result: dict[str, int] = {}
         for name, count in value.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("n_bins keys must be non-empty feature names")
+            if name is None:
+                raise ValueError("n_bins keys must be feature column labels")
             result[name] = _positive_n_bins(count, name=f"n_bins[{name!r}]")
         return MappingProxyType(result)
     return _positive_n_bins(value, name="n_bins")
@@ -1115,7 +1126,13 @@ class SuperLSS:
         artifact = json.loads(serialize_distributional_model(fitted))
         config = {
             "discrete": state.requested_discrete,
-            "n_bins": state_n_bins,
+            # JSON keys a column's bins by the label's text; from_bytes compares
+            # them so, and restores the labels from the fitted state.
+            "n_bins": (
+                state_n_bins
+                if isinstance(state_n_bins, int)
+                else {str(name): count for name, count in state_n_bins.items()}
+            ),
             "separation": self._separation,
             "weight_contract": {
                 "schema_version": state.weight_contract.schema_version,
@@ -1144,12 +1161,18 @@ class SuperLSS:
             if isinstance(state.requested_n_bins, int)
             else dict(state.requested_n_bins)
         )
+        # The public JSON keys a column's bins by the label's text.
         public_n_bins = n_bins if isinstance(n_bins, int) else dict(n_bins)
+        stated_n_bins = (
+            state_n_bins
+            if isinstance(state_n_bins, int)
+            else {str(name): count for name, count in state_n_bins.items()}
+        )
         if public_contract != state.weight_contract:
             raise DistributionalSerializationError(
                 "SuperLSS public weight contract does not match accepted fitted state"
             )
-        if discrete is not state.requested_discrete or public_n_bins != state_n_bins:
+        if discrete is not state.requested_discrete or public_n_bins != stated_n_bins:
             raise DistributionalSerializationError(
                 "SuperLSS public execution configuration does not match accepted fitted state"
             )
@@ -1229,6 +1252,10 @@ class SuperLSS:
             if covariate not in {str(column) for column in frame.columns}:
                 raise ValueError(f"covariate {covariate!r} is not a column of X")
             return frame.column_array(covariate), covariate if name is None else str(name)
+        if _names_a_column(covariate, frame):
+            # Another column label a frame takes, such as an integer.
+            label = str(covariate) if name is None else str(name)
+            return frame.column_array(covariate), label
         values = np.asarray(covariate)
         if values.shape != (len(frame),):
             raise ValueError("covariate must name a column of X or give one value per row of X")

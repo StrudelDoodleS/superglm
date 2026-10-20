@@ -6,11 +6,13 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MethodType
+from typing import cast
 
 from superglm.distributional.family import DistributionalFamily, validate_family
 from superglm.distributional.predictor import Predictor
 from superglm.links import Link
 from superglm.terms import TermInput, normalize_terms
+from superglm.types import FeatureSpec
 
 
 def _copy_template(template: Predictor) -> Predictor:
@@ -116,7 +118,8 @@ def bind_predictor(
         family,
         Predictor(
             name,
-            normalized.features,
+            # Column labels of any hashable type, as Predictor checks them.
+            cast("Mapping[str, FeatureSpec]", normalized.features),
             intercept=intercept,
             link=link,
             interaction_specs=normalized.interaction_specs,

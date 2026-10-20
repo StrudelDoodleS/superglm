@@ -79,7 +79,7 @@ rather than leaving a reader to price off it.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -357,9 +357,23 @@ def _compiled_predictor(fitted: Any, parameter: str) -> Any:
     raise KeyError(f"unknown predictor {parameter!r}")
 
 
-def _compiled_spec(fitted: Any, parameter: str, term: str) -> Any:
+def _feature_label(fitted: Any, parameter: str, term: Hashable) -> Hashable:
+    """The column label of the main term ``term`` names, or ``term`` itself.
+
+    A term is found by its label or by the label's text, as ``_resolve_term``
+    finds its coefficients: ``0`` and ``"0"`` name one term, and no predictor
+    holds two labels with one text.
+    """
+    specs = _compiled_predictor(fitted, parameter).compiled.specs
+    if term in specs:
+        return term
+    return next((name for name in specs if str(name) == str(term)), term)
+
+
+def _compiled_spec(fitted: Any, parameter: str, term: Hashable) -> Any:
     """Return the compiled feature spec of a term, or ``None`` for an interaction."""
-    return _compiled_predictor(fitted, parameter).compiled.specs.get(term)
+    specs = _compiled_predictor(fitted, parameter).compiled.specs
+    return specs.get(_feature_label(fitted, parameter, term))
 
 
 def _interaction_on(fitted: Any, parameter: str, feature: str) -> str | None:
@@ -397,6 +411,7 @@ def _sweep(
             f"term {parameter}:{term!r} is an interaction and has no one-dimensional "
             "effect grid; report it as a surface instead"
         )
+    column = _feature_label(fitted, parameter, term)
     columns = _required_columns(fitted.compiled_predictors)
     reference = _reference_row(frame, columns)
 
@@ -406,14 +421,16 @@ def _sweep(
         grid = None
         names = tuple(str(level) for level in levels)
     else:
-        values = np.asarray(frame.column_array(term), dtype=np.float64)
+        values = np.asarray(frame.column_array(column), dtype=np.float64)
         grid = np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
         swept = grid
         names = None
 
     rows = len(swept)
-    data = {name: pd.Series([reference[name]] * rows) for name in columns}
-    data[term] = pd.Series(swept)
+    data: dict[Hashable, pd.Series] = {
+        name: pd.Series([reference[name]] * rows) for name in columns
+    }
+    data[column] = pd.Series(swept)
     return pd.DataFrame(data), grid, names
 
 
@@ -725,7 +742,7 @@ def _prepare_term_test(
     beta = np.asarray(fitted.coefficients, dtype=np.float64)[term_slice]
     edf = float(fitted.inference.term_edf[qualified])
 
-    parent = term.removesuffix(_SPECIAL_SUFFIX)
+    parent = term.removesuffix(_SPECIAL_SUFFIX) if isinstance(term, str) else term
     spec = _compiled_spec(fitted, parameter, parent)
     level_term = spec is not None and _level_domain(spec) is not None
     design: NDArray[np.float64] | None = None

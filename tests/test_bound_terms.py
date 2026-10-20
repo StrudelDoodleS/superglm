@@ -72,12 +72,14 @@ def test_interactions_resolve_later_parents_and_keep_partition_order():
         "missing",
         "numeric_parent",
         "invalid",
-        "empty",
+        "unnamed",
+        "same_text",
         "duplicate_interaction",
     ],
 )
 def test_invalid_declarations_are_refused(case):
-    from superglm.terms import cat, normalize_terms, s, ti
+    from superglm.features import Numeric
+    from superglm.terms import cat, normalize_terms, s, term, ti
 
     cases = {
         "duplicate": ("x", cat("x")),
@@ -85,7 +87,8 @@ def test_invalid_declarations_are_refused(case):
         "missing": (s("x"), ti("x", "z")),
         "numeric_parent": ("x", s("z"), ti("x", "z")),
         "invalid": (42,),
-        "empty": ("",),
+        "unnamed": ({None: Numeric()},),
+        "same_text": (term(0, Numeric()), "0"),
         "duplicate_interaction": (s("x"), s("z"), ti("x", "z"), ti("x", "z")),
     }
     with pytest.raises((ValueError, TypeError)):
@@ -233,10 +236,14 @@ def test_invalid_helper_names_and_types_fail_at_declaration():
     from superglm.terms import cat, interaction, re, s, term, ti
 
     for helper in (cat, re, s):
-        with pytest.raises(ValueError):
-            helper(" ")
-    with pytest.raises(ValueError):
+        with pytest.raises(TypeError, match="None cannot name a column"):
+            helper(None)
+        with pytest.raises(TypeError, match="hashable"):
+            helper(["x"])
+    with pytest.raises(ValueError, match="non-empty strings"):
         ti("x", "")
+    with pytest.raises(ValueError, match=r"X.rename\(columns=str\)"):
+        ti(0, 1)
     with pytest.raises(TypeError):
         term("x", object())
     with pytest.raises(TypeError):
@@ -314,9 +321,62 @@ def test_invalid_feature_mappings_are_refused(case):
             TypeError,
             "interaction",
         ),
-        "column": (({0: Numeric()},), ValueError, "non-empty strings"),
+        "column": (({None: Numeric()},), TypeError, "None cannot name a column"),
         "bare": ({"x": Numeric()}, TypeError, "inside"),
     }
     terms, error, message = cases[case]
     with pytest.raises(error, match=message):
         normalize_terms(terms)
+
+
+def test_superlss_takes_integer_column_labels_end_to_end():
+    """A SuperLSS predictor takes the labels SuperGLM's features= takes; master refused them.
+
+    Results name the term by its text, as in ``"location:0#wiggle"``, and a
+    term is found by its label or that text.
+    """
+    from superglm import Categorical, GaussianLS, Numeric, Spline, SuperLSS
+
+    rng = np.random.default_rng(11)
+    n = 500
+    frame = pd.DataFrame(
+        {0: rng.uniform(size=n), 1: rng.choice(list("abc"), n), 2: rng.uniform(size=n)}
+    )
+    y = (
+        np.sin(3.0 * frame[0].to_numpy())
+        + 0.3 * (frame[1].to_numpy() == "a")
+        + (0.3 + 0.2 * frame[2].to_numpy()) * rng.standard_normal(n)
+    )
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location({0: Spline(k=6), 1: Categorical()}),
+        family.scale({2: Numeric()}),
+        discrete=True,
+        n_bins={0: 32},
+    )
+    model.fit_reml(frame, y)
+    assert list(model.smoothing_parameters_) == ["location:0#wiggle"]
+    assert any(name.startswith("location:1[") for name in model.coef_)
+    predicted = model.predict(frame.head(5))
+    assert np.all(np.isfinite(predicted))
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), predicted)
+    summary = model.summary()
+    assert {"0", "1"} <= {str(term) for term in summary["term"]}
+    by_label = model.term_inference("location", 0)
+    by_text = model.term_inference("location", "0")
+    assert np.array_equal(by_label.effect, by_text.effect)
+    assert model.term_test("location", 0).p_value == model.term_test("location", "0").p_value
+    assert model.term_test("location", 1).rank > 0
+    # Diagnostics name a covariate by its column label.
+    for check in (model.actual_expected, model.check):
+        assert check(frame, y, 1) is not None
+    assert model.plot_data("term", parameter="location", term=0) is not None
+
+
+def test_superlss_refuses_two_labels_with_one_text():
+    from superglm import GaussianLS, Numeric
+
+    family = GaussianLS()
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        family.location({0: Numeric(), "0": Numeric()})

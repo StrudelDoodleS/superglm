@@ -29,6 +29,7 @@ from superglm.group_matrix import (
 from superglm.links import Link, resolve_link
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.penalty_algebra import build_penalty_components
+from superglm.terms import check_column_label, check_column_texts
 from superglm.types import FeatureSpec, PenaltyComponent
 
 
@@ -72,10 +73,13 @@ class Predictor:
             raise TypeError("features must be a mapping")
         owned_features = dict(self.features)
         for name, feature in owned_features.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("feature names must be non-empty strings")
+            # Any column label SuperGLM's features= takes; results name the
+            # term by its text, as in "location:0#wiggle".
+            check_column_label(name)
             if not isinstance(feature, FeatureSpec):
                 raise TypeError(f"feature {name!r} does not implement FeatureSpec")
+
+        check_column_texts(owned_features)
 
         interactions: list[tuple[str, str]] = []
         for pair in self.interactions:

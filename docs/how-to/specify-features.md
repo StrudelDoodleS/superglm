@@ -97,6 +97,10 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
   in the dict's order.
 - A column can be declared once. A second declaration, in a dict or as a term,
   raises an error.
+- A column label can be anything a dict key can be, so a frame whose columns
+  are numbered takes `s(0)` or `{0: Spline()}`. Results show a term by its
+  label's text, so two labels that read alike, such as `0` and `"0"`, raise an
+  error. Interactions name their columns by strings.
 - Declare each interaction once per pair of columns. `ti("DrivAge", "VehAge")`
   and `ti("VehAge", "DrivAge")` are the same term, and a second one raises an
   error.

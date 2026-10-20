@@ -48,7 +48,7 @@ from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
-from superglm.terms import TermInput, normalize_terms
+from superglm.terms import TermInput, check_column_label, check_column_texts, normalize_terms
 from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -1162,8 +1162,11 @@ def init_model(
         explicit_interactions.append((interaction_name, interaction))
     model._pending_interactions = tuple(pending_interactions)
 
-    # Register explicit features dict
+    # Register explicit features dict, under the column-label rule terms= keeps.
     if features is not None:
+        for name in features:
+            check_column_label(name)
+        check_column_texts(features)
         for name, spec in features.items():
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
