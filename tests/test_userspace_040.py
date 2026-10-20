@@ -278,11 +278,30 @@ def test_a_fit_v0_40_0_converged_still_converges_no_worse(name: str) -> None:
     assert release_differential.flags(name, RELEASE_OUTCOMES[name], record, "v0.40.0") == []
 
 
+HISTORY_OUTCOMES = release_differential.load(
+    FIXTURES.parent / "release_differential_history_v0_39_0.jsonl"
+)
+
+
 @pytest.mark.parametrize("name", release_differential.HISTORY_SUBSET)
 def test_a_fit_an_earlier_release_converged_converges_here(name: str) -> None:
-    """Breaks the release-history sweep found, fixed: v0.40.0 refused rows 2 and
-    13 and left row 3 unconverged; v0.39.0 converged all three to the same fits."""
+    """Breaks the release-history sweep found, fixed: v0.40.0 refused rows 2 and 13 and
+    left row 3 unconverged. v0.39.0 (``release_differential_history_v0_39_0.jsonl``) fitted
+    rows 2 and 13 to convergence and row 3 to the same objective, at its iteration cap.
+    The fit here converges at that objective and held-out deviance. Both are held on both
+    sides, as these fixes restore the same fit rather than a no-worse one: the objective
+    to the harness's ``OBJECTIVE_TOLERANCE`` (relative to ``1 + |V|``, above the REML
+    stop's own resolution), the deviance to its ``HELDOUT_TOLERANCE``, which is above
+    criterion-level moves."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         record = {"status": "ok", **release_differential.run_case(name)}
     assert release_differential.sensible(record), record
+    recorded = HISTORY_OUTCOMES[name]
+    scale = 1.0 + abs(recorded["objective"])
+    assert abs(record["objective"] - recorded["objective"]) <= (
+        release_differential.OBJECTIVE_TOLERANCE * scale
+    ), (record["objective"], recorded["objective"])
+    assert abs(record["test_deviance"] - recorded["test_deviance"]) <= (
+        release_differential.HELDOUT_TOLERANCE * abs(recorded["test_deviance"])
+    ), (record["test_deviance"], recorded["test_deviance"])

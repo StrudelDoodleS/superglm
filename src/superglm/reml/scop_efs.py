@@ -3122,6 +3122,7 @@ def optimize_scop_efs_reml(
     # accepted steps under the plateau cap, and whether a better reference
     # mode sends the search back to a cold start.
     small_step_run = 0
+    reference_checked = False
     restart_from_reference = False
 
     for reml_iter in range(max_reml_iter):
@@ -3581,9 +3582,11 @@ def optimize_scop_efs_reml(
             _reference_restarts > 0
             and not _cold_starts
             and retained_mode.scop_states
+            and not reference_checked
             and small_step_run == _SCOP_REFERENCE_CHECK_RUN
             and max_reml_iter - n_reml_iter >= _SCOP_REFERENCE_RESTART_ITERATIONS
         ):
+            reference_checked = True
             if _better_reference_mode(fit_context, retained_mode):
                 lambdas = lambdas_new
                 restart_from_reference = True

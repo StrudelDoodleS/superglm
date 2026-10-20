@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
+import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -1004,6 +1006,7 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
     from superglm.features._spline_build import _uses_fit_time_scop_constraints as scop
     from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
     from superglm.features._spline_factory import kindless_as_ps, warn_kindless_ps
+    from superglm.features.ordered_categorical import _CLAMP_WARNING_PREFIX
 
     inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
     on_scop = [name for name, spec in inner.items() if scop(spec)]
@@ -1027,7 +1030,12 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
             continue
         wrapper: Any = copy.deepcopy(specs[name])
         wrapper._spline_obj = replacement
-        wrapper._init_spline()
+        with warnings.catch_warnings():
+            # The wrapper's construction already warned of the clamp to its levels.
+            warnings.filterwarnings(
+                "ignore", message=re.escape(_CLAMP_WARNING_PREFIX), category=UserWarning
+            )
+            wrapper._init_spline()
         specs[name] = wrapper
 
 

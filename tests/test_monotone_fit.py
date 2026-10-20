@@ -4,6 +4,7 @@ Tests that SuperGLM with monotone BSplineSmooth / CubicRegressionSpline terms
 produces actually-monotone predictions via the constrained QP solver path.
 """
 
+import warnings
 from contextlib import nullcontext
 
 import numpy as np
@@ -535,6 +536,76 @@ class TestMonotoneFitPSpline:
         assert isinstance(refit._specs["x1"], PSpline)
         assert refit._specs["x1"].n_knots == 4
         assert getattr(refit._specs["x1"], EDITOR_KNOTS_ATTRIBUTE, False)
+
+    def test_an_editor_reset_of_a_kindless_k_term_beside_scop_refits_the_original(self):
+        """``k=8`` is 6 knots as ``cr`` and 4 as ``ps``. A reset hands the ``cr`` template's
+        count to the edited copy; the refit is the opened model's ``ps``, not a 6-knot one.
+        Fails on adf356cd: the reset refits 6 knots."""
+        from superglm import Spline
+        from superglm.editor.knots import _reset_basis
+        from superglm.features.rebuild import declared_spline, respaced_spline
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
+        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+
+        def fitted(x1):
+            model = SuperGLM(
+                family=Gaussian(),
+                selection_penalty=0,
+                features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=inc)},
+            )
+            with pytest.warns(UserWarning, match="x1.*names no kind"):
+                model.fit(df, y)
+            return model
+
+        opened = fitted(Spline(k=8, constraint=inc))
+        explicit = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x1": Spline(kind="ps", k=8, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc),
+            },
+        ).fit(df, y)
+        assert opened._specs["x1"].n_knots == 4
+        unchanged = respaced_spline(declared_spline(opened, "x1"), knot_alpha=0.3)
+        assert unchanged._kindless_args["k"] == 8  # a count left alone keeps the declaration
+        edited = fitted(respaced_spline(declared_spline(opened, "x1"), n_knots=5))
+        assert edited._specs["x1"].n_knots == 5
+        reset, _ = _reset_basis(opened, "x1", declared_spline(edited, "x1"))
+        refit = fitted(reset)
+        assert refit._specs["x1"].n_knots == 4
+        np.testing.assert_array_equal(refit.result.beta, opened.result.beta)
+        np.testing.assert_array_equal(refit.result.beta, explicit.result.beta)
+
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    def test_a_kindless_ordered_basis_clamped_to_its_levels_warns_of_the_clamp_once(
+        self, fit_method
+    ):
+        """The wrapper warned of the clamp when it was declared; installing the ``ps`` basis
+        beside a SCOP term must not warn of it again. Fails on adf356cd: two at the fit."""
+        from superglm import OrderedCategorical, Spline
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x2": rng.uniform(0, 1, 200)})
+        df["band"] = np.array(list("ABCDE"))[(df["x2"].to_numpy() * 5).astype(int)]
+        y = df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+        with pytest.warns(UserWarning, match="n_knots exceeds the level count"):
+            band = OrderedCategorical(order=list("ABCDE"), basis=Spline(constraint=inc))
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x2": Spline(kind="ps", k=8, constraint=inc), "band": band},
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            getattr(model, fit_method)(df, y)
+        texts = [str(w.message) for w in caught]
+        assert [t for t in texts if "names no kind" in t]
+        assert not [t for t in texts if "exceeds the level count" in t]
 
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
     def test_a_kindless_spline_ps_cannot_build_beside_scop_keeps_the_scop_qp_refusal(

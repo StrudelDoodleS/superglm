@@ -644,13 +644,18 @@ def respaced_spline(
     if declared is not None:
         # A spline declared with no kind may fit as ``ps``, rebuilt from these arguments.
         stated = spline._named_knots if spline._named_knots is not None else spline._explicit_knots
+        # ``k`` is 6 knots as ``cr`` and 4 as ``ps``: an unchanged count keeps the declaration.
+        count = (
+            {}
+            if declared.get("k") is not None and spline.n_knots == source.n_knots
+            else {"k": None, "n_knots": spline.n_knots}
+        )
         setattr(
             spline,
             "_kindless_args",
             {
                 **declared,
-                "k": None,
-                "n_knots": spline.n_knots,
+                **count,
                 "knots": stated,
                 "knot_strategy": spline.knot_strategy,
                 "knot_alpha": spline.knot_alpha,

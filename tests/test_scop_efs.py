@@ -8209,6 +8209,26 @@ class TestSCOPReferenceMode:
         assert len(restarted.inner_iter_history) == 2 + len(inner.inner_iter_history)
         assert len(restarted.scop_outer_steps) == 2 + len(inner.scop_outer_steps)
 
+    def test_the_reference_check_runs_at_most_once_per_search(self, monkeypatch, forced_check):
+        """A check that answers False leaves the search as it was, and a later run of small
+        steps must not pay a second cold fit. The run counter is made to match at every
+        accepted step, as it does when large steps keep resetting it.
+        Mutation check: dropping ``not reference_checked`` from the condition calls it at
+        every iteration."""
+
+        class EveryStep:
+            def __eq__(self, run):
+                return run >= 2
+
+            __hash__ = None
+
+        calls, check = forced_check
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", EveryStep())
+        check(False)
+        result = self._increasing_gaussian_fit(max_reml_iter=40)
+        assert result.n_reml_iter > 3  # the counter matched at more than one iteration
+        assert len(calls) == 1
+
     @pytest.mark.filterwarnings("ignore:fit_reml did not converge")
     @pytest.mark.parametrize("max_reml_iter", [2, 20], ids=["at the cap", "within 31 of it"])
     def test_no_reference_check_without_the_budget_for_a_restart(
