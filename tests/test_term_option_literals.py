@@ -3,9 +3,7 @@
 An IDE offers a ``Literal``'s values and a type checker catches a typo, so a
 ``Literal`` that drifts from the runtime either hides a value the runtime takes
 or offers one it refuses. Each case compares a public signature's ``Literal``
-with the runtime's own set: the constant its validation reads, or for the two
-options nothing validates (``knot_strategy`` and ``penalty``), the values the
-build tells apart.
+with the runtime's own set: the constant its validation reads.
 """
 
 from __future__ import annotations
@@ -17,14 +15,24 @@ import typing
 import pytest
 
 import superglm
+import superglm.sklearn as sklearn_wrappers
 from superglm.distributional.binding import bind_predictor
 from superglm.distributional.families import _predictors
 from superglm.editor.knots import STRATEGIES as EDITOR_KNOT_STRATEGIES
-from superglm.features import _spline_factory, categorical, factor_smooth, random_effect, spline
-from superglm.features._spline_config import EXTRAPOLATIONS, PENALTIES
-from superglm.features._spline_knots import QUANTILE_STRATEGIES
+from superglm.features import (
+    _spline_factory,
+    categorical,
+    factor_smooth,
+    piecewise,
+    random_effect,
+    spline,
+)
+from superglm.features._spline_config import EXTRAPOLATIONS, KNOT_STRATEGIES, PENALTIES
+from superglm.features._spline_ranges import JOINS
+from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
 from superglm.features.rebuild import SYMBOLIC_BASE_POLICIES
 from superglm.links import _LINK_SHORTCUTS, Link
+from superglm.types import LAMBDA_POLICY_MODES
 
 _SPLINE_KINDS = (
     spline.PSpline,
@@ -41,7 +49,7 @@ _FAMILY_HELPERS = tuple(
     if inspect.isfunction(method) and not name.startswith("_")
 )
 
-_KNOT_STRATEGIES = {"uniform", *QUANTILE_STRATEGIES}
+_KNOT_STRATEGIES = set(KNOT_STRATEGIES)
 
 # (callables, option, the runtime's set, whether other strings are also taken)
 _CASES = [
@@ -58,6 +66,20 @@ _CASES = [
     ((superglm.FactorSmooth,), "unseen", set(factor_smooth.UNSEEN_POLICIES), False),
     ((superglm.FactorSmooth,), "missing", set(factor_smooth.MISSING_POLICIES), False),
     ((*_FAMILY_HELPERS, bind_predictor), "link", set(_LINK_SHORTCUTS), False),
+    ((superglm.OrderedCategorical,), "base", set(categorical._BASE_POLICIES), True),
+    ((superglm.Piecewise,), "base", set(categorical._BASE_POLICIES), True),
+    ((superglm.Piecewise,), "strategy", set(piecewise._STRATEGIES), False),
+    ((superglm.Piecewise,), "extrapolation", set(EXTRAPOLATIONS), False),
+    ((superglm.PolynomialRange,), "join", set(JOINS), False),
+    ((ConstraintSpec,), "mode", set(CONSTRAINT_MODES), False),
+    ((ConstraintSpec,), "kind", set(CONSTRAINT_KINDS), False),
+    ((superglm.LambdaPolicy,), "mode", set(LAMBDA_POLICY_MODES), False),
+    (
+        (sklearn_wrappers.SuperGLMRegressor, sklearn_wrappers.SuperGLMClassifier),
+        "smoothing",
+        set(sklearn_wrappers._SMOOTHING_METHODS),
+        False,
+    ),
 ]
 
 
@@ -126,3 +148,15 @@ def test_every_factor_smooth_and_link_literal_value_is_taken():
     family = superglm.Poisson()
     for name in _literal_values(_annotation(bind_predictor, "link"))[0]:
         assert isinstance(superglm.links.resolve_link(name, family), superglm.links.Link)
+
+
+@pytest.mark.parametrize(
+    ("option", "typo"), [("knot_strategy", "quantile_row"), ("penalty", "SSP")]
+)
+def test_a_misspelled_spline_option_is_refused_naming_the_accepted_values(option, typo):
+    """Master took any string: a typo fit uniform knots, or no SSP reparametrization."""
+    values, _ = _literal_values(_annotation(superglm.Spline, option))
+    for build in (superglm.Spline, lambda **kw: superglm.s("x", **kw), spline.PSpline):
+        with pytest.raises(ValueError, match=rf"{option} must be one of .*got '{typo}'") as caught:
+            build(**{option: typo})
+        assert all(repr(value) in str(caught.value) for value in values)

@@ -8,8 +8,9 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from superglm.features._spline_knots import QUANTILE_STRATEGIES
 from superglm.features._spline_ranges import PolynomialRange
-from superglm.features.constraint import ConstraintSpec
+from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
 from superglm.types import LambdaPolicy
 
 # The enumerated spline options as types, for the private helpers between the
@@ -21,9 +22,11 @@ type ExtrapolationName = Literal["clip", "extend", "error"]
 
 # The ``extrapolation=`` policies a spline takes.
 EXTRAPOLATIONS = ("clip", "extend", "error")
-# The ``penalty=`` values a spline reads: "ssp" reparametrizes the basis
-# (``dm_builder``), and any other value builds it without; nothing refuses one.
+# The ``penalty=`` values a spline takes: "ssp" reparametrizes the basis
+# (``dm_builder``), and "none" builds it without.
 PENALTIES = ("ssp", "none")
+# The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
+KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
 
 
 def _iter_knots(knots: Any) -> list[Any]:
@@ -94,9 +97,9 @@ def _normalize_constraint(constraint: ConstraintSpec | None) -> tuple[str | None
         raise TypeError(
             "constraint must be None or a Constraint token such as Constraint.fit.increasing"
         )
-    if constraint.kind not in ("increasing", "decreasing", "convex", "concave"):
+    if constraint.kind not in CONSTRAINT_KINDS:
         raise ValueError(f"Unsupported constraint kind: {constraint.kind!r}")
-    if constraint.mode not in ("fit", "postfit"):
+    if constraint.mode not in CONSTRAINT_MODES:
         raise ValueError(f"Unsupported constraint mode: {constraint.mode!r}")
     return constraint.kind, constraint.mode
 
@@ -158,6 +161,8 @@ def initialize_spec(
     validate_select(spec)
 
     spec.degree = degree
+    if penalty not in PENALTIES:
+        raise ValueError(f"penalty must be one of {PENALTIES}, got {penalty!r}")
     spec.penalty = penalty
     spec.discrete = discrete
     spec.n_bins = n_bins
@@ -187,6 +192,8 @@ def configure_knots(
     boundary: tuple[float, float] | None,
 ) -> None:
     """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
+    if knot_strategy not in KNOT_STRATEGIES:
+        raise ValueError(f"knot_strategy must be one of {KNOT_STRATEGIES}, got {knot_strategy!r}")
     if knots is not None and _knots_contain_names(knots):
         # Level-name knots: resolvable only against an OrderedCategorical's
         # declared levels, so resolution is deferred to that host (which

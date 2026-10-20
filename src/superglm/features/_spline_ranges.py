@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -70,7 +71,7 @@ class PolynomialRange:
     lo: float | str
     hi: float | str
     degree: int
-    join: str = "tangent"
+    join: Literal["kink", "tangent", "smooth"] = "tangent"
 
     def __post_init__(self) -> None:
         if isinstance(self.degree, bool) or not isinstance(self.degree, (int, np.integer)):

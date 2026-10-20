@@ -27,7 +27,7 @@ import copy
 import warnings
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -465,7 +465,7 @@ class OrderedCategorical:
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
         basis: _SplineBase | None = None,
-        base: str = "most_exposed",
+        base: Literal["most_exposed", "first"] | str = "most_exposed",
         grouping: Any = None,
         specials: list[str] | None = None,
     ):
