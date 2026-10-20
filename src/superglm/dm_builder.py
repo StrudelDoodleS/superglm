@@ -993,54 +993,30 @@ class BuildResult:
     compiled: CompiledPredictorDesign
 
 
-def _shape_engine(spec: Any) -> str | None:
-    """The engine a fit-time shape constraint on ``spec`` takes: "scop", "qp" or None."""
-    from superglm.features._spline_build import (
-        _uses_fit_time_qp_constraints,
-        _uses_fit_time_scop_constraints,
-    )
-    from superglm.features.ordered_categorical import OrderedCategorical
-
-    if isinstance(spec, OrderedCategorical):
-        spec = spec._spline  # The ordered term's constraint is its basis's.
-    if _uses_fit_time_scop_constraints(spec):
-        return "scop"
-    if _uses_fit_time_qp_constraints(spec):
-        return "qp"
-    return None
-
-
 def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order) -> None:
-    """Build kindless constrained splines as ``ps`` when another term's constraint is on SCOP.
+    """Constrained splines with no kind beside a SCOP (``ps``) constrained term build as ``ps``.
 
-    One model cannot put shape constraints on both SCOP (``ps``) and the QP
-    (``cr``, ``bs``). A spline that names no kind is ``cr`` and goes to the
-    QP; before 0.40 it was ``ps`` and went to SCOP. When every QP term named
-    no kind, they build as ``ps``, as before 0.40, with a warning. A QP term
-    whose kind was named keeps the refusal.
+    A ``cr`` constraint goes to the QP, and one model cannot use both engines.
+    Before 0.40 such a spline was ``ps``; it is again when every QP term named no kind.
     """
     import warnings
 
+    from superglm.features._spline_build import _uses_fit_time_scop_constraints as scop
+    from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
     from superglm.features._spline_factory import kindless_as_ps, kindless_ps_message
 
-    engines = {name: _shape_engine(specs[name]) for name in feature_order}
-    scop = [name for name, engine in engines.items() if engine == "scop"]
-    qp = [name for name, engine in engines.items() if engine == "qp"]
-    if not scop or not qp:
+    inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
+    on_scop = [name for name, spec in inner.items() if scop(spec)]
+    on_qp = {
+        name: kindless_as_ps(spec)
+        for name, spec in inner.items()
+        if shaped(spec) and not scop(spec)
+    }
+    if not on_scop or not on_qp or None in on_qp.values():
         return
-    replacements = {name: kindless_as_ps(specs[name]) for name in qp}
-    if any(replacement is None for replacement in replacements.values()):
-        return
-    for name, replacement in replacements.items():
-        warnings.warn(
-            f"Feature {name!r}: "
-            + kindless_ps_message(
-                f"would put this shape constraint on the QP while {scop[0]!r} puts its "
-                "constraint on SCOP, and one model cannot use both"
-            ),
-            UserWarning,
-            stacklevel=4,
-        )
+    for name, replacement in on_qp.items():
+        reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
+        warnings.warn(f"Feature {name!r}: {kindless_ps_message(reason)}", UserWarning, stacklevel=4)
         specs[name] = cast(FeatureSpec, replacement)
 
 

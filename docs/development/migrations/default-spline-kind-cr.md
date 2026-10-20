@@ -12,24 +12,18 @@ Spline(n_knots=10)               # cubic regression spline from 0.40
 Spline(kind="ps", n_knots=10)    # the P-spline that 0.39 fitted
 ```
 
-Four changes follow from it. One rule limits them: a spline with no kind
-that `cr` cannot fit builds as `kind="ps"`, the P-spline 0.39 built. It
-warns that it did so; pass `kind=` to choose and silence the warning. This
-happens in five cases:
+A spline with no kind that `cr` cannot take builds as `kind="ps"`, the
+P-spline that 0.39 built, with a warning. Pass `kind=` to choose the kind and
+silence it. This happens in three cases:
 
 - **A degree other than 3**, such as `Spline(degree=2)`.
 - **A penalty order above 3**, such as `Spline(m=4)` or `Spline(m=(2, 4))`.
-- **A column with one value** in the data the model is fitted on.
-- **An ordered term with no `basis` whose training rows sit at one level**
-  (for example a CV fold or a per-segment fit). It builds on
-  `Spline(kind="ps", n_knots=5)`, and the warning names `basis=`.
-- **A spline with a fit-time shape constraint beside a `ps` one.** The `cr`
-  spline would put its constraint on the QP and the `ps` term puts its on
-  SCOP, and one model cannot use both. This holds when every QP-constrained
-  term names no kind; a `cr` or `bs` term whose kind is named still stops
-  with an error.
+- **A fit-time shape constraint beside a `ps` term with one.** A `cr` spline
+  puts its constraint on the QP, a `ps` term puts its on SCOP, and one model
+  cannot use both. A `cr` or `bs` term whose kind is named still stops with
+  an error.
 
-The changes:
+Four changes follow from the new default:
 
 - **A model that names no kind refits as `cr`.** The curve, the smoothing
   parameter, the effective degrees of freedom and the deviance can all move.
@@ -39,12 +33,12 @@ The changes:
   `Spline(constraint=Constraint.fit.increasing)` is now a `cr` term, which the
   QP constrains. The QP chooses the smoothing parameter without the constraint
   and then refits with it. SCOP, which a `ps` term uses, chooses it with the
-  constraint in place. Beside a `ps` constrained term it stays on SCOP, by the
-  rule above.
+  constraint in place. Beside a `ps` constrained term it stays a `ps` term on
+  SCOP.
 - **`cr` refuses a degree other than 3.** A cubic regression spline is always
   cubic. In 0.39, `Spline(kind="cr", degree=2)` fitted a cubic without saying
   so. It now raises an error that names `kind="ps"` and `kind="bs"`.
-  `Spline(degree=2)` with no kind builds as `ps`, by the rule above.
+  `Spline(degree=2)` with no kind builds as `ps`, with a warning.
 - **An ordered term's default basis is `cr`.** `OrderedCategorical(...)` with
   no `basis` now uses `Spline(kind="cr", n_knots=5)`. In 0.39 it used
   `Spline(kind="ps", n_knots=5)`. The knot count is still limited to the
@@ -108,21 +102,19 @@ The changes:
   interaction or a spline-by-factor interaction takes its margins from its
   parents' kind. A `cr` parent's margin is a cardinal cubic regression
   spline placed on the column's quantiles, whatever the parent's knots.
-- **A spline with no kind on a column with one distinct value**: it fits as a
-  P-spline, as in 0.39, with a warning naming the feature.
+- **A spline with no kind on a column with one distinct value**: the fit now
+  stops with an error naming the feature and saying to pass `kind="ps"`. A
+  P-spline fitted it.
 - **An ordered term with no `basis` whose levels are all grouped into one
-  band**: it fits on the 0.39 P-spline basis, with a warning.
-- **`Spline(...)` or `s(...)` with no kind and a degree other than 3 or a
-  penalty order above 3** (`m=4`, or a tuple such as `m=(2, 4)`): it is a
-  P-spline, as in 0.39, with a warning when it is declared.
-- **An ordered term with no `basis` and one observed level in the data** (for
-  example a CV fold or a per-segment fit): it fits on the 0.39 P-spline basis,
-  with a warning naming the feature.
-- **A spline with no kind and a fit-time shape constraint, beside a `ps` term
-  with one** (a `Spline(kind="ps", ...)` or an ordered term on a `ps` basis):
-  it fits as a P-spline on SCOP, as in 0.39, with a warning naming the
-  feature. 0.40.0 stopped these fits with "SCOP + QP monotone terms in the
-  same model are not supported".
+  band**: the fit now stops with an error. A P-spline fitted it.
+- **`Spline(...)` or `s(...)` with no kind and a penalty order above 3** (`m=4`, or a
+  tuple such as `m=(2, 4)`): it is a P-spline, as in 0.39, with a warning.
+- **An ordered term with no `basis` and one observed level in the data** (for example
+  a CV fold or a per-segment fit): `fit` now raises a `ValueError` whose message reads
+  `Feature '<name>': every row of this ordered term is at one level, so its natural
+  spline basis has no range to place its knots on. Drop the term, or pass
+  basis=Spline(kind='ps'), which fits a term with one observed level.` A P-spline
+  fitted it.
 - **A spline with no kind and `select=True` on a column with a very long tail**
   (quantile knots on, for example, a sum insured or a mileage): when the widest
   knot interval is so much wider than the narrowest that double precision cannot
@@ -138,11 +130,8 @@ The changes:
 - **To keep the 0.39 fit**: add `kind="ps"` to every `Spline(...)` and `s(...)`
   that names no kind. Add `basis=Spline(kind="ps", n_knots=5)` to every
   `OrderedCategorical` that omits `basis`.
-- **A degree other than 3, or a penalty order above 3**: pass `kind="ps"` to
-  silence the warning; `kind="bs"` also takes another degree.
-- **Any other warning that a spline with no kind builds as `ps`**: pass
-  `kind="ps"` to keep the fit, or another kind to change it. An ordered term
-  takes `basis=Spline(kind="ps", n_knots=5)`.
+- **A warning that a spline with no kind builds as `ps`**: pass `kind="ps"` to
+  keep the fit and silence it, or `kind="bs"` for another degree.
 - **To keep a 0.39 fixed-penalty fit of an explicit `cr`, `cr_cardinal` or
   `bs` spline**, or to reuse a smoothing parameter a 0.39 `fit_reml()` reported:
   multiply it by `h**-3`, where `h` is the mean knot interval, the fitted
@@ -209,12 +198,11 @@ the 0.40 fit by 0.1 deviance.
 
 - `tests/test_spline_factory.py::TestDefaultKindIsCr` pins the default kind for
   `Spline()` and `s()`, the degree refusal and the penalty-order refusal for `cr`
-  and `cr_cardinal`.
+  and `cr_cardinal`, and the `ps` a spline with no kind builds where `cr` cannot,
+  bit for bit as `kind="ps"`. `tests/test_monotone_fit.py` pins the shape
+  constraint beside a `ps` term.
 - `tests/test_pspline_general_penalty.py` pins `select=True` and the REML rank of
   `cr` and `bs` terms on quantile knots of lognormal(0, 2) and lognormal(0, 1.5)
   data, and the error that names the knot spread on lognormal(0, 3) data.
 - `tests/test_ordered_categorical_api.py` pins the ordered default basis, its
   clamp warning, and a bit-identical fit against `Spline(kind="cr", n_knots=5)`.
-- `tests/test_kindless_spline_fallback.py` pins each of the five cases that
-  build as `ps`: the warning, and a fit bit-identical to the same model
-  declared with `kind="ps"`. It also pins that a named `cr` keeps its error.

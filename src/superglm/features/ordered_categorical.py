@@ -62,10 +62,6 @@ _STEP_MODE_REMOVED_MESSAGE = (
 # move together -- hence one constant rather than two copies of the wording.
 _CLAMP_WARNING_PREFIX = "OrderedCategorical: n_knots exceeds the level count"
 
-# The basis an ordered term with no basis= takes, and the one it took before 0.40.
-_DEFAULT_BASIS = "Spline(kind='cr', n_knots=5)"
-_DEFAULT_BASIS_BEFORE_040 = "Spline(kind='ps', n_knots=5)"
-
 
 def _spline_kind_name(spline: Any) -> str:
     """Return the public factory kind for a spline specification."""
@@ -389,9 +385,7 @@ class OrderedCategorical:
 
         Omitting ``basis`` gives the default cubic regression spline,
         ``Spline(kind="cr", n_knots=5, penalty="ssp", select=False)``
-        (a P-spline before 0.40).  When the training rows sit at one level, the
-        default builds as ``Spline(kind="ps", n_knots=5)``, the default before
-        0.40, with a warning.  In either form ``n_knots`` is clamped to
+        (a P-spline before 0.40).  In either form ``n_knots`` is clamped to
         ``n_levels - 1`` with a warning.  ``Spline(knots=[...])`` may state
         knots as BAND NAMES (``knots=["Mi060", "Mi066"]``): each name resolves
         to that level's VALUE on the smooth's axis at construction --
@@ -1426,31 +1420,13 @@ class OrderedCategorical:
         """
         from dataclasses import replace
 
-        from superglm.features.spline import OneValueError, Spline, _SplineBase
+        from superglm.features.spline import OneValueError, _SplineBase
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
             try:
                 return inner.build(numeric, sample_weight=sample_weight)
             except OneValueError:
-                if not getattr(self, "_basis_was_explicit", True):
-                    # The default cr basis has no range at one level; the P-spline
-                    # default of 0.39 fits it, so the term builds on that.
-                    warnings.warn(
-                        "every row of this ordered term is at one level, so the default "
-                        f"basis {_DEFAULT_BASIS} has no range to place its knots on. It builds "
-                        f"on {_DEFAULT_BASIS_BEFORE_040}, the default before 0.40. Pass "
-                        "basis= to choose the basis and silence this warning; "
-                        f"basis={_DEFAULT_BASIS_BEFORE_040} keeps this fit.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                    self._spline_obj = Spline(kind="ps", n_knots=5, penalty="ssp", select=False)
-                    with warnings.catch_warnings():
-                        # The default basis already warned of this clamp when it was made.
-                        warnings.filterwarnings("ignore", message=_CLAMP_WARNING_PREFIX)
-                        self._init_spline()
-                    return self._basis_spline.build(numeric, sample_weight=sample_weight)
                 # The spline's message names a level score and its kind=, which
                 # an ordered term has neither of; it takes its kind in basis=.
                 raise OneValueError(

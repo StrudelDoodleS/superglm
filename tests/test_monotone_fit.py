@@ -4,6 +4,8 @@ Tests that SuperGLM with monotone BSplineSmooth / CubicRegressionSpline terms
 produces actually-monotone predictions via the constrained QP solver path.
 """
 
+from contextlib import nullcontext
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -409,6 +411,42 @@ class TestMonotoneFitPSpline:
         )
         model.fit(df[["x"]], df["y"])
         assert model._result.converged
+
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    @pytest.mark.parametrize("ordered", [False, True], ids=["spline", "ordered"])
+    def test_kindless_constraint_beside_scop_builds_ps(self, fit_method, ordered):
+        """A constrained spline with no kind was a SCOP ``ps`` term on 0.39. As a
+        ``cr`` QP term beside a ``ps`` one, 0.40.0 refused the model; it builds as
+        ``ps`` again, bit for bit as the explicit declaration. Fails on e7b0df17."""
+        from superglm import OrderedCategorical, Spline
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
+        df["band"] = np.array(list("ABCDE"))[(df["x2"].to_numpy() * 5).astype(int)]
+        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+        scop = (
+            {
+                "band": OrderedCategorical(
+                    order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc)
+                )
+            }
+            if ordered
+            else {"x2": Spline(kind="ps", k=8, constraint=inc)}
+        )
+        X = df[["x1", *scop]]
+        fits = []
+        for x1, warned in (
+            (Spline(constraint=inc), True),
+            (Spline(kind="ps", constraint=inc), False),
+        ):
+            model = SuperGLM(family=Gaussian(), selection_penalty=0, features={"x1": x1, **scop})
+            with pytest.warns(UserWarning, match="x1.*names no kind") if warned else nullcontext():
+                getattr(model, fit_method)(X, y)
+            fits.append(model)
+        assert isinstance(fits[0]._specs["x1"], PSpline)
+        np.testing.assert_array_equal(fits[0].result.beta, fits[1].result.beta)
+        np.testing.assert_array_equal(fits[0].predict(X), fits[1].predict(X))
 
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
     def test_scop_plus_qp_raises(self, fit_method):

@@ -105,20 +105,6 @@ def linear_tail_basis_matrix(spec: Any, x: NDArray):
     )
 
 
-def _domain(spec: Any, x: NDArray) -> tuple[float, float]:
-    """The fitted boundary: the stated one, else the range of the knot-geometry rows."""
-    if spec._explicit_boundary is not None:
-        lo, hi = spec._explicit_boundary
-        return lo, hi
-    return float(x.min()), float(x.max())
-
-
-def knot_domain(spec: Any, x: NDArray, sample_weight: NDArray | None = None) -> tuple[float, float]:
-    """The boundary ``place_knots`` fits to ``x``, without placing anything."""
-    rows, _ = _spline_knots.knot_geometry_data(x, sample_weight)
-    return _domain(spec, rows)
-
-
 def place_knots(
     spec: Any,
     x: NDArray,
@@ -143,7 +129,10 @@ def place_knots(
             "as numbers."
         )
     x, sample_weight = _spline_knots.knot_geometry_data(x, sample_weight)
-    spec._lo, spec._hi = _domain(spec, x)
+    if spec._explicit_boundary is not None:
+        spec._lo, spec._hi = spec._explicit_boundary
+    else:
+        spec._lo, spec._hi = float(x.min()), float(x.max())
     spec._basis_lo = None
     spec._basis_hi = None
     spec._basis_d1_lo = None

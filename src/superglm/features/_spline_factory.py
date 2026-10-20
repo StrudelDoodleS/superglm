@@ -22,51 +22,6 @@ if TYPE_CHECKING:
 
 _VALID_SPLINE_KINDS = ("bs", "ps", "ns", "cr", "cr_cardinal")
 
-# A spline declared with no kind carries the arguments it was declared with,
-# so a model can build it as ``kind="ps"`` exactly as that declaration would
-# have built on 0.39. Explicit kinds and specs pickled before 0.41 read None.
-KINDLESS_ARGS = "_kindless_args"
-
-
-def _cubic_cannot_take(degree: int, m: int | tuple[int, ...]) -> str | None:
-    """Why the default ``cr`` cannot take this degree or penalty order, or None."""
-    from superglm.features.spline import CubicRegressionSpline
-
-    if degree != 3:
-        return f"is always cubic, so it cannot take degree={degree}"
-    cap = CubicRegressionSpline._max_penalty_order
-    orders = (m,) if isinstance(m, int) else tuple(m)
-    worst = max((order for order in orders if isinstance(order, int)), default=0)
-    if cap is not None and worst > cap:
-        return f"takes penalty orders up to {cap}, so it cannot take m={worst}"
-    return None
-
-
-def kindless_ps_message(reason: str) -> str:
-    """The warning a kindless spline gives when it builds as ``ps``."""
-    return (
-        f"This spline names no kind, and the default kind='cr' {reason}. It builds as "
-        "kind='ps', the P-spline a spline with no kind gave before 0.40. Pass kind= to "
-        "choose the kind and silence this warning; kind='ps' keeps this fit."
-    )
-
-
-def kindless_as_ps(spec: Any) -> _SplineBase | None:
-    """The ``ps`` spline a kindless ``spec`` was declared as, or None.
-
-    None when ``spec`` named its kind (or was pickled before kinds were
-    recorded), or when ``ps`` cannot take its declaration either, so the
-    caller keeps the refusal ``cr`` gave. The result is the spline
-    ``Spline(kind="ps", ...)`` builds from the same arguments, and it keeps
-    the record that no kind was named.
-    """
-    declared = getattr(spec, KINDLESS_ARGS, None)
-    if declared is None or declared.get("polynomial_ranges"):
-        return None
-    replacement = Spline(kind="ps", **declared)
-    setattr(replacement, KINDLESS_ARGS, declared)
-    return replacement
-
 
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     """Convert basis dimension ``k`` to interior knot count."""
@@ -93,6 +48,20 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     return n_knots
 
 
+def kindless_as_ps(spec: Any) -> _SplineBase | None:
+    """The ``ps`` spline a spec declared with no kind would be, or None if it named one."""
+    declared = getattr(spec, "_kindless_args", None)  # absent on explicit kinds and 0.40 pickles
+    return None if declared is None else Spline(kind="ps", **declared)
+
+
+def kindless_ps_message(reason: str) -> str:
+    return (
+        f"This spline names no kind, and the default kind='cr' {reason}. It builds as "
+        "kind='ps', the P-spline a spline with no kind was before 0.40. Pass kind= to "
+        "choose the kind and silence this warning; kind='ps' keeps this fit."
+    )
+
+
 def Spline(
     kind: SplineKindName | None = None,
     *,
@@ -113,57 +82,23 @@ def Spline(
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
-    """Create a spline feature spec.
-
-    With no ``kind`` the spline is a cubic regression spline, ``"cr"``,
-    unless ``cr`` cannot take ``degree`` or ``m``: it is then the P-spline
-    ``"ps"`` that 0.39 built, with a ``UserWarning`` naming the choice.
-    """
-    declared = None
+    """Create a spline feature spec; with no ``kind``, ``cr`` unless ``cr`` cannot take it."""
     if kind is None:
-        declared = {
-            "k": k,
-            "n_knots": n_knots,
-            "degree": degree,
-            "knot_strategy": knot_strategy,
-            "penalty": penalty,
-            "select": select,
-            "knots": knots,
-            "discrete": discrete,
-            "n_bins": n_bins,
-            "extrapolation": extrapolation,
-            "boundary": boundary,
-            "knot_alpha": knot_alpha,
-            "constraint": constraint,
-            "m": m,
-            "lambda_policy": lambda_policy,
-            "polynomial_ranges": polynomial_ranges,
-        }
-        reason = None if polynomial_ranges else _cubic_cannot_take(degree, m)
-        kind = "cr" if reason is None else "ps"
+        declared = {name: value for name, value in locals().items() if name != "kind"}
+        from superglm.features.spline import CubicRegressionSpline
+
+        cap = CubicRegressionSpline._max_penalty_order
+        order = max((m,) if isinstance(m, int) else tuple(m))
+        if degree != 3:
+            reason = f"is always cubic, so it cannot take degree={degree}"
+        elif order > cap:
+            reason = f"takes penalty orders up to {cap}, so it cannot take m={order}"
+        else:
+            reason = None
         if reason is not None:
-            # Two frames up is the caller of the public ``Spline`` wrapper.
             warnings.warn(kindless_ps_message(reason), UserWarning, stacklevel=3)
-        spec = Spline(
-            kind=kind,
-            k=k,
-            n_knots=n_knots,
-            degree=degree,
-            knot_strategy=knot_strategy,
-            penalty=penalty,
-            select=select,
-            knots=knots,
-            discrete=discrete,
-            n_bins=n_bins,
-            extrapolation=extrapolation,
-            boundary=boundary,
-            knot_alpha=knot_alpha,
-            constraint=constraint,
-            m=m,
-            lambda_policy=lambda_policy,
-            polynomial_ranges=polynomial_ranges,
-        )
-        setattr(spec, KINDLESS_ARGS, declared)
+        spec = Spline(kind="cr" if reason is None else "ps", **declared)
+        setattr(spec, "_kindless_args", declared)
         return spec
 
     from superglm.features.spline import (
@@ -299,4 +234,4 @@ def Spline(
     )
 
 
-__all__ = ["KINDLESS_ARGS", "Spline", "kindless_as_ps", "kindless_ps_message", "n_knots_from_k"]
+__all__ = ["Spline", "n_knots_from_k"]

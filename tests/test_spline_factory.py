@@ -364,16 +364,43 @@ class TestDefaultKindIsCr:
         assert f"degree={degree} cannot apply" in message
         assert "kind='ps' or kind='bs'" in message
 
-    @pytest.mark.parametrize("arguments", [{"degree": 2}, {"m": 4}, {"m": (2, 4)}])
-    def test_default_kind_builds_ps_where_cr_cannot_serve(self, arguments):
-        """A degree or penalty order ``cr`` cannot take builds the 0.39 P-spline
-        with a warning (``tests/test_kindless_spline_fallback.py``), never a cubic."""
+    @pytest.mark.parametrize(
+        ("arguments", "reason"),
+        [
+            ({"degree": 1}, "cannot take degree=1"),
+            ({"degree": 2}, "cannot take degree=2"),
+            ({"m": 4}, "cannot take m=4"),
+            ({"m": (2, 4)}, "cannot take m=4"),
+        ],
+    )
+    def test_default_kind_builds_ps_where_cr_cannot_serve(self, arguments, reason):
+        """0.39 fitted these as P-splines and 0.40.0 refused them: they build the
+        P-spline again, with a warning naming the choice. Fails on e7b0df17."""
         from superglm.terms import s
 
-        with pytest.warns(UserWarning, match="names no kind"):
-            assert isinstance(Spline(n_knots=8, **arguments), PSpline)
+        with pytest.warns(UserWarning, match="names no kind") as record:
+            spec = Spline(n_knots=8, **arguments)
+        assert reason in str(record[0].message) and "Pass kind=" in str(record[0].message)
+        assert isinstance(spec, PSpline)
         with pytest.warns(UserWarning, match="names no kind"):
             assert isinstance(s("age", n_knots=8, **arguments).spec, PSpline)
+
+    @pytest.mark.parametrize("method", ["fit", "fit_reml"])
+    def test_default_kind_ps_fits_bit_for_bit_as_the_explicit_ps(self, method):
+        import pandas as pd
+
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(20261020)
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 300)})
+        y = rng.poisson(np.exp(0.3 + np.sin(3.0 * X["x"].to_numpy()))).astype(float)
+        fits = []
+        for spec in (Spline(kind="ps", k=9, degree=2), Spline(k=9, degree=2)):
+            model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec})
+            getattr(model, method)(X, y)
+            fits.append(model)
+        np.testing.assert_array_equal(fits[0].result.beta, fits[1].result.beta)
+        np.testing.assert_array_equal(fits[0].predict(X), fits[1].predict(X))
 
     @pytest.mark.parametrize("kind, cap", [("cr", 3), ("cr_cardinal", 2)])
     def test_cubic_regression_kinds_refuse_a_penalty_order_above_their_maximum(self, kind, cap):

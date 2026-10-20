@@ -1173,9 +1173,9 @@ def Spline(
     cubic and refuse a ``degree`` other than 3, and take penalty orders ``m`` up
     to 3 and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
     those. A spline with no kind that ``cr`` cannot serve (a ``degree`` other
-    than 3, a penalty order above 3, a column with one value, or a shape
-    constraint beside a ``ps`` one) builds as ``"ps"``, as before 0.40, with a
-    ``UserWarning``; pass ``kind=`` to choose and silence it.
+    than 3, a penalty order above 3, or a shape constraint beside a ``ps``
+    one) builds as ``"ps"``, as before 0.40, with a ``UserWarning``; pass
+    ``kind=`` to choose and silence it.
 
     ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
     polynomial on each :class:`PolynomialRange` and leaves the rest the
