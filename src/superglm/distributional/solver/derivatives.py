@@ -288,12 +288,7 @@ def nearest_semidefinite_curvature(curvature_packed: NDArray) -> NDArray[np.floa
     definite; it is used only as the terminal policy's last fallback.
     """
     curvature = np.asarray(curvature_packed, dtype=np.float64)
-    if curvature.ndim != 2 or not np.all(np.isfinite(curvature)):
-        raise ValueError("curvature_packed must be a finite two-dimensional array")
-    n_channels = curvature.shape[1]
-    k_parameters = int((np.sqrt(8 * n_channels + 1) - 1) // 2)
-    if k_parameters * (k_parameters + 1) // 2 != n_channels or k_parameters < 1:
-        raise ValueError("curvature_packed does not hold packed symmetric blocks")
+    k_parameters = int((np.sqrt(8 * curvature.shape[1] + 1) - 1) // 2)
     pairs = packed_pairs(k_parameters)
     blocks = np.empty((len(curvature), k_parameters, k_parameters), dtype=np.float64)
     for packed_index, (left, right) in enumerate(pairs):

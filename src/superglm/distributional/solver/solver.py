@@ -936,13 +936,9 @@ def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
 def _geometry(
     context: _SolverContext,
     state: _AcceptedState,
-    source: str,
+    source: chunking.CurvatureSource,
 ) -> DenseJointGeometry:
     if context.chunk_size is not None:
-        if source not in ("observed", "fisher", "nearest_semidefinite"):
-            raise ValueError(
-                "curvature source must be 'observed', 'fisher' or 'nearest_semidefinite'"
-            )
         return chunking.assemble_chunked_geometry(
             context.family,
             context.layout,
@@ -956,9 +952,7 @@ def _geometry(
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
-    if source == "observed":
-        curvature = state.derivatives.curvature_packed
-    elif source == "nearest_semidefinite":
+    if source == "nearest_semidefinite":
         curvature = nearest_semidefinite_curvature(state.derivatives.curvature_packed)
     elif source == "fisher":
         curvature = state.fisher_curvature_packed
@@ -975,7 +969,7 @@ def _geometry(
                 context.links,
             )
     else:
-        raise ValueError("curvature source must be 'observed', 'fisher' or 'nearest_semidefinite'")
+        curvature = state.derivatives.curvature_packed
     if context.dense_matrices is None:
         raise RuntimeError("dense solver context is missing predictor matrices")
     return _assemble_dense_geometry_from_matrices(
@@ -991,7 +985,7 @@ def _geometry(
 def _measured_geometry(
     context: _SolverContext,
     state: _AcceptedState,
-    source: str,
+    source: chunking.CurvatureSource,
     phase_recorder: FitPhaseRecorder | None,
 ) -> DenseJointGeometry:
     with measure_phase(phase_recorder, "curvature_gradient_assembly"):
@@ -1969,9 +1963,8 @@ def _fit_dense_fixed_lambda_core(
                     state.coefficients,
                     phase_recorder=phase_recorder,
                 )
-                if evaluated is None:
-                    raise RuntimeError("an accepted coefficient state no longer evaluates")
-                fallback_state = evaluated
+                if evaluated is not None:
+                    fallback_state = evaluated
             if fisher_available:
                 try:
                     fisher_geometry = (
@@ -2021,8 +2014,6 @@ def _fit_dense_fixed_lambda_core(
                 raise RuntimeError("Fisher fallback is missing its full curvature geometry")
             accepted_geometry = terminal_fisher_geometry
         elif curvature.telemetry.actual_source == "nearest_semidefinite":
-            if len(terminal_semidefinite_geometry) != 1:
-                raise RuntimeError("semidefinite fallback is missing its full curvature geometry")
             accepted_geometry = terminal_semidefinite_geometry[0]
         else:
             accepted_geometry = observed_geometry

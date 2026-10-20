@@ -505,8 +505,6 @@ def iter_likelihood_chunks(
     Private global assembly may retain original plans and consume their row
     ranges directly. The default stream continues to supply owned child plans.
     """
-    if curvature_source not in ("observed", "fisher", "nearest_semidefinite"):
-        raise ValueError("curvature_source must be 'observed', 'fisher' or 'nearest_semidefinite'")
     if curvature_source == "fisher" and not isinstance(family, ExpectedInformationFamily):
         raise ValueError("Fisher chunking requires expected_information_natural")
     response, plan, coefficient_values = _validate_chunk_inputs(

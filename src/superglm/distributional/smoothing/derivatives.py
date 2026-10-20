@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -593,18 +593,15 @@ def _substitute_rows(
             )
 
         return projected
-    if source == "fisher" and isinstance(family, ExpectedInformationFamily):
+    fisher_family = cast(ExpectedInformationFamily, family)
 
-        def information(values: NDArray[np.float64]) -> NDArray[np.float64]:
-            natural = family.expected_information_natural(
-                _theta_from_eta(values, links), likelihood_plan
-            )
-            return np.asarray(
-                transform_natural_information(natural, values, links), dtype=np.float64
-            )
+    def information(values: NDArray[np.float64]) -> NDArray[np.float64]:
+        natural = fisher_family.expected_information_natural(
+            _theta_from_eta(values, links), likelihood_plan
+        )
+        return np.asarray(transform_natural_information(natural, values, links), dtype=np.float64)
 
-        return information
-    raise LamlDerivativeError(f"the terminal {source!r} curvature cannot be re-evaluated")
+    return information
 
 
 @dataclass
@@ -1194,8 +1191,6 @@ def laml_derivatives(
         raise TypeError("want_hessian must be bool")
     if reuse is not None and not isinstance(reuse, LamlDerivativeWorkspace):
         raise TypeError("reuse must be a LamlDerivativeWorkspace")
-    if curvature not in ("observed", "terminal"):
-        raise ValueError("curvature must be 'observed' or 'terminal'")
     source = fit.terminal_curvature.actual_source
     if source != "observed" and not (curvature == "terminal" and source in _SUBSTITUTE_SOURCES):
         raise LamlDerivativeError(

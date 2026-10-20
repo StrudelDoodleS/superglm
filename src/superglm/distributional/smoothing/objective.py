@@ -79,7 +79,7 @@ def _restricted_objective(
     curvature = np.asarray(result.terminal_penalized_curvature, dtype=np.float64)
     basis = np.asarray(null_basis, dtype=np.float64)
     width = curvature.shape[0]
-    if basis.ndim != 2 or basis.shape[0] != width or not 0 < basis.shape[1] < width:
+    if not 0 < basis.shape[1] < width:
         return None
     complete, _ = np.linalg.qr(basis, mode="complete")
     complement = complete[:, basis.shape[1] :]

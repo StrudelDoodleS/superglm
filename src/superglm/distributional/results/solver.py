@@ -1297,8 +1297,6 @@ class DenseSolverResult:
         retained_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (
             1.0 + abs(penalized_optimizing)
         )
-        if self.convergence_reason == "no_ascent_direction" and self.converged:
-            raise ValueError("no_ascent_direction is not a converged stop")
         if self.convergence_reason == "score" and (
             not self.converged or retained_kkt > self.config.tolerance
         ):

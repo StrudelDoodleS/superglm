@@ -149,11 +149,8 @@ class DistributionalFitResult:
             raise ValueError("rank cannot exceed coefficient width")
         if not isinstance(self.curvature_telemetry, CurvatureTelemetry):
             raise TypeError("curvature_telemetry must be CurvatureTelemetry")
-        disclosures = tuple(self.warnings)
-        if any(not isinstance(message, str) or not message for message in disclosures):
-            raise ValueError("warnings must be non-empty strings")
 
-        object.__setattr__(self, "warnings", disclosures)
+        object.__setattr__(self, "warnings", tuple(self.warnings))
         object.__setattr__(self, "coefficients", coefficients)
         object.__setattr__(self, "covariance", covariance)
         object.__setattr__(self, "coefficient_names", coefficient_names)

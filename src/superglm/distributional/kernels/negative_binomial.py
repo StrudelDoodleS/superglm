@@ -1158,24 +1158,9 @@ def negative_binomial_expected_information(
     term budget, or whose information is not representable, raises
     ``NegativeBinomialNumericalDomainError``.
     """
-    sources = tuple(
-        _numeric_vector(values, name)
-        for values, name in ((mean, "mean"), (theta, "theta"), (weights, "weights"))
-    )
-    if not sources[0].size or any(values.shape != sources[0].shape for values in sources[1:]):
-        raise ValueError("negative-binomial information rows must be non-empty and aligned")
     mean_values, theta_values, weight_values = (
-        np.asarray(values, dtype=_FLOAT) for values in sources
+        np.asarray(values, dtype=_FLOAT) for values in (mean, theta, weights)
     )
-    for values, name in (
-        (mean_values, "mean"),
-        (theta_values, "theta"),
-        (weight_values, "weights"),
-    ):
-        if np.any(~np.isfinite(values)) or np.any(values <= 0.0):
-            raise ValueError(f"{name} must be finite and strictly positive")
-    if semantics not in ("prior", "frequency"):
-        raise ValueError("semantics must be 'prior' or 'frequency'")
     scale, multiplier, effective_mean, effective_theta, total, poisson = _domain(
         mean_values, theta_values, weight_values, semantics
     )
