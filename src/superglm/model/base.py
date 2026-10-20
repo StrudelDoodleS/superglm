@@ -881,8 +881,14 @@ def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
     return dict(zip(spline_cols, model._n_knots))
 
 
-def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> None:
-    """Validate factor-smooth geometry after explicit or inferred features exist."""
+def validate_factor_smooth_configuration(
+    model, *, features_resolved: bool, terms_form: bool = False
+) -> None:
+    """Validate factor-smooth geometry after explicit or inferred features exist.
+
+    ``terms_form`` says the model was declared with ``terms=``, so a refusal
+    names the change in that form.
+    """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.random_effect import RandomEffect
@@ -909,21 +915,31 @@ def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> N
     for term in terms:
         group_spec = model._specs.get(term.group)
         if isinstance(group_spec, (Categorical, RandomEffect)):
+            helper = "cat" if isinstance(group_spec, Categorical) else "re"
+            remedy = (
+                f"remove {helper}({term.group!r}) from terms=; the factor smooth reads "
+                "its group column itself and needs no term for it."
+                if terms_form
+                else "remove that group main effect and use an explicit features map "
+                "containing only the intended main effects."
+            )
             raise ValueError(
                 f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
                 "the constant null-space group-intercept geometry of "
-                f"{type(group_spec).__name__} on the same column; remove that "
-                "group main effect and use an explicit features map containing "
-                "only the intended main effects."
+                f"{type(group_spec).__name__} on the same column; {remedy}"
             )
         if term.basis == "sz" and not isinstance(
             model._specs.get(term.variable),
             _SplineBase,
         ):
+            remedy = (
+                f"add s({term.variable!r}) to terms=."
+                if terms_form
+                else f"use features={{{term.variable!r}: Spline(...)}}."
+            )
             raise ValueError(
                 f"FactorSmooth {term.name!r} with basis='sz' requires a global "
-                f"Spline for {term.variable!r}; use "
-                f"features={{{term.variable!r}: Spline(...)}}."
+                f"Spline for {term.variable!r}; {remedy}"
             )
 
 
@@ -1160,6 +1176,7 @@ def init_model(
     validate_factor_smooth_configuration(
         model,
         features_resolved=model._splines is None,
+        terms_form=terms is not None,
     )
 
     from superglm.model.fit_state import ModelConfig

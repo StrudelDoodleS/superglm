@@ -140,10 +140,77 @@ def test_terms_is_keyword_only_and_takes_a_list_holding_any_mapping():
     assert list(model.features) == ["x", "g", "z"]
 
 
-def test_a_factor_smooth_group_declared_as_a_term_is_refused():
-    """The docs send factor smooths to features= and interactions= for this reason."""
-    with pytest.raises(ValueError, match="FactorSmooth"):
-        SuperGLM(terms=[s("x"), cat("g"), interaction(FactorSmooth("x", group="g"))])
+def _factor_smooth_pair(
+    basis: str, global_spline: bool, discrete: bool
+) -> tuple[SuperGLM, SuperGLM]:
+    """One factor-smooth model declared with interactions= and with terms=.
+
+    Neither form declares the group ``g``; without the global spline neither
+    declares ``x`` either. A random effect on another column sits beside it.
+    """
+    smooth = FactorSmooth("x", group="g", basis=basis, k=6)
+    features = {"x": Spline(kind="ps", k=7)} if global_spline else {}
+    terms = [s("x", kind="ps", k=7)] if global_spline else []
+    features["b"] = RandomEffect()
+    terms.append(re("b"))
+    options = {"discrete": discrete, "selection_penalty": 0.0}
+    return (
+        SuperGLM(features=features, interactions=[smooth], **options),
+        SuperGLM(terms=[*terms, interaction(smooth)], **options),
+    )
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+@pytest.mark.parametrize(
+    ("basis", "global_spline"),
+    [("fs", True), ("fs", False), ("sz", True)],
+    ids=["fs-global", "fs-alone", "sz-global"],
+)
+def test_a_factor_smooth_fits_through_terms_as_through_interactions(
+    data, basis, global_spline, discrete
+):
+    """Every factor smooth interactions= fits, terms= fits to the bit (master refused all)."""
+    X, y = data
+    as_dict, as_list = _factor_smooth_pair(basis, global_spline, discrete)
+    assert repr(as_dict) == repr(as_list)
+    as_dict.fit_reml(X, y)
+    as_list.fit_reml(X, y)
+    _assert_same_fit(as_dict, as_list, X, reml=True)
+    assert "x:g:" + basis in [g.name for g in as_list._groups]
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_fit_refuses_a_factor_smooth_in_either_form_alike(data, discrete):
+    X, y = data
+    messages = []
+    for model in _factor_smooth_pair("fs", True, discrete):
+        with pytest.raises(NotImplementedError, match="fit_reml") as caught:
+            model.fit(X, y)
+        messages.append(str(caught.value))
+    assert messages[0] == messages[1]
+
+
+def test_an_sz_smooth_without_its_global_spline_is_refused_in_the_form_declared():
+    with pytest.raises(ValueError, match=r"global Spline for 'x'; use features=") as as_dict:
+        SuperGLM(interactions=[FactorSmooth("x", group="g", basis="sz")])
+    with pytest.raises(
+        ValueError, match=r"global Spline for 'x'; add s\('x'\) to terms="
+    ) as as_list:
+        SuperGLM(terms=[interaction(FactorSmooth("x", group="g", basis="sz"))])
+    messages = [str(as_dict.value), str(as_list.value)]
+    assert messages[0].split(";")[0] == messages[1].split(";")[0]
+
+
+@pytest.mark.parametrize(("helper", "spec"), [(cat, "Categorical"), (re, "RandomEffect")])
+def test_a_main_effect_on_a_factor_smooth_group_is_refused_naming_the_term(helper, spec):
+    """SuperGLM refuses it in both forms; through terms= the message names the term to drop."""
+    smooth = FactorSmooth("x", group="g")
+    with pytest.raises(
+        ValueError, match=rf"{spec} on the same column; remove {helper.__name__}\('g'\) from terms="
+    ):
+        SuperGLM(terms=[s("x"), helper("g"), interaction(smooth)])
+    with pytest.raises(ValueError, match=rf"{spec} on the same column; remove that group"):
+        SuperGLM(features={"x": Spline(), "g": helper("g").spec}, interactions=[smooth])
 
 
 def test_clones_keep_declared_interaction_options_and_names(data):

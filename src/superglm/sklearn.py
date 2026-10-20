@@ -470,10 +470,14 @@ def _fit_common(
     model_kwargs: dict[str, Any]
     if wrapper.terms is not None:
         # ── Native terms= path ───────────────────────────────
-        # The model reads the declared main-term columns; every interaction
-        # parent is one of them.
+        # The model reads the declared main-term columns and every interaction
+        # parent, which is one of them except a factor smooth's, read on its own.
+        normalized = normalize_terms(wrapper.terms)
+        read = dict.fromkeys(normalized.features)
+        for spec in normalized.interaction_specs.values():
+            read.update(dict.fromkeys(spec.parent_names))
         feature_cols = _resolve_native_feature_cols(
-            normalize_terms(wrapper.terms).features,
+            read,
             columns,
             offset_cols,
             synthetic,

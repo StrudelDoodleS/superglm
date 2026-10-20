@@ -17,6 +17,7 @@ from superglm._parallel import parallel_config
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.random_effect import validate_declared_nesting
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
@@ -101,6 +102,12 @@ class Predictor:
                 or not all(isinstance(parent, str) for parent in parents)
             ):
                 raise TypeError("interaction specs must expose two string parent_names")
+            if isinstance(interaction, FactorSmooth):
+                # It reads its variable and group columns itself and builds
+                # without their specs, as in SuperGLM; requiring them as
+                # features forced a main effect on the group, whose level
+                # intercepts the factor smooth already spans.
+                continue
             missing = [parent for parent in parents if parent not in owned_features]
             if missing:
                 raise ValueError(f"interaction spec references unknown features: {missing}")
@@ -294,7 +301,6 @@ def _record_selected_sz_levels(compiled: CompiledPredictorDesign, weights: NDArr
     read at prediction by ``prediction_design._score_interaction``).  Terms
     with unpenalized lines keep their SuperLSS prediction.
     """
-    from superglm.features.factor_smooth import FactorSmooth
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
     matrices = compiled.design.group_matrices

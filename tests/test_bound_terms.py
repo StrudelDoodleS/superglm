@@ -147,6 +147,42 @@ def test_explicit_factor_smooth_retains_its_configured_name():
     assert normalized.interaction_order == ("by_group",)
 
 
+def test_a_factor_smooth_needs_no_parent_terms():
+    """It reads its own columns, as under interactions=; master required both as terms."""
+    from superglm.features import FactorSmooth
+    from superglm.terms import interaction, normalize_terms
+
+    normalized = normalize_terms([interaction(FactorSmooth("x", group="group"))])
+    assert normalized.features == {}
+    assert normalized.interaction_order == ("x:group:fs",)
+
+
+def test_superlss_fits_a_factor_smooth_without_a_term_on_its_group():
+    """A SuperLSS factor smooth no longer needs a main effect on its group.
+
+    The factor smooth already spans every level's intercept, so the main
+    effect master required duplicated it (a random effect there pushes its
+    smoothing parameter to the cap). Master refused this declaration.
+    """
+    from superglm import FactorSmooth, GaussianLS, SuperLSS
+    from superglm.terms import interaction, s
+
+    rng = np.random.default_rng(5)
+    n = 600
+    frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n), "group": rng.choice(list("abcd"), n)})
+    shift = frame["group"].map({"a": 0.4, "b": -0.3, "c": 0.1, "d": 0.0}).to_numpy()
+    y = np.sin(2.0 * frame["x"].to_numpy()) + shift + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="group", k=6))
+    model = SuperLSS(family, family.location(s("x", kind="ps", k=7), smooth), family.scale())
+    model.fit_reml(frame, y)
+    assert "location:x:group:fs#wiggle" in model.smoothing_parameters_
+    predicted = model.predict(frame.head(5))
+    assert np.all(np.isfinite(predicted))
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert np.array_equal(restored.predict(frame.head(5)), predicted)
+
+
 @pytest.mark.parametrize(
     "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
 )

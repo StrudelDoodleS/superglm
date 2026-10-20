@@ -74,23 +74,30 @@ level, not a finite two-way rating table.
 ### Fully penalized FS curves
 
 ```python
+from superglm import FactorSmooth, SuperGLM, interaction, s
+
+model = SuperGLM(
+    family="poisson",
+    terms=[
+        s("DrivAge", kind="ps", k=8),
+        interaction(FactorSmooth("DrivAge", group="Region", basis="fs", kind="ps", k=6)),
+    ],
+    selection_penalty=0.0,
+)
+model.fit_reml(df, y, offset=log_exposure)
+```
+
+The same model as a features dict:
+
+```python
 from superglm import FactorSmooth, Spline, SuperGLM
 
 model = SuperGLM(
     family="poisson",
     features={"DrivAge": Spline(kind="ps", k=8)},
-    interactions=[
-        FactorSmooth(
-            "DrivAge",
-            group="Region",
-            basis="fs",
-            kind="ps",
-            k=6,
-        )
-    ],
+    interactions=[FactorSmooth("DrivAge", group="Region", basis="fs", kind="ps", k=6)],
     selection_penalty=0.0,
 )
-model.fit_reml(df, y, offset=log_exposure)
 ```
 
 FS is analogous to mgcv's `bs="fs"`: every level has a complete curve and
@@ -102,20 +109,13 @@ much work as possible.
 ### Sum-to-zero SZ deviations
 
 ```python
-from superglm import FactorSmooth, Spline, SuperGLM
+from superglm import FactorSmooth, SuperGLM, interaction, s
 
 model = SuperGLM(
     family="poisson",
-    features={"age": Spline(kind="ps", k=7, m=2)},
-    interactions=[
-        FactorSmooth(
-            "age",
-            group="region",
-            basis="sz",
-            kind="ps",
-            k=6,
-            m=2,
-        )
+    terms=[
+        s("age", kind="ps", k=7, m=2),
+        interaction(FactorSmooth("age", group="region", basis="sz", kind="ps", k=6, m=2)),
     ],
     selection_penalty=0.0,
 ).fit_reml(X, y)
@@ -130,10 +130,12 @@ source of duplicate main-effect geometry.
 
 `group=` names the factor whose levels receive curves. It corresponds to the
 factor argument in mgcv's `s(x, factor, bs=...)`; it is not a generic `by=`
-multiplier. SuperGLM rejects a `Categorical` or `RandomEffect` main effect on
-that same grouping column because FS already contains its constant direction
-and SZ's uncentered level curves contain lower-order factor geometry. A random
-effect for a different column is supported.
+multiplier. The group needs no term of its own: the factor smooth reads the
+column itself. SuperGLM rejects a `Categorical` or `RandomEffect` main effect on
+that same grouping column, `cat(...)` or `re(...)` in `terms=`, because FS
+already contains its constant direction and SZ's uncentered level curves
+contain lower-order factor geometry. A random effect for a different column is
+supported.
 
 ## Level universes are inherited, never redeclared
 

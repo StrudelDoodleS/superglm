@@ -84,7 +84,8 @@ class BoundInteraction:
     """An interaction declaration for use inside a family predictor.
 
     Create one with ``ti`` or ``interaction``. Its parent terms must also be
-    declared in that predictor. ``name`` identifies the interaction in results.
+    declared in that predictor, except a ``FactorSmooth``'s, which reads its
+    two columns itself. ``name`` identifies the interaction in results.
     """
 
     name: str
@@ -373,7 +374,10 @@ def interaction(spec: InteractionSpec, *, name: str | None = None) -> BoundInter
 
     Declare the specification's parent terms in the same predictor. Their
     order within the specification is preserved, even when the predictor's
-    declarations appear in a different order.
+    declarations appear in a different order. A ``FactorSmooth`` needs no
+    parent terms: it reads its variable and group columns itself, as it does
+    under ``interactions=``, so ``interaction(FactorSmooth("age",
+    group="region"))`` can stand alone in a predictor.
 
     Parameters
     ----------
@@ -535,9 +539,18 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
             raise ValueError(
                 f"Term name {name!r} identifies both a main feature and an interaction"
             )
+        if isinstance(ispec, FactorSmooth):
+            # A factor smooth reads its variable and group columns itself, as
+            # under interactions=, so neither needs a main term. SuperGLM's own
+            # rules on those terms (a global spline for basis="sz", no main
+            # effect on the group) are the model's, checked where it is built.
+            continue
         for parent in ispec.parent_names:
             if parent not in features:
-                raise ValueError(f"Interaction {name!r} requires declared parent {parent!r}")
+                raise ValueError(
+                    f"Interaction {name!r} requires declared parent {parent!r}; declare it "
+                    f"in the same list, as in s({parent!r}) or cat({parent!r})"
+                )
             parent_spec = features[parent]
             if name in spline_parent_interactions and not isinstance(parent_spec, _SplineBase):
                 raise TypeError(_ti_parent_message(parent, parent_spec, ispec.parent_names))

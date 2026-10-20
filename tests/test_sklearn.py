@@ -960,6 +960,15 @@ class TestNativeTerms:
         with pytest.raises(ValueError, match=r"terms=\[\.\.\.\]"):
             SuperGLMRegressor(terms=[s("age")], **conflict).fit(X, y)
 
+    def test_terms_reads_a_factor_smooth_group_it_does_not_declare(self, sample_data):
+        """The wrapper passes the group column on, so the core's own refusal is the one raised."""
+        from superglm import FactorSmooth, interaction, s
+
+        X, y, _ = sample_data
+        terms = [s("age", kind="ps", k=7), interaction(FactorSmooth("age", group="region"))]
+        with pytest.raises(NotImplementedError, match=r"only supported with fit_reml"):
+            SuperGLMRegressor(terms=terms).fit(X, y)
+
     def test_missing_terms_column_raises(self, sample_data):
         X, y, _ = sample_data
         with pytest.raises(ValueError, match="terms= keys.*not found"):

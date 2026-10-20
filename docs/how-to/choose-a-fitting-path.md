@@ -227,9 +227,9 @@ solver.
 ```python
 model = SuperGLM(
     family="poisson",
-    features={"VehBrand": RandomEffect()},
-    interactions=[
-        FactorSmooth("DrivAge", group="Region", basis="fs", k=6)
+    terms=[
+        re("VehBrand"),
+        interaction(FactorSmooth("DrivAge", group="Region", basis="fs", k=6)),
     ],
     discrete=True,
     n_bins=256,
@@ -287,16 +287,9 @@ For `basis="sz"`, configure the matching global spline explicitly:
 ```python
 model = SuperGLM(
     family="poisson",
-    features={"DrivAge": Spline(kind="ps", k=7, m=2)},
-    interactions=[
-        FactorSmooth(
-            "DrivAge",
-            group="Region",
-            basis="sz",
-            kind="ps",
-            k=6,
-            m=2,
-        )
+    terms=[
+        s("DrivAge", kind="ps", k=7, m=2),
+        interaction(FactorSmooth("DrivAge", group="Region", basis="sz", kind="ps", k=6, m=2)),
     ],
     direct_solve="auto",
     selection_penalty=0.0,

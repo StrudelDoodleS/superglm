@@ -65,6 +65,20 @@ family = GammaLS()
 lss = SuperLSS(family, family.mean(features, ti("DrivAge", "VehAge")), family.scale())
 ```
 
+A factor smooth goes in the list as `interaction(FactorSmooth(...))`. It reads
+its variable and group columns itself, so its group needs no term, and with
+`basis="fs"` its variable needs none either:
+
+```python
+from superglm import FactorSmooth, SuperGLM, interaction, re
+
+terms = [
+    re("VehBrand"),
+    interaction(FactorSmooth("DrivAge", group="Region", basis="fs", k=6)),
+]
+glm = SuperGLM(family="poisson", terms=terms, selection_penalty=0.0)
+```
+
 One list can declare a frequency model and the mean of a severity model:
 
 ```python
@@ -95,9 +109,10 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
 - `n_knots=`, `degree=` and `categorical_base=` configure only the
   `splines=` shorthand. With `terms=`, set them on each term, as in
   `s("DrivAge", n_knots=8)`.
-- In `SuperGLM`, declare a factor smooth with `features=` and `interactions=`.
-  Through `terms=` its group must be declared as a term, and `SuperGLM` refuses
-  a categorical or random effect on a factor smooth's group.
+- A factor smooth's group needs no term. `SuperGLM` refuses `cat(...)` or
+  `re(...)` on it, because the factor smooth already gives every level its own
+  intercept. `basis="sz"` needs a spline on its variable, as in
+  `s("DrivAge", kind="ps", k=7)`.
 
 ## Splines
 
