@@ -221,6 +221,24 @@ def lss_semidefinite_curvature_message(family_name: str) -> str:
     )
 
 
+def lss_corrected_covariance_substitute_message(source: str) -> str:
+    """What a corrected covariance means when the final curvature fell back."""
+    curvature = (
+        "expected (Fisher) information"
+        if source == "fisher"
+        else "nearest positive semidefinite approximation of the observed curvature"
+    )
+    return (
+        "SuperLSS corrected covariance: the observed curvature at the final coefficients was "
+        f"materially indefinite, so the fit used the {curvature} instead, and the correction "
+        "uses it too. V is that curvature's inverse, J = d beta / d rho is the implicit "
+        "derivative of the coefficients under it rather than under the observed Hessian, and "
+        "V_rho inverts the Hessian in log smoothing parameters of the Laplace objective formed "
+        "with it, replayed from the retained rows. V + J V_rho J' is a first-order correction "
+        "for the substitute curvature; model.diagnose() explains the fallback."
+    )
+
+
 def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     """The statement for an unconverged coefficient fit with no smoothing selection."""
     if fit_result is None or bool(getattr(fit_result, "converged", True)):

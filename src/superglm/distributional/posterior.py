@@ -22,6 +22,7 @@ integral above the level, the representation of Acerbi and Tasche (2002),
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -32,6 +33,10 @@ from numpy.typing import NDArray
 from scipy import linalg, stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.diagnostics.convergence import (
+    ConvergenceWarning,
+    lss_corrected_covariance_substitute_message,
+)
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -226,17 +231,18 @@ def _authenticated_terminal_fit(fitted: Any, smoothing: Any) -> tuple[Any, Any]:
     face_names = () if face is None else tuple(face.component_names)
     if tuple(state.exact_face_components) != face_names:
         raise RuntimeError("corrected covariance found unstable terminal active-face provenance")
-    curvature = terminal.terminal_curvature
-    if (
-        terminal.config.coefficient_curvature != "observed"
-        or curvature.requested_source != "observed"
-        or curvature.actual_source != "observed"
-        or curvature.fallback_count != 0
-    ):
-        raise RuntimeError(
-            "corrected covariance requires observed terminal curvature without fallback"
-        )
     return state, terminal
+
+
+def _substitute_curvature(terminal: Any) -> str | None:
+    """The substitute a terminal fit accepted for its observed curvature, if any.
+
+    The terminal policy always requests observed curvature, whatever step
+    policy (``coefficient_curvature``) the solver ran, so a Fisher-stepped fit
+    whose observed curvature was accepted needs no substitute.
+    """
+    source = terminal.terminal_curvature.actual_source
+    return None if source == "observed" else str(source)
 
 
 def _posterior_bound_sum(*terms: NDArray) -> NDArray:
@@ -425,6 +431,7 @@ def _replayed_smoothing_hessian(
             dense_matrices=matrices,
             step=smoothing.config.derivative_step,
             want_hessian=True,
+            curvature="terminal",
         )
     except Exception as exc:
         raise RuntimeError("smoothing derivative replay failed for corrected covariance") from exc
@@ -438,11 +445,22 @@ def _replayed_smoothing_hessian(
     expected_provenance = (
         terminal.terminal_rank.method,
         int(terminal.terminal_rank.rank),
-        "observed",
+        terminal.terminal_curvature.actual_source,
         () if face is None else tuple(face.component_names),
     )
     if derivatives.provenance != expected_provenance:
         raise RuntimeError("smoothing derivative replay changed the terminal derivative provenance")
+    if _substitute_curvature(terminal) is not None:
+        # The stored stationarity gradient was formed with observed curvature,
+        # the only curvature the smoothing search differentiates, so it cannot
+        # authenticate a replay with the substitute; V_rho needs only the Hessian.
+        return _trusted_smoothing_hessian(
+            derivatives.hessian,
+            derivatives.hessian_certificate,
+            count=len(names),
+            certificate_fraction=smoothing.config.hessian_certificate_fraction,
+            replayed=True,
+        )
     stored_gradient = smoothing.terminal_gradient
     stored_certificate = smoothing.terminal_gradient_certificate
     if stored_gradient is None or stored_certificate is None:
@@ -479,8 +497,14 @@ def _resolved_smoothing_hessian(
     *,
     replay_authority: tuple[Any, Any] | None,
 ) -> NDArray[np.float64]:
-    """Use trusted published curvature or one authenticated ephemeral replay."""
-    if smoothing.smoothing_hessian is None:
+    """Use trusted published curvature or one authenticated ephemeral replay.
+
+    A published Hessian was formed with observed curvature, so a fit whose
+    terminal curvature fell back is always replayed with its substitute.
+    """
+    if smoothing.smoothing_hessian is None or (
+        replay_authority is not None and _substitute_curvature(replay_authority[1]) is not None
+    ):
         if replay_authority is None:
             raise RuntimeError("corrected covariance has no authenticated terminal replay state")
         state, terminal = replay_authority
@@ -541,6 +565,15 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     covariance when terminal smoothing curvature cannot be authenticated.  A
     stationary fit with retained training rows replays that curvature only for
     this request when the Newton endgame stopped before forming a Hessian.
+
+    When the observed curvature at the final coefficients was materially
+    indefinite and the fit accepted a substitute (Fisher information, or the
+    nearest semidefinite curvature), the correction is formed with that
+    substitute throughout, as Wood, Pya and Saefken (2016, section 3.3.1) and
+    Wood and Fasiolo (2017, section 3) substitute it for inference: ``V`` and
+    ``J`` already use it, and ``V_rho`` is replayed from the retained rows
+    with it. That is computed, not refused, and disclosed with a
+    ``ConvergenceWarning`` saying what the result means.
     """
     covariance = np.array(fitted.inference.covariance, dtype=np.float64, copy=True)
     if kind == "fixed":
@@ -555,7 +588,9 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
             "this fit has no smoothing result"
         )
     terminal_authority = _authenticated_terminal_fit(fitted, smoothing)
-    if smoothing.smoothing_hessian is None:
+    substitute = _substitute_curvature(terminal_authority[1])
+    replay = smoothing.smoothing_hessian is None or substitute is not None
+    if replay:
         names = _smoothing_gradient_names(smoothing)
     else:
         names = _smoothing_hessian_names(smoothing)
@@ -567,7 +602,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
         fitted,
         smoothing,
         names,
-        replay_authority=(terminal_authority if smoothing.smoothing_hessian is None else None),
+        replay_authority=terminal_authority if replay else None,
     )
 
     beta = np.asarray(fitted.result.coefficients, dtype=np.float64)
@@ -601,6 +636,12 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
             raise ValueError("the corrected posterior covariance is nonfinite")
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise RuntimeError("the corrected posterior covariance could not be represented") from exc
+    if substitute is not None:
+        warnings.warn(
+            lss_corrected_covariance_substitute_message(substitute),
+            ConvergenceWarning,
+            stacklevel=2,
+        )
     return _posterior_symmetric_matrix(corrected)
 
 

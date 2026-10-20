@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from collections.abc import Callable
 
 import matplotlib
@@ -17,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from superglm import Spline, SuperLSS
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional import api as api_module
 from superglm.distributional import posterior as posterior_module
@@ -64,7 +66,7 @@ def stationary_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     return fitted, frame
 
 
-def _terminal_derivatives(fitted: DenseDistributionalModel) -> LamlDerivatives:
+def _terminal_derivative_arguments(fitted: DenseDistributionalModel) -> tuple:
     rows = fitted.fit_state.retained_rows
     assert rows is not None and fitted.smoothing is not None
     plan = fitted.family.bind_likelihood(
@@ -72,17 +74,17 @@ def _terminal_derivatives(fitted: DenseDistributionalModel) -> LamlDerivatives:
         rows.likelihood_weights,
         COMPLETE_OBSERVATION,
     )
-    return real_laml_derivatives(
-        fitted.family,
-        fitted.layout,
-        rows.response,
-        plan,
-        lambdas=fitted.lambdas,
-        fit=fitted.result,
-        dense_matrices=dense_predictor_matrices(fitted.layout),
-        step=fitted.smoothing.config.derivative_step,
-        want_hessian=True,
-    )
+    return (fitted.family, fitted.layout, rows.response, plan), {
+        "lambdas": fitted.lambdas,
+        "fit": fitted.result,
+        "dense_matrices": dense_predictor_matrices(fitted.layout),
+        "step": fitted.smoothing.config.derivative_step,
+    }
+
+
+def _terminal_derivatives(fitted: DenseDistributionalModel) -> LamlDerivatives:
+    arguments, options = _terminal_derivative_arguments(fitted)
+    return real_laml_derivatives(*arguments, **options, want_hessian=True)
 
 
 def _published_model(
@@ -323,41 +325,72 @@ def test_terminal_face_must_match_the_fit_state_authority(stationary_case) -> No
         posterior_covariance(altered, kind="corrected")
 
 
-def test_non_observed_actual_terminal_curvature_refuses_replay(stationary_case) -> None:
+@pytest.mark.parametrize(
+    ("source", "disclosure"),
+    [
+        ("fisher", "expected \\(Fisher\\) information"),
+        ("nearest_semidefinite", "nearest positive semidefinite approximation"),
+    ],
+)
+def test_fallback_terminal_curvature_replays_with_its_substitute(
+    stationary_case,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    disclosure: str,
+) -> None:
+    """A substitute terminal curvature is replayed with its own rows and disclosed, not refused."""
     fitted, _ = stationary_case
     curvature = dataclasses.replace(
         fitted.result.terminal_curvature,
-        actual_source="fisher",
-    )
-    terminal = dataclasses.replace(fitted.result, terminal_curvature=curvature)
-    altered = _with_terminal_result(fitted, terminal)
-
-    with pytest.raises(RuntimeError, match="observed terminal curvature"):
-        posterior_covariance(altered, kind="corrected")
-
-
-def test_terminal_curvature_fallback_count_refuses_replay(stationary_case) -> None:
-    fitted, _ = stationary_case
-    curvature = dataclasses.replace(
-        fitted.result.terminal_curvature,
-        reason="adversarial fallback",
+        actual_source=source,
+        reason="material_indefiniteness_after_retry",
         fallback_count=1,
     )
     terminal = dataclasses.replace(fitted.result, terminal_curvature=curvature)
     altered = _with_terminal_result(fitted, terminal)
+    sources: list[str] = []
 
-    with pytest.raises(RuntimeError, match="without fallback"):
-        posterior_covariance(altered, kind="corrected")
+    def spy(*args, **kwargs) -> LamlDerivatives:
+        sources.append(kwargs["curvature"])
+        return real_laml_derivatives(*args, **kwargs)
+
+    monkeypatch.setattr(posterior_module, "laml_derivatives", spy, raising=False)
+    with pytest.warns(ConvergenceWarning, match=disclosure):
+        corrected = posterior_covariance(altered, kind="corrected")
+
+    assert sources == ["terminal"]
+    assert np.all(np.isfinite(corrected))
+    # The smoothing search's own derivative call still refuses the substitute.
+    arguments, options = _terminal_derivative_arguments(altered)
+    with pytest.raises(LamlDerivativeError, match="observed terminal curvature"):
+        real_laml_derivatives(*arguments, **options, want_hessian=True)
 
 
-def test_non_observed_terminal_solver_policy_refuses_replay(stationary_case) -> None:
+@pytest.mark.parametrize("mutation", ["solver-policy", "requested-source", "fallback-count"])
+def test_observed_terminal_curvature_needs_no_substitute(stationary_case, mutation: str) -> None:
+    """The terminal policy always requests observed curvature; only the accepted source matters.
+
+    A Fisher-stepped fit whose observed curvature was accepted gets the same
+    corrected covariance, without a disclosure.
+    """
     fitted, _ = stationary_case
-    config = dataclasses.replace(fitted.result.config, coefficient_curvature="fisher")
-    terminal = dataclasses.replace(fitted.result, config=config)
+    if mutation == "solver-policy":
+        config = dataclasses.replace(fitted.result.config, coefficient_curvature="fisher")
+        terminal = dataclasses.replace(fitted.result, config=config)
+    else:
+        changes = (
+            {"requested_source": "fisher"}
+            if mutation == "requested-source"
+            else {"reason": "adversarial fallback", "fallback_count": 1}
+        )
+        curvature = dataclasses.replace(fitted.result.terminal_curvature, **changes)
+        terminal = dataclasses.replace(fitted.result, terminal_curvature=curvature)
     altered = _with_terminal_result(fitted, terminal)
 
-    with pytest.raises(RuntimeError, match="observed terminal curvature"):
-        posterior_covariance(altered, kind="corrected")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        actual = posterior_covariance(altered, kind="corrected")
+    np.testing.assert_array_equal(actual, posterior_covariance(fitted, kind="corrected"))
 
 
 @pytest.mark.parametrize(
@@ -466,20 +499,12 @@ def _published_fallback_mismatch(fitted: DenseDistributionalModel) -> DenseDistr
         (_published_plan_mismatch, "likelihood plan identifier"),
         (_published_lambda_mismatch, "smoothing provenance"),
         (_published_face_mismatch, "active-face provenance"),
-        (_published_solver_policy_mismatch, "observed terminal curvature"),
-        (_published_requested_source_mismatch, "observed terminal curvature"),
-        (_published_actual_source_mismatch, "observed terminal curvature"),
-        (_published_fallback_mismatch, "without fallback"),
     ],
     ids=[
         "accepted-result-identity",
         "plan",
         "lambda",
         "face",
-        "solver-policy",
-        "requested-source",
-        "actual-source",
-        "fallback",
     ],
 )
 def test_published_hessian_authenticates_every_terminal_authority(
@@ -494,6 +519,43 @@ def test_published_hessian_authenticates_every_terminal_authority(
 
     with pytest.raises(RuntimeError, match=message):
         posterior_covariance(altered, kind="corrected")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        _published_solver_policy_mismatch,
+        _published_requested_source_mismatch,
+        _published_fallback_mismatch,
+    ],
+    ids=["solver-policy", "requested-source", "fallback"],
+)
+def test_published_hessian_serves_any_observed_terminal_curvature(
+    published_case,
+    mutation: Callable[[DenseDistributionalModel], DenseDistributionalModel],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published, _ = published_case
+    calls = _install_derivative_spy(monkeypatch)
+
+    actual = posterior_covariance(mutation(published), kind="corrected")
+
+    assert calls == []
+    np.testing.assert_array_equal(actual, posterior_covariance(published, kind="corrected"))
+
+
+def test_published_hessian_is_not_used_for_a_substitute_curvature(
+    published_case,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published Hessian was formed with observed curvature, so a substitute replays."""
+    published, _ = published_case
+    calls = _install_derivative_spy(monkeypatch)
+
+    with pytest.warns(ConvergenceWarning, match="first-order correction"):
+        posterior_covariance(_published_actual_source_mismatch(published), kind="corrected")
+
+    assert calls == [True]
 
 
 def _forged_names(derivatives: LamlDerivatives) -> LamlDerivatives:
@@ -1014,3 +1076,122 @@ def test_published_hessian_still_passes_the_trust_gate(
 
     with pytest.raises(RuntimeError, match=message):
         posterior_covariance(published, kind="corrected")
+
+
+@dataclasses.dataclass(frozen=True)
+class _IndefiniteObservedGaussianLS:
+    """GaussianLS whose observed scale-scale curvature is negated at every state.
+
+    Fisher-stepped fits converge on the true mode, but the terminal observed
+    curvature is materially indefinite, so the fit accepts the expected
+    information instead.
+    """
+
+    inner: GaussianLS = GaussianLS()
+
+    @property
+    def parameters(self):
+        return self.inner.parameters
+
+    @property
+    def capabilities(self):
+        return self.inner.capabilities
+
+    @property
+    def default_prediction_name(self):
+        return self.inner.default_prediction_name
+
+    def to_config(self):
+        return {"type": "IndefiniteObservedGaussianLS"}
+
+    def bind_likelihood(self, y, weights, observation):
+        return self.inner.bind_likelihood(y, weights, observation)
+
+    def initialize(self, y, plan):
+        return self.inner.initialize(y, plan)
+
+    def evaluate_natural(self, y, theta, plan, *, derivative_order=2):
+        evaluation = self.inner.evaluate_natural(y, theta, plan, derivative_order=derivative_order)
+        if evaluation.hessian_packed is None:
+            return evaluation
+        hessian = np.array(evaluation.hessian_packed, dtype=np.float64)
+        hessian[:, 2] = -hessian[:, 2]
+        return dataclasses.replace(evaluation, hessian_packed=hessian)
+
+    def expected_information_natural(self, theta, plan):
+        return self.inner.expected_information_natural(theta, plan)
+
+    def default_prediction(self, theta):
+        return self.inner.default_prediction(theta)
+
+
+@pytest.fixture(scope="module")
+def fisher_fallback_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
+    """A stationary smoothing result whose terminal curvature fell back to Fisher.
+
+    The smoothing search differentiates observed curvature only, so a fit that
+    falls back never reaches a stationary stop on its own; here its Newton
+    endgame differentiates the accepted substitute, as the corrected
+    covariance does, so the search can certify stationarity.
+    """
+    from superglm.distributional.smoothing import newton as newton_module
+
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 320)
+    frame = pd.DataFrame({"x": x})
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0 + 0.5 * np.cos(1.8 * x)) * rng.standard_normal(
+        len(x)
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        endgame_derivatives = newton_module.laml_derivatives
+        patch.setattr(
+            newton_module,
+            "laml_derivatives",
+            lambda *args, **kwargs: endgame_derivatives(*args, **kwargs, curvature="terminal"),
+        )
+        fitted = (
+            model_from_templates(
+                family=_IndefiniteObservedGaussianLS(),
+                predictors=[
+                    Predictor("location", {"x": Spline("cr", k=7)}),
+                    Predictor("scale", {"x": Spline("cr", k=5)}),
+                ],
+                coefficient_curvature="fisher",
+            )
+            .fit_reml(frame, response, outer="efs+newton")
+            ._require_fitted()
+        )
+    assert fitted.smoothing is not None
+    assert fitted.smoothing.convergence_reason == "stationary"
+    assert fitted.result.terminal_curvature.actual_source == "fisher"
+    return fitted, frame
+
+
+def test_fisher_fallback_corrected_covariance_is_computed_and_disclosed(
+    fisher_fallback_case,
+) -> None:
+    """Kills the refusal: the parent commit raised "requires observed terminal curvature".
+
+    V and J already use the accepted Fisher curvature; V_rho is replayed with
+    it, so V + J V_rho J' is the corrected covariance of that substitute, and
+    the correction J V_rho J' is positive semidefinite and not zero.
+    """
+    fitted, frame = fisher_fallback_case
+    fixed = posterior_covariance(fitted, kind="fixed")
+    with pytest.warns(ConvergenceWarning, match="first-order correction") as record:
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert len(record) == 1
+    assert "expected (Fisher) information" in str(record[0].message)
+    correction = corrected - fixed
+    np.testing.assert_array_equal(corrected, corrected.T)
+    eigenvalues = np.linalg.eigvalsh(correction)
+    width = len(correction)
+    unit_roundoff = np.finfo(np.float64).eps / 2
+    assert eigenvalues[-1] > 0.0
+    # Forming V + R R' and subtracting V again rounds each entry at most twice.
+    assert eigenvalues[0] >= -4 * width * unit_roundoff * np.max(np.abs(corrected))
+
+    # Every public surface that resolves the corrected covariance discloses once per call.
+    with pytest.warns(ConvergenceWarning, match="first-order correction") as record:
+        term_effect(fitted, frame, "location", "x", covariance="corrected", n_points=5)
+    assert len(record) == 1

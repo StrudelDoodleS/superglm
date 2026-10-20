@@ -958,6 +958,8 @@ By default the suite holds smoothing parameters fixed. With
 stationary fit or performs one authenticated, on-demand replay from retained
 training rows. That replay is ephemeral. A compact fit without a published
 Hessian refuses, as does a fit whose terminal state cannot be authenticated.
+A fit whose final curvature fell back is corrected with the curvature it used,
+replayed from retained rows, and warns that it did.
 Term effects, plots and summaries validate their requested work before
 resolving the covariance, and resolve it at most once per top-level call. The
 simultaneous critical value is floored at the pointwise normal critical value,
