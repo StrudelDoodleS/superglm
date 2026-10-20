@@ -775,8 +775,13 @@ def optimize_direct_reml(
     # the model gets wrong (measured: a Poisson log lambda alternating
     # +-0.02 with its gradient contracting 0.87 a step, 34 iterations to
     # 1e-9 against 15 with the exact Hessian). After two such steps in a row
-    # the search takes the exact Hessian (Wood 2011, full Newton) where the
-    # family and link supply it.
+    # in the endgame (the objective settled to the square root of the
+    # tolerance, where a Newton step would square the error), each decreasing
+    # the objective no more than its quadratic model predicted (a larger
+    # decrease is not curvature but a moving mode, as a separated level
+    # drifting to its bound), and when that rate would not reach the score
+    # bar in the iterations left, the search takes the exact Hessian (Wood
+    # 2011, full Newton) where the family and link supply it.
     try:
         exact_hessian_available = not discrete and w_correction_order == 1
         if exact_hessian_available:
@@ -785,6 +790,7 @@ def optimize_direct_reml(
         exact_hessian_available = False
     previous_delta: NDArray | None = None
     previous_gradient_norm = np.inf
+    previous_model: tuple[NDArray, NDArray, NDArray, float] | None = None
     step_reversals = 0
 
     if verbose:
@@ -1571,10 +1577,19 @@ def optimize_direct_reml(
             delta *= max_newton_step / max_delta
         if exact_hessian_available:
             contraction = proj_grad_norm / previous_gradient_norm
+            excess_decrease = np.inf
+            if previous_model is not None:
+                rho_before, grad_before, hess_before, obj_before = previous_model
+                taken = rho_clipped - rho_before
+                predicted = -float(grad_before @ taken + 0.5 * taken @ hess_before @ taken)
+                excess_decrease = (obj_before - obj) - 2.0 * predicted
+            previous_model = (rho_clipped.copy(), grad.copy(), hess.copy(), obj)
             slow_reversal = (
                 previous_delta is not None
                 and bool(np.any(delta * previous_delta < 0.0))
                 and 0.5 < contraction < 1.0
+                and excess_decrease <= 0.0
+                and obj_change <= math.sqrt(_tol) * (1.0 + abs(obj))
             )
             step_reversals = step_reversals + 1 if slow_reversal else 0
             previous_delta = delta.copy()
