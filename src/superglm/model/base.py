@@ -403,15 +403,33 @@ def _score_unidentified_factor_smooth(
     beta_all: NDArray,
     *,
     population: bool,
+    group_term: dict[str, Any] | None = None,
 ) -> tuple[NDArray[np.floating], tuple]:
-    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``)."""
+    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``).
+
+    ``group_term`` is a main effect on the term's group (an
+    ``OrderedCategorical``, which the model accepts as redundant): its value
+    at each level is read as part of that level's line
+    (``level_constants``), so its share of a separated level's walk does not
+    reach the prediction.
+    """
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
     spec = term["spec"]
     _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
     _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
-    return spec._score_identified(left, right, beta, population=population)
+    constants = None
+    if group_term is not None:
+        import pandas as pd
+
+        levels = as_eager_frame(pd.DataFrame({group_term["name"]: list(spec._levels)}))
+        constants = np.asarray(
+            _score_prediction_term_exact(group_term, levels, beta_all), dtype=np.float64
+        ).ravel()
+    return spec._score_identified(
+        left, right, beta, population=population, level_constants=constants
+    )
 
 
 def prediction_centred_state(result) -> tuple[float, NDArray | None, float | None]:
@@ -690,8 +708,15 @@ def _predict_eta(
     for term in plan["interactions"]:
         spec = term["spec"]
         if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            group_term = next(
+                (feature for feature in plan["features"] if feature["name"] == spec.group), None
+            )
             contribution, named = _score_unidentified_factor_smooth(
-                term, frame, beta_all, population=random_effects == "population"
+                term,
+                frame,
+                beta_all,
+                population=random_effects == "population",
+                group_term=group_term,
             )
             eta += contribution
             if named:

@@ -1147,6 +1147,7 @@ class FactorSmooth:
         beta: NDArray,
         *,
         population: bool,
+        level_constants: NDArray | None = None,
     ) -> tuple[NDArray[np.float64], tuple]:
         """Score the term as predicted when some level stays out of the population (#432).
 
@@ -1155,17 +1156,43 @@ class FactorSmooth:
         ``_identified_blocks`` coefficients; an unseen
         level, and every row under ``population``, the population offset
         ``b(x)' c``.
+
+        ``level_constants`` is a redundant unpenalized term's contribution at
+        each level of the group (a SuperLSS predictor's ``Categorical`` on
+        it), which the term's own per-level constant aliases: a separated
+        level's walk splits between them however the solver chose.  The rule
+        then reads each level's line with its constant, ``beta_l + a_l 1``,
+        and the contribution returned is that level's predicted line less
+        ``a_l``, so the two terms together predict as the term would alone.
+        A level the rule leaves alone is scored from its own coefficients.
+        Under ``population`` a row of a known level gives ``a_l`` back too:
+        the population is the term's alone, as without the redundant term.
         """
         if population:
-            numeric, _ = self._validated_prediction_inputs(x, group)
+            numeric, group_values = self._validated_prediction_inputs(x, group)
             codes = np.full(len(numeric), -1, dtype=np.intp)
         else:
             numeric, codes = self.validate_prediction_values(x, group)
         basis = self.marginal_basis(numeric)
-        blocks, offset = self._identified_blocks(self._level_blocks(beta))
+        raw = self._level_blocks(beta)
+        if level_constants is None:
+            blocks, offset = self._identified_blocks(raw)
+        else:
+            constants = np.asarray(level_constants, dtype=np.float64)
+            constant = self._lowest_order_null_space(1)[:, 0]
+            folded, offset = self._identified_blocks(raw + np.outer(constants, constant))
+            moved = np.asarray(
+                sorted({*self._unidentified_directions(), *self._levels_at_population()}),
+                dtype=np.intp,
+            )
+            blocks = np.array(raw, copy=True)
+            blocks[moved] = folded[moved] - np.outer(constants[moved], constant)
         coefficients = blocks[np.maximum(codes, 0)]
         coefficients[codes < 0] = offset
         result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
+        if population and level_constants is not None:
+            known = pd.Index(self._levels).get_indexer(group_values)
+            result[known >= 0] -= np.asarray(level_constants, dtype=np.float64)[known[known >= 0]]
         unidentified = (
             *self._unidentified_levels,
             *getattr(self, "_weightless_levels", ()),

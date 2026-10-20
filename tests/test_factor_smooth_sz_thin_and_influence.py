@@ -1554,6 +1554,62 @@ def test_a_separated_sz_level_predicts_what_its_rows_identify(family, discrete) 
     assert len(named) == 1 and "g000" in str(named[0].message) and "g001" in str(named[0].message)
 
 
+def test_a_redundant_group_term_carries_no_separated_walk() -> None:
+    """A redundant main effect on the sz group does not price a separated level (sz_explosion round 2).
+
+    The models accept a term on the factor smooth's group as redundant, as
+    0.40 fitted it: SuperGLM an ``OrderedCategorical``, SuperLSS any term.
+    Its per-level values alias the sz term's level constants wherever it
+    leaves them unpenalized, so a separated level's walk splits between the
+    two as the solver chose, and the group term's share reached
+    ``predict``: on the trigger's 3,000 freMTPL2 rows, an
+    ``OrderedCategorical(basis=Polynomial(degree=2))`` on Region moved the
+    zero-claim regions by up to 0.99 on the log scale against the model
+    without it.  The rule reads the group term's value ``a_l`` at each level
+    as part of that level's line (``level_constants``), so trading any
+    sum-zero pattern ``p`` between the two, ``a + p`` against ``beta_l -
+    p_l 1``, which leaves every fitted value where it was, moves no
+    prediction of the pair: within the roundings of the rule, of reading
+    the constant through the natural map, and of adding and taking back
+    ``a``.  Mutation: the group term left out of the rule.
+    """
+    frame, y, _ = _trigger_shaped("poisson")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _trigger_model("poisson", False).fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    beta = np.asarray(model.result.beta[group.sl])
+    blocks = spec._level_blocks(beta)
+    K = len(spec._levels)
+    rng = np.random.default_rng(9)
+    constants = rng.normal(size=K)
+    pattern = rng.normal(size=K)
+    pattern -= pattern.mean()
+    one = spec._lowest_order_null_space(1)[:, 0]
+    traded = (blocks - np.outer(pattern, one))[:-1].ravel()
+    x = np.tile(np.linspace(0.0, 1.0, 21), K)
+    g = np.repeat(np.asarray(spec._levels, dtype=object), 21)
+    codes = np.repeat(np.arange(K), 21)
+
+    def pair(beta_free, level_constants):
+        values, _ = spec._score_identified(
+            x, g, beta_free, population=False, level_constants=level_constants
+        )
+        return level_constants[codes] + values
+
+    before = pair(beta, constants)
+    after = pair(traded, constants + pattern)
+    _, _, _, magnitude = _sz_rule_blocks(spec, blocks)
+    basis = np.abs(spec.marginal_basis(x))
+    reach = basis @ (magnitude + np.outer(np.abs(constants) + np.abs(pattern), np.abs(one))).T
+    reach = reach[np.arange(len(x)), codes] + np.abs(constants[codes]) + np.abs(pattern[codes])
+    count = (K + 8) * spec.k
+    bound = 2.0 * _gamma(count) * np.linalg.cond(spec._natural_map) * reach
+    assert {0, 1} <= set(spec._separated_levels)
+    assert np.all(np.abs(after - before) <= bound)
+
+
 def test_an_sz_term_whose_every_level_separates_predicts_without_its_walk() -> None:
     """Every level separated: the canonical population, which no walk moves (sz_explosion).
 
