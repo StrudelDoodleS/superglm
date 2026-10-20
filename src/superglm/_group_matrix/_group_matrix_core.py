@@ -1022,6 +1022,9 @@ class SplineCategoricalGroupMatrix:
         self.row_idx.flags.writeable = False
         self._sorted_rows = None
         self._row_lookup_certificate = None
+        if "_dense_level" not in slot_state:
+            # Saved before the deferred dense copy (0.18): undecided, as built.
+            self._dense_level = False
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.shape[0], dtype=np.float64)

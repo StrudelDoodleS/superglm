@@ -101,6 +101,24 @@ def _categorical_predict_labels(
     return x
 
 
+def _restore_parent_policy(state: dict, prefix: str, non_base: str, base: str) -> None:
+    """Give a derived term pickled before it carried its parent's policy the policy it scored with.
+
+    ``{prefix}_grouping`` arrived in 0.18 (#213), ``{prefix}_levels`` and
+    ``{prefix}_unseen`` in 0.26 (db2061d4).  Before them the term resolved
+    predict labels with no grouping (0.17 and earlier) or its stored grouping (0.18 to
+    0.25), against the levels its blocks were built on -- base and non-base --
+    and refused any other label.  These defaults reproduce exactly that:
+    ``_categorical_predict_labels`` with ``unseen="error"`` validates against
+    ``set(universe)``.
+    """
+    state.setdefault(f"{prefix}_grouping", None)
+    if f"{prefix}_levels" not in state:
+        built = state.get(base, "") != ""
+        state[f"{prefix}_levels"] = [state[base], *state.get(non_base, ())] if built else []
+    state.setdefault(f"{prefix}_unseen", "error")
+
+
 def interaction_spline_spec(
     spec,
     x: NDArray,
@@ -456,6 +474,10 @@ class SplineCategorical:
         # level -> (low, high): covariate bounds a level's curve is held at
         # past a separated range (``_hold_separated_levels``).
         self._level_clip: dict = {}
+
+    def __setstate__(self, state: dict) -> None:
+        _restore_parent_policy(state, "_cat", "_non_base", "_base_level")
+        self.__dict__.update(state)
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -1018,6 +1040,10 @@ class PolynomialCategorical:
         self._cat_levels: list = []
         self._cat_unseen: str = "error"
 
+    def __setstate__(self, state: dict) -> None:
+        _restore_parent_policy(state, "_cat", "_non_base", "_base_level")
+        self.__dict__.update(state)
+
     @property
     def parent_names(self) -> tuple[str, str]:
         return (self.poly_name, self.cat_name)
@@ -1158,6 +1184,10 @@ class NumericCategorical:
         self._cat_grouping = None
         self._cat_levels: list = []
         self._cat_unseen: str = "error"
+
+    def __setstate__(self, state: dict) -> None:
+        _restore_parent_policy(state, "_cat", "_non_base", "_base_level")
+        self.__dict__.update(state)
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -1310,6 +1340,11 @@ class CategoricalInteraction:
         self._cat2_levels: list = []
         self._cat1_unseen: str = "error"
         self._cat2_unseen: str = "error"
+
+    def __setstate__(self, state: dict) -> None:
+        _restore_parent_policy(state, "_cat1", "_non_base1", "_base1")
+        _restore_parent_policy(state, "_cat2", "_non_base2", "_base2")
+        self.__dict__.update(state)
 
     @property
     def parent_names(self) -> tuple[str, str]:

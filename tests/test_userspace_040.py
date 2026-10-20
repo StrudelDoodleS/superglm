@@ -9,6 +9,12 @@ release differential's compact subset (``benchmarks/release_differential.py
 run --subset`` on 542f5826): every case converged there, so each must converge
 here, at an objective and held-out results no worse than the harness's
 tolerances.
+
+``fixtures/saved_v0_17_0``, ``saved_v0_18_0`` and ``saved_v0_25_0`` hold small
+models those releases saved (the same script, run with each release): one per
+class and era of a term that gained predict-time state after its saver, which
+the 0.41 audit found failing at predict until ``__setstate__`` gave it the
+state its saver scored with.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import pytest
 from benchmarks import release_differential
 
 from superglm import SuperLSS
+from superglm._group_matrix import _group_matrix_centered
 
 from .test_saved_fs_models import _gamma, assert_predicts_as_saved
 
@@ -60,6 +67,61 @@ def test_a_model_saved_by_v0_40_0_loads_predicts_and_refits(name: str) -> None:
         assert str(model.summary())
         getattr(loaded, record["fit"])(frame, y)
     assert np.all(np.isfinite(np.asarray(loaded.predict(frame), dtype=np.float64)))
+
+
+LEGACY_RECORDS = [
+    (saver, path.stem)
+    for saver in ("0.17.0", "0.18.0", "0.25.0")
+    for path in sorted((FIXTURES.parent / f"saved_v{saver.replace('.', '_')}").glob("*.pkl"))
+]
+
+
+def test_the_older_savers_cover_every_term_that_gained_predict_state() -> None:
+    """A spline-by-category term saved before 0.18 lacks its parent's grouping
+    and, before 0.26, its level universe and unseen policy; an
+    OrderedCategorical saved before 0.19 lacks specials.  The numeric,
+    polynomial and categorical by-category terms share that restore
+    (``_restore_parent_policy``)."""
+    assert LEGACY_RECORDS == [
+        ("0.17.0", "spline_cat"),
+        ("0.18.0", "ordered_cat"),
+        ("0.25.0", "spline_cat"),
+    ]
+
+
+def _load_legacy(saver: str, name: str) -> dict:
+    with open(
+        FIXTURES.parent / f"saved_v{saver.replace('.', '_')}" / f"{name}.pkl", "rb"
+    ) as handle:
+        return pickle.load(handle)
+
+
+@pytest.mark.parametrize(("saver", "name"), LEGACY_RECORDS)
+def test_a_model_saved_by_an_older_release_predicts_as_it_did_then(
+    saver: str, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Predictions are the saver's own within two evaluations' rounding
+    (``assert_predicts_as_saved``); without the ``__setstate__`` defaults the
+    first predict raises ``AttributeError``.  The loaded model also summarises
+    and refits.
+
+    ``summary`` runs twice: as these small designs route it, and through the
+    raw-moment route a design of ``_MIN_MIXED_RAW_MOMENT_CELLS`` cells takes,
+    which forms each group's Gram (a spline-by-category block saved by 0.17
+    has no ``_dense_level``).
+    """
+    record = _load_legacy(saver, name)
+    assert record["version"] == saver
+    model, frame = record["model"], record["frame"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert_predicts_as_saved(model, frame, record["prediction"])
+        assert str(model.summary())
+        getattr(model, record["fit"])(frame, record["y"])
+        assert np.all(np.isfinite(np.asarray(model.predict(frame), dtype=np.float64)))
+
+        monkeypatch.setattr(_group_matrix_centered, "_MIN_MIXED_RAW_MOMENT_CELLS", 0)
+        assert str(_load_legacy(saver, name)["model"].summary())
 
 
 def _lss_eta_rounding(model: SuperLSS, frame) -> np.ndarray:

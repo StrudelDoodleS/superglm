@@ -20753,5 +20753,9 @@
     "tests/test_userspace_040.py::test_a_superlss_model_saved_by_v0_40_0_loads_and_predicts[lss_tweedie]": 0.042081538005732,
     "tests/test_userspace_040.py::test_a_superlss_model_saved_by_v0_40_0_loads_and_predicts[lss_two_piece]": 0.029145826993044466,
     "tests/test_userspace_040.py::test_the_fixture_set_covers_every_saved_route": 0.0022664110001642257,
-    "tests/test_userspace_040.py::test_the_pinned_outcomes_are_the_subset_and_all_converged_on_v0_40_0": 0.0010279680136591196
+    "tests/test_userspace_040.py::test_the_pinned_outcomes_are_the_subset_and_all_converged_on_v0_40_0": 0.0010279680136591196,
+    "tests/test_userspace_040.py::test_a_model_saved_by_an_older_release_predicts_as_it_did_then[0.17.0-spline_cat]": 0.49,
+    "tests/test_userspace_040.py::test_a_model_saved_by_an_older_release_predicts_as_it_did_then[0.25.0-spline_cat]": 0.41,
+    "tests/test_userspace_040.py::test_a_model_saved_by_an_older_release_predicts_as_it_did_then[0.18.0-ordered_cat]": 0.29,
+    "tests/test_userspace_040.py::test_the_older_savers_cover_every_term_that_gained_predict_state": 0.0
 }
