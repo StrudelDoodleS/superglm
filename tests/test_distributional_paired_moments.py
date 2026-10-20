@@ -14,19 +14,35 @@ from superglm.distributional.solver._global_moments import (
 )
 
 
+def _buffered(values):
+    """``values`` copied into consecutive views of one owned flat buffer."""
+    buffer = np.empty(sum(value.size for value in values))
+    views = batch_api._carve(buffer, [value.shape for value in values])
+    for view, value in zip(views, values, strict=True):
+        view[...] = value
+    return buffer, views
+
+
 def _fixture(mixed):
     rng = np.random.default_rng(519)
     sizes = tuple(3 + g % 5 for g in range(17))
     capacity = 11
     bins = np.zeros((len(sizes), capacity), dtype=np.intp)
-    ordinary = [np.ones((capacity, 2)), np.ones((capacity, 5))]
-    histograms = [(0, 1, 0, np.zeros((sizes[0], sizes[1])))] if mixed else []
-    directions = [(2, 1, 2, np.zeros((sizes[2], 5)))] if mixed else []
-    vectors = [
-        (g, g % 2, (g % 2) * 2, rng.normal(size=size), rng.normal(size=size))
-        for g, size in enumerate(sizes)
-    ]
+    panel_buffer, ordinary = _buffered([np.ones((capacity, 2)), np.ones((capacity, 5))])
+    matrices = [np.zeros((sizes[0], sizes[1])), np.zeros((sizes[2], 5))] if mixed else []
+    pairs = [(rng.normal(size=size), rng.normal(size=size)) for size in sizes]
+    output_buffer, outputs = _buffered(matrices + [out for pair in pairs for out in pair])
+    histograms = [(0, 1, 0, outputs[0])] if mixed else []
+    directions = [(2, 1, 2, outputs[1])] if mixed else []
+    paired = outputs[len(matrices) :]
+    vectors = [(g, g % 2, (g % 2) * 2, paired[2 * g], paired[2 * g + 1]) for g in range(len(sizes))]
+    assert vectors[-1][-1].base is output_buffer and ordinary[-1].base is panel_buffer
     return rng, sizes, ordinary, bins, histograms, directions, vectors
+
+
+def _buffers(ordinary, vectors):
+    """The owned buffers behind a fixture's views (the mutations edit only the first vector)."""
+    return {"output_buffer": vectors[-1][-1].base, "panel_buffer": ordinary[-1].base}
 
 
 def _build(fixture):
@@ -43,6 +59,7 @@ def _build(fixture):
         n_channels=3,
         vectors=vectors,
         n_score_channels=2,
+        **_buffers(ordinary, vectors),
     )
 
 
@@ -143,7 +160,7 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
         "score_channel",
         "curvature_channel",
         "dtype",
-        "view",
+        "outside",
         "readonly",
         "shape",
         "nonarray",
@@ -163,8 +180,8 @@ def test_paired_constructor_refuses_invalid_buffers_and_metadata(mutation):
         cc = 3
     elif mutation == "dtype":
         score_out = score_out.astype(np.float32)
-    elif mutation == "view":
-        mass_out = mass_out.view()
+    elif mutation == "outside":
+        mass_out = mass_out.copy()
     elif mutation == "readonly":
         mass_out.flags.writeable = False
     elif mutation == "shape":
@@ -193,6 +210,7 @@ def test_paired_targets_require_a_positive_integer_score_channel_count(n_score_c
             n_channels=3,
             vectors=vectors,
             n_score_channels=n_score_channels,
+            **_buffers(ordinary, vectors),
         )
 
 
@@ -200,7 +218,9 @@ def test_paired_targets_require_a_positive_integer_score_channel_count(n_score_c
 @pytest.mark.parametrize("output_kind", ["score", "mass", "histogram"])
 def test_both_derivative_inputs_refuse_overlap_with_every_output_kind(input_kind, output_kind):
     n = 3
-    score_out, mass_out, histogram = np.ones(n), np.ones(n), np.ones((n, 1))
+    output_buffer, (score_out, mass_out, histogram) = _buffered(
+        [np.ones(n), np.ones(n), np.ones((n, 1))]
+    )
     batch = batch_api._BatchedMomentReducers(
         [(0, 1, 0, histogram)],
         [],
@@ -210,6 +230,8 @@ def test_both_derivative_inputs_refuse_overlap_with_every_output_kind(input_kind
         n_channels=1,
         vectors=[(0, 0, 0, score_out, mass_out)],
         n_score_channels=1,
+        output_buffer=output_buffer,
+        panel_buffer=np.empty(0),
     )
     derivatives = {"score": np.ones((n, 1)), "curvature": np.ones((n, 1))}
     derivatives[input_kind] = {
@@ -289,7 +311,7 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
     batch = _build(fixture)
     exact, reserve = batch_api._batch_workspace_bytes(1, 1, 2, vector_count=17)
     assert sum(array.nbytes for array in batch.owned_arrays) == exact
-    assert len(batch.owned_arrays) == 2
+    assert len(batch.owned_arrays) == 3
     assert batch.metadata_reserve_bytes == reserve
     assert not batch.owned_arrays[0].flags.writeable
     _, _, ordinary, bins, histograms, directions, vectors = fixture

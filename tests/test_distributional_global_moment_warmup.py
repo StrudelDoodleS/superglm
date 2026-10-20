@@ -94,11 +94,13 @@ module._accumulate_batched, module._accumulate_batched_strided = (
 )
 
 def build():
-    score_out, mass_out = np.zeros(3), np.zeros(3)
+    outputs = np.zeros(6)
+    score_out, mass_out = module._carve(outputs, [(3,), (3,)])
     batch = module._BatchedMomentReducers(
         [], [], [], np.array([[0, -1, 1, 0]], dtype=np.intp),
         support_sizes=(3,), n_channels=3,
         vectors=[(0, 0, 0, score_out, mass_out)], n_score_channels=2,
+        output_buffer=outputs, panel_buffer=np.empty(0),
     )
     return batch, score_out, mass_out
 

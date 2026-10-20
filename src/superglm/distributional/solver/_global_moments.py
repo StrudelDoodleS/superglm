@@ -21,6 +21,7 @@ from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._batched_moments import (
     _batch_workspace_bytes,
     _BatchedMomentReducers,
+    _carve,
     _warmup_batched_moments,
 )
 from superglm.distributional.solver._ordinary_packing import (
@@ -579,22 +580,24 @@ class GlobalMomentPlan:
             support.solver_support.setflags(write=False)
         for predictor in self._predictors:
             predictor.ordinary_columns.setflags(write=False)
-        self._histograms = [
-            (g, h, channel, np.empty((self._supports[g].n_bins, self._supports[h].n_bins)))
-            for g, h, channel in hist_specs
-        ]
-        self._masses = [
-            (g, channel, np.empty(self._supports[g].n_bins)) for g, channel in mass_specs
-        ]
-        self._directions = [
-            (
-                g,
-                a,
-                channel,
-                np.empty((self._supports[g].n_bins, len(self._predictors[a].ordinary_columns))),
-            )
-            for g, a, channel in directional_specs
-        ]
+        # The native reducer's targets and the ordinary panels it reads are
+        # views of two owned flat buffers, which it addresses by offset.
+        n_bins = [support.n_bins for support in self._supports]
+        widths = [len(predictor.ordinary_columns) for predictor in self._predictors]
+        target_shapes = (
+            [(n_bins[g], n_bins[h]) for g, h, _ in hist_specs]
+            + [(n_bins[g],) for g, _ in mass_specs]
+            + [(n_bins[g], widths[a]) for g, a, _ in directional_specs]
+            + [(size,) for size in n_bins]
+        )
+        self._output_buffer = np.empty(sum(int(np.prod(shape)) for shape in target_shapes))
+        targets = iter(_carve(self._output_buffer, target_shapes))
+        self._histograms = [(g, h, channel, next(targets)) for g, h, channel in hist_specs]
+        self._masses = [(g, channel, next(targets)) for g, channel in mass_specs]
+        self._directions = [(g, a, channel, next(targets)) for g, a, channel in directional_specs]
+        self._support_scores = list(targets)
+        self._panel_buffer = np.empty(chunk_size * sum(widths))
+        self._ordinary = _carve(self._panel_buffer, [(chunk_size, width) for width in widths])
         self._ordinary_blocks = [
             (
                 a,
@@ -609,9 +612,7 @@ class GlobalMomentPlan:
             )
             for a, b, channel in ordinary_specs
         ]
-        self._support_scores = [np.empty(g.n_bins) for g in self._supports]
         self._ordinary_scores = [np.empty(len(p.ordinary_columns)) for p in self._predictors]
-        self._ordinary = [np.empty((chunk_size, len(p.ordinary_columns))) for p in self._predictors]
         self._weighted = np.empty(
             (chunk_size, max(len(p.ordinary_columns) for p in self._predictors))
         )
@@ -621,6 +622,8 @@ class GlobalMomentPlan:
             self._directions,
             self._ordinary,
             self._bins,
+            output_buffer=self._output_buffer,
+            panel_buffer=self._panel_buffer,
             support_sizes=tuple(support.n_bins for support in self._supports),
             n_channels=len(self._predictors) * (len(self._predictors) + 1) // 2,
             vectors=tuple(
@@ -641,8 +644,9 @@ class GlobalMomentPlan:
         )
         self._stats = dict(accounting)
         owned_arrays = (
-            self._accumulators
-            + self._ordinary
+            [x[-1] for x in self._ordinary_blocks]
+            + self._ordinary_scores
+            + [self._output_buffer, self._panel_buffer]
             + [self._weighted, self._bins, self._coefficients, self._penalty]
             + list(self._batched_moments.owned_arrays)
             + [p.ordinary_columns for p in self._predictors]
@@ -1010,6 +1014,7 @@ class GlobalMomentPlan:
         self._accumulators = []
         self._histograms = self._masses = self._directions = self._ordinary_blocks = []
         self._support_scores = self._ordinary_scores = self._ordinary = []
+        self._output_buffer = self._panel_buffer = None
         self._supports = self._predictors = ()
         self._weighted = self._bins = self._coefficients = self._penalty = None
         self._state = "closed"
