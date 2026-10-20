@@ -1016,9 +1016,8 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
         return
     try:
         on_qp = {name: kindless_as_ps(spec) for name, spec in shaped_qp.items()}
-    except (
-        ValueError
-    ):  # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands
+    except ValueError:
+        # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands.
         return
     for name, replacement in on_qp.items():
         reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
