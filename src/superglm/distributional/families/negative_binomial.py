@@ -232,6 +232,10 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     # the 20k sample unconverged at a smoothing cap where the 0.1 start
     # converges, so it stays off.
     information_scaled_start: ClassVar[bool] = False
+    # Every fit whose final curvature fell back used to refuse with this
+    # family's Poisson-boundary diagnosis, which checks the data itself; a
+    # Fisher fallback keeps disclosing it.
+    diagnoses_any_curvature_fallback: ClassVar[bool] = True
 
     def to_config(self) -> dict[str, object]:
         return {"type": "NegativeBinomialLS", "parameterization": "nb2_mean_theta"}

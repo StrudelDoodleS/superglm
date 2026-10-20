@@ -468,16 +468,24 @@ def _curvature_disclosures(
 ) -> tuple[str, ...]:
     """What a fit whose final curvature fell back discloses instead of refusing.
 
-    A projected (nearest semidefinite) curvature is always disclosed. Any
-    fallback, Fisher or projected, also carries the family's own diagnosis of
-    repeated curvature failure, which was raised as an error before fits
-    stopped refusing.
+    A projected (nearest semidefinite) curvature is always disclosed, and so
+    is the family's own diagnosis of repeated curvature failure where the fit
+    used to refuse: after the retry, no expected information was usable, so
+    the policy had to project. A Fisher fallback was accepted before fits
+    stopped refusing and carries no diagnosis, except for a family that
+    declares ``diagnoses_any_curvature_fallback``: one that gained expected
+    information after fits stopped refusing, so every fallback of it used to
+    refuse.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
-    if telemetry.actual_source == "nearest_semidefinite":
+    projected = telemetry.actual_source == "nearest_semidefinite"
+    if projected:
         messages.append(lss_semidefinite_curvature_message(type(family).__name__))
-    if telemetry.fallback_count > 0 and isinstance(family, FitFailureDiagnosingFamily):
+    diagnosed = projected or (
+        telemetry.fallback_count > 0 and getattr(family, "diagnoses_any_curvature_fallback", False)
+    )
+    if diagnosed and isinstance(family, FitFailureDiagnosingFamily):
         weights = likelihood_plan.weights
         # The diagnosis reads the supplied rows at their input positions.
         supplied = np.zeros(weights.provenance.original_count, dtype=np.float64)
