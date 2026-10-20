@@ -116,6 +116,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.links import Link, resolve_link
+from superglm.terms import resolve_label
 
 
 @dataclass(frozen=True)
@@ -607,15 +608,31 @@ class SuperLSS:
         self._training_frame: FrameLike | EagerFrame | None = None
 
     def __reduce__(self) -> tuple[Any, tuple[type[SuperLSS], bytes]]:
-        """Pickle (and so deepcopy and joblib) through the artifact pickler.
+        """Pickle (and so joblib) through the artifact pickler.
 
         The model keeps its configuration in read-only mappings, which the
-        standard pickler refuses; ``to_bytes``'s pickler carries them, so the
-        state goes through it whole and comes back as it was, fitted or not.
+        standard pickler refuses; ``to_bytes``'s pickler carries them. As in
+        ``to_bytes``, the training frame stays out: it is the caller's data,
+        every column and row of it, and a restored model takes ``X_train=``.
         """
         from superglm.distributional.serialization import pickle_state
 
-        return _restore_superlss, (type(self), pickle_state(self.__dict__))
+        state = {**self.__dict__, "_training_frame": None}
+        return _restore_superlss, (type(self), pickle_state(state))
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> SuperLSS:
+        """A deep copy that keeps the training frame, by reference as the model does."""
+        _, (cls, state) = self.__reduce__()
+        copied = _restore_superlss(cls, state)
+        copied._training_frame = self._training_frame
+        memo[id(self)] = copied
+        return copied
+
+    def __copy__(self) -> SuperLSS:
+        """A shallow copy, sharing every member, as ``copy.copy`` gives other objects."""
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        return copied
 
     @property
     def family(self) -> DistributionalFamily:
@@ -1266,9 +1283,11 @@ class SuperLSS:
         """One value per row of ``X`` from a column name or an array, and its label."""
         frame = as_eager_frame(X)
         if isinstance(covariate, str):
-            if covariate not in {str(column) for column in frame.columns}:
+            # A column found by its label or by its label's text, as terms are.
+            column = resolve_label(covariate, frame.columns)
+            if column not in frame.columns:
                 raise ValueError(f"covariate {covariate!r} is not a column of X")
-            return frame.column_array(covariate), covariate if name is None else str(name)
+            return frame.column_array(column), covariate if name is None else str(name)
         if _names_a_column(covariate, frame):
             # Another column label a frame takes, such as an integer.
             label = str(covariate) if name is None else str(name)

@@ -379,6 +379,10 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     # Diagnostics name a covariate by its column label.
     for check in (model.actual_expected, model.check):
         assert check(frame, y, 1) is not None
+    # The label's text names the column too, as it names the term.
+    by_text, by_label = (model.actual_expected(frame, y, key) for key in ("1", 1))
+    assert by_text.levels == by_label.levels
+    assert np.array_equal(by_text.ratio, by_label.ratio)
     assert model.plot_data("term", parameter="location", term=0) is not None
 
 
@@ -446,6 +450,19 @@ def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
     ):
         assert np.array_equal(restored.predict(frame), expected)
     assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame), expected)
+
+    # As to_bytes, a pickle leaves the training frame out (its parent pickled
+    # every row and column of it): a restored model takes X_train=. A deep
+    # copy keeps it, by reference; a shallow copy shares every member.
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored._training_frame is None
+    with pytest.raises(RuntimeError, match="X_train"):
+        restored.summary()
+    assert restored.summary(X_train=frame).equals(model.summary())
+    assert copy.deepcopy(model)._training_frame is model._training_frame
+    assert copy.deepcopy(model).summary().equals(model.summary())
+    shallow = copy.copy(model)
+    assert shallow._model is model._model and shallow._training_frame is model._training_frame
 
 
 def test_superlss_interactions_take_integer_column_labels():
@@ -536,3 +553,27 @@ def test_superlss_keeps_a_repeated_interaction_pair_with_a_warning(second):
     with pytest.warns(RedundantInteractionWarning, match="the second is redundant"):
         location = family.location(s("x"), s("z"), ti("x", "z"), other)
     assert len(location.template.interaction_order) == 2
+
+
+def test_superlss_saves_a_model_whose_labels_are_not_json_values():
+    """A date or NumPy integer label fits and survives to_bytes; the parent refused saving it."""
+    import datetime
+
+    from superglm import Categorical, GaussianLS, Numeric, Spline, SuperLSS
+    from superglm.terms import ti
+
+    rng = np.random.default_rng(31)
+    n = 400
+    day, code = datetime.date(2026, 1, 1), np.int64(7)
+    frame = pd.DataFrame(
+        {day: rng.uniform(size=n), code: rng.uniform(size=n), "g": rng.choice(list("abc"), n)}
+    )
+    y = np.sin(3.0 * frame[day].to_numpy()) + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location({day: Spline(k=6), code: Spline(k=6), "g": Categorical()}, ti(day, code)),
+        family.scale({code: Numeric()}),
+    ).fit_reml(frame, y)
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert np.array_equal(restored.predict(frame), model.predict(frame))
