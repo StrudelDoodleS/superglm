@@ -4738,3 +4738,27 @@ def test_rank_matched_comparison_restricts_the_higher_rank_fit_to_the_common_sub
     assert smoothing_objective.rank_matched_objectives(
         current, current_objective, current, current_objective + 1.0
     ) == (current_objective, current_objective + 1.0)
+
+
+def test_rank_matched_comparison_leaves_non_nested_discarded_spaces_unrestricted():
+    """Fits that discard different directions are compared as computed.
+
+    The current fit (rank 4 of 5) discards one direction; the trial (rank 3)
+    discards two others orthogonal to it. Restricted to the complement of the
+    trial's discarded pair, the current curvature still holds its own null
+    direction, so the restriction is rank deficient under the shared rank
+    policy and is not used. Whether a Cholesky factorization of it succeeds
+    depends on rounding; when it did, its log-determinant took about 18 off
+    the current objective.
+    """
+    rng = np.random.default_rng(5)
+    basis, _ = np.linalg.qr(rng.standard_normal((5, 5)))
+    current = _rank_fit(basis @ np.diag([3.0, 1.5, 0.7, 0.4, 0.0]) @ basis.T)
+    trial = _rank_fit(basis @ np.diag([3.0, 1.5, 0.0, 0.0, 0.9]) @ basis.T)
+    assert (current.terminal_rank.rank, trial.terminal_rank.rank) == (4, 3)
+
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    assert smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    ) == (current_objective, trial_objective)

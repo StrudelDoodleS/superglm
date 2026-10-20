@@ -22,6 +22,7 @@ from superglm.reml.penalty_algebra import (
     _PenaltyLogdetEvaluation,
     penalty_component_dense_matrix,
 )
+from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.types import LambdaPolicy
 
 
@@ -73,8 +74,11 @@ def _restricted_objective(
     The Laplace log-determinant is the pseudo-determinant of the penalized
     curvature over the subspace it retains. Restricting it to the orthogonal
     complement of another fit's discarded directions puts both fits on the
-    same retained subspace. ``None`` when that restriction is not positive
-    definite.
+    same retained subspace. That holds when the two fits' discarded spaces are
+    nested; when they are not, the restriction keeps a near-null direction of
+    its own. The shared rank policy, the one that decided both fits' ranks,
+    then finds it rank deficient, and ``None`` (compare as computed) is the
+    answer on every platform.
     """
     curvature = np.asarray(result.terminal_penalized_curvature, dtype=np.float64)
     basis = np.asarray(null_basis, dtype=np.float64)
@@ -85,11 +89,12 @@ def _restricted_objective(
     complement = complete[:, basis.shape[1] :]
     restricted = complement.T @ curvature @ complement
     try:
-        factor = np.linalg.cholesky(0.5 * (restricted + restricted.T))
-    except np.linalg.LinAlgError:
+        decomposition = decompose_gram(0.5 * (restricted + restricted.T), policy=SHARED_RANK_POLICY)
+    except ValueError:
         return None
-    log_det = 2.0 * float(np.sum(np.log(np.diag(factor))))
-    value = objective + 0.5 * (log_det - result.terminal_rank.log_pdet)
+    if decomposition.rank != complement.shape[1]:
+        return None
+    value = objective + 0.5 * (decomposition.log_pdet - result.terminal_rank.log_pdet)
     return value if math.isfinite(value) else None
 
 
