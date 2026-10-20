@@ -384,6 +384,17 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     assert by_text.levels == by_label.levels
     assert np.array_equal(by_text.ratio, by_label.ratio)
     assert model.plot_data("term", parameter="location", term=0) is not None
+    # A reference value is found by its column's label or text.
+    curves = model.risk_curves({1: "c", 2: 0.9}, 0)
+    assert curves.reference == {1: "c", 2: 0.9}
+    # A term to plot and a segmentation column are found the same way.
+    assert len(model.plot("location", terms=0, n_sim=16).axes) >= 1
+    assert len(model.plot("location", terms=[0, "0"], n_sim=16).axes) >= 1
+    by_label = model.portfolio(frame, n_draws=16, by=1, seed=5)
+    by_text = model.portfolio(frame, n_draws=16, by="1", seed=5)
+    assert by_label.by == by_text.by == "1"
+    assert by_label.by_segment.equals(by_text.by_segment)
+    assert list(by_label.by_segment["segment"]) == ["a", "b", "c"]
 
 
 def test_superlss_refuses_two_labels_with_one_text():

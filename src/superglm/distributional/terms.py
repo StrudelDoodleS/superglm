@@ -374,11 +374,12 @@ def _compiled_spec(fitted: Any, parameter: str, term: Hashable) -> Any:
     return specs.get(_feature_label(fitted, parameter, term))
 
 
-def _interaction_on(fitted: Any, parameter: str, feature: str) -> str | None:
+def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | None:
     """Name the predictor's first interaction built on ``feature``, if any."""
     compiled = _compiled_predictor(fitted, parameter).compiled
+    label = resolve_label(feature, compiled.specs)
     for name in compiled.interaction_order:
-        if feature in compiled.interaction_specs[name].parent_names:
+        if label in compiled.interaction_specs[name].parent_names:
             return name
     return None
 

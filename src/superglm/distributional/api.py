@@ -10,7 +10,7 @@ import math
 import operator
 import pickle
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -1919,7 +1919,7 @@ class SuperLSS:
     def plot(
         self,
         parameter: str | None = None,
-        terms: str | Sequence[str] | None = None,
+        terms: Hashable | Iterable[Hashable] | None = None,
         *,
         engine: str = "matplotlib",
         covariance: CovarianceKind = "fixed",
@@ -1943,7 +1943,13 @@ class SuperLSS:
             if parameter is None
             else (parameter,)
         )
-        asked = None if terms is None else (terms,) if isinstance(terms, str) else tuple(terms)
+        asked = (
+            None
+            if terms is None
+            else (str(terms),)
+            if isinstance(terms, str) or not isinstance(terms, Iterable)
+            else tuple(str(term) for term in terms)
+        )
         selections: dict[str, tuple[str, ...]] = {}
         for name in names:
             selected = self._parameter_terms(name, asked)
