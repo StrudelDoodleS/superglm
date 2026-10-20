@@ -387,6 +387,9 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     # A reference value is found by its column's label or text.
     curves = model.risk_curves({1: "c", 2: 0.9}, 0)
     assert curves.reference == {1: "c", 2: 0.9}
+    # So is the swept covariate.
+    by_text = model.risk_curves({1: "c", 2: 0.9}, "0")
+    assert by_text.reference == curves.reference
     # A term to plot and a segmentation column are found the same way.
     assert len(model.plot("location", terms=0, n_sim=16).axes) >= 1
     assert len(model.plot("location", terms=[0, "0"], n_sim=16).axes) >= 1
@@ -429,6 +432,16 @@ def test_superlss_refuses_two_labels_with_one_text():
     with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
         SuperLSS(family, family.location({0: Numeric()}), family.scale({"0": Numeric()}))
     SuperLSS(family, family.location({0: Numeric()}), family.scale({0: Numeric()}))
+    # A factor smooth reads its columns without terms of their own; they count too.
+    from superglm import FactorSmooth
+    from superglm.terms import interaction
+
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        SuperLSS(
+            family,
+            family.location(interaction(FactorSmooth(0, group="g"))),
+            family.scale({"0": Numeric()}),
+        )
 
 
 @pytest.mark.parametrize("basis", ["fs", "sz"])

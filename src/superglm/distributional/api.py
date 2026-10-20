@@ -358,8 +358,20 @@ def _owned_predictors(
         raise TypeError("predictors must contain only Predictor values")
     _predictor_error(parameters, values)
     # Results name a term by its label's text, and every predictor's terms share
-    # one namespace, so one text may not name two different labels.
-    check_column_texts(label for predictor in values for label in predictor.features)
+    # one namespace, so one text may not name two different labels. A factor
+    # smooth reads its two columns without terms of their own, so they count too.
+    check_column_texts(
+        label
+        for predictor in values
+        for label in (
+            *predictor.features,
+            *(
+                parent
+                for spec in predictor.interaction_specs.values()
+                for parent in spec.parent_names
+            ),
+        )
+    )
     for parameter, predictor in zip(parameters, values, strict=True):
         _validate_link_support(parameter, predictor)
     return _clone_predictor_templates(values)

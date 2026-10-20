@@ -362,6 +362,8 @@ def _sweep(
     """Build the one-covariate sweep frame every surface is evaluated on."""
     frame = as_eager_frame(X_train)
     columns = _model_columns(fitted)
+    # The covariate's label or its text names the column (a label need not be a str).
+    covariate = cast(Any, resolve_label(covariate, columns))
     if covariate not in columns:
         raise ValueError(f"the model does not use column {covariate!r}; it reads {list(columns)}")
     frame.require_columns(columns)
