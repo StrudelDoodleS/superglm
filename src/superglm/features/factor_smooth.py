@@ -27,6 +27,11 @@ SZ_POPULATION_PREDICTION = (
     "the population value: "
 )
 _MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
+# The values each enumerated option of ``FactorSmooth`` takes.
+BASES = ("fs", "sz")
+KINDS = ("ps",)
+UNSEEN_POLICIES = ("population", "error")
+MISSING_POLICIES = ("error",)
 
 
 def _combine_qr_r(
@@ -156,7 +161,7 @@ class FactorSmooth:
         *,
         group: str,
         basis: Literal["fs", "sz"] = "fs",
-        kind: str = "ps",
+        kind: Literal["ps"] = "ps",
         k: int = 6,
         m: int = 2,
         levels=None,
@@ -174,9 +179,9 @@ class FactorSmooth:
             raise ValueError("group must be a non-empty column name")
         if variable == group:
             raise ValueError("variable and group must name different columns")
-        if basis not in ("fs", "sz"):
+        if basis not in BASES:
             raise ValueError(f"basis must be 'fs' or 'sz', got {basis!r}")
-        if kind != "ps":
+        if kind not in KINDS:
             raise NotImplementedError("FactorSmooth currently supports only kind='ps'.")
         if isinstance(k, bool) or not isinstance(k, int):
             raise TypeError("k must be an integer")
@@ -186,9 +191,9 @@ class FactorSmooth:
             raise TypeError("m must be an integer")
         if not 1 <= m < k:
             raise ValueError(f"m must be between 1 and k - 1, got m={m}, k={k}")
-        if unseen not in ("population", "error"):
+        if unseen not in UNSEEN_POLICIES:
             raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
-        if missing != "error":
+        if missing not in MISSING_POLICIES:
             raise ValueError(f"missing must be 'error', got {missing!r}")
         if name is not None and (not isinstance(name, str) or not name):
             raise ValueError("name must be a non-empty string when supplied")

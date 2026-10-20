@@ -188,17 +188,17 @@ def term(column: Hashable, spec: FeatureSpec) -> BoundTerm:
 def s(
     column: Hashable,
     *,
-    kind: str = "cr",
+    kind: Literal["cr", "ps", "bs", "ns", "cr_cardinal"] = "cr",
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
-    knot_strategy: str = "uniform",
-    penalty: str = "ssp",
+    knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"] = "uniform",
+    penalty: Literal["ssp", "none"] = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
     n_bins: int | None = None,
-    extrapolation: str = "clip",
+    extrapolation: Literal["clip", "extend", "error"] = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
     constraint: ConstraintSpec | None = None,
@@ -216,7 +216,7 @@ def s(
     ----------
     column : hashable
         Label of the numeric input column, usually its name.
-    kind : str, default="cr"
+    kind : {"cr", "ps", "bs", "ns", "cr_cardinal"}, default="cr"
         Spline basis. Common choices are ``"cr"`` for cubic regression splines
         and ``"ps"`` for P-splines. See ``Spline`` for the other bases.
     k : int, optional
@@ -227,8 +227,10 @@ def s(
     degree : int, default=3
         Polynomial degree for bases that support this option. Cubic
         regression splines remain cubic.
-    knot_strategy : str, default="uniform"
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, \
+default="uniform"
         Knot-placement rule. ``"uniform"`` spaces knots evenly;
+        ``"quantile"`` places them at quantiles of the distinct values,
         ``"quantile_rows"`` follows the training data and
         ``"quantile_tempered"`` tempers that concentration.
     penalty : {"ssp", "none"}, default="ssp"
@@ -310,10 +312,10 @@ def s(
 def cat(
     column: Hashable,
     *,
-    base: str = "most_exposed",
+    base: Literal["most_exposed", "first"] | str = "most_exposed",
     grouping: LevelGrouping | None = None,
     levels: Any = None,
-    unseen: str = "error",
+    unseen: Literal["error", "base"] | str = "error",
 ) -> BoundTerm:
     """Declare a categorical effect with a reference level.
 
@@ -325,7 +327,7 @@ def cat(
     ----------
     column : hashable
         Label of the categorical input column, usually its name.
-    base : str, default="most_exposed"
+    base : {"most_exposed", "first"} or str, default="most_exposed"
         Reference level. Use the level with the greatest total sample weight,
         ``"first"`` for the first level, or a specific level name.
     grouping : LevelGrouping, optional
@@ -333,7 +335,7 @@ def cat(
     levels : sequence, data column or categorical dtype, optional
         Declare the allowed input levels. With ``grouping``, these are the
         original levels before grouping.
-    unseen : str, default="error"
+    unseen : {"error", "base"} or str, default="error"
         Prediction policy for levels outside the fitted level universe.
         ``"base"`` uses the reference level and emits a warning. The label of
         a group of ``grouping`` gives them that group's effect, also with a

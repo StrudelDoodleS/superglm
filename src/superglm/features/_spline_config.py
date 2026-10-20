@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -11,6 +11,19 @@ from numpy.typing import ArrayLike, NDArray
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.constraint import ConstraintSpec
 from superglm.types import LambdaPolicy
+
+# The enumerated spline options as types, for the private helpers between the
+# public signatures (which spell each ``Literal`` out) and the spec.
+type SplineKindName = Literal["cr", "ps", "bs", "ns", "cr_cardinal"]
+type KnotStrategyName = Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"]
+type PenaltyName = Literal["ssp", "none"]
+type ExtrapolationName = Literal["clip", "extend", "error"]
+
+# The ``extrapolation=`` policies a spline takes.
+EXTRAPOLATIONS = ("clip", "extend", "error")
+# The ``penalty=`` values a spline reads: "ssp" reparametrizes the basis
+# (``dm_builder``), and any other value builds it without; nothing refuses one.
+PENALTIES = ("ssp", "none")
 
 
 def _iter_knots(knots: Any) -> list[Any]:
@@ -148,7 +161,7 @@ def initialize_spec(
     spec.penalty = penalty
     spec.discrete = discrete
     spec.n_bins = n_bins
-    if extrapolation not in {"clip", "extend", "error"}:
+    if extrapolation not in EXTRAPOLATIONS:
         raise ValueError(
             f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
         )

@@ -8,7 +8,7 @@ penalty controls smoothness, not the knot count.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -140,12 +140,12 @@ class _SplineBase:
     # runtime lookups are unchanged.
     n_knots: int
     degree: int
-    knot_strategy: str
+    knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"]
     knot_alpha: float
-    penalty: str
+    penalty: Literal["ssp", "none"]
     discrete: bool | None
     n_bins: int | None
-    extrapolation: str
+    extrapolation: Literal["clip", "extend", "error"]
     select: bool
     constraint_kind: str | None
     constraint_mode: str
@@ -187,12 +187,14 @@ class _SplineBase:
         self,
         n_knots: int = 10,
         degree: int = 3,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         select: bool = False,
@@ -627,13 +629,15 @@ class PSpline(_BSplineBase):
         self,
         n_knots: int = 10,
         degree: int = 3,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         constraint=None,
@@ -738,13 +742,15 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
         self,
         n_knots: int = 10,
         degree: int = 3,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         constraint=None,
@@ -805,13 +811,15 @@ class NaturalSpline(_SplineBase):
         self,
         n_knots: int = 10,
         degree: int = 3,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         m: int | tuple[int, ...] = 2,
@@ -893,13 +901,15 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
     def __init__(
         self,
         n_knots: int = 10,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         constraint=None,
@@ -1019,13 +1029,15 @@ class CardinalCRSpline(_SplineBase):
     def __init__(
         self,
         n_knots: int = 10,
-        knot_strategy: str = "uniform",
-        penalty: str = "ssp",
+        knot_strategy: Literal[
+            "uniform", "quantile", "quantile_rows", "quantile_tempered"
+        ] = "uniform",
+        penalty: Literal["ssp", "none"] = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         boundary: tuple[float, float] | None = None,
         knot_alpha: float = 0.2,
         constraint=None,
@@ -1135,18 +1147,18 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "cr",
+    kind: Literal["cr", "ps", "bs", "ns", "cr_cardinal"] = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
-    knot_strategy: str = "uniform",
-    penalty: str = "ssp",
+    knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"] = "uniform",
+    penalty: Literal["ssp", "none"] = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
     n_bins: int | None = None,
-    extrapolation: str = "clip",
+    extrapolation: Literal["clip", "extend", "error"] = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
     constraint=None,

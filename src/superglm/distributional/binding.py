@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MethodType
-from typing import cast
+from typing import Literal, cast
 
 from superglm.distributional.family import DistributionalFamily, validate_family
 from superglm.distributional.predictor import Predictor
@@ -72,7 +72,19 @@ def bind_predictor(
     name: str,
     *terms: TermInput,
     intercept: bool = True,
-    link: str | Link | None = None,
+    link: Literal[
+        "log",
+        "identity",
+        "logit",
+        "probit",
+        "cloglog",
+        "cauchit",
+        "inverse",
+        "inverse_squared",
+        "sqrt",
+    ]
+    | Link
+    | None = None,
 ) -> BoundPredictor:
     """Declare a predictor by parameter name, including for custom families.
 

@@ -17,12 +17,16 @@ import dataclasses
 import re
 import warnings
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
 
-from superglm.features._spline_config import configure_knots, initialize_runtime_state
+from superglm.features._spline_config import (
+    SplineKindName,
+    configure_knots,
+    initialize_runtime_state,
+)
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -700,7 +704,7 @@ def rebased_spline(
         constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
     orders = tuple(source._m_orders)
     spline = Spline(
-        kind=kind,
+        kind=cast(SplineKindName, kind),
         n_knots=source.n_knots,
         knots=stated,
         degree=3 if kind in CUBIC_KINDS else source.degree if degree is None else degree,

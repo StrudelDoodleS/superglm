@@ -10,6 +10,12 @@ from numpy.typing import ArrayLike
 from superglm.types import LambdaPolicy
 
 if TYPE_CHECKING:
+    from superglm.features._spline_config import (
+        ExtrapolationName,
+        KnotStrategyName,
+        PenaltyName,
+        SplineKindName,
+    )
     from superglm.features._spline_ranges import PolynomialRange
     from superglm.features.spline import _SplineBase
 
@@ -42,18 +48,18 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 
 
 def Spline(
-    kind: str = "cr",
+    kind: SplineKindName = "cr",
     *,
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
-    knot_strategy: str = "uniform",
-    penalty: str = "ssp",
+    knot_strategy: KnotStrategyName = "uniform",
+    penalty: PenaltyName = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
     n_bins: int | None = None,
-    extrapolation: str = "clip",
+    extrapolation: ExtrapolationName = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
     constraint=None,

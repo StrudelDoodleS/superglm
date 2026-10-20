@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from superglm.distributional.binding import BoundPredictor
@@ -17,7 +17,22 @@ class TweediePredictors:
     _predictor_helpers = {"mean": "mu", "dispersion": "phi", "power": "p"}
 
     def mu(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the Tweedie conditional-mean predictor.
 
@@ -41,7 +56,22 @@ class TweediePredictors:
         )
 
     def phi(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the Tweedie dispersion predictor.
 
@@ -65,7 +95,22 @@ class TweediePredictors:
         )
 
     def p(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the Tweedie variance-power predictor.
 
@@ -95,7 +140,22 @@ class MeanPredictor:
     _predictor_helpers = {"mean": "mean"}
 
     def mean(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare a predictor for the conditional response mean.
 
@@ -125,7 +185,22 @@ class LocationPredictor:
     _predictor_helpers = {"location": "location"}
 
     def location(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the family's location predictor.
 
@@ -157,7 +232,22 @@ class ScalePredictor:
     _predictor_helpers = {"scale": "scale"}
 
     def scale(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the family's scale predictor.
 
@@ -188,7 +278,22 @@ class ThetaPredictor:
     _predictor_helpers = {"theta": "theta"}
 
     def theta(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the negative-binomial size predictor.
 
@@ -217,7 +322,22 @@ class ShapePredictor:
     _predictor_helpers = {"shape": "shape"}
 
     def shape(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the family's shape predictor.
 
@@ -246,7 +366,22 @@ class SkewPredictor:
     _predictor_helpers = {"skew": "skew"}
 
     def skew(
-        self, *terms: TermInput, intercept: bool = True, link: str | Link | None = None
+        self,
+        *terms: TermInput,
+        intercept: bool = True,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare the two-piece family's asymmetry predictor.
 
