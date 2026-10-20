@@ -434,6 +434,50 @@ def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray
     return bool(program.status == 0 and certified(np.asarray(program.x, dtype=np.float64)))
 
 
+def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray) -> NDArray:
+    """``H`` ``(q, r)``, orthonormal: the span of a separated level's directions of recession.
+
+    ``sign``, ``natural``, ``null_space`` and ``free`` as ``_recedes``, which
+    found a direction.  The directions form the polyhedral cone ``C = {h : D h
+    >= 0}``, ``D`` the boundary rows' ``sign * b(x)' N_P Z``.  Its span is
+    ``{h : D_I h = 0}``, ``I`` its implicit equalities: the rows every
+    direction holds at zero.  The other rows are the separated ones, at the
+    boundary in the limiting conditional model, whose likelihood is flat along
+    the span: no coefficient there has a finite estimate, and the fit's
+    coordinate along it is where its walk stopped (Geyer 2009, section 3;
+    Correia, Guimaraes & Zylkin 2021, Proposition 3, whose maximal certificate
+    of separation this is).  One linear program finds a direction in ``C``'s
+    relative interior: maximize ``sum t`` under ``t <= D h``, ``0 <= t <= 1``,
+    ``h`` free.  A relative-interior direction, scaled, clears every row
+    outside ``I`` at once, so the optimum takes ``t = 1`` on exactly those and
+    ``t = 0`` on ``I``.  With one free direction the cone is a ray, spanning it;
+    when the program cannot be solved the span is the whole of ``Z``.
+    """
+    q = free.shape[1]
+    if q == 1:
+        return np.ones((1, 1))
+    from scipy.optimize import linprog
+
+    D = sign[:, None] * (natural @ null_space @ free)
+    n = len(D)
+    program = linprog(
+        np.concatenate([np.zeros(q), -np.ones(n)]),
+        A_ub=np.hstack([-D, np.eye(n)]),
+        b_ub=np.zeros(n),
+        bounds=[(None, None)] * q + [(0.0, 1.0)] * n,
+        method="highs",
+    )
+    if program.status != 0:
+        return np.eye(q)
+    implicit = D[np.asarray(program.x, dtype=np.float64)[q:] < 0.5]
+    if not len(implicit):
+        return np.eye(q)
+    _, values, right = np.linalg.svd(implicit, full_matrices=True)
+    # the rank rule of ``numpy.linalg.matrix_rank``: ``max(n, q) eps`` of the largest value
+    rank = int(np.sum(values > 2.0 * max(implicit.shape) * _rounding(1) * values[0]))
+    return np.ascontiguousarray(right[rank:].T)
+
+
 def separated_factor_smooth_levels(
     dominant: Any,
     null_space: NDArray,
@@ -441,7 +485,23 @@ def separated_factor_smooth_levels(
     y: NDArray,
     boundaries: tuple[str, ...],
 ) -> tuple[int, ...]:
-    """The ``sz`` levels whose unpenalized line separates the response.
+    """The ``sz`` levels whose unpenalized line separates the response (``separated_factor_smooth_spans``)."""
+    return tuple(separated_factor_smooth_spans(dominant, null_space, prior_weights, y, boundaries))
+
+
+def separated_factor_smooth_spans(
+    dominant: Any,
+    null_space: NDArray,
+    prior_weights: NDArray | None,
+    y: NDArray,
+    boundaries: tuple[str, ...],
+) -> dict[int, NDArray]:
+    """The ``sz`` levels whose unpenalized line separates the response, each with its span.
+
+    Returns ``{level: S}``, in level order, with ``S`` ``(k, r)`` an
+    orthonormal basis, in the natural coordinates, of the span of the level's
+    directions of recession (``_recession_span``): the part of its line with
+    no finite estimate.
 
     An ``sz`` level's deviation keeps its polynomial part ``b(x)' N_P f``
     unpenalized, and moving it with every level by ``-1 / K`` and the main
@@ -456,7 +516,9 @@ def separated_factor_smooth_levels(
     boundary separates along the constant when the basis reproduces it
     (``b(x)' N_P v = raw(x)' w`` with ``w`` the unit vector, a partition of
     unity, positive on every row): one sparse product for every such level.
-    Any other candidate is decided on its own rows (``_recedes``).
+    Any other candidate is decided on its own rows (``_recedes``).  Along
+    the constant every row of a one-sided level clears zero, so its directions
+    span all of ``N_P``.
     """
     from superglm.solvers._structured.layout import (
         first_distinct_level_rows,
@@ -465,7 +527,7 @@ def separated_factor_smooth_levels(
 
     nullity = null_space.shape[1]
     if not boundaries or not nullity:
-        return ()
+        return {}
     n_levels = int(dominant.n_levels)
     codes = np.asarray(dominant.codes, dtype=np.intp)
     weights = (
@@ -481,8 +543,9 @@ def separated_factor_smooth_levels(
     n_upper = np.bincount(codes[upper], minlength=n_levels)
     candidates = (count < nullity) & ((n_lower > 0) | (n_upper > 0))
     if not np.any(candidates):
-        return ()
+        return {}
     separated = np.zeros(n_levels, dtype=bool)
+    spans: dict[int, NDArray] = {}
 
     one_sided = candidates & (count == 0) & ((n_lower == 0) | (n_upper == 0))
     if np.any(one_sided):
@@ -538,7 +601,10 @@ def separated_factor_smooth_levels(
             edge = side != 0.0
             if np.any(edge) and _recedes(side[edge], unique[edge], null_space, free):
                 separated[level] = True
-    return tuple(int(level) for level in np.flatnonzero(separated))
+                span = _recession_span(side[edge], unique[edge], null_space, free)
+                spans[int(level)] = np.ascontiguousarray(null_space @ free @ span)
+    whole = np.ascontiguousarray(null_space)
+    return {int(level): spans.get(int(level), whole) for level in np.flatnonzero(separated)}
 
 
 #: What a term whose ``sz`` lines are unpenalized can do about it (#444): the
@@ -557,7 +623,9 @@ def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int)
         f"unpenalized line that separates the response: {_format_labels(labels)}. The "
         "likelihood keeps increasing along each such line, so their fitted values walk to "
         "the response boundary for as long as the fit runs. They are left out of the "
-        f"population curve, the mean of the levels the data identify. {SZ_SELECT_REMEDY} "
+        "population curve, the mean of the levels the data identify, and predict follows "
+        "the population curve along each such line, where the fit has no finite estimate. "
+        f"{SZ_SELECT_REMEDY} "
         "separation='ignore' silences this warning."
     )
 

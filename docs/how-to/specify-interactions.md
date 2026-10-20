@@ -227,7 +227,8 @@ and `relativities()` report on the same footing: each level's curve is its
 deviation from the population curve, and the global curve is the population
 curve.
 
-If every level is in this position, no level identifies the population curve.
+If every level is in this position, or has a line that separates the response
+(next section), no level identifies the population curve.
 Its unpenalized part is then set by a convention: each level's unidentified
 part is zero. Away from the levels' own values, the curves still depend on
 where the fit landed along the global smooth's unpenalized curve, wherever
@@ -251,6 +252,15 @@ move toward zero (or one) for as long as the fit runs.
   refuse the fit for this case.
 - The population curve leaves these levels out of its average, so it does not
   follow their lines.
+- `predict` does not follow those lines either: where the fit stopped along a
+  line says nothing about the data, and away from the level's own rows the
+  line can rise as steeply as it falls there.
+- Along that line the level follows the shape of the population curve, and it
+  keeps what its other rows identify. A level whose claims all sit at one value
+  keeps its fitted value there.
+- A level whose every row is on the boundary, such as a level with no claims,
+  is predicted at the population curve.
+- Each call to `predict` that meets such a level warns once and names it.
 
 To give such levels finite estimates, pass `select=True` to the term, or use
 `basis="fs"`.

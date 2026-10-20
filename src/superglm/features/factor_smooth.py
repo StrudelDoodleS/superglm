@@ -26,8 +26,10 @@ _MARGINAL_QR_CHUNK_ROWS = 65_536
 SZ_POPULATION_PREDICTION = (
     "FactorSmooth basis='sz' levels whose rows hold fewer distinct x values than the "
     "penalty's null space keep the curve their rows identify and follow the population "
-    "curve's shape where their rows say nothing; levels without weight are predicted at "
-    "the population value: "
+    "curve's shape where their rows say nothing; levels whose unpenalized line separates "
+    "the response follow the population curve along that line, which has no finite "
+    "estimate; levels without weight, or whose every row separates, are predicted at the "
+    "population value: "
 )
 _MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
 # Warnings about a declaration point at the first frame outside the package.
@@ -346,6 +348,8 @@ class FactorSmooth:
         self._free_directions: tuple[NDArray, ...] | None = None
         self._weightless_levels: tuple[int, ...] = ()
         self._separated_levels: tuple[int, ...] = ()
+        # Each separated level's span of directions of recession, natural basis.
+        self._separated_directions: tuple[NDArray, ...] = ()
         self._population_null_space: NDArray | None = None
 
     @property
@@ -812,8 +816,9 @@ class FactorSmooth:
         (``layout.sz_level_identification``).  A level whose unpenalized line
         separates the response (``boundaries``, the family's response
         boundaries reached at infinite ``eta``) has no finite line
-        (``diagnostics.separation.separated_factor_smooth_levels``).  Both
-        stay out of the population curve (``_population_map``).
+        (``diagnostics.separation.separated_factor_smooth_spans``), along the
+        span of its directions of recession, recorded with it.  Both stay out
+        of the population curve (``_population_map``).
 
         A design whose lines carry their ``"null"`` penalty (``select=True``,
         #444) has neither: the penalty bounds every line and identifies every
@@ -821,13 +826,14 @@ class FactorSmooth:
         without weight is recorded there; it has no data term, so it is
         predicted at the population curve.
         """
-        from superglm.diagnostics.separation import separated_factor_smooth_levels
+        from superglm.diagnostics.separation import separated_factor_smooth_spans
         from superglm.solvers._structured.layout import sz_level_identification
 
         self._unidentified_levels = ()
         self._free_directions = ()
         self._weightless_levels = ()
         self._separated_levels = ()
+        self._separated_directions = ()
         self._population_null_space = None
         if self.basis != "sz":
             return ()
@@ -846,15 +852,17 @@ class FactorSmooth:
                 self._population_null_space = np.eye(self.k)[:, np.diag(lines) == 1.0]
             return ()
         rows = sz_level_identification(design, prior_weights)
-        separated: tuple[int, ...] = ()
+        spans: dict[int, NDArray] = {}
         if response is not None and boundaries:
-            separated = separated_factor_smooth_levels(
+            spans = separated_factor_smooth_spans(
                 design, rows.null_space, prior_weights, response, boundaries
             )
+        separated = tuple(spans)
         self._unidentified_levels = rows.thin
         self._free_directions = rows.free
         self._weightless_levels = rows.weightless
         self._separated_levels = separated
+        self._separated_directions = tuple(spans.values())
         self._population_null_space = rows.null_space if (rows.thin or separated) else None
         return separated
 
@@ -898,20 +906,53 @@ class FactorSmooth:
 
         ``"main"`` (no level left out: the main effect, as the sum-to-zero
         constraint makes it), ``"mean"`` (the mean of the levels the data
-        identify), ``"separated_mean"`` (every level the data identify
-        separates: their mean, which follows how far the fit walked their
-        lines) or ``"canonical"`` (every level thin).  A term that selects
-        its lines (``select=True``, #444) penalizes them instead: always
-        ``"main"``.
+        identify) or ``"canonical"`` (every level thin or separated).  A term
+        that selects its lines (``select=True``, #444) penalizes them
+        instead: always ``"main"``.
         """
         excluded = set(self._unidentified_levels) | set(self._separated_levels)
         if not excluded:
             return "main"
         if len(excluded) < len(self._levels):
             return "mean"
-        if len(self._unidentified_levels) < len(self._levels):
-            return "separated_mean"
         return "canonical"
+
+    def _unidentified_directions(self) -> dict[int, NDArray]:
+        """Each level left out of the population and the directions of its line the data leave free.
+
+        A thin level's ``_free_directions``, which its rows do not see; a
+        separated level's span of directions of recession, along which its
+        line has no finite estimate (``_record_unidentified_levels``).  That
+        span holds a thin level's free directions, which every one of its
+        rows holds at zero, so it replaces them for a level that is both.  A
+        model saved before the spans were recorded takes all of ``N_P`` for
+        its separated levels.
+        """
+        directions = dict(zip(self._unidentified_levels, self._free_directions, strict=True))
+        separated = tuple(getattr(self, "_separated_levels", ()))
+        spans = tuple(getattr(self, "_separated_directions", ()))
+        if len(spans) != len(separated):
+            spans = (np.asarray(self._population_null_space, dtype=np.float64),) * len(separated)
+        directions.update(zip(separated, spans, strict=True))
+        return directions
+
+    def _levels_at_population(self) -> tuple[int, ...]:
+        """The levels predicted at the population value: without weight, or with every row separated.
+
+        A separated level whose directions of recession span all of ``N_P``
+        has every one of its rows at the response boundary in the limiting
+        conditional model (``separated_factor_smooth_spans``), so that model
+        holds none of its rows, as for a level without weight: its wiggle is
+        the penalty's alone.
+        """
+        weightless = tuple(getattr(self, "_weightless_levels", ()))
+        separated = tuple(getattr(self, "_separated_levels", ()))
+        if not separated:
+            return weightless
+        nullity = np.asarray(self._population_null_space).shape[1]
+        directions = self._unidentified_directions()
+        whole = tuple(level for level in separated if directions[level].shape[1] == nullity)
+        return weightless + tuple(level for level in whole if level not in weightless)
 
     def _population_map(self) -> tuple[NDArray, NDArray] | None:
         """``(levels, V)``: the population offset ``c = sum_i V_i beta_{levels_i}`` (natural basis).
@@ -933,16 +974,16 @@ class FactorSmooth:
         predicts the population for a level it did not see.  ``V`` is one
         ``(k, k)`` matrix shared by the levels, or one per level.
 
-        With every level separated or thin there is no such mean.  If some
-        level is not thin (every one of those separates) the mean is over
-        them, and it follows the separated lines (a warning at fit, which
-        names ``select=True``).  If every
-        level is thin the population is the canonical point of the family,
-        where each level's free part is zero, ``Pi_t (beta_t + s_t - S / K)
-        = 0`` (``Pi_t`` the projector on ``_free_directions[t]``, ``S = sum_t
-        s_t``): ``S = -(I - M / K)^+ sum_t Pi_t beta_t`` with ``M = sum_t
-        Pi_t``, unique when no direction of ``N_P`` is free in every level,
-        and ``c = S / K``.  ``None`` when no level is left out.
+        A separated level's line walks the same family along the span of its
+        directions of recession (``_unidentified_directions``).  With every
+        level separated or thin there is no such mean, and the population is
+        the canonical point of the family, where each level's free part is
+        zero, ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the projector on
+        ``_unidentified_directions()[t]``, ``S = sum_t s_t``): ``S = -(I - M /
+        K)^+ sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no
+        direction of ``N_P`` is free in every level, and ``c = S / K``.  It
+        does not follow how far the fit walked a separated line.  ``None``
+        when no level is left out.
         """
         if not self._has_population_offset:
             return None
@@ -952,11 +993,10 @@ class FactorSmooth:
         thin = tuple(self._unidentified_levels)
         excluded = set(thin) | set(self._separated_levels)
         identified = [level for level in range(n_levels) if level not in excluded]
-        if not identified:
-            identified = [level for level in range(n_levels) if level not in set(thin)]
         if identified:
             return np.asarray(identified, dtype=np.intp), projector / len(identified)
-        free = [np.asarray(f, dtype=np.float64) for f in self._free_directions]
+        unidentified = self._unidentified_directions()
+        free = [np.asarray(f, dtype=np.float64) for f in unidentified.values()]
         projectors = np.stack([f @ f.T for f in free])
         local = null_space.T @ (np.eye(len(projector)) - projectors.sum(axis=0) / n_levels)
         local = local @ null_space
@@ -966,7 +1006,7 @@ class FactorSmooth:
         keep = values > len(values) * np.finfo(np.float64).eps
         inverse = (vectors[:, keep] / values[keep]) @ vectors[:, keep].T
         lifted = -(null_space @ inverse @ null_space.T) / n_levels
-        return np.asarray(thin, dtype=np.intp), lifted @ projectors
+        return np.asarray(tuple(unidentified), dtype=np.intp), lifted @ projectors
 
     def _population_offset(self, blocks: NDArray) -> NDArray[np.float64]:
         """The population curve's offset ``c`` (natural basis) from the level blocks (``_population_map``)."""
@@ -1006,13 +1046,21 @@ class FactorSmooth:
         family ``beta_t - c`` moves by ``r_t``, which ``Pi_t`` removes, so the
         level's prediction moves by ``-R / K`` exactly as the main effect
         moves by ``+R / K``, and at its own rows ``b(x)' Pi_t = 0`` keeps the
-        fit.  A level without weight is predicted at the population value.
+        fit.  A separated level takes the population's part along the span
+        of its directions of recession, by the same rule
+        (``_unidentified_directions``): the fit's coefficients there are where
+        its walk stopped, not an estimate, and the part of its line they leave
+        is what the limiting conditional model identifies (Correia, Guimaraes
+        & Zylkin 2021, Proposition 3).  Its rows at the response boundary are
+        then predicted on the population's line there rather than at the
+        boundary.  A level without weight, or whose every row separates
+        (``_levels_at_population``), is predicted at the population value.
         Every other level keeps its coefficients.
         """
         coefficients = np.array(blocks, dtype=np.float64, copy=True)
         offset = self._population_offset(coefficients)
-        weightless = set(getattr(self, "_weightless_levels", ()))
-        for level, free in zip(self._unidentified_levels, self._free_directions, strict=True):
+        weightless = set(self._levels_at_population())
+        for level, free in self._unidentified_directions().items():
             if level in weightless:
                 continue
             directions = np.asarray(free, dtype=np.float64)
@@ -1031,8 +1079,9 @@ class FactorSmooth:
     ) -> tuple[NDArray[np.float64], tuple]:
         """Score the term as predicted when some level stays out of the population (#432).
 
-        Returns the term's contribution and the thin levels among the rows.
-        Each level takes its ``_identified_blocks`` coefficients; an unseen
+        Returns the term's contribution and the levels among the rows that
+        are thin, separated or without weight.  Each level takes its
+        ``_identified_blocks`` coefficients; an unseen
         level, and every row under ``population``, the population offset
         ``b(x)' c``.
         """
@@ -1046,7 +1095,11 @@ class FactorSmooth:
         coefficients = blocks[np.maximum(codes, 0)]
         coefficients[codes < 0] = offset
         result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
-        unidentified = (*self._unidentified_levels, *getattr(self, "_weightless_levels", ()))
+        unidentified = (
+            *self._unidentified_levels,
+            *getattr(self, "_weightless_levels", ()),
+            *getattr(self, "_separated_levels", ()),
+        )
         thin = np.isin(codes, np.asarray(unidentified, dtype=np.intp))
         named = tuple(self._levels[code] for code in np.unique(codes[thin]))
         return result, named

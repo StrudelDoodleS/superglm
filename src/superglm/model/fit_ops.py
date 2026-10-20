@@ -773,7 +773,7 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     named in a ``SeparationWarning`` (never refused: the population curve
     leaves them out, ``FactorSmooth._population_map``), unless the model's
     ``separation`` is ``"ignore"``; a population fixed by the canonical
-    convention, or by separated lines alone, is named in a ``UserWarning``.
+    convention is named in a ``UserWarning``.
     Each names the term's remedy, ``select=True`` (#444): a term that
     selects its lines has none of these, and nothing here warns for it.
     """
@@ -804,8 +804,9 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 SeparationWarning,
                 stacklevel=level,
             )
-        convention = spec._population_convention
-        if convention == "canonical":
+        if spec._population_convention != "canonical":
+            continue
+        if not spec._separated_levels:
             warnings.warn(
                 f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
                 "values than the penalty's null space, so no level identifies the population "
@@ -817,11 +818,15 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 UserWarning,
                 stacklevel=level,
             )
-        elif convention == "separated_mean":
+        else:
             warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level the data identify has "
-                "an unpenalized line that separates the response, so the population curve is "
-                f"their mean and moves with how far the fit walked those lines. {SZ_SELECT_REMEDY}",
+                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
+                "values than the penalty's null space or separates the response along its line, "
+                "so no level identifies the population curve. Its polynomial part "
+                "is fixed by convention (each level's unidentified polynomial part zero); away "
+                "from the levels' own x values the population curve, and every level's curve, "
+                "still follow the fit's point along the main effect's unpenalized curve wherever "
+                f"that curve is not a polynomial. {SZ_SELECT_REMEDY}",
                 UserWarning,
                 stacklevel=level,
             )
@@ -858,6 +863,7 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
         spec._free_directions = ()
         spec._weightless_levels = ()
         spec._separated_levels = ()
+        spec._separated_directions = ()
         spec._population_null_space = None
     warnings.warn(
         "This model was saved before superglm recorded which FactorSmooth basis='sz' levels "

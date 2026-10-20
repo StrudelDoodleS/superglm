@@ -656,7 +656,13 @@ def _sz_rule_blocks(spec, blocks: np.ndarray):
         stacked = np.broadcast_to(np.abs(V), (len(levels), *V.shape[-2:]))
         reach = np.einsum("lij,lj->i", stacked, np.abs(blocks[levels]))
     magnitude = np.abs(blocks) + np.abs(predicted) + reach[None, :]
-    for level, free in zip(spec._unidentified_levels, spec._free_directions, strict=True):
+    directions = getattr(spec, "_unidentified_directions", None)
+    free_by_level = (
+        directions()
+        if directions is not None
+        else dict(zip(spec._unidentified_levels, spec._free_directions, strict=True))
+    )
+    for level, free in free_by_level.items():
         F = np.abs(np.asarray(free))
         magnitude[level] += F @ (F.T @ (np.abs(blocks[level]) + reach))
     return blocks, predicted, offset, magnitude
@@ -1291,6 +1297,213 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
         dm, spec._population_null_space, None, binary, ("zero", "one")
     )
     assert 3 in found and 2 not in found
+
+
+def _trigger_shaped(family: str, *, every_level: bool = False):
+    """The 0.41 census trigger in miniature: small levels of a frequency book whose lines separate.
+
+    ``x`` takes 21 grid values, so ``discrete=True`` bins it losslessly.  g000
+    has 12 rows at ``x`` in {0, 0.2, 0.25} and no claim: every row separates,
+    along the constant.  g001 has 40 rows below ``x = 0.5`` without a claim
+    and its one claim at ``x = 0.5``, its largest value: the line through zero
+    there, rising above it, separates (under a binomial family the claim sits
+    on the upper boundary, so every row separates).  The other levels have
+    claims across ``x``.  With
+    ``every_level`` each of four levels is g001's shape, its claim at its own
+    largest ``x``.  Returns the frame, the response and each separated
+    level's claim ``x`` (``None`` for g000).
+    """
+    rng = np.random.default_rng(41)
+    grid = np.linspace(0.0, 1.0, 21)
+    K, n = (4, 0) if every_level else (12, 3000)
+    g = rng.integers(2, max(K, 3), n)
+    x = rng.choice(grid, n)
+    claims: dict[str, float | None] = {}
+    blocks = [] if every_level else [(0, rng.choice(grid[[0, 4, 5]], 12), None)]
+    for level in range(1 if not every_level else 0, 2 if not every_level else K):
+        top = grid[10 + 2 * level] if every_level else grid[10]
+        blocks.append((level, rng.choice(grid[grid < top], 40), top))
+    eta = -1.0 + 0.8 * np.sin(3.0 * x) + rng.normal(0.0, 0.2, K)[g]
+    mu = np.exp(eta)
+    y = {
+        "poisson": lambda: rng.poisson(mu),
+        "binomial": lambda: rng.binomial(1, mu / (1.0 + mu)),
+        "tweedie": lambda: rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.5),
+        "negative_binomial": lambda: rng.negative_binomial(1.0, 1.0 / (1.0 + mu)),
+    }[family]().astype(float)
+    for level, values, top in blocks:
+        name = f"g{level:03d}"
+        claims[name] = None if top is None else float(top)
+        g = np.concatenate([g, np.full(len(values) + (top is not None), level)])
+        x = np.concatenate([x, values, [] if top is None else [top]])
+        y = np.concatenate([y, np.zeros(len(values)), [] if top is None else [1.0]])
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v:03d}" for v in g], dtype=object)})
+    return frame, y, claims
+
+
+def _trigger_model(family: str, discrete: bool) -> SuperGLM:
+    from superglm import families
+
+    chosen = {
+        "poisson": "poisson",
+        "binomial": "binomial",
+        "tweedie": families.tweedie(p=1.5),
+        "negative_binomial": families.nb2(theta=1.0),
+    }[family]
+    return SuperGLM(
+        family=chosen,
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+            )
+        ],
+        selection_penalty=0,
+        discrete=discrete,
+    )
+
+
+def _recession_oracle(spec, at: float) -> np.ndarray:
+    """The line through zero at ``x = at``, in the natural basis, unit length.
+
+    Read from the term's own penalty (its zero diagonal: the unpenalized
+    polynomial coordinates) and basis, not from the separation scan: the
+    one direction of ``N_P`` a level whose one claim sits at ``at`` leaves
+    free to walk.
+    """
+    wiggle = np.diag(dict(spec._base_penalty_components)["wiggle"])
+    null_space = np.eye(len(wiggle))[:, wiggle == 0.0]
+    seen = spec.marginal_basis(np.array([at])) @ null_space
+    direction = null_space @ np.linalg.svd(seen, full_matrices=True)[2][1:].T
+    return direction[:, 0] / np.linalg.norm(direction[:, 0])
+
+
+def _walk(spec, blocks: np.ndarray, moves: dict[int, np.ndarray]) -> tuple:
+    """Move each level along its direction, every level by ``-R / K``: the fit's walk family."""
+    shifted = np.array(blocks, copy=True)
+    total = np.zeros(blocks.shape[1])
+    for level, r in moves.items():
+        shifted[level] += r
+        total += r
+    shifted -= total[None, :] / len(blocks)
+    return shifted, total / len(blocks)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("family", ["poisson", "binomial", "tweedie", "negative_binomial"])
+def test_a_separated_sz_level_predicts_what_its_rows_identify(family, discrete) -> None:
+    """A separated level predicts the population where its line has no estimate (sz_explosion).
+
+    The 0.41 compile census's first SuperGLM fit (Poisson, an ``sz`` term on
+    VehAge by Region, 3,000 rows of freMTPL2) predicted a mean claim rate of
+    2.8e31 on the test book: 12 of its 22 regions separate, and the fit walks
+    each one's unpenalized line until the link's overflow guard stops it, in
+    a direction the data do not choose.  R43, 13 policies without a claim at
+    ``VehAge`` 0, 4 and 5, walked to ``eta = -80`` there and to ``+80`` at 15.
+    Here, on master (3681b0c1), g001's walked line reached the guard both
+    ways, ``eta = -80`` on its own rows and ``+80`` above its claim (``-20``
+    and ``+20``, the logit's guard, under the binomial), and g000 predicted
+    its walk, ``-80`` to ``-15``, wherever the fit stopped it, differently
+    on the exact and binned routes; the population ran from -1.8 to -0.1.  Along the span of a
+    level's directions of recession the likelihood has no maximum, so the
+    fit's coefficients there are not an estimate: the limiting conditional
+    model (Geyer 2009; Correia, Guimaraes & Zylkin 2021, Proposition 3) leaves
+    them unidentified, as a thin level's free directions are.  So g000, whose
+    every row separates, predicts the population curve exactly, as an unseen
+    level does; g001 keeps its fit at its claim and follows the population
+    along the line through zero there, so moving the fit along that line,
+    the walk itself, moves none of its predictions (``_assert_rule_follows``
+    to the rule's rounding).  Mutations: no span recorded (each separated
+    level predicted at its fit), the span of every separated level taken as
+    all of ``N_P``, the wiggle kept on g000.
+    """
+    from superglm.model import base
+
+    frame, y, claims = _trigger_shaped(family)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _trigger_model(family, discrete).fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
+
+    grid = np.linspace(0.0, 1.0, 21)
+    probe = pd.DataFrame(
+        {"x": np.tile(grid, 3), "g": np.repeat(["g000", "g001", "unseen"], len(grid))}
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = base.predict_eta_exact(model, probe)
+    population = base.predict_eta_exact(model, probe, random_effects="population", warn=False)
+    assert np.all(np.isfinite(eta))
+    # A binomial claim is a response on the upper boundary: g001 then has no row inside.
+    wholly = ["g000", "g001"] if family == "binomial" else ["g000"]
+    every_row, unseen = probe["g"].isin(wholly).to_numpy(), probe["g"].eq("unseen").to_numpy()
+    assert np.array_equal(eta[every_row], population[every_row])
+    assert np.array_equal(eta[unseen], population[unseen])
+
+    # g001 at its claim keeps the fit at that row, to the rule's rounding and
+    # the computed span's backward error (``_own_row_misfit``'s argument).
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    _, _, offset, _ = _sz_rule_blocks(spec, blocks)
+    if family != "binomial":
+        claim_row = (frame["g"].eq("g001") & frame["x"].eq(claims["g001"])).to_numpy()
+        at_claim = frame[claim_row].iloc[:1]
+        span = spec._unidentified_directions()[1]
+        seen = spec.marginal_basis(np.array([claims["g001"]])) @ spec._population_null_space
+        misfit = 2 * _U * np.linalg.norm(seen, 2) * np.linalg.norm(span.T @ (blocks[1] - offset))
+        bound = 2.0 * _rounding_bound(model, at_claim) + misfit
+        fitted = _fitted_eta(model)[np.flatnonzero(claim_row)[:1]]
+        predicted = base.predict_eta_exact(model, at_claim, warn=False)
+        assert np.all(np.abs(predicted - fitted) <= bound)
+
+    # The walk: g001 along the oracle's line, g000 along all of N_P, each as
+    # far as the largest coefficient; no prediction moves.
+    scale = float(np.max(np.abs(blocks)))
+    rng = np.random.default_rng(3)
+    null_space = spec._population_null_space
+    along = null_space @ rng.normal(size=null_space.shape[1])
+    moves = {
+        0: scale * along / np.linalg.norm(along),
+        1: scale * _recession_oracle(spec, claims["g001"]),
+    }
+    shifted, step = _walk(spec, blocks, moves)
+    _assert_rule_follows(spec, blocks, shifted, step)
+    named = [w for w in caught if "follow the population curve along that line" in str(w.message)]
+    assert len(named) == 1 and "g000" in str(named[0].message) and "g001" in str(named[0].message)
+
+
+def test_an_sz_term_whose_every_level_separates_predicts_without_its_walk() -> None:
+    """Every level separated: the canonical population, which no walk moves (sz_explosion).
+
+    Four levels, each with its one claim at its own largest ``x``.  With no
+    level identified, master (3681b0c1) took the population as the mean of
+    the separated levels (``"separated_mean"``), so it followed how far the
+    fit walked their lines, and every level kept its walked line.  Their
+    directions of recession now join the canonical convention, as a thin
+    level's free directions do: the population is the point of the family
+    where each level's walked part is zero, and moving every level along
+    its line (``_recession_oracle``) moves neither the population nor any
+    level's prediction.  Mutation: the population as the separated levels'
+    mean.
+    """
+    frame, y, claims = _trigger_shaped("poisson", every_level=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _trigger_model("poisson", False).fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    assert len(spec._separated_levels) == len(spec._levels) == 4
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    scale = float(np.max(np.abs(blocks)))
+    moves = {
+        level: scale * _recession_oracle(spec, claims[name])
+        for level, name in enumerate(spec._levels)
+    }
+    shifted, step = _walk(spec, blocks, moves)
+    _assert_rule_follows(spec, blocks, shifted, step)
+    assert spec._population_convention == "canonical"
+    assert [w for w in caught if "fixed by convention" in str(w.message)]
 
 
 def _working_rows(model: SuperGLM):
