@@ -448,7 +448,7 @@ _COOLDOWN_DAYS = 7
 # release's upload in pyproject's ``exclude-newer-package``; drop it (and its entry
 # here) at the first lock bump after the window has passed that release.
 _COOLDOWN_EXEMPTIONS = {
-    "virtualenv": "21.14.2 fixes GHSA-8rjx-v5ww-45pp and GHSA-c947-3pg5-gm8q",
+    "certifi": "2026.10.19 fixes GHSA-6q48-6c7w-9gw2",
 }
 # Packages a lock change may move below the base lock, each with its reason.
 _LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}

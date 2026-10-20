@@ -105,9 +105,8 @@ required-version = "==0.12.1"
 # which admits that release and nothing newer, listed with its advisories in
 # tests/test_supply_chain_governance.py; drop it once the window has passed it.
 exclude-newer = "7 days"
-# virtualenv 21.14.2 (uploaded 2026-10-01T06:22:47Z) fixes GHSA-8rjx-v5ww-45pp
-# and GHSA-c947-3pg5-gm8q.
-exclude-newer-package = { virtualenv = "2026-10-01T06:23:00Z" }
+# certifi 2026.10.19 (uploaded 2026-10-20T02:24:16Z) fixes GHSA-6q48-6c7w-9gw2.
+exclude-newer-package = { certifi = "2026-10-20T02:25:00Z" }
 
 [build-system]
 requires = ["hatchling>=1.27"]
