@@ -288,7 +288,9 @@ def test_scop_constraint_rejects_a_main_effect_factor_smooth_of_the_same_variabl
         model.fit_reml(X, y)
 
 
-def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_column() -> None:
+def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_column(
+    monkeypatch,
+) -> None:
     """The duplication is reachable on the factor smooth's OTHER parent too.
 
     A factor smooth spans two columns. Along ``variable`` the free copy of the
@@ -300,18 +302,22 @@ def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_colu
     categorical column be shape-constrained at all.
 
     Any term on the grouping column now duplicates the factor smooth's
-    per-level intercepts and is refused when the model is declared, before the
-    fit-time guard is reached.
+    per-level intercepts and is refused when the model is declared. The
+    fit-time guard still catches a model an earlier release declared: an
+    unfitted pickle of one, and its ``clone_unfitted``, reach ``fit_reml``
+    without the declaration check (measured on a master pickle).
 
     Measured 0/6 across seed, rows, level count and basis size. A guard keyed on
     ``spec.variable`` alone passes this straight through to that failure, which
     is what an earlier form of this change did.
     """
+    import superglm.model.base as model_base
     from superglm import OrderedCategorical
 
     levels = [f"L{index:02d}" for index in range(10)]
-    with pytest.raises(ValueError, match=r"'g'.*duplicates.*group-intercept"):
-        SuperGLM(
+
+    def declare():
+        return SuperGLM(
             family="gaussian",
             features={
                 "g": OrderedCategorical(
@@ -321,6 +327,22 @@ def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_colu
             },
             interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
         )
+
+    with pytest.raises(ValueError, match=r"'g'.*duplicates.*group-intercept"):
+        declare()
+
+    # As an earlier release declared it, without the declaration check.
+    monkeypatch.setattr(model_base, "validate_factor_smooth_configuration", lambda *a, **k: None)
+    legacy = declare()
+    monkeypatch.undo()
+    rng = np.random.default_rng(0)
+    codes = rng.integers(0, len(levels), 600)
+    x = rng.uniform(0.0, 1.0, 600)
+    X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
+    y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, 600)
+    for model in (legacy, legacy.clone_unfitted()):
+        with pytest.raises(NotImplementedError, match=r"sharing shape-constrained 'g'"):
+            model.fit_reml(X, y)
 
 
 @pytest.mark.parametrize(
