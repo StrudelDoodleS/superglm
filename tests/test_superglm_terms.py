@@ -434,6 +434,12 @@ def test_an_ordinal_term_on_a_factor_smooth_group_fits_with_a_warning_in_both_fo
     as_dict.fit_reml(X, y)
     as_list.fit_reml(X, y)
     _assert_same_fit(as_dict, as_list, X, reml=True)
+    # Clones (drop1, the editor, Structure.apply) do not repeat it.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FactorSmoothGroupTermWarning)
+        as_list._clone_without_features(set())
 
 
 def _labelled_interaction_pair() -> tuple[SuperGLM, SuperGLM]:
