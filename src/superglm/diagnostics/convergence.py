@@ -221,6 +221,18 @@ def lss_semidefinite_curvature_message(family_name: str) -> str:
     )
 
 
+def lss_no_ascent_direction_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its coefficient solver found no ascent direction."""
+    return (
+        f"SuperLSS {family_name} fit: the coefficient solver found no ascent direction (no "
+        "damping of the curvature gave a step certified to increase the penalized likelihood), "
+        "so it stopped unconverged at its last accepted coefficients with reason "
+        "'no_ascent_direction'. model.diagnose() reports the stop. Refit with "
+        "coefficient_curvature='fisher' where the family supplies expected information, larger "
+        "starting smoothing parameters (initial_lambda), or simpler terms."
+    )
+
+
 def lss_null_model_nonconvergence_message(family_name: str, reason: str) -> str:
     """The disclosure a SuperLSS fit makes when its intercept-only null fit did not converge."""
     return (

@@ -1292,12 +1292,28 @@ def _run_iterations(
                 step_relative=step_relative,
             )
 
-        with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
-            direction = _solve_coefficient_direction(
-                context,
-                geometry.penalized_curvature,
-                geometry.score_penalized,
-                config,
+        try:
+            with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
+                direction = _solve_coefficient_direction(
+                    context,
+                    geometry.penalized_curvature,
+                    geometry.score_penalized,
+                    config,
+                )
+        except DenseSolverError:
+            # No Levenberg damping of the curvature gives a certified ascent
+            # direction. The accepted state is the best one reached: stop there,
+            # unconverged, and let the fit disclose why instead of raising.
+            return _OptimizationRun(
+                state=state,
+                geometry=geometry,
+                observed_geometry=observed_geometry,
+                history=tuple(history),
+                converged=False,
+                reason="no_ascent_direction",
+                score_relative=score_relative,
+                objective_relative_change=objective_relative_change,
+                step_relative=step_relative,
             )
         optimization_score = _optimization_score(context, geometry.score_penalized)
         if (
@@ -1913,6 +1929,10 @@ def _fit_dense_fixed_lambda_core(
                 # The mandatory tighter attempt has still occurred.  Preserve the
                 # accepted state and let the explicit curvature policy record the
                 # Fisher fallback rather than relabeling a failed solve as success.
+                retry = None
+            if retry is not None and retry.reason == "no_ascent_direction":
+                # A retry that ran out of ascent directions is a failed solve
+                # too, handled as one: the main run's state and verdict stand.
                 retry = None
             if retry is not None:
                 state = retry.state

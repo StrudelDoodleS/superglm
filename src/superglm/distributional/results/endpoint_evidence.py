@@ -33,6 +33,8 @@ ConvergenceReason = Literal[
     "resolution_limited_stationarity",
     "max_iterations",
     "line_search_failed",
+    # No damping of the coefficient curvature gave a certified ascent direction.
+    "no_ascent_direction",
 ]
 
 

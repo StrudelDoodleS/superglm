@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.diagnostics.convergence import (
+    lss_no_ascent_direction_message,
     lss_null_model_nonconvergence_message,
     lss_semidefinite_curvature_message,
 )
@@ -574,6 +575,11 @@ def prepare_distributional_fit_state(
         curvature_telemetry=solver_result.terminal_curvature,
         exact_face_components=exact_face_components,
         warnings=(
+            *(
+                (lss_no_ascent_direction_message(type(family).__name__),)
+                if solver_result.convergence_reason == "no_ascent_direction"
+                else ()
+            ),
             *_curvature_disclosures(family, solver_result, response, likelihood_plan),
             *(
                 ()

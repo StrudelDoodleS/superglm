@@ -322,7 +322,12 @@ def _not_converged_finding(
         impacts=("fit_validity",),
         headline=f"The accepted {loop} loop did not converge.",
         observed=f"The authoritative {loop} result stopped with reason {reason!r}.",
-        interpretation="The reported parameter state did not satisfy its governing fit contract.",
+        interpretation=(
+            "No damping of the coefficient curvature gave a certified ascent direction, so the "
+            "solver stopped at its last accepted coefficients."
+            if reason == "no_ascent_direction"
+            else "The reported parameter state did not satisfy its governing fit contract."
+        ),
         caveats=("This evidence does not identify a statistical cause for the failure.",),
         evidence=_evidence_set(
             provenance,
@@ -332,7 +337,10 @@ def _not_converged_finding(
         ),
         action_kind="inspect_fit_configuration",
         action_question=(
-            f"Which data or configuration change lets the {loop} loop satisfy its declared "
+            "Does coefficient_curvature='fisher', larger starting smoothing parameters "
+            "(initial_lambda) or simpler terms give the solver an ascent direction?"
+            if reason == "no_ascent_direction"
+            else f"Which data or configuration change lets the {loop} loop satisfy its declared "
             "convergence contract?"
         ),
         action_metrics=("convergence reason", "iterations", "fit objective"),

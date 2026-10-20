@@ -1703,6 +1703,56 @@ def test_unconverged_null_model_finishes_and_discloses(monkeypatch) -> None:
     assert "fit.null_model_not_converged" in [f.code for f in restored.diagnose().findings]
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_no_ascent_direction_stops_at_the_accepted_iterate_and_discloses(
+    monkeypatch, discrete
+) -> None:
+    """Kills the escape: the parent commit raised DenseSolverError from the fit.
+
+    The coefficient direction solve refuses on the second iteration, as it does
+    when no Levenberg damping gives a certified ascent direction. The fit keeps
+    the coefficients the first iteration accepted and discloses the stop.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.distributional.solver import solver as solver_module
+
+    solve = solver_module._solve_coefficient_direction
+    calls = 0
+
+    def refuse_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise solver_module.DenseSolverError("unable to construct a certified ascent direction")
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(solver_module, "_solve_coefficient_direction", refuse_second)
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+        discrete=discrete,
+    )
+    with pytest.warns(ConvergenceWarning, match="found no ascent direction"):
+        model.fit(frame, response, lambdas={})
+
+    terminal = model._require_fitted().result
+    assert (terminal.resolved_chunk_size is not None) == discrete
+    assert terminal.converged is False
+    assert terminal.convergence_reason == "no_ascent_direction"
+    assert len(terminal.history) == 1
+    assert terminal.history[0].objective_after > terminal.history[0].objective_before
+    assert np.array_equal(terminal.coefficients, model._require_fitted().coefficients)
+    assert not model.result_.converged
+    assert any("no_ascent_direction" in message for message in model.result_.warnings)
+    findings = [f for f in model.diagnose().findings if f.code == "fit.not_converged"]
+    assert findings and "ascent direction" in findings[0].interpretation
+    assert "coefficient_curvature='fisher'" in findings[0].actions[0].question
+
+
 def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame, response, _, _ = _fixture()
     model = model_from_templates(
