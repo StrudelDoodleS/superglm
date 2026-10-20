@@ -157,6 +157,54 @@ def _usable_w_correction(correction, args: tuple, kwargs: dict, distribution):
         ) from error
 
 
+def _slow_reversal(
+    delta: NDArray,
+    previous_delta: NDArray | None,
+    contraction: float,
+    excess_decrease: float,
+    obj_change: float,
+    obj: float,
+    tol: float,
+) -> bool:
+    """Whether this order-1 Newton step reversed a previous one at a slow, linear rate.
+
+    All of these hold: a coordinate changed sign against the previous step; the
+    gradient shrank by less than half a step, but shrank; the objective fell by
+    no more than twice what the quadratic model predicted (a larger fall is a
+    moving mode, as a separated level drifting to its bound, not curvature);
+    and the objective has settled to ``sqrt(tol)``, where a Newton step would
+    square the error.
+    """
+    return (
+        previous_delta is not None
+        and bool(np.any(delta * previous_delta < 0.0))
+        and 0.5 < contraction < 1.0
+        and excess_decrease <= 0.0
+        and obj_change <= math.sqrt(tol) * (1.0 + abs(obj))
+    )
+
+
+def _escalates_to_exact_hessian(
+    step_reversals: int,
+    slow_reversal: bool,
+    tol: float,
+    score_scale: float,
+    proj_grad_norm: float,
+    contraction: float,
+    iterations_left: int,
+) -> bool:
+    """Whether two slow reversals in a row, at a rate that cannot finish in time, switch Hessians.
+
+    Linear convergence at ``contraction`` a step reaches the score bar within
+    the iterations left in the common case, and the search then finishes as it
+    always has on the order-1 Hessian.
+    """
+    if step_reversals < 2 or not slow_reversal:
+        return False
+    steps = math.log(tol * score_scale / max(proj_grad_norm, 1e-300)) / math.log(contraction)
+    return steps > iterations_left
+
+
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
     """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
 
@@ -1586,25 +1634,21 @@ def optimize_direct_reml(
                 predicted = -float(grad_before @ taken + 0.5 * taken @ hess_before @ taken)
                 excess_decrease = (obj_before - obj) - 2.0 * predicted
             previous_model = (rho_clipped.copy(), grad.copy(), hess.copy(), obj)
-            slow_reversal = (
-                previous_delta is not None
-                and bool(np.any(delta * previous_delta < 0.0))
-                and 0.5 < contraction < 1.0
-                and excess_decrease <= 0.0
-                and obj_change <= math.sqrt(_tol) * (1.0 + abs(obj))
+            slow_reversal = _slow_reversal(
+                delta, previous_delta, contraction, excess_decrease, obj_change, obj, _tol
             )
             step_reversals = step_reversals + 1 if slow_reversal else 0
             previous_delta = delta.copy()
             previous_gradient_norm = proj_grad_norm
-            # Linear convergence at this rate reaches the score bar within the
-            # iterations left, so the search finishes as it always has.
-            out_of_budget = (
-                slow_reversal
-                and math.log(_tol * score_scale / max(proj_grad_norm, 1e-300))
-                / math.log(contraction)
-                > max_reml_iter - n_iter
-            )
-            if step_reversals >= 2 and out_of_budget:
+            if _escalates_to_exact_hessian(
+                step_reversals,
+                slow_reversal,
+                _tol,
+                score_scale,
+                proj_grad_norm,
+                contraction,
+                max_reml_iter - n_iter,
+            ):
                 w_correction_order = 2
                 exact_hessian_available = False
         _t_hessian += _time.perf_counter() - _t0

@@ -516,7 +516,7 @@ def _noise_spline_fit(seed: int, **fit_kwargs):
         model.fit_reml(
             pd.DataFrame({"x1": x1, "x4": x4, "x3": x3}), y, offset=np.log(exposure), **fit_kwargs
         )
-    return model._reml_result
+    return model
 
 
 def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
@@ -529,16 +529,97 @@ def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
     short of its optimum still reports it: capped at 5 iterations it is not
     converged.
     """
-    reference = _noise_spline_fit(52, max_reml_iter=200, w_correction_order=2)
+    reference = _noise_spline_fit(52, max_reml_iter=200, w_correction_order=2)._reml_result
     assert reference.converged
 
-    fit = _noise_spline_fit(52)
+    model = _noise_spline_fit(52)
+    fit = model._reml_result
+    # The fit escalated: nothing else sets the order to 2 here. The gates are tested
+    # on forced inputs below, because whether this trajectory reverses twice at a slow
+    # rate depends on how the BLAS build rounds.
+    assert model._reml_profile["reml_w_correction_order"] == 2
     assert fit.converged
     assert fit.termination_reason == "score_objective_tolerance"
     # Both stop at the same optimum: the objective agrees to the REML stop's own
     # resolution (reml_tol=1e-9 relative to a criterion of about 72).
     assert fit.objective == pytest.approx(reference.objective, rel=1e-9)
 
-    capped = _noise_spline_fit(52, max_reml_iter=5)
+    capped = _noise_spline_fit(52, max_reml_iter=5)._reml_result
     assert not capped.converged
     assert capped.termination_reason == "max_reml_iter"
+
+
+class TestExactHessianEscalationGates:
+    """Each arm of the escalation, on inputs where only that arm is false.
+
+    Deleting an arm from ``direct.py`` makes the case that isolates it escalate.
+    """
+
+    TOL = 1e-9
+    SLOW = {
+        "delta": np.array([0.02, -0.01]),
+        "previous_delta": np.array([-0.02, 0.01]),
+        "contraction": 0.87,
+        "excess_decrease": -1e-9,
+        "obj_change": 1e-5,
+        "obj": 70.0,
+        "tol": TOL,
+    }
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"previous_delta": None},
+            {"previous_delta": np.array([0.02, -0.01])},
+            {"contraction": 0.5},
+            {"contraction": 0.3},
+            {"contraction": 1.0},
+            {"contraction": 1.4},
+            {"excess_decrease": 1e-6},
+            {"excess_decrease": np.inf},
+            {"obj_change": 0.5},
+        ],
+        ids=[
+            "no previous step",
+            "no reversal",
+            "contraction at one half",
+            "fast contraction",
+            "no contraction",
+            "growing gradient",
+            "objective fell more than twice the model's prediction (a drifting mode)",
+            "no model to compare with",
+            "objective not settled to sqrt(tol)",
+        ],
+    )
+    def test_a_step_missing_one_condition_is_not_a_slow_reversal(self, change):
+        from superglm.reml.direct import _slow_reversal
+
+        assert _slow_reversal(**self.SLOW)
+        assert not _slow_reversal(**{**self.SLOW, **change})
+
+    @pytest.mark.parametrize(
+        ("kwargs", "escalates"),
+        [
+            ({}, True),
+            ({"step_reversals": 1}, False),  # one reversal is a bounce, not a pattern
+            ({"slow_reversal": False}, False),
+            ({"iterations_left": 100}, False),  # the linear rate finishes within the budget
+            ({"iterations_left": 0}, True),
+        ],
+        ids=["all gates", "one reversal", "not slow", "enough budget", "out of budget"],
+    )
+    def test_escalation_needs_two_reversals_and_a_budget_the_rate_cannot_meet(
+        self, kwargs, escalates
+    ):
+        from superglm.reml.direct import _escalates_to_exact_hessian
+
+        arguments = {
+            "step_reversals": 2,
+            "slow_reversal": True,
+            "tol": self.TOL,
+            "score_scale": 1.0,
+            "proj_grad_norm": 1e-3,
+            "contraction": 0.87,  # 99 steps from 1e-3 to 1e-9
+            "iterations_left": 50,
+        }
+        assert _escalates_to_exact_hessian(**{**arguments, **kwargs}) is escalates
