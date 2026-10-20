@@ -914,7 +914,7 @@ def validate_factor_smooth_configuration(
     if not features_resolved:
         return
 
-    def group_remedy(group, spec) -> str:
+    def group_remedy(group, spec, smooth) -> str:
         if terms_form:
             where = f"{declaration_text(group, spec)} from terms="
         elif model._splines is None:

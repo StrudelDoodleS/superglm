@@ -133,9 +133,18 @@ def bind_predictor(
     refuse_terms_on_factor_smooth_groups(
         normalized.features,
         [spec for spec in normalized.interaction_specs.values() if isinstance(spec, FactorSmooth)],
-        lambda group, spec: (
+        lambda group, spec, smooth: (
             f"remove {declaration_text(group, spec)} from the {name!r} predictor; "
             "the factor smooth reads its group column itself."
+            + (
+                # Without an intercept an sz term's sum-to-zero level constants
+                # leave the overall level to the group term, which the
+                # intercept carries instead.
+                f" With intercept=False, the same model is intercept=True without "
+                f"the term on {group!r}."
+                if smooth.basis == "sz" and not intercept
+                else ""
+            )
         ),
     )
     return BoundPredictor(

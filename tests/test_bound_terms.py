@@ -494,3 +494,17 @@ def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loa
     fitted = legacy.fit(frame, y, lambdas=lambdas)
     restored = SuperLSS.from_bytes(fitted.to_bytes())
     assert np.array_equal(restored.predict(frame), fitted.predict(frame))
+
+
+@pytest.mark.parametrize(("basis", "intercept"), [("sz", False), ("sz", True), ("fs", False)])
+def test_the_group_refusal_names_intercept_true_for_sz_without_an_intercept(basis, intercept):
+    """Only sz without an intercept leaves the overall level to the group term."""
+    from superglm import FactorSmooth, GaussianLS
+    from superglm.terms import cat, interaction, s
+
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="g", basis=basis))
+    with pytest.raises(ValueError, match=r"remove cat\('g'\)") as caught:
+        family.location(s("x"), cat("g"), smooth, intercept=intercept)
+    sentence = "With intercept=False, the same model is intercept=True without the term on 'g'."
+    assert (sentence in str(caught.value)) is (basis == "sz" and not intercept)

@@ -122,8 +122,8 @@ def refuse_terms_on_factor_smooth_groups(features: Any, smooths: Any, remedy: An
     deficient, whatever the term's type. mgcv documents the same for ``sz``:
     adding the factor's main effect "will lead to a rank deficient model".
 
-    ``remedy(group, spec)`` names the change in the form the model was
-    declared in.
+    ``remedy(group, spec, smooth)`` names the change in the form the model
+    was declared in.
     """
     for smooth in smooths:
         if smooth.group not in features:
@@ -132,7 +132,7 @@ def refuse_terms_on_factor_smooth_groups(features: Any, smooths: Any, remedy: An
         raise ValueError(
             f"FactorSmooth {smooth.name!r} gives every level of {smooth.group!r} its own "
             f"intercept, so the {type(spec).__name__} term on {smooth.group!r} duplicates "
-            f"that group-intercept geometry; {remedy(smooth.group, spec)}"
+            f"that group-intercept geometry; {remedy(smooth.group, spec, smooth)}"
         )
 
 
