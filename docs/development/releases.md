@@ -102,7 +102,19 @@ Use the release_manager agent to assess the unreleased changes as a release cand
 
 The assessment is bound to the latest published release and the exact
 `origin/master` head SHA; its authoritative diff is release-tag to master
-head. After approving the exact version and that SHA-bound assessment (under
+head.
+
+The assessment also runs the release differential against that release,
+through benchboard:
+`benchmarks/release_differential.py release vX.Y.Z --out <dir>`. It fits one
+seeded corpus (every family, link, term kind and route of `SuperGLM`, and
+every `SuperLSS` family) on the release and on the head. A fit the release
+converged to a sensible answer that the head refuses, leaves unconverged, or
+fits worse beyond the harness's tolerances blocks the release until it is
+fixed, or explained in the assessment as a deliberate change with its
+evidence. `tests/test_userspace_040.py` holds the harness's compact subset to
+v0.40.0's outcomes in every full suite, and models saved by v0.40.0 to
+loading and predicting as they did. After approving the exact version and that SHA-bound assessment (under
 the single instruction, the assessment it produced):
 
 ```text
