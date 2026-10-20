@@ -642,9 +642,9 @@ def _sz_rule(spec, beta: np.ndarray):
 def _sz_rule_blocks(spec, blocks: np.ndarray):
     """``(blocks, predicted blocks, c)`` of the ``sz`` term, and the rule's float64 magnitude.
 
-    ``beta_t' = beta_t - F F' (beta_t - c)`` and ``c = sum_i V_i beta_i``
+    ``beta_t' = beta_t - P_t (beta_t - c)`` and ``c = sum_i V_i beta_i``
     (``FactorSmooth._identified_blocks``): each entry is within
-    ``gamma_(K k + 4 k)`` of ``|beta_t| + |c| + |F| |F'| (|beta_t| + |c|)``
+    ``gamma_(K k + 4 k)`` of ``|beta_t| + |c| + |P_t| (|beta_t| + |c|)``
     with ``|c|`` itself bounded by ``sum_i |V_i| |beta_i|`` (Higham 2002,
     section 3.5); returned per level, ``(K, k)``.
     """
@@ -656,16 +656,18 @@ def _sz_rule_blocks(spec, blocks: np.ndarray):
         stacked = np.broadcast_to(np.abs(V), (len(levels), *V.shape[-2:]))
         reach = np.einsum("lij,lj->i", stacked, np.abs(blocks[levels]))
     magnitude = np.abs(blocks) + np.abs(predicted) + reach[None, :]
-    directions = getattr(spec, "_unidentified_directions", None)
-    free_by_level = (
-        directions()
-        if directions is not None
-        else dict(zip(spec._unidentified_levels, spec._free_directions, strict=True))
-    )
-    for level, free in free_by_level.items():
-        F = np.abs(np.asarray(free))
-        magnitude[level] += F @ (F.T @ (np.abs(blocks[level]) + reach))
+    for level, projector in _projectors(spec).items():
+        magnitude[level] += np.abs(projector) @ (np.abs(blocks[level]) + reach)
     return blocks, predicted, offset, magnitude
+
+
+def _projectors(spec) -> dict:
+    """Each level's projector onto its free directions, or ``F F'`` on a tree without one."""
+    projectors = getattr(spec, "_free_projectors", None)
+    if projectors is not None:
+        return projectors()
+    pairs = zip(spec._unidentified_levels, spec._free_directions, strict=True)
+    return {level: np.asarray(f) @ np.asarray(f).T for level, f in pairs}
 
 
 def _eta_magnitude(model: SuperGLM, frame: pd.DataFrame) -> np.ndarray:
@@ -710,11 +712,12 @@ def _eta_magnitude(model: SuperGLM, frame: pd.DataFrame) -> np.ndarray:
 def _own_row_misfit(model: SuperGLM, frame: pd.DataFrame, weight: np.ndarray) -> np.ndarray:
     """Per row, how far a thin level's rule may move its own rows in exact arithmetic.
 
-    ``b(x_i)' F F' (beta_t - c)`` is zero where the free directions ``F``
-    are the exact null space of the level's distinct rows on ``N_P``; the
+    ``b(x_i)' P_t (beta_t - c)`` is zero where the free directions ``F``,
+    the range of the level's projector ``P_t`` (``_free_projectors``), are
+    the exact null space of the level's distinct rows on ``N_P``; the
     computed ``F`` is that of the rows perturbed by the SVD's backward error,
     ``m u ||E_t||_2`` (this module's eigensolver convention), so the term is
-    within that times ``||F' (beta_t - c)||_2``.
+    within that times ``||P_t (beta_t - c)||_2`` (``F`` orthonormal).
     """
     spec = model._interaction_specs["x:g:sz"]
     group = next(g for g in model._groups if g.name == "x:g:sz")
@@ -722,14 +725,15 @@ def _own_row_misfit(model: SuperGLM, frame: pd.DataFrame, weight: np.ndarray) ->
     nullity = spec._population_null_space.shape[1]
     codes = pd.Index(spec._levels).get_indexer(frame["g"].to_numpy())
     misfit = np.zeros(len(frame))
-    for level, free in zip(spec._unidentified_levels, spec._free_directions, strict=True):
+    projectors = _projectors(spec)
+    for level in spec._unidentified_levels:
         rows = (codes == level) & (weight > 0.0)
         if not np.any(rows):
             continue
         seen = spec.marginal_basis(frame["x"].to_numpy(dtype=float)[rows])
         seen = np.unique(seen, axis=0) @ spec._population_null_space
         size = nullity * _U * float(np.linalg.norm(seen, 2))
-        misfit[rows] = size * float(np.linalg.norm(np.asarray(free).T @ (blocks[level] - offset)))
+        misfit[rows] = size * float(np.linalg.norm(projectors[level] @ (blocks[level] - offset)))
     return misfit
 
 
@@ -851,6 +855,82 @@ def test_sz_predictions_do_not_move_along_the_alias_family(variant) -> None:
     scale = float(np.max(np.abs(blocks)))
     shifted, step = _family_shift(spec, blocks, spec._unidentified_levels, scale)
     _assert_rule_follows(spec, blocks, shifted, step)
+
+
+def _polynomial_deviation(spec, beta: np.ndarray, level: int, grid: np.ndarray) -> tuple:
+    """The polynomial part of ``level``'s deviation from the population on ``grid``, and its rounding.
+
+    ``reconstruct`` reports each level as predicted minus the population
+    offset; its part in ``N_P`` (the wiggle penalty's zero diagonal, read
+    from the term's penalty, not its rule) is the level's line about the
+    population.  The rule's float64 magnitudes are ``_sz_rule_blocks``'; its
+    projector comes from two solves, the lowest-order direction through the
+    natural map and the split of ``N_P``, so the curve is within
+    ``gamma_((K + 8) k)`` of those magnitudes times both condition numbers
+    (Higham 2002, sections 3.5 and 7.1).
+    """
+    deviation = np.asarray(spec.reconstruct(beta)["coefficients"][spec._levels[level]])
+    wiggle = np.diag(dict(spec._base_penalty_components)["wiggle"])
+    null_space = np.eye(len(wiggle))[:, wiggle == 0.0]
+    basis = spec.marginal_basis(grid) @ null_space
+    curve = basis @ (null_space.T @ deviation)
+    _, _, _, magnitude = _sz_rule(spec, beta)
+    free = np.asarray(spec._unidentified_directions()[level])
+    order = null_space.shape[1] - free.shape[1]
+    low = null_space.T @ spec._lowest_order_null_space(order)
+    split = np.column_stack([low, null_space.T @ free])
+    conditioning = np.linalg.cond(split) * np.linalg.cond(spec._natural_map)
+    count = (len(spec._levels) + 8) * spec.k
+    reach = np.abs(basis) @ (np.abs(null_space.T) @ magnitude[level])
+    return curve, _gamma(count) * conditioning * reach
+
+
+@pytest.mark.parametrize("m", [2, 3])
+def test_a_thin_level_follows_the_shape_of_the_population_curve(m) -> None:
+    """A level seen at one ``x`` keeps a constant deviation from the population (#432, sz_explosion round 2).
+
+    The user guide says that where a thin level's rows say nothing (its
+    slope, with ``m = 2``), it follows the shape of the population curve.
+    The rule projected the deviation's free part away orthogonally in the
+    natural basis, whose metric is the book's rows: the complement of the
+    line through zero at the level's ``x`` is then the line orthogonal to it
+    over the book, which tilts unless ``x`` is the book's mean.  On master
+    (3681b0c1) g0, seen only at ``x = 0.1``, sat 0.95 above the population
+    there and 0.45 below it at ``x = 1``.  The projector now splits along
+    the lowest-order part of ``N_P`` its identified values fix (the
+    constant, for one value): the deviation's polynomial part is constant,
+    for ``m = 2`` and ``m = 3``.  Mutation: the orthogonal projector.
+    """
+    rng = np.random.default_rng(5)
+    K, n = 8, 4000
+    g = rng.integers(0, K, n)
+    x = rng.uniform(size=n)
+    x[g == 0] = 0.1
+    y = np.sin(3 * x) + 0.3 * rng.normal(0, 1, K)[g] + 0.5 * (g == 0) + 0.2 * rng.normal(size=n)
+    frame = pd.DataFrame({"x": x, "g": np.array([f"g{v}" for v in g], dtype=object)})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="g",
+                basis="sz",
+                k=6,
+                m=m,
+                lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+            )
+        ],
+        selection_penalty=0,
+    )
+    model = _fit(model, frame, y, None)
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._unidentified_levels == (0,)
+    group = next(gr for gr in model._groups if gr.name == "x:g:sz")
+    beta = np.asarray(model.result.beta[group.sl])
+    curve, rounding = _polynomial_deviation(spec, beta, 0, np.linspace(0.0, 1.0, 21))
+    assert np.max(curve) - np.min(curve) <= 2.0 * np.max(rounding)
+    assert abs(float(curve[0])) > 0.1
 
 
 def _all_thin_frame():

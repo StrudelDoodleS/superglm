@@ -173,8 +173,8 @@ def _population_deviations(
 
     ``predict(level) - predict(population)`` is ``b(x)' d_t`` with ``d_t =
     Q_t (beta_t - c)`` (#432, ``FactorSmooth._identified_blocks``): ``Q_t =
-    I - Pi_t`` for a thin or separated level with weight (``Pi_t`` the
-    projector on ``_unidentified_directions()[t]``), ``0`` for one predicted
+    I - P_t`` for a thin or separated level with weight (``P_t`` its
+    projector, ``FactorSmooth._free_projectors``), ``0`` for one predicted
     at the population value (``_levels_at_population``),
     ``I`` for every other level, and ``c = C theta`` the population offset
     (``_population_contrast``).  So ``cov(d_t) = Q_t (S_tt - X_t - X_t' +
@@ -198,9 +198,8 @@ def _population_deviations(
     )
     keep = np.broadcast_to(np.eye(k), (n_levels, k, k)).copy()
     weightless = set(spec._levels_at_population())
-    for level, directions in spec._unidentified_directions().items():
-        free_part = np.asarray(directions, dtype=np.float64)
-        keep[level] = np.eye(k) - free_part @ free_part.T
+    for level, projector in spec._free_projectors().items():
+        keep[level] = np.eye(k) - projector
     for level in weightless:
         keep[level] = 0.0
     covariances = keep @ covariances @ np.transpose(keep, (0, 2, 1))

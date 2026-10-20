@@ -350,6 +350,8 @@ class FactorSmooth:
         self._separated_levels: tuple[int, ...] = ()
         # Each separated level's span of directions of recession, natural basis.
         self._separated_directions: tuple[NDArray, ...] = ()
+        # How a level left out of the population splits its line (``_free_projectors``).
+        self._free_complement: str = "lowest_order"
         self._population_null_space: NDArray | None = None
 
     @property
@@ -834,6 +836,7 @@ class FactorSmooth:
         self._weightless_levels = ()
         self._separated_levels = ()
         self._separated_directions = ()
+        self._free_complement = "lowest_order"
         self._population_null_space = None
         if self.basis != "sz":
             return ()
@@ -965,6 +968,54 @@ class FactorSmooth:
         whole = tuple(level for level in separated if directions[level].shape[1] == nullity)
         return weightless + tuple(level for level in whole if level not in weightless)
 
+    def _lowest_order_null_space(self, order: int) -> NDArray:
+        """``(k, order)``: the coefficient sequences polynomial below degree ``order``, natural basis.
+
+        The null space of an ``order``-th difference penalty, inside ``N_P``
+        for ``order <= m``.  Order 1 is the constant curve (the basis is a
+        partition of unity) and order 2 adds the coefficient-index line, the
+        straight line in ``x`` between the boundary knots.  A nonzero element
+        has at most ``order - 1`` zeros (Schoenberg's variation diminishing
+        property), so it meets the directions a level's ``order`` identified
+        values leave free only at zero.
+        """
+        index = np.arange(self.k, dtype=np.float64) / (self.k - 1)
+        raw = np.vander(index, order, increasing=True)
+        return np.linalg.solve(np.asarray(self._natural_map, dtype=np.float64), raw)
+
+    def _free_projectors(self) -> dict[int, NDArray]:
+        """Each level left out of the population and its projector ``P_t`` onto its free directions.
+
+        ``P_t`` projects onto the span of ``F_t = _unidentified_directions()[t]``
+        along the wiggle and the lowest-order part of ``N_P`` that the level's
+        ``d = m - r`` identified values fix (``_lowest_order_null_space``), so
+        the polynomial part of the level's deviation from the population is
+        the lowest-order curve through what its rows identify: with ``m = 2``
+        and one identified value, a constant, and the level follows the shape
+        of the population curve.  ``P_t r = r`` along the free directions and
+        ``b(x)' P_t = 0`` at the level's own rows, whichever complement, which
+        is what keeps ``predict`` off the fit's point along the family and on
+        the fit at those rows.  A model saved before this rule keeps the
+        orthogonal projector ``F_t F_t'`` it was saved with
+        (``_free_complement``), whose complement depends on where the book's
+        rows lie and tilts the deviation away from the level's own ``x``.
+        """
+        directions = self._unidentified_directions()
+        if not directions:
+            return {}
+        if getattr(self, "_free_complement", "orthogonal") != "lowest_order":
+            return {level: np.asarray(f) @ np.asarray(f).T for level, f in directions.items()}
+        null_space = np.asarray(self._population_null_space, dtype=np.float64)
+        nullity = null_space.shape[1]
+        projectors = {}
+        for level, free in directions.items():
+            free = np.asarray(free, dtype=np.float64)
+            order = nullity - free.shape[1]
+            low = null_space @ (null_space.T @ self._lowest_order_null_space(order))
+            split = null_space.T @ np.column_stack([low, free])
+            projectors[level] = free @ np.linalg.solve(split, null_space.T)[order:]
+        return projectors
+
     def _population_map(self) -> tuple[NDArray, NDArray] | None:
         """``(levels, V)``: the population offset ``c = sum_i V_i beta_{levels_i}`` (natural basis).
 
@@ -989,11 +1040,16 @@ class FactorSmooth:
         directions of recession (``_unidentified_directions``).  With every
         level separated or thin there is no such mean, and the population is
         the canonical point of the family, where each level's free part is
-        zero, ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the projector on
-        ``_unidentified_directions()[t]``, ``S = sum_t s_t``): ``S = -(I - M /
-        K)^+ sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no
+        zero, ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the orthogonal
+        projector on ``_unidentified_directions()[t]``, ``S = sum_t s_t``):
+        ``S = -(I - M / K)^+ sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no
         direction of ``N_P`` is free in every level, and ``c = S / K``.  It
-        does not follow how far the fit walked a separated line.  A model
+        does not follow how far the fit walked a separated line.  The
+        orthogonal projectors pin it: with every level seen at fewer values
+        than ``N_P`` has dimensions, no data separate the population's
+        polynomial part from a part every level shares, and the minimum-norm
+        point is the convention.  Each level is then predicted by its own
+        projector (``_free_projectors``) about that population.  A model
         saved before the spans were recorded keeps its separated levels'
         mean there (``_spans_recorded``).  ``None`` when no level is left
         out.
@@ -1056,11 +1112,12 @@ class FactorSmooth:
         """``(blocks', c)``: each level's coefficients as predicted, and the population offset.
 
         A thin level keeps what its rows identify and takes the population's
-        part in the directions they leave free, ``beta_t - Pi_t (beta_t -
-        c)`` (``Pi_t`` the projector on ``_free_directions[t]``): along the
-        family ``beta_t - c`` moves by ``r_t``, which ``Pi_t`` removes, so the
+        part in the directions they leave free, ``beta_t - P_t (beta_t -
+        c)`` (``P_t`` the projector onto ``_free_directions[t]`` along the
+        lowest-order part they leave fixed, ``_free_projectors``): along the
+        family ``beta_t - c`` moves by ``r_t``, which ``P_t`` removes, so the
         level's prediction moves by ``-R / K`` exactly as the main effect
-        moves by ``+R / K``, and at its own rows ``b(x)' Pi_t = 0`` keeps the
+        moves by ``+R / K``, and at its own rows ``b(x)' P_t = 0`` keeps the
         fit.  A separated level takes the population's part along the span
         of its directions of recession, by the same rule
         (``_unidentified_directions``): the fit's coefficients there are where
@@ -1075,11 +1132,10 @@ class FactorSmooth:
         coefficients = np.array(blocks, dtype=np.float64, copy=True)
         offset = self._population_offset(coefficients)
         weightless = set(self._levels_at_population())
-        for level, free in self._unidentified_directions().items():
+        for level, projector in self._free_projectors().items():
             if level in weightless:
                 continue
-            directions = np.asarray(free, dtype=np.float64)
-            coefficients[level] -= directions @ (directions.T @ (blocks[level] - offset))
+            coefficients[level] -= projector @ (blocks[level] - offset)
         for level in weightless:
             coefficients[level] = offset
         return coefficients, offset
