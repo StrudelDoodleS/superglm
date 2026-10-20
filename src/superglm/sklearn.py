@@ -406,6 +406,10 @@ def _select_feature_frame(X: EagerFrame, feature_cols: list[str]) -> FrameLike:
 # ── Shared fit / predict helpers ─────────────────────────────────
 
 
+# Each ``smoothing=`` value and the SuperGLM method it fits with.
+_SMOOTHING_METHODS = {"fixed": "fit", "reml": "fit_reml"}
+
+
 def _fit_common(
     wrapper,
     X,
@@ -571,8 +575,12 @@ def _fit_common(
         model_kwargs.pop("splines", None)
         model_kwargs["features"] = {}
 
+    if wrapper.smoothing not in _SMOOTHING_METHODS:
+        raise ValueError(
+            f"smoothing must be one of {tuple(_SMOOTHING_METHODS)}, got {wrapper.smoothing!r}"
+        )
     wrapper._model = SuperGLM(**model_kwargs)
-    wrapper._model.fit(
+    getattr(wrapper._model, _SMOOTHING_METHODS[wrapper.smoothing])(
         _select_feature_frame(X_frame, feature_cols),
         y,
         sample_weight=sample_weight,
@@ -673,6 +681,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         :class:`~superglm.SuperGLM` as ``terms=``. Mutually exclusive with
         ``features`` and with the shorthand wrapper arguments, as
         ``features`` is. The model reads the declared columns.
+    smoothing : {"fixed", "reml"}, default="fixed"
+        Keyword only. ``"fixed"`` fits with ``SuperGLM.fit`` at the
+        ``spline_penalty`` smoothing; ``"reml"`` fits with
+        ``SuperGLM.fit_reml``, which selects every smoothing parameter by REML
+        and is the fit random effects and factor smooths need.
     """
 
     def __init__(
@@ -693,6 +706,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         weight_semantics: Literal["prior", "frequency"] = "prior",
         *,
         terms: list[TermInput] | None = None,
+        smoothing: Literal["fixed", "reml"] = "fixed",
     ):
         self.family = family
         self.penalty = penalty
@@ -709,6 +723,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.offset = offset
         self.weight_semantics = weight_semantics
         self.terms = terms
+        self.smoothing = smoothing
 
     def __setstate__(self, state: dict) -> None:
         """Restore an estimator pickled before ``weight_semantics`` existed.
@@ -718,10 +733,12 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         refitting. The backfill is the contract the estimator was originally
         fitted under -- the pre-change family rule -- not the new default, so a
         restored wrapper keeps reproducing what it recorded. An estimator
-        pickled before ``terms`` existed restores it as ``None``.
+        pickled before ``terms`` existed restores it as ``None``, and one
+        pickled before ``smoothing`` existed as ``"fixed"``, the fit it ran.
         """
         self.__dict__.update(state)
         self.__dict__.setdefault("terms", None)
+        self.__dict__.setdefault("smoothing", "fixed")
         if "weight_semantics" not in self.__dict__:
             from superglm.distributions import resolve_distribution
             from superglm.solvers.dispersion import family_default_weight_semantics
@@ -847,6 +864,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         :class:`~superglm.SuperGLM` as ``terms=``. Mutually exclusive with
         ``features`` and with the shorthand wrapper arguments, as
         ``features`` is. The model reads the declared columns.
+    smoothing : {"fixed", "reml"}, default="fixed"
+        Keyword only. ``"fixed"`` fits with ``SuperGLM.fit`` at the
+        ``spline_penalty`` smoothing; ``"reml"`` fits with
+        ``SuperGLM.fit_reml``, which selects every smoothing parameter by REML
+        and is the fit random effects and factor smooths need.
     """
 
     def __init__(
@@ -867,6 +889,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         weight_semantics: Literal["prior", "frequency"] = "prior",
         *,
         terms: list[TermInput] | None = None,
+        smoothing: Literal["fixed", "reml"] = "fixed",
     ):
         self.penalty = penalty
         self.selection_penalty = selection_penalty
@@ -883,6 +906,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.threshold = threshold
         self.weight_semantics = weight_semantics
         self.terms = terms
+        self.smoothing = smoothing
 
     def __setstate__(self, state: dict) -> None:
         """Restore an estimator pickled before ``weight_semantics`` existed.
@@ -892,10 +916,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         refitting. The backfill is the contract the estimator was originally
         fitted under -- the pre-change family rule -- not the new default, so a
         restored wrapper keeps reproducing what it recorded. An estimator
-        pickled before ``terms`` existed restores it as ``None``.
+        pickled before ``terms`` existed restores it as ``None``, and one
+        pickled before ``smoothing`` existed as ``"fixed"``, the fit it ran.
         """
         self.__dict__.update(state)
         self.__dict__.setdefault("terms", None)
+        self.__dict__.setdefault("smoothing", "fixed")
         if "weight_semantics" not in self.__dict__:
             from superglm.distributions import resolve_distribution
             from superglm.solvers.dispersion import family_default_weight_semantics

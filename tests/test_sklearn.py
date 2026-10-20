@@ -969,6 +969,58 @@ class TestNativeTerms:
         with pytest.raises(NotImplementedError, match=r"only supported with fit_reml"):
             SuperGLMRegressor(terms=terms).fit(X, y)
 
+    def test_reml_smoothing_fits_as_superglm_fit_reml(self, sample_data):
+        """smoothing="reml" routes to fit_reml: a factor smooth and a random effect fit.
+
+        Master's wrappers had no such parameter and called fit() only.
+        """
+        from superglm import FactorSmooth, SuperGLM, interaction, re, s
+
+        X, y, sample_weight = sample_data
+        X = X.assign(broker=np.resize(["b0", "b1", "b2", "b3", "b4"], len(X)))
+        terms = [
+            s("age", kind="ps", k=7),
+            re("broker"),
+            interaction(FactorSmooth("age", group="region", k=6)),
+        ]
+        wrapper = SuperGLMRegressor(terms=terms, selection_penalty=0.0, smoothing="reml")
+        wrapper.fit(X, y, sample_weight=sample_weight)
+        core = SuperGLM(family="poisson", terms=terms, selection_penalty=0.0)
+        core.fit_reml(X, y, sample_weight=sample_weight)
+        np.testing.assert_array_equal(wrapper.coef_, core.result.beta)
+        assert wrapper.intercept_ == core.result.intercept
+        np.testing.assert_array_equal(wrapper.predict(X), core.predict(X))
+        assert wrapper._model.reml_diagnostics()["lambdas"] == core.reml_diagnostics()["lambdas"]
+
+    def test_reml_smoothing_survives_clone_pickle_and_cross_val_score(self, sample_data):
+        import pickle
+
+        from sklearn.base import clone
+        from sklearn.model_selection import KFold, cross_val_score
+
+        from superglm import cat, s
+
+        X, y, _ = sample_data
+        model = SuperGLMRegressor(
+            terms=[s("age", k=6), cat("region")], selection_penalty=0.0, smoothing="reml"
+        )
+        assert clone(model).get_params()["smoothing"] == "reml"
+        assert model.set_params(smoothing="fixed").smoothing == "fixed"
+        model.set_params(smoothing="reml")
+        scores = cross_val_score(model, X, y, cv=KFold(3, shuffle=True, random_state=0))
+        assert np.all(np.isfinite(scores))
+        fitted = model.fit(X, y)
+        assert fitted._model.reml_diagnostics()["lambdas"]
+        restored = pickle.loads(pickle.dumps(fitted))
+        np.testing.assert_array_equal(restored.predict(X), fitted.predict(X))
+        legacy = dict(fitted.__dict__)
+        del legacy["smoothing"]
+        old = SuperGLMRegressor.__new__(SuperGLMRegressor)
+        old.__setstate__(legacy)
+        assert old.get_params()["smoothing"] == "fixed"
+        with pytest.raises(ValueError, match="smoothing must be one of"):
+            SuperGLMRegressor(smoothing="REML").fit(X, y)
+
     def test_missing_terms_column_raises(self, sample_data):
         X, y, _ = sample_data
         with pytest.raises(ValueError, match="terms= keys.*not found"):
