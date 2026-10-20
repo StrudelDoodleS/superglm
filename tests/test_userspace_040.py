@@ -198,3 +198,13 @@ def test_a_fit_v0_40_0_converged_still_converges_no_worse(name: str) -> None:
         warnings.simplefilter("ignore")
         record = {"status": "ok", **release_differential.run_case(name)}
     assert release_differential.flags(name, RELEASE_OUTCOMES[name], record) == []
+
+
+@pytest.mark.parametrize("name", release_differential.HISTORY_SUBSET)
+def test_a_fit_an_earlier_release_converged_converges_here(name: str) -> None:
+    """Breaks the release-history sweep found, fixed: v0.40.0 refused rows 2 and
+    13 and left row 3 unconverged; v0.39.0 converged all three to the same fits."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        record = {"status": "ok", **release_differential.run_case(name)}
+    assert release_differential.sensible(record), record
