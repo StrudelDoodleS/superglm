@@ -92,6 +92,28 @@ def warn_population_levels(named: Sequence[str]) -> None:
     warn_caller(SZ_POPULATION_PREDICTION + "; ".join(named) + ".")
 
 
+def group_level_values(
+    predictor: CompiledPredictor, interaction: Any, coefficients: NDArray
+) -> NDArray | None:
+    """A term on an sz term's group in the same predictor: its value at each of the term's levels.
+
+    SuperLSS accepts such a term as redundant (0.40 required one); where it
+    leaves its per-level values unpenalized they alias the sz term's level
+    constants, so the sz rule reads them as part of each level's line
+    (``FactorSmooth._score_identified``).  ``coefficients`` are that term's;
+    ``None`` without such a term or a level the rule moves.
+    """
+    group = getattr(interaction, "group", None)
+    if not getattr(interaction, "_has_population_offset", False):
+        return None
+    if group not in predictor.compiled.feature_order:
+        return None
+    levels = np.asarray(list(interaction._levels), dtype=object)
+    return np.asarray(
+        _score_feature(predictor.compiled.specs[group], levels, coefficients), dtype=np.float64
+    ).ravel()
+
+
 def _score_interaction(
     spec: Any,
     left: NDArray,
@@ -99,12 +121,19 @@ def _score_interaction(
     coefficients: NDArray,
     *,
     named: list | None = None,
+    level_constants: NDArray | None = None,
 ) -> NDArray:
-    """One interaction term's contribution; ``named`` collects the levels it predicts at the population."""
+    """One interaction term's contribution; ``named`` collects the levels it predicts at the population.
+
+    ``level_constants``: a redundant group term's value at each of an sz
+    term's levels (``group_level_values``).
+    """
     if getattr(spec, "_has_population_offset", False):
         # An sz term with a level left out of its population (#432, #457):
         # scored as SuperGLM predicts it.
-        values, levels = spec._score_identified(left, right, coefficients, population=False)
+        values, levels = spec._score_identified(
+            left, right, coefficients, population=False, level_constants=level_constants
+        )
         if named is not None:
             named.extend(levels)
         return np.asarray(values, dtype=np.float64)
@@ -156,6 +185,38 @@ def _interaction_design(
             for index in range(width)
         )
     )
+
+
+def _add_group_term_columns(
+    matrix: NDArray[np.float64],
+    predictor: CompiledPredictor,
+    interaction: Any,
+    left: NDArray,
+    right: NDArray,
+    *,
+    width: int,
+    intercept_width: int,
+) -> None:
+    """Add an sz term's dependence on a redundant group term's coefficients to that term's columns.
+
+    The rule reads the group term's per-level values into each level's line
+    (``group_level_values``), so the sz contribution is linear in the group
+    term's coefficients too: one column of it per coefficient, at zero sz
+    coefficients, added onto the group term's own design.
+    """
+    group = getattr(interaction, "group", None)
+    if not getattr(interaction, "_has_population_offset", False):
+        return
+    if group not in predictor.compiled.feature_order:
+        return
+    group_indices = _term_indices(predictor.compiled.groups, group)
+    zeros = np.zeros(width, dtype=np.float64)
+    identity = np.eye(len(group_indices), dtype=np.float64)
+    for column, index in enumerate(group_indices):
+        constants = group_level_values(predictor, interaction, identity[:, column])
+        matrix[:, index + intercept_width] += _score_interaction(
+            interaction, left, right, zeros, level_constants=constants
+        )
 
 
 def _assign_term(
@@ -269,6 +330,15 @@ def build_joint_prediction_design(
                 listed = ", ".join(dict.fromkeys(map(str, levels)))
                 named.append(f"{predictor.name} term {name!r} levels {listed}")
             _assign_term(matrix, assigned, indices, values, term_name=name)
+            _add_group_term_columns(
+                matrix,
+                predictor,
+                interaction,
+                frame.column_array(left_name),
+                frame.column_array(right_name),
+                width=len(slope_indices),
+                intercept_width=intercept_width,
+            )
 
         if not np.all(assigned):
             missing = np.flatnonzero(~assigned).tolist()

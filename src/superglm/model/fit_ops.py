@@ -780,8 +780,8 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     import warnings
 
     from superglm.diagnostics.separation import (
-        SZ_SELECT_REMEDY,
         SeparationWarning,
+        format_factor_smooth_canonical,
         format_factor_smooth_separation,
         response_boundaries,
     )
@@ -804,29 +804,9 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 SeparationWarning,
                 stacklevel=level,
             )
-        if spec._population_convention != "canonical":
-            continue
-        if not spec._separated_levels:
+        if spec._population_convention == "canonical":
             warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
-                "values than the penalty's null space, so no level identifies the population "
-                "curve. Its polynomial part is fixed by convention (each level's unidentified "
-                "polynomial part zero); away from the levels' own x values the population curve, "
-                "and every level's curve, still follow the fit's point along the main effect's "
-                "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
-                f"training rows reproduce the fit. {SZ_SELECT_REMEDY}",
-                UserWarning,
-                stacklevel=level,
-            )
-        else:
-            warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
-                "values than the penalty's null space or separates the response along its line, "
-                "so no level identifies the population curve. Its polynomial part "
-                "is fixed by convention (each level's unidentified polynomial part zero); away "
-                "from the levels' own x values the population curve, and every level's curve, "
-                "still follow the fit's point along the main effect's unpenalized curve wherever "
-                f"that curve is not a polynomial. {SZ_SELECT_REMEDY}",
+                format_factor_smooth_canonical(group.name, bool(spec._separated_levels)),
                 UserWarning,
                 stacklevel=level,
             )

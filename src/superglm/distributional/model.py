@@ -32,6 +32,7 @@ from superglm.distributional.prediction_design import (
     _score_feature,
     _score_interaction,
     _term_indices,
+    group_level_values,
     warn_population_levels,
 )
 from superglm.distributional.predictor import (
@@ -50,6 +51,7 @@ from superglm.distributional.result import (
 from superglm.distributional.separation import (
     apply_separation_policy,
     predictor_response_boundaries,
+    record_factor_smooth_levels,
     scan_predictor_separation,
     validate_separation_policy,
 )
@@ -187,12 +189,23 @@ def _predict_one_eta(
         indices = _term_indices(predictor.compiled.groups, name)
         left_name, right_name = interaction.parent_names
         levels: list = []
+        group = getattr(interaction, "group", None)
+        constants = (
+            group_level_values(
+                predictor,
+                interaction,
+                slopes[_term_indices(predictor.compiled.groups, group)],
+            )
+            if group in predictor.compiled.feature_order
+            else None
+        )
         contribution = _score_interaction(
             interaction,
             frame.column_array(left_name),
             frame.column_array(right_name),
             slopes[indices],
             named=levels,
+            level_constants=constants,
         )
         if levels and named is not None:
             named.append(f"{predictor.name} term {name!r} levels {', '.join(map(str, levels))}")
@@ -598,6 +611,23 @@ def _fit_candidate(
                 boundaries=separation_boundaries,
             ),
             separation_policy,
+            stacklevel=4,
+        )
+    if len(family.parameters) == len(templates):
+        # Recorded under every policy, as SuperGLM records them: "ignore"
+        # silences the warning, never the prediction rule.
+        record_factor_smooth_levels(
+            compiled,
+            retained_y,
+            resolved_weights.values,
+            boundaries=(
+                separation_boundaries
+                if separation_boundaries is not None
+                else predictor_response_boundaries(
+                    family, resolve_predictor_links(family.parameters, templates)
+                )
+            ),
+            policy=separation_policy,
             stacklevel=4,
         )
     with measure_phase(phase_recorder, "layout_penalty_assembly"):

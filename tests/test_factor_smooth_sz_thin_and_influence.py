@@ -2088,6 +2088,82 @@ def _superlss_with_a_declared_empty_sz_level():
     return model, frame, y, weight, lambdas
 
 
+@pytest.mark.parametrize("group_term", [False, True])
+def test_superlss_predicts_a_separated_sz_level_without_its_walk(group_term) -> None:
+    """SuperLSS records separated sz levels and predicts them as SuperGLM does (sz_explosion round 2).
+
+    SuperLSS recorded nothing for an sz term without ``select=True``, so a
+    separated level predicted its walked line: a TweedieLSS mean on the
+    trigger's 3,000 freMTPL2 rows predicted a mean pure premium of 5.1e156,
+    R43 at ``eta = 372``, without a warning.  The 0.40 form also declares the
+    group's ``Categorical``, which aliases the level constants, and there the
+    walk split between the two terms (R43's categorical coefficient was
+    -198).  The fit now records the term's levels under the family's response
+    boundary for the predictor, and prediction reads a redundant group
+    term's value at each level as part of that level's line
+    (``group_level_values``).  g000, whose every row separates, then
+    predicts the mean predictor's population, the value an unseen level
+    takes, with or without the group term (to the rounding of adding and
+    taking back its value); the joint prediction design, which posterior
+    draws and standard errors use, gives the point prediction.  Mutations:
+    no recording at the SuperLSS fit; the group term left out of the rule;
+    its columns left out of the joint design.
+    """
+    import superglm as sg
+    from superglm.distributional.prediction_design import build_joint_prediction_design
+
+    frame, y, _ = _trigger_shaped("tweedie")
+    family = sg.TweedieLSS()
+    terms = [sg.s("x", kind="ps", k=8)]
+    if group_term:
+        terms.append(sg.cat("g", unseen="base"))
+    terms.append(sg.interaction(FactorSmooth("x", group="g", basis="sz", k=5)))
+    model = sg.SuperLSS(family, family.mu(*terms), family.phi(), family.p())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+    fitted = model._require_fitted()
+    spec = fitted.compiled_predictors[0].compiled.interaction_specs["x:g:sz"]
+    assert {0, 1} <= set(spec._separated_levels)
+    assert [
+        w for w in caught if "'mean:x:g:sz'" in str(w.message) and "separates" in str(w.message)
+    ]
+
+    grid = np.linspace(0.0, 1.0, 21)
+    probe = pd.DataFrame({"x": np.tile(grid, 2), "g": np.repeat(["g000", "gnew"], len(grid))})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        eta = np.asarray(model.predict_link(probe))[:, 0]
+    separated, unseen = eta[: len(grid)], eta[len(grid) :]
+    assert np.all(np.isfinite(eta))
+    if not group_term:
+        # both take the population offset itself: the same arithmetic, bit for bit
+        assert np.array_equal(separated, unseen)
+    else:
+        # g000 adds its categorical value a and takes back b(x)' a 1, the constant
+        # read through the natural map: rounding of gamma_(8 k) times the natural
+        # map's condition number on those magnitudes (Higham 2002, section 7.1)
+        from superglm.distributional.prediction_design import _term_indices, group_level_values
+
+        predictor = fitted.compiled_predictors[0]
+        slopes = fitted.result.coefficients[fitted.layout.predictors[0].coefficient_slice][1:]
+        values = group_level_values(
+            predictor, spec, slopes[_term_indices(predictor.compiled.groups, "g")]
+        )
+        constant = np.abs(spec._lowest_order_null_space(1)[:, 0])
+        added = abs(values[0]) * (np.abs(spec.marginal_basis(grid)) @ constant + 1.0)
+        bound = _gamma(8 * spec.k) * np.linalg.cond(spec._natural_map)
+        assert np.all(np.abs(separated - unseen) <= bound * (added + np.abs(unseen)))
+
+    design = build_joint_prediction_design(probe, fitted.compiled_predictors, fitted.layout)
+    state = fitted.layout.predictors[0]
+    local = fitted.result.coefficients[state.coefficient_slice]
+    from_design = design.local["mean"] @ local
+    count = len(local) + len(spec._levels) * spec.k
+    magnitude = np.abs(design.local["mean"]) @ np.abs(local)
+    assert np.all(np.abs(from_design - eta) <= _gamma(count) * (magnitude + np.abs(eta)))
+
+
 def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
     """SuperLSS records a ``select=True`` sz term's weightless levels and predicts them as SuperGLM does (#457).
 

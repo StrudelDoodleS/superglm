@@ -715,6 +715,29 @@ def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int)
     )
 
 
+def format_factor_smooth_canonical(name: str, separated: bool) -> str:
+    """The warning for an ``sz`` term no level of which identifies the population curve."""
+    if not separated:
+        return (
+            f"FactorSmooth {name!r} (basis='sz'): every level holds fewer distinct x "
+            "values than the penalty's null space, so no level identifies the population "
+            "curve. Its polynomial part is fixed by convention (each level's unidentified "
+            "polynomial part zero); away from the levels' own x values the population curve, "
+            "and every level's curve, still follow the fit's point along the main effect's "
+            "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
+            f"training rows reproduce the fit. {SZ_SELECT_REMEDY}"
+        )
+    return (
+        f"FactorSmooth {name!r} (basis='sz'): every level holds fewer distinct x "
+        "values than the penalty's null space or separates the response along its line, "
+        "so no level identifies the population curve. Its polynomial part "
+        "is fixed by convention (each level's unidentified polynomial part zero); away "
+        "from the levels' own x values the population curve, and every level's curve, "
+        "still follow the fit's point along the main effect's unpenalized curve wherever "
+        f"that curve is not a polynomial. {SZ_SELECT_REMEDY}"
+    )
+
+
 # ── spline x factor curves: a level's curve over a range it separates ──────
 
 

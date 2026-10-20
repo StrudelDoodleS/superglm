@@ -20,6 +20,8 @@ from superglm.diagnostics.separation import (
     SeparatedTerm,
     SeparationError,
     SeparationWarning,
+    format_factor_smooth_canonical,
+    format_factor_smooth_separation,
     format_separation_message,
     scan_categorical_term,
     scan_interaction_term,
@@ -108,6 +110,64 @@ def scan_predictor_separation(
     return findings
 
 
+def record_factor_smooth_levels(
+    compiled: Sequence[CompiledPredictor],
+    y: NDArray,
+    weights: NDArray,
+    *,
+    boundaries: Sequence[tuple[str, ...]],
+    policy: SeparationPolicy,
+    stacklevel: int,
+) -> None:
+    """Record what the data identify of every ``sz`` term's levels, as SuperGLM's fit does.
+
+    For each predictor's ``sz`` term without ``select=True``
+    (``FactorSmooth._record_unidentified_levels``, read at prediction by
+    ``prediction_design._score_interaction``): its thin and weightless
+    levels, and, under the response boundaries the family declares for that
+    predictor, the levels whose unpenalized line separates the response.  A
+    dispersion predictor's walk runs the other way from a mean's (log phi to
+    ``+inf`` on rows at zero), but its directions of recession are the
+    negatives of a mean's on the same rows, with the same span.  Separated
+    levels are named in a ``SeparationWarning`` unless the policy is
+    ``"ignore"``; like SuperGLM it never refuses the fit.  A term no level of
+    which identifies the population curve is named in a ``UserWarning``.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.group_matrix import FactorSmoothGroupMatrix
+
+    response = np.asarray(y, dtype=np.float64)
+    weight_values = np.asarray(weights, dtype=np.float64)
+    for predictor, predictor_boundaries in zip(compiled, boundaries, strict=True):
+        matrices = predictor.compiled.design.group_matrices
+        for group, matrix in zip(predictor.compiled.groups, matrices, strict=True):
+            spec = predictor.compiled.interaction_specs.get(group.feature_name)
+            if not (
+                isinstance(spec, FactorSmooth)
+                and spec.basis == "sz"
+                and not spec._selects_lines
+                and isinstance(matrix, FactorSmoothGroupMatrix)
+            ):
+                continue
+            name = f"{predictor.name}:{group.feature_name}"
+            separated = spec._record_unidentified_levels(
+                matrix, weight_values, response, tuple(predictor_boundaries)
+            )
+            if separated and policy != "ignore":
+                labels = [spec._levels[code] for code in separated]
+                warnings.warn(
+                    format_factor_smooth_separation(name, labels, len(spec._levels)),
+                    SeparationWarning,
+                    stacklevel=stacklevel,
+                )
+            if spec._population_convention == "canonical":
+                warnings.warn(
+                    format_factor_smooth_canonical(name, bool(spec._separated_levels)),
+                    UserWarning,
+                    stacklevel=stacklevel,
+                )
+
+
 def apply_separation_policy(
     findings: Sequence[SeparatedTerm],
     policy: SeparationPolicy,
@@ -128,6 +188,7 @@ __all__ = [
     "SeparationPolicy",
     "apply_separation_policy",
     "predictor_response_boundaries",
+    "record_factor_smooth_levels",
     "scan_predictor_separation",
     "validate_separation_policy",
 ]
