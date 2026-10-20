@@ -149,6 +149,33 @@ def test_main_effect_level_detected():
     assert "'c6'" in message
 
 
+def test_predict_names_a_separated_categorical_level_it_meets():
+    """``predict`` names a main-effect level that had only zero responses at fit (sz_explosion round 2).
+
+    The fit warns at build; the level has no finite effect, and its
+    predictions sit near zero wherever the walk stopped.  ``predict`` said
+    nothing.  It now names the level when its rows reach it, and stays
+    silent on rows of other levels.  Mutation: no record of the level.
+    """
+    rng = np.random.default_rng(5)
+    n = 2500
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    w = np.ones(n)
+    y = _tweedie_response(rng, n)
+    y = np.where(c == "c6", 0.0, np.where(y == 0.0, 0.4, y))
+    model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}, max_iter=60)
+    fit_catching(model, pd.DataFrame({"c": c}), y, w)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
+    named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    assert len(named) == 1 and "'c' levels c6" in str(named[0].message)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
+    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+
+
 def test_gaussian_identity_never_fires():
     df, y, w, _ = separated_crossed_design()
     model = SuperGLM(

@@ -297,6 +297,9 @@ class Categorical:
     # Whether `base=` names a level although it reads "first" or "most_exposed".
     # Only a rebuild sets it, for a reference a fit resolved or a user chose.
     _base_is_level: bool = False
+    # Levels with exposure but only boundary responses at fit (the build's
+    # separation scan); ``predict`` names them when it meets them.
+    _separated_levels_at_fit: tuple = ()
 
     def __init__(
         self,

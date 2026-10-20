@@ -10,6 +10,7 @@ from collections.abc import Hashable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
@@ -694,11 +695,27 @@ def _predict_eta(
         else:
             eta.add(lambda: scorer(term, frame, beta_all))
 
+    separated_levels: list[str] = []
     for term in plan["features"]:
         if random_effects == "population" and isinstance(term["spec"], RandomEffect):
             term["spec"].validate_prediction_values(frame.column_array(term["name"]))
             continue
         score(term)
+        held = getattr(term["spec"], "_separated_levels_at_fit", ())
+        if held and not fitted and warn:
+            met = pd.unique(pd.Series(frame.column_array(term["name"]), dtype=object))
+            named = [label for label in held if label in set(met)]
+            if named:
+                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    if separated_levels:
+        warnings.warn(
+            "Categorical levels that had exposure but only boundary responses at fit have no "
+            "finite effect; the fit's value for them is where its walk stopped, so their "
+            "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
+            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term.",
+            UserWarning,
+            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
+        )
 
     if not fitted:
         from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded

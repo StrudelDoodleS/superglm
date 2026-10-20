@@ -312,6 +312,38 @@ therefore the same model.
 - `basis="fs"` already penalizes every level's polynomial part, so
   `select=True` applies to `basis="sz"` only.
 
+### Groups with sparse levels
+
+A level with few rows, or few claims, gives an unpenalized part of its curve
+little or nothing to estimate it from. On the first 3,000 training policies of
+the French motor book, with a vehicle-age curve by region, 12 of the 22
+regions had no claim or had all their claims at a single vehicle age. These
+are the held-out results on the remaining policies (Poisson, claim frequency):
+
+| How the region enters | Held-out deviance | Gini |
+|---|---|---|
+| `FactorSmooth(basis="sz")`, lines unpenalized | 40,604 | 0.077 |
+| `FactorSmooth(basis="sz", select=True)` | 34,201 | 0.163 |
+| `FactorSmooth(basis="fs")` | 34,332 | 0.182 |
+| `re("Region")`, no factor smooth | 34,201 | 0.163 |
+| `cat("Region")`, no factor smooth | 79,099 | 0.075 |
+| `cat("Region")` with a vehicle-age curve by region (`SplineCategorical`) | 80,724 | 0.084 |
+
+- For a curve by level, pass `select=True` to an SZ term or use
+  `basis="fs"`. Both penalize every level's line, so a sparse level stays
+  close to the population curve.
+- For a level effect alone, use `re()`. It shrinks a sparse level toward the
+  average.
+- A plain categorical level with exposure and no claim has no finite effect.
+  The fit warns, the level is predicted close to zero, and `predict` names it.
+  The same holds for a spline-by-category interaction, whose levels take their
+  constant from the categorical main effect.
+- A numeric or polynomial curve by category gives each level its own slope or
+  curve. When a level's claims cannot fix it, the fit warns, and `predict`
+  holds that level's curve flat beyond the values its rows covered.
+- To keep a categorical term, merge sparse levels into similar ones with
+  `Categorical(grouping=...)`.
+
 ## Separated cells: exposure without response
 
 A crossed categorical cell that carries exposure but whose responses all sit

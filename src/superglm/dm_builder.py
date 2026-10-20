@@ -1173,6 +1173,11 @@ def build_design_matrix(
         separation_response=y,
     )
     separation_records = compiled.separation_records
+    from superglm.features.categorical import Categorical
+
+    for spec in compiled.specs.values():
+        if isinstance(spec, Categorical):
+            spec._separated_levels_at_fit = ()
     if separation_records:
         from superglm.diagnostics.separation import (
             emit_curve_separation,
@@ -1210,10 +1215,13 @@ def build_design_matrix(
                 continue
             if record[0] == "cat":
                 _, name_c, spec_c, x_c = record
-                findings.extend(
-                    scan_categorical_term(
-                        name_c, spec_c, x_c, y, sample_weight, separation_boundaries
-                    )
+                found = scan_categorical_term(
+                    name_c, spec_c, x_c, y, sample_weight, separation_boundaries
+                )
+                findings.extend(found)
+                # predict names these levels when it meets them (_predict_eta)
+                spec_c._separated_levels_at_fit = tuple(
+                    label for finding in found for label in finding.labels
                 )
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
