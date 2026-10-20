@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.diagnostics.convergence import (
+    lss_fisher_curvature_message,
     lss_no_ascent_direction_message,
     lss_null_model_nonconvergence_message,
     lss_semidefinite_curvature_message,
@@ -468,23 +469,26 @@ def _curvature_disclosures(
 ) -> tuple[str, ...]:
     """What a fit whose final curvature fell back discloses instead of refusing.
 
-    A projected (nearest semidefinite) curvature is always disclosed, and so
-    is the family's own diagnosis of repeated curvature failure where the fit
-    used to refuse: after the retry, no expected information was usable, so
-    the policy had to project. A Fisher fallback was accepted before fits
-    stopped refusing and carries no diagnosis, except for a family that
+    Every fallback the fit used to refuse is disclosed, with the family's own
+    diagnosis of repeated curvature failure when it has one. A projected
+    (nearest semidefinite) curvature always used to refuse: after the retry no
+    expected information was usable. A Fisher fallback was accepted silently
+    before fits stopped refusing, and still is, except for a family that
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
-    refuse.
+    refuse and is disclosed whether or not its diagnosis fires.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
     projected = telemetry.actual_source == "nearest_semidefinite"
+    used_to_refuse = telemetry.fallback_count > 0 and getattr(
+        family, "diagnoses_any_curvature_fallback", False
+    )
     if projected:
         messages.append(lss_semidefinite_curvature_message(type(family).__name__))
-    diagnosed = projected or (
-        telemetry.fallback_count > 0 and getattr(family, "diagnoses_any_curvature_fallback", False)
-    )
+    elif used_to_refuse and telemetry.actual_source == "fisher":
+        messages.append(lss_fisher_curvature_message(type(family).__name__))
+    diagnosed = projected or used_to_refuse
     if diagnosed and isinstance(family, FitFailureDiagnosingFamily):
         weights = likelihood_plan.weights
         # The diagnosis reads the supplied rows at their input positions.

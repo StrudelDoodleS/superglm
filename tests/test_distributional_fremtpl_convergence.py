@@ -218,6 +218,12 @@ def _fit_disclosing(model, sample, response, **options):
     assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    # Every final-curvature fallback of these families used to refuse (NB2 had
+    # no expected information, Tweedie has none), so each one is disclosed.
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    if telemetry.fallback_count > 0:
+        assert model.result_.warnings
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
     for message in model.result_.warnings:
         assert any(str(item.message) == message for item in caught)
 

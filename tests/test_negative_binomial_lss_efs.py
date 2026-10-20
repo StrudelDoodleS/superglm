@@ -396,6 +396,9 @@ def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
     assert np.all(np.isfinite(np.asarray(model.predict(frame, offsets=offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    # Every NB2 final-curvature fallback used to refuse, so each one is disclosed.
+    if model._require_fitted().fit_state.solver_result.terminal_curvature.fallback_count > 0:
+        assert model.result_.warnings
     for message in model.result_.warnings:
         assert any(str(item.message) == message for item in caught)
 
@@ -481,3 +484,37 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
     assert len(ranks) > 1
     assert smoothing.converged, smoothing.convergence_reason
+
+
+def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None:
+    """An NB2 fit that ends on Fisher information says so, as master's refusal did.
+
+    The observed size curvature is sign-flipped at every state, so the final
+    observed curvature stays indefinite after the retry and the policy accepts
+    the expected information. The data are overdispersed, so the Poisson-boundary
+    diagnosis does not fire; the parent then disclosed nothing at all.
+    """
+    from dataclasses import replace
+
+    evaluate = NegativeBinomialLS.evaluate_natural
+
+    def indefinite(self, y, theta, plan, *, derivative_order=2):
+        result = evaluate(self, y, theta, plan, derivative_order=derivative_order)
+        if result.hessian_packed is None:
+            return result
+        hessian = np.array(result.hessian_packed, copy=True)
+        hessian[:, 2] = -hessian[:, 2]
+        return replace(result, hessian_packed=hessian)
+
+    monkeypatch.setattr(NegativeBinomialLS, "evaluate_natural", indefinite)
+    frame, response = _overdispersed_fixture()
+    assert float(np.var(response)) > float(np.mean(response))
+    model = _model()
+    with pytest.warns(ConvergenceWarning, match="expected \\(Fisher\\) information"):
+        model.fit(frame, response, lambdas=_INITIAL_LAMBDAS, max_inner_iter=20)
+
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    assert telemetry.actual_source == "fisher"
+    assert telemetry.fallback_count >= 1
+    assert any("expected (Fisher) information" in message for message in model.result_.warnings)
+    assert not any("Poisson-like" in message for message in model.result_.warnings)

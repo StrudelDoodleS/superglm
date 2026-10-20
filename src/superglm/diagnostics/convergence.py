@@ -221,6 +221,20 @@ def lss_semidefinite_curvature_message(family_name: str) -> str:
     )
 
 
+def lss_fisher_curvature_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its final curvature fell back to Fisher information."""
+    return (
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
+        "indefinite after a tighter retry, so the standard errors, effective degrees of freedom "
+        "and smoothing updates use the expected (Fisher) information instead. Indefinite "
+        "observed curvature means the fit is not at a proper maximum of the observed "
+        "likelihood: it stopped short of one, or the maximum lies on a boundary such as a "
+        "size at its Poisson limit; model.diagnose() explains the stop. Refit with a larger "
+        "max_inner_iter, larger starting smoothing parameters (initial_lambda), or simpler "
+        "terms before reading the summary."
+    )
+
+
 def lss_no_ascent_direction_message(family_name: str) -> str:
     """The disclosure a SuperLSS fit makes when its coefficient solver found no ascent direction."""
     return (
