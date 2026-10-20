@@ -874,6 +874,18 @@ def _evaluate_fused_trial(
 
 
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
+    """Starting coefficients: the family's starting parameters, projected with the penalty.
+
+    Each predictor's link-scale starting values, less its offset, are fitted by
+    penalized weighted least squares with the starting penalty, as the first
+    working regression of penalized IRLS and of GAMLSS's RS algorithm fits them
+    (Stasinopoulos and Rigby, J. Statist. Softw. 23(7), 2007, section 1.5).
+    The starting values are constant per predictor, so without an offset this
+    is the intercept alone. An offset makes the target vary by row; projecting
+    it without the penalty let a spline basis with sparse tail data absorb
+    ``-log(exposure)`` with coefficients near 1e5, a penalty of 2e10 against a
+    log likelihood of 4e3, and fitted means the NB2 kernel cannot evaluate.
+    """
     initialized = context.family.initialize(context.response, context.likelihood_plan)
     initialized.validate_shape(
         n_observations=len(context.response),
@@ -896,7 +908,8 @@ def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
                 dtype=np.float64,
             )
             target = target - state.offset
-            gram = plan.diagonal_moment(weights)
+            block = context.penalty[state.coefficient_slice, state.coefficient_slice]
+            gram = plan.diagonal_moment(weights) + block
             rhs = plan.score(weights * target)
             coefficients[state.coefficient_slice] = decompose_gram(gram).solve(rhs)
         return _readonly(coefficients)
@@ -913,9 +926,10 @@ def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
         target = np.asarray(link.link(initialized.theta[:, parameter_index]), dtype=np.float64)
         target = target - state.offset
         weighted_matrix = matrix * square_root_weight[:, None]
-        weighted_target = target * square_root_weight
-        local = np.linalg.lstsq(weighted_matrix, weighted_target, rcond=None)[0]
-        coefficients[state.coefficient_slice] = local
+        block = context.penalty[state.coefficient_slice, state.coefficient_slice]
+        gram = weighted_matrix.T @ weighted_matrix + block
+        rhs = weighted_matrix.T @ (target * square_root_weight)
+        coefficients[state.coefficient_slice] = decompose_gram(gram).solve(rhs)
     return _readonly(coefficients)
 
 

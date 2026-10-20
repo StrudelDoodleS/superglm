@@ -367,11 +367,9 @@ def _claims_book_fixture(seed: int = 7, n_rows: int = 1500):
     return frame, counts, np.log(exposure)
 
 
-def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
-    """Kills the refusal on ordinary-looking data: the fit returns and discloses its fallback."""
-    frame, counts, log_exposure = _claims_book_fixture()
+def _claims_book_model() -> SuperLSS:
     family = NegativeBinomialLS()
-    model = SuperLSS(
+    return SuperLSS(
         family,
         family.mean(
             s("DrivAge", kind="cr", k=10),
@@ -383,14 +381,60 @@ def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
         ),
         family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
     )
+
+
+def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
+    """Kills the refusal on ordinary-looking data: the fit returns, predicts and discloses."""
+    frame, counts, log_exposure = _claims_book_fixture()
+    model = _claims_book_model()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.fit_reml(frame, counts, offsets={"mean": log_exposure, "theta": log_exposure})
 
-    fits = model._require_fitted().fit_state.smoothing.coefficient_fits
-    assert any(fit.terminal_curvature.fallback_count > 0 for fit in fits)
     assert np.all(np.isfinite(model.covariance_))
+    offsets = {"mean": log_exposure, "theta": log_exposure}
+    assert np.all(np.isfinite(np.asarray(model.predict(frame, offsets=offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
     for message in model.result_.warnings:
         assert any(str(item.message) == message for item in caught)
+
+
+def test_offset_start_is_projected_with_the_starting_penalty(monkeypatch) -> None:
+    """Kills an unpenalized starting projection of an offset-shifted target.
+
+    Penalized least squares cannot pay more penalty than the intercept-only
+    start's residual sum of squares, which is feasible at zero penalty. The
+    unpenalized projection let the vehicle-age spline absorb -log(exposure)
+    with a starting penalty 7.6 times that bound on this seed (and 2.3e10
+    against a log likelihood of 3.8e3 on the 20,000-row freMTPL2 sample).
+    """
+    import superglm.distributional.solver.solver as solver_module
+
+    starts = []
+    original = solver_module._initial_coefficients
+
+    def record(context):
+        coefficients = original(context)
+        starts.append((context, coefficients))
+        return coefficients
+
+    monkeypatch.setattr(solver_module, "_initial_coefficients", record)
+    frame, counts, log_exposure = _claims_book_fixture(seed=3, n_rows=4000)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _claims_book_model().fit_reml(
+            frame, counts, offsets={"mean": log_exposure, "theta": log_exposure}, max_reml_iter=1
+        )
+
+    context, coefficients = starts[0]
+    initial = context.family.initialize(context.response, context.likelihood_plan).theta
+    weights = context.likelihood_plan.weights.values
+    state = context.layout.predictors[0]
+    target = np.log(initial[:, 0]) - state.offset
+    centred = target - np.sum(weights * target) / np.sum(weights)
+    block = state.coefficient_slice
+    start = coefficients[block]
+    penalty = float(start @ context.penalty[block, block] @ start)
+    residual = float(np.sum(weights * centred**2))
+    assert penalty <= residual * (1.0 + 1.0e-8), (penalty, residual)

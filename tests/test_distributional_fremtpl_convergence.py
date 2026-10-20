@@ -176,10 +176,11 @@ def test_uncapped_gamma_explicit_weak_start_refuses_unresolved_stationarity(unca
 def test_negative_binomial_book_sample_finishes_instead_of_refusing():
     """Kills the refusal on the 20,000-row freMTPL2 sample of the lss_nb benchmark case.
 
-    Master raised RepeatedCurvatureIndefinitenessError on this sample: the
-    terminal observed curvature stayed indefinite and NB2 had no expected
-    information. The fit now returns, records the fallback it took and
-    discloses non-convergence.
+    Master raised RepeatedCurvatureIndefinitenessError on this sample: its
+    unpenalized start fitted -log(exposure) with vehicle-age spline
+    coefficients near 2e5, the solver stalled there, and the terminal observed
+    curvature stayed indefinite with no Fisher fallback. The fit now returns,
+    predicts finite means and discloses non-convergence.
     """
     import warnings
 
@@ -222,8 +223,8 @@ def test_negative_binomial_book_sample_finishes_instead_of_refusing():
             offsets={"mean": log_exposure, "theta": log_exposure},
         )
 
-    fits = model._require_fitted().fit_state.smoothing.coefficient_fits
-    assert any(fit.terminal_curvature.fallback_count > 0 for fit in fits)
     assert np.all(np.isfinite(model.covariance_))
+    offsets = {"mean": log_exposure, "theta": log_exposure}
+    assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
