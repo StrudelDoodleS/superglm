@@ -1509,7 +1509,7 @@ def test_resolution_limited_exact_face_reason_round_trips_without_certification(
     serialized = serialize_distributional_model(resolution_limited_model)
     restored = deserialize_distributional_model(serialized)
     restored_smoothing = restored.smoothing
-    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "10.0.0"
+    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "11.0.0"
     assert restored_smoothing is not None
     assert restored_smoothing.terminal_fit.convergence_reason == "resolution_limited_stationarity"
     np.testing.assert_array_equal(
@@ -1841,6 +1841,36 @@ def test_published_negative_binomial_artifact_loads_after_gaining_expected_infor
     assert again.recorded_expected_information is False
 
 
+def test_a_schema_ten_reader_refuses_newer_artifacts_at_its_version_gate(monkeypatch) -> None:
+    """Kills the silent manifest change: 0.40 reads schema 10, which has no disclosures.
+
+    A fit's disclosures are part of the schema-11 manifest. Written under the
+    parent's schema 10, an artifact carrying them passed a 0.40 reader's version
+    gate and then failed its manifest comparison, the error reserved for
+    tampering. Under schema 11 the 0.40 reader (modelled here: schema 10,
+    reading 8 and 9) refuses it before unpickling, naming both versions.
+    """
+    fixed = _fixed_model()[0]
+    state = fixed.fit_state
+    disclosed = replace(
+        fixed,
+        _fit_state=replace(state, result=replace(state.result, warnings=("a disclosure",))),
+    )
+    artifact = serialize_distributional_model(disclosed)
+    assert json.loads(artifact)["manifest"]["fit"]["warnings"] == ["a disclosure"]
+    assert deserialize_distributional_model(artifact).fitted_result.warnings == ("a disclosure",)
+
+    monkeypatch.setattr(serialization_module, "SCHEMA_VERSION", "10.0.0")
+    monkeypatch.setattr(serialization_module, "READABLE_PREVIOUS_MAJORS", frozenset({8, 9}))
+
+    def unexpected_unpickle(*args, **kwargs):
+        raise AssertionError("the schema-10 reader must refuse before unpickling")
+
+    monkeypatch.setattr(serialization_module.pickle, "loads", unexpected_unpickle)
+    with pytest.raises(DistributionalSerializationError, match="major versions differ"):
+        deserialize_distributional_model(artifact)
+
+
 def test_schema_eight_negative_binomial_scope_follows_the_recorded_capability(
     negative_binomial_artifact_model,
 ) -> None:
@@ -2088,16 +2118,48 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
     _decomposition_models,
     _joint_exact_face_model,
 ) -> None:
-    """Pin the schema-10 manifest, including historical row retention.
+    """Pin the schema-11 manifest, including historical row retention and disclosures.
 
     ``deserialize_distributional_model`` compares the recomputed manifest to the
     stored one for equality, so omitting a behavior-driving key leaves that state
     unauthenticated. Deliberate manifest changes must bump the major component
     and update these key sets together.
     """
-    assert SCHEMA_VERSION == "10.0.0"
+    assert SCHEMA_VERSION == "11.0.0"
 
-    manifest = distributional_manifest(_fixed_model()[0])
+    fixed = _fixed_model()[0]
+    manifest = distributional_manifest(fixed)
+    fit_fields = {
+        "revision",
+        "coefficients",
+        "predictor_coefficients",
+        "smoothing_parameters",
+        "covariance",
+        "total_effective_df",
+        "predictor_edf",
+        "intercept_edf",
+        "term_edf",
+        "log_likelihood",
+        "penalized_log_likelihood",
+        "null_objective",
+        "converged",
+        "coefficient_converged",
+        "smoothing_converged",
+        "n_inner_iter",
+        "n_smoothing_iter",
+        "rank",
+        "curvature_telemetry",
+    }
+    assert set(manifest["fit"]) == fit_fields
+    # Schema 11: a fit that disclosed something records it.
+    state = fixed.fit_state
+    disclosed = replace(
+        fixed,
+        _fit_state=replace(state, result=replace(state.result, warnings=("a disclosure",))),
+    )
+    disclosed_fit = distributional_manifest(disclosed)["fit"]
+    assert set(disclosed_fit) == fit_fields | {"warnings"}
+    assert disclosed_fit["warnings"] == ["a disclosure"]
     assert set(manifest) == {
         "family",
         "fit",

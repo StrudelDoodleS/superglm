@@ -11,9 +11,12 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier unless explicitly supported.** Schemas 8 and 9
-  retain full historical rows. Schema 8 also retains its original telemetry
-  encoding and family-dependent curvature scope. Known
+* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9 and
+  10 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
+  retains its original telemetry encoding and family-dependent curvature
+  scope. Schema 11 added a fit's disclosures and NegativeBinomialLS's expected
+  information to the manifest, so readers of schema 10 refuse its artifacts
+  at their version gate instead of reporting a manifest mismatch. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
@@ -34,8 +37,8 @@ with or corrupted, and never merely that it is old.
 
 One family capability is read as the artifact recorded it rather than as the
 family now declares it: ``expected_information`` may be gained after an
-artifact was written (NegativeBinomialLS gained it after schema 10.0.0
-artifacts were published). A fit's telemetry records which curvature it used,
+artifact was written (NegativeBinomialLS gained it in schema 11.0.0; schema 10
+artifacts record it absent). A fit's telemetry records which curvature it used,
 so the gain changes nothing the artifact holds; the recorded value is kept on
 the loaded model (``recorded_expected_information``) for the schema-8
 curvature scope, which depended on it.

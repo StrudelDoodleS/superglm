@@ -26,7 +26,7 @@ def test_history_artifact_refuses_schema_nine_reader_before_unpickling(
     monkeypatch, retain_history_rows
 ):
     artifact = serialize_distributional_model(_fit(retain_history_rows=retain_history_rows))
-    assert json.loads(artifact)["schema_version"] == "10.0.0"
+    assert json.loads(artifact)["schema_version"] == "11.0.0"
 
     # Model the previous reader's version gate. A new payload must be refused
     # there, before an old constructor or manifest comparison sees new state.
