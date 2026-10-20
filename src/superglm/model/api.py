@@ -1947,6 +1947,16 @@ class SuperGLM:
         data and, for continuous x continuous surfaces, optional density / HDR
         grid data when ``X`` and ``sample_weight`` are supplied.
 
+        A ``FactorSmooth`` term exports like a ``SplineCategorical``, with
+        ``plot_kind="varying_coefficient"``: ``effect`` has one row per level
+        and grid value of the smoothed variable (``n_points`` values), with
+        columns named by the variable and the group, ``log_relativity``,
+        ``relativity``, ``is_base_level`` (always ``False``: every level has a
+        curve) and ``se_log_relativity``, the curve's posterior standard error.
+        These are the curves :meth:`factor_smooth` reports: each level's own
+        curve for ``basis="fs"``, its deviation from the population curve for
+        ``basis="sz"``.
+
         With ``centering="native"`` (default), relativity values are
         the exponentiated fitted term contributions under the model's
         identifiability constraint — not portfolio-average relativities.

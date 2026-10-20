@@ -500,3 +500,41 @@ def test_accessors_find_a_term_by_its_label_or_its_text(labelled):
     assert model.summary()["level_universes"]["1"] == model.summary()["level_universes"][1]
     with pytest.raises(KeyError):
         relativities["9"]
+
+
+@pytest.mark.parametrize("labels", ["text", "integer"])
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_plot_data_and_plot_draw_a_factor_smooth_as_level_curves(data, basis, labels):
+    """Master raised 'Cannot determine plot-data structure' for every factor smooth.
+
+    The payload is SplineCategorical's varying-coefficient shape, carrying the
+    curves and standard errors ``factor_smooth`` reports.
+    """
+    X, y = data
+    variable, group = ("x", "g") if labels == "text" else (0, 1)
+    X = X.rename(columns={"x": variable, "g": group})
+    smooth = FactorSmooth(variable, group=group, basis=basis, k=6)
+    model = SuperGLM(
+        terms=[s(variable, kind="ps", k=7), interaction(smooth)], selection_penalty=0.0
+    ).fit_reml(X, y)
+    payload = model.plot_data(smooth.name, n_points=25)
+    assert payload["plot_kind"] == "varying_coefficient"
+    effect = payload["effect"]
+    curves = model.factor_smooth(smooth.name, grid=25).curves
+    assert list(effect.columns) == [
+        variable,
+        group,
+        "log_relativity",
+        "relativity",
+        "is_base_level",
+        "se_log_relativity",
+    ]
+    assert not effect["is_base_level"].any()
+    np.testing.assert_array_equal(effect[variable].to_numpy(), curves[variable].to_numpy())
+    np.testing.assert_array_equal(effect["log_relativity"].to_numpy(), curves["effect"].to_numpy())
+    np.testing.assert_array_equal(
+        effect["se_log_relativity"].to_numpy(), curves["posterior_se"].to_numpy()
+    )
+    assert list(effect[group].unique()) == list(curves["level"].unique())
+    figure = model.plot(smooth.name, n_points=25)
+    assert len(figure.axes[0].lines) >= len(curves["level"].unique())
