@@ -1224,10 +1224,13 @@ __all__ = [
 
 
 def _warmup_negative_binomial() -> None:
-    """Compile the theta-series cores a SuperLSS NB2 fit calls, serial and parallel (no rows).
+    """Compile the NB2 kernels a SuperLSS fit calls on its way (no rows).
 
-    The LAML endgame's third- and fourth-derivative kernels compile on first
-    use, as the Tweedie family's do.
+    The theta-series cores, serial and parallel, and the expected size
+    information, which the terminal curvature policy falls back to and
+    ``coefficient_curvature="fisher"`` steps with. The LAML endgame's third-
+    and fourth-derivative kernels compile on first use, as the Tweedie
+    family's do.
     """
     rows = np.zeros(0, dtype=np.int64)
     values = np.zeros(0, dtype=_FLOAT)
@@ -1237,3 +1240,4 @@ def _warmup_negative_binomial() -> None:
             _SERIES_EXPONENTS, _SERIES_BERNOULLI, np.zeros((0, 2), dtype=np.bool_),
             np.zeros((0, 2), dtype=_FLOAT), np.zeros((0, 2), dtype=_FLOAT),
         )  # fmt: skip
+    _compiled.expected_size_information(values, values, _MAX_INFORMATION_TERMS_PER_ROW)

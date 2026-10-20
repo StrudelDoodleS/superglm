@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -592,3 +594,29 @@ def test_a_single_large_count_is_no_longer_refused_below_the_budget() -> None:
         counts, ones * 10.0, ones, ones, "prior", derivative_order=2
     )
     assert np.isfinite(out.optimizing_log_likelihood[0])
+
+
+def test_public_warmup_compiles_the_expected_information_kernel() -> None:
+    """warmup() compiles the NB2 Fisher kernel with the signature a fit calls it with."""
+    script = r"""
+import numpy as np
+import superglm
+from superglm.distributional.kernels import _negative_binomial_numba as compiled
+from superglm.distributional.kernels.negative_binomial import (
+    negative_binomial_expected_information,
+)
+
+kernel = compiled.expected_size_information
+assert not kernel.nopython_signatures
+superglm.warmup()
+signatures = tuple(kernel.nopython_signatures)
+assert len(signatures) == 1, signatures
+negative_binomial_expected_information(
+    np.array([0.1, 2.0]), np.array([1.5, 30.0]), np.ones(2), "prior"
+)
+assert tuple(kernel.nopython_signatures) == signatures
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script], check=False, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
