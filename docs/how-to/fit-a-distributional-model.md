@@ -592,8 +592,10 @@ and artifact. They must satisfy `1 < power_lower < power_upper < 2`, and the
 power link keeps fitted values strictly inside those walls.
 
 Both fixed smoothing parameters and automatic smoothing support dense or grouped
-discrete execution with observed coefficient curvature. There is no Fisher
-fallback for `TweedieLSS`.
+discrete execution with observed coefficient curvature. `TweedieLSS` has no
+Fisher information; when the observed curvature at the end of a fit is not a
+proper maximum, the fit uses the nearest positive semidefinite curvature
+instead and warns (see "Curvature choice").
 
 The example sets the outer iteration policy explicitly for reproducibility.
 Always inspect reported convergence, the terminal residual, and curvature
@@ -1145,8 +1147,11 @@ the default solve. Under either policy the accepted terminal point is
 re-examined with the penalized observed Hessian `A + S`, restricted to the
 active coefficient subspace when needed. If it is materially indefinite the
 solver retries with a tighter tolerance, then falls back to penalized expected
-information `F + S` when the family supplies it and refuses the fit otherwise.
-The requested policy
+information `F + S` when the family supplies it. Without usable expected
+information the fit is not refused: each row's observed curvature is replaced
+by its nearest positive semidefinite matrix (Wood and Fasiolo, 2017; Higham,
+1988), the fit warns, and the warning is kept in `result_.warnings`; telemetry
+then reports `actual_source` as `"nearest_semidefinite"`. The requested policy
 is `training_telemetry().curvature_policy`;
 the terminal source and any fallback are in `training_telemetry().curvature`
 (`actual_source`, `fallback_count`, `matrix_kind`).
@@ -1336,7 +1341,9 @@ order you are likely to meet them.
 - **Tweedie and negative binomial fit on exact curvature only.** Dense,
   chunked and discrete designs all work, but these two families have no
   Fisher approximation to fall back on: if a fit ends where the exact
-  curvature does not describe a proper maximum, it refuses rather than guess.
+  curvature does not describe a proper maximum, its standard errors and
+  effective degrees of freedom use the nearest positive semidefinite
+  curvature, and the fit warns.
 - **`smoothing_certified_` is strict, and `False` is not a defect on its
   own.** It is `True` only for a converged interior stop with every check
   passed: no `practical_plateau` stop (the default `practical_reml=True`

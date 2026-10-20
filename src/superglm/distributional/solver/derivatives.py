@@ -273,3 +273,43 @@ def transform_natural_information(
             information[:, packed_index], first[:, left], first[:, right]
         )
     return _readonly_float_array(transformed, name="predictor_information_packed")
+
+
+def nearest_semidefinite_curvature(curvature_packed: NDArray) -> NDArray[np.float64]:
+    """Project each row's packed predictor curvature onto the semidefinite cone.
+
+    Each row's ``K x K`` block is replaced by its nearest positive semidefinite
+    matrix in the Frobenius norm, which keeps its eigenvectors and sets its
+    negative eigenvalues to zero (Higham, *Linear Algebra Appl.* 103, 1988).
+    Rows whose block has no negative eigenvalue are returned bit for bit.
+    A Gram ``X'WX`` of semidefinite row blocks is semidefinite, so this is
+    the per-observation form of the substitution Wood, Pya and Saefken (JASA
+    111, 2016, section 3.3.1) make when observed curvature is not positive
+    definite; it is used only as the terminal policy's last fallback.
+    """
+    curvature = np.asarray(curvature_packed, dtype=np.float64)
+    if curvature.ndim != 2 or not np.all(np.isfinite(curvature)):
+        raise ValueError("curvature_packed must be a finite two-dimensional array")
+    n_channels = curvature.shape[1]
+    k_parameters = int((np.sqrt(8 * n_channels + 1) - 1) // 2)
+    if k_parameters * (k_parameters + 1) // 2 != n_channels or k_parameters < 1:
+        raise ValueError("curvature_packed does not hold packed symmetric blocks")
+    pairs = packed_pairs(k_parameters)
+    blocks = np.empty((len(curvature), k_parameters, k_parameters), dtype=np.float64)
+    for packed_index, (left, right) in enumerate(pairs):
+        blocks[:, left, right] = curvature[:, packed_index]
+        blocks[:, right, left] = curvature[:, packed_index]
+    values = np.linalg.eigvalsh(blocks)
+    rows = np.flatnonzero(values[:, 0] < 0.0)
+    projected = np.array(curvature, dtype=np.float64, copy=True)
+    if rows.size:
+        row_values, row_vectors = np.linalg.eigh(blocks[rows])
+        clipped = np.einsum(
+            "rik,rk,rjk->rij", row_vectors, np.maximum(row_values, 0.0), row_vectors
+        )
+        for packed_index, (left, right) in enumerate(pairs):
+            projected[rows, packed_index] = 0.5 * (
+                clipped[:, left, right] + clipped[:, right, left]
+            )
+    projected.setflags(write=False)
+    return projected

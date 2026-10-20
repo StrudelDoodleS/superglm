@@ -10,10 +10,9 @@ from types import MappingProxyType
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.family import CurvatureKind
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import DenseSolverResult
-from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
 
 
 def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
@@ -58,8 +57,8 @@ class JointInference:
     predictor_edf: Mapping[str, float]
     intercept_edf: Mapping[str, float]
     term_edf: Mapping[str, float]
-    covariance_curvature_source: CurvatureKind
-    edf_curvature_source: CurvatureKind
+    covariance_curvature_source: AcceptedCurvatureKind
+    edf_curvature_source: AcceptedCurvatureKind
     curvature_telemetry: CurvatureTelemetry
     rank: int
     reconciliation_tolerance: float
@@ -147,7 +146,7 @@ class JointInference:
         object.__setattr__(self, "predictor_reconciliation_error", predictor_error)
 
     @property
-    def curvature_source(self) -> CurvatureKind:
+    def curvature_source(self) -> AcceptedCurvatureKind:
         """The single terminal curvature source shared by covariance and EDF."""
         return self.covariance_curvature_source
 

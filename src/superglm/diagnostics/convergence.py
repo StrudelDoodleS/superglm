@@ -207,6 +207,20 @@ def lss_nonconvergence_message(fitted_result: Any, smoothing_reason: str | None)
     )
 
 
+def lss_semidefinite_curvature_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its final curvature had to be projected."""
+    return (
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
+        "indefinite after a tighter retry, and no usable expected information was available, "
+        "so the standard errors, effective degrees of freedom and smoothing updates use the "
+        "nearest positive semidefinite approximation of the observed curvature. Indefinite "
+        "curvature usually means the coefficient fit stopped short of a maximum; "
+        "model.diagnose() explains the stop. Refit with a larger max_inner_iter, larger "
+        "starting smoothing parameters (initial_lambda), or simpler terms before reading the "
+        "summary."
+    )
+
+
 def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     """The statement for an unconverged coefficient fit with no smoothing selection."""
     if fit_result is None or bool(getattr(fit_result, "converged", True)):

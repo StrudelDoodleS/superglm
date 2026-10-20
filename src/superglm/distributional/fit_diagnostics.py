@@ -389,6 +389,11 @@ def _negative_eigenvalue_resolution(matrix: np.ndarray) -> float:
     return relative_bar * scale
 
 
+def _accepted_source_label(source: str) -> str:
+    """Name an accepted curvature source in prose."""
+    return "nearest positive semidefinite observed" if source == "nearest_semidefinite" else source
+
+
 def _curvature_indefinite_finding(
     context: _LSSDiagnosticContext,
 ) -> DiagnosticFinding | None:
@@ -428,7 +433,7 @@ def _curvature_indefinite_finding(
             f"The {source_label} in {coordinate_phrase} recorded raw minimum eigenvalue "
             f"{minimum:.3e}; the terminal policy's diagonally equilibrated analysis classified "
             f"the requested matrix as materially indefinite before accepting "
-            f"{telemetry.actual_source} curvature."
+            f"{_accepted_source_label(telemetry.actual_source)} curvature."
         )
         minimum_evidence = DiagnosticEvidence(
             metric="minimum_eigenvalue",
@@ -441,7 +446,8 @@ def _curvature_indefinite_finding(
             "The raw minimum eigenvalue and the policy's diagonally equilibrated rank analysis "
             "are different diagnostics. The requested matrix norm and numerical threshold are "
             "not retained after fallback; materiality comes from the terminal curvature-policy "
-            f"decision, not from the accepted {telemetry.actual_source} rank or condition estimate."
+            "decision, not from the accepted "
+            f"{_accepted_source_label(telemetry.actual_source)} rank or condition estimate."
         )
     else:
         headline = f"The {source_label} has a resolved negative eigenvalue."
@@ -1479,7 +1485,7 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
     if condition is not None and condition >= _CONDITION_WARNING_THRESHOLD:
         accepted_source = fit.terminal_curvature.actual_source
         matrix_kind = context.terminal_policy_matrix_kind
-        source_label = f"accepted {accepted_source} {matrix_kind} curvature"
+        source_label = f"accepted {_accepted_source_label(accepted_source)} {matrix_kind} curvature"
         findings.append(
             _finding(
                 "numerics.conditioning_warning",

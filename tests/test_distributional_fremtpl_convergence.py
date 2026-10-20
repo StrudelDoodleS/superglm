@@ -171,3 +171,59 @@ def test_uncapped_gamma_explicit_weak_start_refuses_unresolved_stationarity(unca
     assert not model.result_.converged
     report = model.diagnose()
     assert any(finding.identifier == "fit.not_converged:coefficient" for finding in report.findings)
+
+
+def test_negative_binomial_book_sample_finishes_instead_of_refusing():
+    """Kills the refusal on the 20,000-row freMTPL2 sample of the lss_nb benchmark case.
+
+    Master raised RepeatedCurvatureIndefinitenessError on this sample: the
+    terminal observed curvature stayed indefinite and NB2 had no expected
+    information. The fit now returns, records the fallback it took and
+    discloses non-convergence.
+    """
+    import warnings
+
+    from superglm import NegativeBinomialLS, SuperLSS, cat, s
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    freq = _datasets.load_freq_corrected()
+    freq["LogDensity"] = np.log1p(freq["Density"].to_numpy(dtype=np.float64))
+    for column in ("DrivAge", "VehAge", "BonusMalus", "VehPower"):
+        freq[column] = freq[column].astype(np.float64)
+    for column in ("VehBrand", "Region", "VehGas", "Area"):
+        freq[column] = freq[column].astype(str)
+    order = np.random.default_rng(20261012).permutation(len(freq))
+    train = np.zeros(len(freq), dtype=bool)
+    train[order[: int(round(0.8 * len(freq)))]] = True
+    sample = freq[train].reset_index(drop=True).iloc[:20000]
+    log_exposure = np.log(sample["Exposure"].to_numpy(dtype=np.float64))
+
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("DrivAge", kind="cr", k=10),
+            s("VehAge", kind="cr", k=10),
+            s("BonusMalus", kind="cr", k=10),
+            s("LogDensity", kind="cr", k=8),
+            s("VehPower", kind="cr", k=6),
+            cat("VehBrand"),
+            cat("Region"),
+            cat("VehGas"),
+            cat("Area"),
+        ),
+        family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(
+            sample,
+            sample["ClaimNb"].to_numpy(dtype=np.float64),
+            offsets={"mean": log_exposure, "theta": log_exposure},
+        )
+
+    fits = model._require_fitted().fit_state.smoothing.coefficient_fits
+    assert any(fit.terminal_curvature.fallback_count > 0 for fit in fits)
+    assert np.all(np.isfinite(model.covariance_))
+    if not model.result_.converged:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)

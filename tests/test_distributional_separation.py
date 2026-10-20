@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import warnings
 from dataclasses import replace
 
@@ -8,9 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm import SuperLSS
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.distributional import GammaLS, GaussianLS, NegativeBinomialLS, Predictor, TweedieLSS
-from superglm.distributional.curvature import RepeatedCurvatureIndefinitenessError
 from superglm.distributional.family import ResponseBoundaryFamily
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.features import Categorical, Spline
@@ -66,21 +65,40 @@ def _tweedie_model(**kwargs):
 
 
 # With the all-zero level on both the mean and the dispersion predictor its
-# rows share one direction in (log mu, log phi): an exact null vector of the
-# unpenalised curvature, which the coefficient solver's rank policy refuses
-# as materially indefinite.  The scan runs before that solver, and the
-# refusal is not what these tests assert.
-_SOLVER_REFUSAL = RepeatedCurvatureIndefinitenessError
+# rows share one direction in (log mu, log phi), along which the observed
+# curvature stays materially indefinite.  TweedieLSS has no expected
+# information, so the solver used to refuse the fit here; it now accepts the
+# nearest semidefinite curvature and discloses it.
 
 
 def test_separated_level_warns_before_fitting_and_names_both_predictors() -> None:
     frame, y, exposure = _separated_tweedie_fixture()
-    with pytest.warns(SeparationWarning) as record, contextlib.suppress(_SOLVER_REFUSAL):
+    with pytest.warns(SeparationWarning) as record:
         _tweedie_model().fit(frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0})
     message = str(record[0].message)
     assert "'mean:region'" in message and "'dispersion:region'" in message
     assert "'d'" in message
     assert "collapse" in message
+
+
+def test_separated_tweedie_fit_finishes_on_the_nearest_semidefinite_curvature() -> None:
+    """Kills the refusal for a family without expected information (master raised here)."""
+    frame, y, exposure = _separated_tweedie_fixture()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _tweedie_model().fit(
+            frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0}
+        )
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    assert telemetry.actual_source == "nearest_semidefinite"
+    assert telemetry.fallback_count == 1
+    assert len(model.result_.warnings) == 1
+    assert "nearest positive semidefinite" in model.result_.warnings[0]
+    assert any(str(item.message) == model.result_.warnings[0] for item in caught)
+    assert np.all(np.isfinite(model.covariance_))
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert restored.result_.warnings == model.result_.warnings
+    assert restored.result_.curvature_telemetry == model.result_.curvature_telemetry
 
 
 def test_separation_error_refuses_the_design() -> None:
@@ -93,7 +111,7 @@ def test_separation_error_refuses_the_design() -> None:
 
 def test_separation_ignore_is_silent() -> None:
     frame, y, exposure = _separated_tweedie_fixture()
-    with warnings.catch_warnings(), contextlib.suppress(_SOLVER_REFUSAL):
+    with warnings.catch_warnings():
         warnings.simplefilter("error", SeparationWarning)
         _tweedie_model(separation="ignore").fit(
             frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0}

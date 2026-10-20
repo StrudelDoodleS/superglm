@@ -13,8 +13,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.diagnostics.convergence import lss_semidefinite_curvature_message
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
-from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
+from superglm.distributional.family import (
+    DistributionalFamily,
+    FamilyLikelihoodPlan,
+    FitFailureDiagnosingFamily,
+)
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
@@ -451,6 +456,37 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _curvature_disclosures(
+    family: DistributionalFamily,
+    solver_result: DenseSolverResult,
+    response: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+) -> tuple[str, ...]:
+    """What a fit whose final curvature fell back discloses instead of refusing.
+
+    A projected (nearest semidefinite) curvature is always disclosed. Any
+    fallback, Fisher or projected, also carries the family's own diagnosis of
+    repeated curvature failure, which was raised as an error before fits
+    stopped refusing.
+    """
+    telemetry = solver_result.terminal_curvature
+    messages: list[str] = []
+    if telemetry.actual_source == "nearest_semidefinite":
+        messages.append(lss_semidefinite_curvature_message(type(family).__name__))
+    if telemetry.fallback_count > 0 and isinstance(family, FitFailureDiagnosingFamily):
+        weights = likelihood_plan.weights
+        # The diagnosis reads the supplied rows at their input positions.
+        supplied = np.zeros(weights.provenance.original_count, dtype=np.float64)
+        supplied[weights.input_positions] = response
+        try:
+            diagnosis = family.diagnose_repeated_curvature_failure(supplied, weights)
+        except Exception:  # noqa: BLE001 - a failed diagnosis must not fail the fit
+            diagnosis = None
+        if isinstance(diagnosis, Exception) and str(diagnosis):
+            messages.append(str(diagnosis))
+    return tuple(messages)
+
+
 def prepare_distributional_fit_state(
     family: DistributionalFamily,
     predictor_templates: Sequence[Predictor],
@@ -534,6 +570,7 @@ def prepare_distributional_fit_state(
         rank=inference.rank,
         curvature_telemetry=solver_result.terminal_curvature,
         exact_face_components=exact_face_components,
+        warnings=_curvature_disclosures(family, solver_result, response, likelihood_plan),
     )
     rows = None
     if retain_rows:

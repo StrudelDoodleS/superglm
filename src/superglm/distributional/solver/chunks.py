@@ -34,6 +34,7 @@ from superglm.distributional.solver._global_moments import (
 from superglm.distributional.solver._small_group_panels import build_small_group_panels
 from superglm.distributional.solver.assembly import DenseJointGeometry, GroupedGeometryAccumulator
 from superglm.distributional.solver.derivatives import (
+    nearest_semidefinite_curvature,
     transform_natural_derivatives,
     transform_natural_information,
 )
@@ -44,7 +45,9 @@ from superglm.distributional.weights import (
 from superglm.group_matrix import DesignMatrix
 
 ChunkSize = int | Literal["auto"]
-CurvatureSource = Literal["observed", "fisher"]
+# ``nearest_semidefinite`` is the terminal policy's last fallback: observed
+# curvature with each row's block projected onto the semidefinite cone.
+CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 
 # Includes eta, theta, natural/transformed derivatives, masks, and family temporaries.
 # It is a deterministic bound selector, not a claim about exact allocator RSS.
@@ -502,8 +505,8 @@ def iter_likelihood_chunks(
     Private global assembly may retain original plans and consume their row
     ranges directly. The default stream continues to supply owned child plans.
     """
-    if curvature_source not in ("observed", "fisher"):
-        raise ValueError("curvature_source must be 'observed' or 'fisher'")
+    if curvature_source not in ("observed", "fisher", "nearest_semidefinite"):
+        raise ValueError("curvature_source must be 'observed', 'fisher' or 'nearest_semidefinite'")
     if curvature_source == "fisher" and not isinstance(family, ExpectedInformationFamily):
         raise ValueError("Fisher chunking requires expected_information_natural")
     response, plan, coefficient_values = _validate_chunk_inputs(
@@ -613,6 +616,8 @@ def iter_likelihood_chunks(
                 transformed = transform_natural_derivatives(natural, eta, links)
                 if curvature_source == "observed":
                     curvature = transformed.curvature_packed
+                elif curvature_source == "nearest_semidefinite":
+                    curvature = nearest_semidefinite_curvature(transformed.curvature_packed)
                 else:
                     assert isinstance(family, ExpectedInformationFamily)
                     information = family.expected_information_natural(theta, child_plan)

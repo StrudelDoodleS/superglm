@@ -9,13 +9,19 @@ import numpy as np
 
 from superglm.distributional.family import CurvatureKind
 
+# What a terminal curvature policy can accept: a family's own source, or the
+# nearest positive semidefinite matrix to the observed curvature when that
+# stays materially indefinite and no Fisher curvature is usable. The last is a
+# solver fallback, never a family declaration, so it is not a CurvatureKind.
+AcceptedCurvatureKind = Literal["observed", "fisher", "hybrid", "nearest_semidefinite"]
+
 
 @dataclass(frozen=True)
 class CurvatureTelemetry:
     """Required audit record for one accepted or retried curvature request."""
 
     requested_source: CurvatureKind
-    actual_source: CurvatureKind
+    actual_source: AcceptedCurvatureKind
     reason: str | None
     minimum_eigenvalue: float
     rank: int
@@ -28,7 +34,7 @@ class CurvatureTelemetry:
         valid_sources = ("observed", "fisher", "hybrid")
         if self.requested_source not in valid_sources:
             raise ValueError(f"invalid requested curvature source: {self.requested_source!r}")
-        if self.actual_source not in valid_sources:
+        if self.actual_source not in (*valid_sources, "nearest_semidefinite"):
             raise ValueError(f"invalid actual curvature source: {self.actual_source!r}")
         if self.matrix_kind not in (None, "data", "penalized"):
             raise ValueError("matrix_kind must be 'data', 'penalized', or None for legacy state")

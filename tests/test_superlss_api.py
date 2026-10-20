@@ -1581,6 +1581,83 @@ def test_material_indefiniteness_still_falls_back_to_fisher() -> None:
     assert model.training_telemetry().curvature.fallback_count >= 1
 
 
+@dataclass(frozen=True)
+class _IndefiniteObservedNoFisherLS:
+    """The indefinite-observed GaussianLS with no expected information at all.
+
+    Its observed curvature stays materially indefinite after the retry and it
+    has no Fisher fallback: the case the terminal policy used to refuse.
+    """
+
+    inner: _IndefiniteObservedGaussianLS = _IndefiniteObservedGaussianLS()
+
+    @property
+    def parameters(self):
+        return self.inner.parameters
+
+    @property
+    def capabilities(self):
+        return replace(self.inner.capabilities, expected_information=False)
+
+    @property
+    def default_prediction_name(self):
+        return self.inner.default_prediction_name
+
+    def to_config(self):
+        return {"type": "IndefiniteObservedNoFisherLS"}
+
+    def bind_likelihood(self, y, weights, observation):
+        return self.inner.bind_likelihood(y, weights, observation)
+
+    def initialize(self, y, plan):
+        return self.inner.initialize(y, plan)
+
+    def evaluate_natural(self, y, theta, plan, *, derivative_order=2):
+        return self.inner.evaluate_natural(y, theta, plan, derivative_order=derivative_order)
+
+    def default_prediction(self, theta):
+        return self.inner.default_prediction(theta)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_repeated_indefiniteness_without_fisher_finishes_and_discloses(discrete) -> None:
+    """Kills the refusal: master raised RepeatedCurvatureIndefinitenessError here.
+
+    The accepted curvature is the observed one with each row projected onto the
+    semidefinite cone, recorded in telemetry and in ``result_.warnings``, and
+    warned at fit time.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=_IndefiniteObservedNoFisherLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+        discrete=discrete,
+    )
+    with pytest.warns(ConvergenceWarning, match="nearest positive semidefinite"):
+        model.fit(frame, response, lambdas={}, max_inner_iter=5)
+    fitted = model._require_fitted()
+    telemetry = fitted.fit_state.solver_result.terminal_curvature
+    assert telemetry.requested_source == "observed"
+    assert telemetry.actual_source == "nearest_semidefinite"
+    assert telemetry.fallback_count == 1
+    assert len(model.result_.warnings) == 1
+    assert "nearest positive semidefinite" in model.result_.warnings[0]
+    assert model.result_.curvature_telemetry.actual_source == "nearest_semidefinite"
+    # The published curvature is the projected observed curvature, so it is
+    # semidefinite and the covariance is finite.
+    curvature = fitted.fit_state.solver_result.terminal_penalized_curvature
+    scale = np.sqrt(np.diag(curvature))
+    assert np.min(np.linalg.eigvalsh(curvature / np.outer(scale, scale))) > -1.0e-12
+    assert np.all(np.isfinite(model.covariance_))
+    findings = [f for f in model.diagnose().findings if f.code == "fit.curvature_indefinite"]
+    assert findings and "nearest positive semidefinite observed" in findings[0].observed
+
+
 def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame, response, _, _ = _fixture()
     model = model_from_templates(

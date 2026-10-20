@@ -803,6 +803,7 @@ def distributional_manifest(model: DenseDistributionalModel) -> dict[str, Any]:
             "n_smoothing_iter": fit.n_smoothing_iter,
             "rank": fit.rank,
             "curvature_telemetry": _telemetry_manifest(fit.curvature_telemetry),
+            **({"warnings": list(fit.warnings)} if fit.warnings else {}),
         },
         "solver": _solver_manifest(model.result),
         "smoothing": _smoothing_manifest(model.smoothing),

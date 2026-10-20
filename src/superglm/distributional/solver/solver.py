@@ -19,6 +19,7 @@ from superglm.distributional.family import (
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.result import (
@@ -55,6 +56,7 @@ from superglm.distributional.solver.curvature import (
 )
 from superglm.distributional.solver.derivatives import (
     PredictorLikelihoodEvaluation,
+    nearest_semidefinite_curvature,
     transform_natural_derivatives,
     transform_natural_information,
 )
@@ -923,8 +925,10 @@ def _geometry(
     source: str,
 ) -> DenseJointGeometry:
     if context.chunk_size is not None:
-        if source not in ("observed", "fisher"):
-            raise ValueError("curvature source must be 'observed' or 'fisher'")
+        if source not in ("observed", "fisher", "nearest_semidefinite"):
+            raise ValueError(
+                "curvature source must be 'observed', 'fisher' or 'nearest_semidefinite'"
+            )
         return chunking.assemble_chunked_geometry(
             context.family,
             context.layout,
@@ -940,6 +944,8 @@ def _geometry(
         raise RuntimeError("dense accepted state is missing derivative geometry")
     if source == "observed":
         curvature = state.derivatives.curvature_packed
+    elif source == "nearest_semidefinite":
+        curvature = nearest_semidefinite_curvature(state.derivatives.curvature_packed)
     elif source == "fisher":
         curvature = state.fisher_curvature_packed
         if curvature is None:
@@ -955,7 +961,7 @@ def _geometry(
                 context.links,
             )
     else:
-        raise ValueError("curvature source must be 'observed' or 'fisher'")
+        raise ValueError("curvature source must be 'observed', 'fisher' or 'nearest_semidefinite'")
     if context.dense_matrices is None:
         raise RuntimeError("dense solver context is missing predictor matrices")
     return _assemble_dense_geometry_from_matrices(
@@ -1824,6 +1830,8 @@ def _fit_dense_fixed_lambda_core(
         fisher_available = context.fisher_family is not None
         requested_terminal_curvature = observed_geometry.penalized_curvature
         terminal_fisher_geometry: DenseJointGeometry | None = None
+        # Filled only if the policy asks for its last fallback.
+        terminal_semidefinite_geometry: list[DenseJointGeometry] = []
         if context.coefficient_face is not None and context.coefficient_face.reduced_width == 0:
             empty_matrix = _readonly(np.zeros((0, 0), dtype=np.float64))
             empty_rank = decompose_gram(empty_matrix)
@@ -1901,24 +1909,49 @@ def _fit_dense_fixed_lambda_core(
             fisher_matrix = None
             # A dense reused endpoint carries no row derivatives (see
             # _reuse_observed_initial_result), and a failed retry keeps that
-            # state.  Dense Fisher geometry cannot be measured from it, so the
-            # policy sees no Fisher fallback -- the same guard the retry above
-            # applies when it reuses the accepted geometry instead.  Chunked
-            # geometry is assembled from rows and never needs the derivatives.
-            fisher_measurable = context.chunk_size is not None or state.derivatives is not None
-            if fisher_available and fisher_measurable:
-                fisher_geometry = (
-                    coefficient_geometry
-                    if retry_config.coefficient_curvature == "fisher"
-                    else _measured_geometry(
-                        context,
-                        state,
-                        "fisher",
-                        phase_recorder,
-                    )
+            # state.  Both fallbacks are row geometry, so that state is
+            # evaluated once more, at the same coefficients, to measure them.
+            # Chunked geometry is assembled from rows and never needs this.
+            fallback_state = state
+            if context.chunk_size is None and state.derivatives is None:
+                evaluated = _evaluate_state(
+                    context,
+                    state.coefficients,
+                    phase_recorder=phase_recorder,
                 )
-                terminal_fisher_geometry = fisher_geometry
-                fisher_matrix = fisher_geometry.penalized_curvature
+                if evaluated is None:
+                    raise RuntimeError("an accepted coefficient state no longer evaluates")
+                fallback_state = evaluated
+            if fisher_available:
+                try:
+                    fisher_geometry = (
+                        coefficient_geometry
+                        if retry_config.coefficient_curvature == "fisher"
+                        else _measured_geometry(
+                            context,
+                            fallback_state,
+                            "fisher",
+                            phase_recorder,
+                        )
+                    )
+                except (_NumericalEvaluationError, FloatingPointError, OverflowError):
+                    # Expected information the family cannot represent at this
+                    # state is no fallback; the semidefinite one below is.
+                    fisher_geometry = None
+                if fisher_geometry is not None:
+                    terminal_fisher_geometry = fisher_geometry
+                    fisher_matrix = fisher_geometry.penalized_curvature
+
+            def _nearest_semidefinite() -> NDArray[np.float64]:
+                geometry = _measured_geometry(
+                    context,
+                    fallback_state,
+                    "nearest_semidefinite",
+                    phase_recorder,
+                )
+                terminal_semidefinite_geometry.append(geometry)
+                return _policy_curvature(context, geometry.penalized_curvature)
+
             requested_terminal_curvature = observed_geometry.penalized_curvature
             curvature = resolve_curvature(
                 "observed",
@@ -1926,6 +1959,7 @@ def _fit_dense_fixed_lambda_core(
                 fisher_matrix=(
                     None if fisher_matrix is None else _policy_curvature(context, fisher_matrix)
                 ),
+                semidefinite_fallback=_nearest_semidefinite,
                 state=curvature.state,
                 matrix_kind="penalized",
             )
@@ -1936,6 +1970,10 @@ def _fit_dense_fixed_lambda_core(
             if terminal_fisher_geometry is None:
                 raise RuntimeError("Fisher fallback is missing its full curvature geometry")
             accepted_geometry = terminal_fisher_geometry
+        elif curvature.telemetry.actual_source == "nearest_semidefinite":
+            if len(terminal_semidefinite_geometry) != 1:
+                raise RuntimeError("semidefinite fallback is missing its full curvature geometry")
+            accepted_geometry = terminal_semidefinite_geometry[0]
         else:
             accepted_geometry = observed_geometry
         terminal_data_curvature = np.asarray(
