@@ -840,6 +840,48 @@ def test_observed_only_terminal_policy_falls_back_to_the_nearest_semidefinite_cu
     )
 
 
+def test_chunked_trial_whose_geometry_is_refused_is_backtracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills the crash: master accepted a chunked trial on its value, then raised.
+
+    A chunked trial is screened on its log likelihood alone; when the family
+    then refuses the trial's derivatives (TweedieLSS on a binned 3,000-row
+    freMTPL2 sample: "required float64 work is not representable") the
+    solver backtracks, as a dense trial whose derivatives fail is rejected.
+    """
+    base_family, layout = _intercept_layout(4)
+    family = _ObservedOnlyGaussian(base_family)
+    scale = base_family.scale_floor + 1.0
+    response = np.array([-scale, -scale, scale, scale]) + 0.4
+    original_geometry = solver_module._measured_geometry
+    calls = []
+
+    def refuse_first_trial(context, state, source, phase_recorder):
+        calls.append(state.coefficients.copy())
+        if len(calls) == 2:
+            raise ValueError("numerical evaluation refused: derivatives not representable")
+        return original_geometry(context, state, source, phase_recorder)
+
+    monkeypatch.setattr(solver_module, "_measured_geometry", refuse_first_trial)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        chunk_size=2,
+    )
+
+    assert len(calls) >= 3
+    # The refused trial is never the state the next geometry is measured at.
+    assert not np.array_equal(calls[2], calls[1])
+    assert result.converged
+    assert result.history[0].backtracks >= 1
+
+
 def test_solver_result_plan_and_execution_fields_are_required() -> None:
     parameters = inspect.signature(solver_module.DenseSolverResult).parameters
 

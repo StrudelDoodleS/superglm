@@ -1407,10 +1407,26 @@ def _run_iterations(
                     > state.penalized_optimizing_log_likelihood
                 )
             ):
-                accepted = candidate
                 accepted_geometry = None if fused is None else fused[1]
-                fused = None
-                break
+                if accepted_geometry is None and context.chunk_size is not None:
+                    # A chunked trial is screened on its value alone. Its
+                    # derivatives are part of its validity, as they are for a
+                    # dense trial (whose evaluation returns None when they
+                    # cannot be formed), so a trial whose geometry the family
+                    # refuses is backtracked from, not accepted and raised.
+                    try:
+                        accepted_geometry = _measured_geometry(
+                            context,
+                            candidate,
+                            config.coefficient_curvature,
+                            phase_recorder,
+                        )
+                    except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+                        accepted_geometry = None
+                if accepted_geometry is not None or context.chunk_size is None:
+                    accepted = candidate
+                    fused = None
+                    break
             fused = None
             if attempt == config.max_backtracks:
                 break
