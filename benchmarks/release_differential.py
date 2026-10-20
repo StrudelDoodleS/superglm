@@ -10,7 +10,7 @@ so it runs unchanged on any release from v0.40.0.
     release REF --out DIR [--subset]
                      run the corpus at REF (a detached worktree with its own
                      environment, shared with ``books.py``) and here, then compare
-    compare BASE CANDIDATE
+    compare BASE CANDIDATE RELEASE
                      flag candidate outcomes worse than the base; exit 1 on any flag
 
 The corpus: SuperGLM over every built-in family and link, nine term kinds
@@ -59,16 +59,23 @@ LSS_FAMILIES = [
     "GeneralizedGammaLSS", "GeneralizedParetoLSS", "TwoPieceNormalLSS", "TwoPieceLogNormalLSS",
 ]  # fmt: skip
 
-# Pairs whose published criterion changed between releases, so their objectives
-# are not comparable across the change (held-out metrics still are): v0.41's
+# Pairs whose published criterion changed in a release, keyed by that release:
+# their objectives are not comparable across the change (held-out metrics still
+# are), and are compared again against any base from that release on. v0.41's
 # binned route takes observed curvature for these pairs (#500), v0.40.0 Fisher.
 CRITERION_CHANGES = {
-    ("glm", family, link, "binned"): "#500 binned observed curvature"
-    for family, link in [
-        ("gamma", "log"), ("tweedie15", "log"), ("tweedie12", "log"), ("nb2fixed", "log"),
-        ("nb2auto", "log"), ("binomial", "probit"), ("binomial", "cloglog"),
-    ]
+    (0, 41, 0): {
+        ("glm", family, link, "binned"): "#500 binned observed curvature"
+        for family, link in [
+            ("gamma", "log"), ("tweedie15", "log"), ("tweedie12", "log"), ("nb2fixed", "log"),
+            ("nb2auto", "log"), ("binomial", "probit"), ("binomial", "cloglog"),
+        ]
+    }
 }  # fmt: skip
+
+
+def _release_tuple(release: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in release.lstrip("v").split("."))
 
 
 def glm_cases() -> list[str]:
@@ -621,11 +628,20 @@ def sensible(record: dict) -> bool:
     held = record.get("test_nll", record.get("test_deviance"))
     if not _finite(held) and not _finite(record.get("test_deviance")):
         return False
-    return not _finite(record.get("max_mu")) or record["max_mu"] < 1e8
+    return _sane_mean(record.get("max_mu"))
 
 
-def flags(name: str, base: dict, candidate: dict) -> list[str]:
-    """Why the candidate's outcome is worse than a sensible base outcome (empty: it is not)."""
+def _sane_mean(max_mu) -> bool:
+    """No runaway mean; absent (an LSS record) passes, a NaN or an infinity does not."""
+    return max_mu is None or (_finite(max_mu) and max_mu < 1e8)
+
+
+def flags(name: str, base: dict, candidate: dict, base_release: str) -> list[str]:
+    """Why the candidate's outcome is worse than a sensible base outcome (empty: it is not).
+
+    ``base_release`` (for example ``v0.40.0``) decides which pairs' objectives are
+    comparable: those whose criterion changed in a later release are not.
+    """
     if not sensible(base):
         return []
     if candidate["status"] != "ok":
@@ -635,8 +651,18 @@ def flags(name: str, base: dict, candidate: dict) -> list[str]:
     found = []
     parts = name.split("/")
     key = tuple(parts[:3]) + (parts[5] if parts[0] == "glm" else "",)
+    changed = any(
+        key in pairs
+        for since, pairs in CRITERION_CHANGES.items()
+        if _release_tuple(base_release) < since
+    )
+    for metric in ("objective", "test_nll", "test_deviance", "gini"):
+        if _finite(base.get(metric)) and not _finite(candidate.get(metric)):
+            found.append(f"{metric} {base[metric]:.6g} -> {candidate.get(metric)}")
+    if not _sane_mean(candidate.get("max_mu")):
+        found.append(f"max_mu {base.get('max_mu')} -> {candidate.get('max_mu')}")
     old, new = base.get("objective"), candidate.get("objective")
-    if key not in CRITERION_CHANGES and _finite(old) and _finite(new):
+    if not changed and _finite(old) and _finite(new):
         if new > old + OBJECTIVE_TOLERANCE * (1.0 + abs(old)):
             found.append(f"objective {old:.8g} -> {new:.8g}")
     for metric in ("test_nll", "test_deviance"):
@@ -655,7 +681,9 @@ def flags(name: str, base: dict, candidate: dict) -> list[str]:
     return found
 
 
-def compare(base: dict[str, dict], candidate: dict[str, dict]) -> dict[str, list[str]]:
+def compare(
+    base: dict[str, dict], candidate: dict[str, dict], base_release: str
+) -> dict[str, list[str]]:
     """Flags for every case in both records; a case missing from the candidate is flagged."""
     out = {}
     for name, record in base.items():
@@ -663,7 +691,7 @@ def compare(base: dict[str, dict], candidate: dict[str, dict]) -> dict[str, list
             if sensible(record):
                 out[name] = ["missing from the candidate run"]
             continue
-        found = flags(name, record, candidate[name])
+        found = flags(name, record, candidate[name], base_release)
         if found:
             out[name] = found
     return out
@@ -747,13 +775,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("compare")
     p.add_argument("base")
     p.add_argument("candidate")
+    p.add_argument("release", help="the base's release tag, for example v0.40.0")
     args = parser.parse_args(argv)
 
     if args.cmd == "run":
         run(_selected(args), Path(args.out))
         return 0
     if args.cmd == "compare":
-        found = compare(load(Path(args.base)), load(Path(args.candidate)))
+        found = compare(load(Path(args.base)), load(Path(args.candidate)), args.release)
         for name, reasons in sorted(found.items()):
             print(f"{name}: {'; '.join(reasons)}")
         print(f"{len(found)} flagged")
@@ -762,7 +791,7 @@ def main(argv=None) -> int:
     import books
 
     tree = books.prepare_tree(books._resolve(args.ref))
-    out = Path(args.out)
+    out = Path(args.out).resolve()  # the baseline runs with its own tree as cwd
     out.mkdir(parents=True, exist_ok=True)
     forwarded = [
         *(["--only", args.only] if args.only else []),
@@ -780,7 +809,7 @@ def main(argv=None) -> int:
         check=True,
     )
     run(_selected(args), candidate)
-    return main(["compare", str(base), str(candidate)])
+    return main(["compare", str(base), str(candidate), args.ref])
 
 
 if __name__ == "__main__":

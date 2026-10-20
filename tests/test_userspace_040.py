@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import pickle
+import sys
 import warnings
 from pathlib import Path
 
@@ -188,6 +189,75 @@ def test_the_pinned_outcomes_are_the_subset_and_all_converged_on_v0_40_0() -> No
     assert all(release_differential.sensible(record) for record in RELEASE_OUTCOMES.values())
 
 
+def _record(**changes) -> dict:
+    record = {
+        "status": "ok",
+        "converged": True,
+        "objective": 1000.0,
+        "test_nll": 0.5,
+        "test_deviance": 800.0,
+        "gini": 0.3,
+        "max_mu": 4.0,
+    }
+    return {**record, **changes}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"objective": float("nan")},
+        {"test_nll": float("nan")},
+        {"test_deviance": float("inf")},
+        {"gini": float("nan")},
+        {"max_mu": float("inf")},
+        {"max_mu": float("nan")},
+    ],
+)
+def test_the_differential_flags_a_converged_candidate_with_non_finite_results(broken) -> None:
+    """Fails on eedfa48e, where non-finite candidate metrics skipped every comparison."""
+    name = "glm/poisson/log/small/mains/exact/fit_reml"
+    assert release_differential.flags(name, _record(), _record(), "v0.40.0") == []
+    assert release_differential.flags(name, _record(), _record(**broken), "v0.40.0")
+
+
+def test_the_criterion_change_exempts_only_bases_that_predate_it() -> None:
+    """The objective of a pair whose criterion changed in v0.41 is compared again from a
+    v0.41 base on. Fails on eedfa48e, which exempted the pair for every base."""
+    name = "glm/gamma/log/small/mains/binned/fit_reml"
+    worse = _record(objective=1000.0 + 1.0)
+    assert release_differential.flags(name, _record(), worse, "v0.40.0") == []
+    assert release_differential.flags(name, _record(), worse, "v0.41.0")
+    assert release_differential.flags(name, _record(), worse, "v0.42.0")
+
+
+def test_the_release_command_gives_the_baseline_an_absolute_output_path(
+    tmp_path, monkeypatch
+) -> None:
+    """The baseline runs with its own tree as the working directory, so a relative --out
+    would point inside that tree. Fails on eedfa48e, which passed the path as given."""
+    from types import SimpleNamespace
+
+    launched = []
+    books = SimpleNamespace(
+        _resolve=lambda ref: ref,
+        prepare_tree=lambda ref: tmp_path / "tree",
+        _venv_python=lambda tree: "python",
+        _clean_env=dict,
+    )
+    monkeypatch.setitem(sys.modules, "books", books)
+    monkeypatch.setattr(
+        release_differential.subprocess, "run", lambda command, **kwargs: launched.append(command)
+    )
+    monkeypatch.setattr(release_differential, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(release_differential, "load", lambda path: {})
+    monkeypatch.chdir(tmp_path)
+
+    assert release_differential.main(["release", "v0.40.0", "--out", "results"]) == 0
+    baseline = Path(launched[0][launched[0].index("--out") + 1])
+    assert baseline.is_absolute()
+    assert baseline == tmp_path / "results" / "v0.40.0.jsonl"
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("name", release_differential.SUBSET)
 def test_a_fit_v0_40_0_converged_still_converges_no_worse(name: str) -> None:
@@ -197,7 +267,7 @@ def test_a_fit_v0_40_0_converged_still_converges_no_worse(name: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         record = {"status": "ok", **release_differential.run_case(name)}
-    assert release_differential.flags(name, RELEASE_OUTCOMES[name], record) == []
+    assert release_differential.flags(name, RELEASE_OUTCOMES[name], record, "v0.40.0") == []
 
 
 @pytest.mark.parametrize("name", release_differential.HISTORY_SUBSET)
