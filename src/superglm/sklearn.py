@@ -589,7 +589,9 @@ def _fit_common(
 
     # sklearn attributes
     wrapper.n_features_in_ = len(feature_cols)
-    wrapper.feature_names_in_ = np.array(feature_cols)
+    # An object array keeps each label as it is: NumPy would turn [0, "z"] into
+    # strings, and predict would then look for a column "0".
+    wrapper.feature_names_in_ = np.array(feature_cols, dtype=object)
     wrapper.intercept_ = wrapper._model.result.intercept
     wrapper.coef_ = wrapper._model.result.beta
 

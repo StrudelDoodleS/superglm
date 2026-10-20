@@ -1030,6 +1030,23 @@ class TestNativeTerms:
         with pytest.raises(ValueError, match=r"terms= keys \['nonexistent'\] not found"):
             SuperGLMRegressor(terms=[s(0), cat("region"), "nonexistent"]).fit(X, y)
 
+    def test_mixed_int_and_str_labels_predict_as_the_core_model(self, sample_data):
+        """feature_names_in_ kept [0, "region"] as strings on 19362389, so predict failed."""
+        from sklearn.model_selection import KFold, cross_val_score
+
+        from superglm import SuperGLM, cat, s
+
+        X, y, _ = sample_data
+        X = X.rename(columns={"age": 0})
+        terms = [s(0, k=6), cat("region")]
+        wrapper = SuperGLMRegressor(terms=terms, selection_penalty=0.0).fit(X, y)
+        core = SuperGLM(family="poisson", terms=terms, selection_penalty=0.0).fit(X, y)
+        assert list(wrapper.feature_names_in_) == [0, "region"]
+        np.testing.assert_array_equal(wrapper.predict(X), core.predict(X))
+        assert np.isfinite(wrapper.score(X, y))
+        scores = cross_val_score(wrapper, X, y, cv=KFold(3, shuffle=True, random_state=0))
+        assert np.all(np.isfinite(scores))
+
     def test_missing_terms_column_raises(self, sample_data):
         X, y, _ = sample_data
         with pytest.raises(ValueError, match="terms= keys.*not found"):
