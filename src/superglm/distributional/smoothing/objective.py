@@ -22,7 +22,6 @@ from superglm.reml.penalty_algebra import (
     _PenaltyLogdetEvaluation,
     penalty_component_dense_matrix,
 )
-from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.types import LambdaPolicy
 
 
@@ -72,30 +71,37 @@ def _restricted_objective(
     """``objective`` with its log-determinant taken off the span of ``null_basis``.
 
     The Laplace log-determinant is the pseudo-determinant of the penalized
-    curvature over the subspace it retains. Restricting it to the orthogonal
-    complement of another fit's discarded directions puts both fits on the
-    same retained subspace. That holds when the two fits' discarded spaces are
-    nested; when they are not, the restriction keeps a near-null direction of
-    its own. The shared rank policy, the one that decided both fits' ranks,
-    then finds it rank deficient, and ``None`` (compare as computed) is the
-    answer on every platform.
+    curvature ``C`` over the subspace it retains. Restricting it to the
+    orthogonal complement of another fit's discarded directions ``N`` puts
+    both fits on the same retained subspace when the two discarded spaces are
+    nested: each of this fit's own discarded directions lies closer to
+    ``span(N)`` than to its complement. Otherwise (fits that discard
+    different directions) ``None``: compare as computed.
+
+    For nested spaces Jacobi's complementary-minor identity (Brualdi and
+    Schneider, Linear Algebra Appl. 52/53, 1983), in its pseudo-determinant
+    form, gives the restriction without rotating ``C``:
+    ``log det(Q'CQ) = log pdet(C) + log det(B'C^+B)``, with ``B`` an
+    orthonormal basis of the part of ``span(N)`` orthogonal to this fit's own
+    null space. ``C^+`` comes from the fit's own equilibrated decomposition,
+    and ``B`` is formed from the columns of ``N``, so a coefficient whose
+    curvature is ``1e-30`` beside ``1e9`` (a size near its Poisson limit) keeps
+    the exact zeros the rotated ``Q'CQ`` would fill with rounding.
     """
-    curvature = np.asarray(result.terminal_penalized_curvature, dtype=np.float64)
-    basis = np.asarray(null_basis, dtype=np.float64)
-    width = curvature.shape[0]
-    if not 0 < basis.shape[1] < width:
-        return None
-    complete, _ = np.linalg.qr(basis, mode="complete")
-    complement = complete[:, basis.shape[1] :]
-    restricted = complement.T @ curvature @ complement
-    try:
-        decomposition = decompose_gram(0.5 * (restricted + restricted.T), policy=SHARED_RANK_POLICY)
-    except ValueError:
-        return None
-    if decomposition.rank != complement.shape[1]:
-        return None
-    value = objective + 0.5 * (decomposition.log_pdet - result.terminal_rank.log_pdet)
-    return value if math.isfinite(value) else None
+    null = np.asarray(null_basis, dtype=np.float64)
+    rank = result.terminal_rank
+    own = rank.parameter_null_basis
+    if own is not None and own.shape[1]:
+        own = np.asarray(own, dtype=np.float64)
+        cosines = np.linalg.svd(np.linalg.qr(null)[0].T @ np.linalg.qr(own)[0], compute_uv=False)
+        if cosines.min() ** 2 <= 0.5:
+            return None
+        null = null @ np.linalg.svd(own.T @ null)[2][own.shape[1] :].T
+    inverse = np.column_stack([rank.solve(column) for column in null.T])
+    sign, log_det = np.linalg.slogdet(null.T @ inverse)
+    _, log_gram = np.linalg.slogdet(null.T @ null)
+    value = objective + 0.5 * (log_det - log_gram)
+    return value if sign > 0 and math.isfinite(value) else None
 
 
 def rank_matched_objectives(
@@ -115,7 +121,7 @@ def rank_matched_objectives(
     coefficients and evaluate the criterion in the reduced space; two fits
     are compared there, the higher-rank one restricted to the complement of
     the lower-rank one's discarded directions. Equal ranks, active faces, and
-    restrictions that are not positive definite compare as computed.
+    fits whose discarded spaces are not nested compare as computed.
     """
 
     current_rank, trial_rank = current.terminal_rank, trial.terminal_rank

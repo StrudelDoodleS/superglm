@@ -4745,11 +4745,11 @@ def test_rank_matched_comparison_leaves_non_nested_discarded_spaces_unrestricted
 
     The current fit (rank 4 of 5) discards one direction; the trial (rank 3)
     discards two others orthogonal to it. Restricted to the complement of the
-    trial's discarded pair, the current curvature still holds its own null
-    direction, so the restriction is rank deficient under the shared rank
-    policy and is not used. Whether a Cholesky factorization of it succeeds
-    depends on rounding; when it did, its log-determinant took about 18 off
-    the current objective.
+    trial's discarded pair, the current curvature would still hold its own
+    null direction, so the discarded spaces are not nested and the fits are
+    compared as computed. A Cholesky factorization of that restriction
+    succeeds or fails with rounding; when it succeeded, its log-determinant
+    took about 18 off the current objective.
     """
     rng = np.random.default_rng(5)
     basis, _ = np.linalg.qr(rng.standard_normal((5, 5)))
@@ -4762,3 +4762,39 @@ def test_rank_matched_comparison_leaves_non_nested_discarded_spaces_unrestricted
     assert smoothing_objective.rank_matched_objectives(
         current, current_objective, trial, trial_objective
     ) == (current_objective, trial_objective)
+
+
+def test_rank_matched_comparison_restricts_nested_spaces_beside_a_vanishing_curvature():
+    """Nested discarded spaces are restricted beside a retained 1e-30 curvature.
+
+    Both fits keep a decoupled coefficient at curvature 1e-30, as a size
+    coefficient near its Poisson limit has. The current fit (rank 4 of 5)
+    discards one direction; the trial discards that one and a second, so the
+    spaces are nested. Rotated onto the complement of the trial's pair, the
+    1e-30 sits beside entries of order one and the shared rank policy finds
+    the rotation rank deficient, so 5ca879b3 compared these fits as computed.
+    The current fit's own decomposition resolves it: the restricted
+    log-determinant is the log of 1e-30, 3 and 1.5. An orthonormal basis
+    formed by Householder QR instead of from the null basis's own columns
+    puts rounding on the 1e-30 coefficient and misses by 2e-4 relative.
+    """
+    rng = np.random.default_rng(7)
+    rotation, _ = np.linalg.qr(rng.standard_normal((4, 4)))
+
+    def fit(values: list[float]) -> SimpleNamespace:
+        matrix = np.zeros((5, 5))
+        matrix[0, 0] = 1.0e-30
+        matrix[1:, 1:] = rotation @ np.diag(values) @ rotation.T
+        return _rank_fit(matrix)
+
+    current, trial = fit([3.0, 1.5, 0.7, 0.0]), fit([3.0, 1.5, 0.0, 0.0])
+    assert (current.terminal_rank.rank, trial.terminal_rank.rank) == (4, 3)
+
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    common = 0.5 * float(np.log(1.0e-30) + np.log(3.0) + np.log(1.5))
+    reference, candidate = smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    assert reference == pytest.approx(common, rel=1.0e-12)
+    assert candidate == trial_objective
