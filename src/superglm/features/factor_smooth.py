@@ -915,7 +915,20 @@ class FactorSmooth:
             return "main"
         if len(excluded) < len(self._levels):
             return "mean"
+        if not self._spans_recorded and len(self._unidentified_levels) < len(self._levels):
+            return "separated_mean"
         return "canonical"
+
+    @property
+    def _spans_recorded(self) -> bool:
+        """Whether every separated level carries its span (a model saved before 0.41 does not).
+
+        Such a model keeps the convention it was saved with: its separated
+        levels predict at their fitted coefficients, and with no level
+        identified its population is their mean (``"separated_mean"``).
+        """
+        spans = getattr(self, "_separated_directions", ())
+        return len(spans) == len(getattr(self, "_separated_levels", ()))
 
     def _unidentified_directions(self) -> dict[int, NDArray]:
         """Each level left out of the population and the directions of its line the data leave free.
@@ -925,15 +938,13 @@ class FactorSmooth:
         line has no finite estimate (``_record_unidentified_levels``).  That
         span holds a thin level's free directions, which every one of its
         rows holds at zero, so it replaces them for a level that is both.  A
-        model saved before the spans were recorded takes all of ``N_P`` for
-        its separated levels.
+        model saved before the spans were recorded (``_spans_recorded``)
+        has none for its separated levels.
         """
         directions = dict(zip(self._unidentified_levels, self._free_directions, strict=True))
-        separated = tuple(getattr(self, "_separated_levels", ()))
-        spans = tuple(getattr(self, "_separated_directions", ()))
-        if len(spans) != len(separated):
-            spans = (np.asarray(self._population_null_space, dtype=np.float64),) * len(separated)
-        directions.update(zip(separated, spans, strict=True))
+        if self._spans_recorded:
+            spans = getattr(self, "_separated_directions", ())
+            directions.update(zip(self._separated_levels, spans, strict=True))
         return directions
 
     def _levels_at_population(self) -> tuple[int, ...]:
@@ -947,7 +958,7 @@ class FactorSmooth:
         """
         weightless = tuple(getattr(self, "_weightless_levels", ()))
         separated = tuple(getattr(self, "_separated_levels", ()))
-        if not separated:
+        if not separated or not self._spans_recorded:
             return weightless
         nullity = np.asarray(self._population_null_space).shape[1]
         directions = self._unidentified_directions()
@@ -982,8 +993,10 @@ class FactorSmooth:
         ``_unidentified_directions()[t]``, ``S = sum_t s_t``): ``S = -(I - M /
         K)^+ sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no
         direction of ``N_P`` is free in every level, and ``c = S / K``.  It
-        does not follow how far the fit walked a separated line.  ``None``
-        when no level is left out.
+        does not follow how far the fit walked a separated line.  A model
+        saved before the spans were recorded keeps its separated levels'
+        mean there (``_spans_recorded``).  ``None`` when no level is left
+        out.
         """
         if not self._has_population_offset:
             return None
@@ -993,6 +1006,8 @@ class FactorSmooth:
         thin = tuple(self._unidentified_levels)
         excluded = set(thin) | set(self._separated_levels)
         identified = [level for level in range(n_levels) if level not in excluded]
+        if not identified and not self._spans_recorded:
+            identified = [level for level in range(n_levels) if level not in set(thin)]
         if identified:
             return np.asarray(identified, dtype=np.intp), projector / len(identified)
         unidentified = self._unidentified_directions()
