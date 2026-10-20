@@ -1181,10 +1181,12 @@ def negative_binomial_expected_information(
     )
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         predicted = effective_mean + 37.0 / np.log1p(effective_theta / effective_mean) + 64.0
-    if (
-        not np.all(np.isfinite(predicted))
-        or float(np.max(predicted)) > _MAX_INFORMATION_TERMS_PER_ROW
-        or float(np.sum(predicted)) > _MAX_RECURRENCE_CELLS
+    # Only the per-row cap applies: the series is row-local and allocates
+    # nothing per term, so the total work is what the rows need, and an
+    # aggregate cap on the prediction (64 terms or more a row) would refuse a
+    # call by its row count alone.
+    if not np.all(np.isfinite(predicted)) or float(np.max(predicted)) > (
+        _MAX_INFORMATION_TERMS_PER_ROW
     ):
         raise NegativeBinomialNumericalDomainError(
             "NB2 expected information needs more series terms than its budget allows"

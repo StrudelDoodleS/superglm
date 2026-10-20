@@ -625,6 +625,25 @@ def test_family_expected_information_is_the_weighted_natural_fisher_matrix(seman
         )
 
 
+def test_expected_information_has_no_cap_on_its_row_count(monkeypatch) -> None:
+    """Only a row's own term budget can refuse it, never the number of rows in a call.
+
+    A dense fit evaluates every row in one call. The parent also capped the sum
+    of the per-row term predictions (64 or more each) at the recurrence-cell
+    budget, so a large enough book was refused whatever each row cost. The cap
+    is shrunk here so that 64 cheap rows would cross it.
+    """
+    from superglm.distributional.kernels import negative_binomial as kernel
+
+    monkeypatch.setattr(kernel, "_MAX_RECURRENCE_CELLS", 1000)
+    rows = 64
+    mean = np.full(rows, 0.05)
+    theta = np.full(rows, 1.0)
+    together = kernel.negative_binomial_expected_information(mean, theta, np.ones(rows), "prior")
+    alone = kernel.negative_binomial_expected_information(mean[:1], theta[:1], np.ones(1), "prior")
+    np.testing.assert_array_equal(together, np.repeat(alone, rows, axis=0))
+
+
 @pytest.mark.parametrize(("mean", "size"), [(Fraction(7, 100), 1), (Fraction(3), 2)])
 def test_expected_information_is_the_mean_of_the_observed_information(mean, size) -> None:
     """Fisher information is E[-Hessian]: checked against the family's own observed rows."""
