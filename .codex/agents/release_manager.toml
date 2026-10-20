@@ -152,7 +152,13 @@ ASSESSMENT PROCEDURE
    environments, and runtime dependencies directly.
 10. Classify every material change, challenge unsupported declarations, and use
     the highest impact.
-11. Re-fetch origin/master. If origin/master moves, discard the assessment and
+11. Run the release differential against the selected tag through benchboard:
+    benchboard heavy release-differential -- timeout 7200 uv run python
+    benchmarks/release_differential.py release <tag> --out <dir>. Report every
+    flagged case. A flagged case blocks the recommendation until a fix
+    restores the release's result without losing what the change bought;
+    otherwise report it as a one-screen owner decision.
+12. Re-fetch origin/master. If origin/master moves, discard the assessment and
     restart against the new exact assessed head SHA.
 
 ASSESSMENT REPORT
