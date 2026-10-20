@@ -317,17 +317,25 @@ def test_factor_smooth_keeps_label_levels_over_an_oc_group_main():
     mapped level scores -- but a FactorSmooth factorizes its group column into
     the term's own level set, so resolving it would silently re-key that
     identity to ``[0.0, 0.25, ...]`` and every by-label lookup its inference
-    exposes would fail on the fitted labels.  Reachable from public API: an OC
-    main is the ONLY main a FactorSmooth's group column may carry (a
-    Categorical there is rejected as duplicated group-intercept geometry).
+    exposes would fail on the fitted labels.  An OC main on the group was the
+    one main a FactorSmooth's group could carry; it is now refused like any
+    other, since every term on the group repeats the per-level intercepts the
+    factor smooth spans.  The factor smooth keeps its label levels without it.
     """
     from superglm import FactorSmooth
 
     df, y = _frame()
+    smooth = FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)
+    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'age_band' duplicates"):
+        SuperGLM(
+            family="poisson",
+            features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
+            interactions=[smooth],
+        )
     model = SuperGLM(
         family="poisson",
-        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)],
+        features={"power": Spline(kind="ps", n_knots=5)},
+        interactions=[smooth],
         selection_penalty=0.0,
     )
     model.fit_reml(df, y)
@@ -535,17 +543,14 @@ def test_a_specials_term_may_still_be_a_factor_smooth_group():
     with pytest.raises(NotImplementedError, match="specials"):
         resolve_interaction_parent_of(TensorInteraction("age_band", "power"), spec, labels)
 
-    df, y = _specials_frame()
-    model = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
-        interactions=[FactorSmooth(variable="power", group="age_band")],
-    )
-    model.fit_reml(df, y)
-    assert np.isfinite(model._result.effective_df)
-    # The group kept its label identity, the special included as a level of it.
-    fs = model._interaction_specs["power:age_band:fs"]
-    assert set(fs._levels) == set(BANDS) | {"MISSING"}
+    # The model itself is now refused at declaration: an OC main on a factor
+    # smooth's group repeats the per-level intercepts the factor smooth spans.
+    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'age_band' duplicates"):
+        SuperGLM(
+            family="poisson",
+            features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
+            interactions=[FactorSmooth(variable="power", group="age_band")],
+        )
 
 
 def test_resolver_reads_a_level_the_way_transform_reads_it():
