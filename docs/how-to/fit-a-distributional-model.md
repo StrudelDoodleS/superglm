@@ -313,6 +313,12 @@ beyond the numerical range, gives the same row, and a size heading to infinity
 below the mean keep full accuracy too. Means, weights and sizes not at the
 Poisson limit must lie in `[2**-450, 2**450]`.
 
+When a size reaches that limit during smoothing selection, the coefficients
+that only it determined lose their curvature and the fit's rank drops. Two
+smoothing iterates are then compared over the coefficients both retain, as
+Wood, Pya and Säfken (2016) drop unidentifiable coefficients, so the drop is
+not mistaken for a worse fit.
+
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
 observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
 1987): the solver falls back to it when the observed curvature at the end of a

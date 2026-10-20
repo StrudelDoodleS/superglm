@@ -438,3 +438,46 @@ def test_offset_start_is_projected_with_the_starting_penalty(monkeypatch) -> Non
     penalty = float(start @ context.penalty[block, block] @ start)
     residual = float(np.sum(weights * centred**2))
     assert penalty <= residual * (1.0 + 1.0e-8), (penalty, residual)
+
+
+def _poisson_group_fixture() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """One group Poisson (its size heads to the Poisson limit), the other NB2 with size 2."""
+    rng = np.random.default_rng(2)
+    n_rows = 2000
+    x, z = rng.uniform(0.0, 1.0, n_rows), rng.uniform(0.0, 1.0, n_rows)
+    group = rng.integers(0, 2, n_rows)
+    exposure = rng.uniform(0.2, 1.0, n_rows)
+    mean = exposure * np.exp(-1.5 + np.sin(2.0 * np.pi * x))
+    response = np.where(
+        group == 0,
+        rng.poisson(mean),
+        rng.negative_binomial(2.0, 2.0 / (2.0 + mean)),
+    ).astype(np.float64)
+    frame = pd.DataFrame({"x": x, "z": z, "g": pd.Categorical(group.astype(str))})
+    return frame, response, np.log(exposure)
+
+
+def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> None:
+    """A rank drop from a size reaching its Poisson limit is not an objective increase.
+
+    The Poisson group's size direction loses its curvature as it heads to the
+    limit, and the terminal rank drops between smoothing iterations. Compared
+    as computed, the pseudo-determinant over the smaller subspace read as a
+    worse criterion and every later proposal was rejected (objective_rejected);
+    compared over the common subspace, selection converges.
+    """
+    frame, response, log_exposure = _poisson_group_fixture()
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="cr", k=8)),
+        family.theta(s("z", kind="cr", k=5), cat("g")),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+
+    smoothing = model._require_fitted().fit_state.smoothing
+    ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
+    assert len(ranks) > 1
+    assert smoothing.converged, smoothing.convergence_reason

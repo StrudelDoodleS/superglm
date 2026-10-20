@@ -44,7 +44,11 @@ from superglm.distributional.smoothing.derivatives import (
 )
 from superglm.distributional.smoothing.evidence import _fresh_raw_evidence, _FreshRawEvidence
 from superglm.distributional.smoothing.history import compact_coefficient_history
-from superglm.distributional.smoothing.objective import _complete_mapping, _laplace_objective
+from superglm.distributional.smoothing.objective import (
+    _complete_mapping,
+    _laplace_objective,
+    rank_matched_objectives,
+)
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import _DenseObservedReuseSession
@@ -1080,7 +1084,10 @@ def run_newton_endgame(
                 tolerances.append(fitter.tolerance)
                 if trial_objective is None:
                     continue
-                if trial_objective <= objective + ARMIJO_CONSTANT * scale * descent + ceiling_slack:
+                reference, candidate = rank_matched_objectives(
+                    current.fit, objective, trial_fit, trial_objective
+                )
+                if candidate <= reference + ARMIJO_CONSTANT * scale * descent + ceiling_slack:
                     accepted_fit = trial_fit
                     accepted_lambdas = trial_lambdas
                     accepted_objective = trial_objective

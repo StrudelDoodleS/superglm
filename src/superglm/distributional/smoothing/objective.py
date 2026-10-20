@@ -63,6 +63,76 @@ def joint_laplace_objective(
     return float(objective)
 
 
+def _restricted_objective(
+    result: DenseSolverResult,
+    objective: float,
+    null_basis: NDArray,
+) -> float | None:
+    """``objective`` with its log-determinant taken off the span of ``null_basis``.
+
+    The Laplace log-determinant is the pseudo-determinant of the penalized
+    curvature over the subspace it retains. Restricting it to the orthogonal
+    complement of another fit's discarded directions puts both fits on the
+    same retained subspace. ``None`` when that restriction is not positive
+    definite.
+    """
+    curvature = np.asarray(result.terminal_penalized_curvature, dtype=np.float64)
+    basis = np.asarray(null_basis, dtype=np.float64)
+    width = curvature.shape[0]
+    if basis.ndim != 2 or basis.shape[0] != width or not 0 < basis.shape[1] < width:
+        return None
+    complete, _ = np.linalg.qr(basis, mode="complete")
+    complement = complete[:, basis.shape[1] :]
+    restricted = complement.T @ curvature @ complement
+    try:
+        factor = np.linalg.cholesky(0.5 * (restricted + restricted.T))
+    except np.linalg.LinAlgError:
+        return None
+    log_det = 2.0 * float(np.sum(np.log(np.diag(factor))))
+    value = objective + 0.5 * (log_det - result.terminal_rank.log_pdet)
+    return value if math.isfinite(value) else None
+
+
+def rank_matched_objectives(
+    current: DenseSolverResult,
+    current_objective: float,
+    trial: DenseSolverResult,
+    trial_objective: float,
+) -> tuple[float, float]:
+    """Two fits' Laplace objectives over the same retained curvature subspace.
+
+    A coefficient direction whose curvature vanishes (a size heading to its
+    Poisson limit, a level whose rows all sit on the response boundary) is
+    retained while its eigenvalue is above the rank cutoff and discarded once
+    below it; the pseudo-determinant then drops a log-eigenvalue near the
+    cutoff's, a jump the smoothing parameters did not cause. Wood, Pya and
+    Saefken (JASA 111, 2016, sec. 3.1.2) drop such unidentifiable
+    coefficients and evaluate the criterion in the reduced space; two fits
+    are compared there, the higher-rank one restricted to the complement of
+    the lower-rank one's discarded directions. Equal ranks, active faces, and
+    restrictions that are not positive definite compare as computed.
+    """
+
+    current_rank, trial_rank = current.terminal_rank, trial.terminal_rank
+    if (
+        current_rank.rank == trial_rank.rank
+        or current.coefficient_face is not None
+        or trial.coefficient_face is not None
+    ):
+        return current_objective, trial_objective
+    if trial_rank.rank < current_rank.rank:
+        if trial_rank.parameter_null_basis is None:
+            return current_objective, trial_objective
+        restricted = _restricted_objective(
+            current, current_objective, trial_rank.parameter_null_basis
+        )
+        return (current_objective if restricted is None else restricted), trial_objective
+    if current_rank.parameter_null_basis is None:
+        return current_objective, trial_objective
+    restricted = _restricted_objective(trial, trial_objective, current_rank.parameter_null_basis)
+    return current_objective, (trial_objective if restricted is None else restricted)
+
+
 def _laplace_objective(
     result: DenseSolverResult,
     *,

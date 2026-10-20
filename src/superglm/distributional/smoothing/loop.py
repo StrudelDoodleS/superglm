@@ -74,6 +74,7 @@ from superglm.distributional.smoothing.objective import (
     _complete_mapping,
     _laplace_objective,
     _maximum_step,
+    rank_matched_objectives,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, PenaltyFaceError
 from superglm.distributional.smoothing.proposals import (
@@ -87,6 +88,20 @@ from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import _DenseObservedReuseSession, fit_dense_fixed_lambda
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.reml.penalty_support import PenaltyNumericalError
+
+
+def _within_ceiling(
+    current: DenseSolverResult,
+    current_objective: float,
+    trial: DenseSolverResult,
+    trial_objective: float,
+    config: DistributionalEFSConfig,
+) -> bool:
+    """Accept a trial no worse than the current objective, on a common subspace."""
+    reference, candidate = rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    return candidate <= reference + config.objective_tolerance * (1.0 + abs(reference))
 
 
 def _trial_laplace_objective(
@@ -1129,9 +1144,6 @@ def fit_distributional_efs(
             missing=0.0,
         )
         boundary_nominations = tuple(name for name in estimated_names if name in nominations)
-        objective_ceiling = current_objective + outer_config.objective_tolerance * (
-            1.0 + abs(current_objective)
-        )
 
         accelerated_values = None
         trial_config = (
@@ -1201,7 +1213,9 @@ def fit_distributional_efs(
                 if (
                     trial_objective is not None
                     and _acceleration_provenance(estimated_names, trial_fit) == provenance
-                    and trial_objective <= objective_ceiling
+                    and _within_ceiling(
+                        current_fit, current_objective, trial_fit, trial_objective, outer_config
+                    )
                 ):
                     accepted_fit = trial_fit
                     accepted_fit_index = fit_index
@@ -1265,7 +1279,9 @@ def fit_distributional_efs(
                         lambdas=trial_lambdas,
                         face=current_face,
                     )
-                if trial_objective is not None and trial_objective <= objective_ceiling:
+                if trial_objective is not None and _within_ceiling(
+                    current_fit, current_objective, trial_fit, trial_objective, outer_config
+                ):
                     accepted_fit = trial_fit
                     accepted_fit_index = fit_index
                     accepted_lambdas = trial_lambdas
