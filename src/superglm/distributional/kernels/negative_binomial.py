@@ -611,11 +611,16 @@ def _recurrences(
         # log1p((j - mean)/total) == log((theta + j)/total). Below -1/2 the
         # log1p argument nears -1, where its rounding is amplified by
         # 1/(1 + argument); the quotient form is then the well-conditioned one.
+        # A tile without such a cell (mean < theta + 2j throughout, the usual
+        # claim-frequency case) takes log1p alone. A tile with one evaluates
+        # both forms and selects: numpy's masked (where=) and gathered
+        # evaluations of the logarithm measured slower than the full one.
         argument = (offsets - row_mean) / total
-        with np.errstate(divide="ignore", invalid="ignore"):
-            terms = np.where(
-                argument < -0.5, np.log((row_theta + offsets) / total), np.log1p(argument)
-            )
+        quotient = argument < -0.5
+        if quotient.any():
+            terms = np.where(quotient, np.log((row_theta + offsets) / total), np.log1p(argument))
+        else:
+            terms = np.log1p(argument)
         value[rows] += np.sum(terms, axis=1)
         selected = rows[derivative_rows[rows]]
         if derivative_order == 0 or not selected.size:

@@ -372,3 +372,43 @@ def test_sizes_far_below_the_mean_keep_exact_values_and_log_channels(
 def test_parameters_outside_the_numerical_domain_are_still_refused(mean, theta):
     with pytest.raises(NegativeBinomialNumericalDomainError):
         _row(0, mean, theta, 1.0, "prior")
+
+
+def test_value_recurrence_takes_the_quotient_logarithm_only_in_tiles_that_use_it(monkeypatch):
+    """A recurrence tile with no cell below -1/2 evaluates log1p alone.
+
+    The quotient form is needed only where mean > theta + 2j; a tile with such
+    a cell evaluates both forms and selects. The values are those of
+    evaluating both forms and selecting per cell, bit for bit.
+    """
+    counts = np.array([3, 5, 2, 7, 4], dtype=np.int64)
+    mean = np.array([0.5, 40.0, 1.0, 900.0, 0.02])
+    theta = np.array([2.0, 1.0, 3.0, 0.5, 1.0e9])
+    total = (mean + theta)[:, None]
+    offsets = np.arange(int(counts.max()), dtype=float)[None, :]
+    argument = (offsets - mean[:, None]) / total
+    used = offsets < counts[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        selected = np.where(
+            argument < -0.5, np.log((theta[:, None] + offsets) / total), np.log1p(argument)
+        )
+    expected_value = np.sum(np.where(used, selected, 0.0), axis=1)
+    tile_cells_needing_log = 0
+    for rows, start, width in nb_kernel._iter_recurrence_tiles(counts):
+        cells = (start + np.arange(width)[None, :] - mean[rows, None]) / total[rows] < -0.5
+        tile_cells_needing_log += cells.size if cells.any() else 0
+    assert 0 < tile_cells_needing_log < int(np.count_nonzero(used))
+
+    evaluated = []
+    real_log = np.log
+
+    def counting_log(values, *args, **kwargs):
+        evaluated.append(np.size(values))
+        return real_log(values, *args, **kwargs)
+
+    monkeypatch.setattr(np, "log", counting_log)
+    value, _, _ = nb_kernel._recurrences(counts, mean, theta, 0, np.zeros(len(counts), bool))
+    monkeypatch.undo()
+
+    assert sum(evaluated) == tile_cells_needing_log
+    np.testing.assert_array_equal(value, expected_value)
