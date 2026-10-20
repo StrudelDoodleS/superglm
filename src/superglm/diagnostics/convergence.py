@@ -221,6 +221,17 @@ def lss_semidefinite_curvature_message(family_name: str) -> str:
     )
 
 
+def lss_null_model_nonconvergence_message(family_name: str, reason: str) -> str:
+    """The disclosure a SuperLSS fit makes when its intercept-only null fit did not converge."""
+    return (
+        f"SuperLSS {family_name} fit: the intercept-only null model did not converge "
+        f"(reason {reason!r}). The fitted model is unaffected, but result_.null_objective, "
+        "the null model kept with the fit and anything compared with it are based on the "
+        "unconverged null's last accepted iterate. Refit with a larger max_inner_iter to let "
+        "the null fit converge; model.diagnose() reports the stop."
+    )
+
+
 def lss_corrected_covariance_substitute_message(source: str) -> str:
     """What a corrected covariance means when the final curvature fell back."""
     curvature = (

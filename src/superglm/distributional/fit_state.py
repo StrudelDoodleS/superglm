@@ -13,7 +13,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.diagnostics.convergence import lss_semidefinite_curvature_message
+from superglm.diagnostics.convergence import (
+    lss_null_model_nonconvergence_message,
+    lss_semidefinite_curvature_message,
+)
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import (
     DistributionalFamily,
@@ -570,7 +573,18 @@ def prepare_distributional_fit_state(
         rank=inference.rank,
         curvature_telemetry=solver_result.terminal_curvature,
         exact_face_components=exact_face_components,
-        warnings=_curvature_disclosures(family, solver_result, response, likelihood_plan),
+        warnings=(
+            *_curvature_disclosures(family, solver_result, response, likelihood_plan),
+            *(
+                ()
+                if compact_null.converged
+                else (
+                    lss_null_model_nonconvergence_message(
+                        type(family).__name__, compact_null.convergence_reason
+                    ),
+                )
+            ),
+        ),
     )
     rows = None
     if retain_rows:

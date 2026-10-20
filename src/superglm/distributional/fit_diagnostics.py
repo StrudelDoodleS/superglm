@@ -88,6 +88,8 @@ class _LSSDiagnosticContext:
     terminal_fit: DenseSolverResult
     smoothing: DistributionalEFSResult | None
     exact_face_components: tuple[str, ...]
+    null_converged: bool
+    null_convergence_reason: str
 
     @classmethod
     def from_model(cls, model: DenseDistributionalModel) -> _LSSDiagnosticContext:
@@ -113,6 +115,8 @@ class _LSSDiagnosticContext:
             terminal_fit=state.solver_result,
             smoothing=state.smoothing,
             exact_face_components=state.exact_face_components,
+            null_converged=state.null_model.converged,
+            null_convergence_reason=str(state.null_model.convergence_reason),
         )
 
 
@@ -332,6 +336,29 @@ def _not_converged_finding(
             "convergence contract?"
         ),
         action_metrics=("convergence reason", "iterations", "fit objective"),
+    )
+
+
+def _null_model_not_converged_finding(reason: str) -> DiagnosticFinding:
+    return _finding(
+        "fit.null_model_not_converged",
+        priority=2,
+        severity="warning",
+        impacts=("null_comparison",),
+        headline="The intercept-only null model did not converge.",
+        observed=f"The null coefficient fit stopped with reason {reason!r}.",
+        interpretation=(
+            "The fitted model is unaffected. The null objective and every comparison with the "
+            "null model are based on the unconverged null's last accepted iterate."
+        ),
+        evidence=_evidence_set(
+            "fit_result",
+            ("loop", "null_model"),
+            ("terminal_reason", reason),
+        ),
+        action_kind="inspect_fit_configuration",
+        action_question="Does a larger max_inner_iter let the null fit converge?",
+        action_metrics=("null convergence reason", "null objective"),
     )
 
 
@@ -558,6 +585,8 @@ def _analyze_fit_status(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindi
     curvature = _curvature_indefinite_finding(context)
     if curvature is not None:
         findings.append(curvature)
+    if not context.null_converged:
+        findings.append(_null_model_not_converged_finding(context.null_convergence_reason))
     return tuple(findings)
 
 

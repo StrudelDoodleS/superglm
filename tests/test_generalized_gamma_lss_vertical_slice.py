@@ -18,7 +18,6 @@ from superglm.distributional.families.generalized_gamma import GeneralizedGammaL
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels import generalized_gamma as gg
 from superglm.distributional.model import _readonly_default_prediction
-from superglm.distributional.null_model import NullModelFitError
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric
 from tests._generalized_gamma_lss_oracles import mp_log_density
@@ -219,17 +218,16 @@ def test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary():
         model = model_from_templates(family=GeneralizedGammaLSS(), predictors=predictors).fit(
             frame, y
         )
-    except NullModelFitError as failure:
-        # Measured outcome: the intercept-only joint null model walks into the
-        # infinite-mean barrier, every further step is rejected as invalid, and the
-        # null solve exhausts its iterations.  The family's repeated-curvature
-        # diagnosis is only consulted on the curvature path, so it cannot name the
-        # boundary here; extending it to the null-model path is an engine follow-up.
-        assert "did not converge" in str(failure)
-        return
     except Exception as failure:  # noqa: BLE001 - the diagnosis is the assertion
         assert "infinite-mean" in str(failure)
         return
+    # Measured outcome: the intercept-only joint null model walks into the
+    # infinite-mean barrier, every further step is rejected as invalid, and the
+    # null solve exhausts its iterations.  The fit finishes and says so instead
+    # of raising NullModelFitError, as it did before unconverged nulls were
+    # disclosed rather than refused.
+    if not model._require_fitted().null_model.converged:
+        assert any("null model did not converge" in message for message in model.result_.warnings)
     fitted = model.predict_parameters(frame)
     pressure = float(np.max(fitted["scale"].to_numpy() * np.abs(fitted["shape"].to_numpy())))
     assert pressure >= 0.85, "a finite-mean fit on infinite-mean data must sit near the boundary"

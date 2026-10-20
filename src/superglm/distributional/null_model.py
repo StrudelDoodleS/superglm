@@ -85,7 +85,13 @@ def _null_layout(source: StackedLayout, n_observations: int) -> StackedLayout:
 
 
 class NullModelFitError(RuntimeError):
-    """Raised when a joint null coefficient fit reaches no converged state."""
+    """A joint null coefficient fit that reached no converged state.
+
+    ``fit_joint_null_model`` no longer raises it: an unconverged null fit is
+    returned with ``converged=False`` and its convergence reason, and a
+    SuperLSS fit discloses it instead of refusing. The class stays importable
+    for code that catches it.
+    """
 
     def __init__(self, result: DenseSolverResult):
         self.result = result
@@ -229,7 +235,12 @@ def fit_joint_null_model(
     likelihood_plan: FamilyLikelihoodPlan,
     config: DenseSolverConfig | None = None,
 ) -> JointNullModel:
-    """Fit one intercept per family parameter under the already-bound likelihood."""
+    """Fit one intercept per family parameter under the already-bound likelihood.
+
+    A fit that stops short of convergence is returned as it stands, with
+    ``converged=False`` and the solver's convergence reason; the caller
+    discloses it.
+    """
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
     if not isinstance(source_layout, StackedLayout):
@@ -265,8 +276,6 @@ def fit_joint_null_model(
         penalty,
         config=solver_config,
     )
-    if not result.converged:
-        raise NullModelFitError(result)
     links = {state.name: state.link for state in layout.predictors}
     offsets = {state.name: state.offset for state in layout.predictors}
     return JointNullModel(

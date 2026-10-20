@@ -253,7 +253,7 @@ def test_null_state_retains_complete_auditable_fit_metadata() -> None:
         null.family_config["scale_floor"] = 1.0
 
 
-def test_null_fit_propagates_solver_errors_and_rejects_nonconvergence(
+def test_null_fit_propagates_solver_errors_and_keeps_nonconvergence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame, response, weights = _fixture()
@@ -273,14 +273,17 @@ def test_null_fit_propagates_solver_errors_and_rejects_nonconvergence(
         convergence_reason="max_iterations",
     )
     monkeypatch.setattr(null_module, "fit_dense_fixed_lambda", lambda *args, **kwargs: failed)
-    with pytest.raises(NullModelFitError, match="did not converge") as captured:
-        fit_joint_null_model(
-            family,
-            layout,
-            response,
-            likelihood_plan=likelihood_plan,
-        )
-    assert captured.value.result is failed
+    # Returned and recorded, not refused: the SuperLSS fit discloses it.
+    unconverged = fit_joint_null_model(
+        family,
+        layout,
+        response,
+        likelihood_plan=likelihood_plan,
+    )
+    assert unconverged.result is failed
+    assert unconverged.converged is False
+    assert unconverged.convergence_reason == "max_iterations"
+    assert issubclass(NullModelFitError, RuntimeError)
 
     def raise_solver_error(*args, **kwargs):
         raise DenseSolverError("null sentinel")

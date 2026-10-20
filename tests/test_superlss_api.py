@@ -1658,6 +1658,51 @@ def test_repeated_indefiniteness_without_fisher_finishes_and_discloses(discrete)
     assert findings and "nearest positive semidefinite observed" in findings[0].observed
 
 
+def test_unconverged_null_model_finishes_and_discloses(monkeypatch) -> None:
+    """Kills the refusal: the parent commit raised NullModelFitError from the fit.
+
+    The intercept-only null fit is made to stop on its iteration budget. The
+    fit is returned; the disclosure is warned, kept in ``result_.warnings``,
+    reported by ``diagnose()`` and carried through serialization with the
+    null's own convergence record.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.distributional import null_model as null_module
+
+    solve = null_module.fit_dense_fixed_lambda
+
+    def starved(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        return replace(result, converged=False, convergence_reason="max_iterations")
+
+    monkeypatch.setattr(null_module, "fit_dense_fixed_lambda", starved)
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+    )
+    with pytest.warns(ConvergenceWarning, match="null model did not converge"):
+        model.fit(frame, response, lambdas={})
+
+    fitted = model._require_fitted()
+    assert fitted.null_model.converged is False
+    assert fitted.null_model.convergence_reason == "max_iterations"
+    assert model.result_.converged
+    assert model.result_.null_objective == fitted.null_model.objective
+    assert [m for m in model.result_.warnings if "null model did not converge" in m]
+    codes = [finding.code for finding in model.diagnose().findings]
+    assert "fit.null_model_not_converged" in codes
+
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert restored.result_.warnings == model.result_.warnings
+    assert restored._require_fitted().null_model.converged is False
+    assert restored._require_fitted().null_model.convergence_reason == "max_iterations"
+    assert "fit.null_model_not_converged" in [f.code for f in restored.diagnose().findings]
+
+
 def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame, response, _, _ = _fixture()
     model = model_from_templates(

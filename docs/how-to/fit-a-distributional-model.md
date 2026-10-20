@@ -354,8 +354,9 @@ only redistribute mass within a cell and never touch the mean table. The mean
 must exist: cells with `shape < 0` and `scale·|shape| ≥ 1` are outside the
 model, the solver's line search backs away from them, and a repeated curvature
 failure is diagnosed with a message naming that boundary. A book whose tail
-genuinely has no mean drives the intercept-only null fit into that boundary
-and the fit stops with `NullModelFitError`; use the location form for it.
+genuinely has no mean drives the intercept-only null fit into that boundary.
+The fit still finishes, warns that its null model did not converge, and keeps
+that warning in `result_.warnings`; use the location form for such a book.
 
 **Location form.** `GeneralizedGammaLSS(parametrisation="location")` puts the
 identity-linked log-scale location first (`log Y = location + scale·W`); its
