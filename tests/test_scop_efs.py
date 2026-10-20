@@ -8046,3 +8046,98 @@ class TestJointSCOPNewton:
             assert np.isfinite(result.objective_after)
             assert result.objective_after <= result.objective_before + 1e-8
             assert result.dropped_cross_blocks >= 1
+
+
+def _convex_beside_cr_fixture():
+    """A convex P-spline beside a cr spline on which the warm search follows a worse mode.
+
+    The release-history corpus's synthetic book (4,000 rows, Poisson with a
+    log-exposure offset), regenerated here from its seed by its own code,
+    including ``np.vectorize`` typing a level-effect lookup by its first
+    value. At one lambda the SCOP coefficients have two certified local
+    modes 3.3e-3 apart in penalized deviance, the worse one with log|H| 8.0
+    lower; v0.40.0 followed the worse one for 100 iterations to an EDF of
+    1628 with 16 coefficients.
+    """
+    rng = np.random.default_rng(20261020)
+
+    def synth(n):
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(-2, 2, n)
+        x3 = rng.normal(0, 1, n)
+        x4 = rng.uniform(0, 1, n)
+        glev = np.array([*"abcdefg", "thin"])
+        gp = np.array([0.25, 0.2, 0.15, 0.12, 0.1, 0.09, 0.085, 0.005])
+        gp /= gp.sum()
+        g = glev[rng.choice(8, n, p=gp)]
+        o = np.array(list("ABCDE"))[rng.choice(5, n, p=[0.1, 0.3, 0.3, 0.2, 0.1])]
+        r = np.array([f"r{i:02d}" for i in range(40)])[rng.integers(0, 40, n)]
+        h = np.array(["h1", "h2", "h3", "h4"])[rng.integers(0, 4, n)]
+        expo = rng.uniform(0.2, 1.0, n)
+        geff = dict(zip(glev, [0, 0.2, -0.1, 0.3, -0.2, 0.1, 0.05, 0.4], strict=True))
+        oeff = {"A": -0.3, "B": -0.1, "C": 0, "D": 0.15, "E": 0.3}
+        reff_values = rng.normal(0, 0.25, 40)
+        reff = {f"r{i:02d}": reff_values[i] for i in range(40)}
+        heff = {"h1": 0.0, "h2": 0.15, "h3": -0.1, "h4": 0.2}
+        f = (
+            0.4 * np.sin(x1 / 1.6)
+            + 0.25 * x2**2 / 4
+            - 0.2 * x3
+            + 0.5 * x4
+            + np.vectorize(geff.get)(g)
+            + np.vectorize(oeff.get)(o)
+            + np.vectorize(reff.get)(r)
+            + np.vectorize(heff.get)(h) * x1 / 10
+            + 0.1 * np.sin(x1 / 2) * x2
+        )
+        return pd.DataFrame({"x1": x1, "x2": x2}), expo, f
+
+    frame, expo, f = synth(4000)
+    synth(2000)
+    y = rng.poisson(expo * np.exp(-1.0 + f)).astype(float)
+    return frame, y, np.log(expo)
+
+
+class TestSCOPReferenceMode:
+    def test_a_search_on_a_worse_local_mode_restarts_and_publishes_a_reproducible_fit(self):
+        """The published fit is the one a cold fit at its lambdas reproduces.
+
+        On e7b0df17 (v0.40.0's solver) this fit stops at max_reml_iter=100,
+        not converged, with an EDF of 1628 for 16 coefficients and an
+        objective 4.0 below what a fixed-lambda fit at its own lambdas gives.
+        Mutation check: ``_better_reference_mode`` returning None restores
+        exactly that.
+        """
+        from superglm import LambdaPolicy, Spline
+
+        frame, y, offset = _convex_beside_cr_fixture()
+
+        features = {
+            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex),
+            "x1": Spline(kind="cr", k=8),
+        }
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+        model.fit_reml(frame, y, offset=offset)
+        reml = model._reml_result
+        assert reml.converged
+        assert model.result.effective_df <= model.result.beta.size
+
+        fixed = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x2": Spline(
+                    kind="ps",
+                    k=10,
+                    constraint=Constraint.fit.convex,
+                    lambda_policy=LambdaPolicy.fixed(reml.lambdas["x2"]),
+                ),
+                "x1": Spline(kind="cr", k=8, lambda_policy=LambdaPolicy.fixed(reml.lambdas["x1"])),
+            },
+        )
+        fixed.fit_reml(frame, y, offset=offset)
+        # Both are certified modes at one lambda; the objective is a sum of
+        # terms of order 1e3 evaluated twice, so agreement to 1e-8 relative
+        # separates "the same mode" from the 4.0 gap of a different one.
+        assert fixed._reml_result.objective == pytest.approx(reml.objective, rel=1e-8)
+        assert fixed.result.effective_df == pytest.approx(model.result.effective_df, rel=1e-6)
