@@ -32,15 +32,29 @@ _EPS = np.finfo(_FLOAT).eps
 _TINY = np.nextafter(_FLOAT(0.0), _FLOAT(1.0))
 _DOMAIN_MIN = math.ldexp(1.0, -450)
 _DOMAIN_MAX = math.ldexp(1.0, 450)
-_MIN_RATIO = math.ldexp(1.0, -26)
-# The low-mean tail uses stable log1p recurrences and the certified theta
-# series. At the absolute exponent limits, its leading zero-count natural
-# theta Hessian scales as (weight/theta) * (mean/theta)**2: a 2^-52 ratio
-# leaves the extreme exponent at -1004, above binary64's normal floor -1022.
-# Keep the tighter reciprocal bound: the large-mean recurrence approaches
-# log1p(-1) there. Neither extension nor a tiny ratio replaces finite NB2 by
-# Poisson; derivative-representation checks remain authoritative throughout.
-_MIN_MEAN_THETA_RATIO = _EPS
+# The kernel is NB2 at every mean/theta ratio; no ratio is refused.
+#
+# Toward the Poisson limit (theta -> inf) NB2 is the Poisson law plus
+# ((y - mean)^2 - y)/(2 theta) + O(theta^-2) (the NB2 expansion in 1/theta).
+# Once max(mean, count - 1) < _POISSON_LIMIT_RATIO * theta, in effective
+# units, that correction, and with it every derivative in theta, is below one
+# unit roundoff of the row's own value and mean channels: the row has reached
+# its Poisson limit at working precision. It is evaluated there, at the
+# family's boundary theta = inf, as a likelihood whose maximum lies at
+# infinity is read in the limit model (Geyer, Electron. J. Statist. 3, 2009):
+# at one surrogate size, 2^_POISSON_SURROGATE_EXPONENT times that reach,
+# whatever theta is, with every theta channel exactly zero. Its value and mean
+# channels then agree with the Poisson row's to about 2^-60 relative, they are
+# flat in theta, and a size that has reached the limit is not pushed further
+# by derivatives below the precision of the fit. The ratio bound also keeps
+# every other row's natural theta channels in the normal range: their extreme
+# exponent, (weight/theta) (mean/theta)^2 at the +/-450 limits, is -1004.
+#
+# Toward the other limit (theta/mean -> 0) the value recurrence switches from
+# log1p((j - mean)/(mean + theta)), which approaches log1p(-1), to
+# log((theta + j)/(mean + theta)) once that argument is below -1/2.
+_POISSON_LIMIT_RATIO = _EPS
+_POISSON_SURROGATE_EXPONENT = 60
 _POISSON_LIKE_INITIAL_THETA_FACTOR = 0.5 / math.sqrt(_EPS)
 _SERIES_ORDER = 12
 _SERIES_RATIO = 1.0 / 16.0
@@ -277,30 +291,51 @@ def _domain(
     theta: NDArray[np.float64],
     weights: NDArray[np.float64],
     semantics: WeightSemantics,
-) -> tuple[NDArray[np.float64], ...]:
+    counts: NDArray[np.int64] | None = None,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.bool_],
+]:
+    """Effective parameters, with Poisson-limit rows moved to their surrogate size.
+
+    Returns ``(scale, multiplier, effective_mean, effective_theta, total,
+    poisson)``. A row is at its Poisson limit when ``max(mean, count - 1)``,
+    in effective units, is below ``_POISSON_LIMIT_RATIO`` times its size (the
+    expected information, which has no count, uses the mean alone). Its
+    effective size is then its surrogate, so it is in the numerical domain
+    whatever its own size.
+    """
     _require_numerical_domain_range(mean, "mean")
-    _require_numerical_domain_range(theta, "theta")
     _require_numerical_domain_range(weights, "weight")
     ones = np.ones_like(weights)
     scale = weights if semantics == "prior" else ones
     multiplier = ones if semantics == "prior" else weights
-    effective_mean, effective_theta = scale * mean, scale * theta
+    effective_mean = scale * mean
     _require_numerical_domain_range(effective_mean, "effective mean")
-    _require_numerical_domain_range(effective_theta, "effective theta")
-    ratio_bad = (effective_mean < _MIN_MEAN_THETA_RATIO * effective_theta) | (
-        effective_theta < _MIN_RATIO * effective_mean
+    reach = (
+        effective_mean
+        if counts is None
+        else np.maximum(effective_mean, np.maximum(counts.astype(_FLOAT) - 1.0, 0.0))
     )
-    if np.any(ratio_bad):
-        row = int(np.flatnonzero(ratio_bad)[0])
-        if effective_theta[row] > effective_mean[row]:
-            raise NegativeBinomialPoissonBoundaryError(
-                f"negative-binomial row {row} is Poisson-like beyond the supported finite "
-                "theta numerical domain"
+    with np.errstate(over="ignore"):
+        effective_theta = scale * theta
+    poisson = reach < _POISSON_LIMIT_RATIO * effective_theta
+    if np.any(poisson):
+        surrogate = np.minimum(np.ldexp(reach[poisson], _POISSON_SURROGATE_EXPONENT), _DOMAIN_MAX)
+        if np.any(reach[poisson] >= _POISSON_LIMIT_RATIO * surrogate):
+            raise NegativeBinomialNumericalDomainError(
+                "a negative-binomial row's Poisson limit lies outside the numerical domain"
             )
-        raise NegativeBinomialNumericalDomainError(
-            f"negative-binomial row {row} has mean/theta ratio outside the numerical domain"
-        )
-    return scale, multiplier, effective_mean, effective_theta, effective_mean + effective_theta
+        effective_theta = effective_theta.copy()
+        effective_theta[poisson] = surrogate
+    _require_numerical_domain_range(theta[~poisson], "theta")
+    _require_numerical_domain_range(effective_theta, "effective theta")
+    total = effective_mean + effective_theta
+    return scale, multiplier, effective_mean, effective_theta, total, poisson
 
 
 def _moment_theta_candidate(
@@ -573,7 +608,15 @@ def _recurrences(
         offsets = np.arange(start, start + width, dtype=_FLOAT)[None, :]
         row_mean, row_theta = mean[rows, None], theta[rows, None]
         total = row_mean + row_theta
-        value[rows] += np.sum(np.log1p((offsets - row_mean) / total), axis=1)
+        # log1p((j - mean)/total) == log((theta + j)/total). Below -1/2 the
+        # log1p argument nears -1, where its rounding is amplified by
+        # 1/(1 + argument); the quotient form is then the well-conditioned one.
+        argument = (offsets - row_mean) / total
+        with np.errstate(divide="ignore", invalid="ignore"):
+            terms = np.where(
+                argument < -0.5, np.log((row_theta + offsets) / total), np.log1p(argument)
+            )
+        value[rows] += np.sum(terms, axis=1)
         selected = rows[derivative_rows[rows]]
         if derivative_order == 0 or not selected.size:
             continue
@@ -670,17 +713,18 @@ def evaluate_negative_binomial_rows(
     """Evaluate normalized NB2 rows, excluding the factorial carrier.
 
     Continuous inputs and effective prior-scaled parameters must be in
-    ``[2^-450, 2^450]``, with effective ``mean/theta >= 2^-52`` and
-    ``theta/mean >= 2^-26``. Hessians are packed as ``(mean-mean, mean-theta,
-    theta-theta)`` in natural coordinates.
+    ``[2^-450, 2^450]``, except the size of a row past its Poisson limit
+    (effective ``max(mean, count - 1) < 2^-52 theta``), which may take any
+    positive value and has zero theta channels. Hessians are packed as ``(mean-mean,
+    mean-theta, theta-theta)`` in natural coordinates.
     """
 
     arrays, integer_counts, order = _inputs(
         counts, mean, theta, weights, semantics, derivative_order
     )
     count_values, mean_values, theta_values, weight_values = arrays
-    scale, multiplier, effective_mean, effective_theta, total = _domain(
-        mean_values, theta_values, weight_values, semantics
+    scale, multiplier, effective_mean, effective_theta, total, poisson = _domain(
+        mean_values, theta_values, weight_values, semantics, integer_counts
     )
 
     if order:
@@ -799,6 +843,13 @@ def evaluate_negative_binomial_rows(
             )
             _finite_output(hessians, "Hessian", NegativeBinomialDerivativeRepresentationError)
 
+        if np.any(poisson):
+            # A Poisson-limit row has no theta channels (see _POISSON_LIMIT_RATIO).
+            for channels in (scores, target_score):
+                channels[poisson, 1] = 0.0
+            for channels in (hessians, target_hessian):
+                if channels is not None:
+                    channels[poisson, 1:] = 0.0
         _retain_log_channels(
             integer_counts,
             mean_values,
@@ -817,6 +868,28 @@ def evaluate_negative_binomial_rows(
         hessian_packed=hessians,
         valid=np.ones(len(integer_counts), dtype=np.bool_),
     )
+
+
+def _poisson_limit_theta_channels(
+    derivatives: NDArray[np.float64],
+    error: NDArray[np.float64],
+    poisson: NDArray[np.bool_],
+) -> None:
+    """Zero a Poisson-limit row's log-theta derivatives, in place, keeping a true bound.
+
+    Column 0 is the pure log-mean derivative; every later column involves
+    log theta. The last, pure log-theta column is the certified one: its true
+    value at any size past the surrogate is smaller in magnitude than at the
+    surrogate (it falls like 1/theta there), so the bound grows by that
+    magnitude, rounded upward once. The mixed columns are below the row's
+    unit roundoff, as its theta score is.
+    """
+
+    if not np.any(poisson):
+        return
+    with np.errstate(over="ignore"):
+        error[poisson] = np.nextafter(error[poisson] + np.abs(derivatives[poisson, -1]), np.inf)
+    derivatives[poisson, 1:] = 0.0
 
 
 def negative_binomial_log_third_derivatives(
@@ -841,8 +914,8 @@ def negative_binomial_log_third_derivatives(
 
     arrays, integer_counts, _ = _inputs(counts, mean, theta, weights, semantics, 2)
     _, _, _, weight_values = arrays
-    _, multiplier, effective_mean, effective_theta, _ = _domain(
-        arrays[1], arrays[2], weight_values, semantics
+    _, multiplier, effective_mean, effective_theta, _, poisson = _domain(
+        arrays[1], arrays[2], weight_values, semantics, integer_counts
     )
     remainder, remainder_error, remainder_scale = _ratio_remainder(effective_mean / effective_theta)
     third, error, _ = _compiled.log_third_derivatives(
@@ -857,6 +930,7 @@ def negative_binomial_log_third_derivatives(
         _SERIES_EXPONENTS,
         _SERIES_BERNOULLI,
     )
+    _poisson_limit_theta_channels(third, error, poisson)
     with np.errstate(over="ignore", invalid="ignore"):
         third = third * multiplier[:, None]
         error = (1.0 + _gamma(2)) * (error * multiplier)
@@ -964,8 +1038,8 @@ def negative_binomial_log_fourth_derivatives(
 
     arrays, integer_counts, _ = _inputs(counts, mean, theta, weights, semantics, 2)
     _, _, _, weight_values = arrays
-    _, multiplier, effective_mean, effective_theta, total = _domain(
-        arrays[1], arrays[2], weight_values, semantics
+    _, multiplier, effective_mean, effective_theta, total, poisson = _domain(
+        arrays[1], arrays[2], weight_values, semantics, integer_counts
     )
     remainder, remainder_error, remainder_scale = _ratio_remainder(effective_mean / effective_theta)
     bbbb, error = _compiled.log_fourth_derivative(
@@ -990,6 +1064,7 @@ def negative_binomial_log_fourth_derivatives(
             n_rows,
         )
         fourth[:, 4] = bbbb
+        _poisson_limit_theta_channels(fourth, error, poisson)
         fourth *= multiplier[:, None]
         error = (1.0 + _gamma(2)) * (error * multiplier)
     _finite_output(fourth, "fourth derivative", NegativeBinomialDerivativeRepresentationError)
@@ -1096,7 +1171,7 @@ def negative_binomial_expected_information(
             raise ValueError(f"{name} must be finite and strictly positive")
     if semantics not in ("prior", "frequency"):
         raise ValueError("semantics must be 'prior' or 'frequency'")
-    scale, multiplier, effective_mean, effective_theta, total = _domain(
+    scale, multiplier, effective_mean, effective_theta, total, poisson = _domain(
         mean_values, theta_values, weight_values, semantics
     )
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
@@ -1122,6 +1197,8 @@ def negative_binomial_expected_information(
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         information[:, 0] = multiplier * (scale * (effective_theta / total)) / mean_values
         information[:, 2] = multiplier * ((size_information / theta_values) / theta_values)
+    # A Poisson-limit row carries no size information (see _POISSON_LIMIT_RATIO).
+    information[poisson, 2] = 0.0
     if not np.all(np.isfinite(information)):
         raise NegativeBinomialNumericalDomainError("NB2 expected information is not representable")
     return readonly(information, dtype=np.dtype(np.float64), shape=(len(mean_values), 3))

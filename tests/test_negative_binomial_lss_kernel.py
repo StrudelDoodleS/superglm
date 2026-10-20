@@ -18,7 +18,6 @@ NegativeBinomialDerivativeRepresentationError = (
     nb_kernel.NegativeBinomialDerivativeRepresentationError
 )
 NegativeBinomialNumericalDomainError = nb_kernel.NegativeBinomialNumericalDomainError
-NegativeBinomialPoissonBoundaryError = nb_kernel.NegativeBinomialPoissonBoundaryError
 evaluate_negative_binomial_rows = nb_kernel.evaluate_negative_binomial_rows
 
 
@@ -294,8 +293,12 @@ _DOMAIN_HIGH = math.ldexp(1.0, 450)
         (0, 1.0, 1.0, np.nextafter(_DOMAIN_HIGH, np.inf), NegativeBinomialNumericalDomainError),
         (0, 1.0, np.nextafter(2.0**26, np.inf), 1.0, None),
         (0, 1.0, 2.0**52, 1.0, None),
-        (0, 1.0, np.nextafter(2.0**52, np.inf), 1.0, NegativeBinomialPoissonBoundaryError),
-        (0, np.nextafter(2.0**26, np.inf), 1.0, 1.0, NegativeBinomialNumericalDomainError),
+        # Past the Poisson limit a size of any magnitude is valid.
+        (0, 1.0, np.nextafter(2.0**52, np.inf), 1.0, None),
+        (0, 1.0, np.nextafter(_DOMAIN_HIGH, np.inf), 1.0, None),
+        (3, 1.0, 1.0e300, 1.0, None),
+        (0, np.nextafter(2.0**26, np.inf), 1.0, 1.0, None),
+        (2, 2.0**40, 1.0, 1.0, None),
     ],
 )
 def test_numerical_domain_endpoints_and_ratio_boundary(

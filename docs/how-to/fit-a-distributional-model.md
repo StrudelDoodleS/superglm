@@ -303,12 +303,15 @@ likelihood exact: aggregate identical rows and fit them with
 `weight_semantics="frequency"`, or move exposure into an offset so that the
 counts themselves stay small.
 
-The finite kernel permits `2**-52 <= mean/theta <= 2**26`, subject to its
-unchanged absolute/effective exponent, weight, overflow, and numerical
-retention checks. The extended low-mean range uses the existing checked
-finite-NB2 recurrences and series. It lets low-exposure rows remain in a
-distributional fit without substituting a Poisson density. Ratios below this
-range still raise `NegativeBinomialPoissonBoundaryError`.
+The kernel evaluates NB2 at every `mean/theta` ratio. A row whose
+`max(mean, count - 1)` is below `2**-52` times its size has reached its
+Poisson limit at working precision: its likelihood and mean derivatives are
+the Poisson ones to within one rounding of the row's own values, and it has no
+size derivatives. It is evaluated as that limit, so any larger size, even one
+beyond the numerical range, gives the same row, and a size heading to infinity
+(a Poisson-like group of rows) stops there instead of being refused. Sizes far
+below the mean keep full accuracy too. Means, weights and sizes not at the
+Poisson limit must lie in `[2**-450, 2**450]`.
 
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
 observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
