@@ -22,6 +22,7 @@ from superglm.reml.penalty_algebra import (
     _PenaltyLogdetEvaluation,
     penalty_component_dense_matrix,
 )
+from superglm.solvers.rank import RankDecomposition, _eigensolver_relative_bar
 from superglm.types import LambdaPolicy
 
 
@@ -63,20 +64,55 @@ def joint_laplace_objective(
     return float(objective)
 
 
+def _discarded_space_error(rank: RankDecomposition) -> float:
+    """Bound on the sine between a computed discarded subspace and the exact one.
+
+    Measured in the decomposition's equilibrated coordinates, where ``eigh``
+    is backward stable: the computed eigenvectors are exact for ``G + E``
+    with ``||E||_2 <= p(n) u ||G||_2`` (*LAPACK Users' Guide*, 3rd ed., sec.
+    4.7, whose ``epsilon`` is ``u``). ``cutoff`` is
+    ``_eigensolver_relative_bar(n) * max|w|``, i.e. ``2 n u ||G||``, so it
+    bounds ``||E||`` with ``p(n) = 2n``. By Weyl the exact retained
+    eigenvalues are at least ``min(retained) - cutoff`` and the computed
+    discarded ones are at most ``cutoff``, so the sin theta theorem (Davis
+    and Kahan, SIAM J. Numer. Anal. 7, 1970; Stewart and Sun, *Matrix
+    Perturbation Theory*, 1990, ch. V) gives
+    ``cutoff / (min(retained) - 2 cutoff)``; ``inf`` when that separation is
+    not positive. Structural (zero-diagonal) columns are discarded as exact
+    unit vectors and add nothing.
+    """
+    if rank.rank == 0 or int(np.count_nonzero(rank.column_scale)) == rank.rank:
+        return 0.0
+    gap = float(np.min(cast(NDArray, rank.retained_values))) - 2.0 * rank.cutoff
+    return rank.cutoff / gap if gap > 0.0 else math.inf
+
+
 def _restricted_objective(
     result: DenseSolverResult,
     objective: float,
-    null_basis: NDArray,
+    other: RankDecomposition,
 ) -> float | None:
-    """``objective`` with its log-determinant taken off the span of ``null_basis``.
+    """``objective`` with its log-determinant taken off the other fit's discarded span.
 
     The Laplace log-determinant is the pseudo-determinant of the penalized
     curvature ``C`` over the subspace it retains. Restricting it to the
-    orthogonal complement of another fit's discarded directions ``N`` puts
-    both fits on the same retained subspace when the two discarded spaces are
-    nested: each of this fit's own discarded directions lies closer to
-    ``span(N)`` than to its complement. Otherwise (fits that discard
-    different directions) ``None``: compare as computed.
+    orthogonal complement of the other fit's discarded directions ``N`` puts
+    both fits on the same retained subspace when this fit's own discarded
+    directions lie in ``span(N)``. Otherwise (fits that discard different
+    directions) ``None``: compare as computed.
+
+    Containment is tested to the accuracy the two decompositions determine
+    their discarded spaces. In this fit's equilibrated coordinates its own
+    space is within ``e_own`` of exact and the other's within ``k e_other``
+    (:func:`_discarded_space_error`; ``k`` is the condition number of the
+    diagonal map between the two fits' equilibrations, which stretches a
+    sine by at most ``k``). Exactly nested spaces then have principal sines
+    at most ``e_own + k e_other``, plus ``2 n u`` for forming the sines; a
+    larger sine shows the spaces are not nested. Near a vanishing curvature
+    the gap is small and the bound wide, so a pair is restricted unless the
+    decompositions resolve that it is not nested. Measured in parameter
+    coordinates the sines mislead: on the 20k freMTPL NB2 sample a pair at
+    5.1e-4 there is at 3e-10 in either fit's equilibrated coordinates.
 
     For nested spaces Jacobi's complementary-minor identity (Brualdi and
     Schneider, Linear Algebra Appl. 52/53, 1983), in its pseudo-determinant
@@ -88,13 +124,22 @@ def _restricted_objective(
     curvature is ``1e-30`` beside ``1e9`` (a size near its Poisson limit) keeps
     the exact zeros the rotated ``Q'CQ`` would fill with rounding.
     """
-    null = np.asarray(null_basis, dtype=np.float64)
+    null = np.asarray(other.parameter_null_basis, dtype=np.float64)
     rank = result.terminal_rank
     own = rank.parameter_null_basis
     if own is not None and own.shape[1]:
         own = np.asarray(own, dtype=np.float64)
-        cosines = np.linalg.svd(np.linalg.qr(null)[0].T @ np.linalg.qr(own)[0], compute_uv=False)
-        if cosines.min() ** 2 <= 0.5:
+        scale, other_scale = rank.column_scale, other.column_scale
+        weight = np.where(scale > 0.0, scale, np.where(other_scale > 0.0, other_scale, 1.0))
+        stretch = weight[other_scale > 0.0] / other_scale[other_scale > 0.0]
+        other_error = _discarded_space_error(other)
+        tolerance = _discarded_space_error(rank) + _eigensolver_relative_bar(rank.width)
+        if other_error:
+            tolerance += float(stretch.max() / stretch.min()) * other_error
+        basis = np.linalg.qr(weight[:, None] * null)[0]
+        own_basis = np.linalg.qr(weight[:, None] * own)[0]
+        sines = np.linalg.svd(own_basis - basis @ (basis.T @ own_basis), compute_uv=False)
+        if sines.max() > tolerance:
             return None
         null = null @ np.linalg.svd(own.T @ null)[2][own.shape[1] :].T
     inverse = np.column_stack([rank.solve(column) for column in null.T])
@@ -134,13 +179,11 @@ def rank_matched_objectives(
     if trial_rank.rank < current_rank.rank:
         if trial_rank.parameter_null_basis is None:
             return current_objective, trial_objective
-        restricted = _restricted_objective(
-            current, current_objective, trial_rank.parameter_null_basis
-        )
+        restricted = _restricted_objective(current, current_objective, trial_rank)
         return (current_objective if restricted is None else restricted), trial_objective
     if current_rank.parameter_null_basis is None:
         return current_objective, trial_objective
-    restricted = _restricted_objective(trial, trial_objective, current_rank.parameter_null_basis)
+    restricted = _restricted_objective(trial, trial_objective, current_rank)
     return current_objective, (trial_objective if restricted is None else restricted)
 
 
