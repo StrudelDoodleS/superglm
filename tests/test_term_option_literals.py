@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import types
 import typing
+import warnings
 
 import pytest
 
@@ -168,14 +169,29 @@ def test_an_unknown_spline_option_builds_as_before_and_says_so(option, value, tr
     from superglm.features._spline_config import SplineOptionWarning
 
     values, _ = _literal_values(_annotation(superglm.Spline, option))
-    x = np.linspace(0.0, 1.0, 200)
     for build in (superglm.Spline, lambda **kw: superglm.s("x", **kw).spec, spline.PSpline):
         with pytest.warns(SplineOptionWarning, match=rf"{option}={value!r}") as caught:
-            spec = build(**{option: value})
+            build(**{option: value})
         message = str(caught[0].message)
         assert treated_as in message
         assert all(repr(accepted) in message for accepted in values)
-    spec.build(x)
+
+    # It builds as what the warning names: the fit equals the named value's,
+    # to the bit, so a case-folding or other reinterpretation fails here.
+    import pandas as pd
+
+    reference = {"penalty": "none", "knot_strategy": "uniform"}[option]
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame({"x": rng.uniform(size=300)})
+    y = rng.poisson(np.exp(np.sin(3.0 * frame["x"].to_numpy()))).astype(float)
+    fits = []
+    for chosen in (value, reference):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SplineOptionWarning)
+            features = {"x": superglm.Spline(k=8, **{option: chosen})}
+        model = superglm.SuperGLM(features=features, selection_penalty=0.0)
+        fits.append(model.fit_reml(frame, y).predict(frame))
+    assert np.array_equal(*fits)
 
 
 def test_what_040_fitted_as_intended_still_builds():
