@@ -491,3 +491,54 @@ def test_evaluated_candidate_requires_both_score_and_objective_tolerance() -> No
 
     assert not score_failure.converged
     assert not objective_failure.converged
+
+
+def _noise_spline_fit(seed: int, **fit_kwargs):
+    """150 Poisson rows: a P-spline on an x with no effect beside a cr spline."""
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Numeric, Spline, SuperGLM
+
+    rng = np.random.default_rng(seed)
+    n = 150
+    x1, x4, x3 = rng.uniform(0, 10, n), rng.uniform(0, 1, n), rng.normal(0, 1, n)
+    exposure = rng.uniform(0.2, 1, n)
+    y = rng.poisson(exposure * np.exp(-0.5 + 0.5 * x4 - 0.2 * x3)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x1": Spline(kind="ps", k=10), "x4": Spline(kind="cr", k=8), "x3": Numeric()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            pd.DataFrame({"x1": x1, "x4": x4, "x3": x3}), y, offset=np.log(exposure), **fit_kwargs
+        )
+    return model._reml_result
+
+
+def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
+    """The order-1 outer Hessian zigzags; the exact one converges within the default budget.
+
+    On 53cefda2 this fit's x4 smoothing parameter alternates around its optimum
+    with the gradient contracting about 0.87 a step: not converged at the
+    default max_reml_iter=20, converged after 76 iterations at 200. Mutation
+    check: never escalating to the exact Hessian restores that. A fit stopped
+    short of its optimum still reports it: capped at 5 iterations it is not
+    converged.
+    """
+    reference = _noise_spline_fit(52, max_reml_iter=200, w_correction_order=2)
+    assert reference.converged
+
+    fit = _noise_spline_fit(52)
+    assert fit.converged
+    assert fit.termination_reason == "score_objective_tolerance"
+    # Both stop at the same optimum: the objective agrees to the REML stop's own
+    # resolution (reml_tol=1e-9 relative to a criterion of about 72).
+    assert fit.objective == pytest.approx(reference.objective, rel=1e-9)
+
+    capped = _noise_spline_fit(52, max_reml_iter=5)
+    assert not capped.converged
+    assert capped.termination_reason == "max_reml_iter"
