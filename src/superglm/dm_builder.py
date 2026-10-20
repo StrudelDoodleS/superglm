@@ -1022,9 +1022,9 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
         if inner[name] is specs[name]:
             specs[name] = cast(FeatureSpec, replacement)
             continue
-        wrapper = copy.deepcopy(specs[name])
-        wrapper._spline_obj = replacement  # type: ignore[attr-defined]
-        wrapper._init_spline()  # type: ignore[attr-defined]
+        wrapper: Any = copy.deepcopy(specs[name])
+        wrapper._spline_obj = replacement
+        wrapper._init_spline()
         specs[name] = wrapper
 
 
