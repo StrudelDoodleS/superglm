@@ -110,7 +110,15 @@ class Predictor:
                 # It reads its variable and group columns itself and builds
                 # without their specs, as in SuperGLM; requiring them as
                 # features forced a main effect on the group, whose level
-                # intercepts the factor smooth already spans.
+                # intercepts the factor smooth already spans. An sz term
+                # still needs a term on its variable: its deviations sum to
+                # zero, so that term carries the population curve.
+                if interaction.basis == "sz" and interaction.variable not in owned_features:
+                    raise ValueError(
+                        f"FactorSmooth {interaction.name!r} with basis='sz' needs a term on "
+                        f"{interaction.variable!r} for the population curve its deviations "
+                        f"sum around; add s({interaction.variable!r})"
+                    )
                 continue
             missing = [parent for parent in parents if parent not in owned_features]
             if missing:

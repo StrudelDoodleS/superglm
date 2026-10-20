@@ -186,6 +186,18 @@ def test_superlss_fits_a_factor_smooth_without_a_term_on_its_group():
     assert np.array_equal(restored.predict(frame.head(5)), predicted)
 
 
+def test_superlss_sz_smooth_still_needs_a_term_on_its_variable():
+    """As on master, now with the term to add; the group needs none."""
+    from superglm import FactorSmooth, GaussianLS
+    from superglm.terms import interaction
+
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="group", basis="sz"))
+    with pytest.raises(ValueError, match=r"needs a term on 'x'.*add s\('x'\)"):
+        family.location(smooth)
+    assert family.location("x", smooth).template.interaction_order == ("x:group:sz",)
+
+
 @pytest.mark.parametrize(
     "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
 )
