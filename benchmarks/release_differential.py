@@ -75,6 +75,10 @@ CRITERION_CHANGES = {
 
 
 def _release_tuple(release: str) -> tuple[int, ...]:
+    """``v0.40.0`` as (0, 40, 0); a ref that is not a release tag, such as ``master`` or a
+    sha, as a version after every criterion change, so none of them is exempted."""
+    if not re.fullmatch(r"v?\d+(\.\d+)*", release):
+        return (sys.maxsize,)
     return tuple(int(part) for part in release.lstrip("v").split("."))
 
 

@@ -230,6 +230,14 @@ def test_the_criterion_change_exempts_only_bases_that_predate_it() -> None:
     assert release_differential.flags(name, _record(), worse, "v0.42.0")
 
 
+@pytest.mark.parametrize("ref", ["master", "3681b0c1", "v0.41.0rc1"])
+def test_a_base_that_is_not_a_release_tag_is_compared_without_a_criterion_exemption(ref) -> None:
+    """``release REF`` ends in a compare against REF. Fails on df503618, where a REF other
+    than ``vX.Y.Z`` raised ValueError there after both corpora had run."""
+    name = "glm/gamma/log/small/mains/binned/fit_reml"
+    assert release_differential.flags(name, _record(), _record(objective=1001.0), ref)
+
+
 def test_the_release_command_gives_the_baseline_an_absolute_output_path(
     tmp_path, monkeypatch
 ) -> None:
