@@ -382,8 +382,10 @@ class TestDefaultKindIsCr:
             spec = Spline(n_knots=8, **arguments)
         assert reason in str(record[0].message) and "Pass kind=" in str(record[0].message)
         assert isinstance(spec, PSpline)
-        with pytest.warns(UserWarning, match="names no kind"):
+        assert record[0].filename == __file__  # the caller's line, not a superglm frame
+        with pytest.warns(UserWarning, match="names no kind") as record:
             assert isinstance(s("age", n_knots=8, **arguments).spec, PSpline)
+        assert record[0].filename == __file__
 
     @pytest.mark.parametrize("method", ["fit", "fit_reml"])
     def test_default_kind_ps_fits_bit_for_bit_as_the_explicit_ps(self, method):

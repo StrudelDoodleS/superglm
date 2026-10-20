@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -54,12 +55,16 @@ def kindless_as_ps(spec: Any) -> _SplineBase | None:
     return None if declared is None else Spline(kind="ps", **declared)
 
 
-def kindless_ps_message(reason: str) -> str:
-    return (
-        f"This spline names no kind, and the default kind='cr' {reason}. It builds as "
+def warn_kindless_ps(reason: str, prefix: str = "") -> None:
+    """Warn that a spline with no kind builds as ``ps``, at the caller's line outside superglm."""
+    message = (
+        f"{prefix}This spline names no kind, and the default kind='cr' {reason}. It builds as "
         "kind='ps', the P-spline a spline with no kind was before 0.40. Pass kind= to "
         "choose the kind and silence this warning; kind='ps' keeps this fit."
     )
+    here = os.path.dirname(os.path.abspath(__file__))
+    package = os.path.dirname(here) + os.sep
+    warnings.warn(message, UserWarning, skip_file_prefixes=(package,))
 
 
 def Spline(
@@ -96,7 +101,7 @@ def Spline(
         else:
             reason = None
         if reason is not None:
-            warnings.warn(kindless_ps_message(reason), UserWarning, stacklevel=3)
+            warn_kindless_ps(reason)
         spec = Spline(kind="cr" if reason is None else "ps", **declared)
         setattr(spec, "_kindless_args", declared)
         return spec

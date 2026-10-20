@@ -11,6 +11,7 @@ model.py focused on orchestration.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -998,26 +999,33 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
 
     A ``cr`` constraint goes to the QP, and one model cannot use both engines.
     Before 0.40 such a spline was ``ps``; it is again when every QP term named no kind.
+    A wrapper such as an ordered categorical keeps its levels and takes the ``ps`` basis.
     """
-    import warnings
-
     from superglm.features._spline_build import _uses_fit_time_scop_constraints as scop
     from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
-    from superglm.features._spline_factory import kindless_as_ps, kindless_ps_message
+    from superglm.features._spline_factory import kindless_as_ps, warn_kindless_ps
 
     inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
     on_scop = [name for name, spec in inner.items() if scop(spec)]
+    if not on_scop:
+        return
     on_qp = {
         name: kindless_as_ps(spec)
         for name, spec in inner.items()
         if shaped(spec) and not scop(spec)
     }
-    if not on_scop or not on_qp or None in on_qp.values():
+    if not on_qp or None in on_qp.values():
         return
     for name, replacement in on_qp.items():
         reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
-        warnings.warn(f"Feature {name!r}: {kindless_ps_message(reason)}", UserWarning, stacklevel=4)
-        specs[name] = cast(FeatureSpec, replacement)
+        warn_kindless_ps(reason, f"Feature {name!r}: ")
+        if inner[name] is specs[name]:
+            specs[name] = cast(FeatureSpec, replacement)
+            continue
+        wrapper = copy.deepcopy(specs[name])
+        wrapper._spline_obj = replacement  # type: ignore[attr-defined]
+        wrapper._init_spline()  # type: ignore[attr-defined]
+        specs[name] = wrapper
 
 
 def build_design_matrix(

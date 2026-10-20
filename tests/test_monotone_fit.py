@@ -449,6 +449,58 @@ class TestMonotoneFitPSpline:
         np.testing.assert_array_equal(fits[0].predict(X), fits[1].predict(X))
 
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    def test_kindless_ordered_categorical_beside_scop_keeps_its_levels(self, fit_method):
+        """An ordered categorical whose basis names no kind, beside a SCOP term, takes the
+        ``ps`` basis and keeps its level map: string levels fit, bit for bit as the
+        explicit ``kind='ps'`` basis (and as 0.39). Fails on eedfa48e, which replaced the
+        wrapper by a bare P-spline on the band column."""
+        from superglm import OrderedCategorical, Spline
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x2": rng.uniform(0, 1, 200)})
+        df["band"] = np.array(list("ABCDE"))[(df["x2"].to_numpy() * 5).astype(int)]
+        y = df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+        fits = []
+        for kind, warned in ((None, True), ("ps", False)):
+            features = {
+                "x2": Spline(kind="ps", k=8, constraint=inc),
+                "band": OrderedCategorical(
+                    order=list("ABCDE"), basis=Spline(kind=kind, k=5, constraint=inc)
+                ),
+            }
+            model = SuperGLM(family=Gaussian(), selection_penalty=0, features=features)
+            with (
+                pytest.warns(UserWarning, match="band.*names no kind") if warned else nullcontext()
+            ):
+                getattr(model, fit_method)(df, y)
+            fits.append(model)
+        assert isinstance(fits[0]._specs["band"], OrderedCategorical)
+        assert isinstance(fits[0]._specs["band"]._spline, PSpline)
+        np.testing.assert_array_equal(fits[0].result.beta, fits[1].result.beta)
+        np.testing.assert_array_equal(fits[0].predict(df), fits[1].predict(df))
+
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    def test_kindless_constraint_without_scop_stays_cr(self, fit_method, recwarn):
+        """No SCOP term, no rewrite: a kindless ``k=4`` monotone spline is the QP ``cr``
+        term it was on 0.40, and nothing is built as ``ps`` (which needs ``k >= 5``).
+        Fails on eedfa48e with ``k=4 is too small for kind='ps'``."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame({"x": rng.uniform(0, 1, 200)})
+        y = df["x"] + rng.normal(0, 0.1, 200)
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x": Spline(k=4, constraint=Constraint.fit.increasing)},
+        )
+        getattr(model, fit_method)(df, y)
+        assert isinstance(model._specs["x"], CubicRegressionSpline)
+        assert not [w for w in recwarn if "names no kind" in str(w.message)]
+        assert np.all(np.diff(model.predict(df.sort_values("x"))) >= -1e-12)
+
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
     def test_scop_plus_qp_raises(self, fit_method):
         """Every fit entry point rejects mixed SCOP and QP engines."""
         rng = np.random.default_rng(42)
