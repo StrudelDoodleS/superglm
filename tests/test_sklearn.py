@@ -1031,17 +1031,26 @@ class TestNativeTerms:
             SuperGLMRegressor(terms=[s(0), cat("region"), "nonexistent"]).fit(X, y)
 
     def test_mixed_int_and_str_labels_predict_as_the_core_model(self, sample_data):
-        """feature_names_in_ kept [0, "region"] as strings on 19362389, so predict failed."""
+        """feature_names_in_ kept [0, "region"] as strings on 19362389, so predict failed.
+
+        A tuple label was unpacked into a second dimension on cf35b46d.
+        """
         from sklearn.model_selection import KFold, cross_val_score
 
-        from superglm import SuperGLM, cat, s
+        from superglm import Numeric, SuperGLM, cat, s, term
 
         X, y, _ = sample_data
-        X = X.rename(columns={"age": 0})
-        terms = [s(0, k=6), cat("region")]
+        X = X.rename(columns={"age": 0, "density": ("a", "b")})
+        terms = [s(0, k=6), cat("region"), term(("a", "b"), Numeric())]
         wrapper = SuperGLMRegressor(terms=terms, selection_penalty=0.0).fit(X, y)
         core = SuperGLM(family="poisson", terms=terms, selection_penalty=0.0).fit(X, y)
-        assert list(wrapper.feature_names_in_) == [0, "region"]
+        assert list(wrapper.feature_names_in_) == [0, "region", ("a", "b")]
+        # Labels that are all tuples are where np.array added a dimension.
+        tupled = SuperGLMRegressor(terms=[term(("a", "b"), Numeric())], selection_penalty=0.0)
+        single = SuperGLM(
+            family="poisson", terms=[term(("a", "b"), Numeric())], selection_penalty=0.0
+        )
+        np.testing.assert_array_equal(tupled.fit(X, y).predict(X), single.fit(X, y).predict(X))
         np.testing.assert_array_equal(wrapper.predict(X), core.predict(X))
         assert np.isfinite(wrapper.score(X, y))
         scores = cross_val_score(wrapper, X, y, cv=KFold(3, shuffle=True, random_state=0))

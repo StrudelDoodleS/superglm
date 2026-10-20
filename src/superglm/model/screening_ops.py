@@ -1411,17 +1411,19 @@ def screen_interactions(
                         break
                 # bin the largest not-yet-binned margin that binning can shrink;
                 # a categorical margin is never binnable, whatever its level count
-                binnable = sorted(
-                    (
-                        (n, name)
-                        for n, name in ((n_l, left), (n_r, right))
-                        if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
-                    ),
-                    # A size tie breaks on the label's text, which is the label
-                    # for a str one, so str-only models bin as before.
-                    key=lambda item: (item[0], str(item[1])),
-                    reverse=True,
-                )
+                binnable = [
+                    (n, name)
+                    for n, name in ((n_l, left), (n_r, right))
+                    if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
+                ]
+                try:
+                    # A size tie breaks on the labels' own order, as on 0.40.
+                    binnable = sorted(binnable, reverse=True)
+                except TypeError:
+                    # Labels that do not order (0 and "z") break it on their text.
+                    binnable = sorted(
+                        binnable, key=lambda item: (item[0], str(item[1])), reverse=True
+                    )
                 if not binnable:
                     if arrow_lookahead:
                         # The speculative handoff has now run out of support
