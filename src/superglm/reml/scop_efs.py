@@ -2198,6 +2198,10 @@ _SCOP_NEWTON_PLATEAU_MAX_STEP = 0.01
 # not moving with lambda alone (measured: the convex fixture's search moved
 # lambda by 1e-4 a step while its LAML fell 0.007 a step for 96 steps).
 _SCOP_REFERENCE_CHECK_RUN = 10
+# The iterations a restart needs (measured: 31 on the convex fixture). With
+# less budget left the restart would publish an unconverged early cold iterate
+# in place of the tracked mode, so the search stops as it otherwise would.
+_SCOP_REFERENCE_RESTART_ITERATIONS = 31
 _SCOP_REFERENCE_RESTARTS = 1
 
 
@@ -2705,10 +2709,8 @@ def _uncertified_bootstrap_mode(fit: _SCOPInnerFit) -> _SCOPREMLMode:
         return _scop_mode_from_fit(fit, curvature="fisher")
 
 
-def _better_reference_mode(
-    context: _SCOPREMLFitContext, mode: _SCOPREMLMode
-) -> _SCOPREMLMode | None:
-    """A cold fit's mode at ``mode``'s lambdas, when it is the better penalized optimum.
+def _better_reference_mode(context: _SCOPREMLFitContext, mode: _SCOPREMLMode) -> bool:
+    """Whether a cold fit at ``mode``'s lambdas reaches a better penalized optimum.
 
     LAML is the Laplace approximation at the maximizer of the penalized
     likelihood (Wood, Pya and Saefken 2016, section 3.1). The SCOP latent
@@ -2724,16 +2726,14 @@ def _better_reference_mode(
     16 coefficients.
 
     The reference is the fit every fixed-lambda SCOP fit and the bootstrap
-    make: a cold start, whose superglm warnings are held back as the
-    bootstrap's are (``_bootstrap_attempt``) and replayed only when this mode
-    is kept. It is returned only when its
-    penalized deviance is lower than ``mode``'s by more than the line
-    search's relative tolerance; a reference that fails to converge or
-    certify is no evidence, and None is returned.
+    make: a cold start. It is a diagnostic and its mode is never published (the
+    search restarts), so its superglm warnings are held and dropped. It counts
+    only when its penalized deviance is lower than ``mode``'s by more than the
+    line search's relative tolerance; a reference that fails to converge or
+    certify is no evidence.
     """
-    held: list[held_warnings.HeldWarning] = []
     try:
-        with held_warnings.hold() as held:
+        with held_warnings.hold():
             # Its own centring and Gamma scale-root warm history, as the
             # bootstrap's start had: the search's state must not see a fit it
             # may discard.
@@ -2757,16 +2757,13 @@ def _better_reference_mode(
                 require_converged=True,
             )
     except (ObservedModeNotCertifiedError, ObservedModeNotConvergedError):
-        return None
+        return False
     if reference is None:
-        return None
+        return False
     tracked = float(mode.evaluation.penalized_deviance)
     cold = float(reference.evaluation.penalized_deviance)
     tolerance = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(tracked), 1.0)
-    if not (np.isfinite(cold) and cold < tracked - tolerance):
-        return None
-    held_warnings.replay(held)
-    return reference
+    return bool(np.isfinite(cold) and cold < tracked - tolerance)
 
 
 def optimize_scop_efs_reml(
@@ -3585,8 +3582,9 @@ def optimize_scop_efs_reml(
             and not _cold_starts
             and retained_mode.scop_states
             and small_step_run == _SCOP_REFERENCE_CHECK_RUN
+            and max_reml_iter - n_reml_iter >= _SCOP_REFERENCE_RESTART_ITERATIONS
         ):
-            if _better_reference_mode(fit_context, retained_mode) is not None:
+            if _better_reference_mode(fit_context, retained_mode):
                 lambdas = lambdas_new
                 restart_from_reference = True
                 break

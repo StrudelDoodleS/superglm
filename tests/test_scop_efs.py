@@ -8141,3 +8141,89 @@ class TestSCOPReferenceMode:
         # separates "the same mode" from the 4.0 gap of a different one.
         assert fixed._reml_result.objective == pytest.approx(reml.objective, rel=1e-8)
         assert fixed.result.effective_df == pytest.approx(model.result.effective_df, rel=1e-6)
+
+    @staticmethod
+    def _increasing_gaussian_fit(max_reml_iter):
+        """A five-iteration SCOP REML fit, small enough to force the reference check."""
+        rng = np.random.default_rng(3)
+        frame = pd.DataFrame({"x": rng.uniform(0, 1, 400)})
+        y = (0.2 + 1.5 * frame["x"] ** 2 + rng.normal(0, 0.3, 400)).to_numpy()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, y, max_reml_iter=max_reml_iter)
+        return model._reml_result
+
+    @pytest.fixture
+    def forced_check(self, monkeypatch):
+        """Every accepted step counts as small, so the check fires at iteration 2; it
+        answers from ``calls`` instead of from the trajectory."""
+        monkeypatch.setattr(scop_efs_module, "_SCOP_NEWTON_PLATEAU_MAX_STEP", np.inf)
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", 2)
+        calls = []
+
+        def check(answer):
+            def fake(context, mode):
+                calls.append(mode)
+                return answer
+
+            monkeypatch.setattr(scop_efs_module, "_better_reference_mode", fake)
+
+        return calls, check
+
+    def test_a_restart_sums_the_iterations_and_concatenates_the_histories(
+        self, monkeypatch, forced_check
+    ):
+        """A better reference mode at iteration 2 restarts the search cold, once, in the
+        iterations left; the published history is both searches', in order.
+        Mutation check: dropping the ``n_reml_iter +`` or a history prefix in the
+        restart's ``replace`` fails the sums below."""
+        calls, check = forced_check
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_RESTART_ITERATIONS", 1)
+        check(False)
+        plain = self._increasing_gaussian_fit(max_reml_iter=40)
+        assert len(calls) == 1  # fires once, at iteration 2, and a False answer is inert
+
+        real, nested = scop_efs_module.optimize_scop_efs_reml, []
+
+        def spy(*args, **kwargs):
+            out = real(*args, **kwargs)
+            nested.append((kwargs, out))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "optimize_scop_efs_reml", spy)
+        calls.clear()
+        check(True)
+        restarted = self._increasing_gaussian_fit(max_reml_iter=40)
+
+        assert len(calls) == 1  # the restart is cold and has no restart left to spend
+        kwargs, inner = nested[0]  # the restart returns before the search that started it
+        assert kwargs["_cold_starts"] is True and kwargs["_reference_restarts"] == 0
+        assert kwargs["max_reml_iter"] == 40 - 2
+        assert restarted.n_reml_iter == 2 + inner.n_reml_iter
+        assert len(restarted.objective_history) == 2 + len(inner.objective_history)
+        assert restarted.objective_history[:2] == plain.objective_history[:2]
+        assert restarted.objective_history[2:] == list(inner.objective_history)
+        assert len(restarted.inner_iter_history) == 2 + len(inner.inner_iter_history)
+        assert len(restarted.scop_outer_steps) == 2 + len(inner.scop_outer_steps)
+
+    @pytest.mark.filterwarnings("ignore:fit_reml did not converge")
+    @pytest.mark.parametrize("max_reml_iter", [2, 20], ids=["at the cap", "within 31 of it"])
+    def test_no_reference_check_without_the_budget_for_a_restart(self, forced_check, max_reml_iter):
+        """At the cap a restart gets ``max_reml_iter=0`` and would publish its bootstrap
+        step in place of the search's last iterate; near it, an unconverged early cold
+        iterate. The search stops as it otherwise would, without the check. Fails
+        without the budget condition at the check (the check is then called)."""
+        calls, check = forced_check
+        check(True)
+        capped = self._increasing_gaussian_fit(max_reml_iter=max_reml_iter)
+        assert calls == []
+        assert capped.n_reml_iter == min(max_reml_iter, 5)
+
+    def test_the_reference_check_runs_when_the_budget_covers_a_restart(self, forced_check):
+        calls, check = forced_check
+        check(False)
+        self._increasing_gaussian_fit(max_reml_iter=40)
+        assert len(calls) == 1
