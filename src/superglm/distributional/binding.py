@@ -10,8 +10,9 @@ from typing import Literal, cast
 
 from superglm.distributional.family import DistributionalFamily, validate_family
 from superglm.distributional.predictor import Predictor
+from superglm.features.factor_smooth import FactorSmooth, refuse_terms_on_factor_smooth_groups
 from superglm.links import Link
-from superglm.terms import TermInput, normalize_terms
+from superglm.terms import TermInput, declaration_text, normalize_terms
 from superglm.types import FeatureSpec
 
 
@@ -126,6 +127,17 @@ def bind_predictor(
     'location'
     """
     normalized = normalize_terms(terms)
+    # Refused where a predictor is declared, as SuperGLM refuses it; a template
+    # restored from a saved artifact is bound without this check, so a model
+    # saved before the refusal still loads.
+    refuse_terms_on_factor_smooth_groups(
+        normalized.features,
+        [spec for spec in normalized.interaction_specs.values() if isinstance(spec, FactorSmooth)],
+        lambda group, spec: (
+            f"remove {declaration_text(group, spec)} from the {name!r} predictor; "
+            "the factor smooth reads its group column itself."
+        ),
+    )
     return BoundPredictor(
         family,
         Predictor(

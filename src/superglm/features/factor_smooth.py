@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -109,6 +110,32 @@ def _natural_parameterization_from_r(
     return natural_map, tuple(components)
 
 
+def refuse_terms_on_factor_smooth_groups(features: Any, smooths: Any, remedy: Any) -> None:
+    """Refuse a main term on a factor smooth's group column, in either model.
+
+    Both bases give every level its own intercept: with the model intercept,
+    the per-level indicator columns lie in the factor smooth's column space
+    (``fs`` keeps each level's constant in its penalized null space; ``sz``
+    leaves each level's polynomial part uncentered and sums it to zero across
+    levels). Any term on the group column is a function of the level alone,
+    so its columns lie in that span too and the design is structurally rank
+    deficient, whatever the term's type. mgcv documents the same for ``sz``:
+    adding the factor's main effect "will lead to a rank deficient model".
+
+    ``remedy(group, spec)`` names the change in the form the model was
+    declared in.
+    """
+    for smooth in smooths:
+        if smooth.group not in features:
+            continue
+        spec = features[smooth.group]
+        raise ValueError(
+            f"FactorSmooth {smooth.name!r} gives every level of {smooth.group!r} its own "
+            f"intercept, so the {type(spec).__name__} term on {smooth.group!r} duplicates "
+            f"that group-intercept geometry; {remedy(smooth.group, spec)}"
+        )
+
+
 def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
     """Whether ``policy`` fixes its smoothing parameter at zero (``LambdaPolicy.off()``)."""
     return policy is not None and policy.mode == "fixed" and float(cast(float, policy.value)) == 0.0
@@ -157,9 +184,9 @@ class FactorSmooth:
 
     def __init__(
         self,
-        variable: str,
+        variable: Hashable,
         *,
-        group: str,
+        group: Hashable,
         basis: Literal["fs", "sz"] = "fs",
         kind: Literal["ps"] = "ps",
         k: int = 6,
@@ -172,11 +199,11 @@ class FactorSmooth:
         select: bool = False,
     ):
         from superglm.features._level_source import resolve_level_source
+        from superglm.terms import check_column_label
 
-        if not isinstance(variable, str) or not variable:
-            raise ValueError("variable must be a non-empty column name")
-        if not isinstance(group, str) or not group:
-            raise ValueError("group must be a non-empty column name")
+        # Column labels under the rule main terms follow.
+        check_column_label(variable)
+        check_column_label(group)
         if variable == group:
             raise ValueError("variable and group must name different columns")
         if basis not in BASES:
@@ -249,8 +276,9 @@ class FactorSmooth:
                     "that smoothing parameter or fix it above zero."
                 )
 
-        self.variable = variable
-        self.group = group
+        # Any column label; typed by the str convention the interaction classes share.
+        self.variable = cast(str, variable)
+        self.group = cast(str, group)
         self.basis: Literal["fs", "sz"] = basis
         self.kind = kind
         self.k = k

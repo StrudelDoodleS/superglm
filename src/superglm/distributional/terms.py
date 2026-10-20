@@ -103,6 +103,7 @@ from superglm.distributional.prediction_design import (
     build_joint_prediction_design,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.terms import resolve_label
 
 TermKind = Literal["spline", "categorical", "numeric", "other"]
 
@@ -357,17 +358,14 @@ def _compiled_predictor(fitted: Any, parameter: str) -> Any:
     raise KeyError(f"unknown predictor {parameter!r}")
 
 
-def _feature_label(fitted: Any, parameter: str, term: Hashable) -> Hashable:
+def _feature_label(fitted: Any, parameter: str, term: Hashable) -> Any:
     """The column label of the main term ``term`` names, or ``term`` itself.
 
     A term is found by its label or by the label's text, as ``_resolve_term``
     finds its coefficients: ``0`` and ``"0"`` name one term, and no predictor
     holds two labels with one text.
     """
-    specs = _compiled_predictor(fitted, parameter).compiled.specs
-    if term in specs:
-        return term
-    return next((name for name in specs if str(name) == str(term)), term)
+    return resolve_label(term, _compiled_predictor(fitted, parameter).compiled.specs)
 
 
 def _compiled_spec(fitted: Any, parameter: str, term: Hashable) -> Any:

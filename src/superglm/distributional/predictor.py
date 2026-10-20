@@ -86,8 +86,8 @@ class Predictor:
             if not isinstance(pair, tuple) or len(pair) != 2:
                 raise ValueError("each interaction must be a two-name tuple")
             left, right = pair
-            if not isinstance(left, str) or not isinstance(right, str):
-                raise TypeError("interaction names must be strings")
+            check_column_label(left)
+            check_column_label(right)
             missing = [name for name in pair if name not in owned_features]
             if missing:
                 raise ValueError(f"interaction references unknown features: {missing}")
@@ -100,12 +100,10 @@ class Predictor:
             if not isinstance(interaction_name, str) or not interaction_name:
                 raise ValueError("interaction spec names must be non-empty strings")
             parents = getattr(interaction, "parent_names", None)
-            if (
-                not isinstance(parents, tuple)
-                or len(parents) != 2
-                or not all(isinstance(parent, str) for parent in parents)
-            ):
-                raise TypeError("interaction specs must expose two string parent_names")
+            if not isinstance(parents, tuple) or len(parents) != 2:
+                raise TypeError("interaction specs must expose two parent_names")
+            for parent in parents:
+                check_column_label(parent)
             if isinstance(interaction, FactorSmooth):
                 # It reads its variable and group columns itself and builds
                 # without their specs, as in SuperGLM; requiring them as

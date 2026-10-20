@@ -24,6 +24,7 @@ from superglm.profiling._reporting import (
     tweedie_profile_report_identity,
 )
 from superglm.solvers.rank import selected_group_name_set
+from superglm.terms import TermResults
 from superglm.types import GroupSlice
 
 
@@ -208,7 +209,9 @@ def summary(
             "n_obs": n,
             "n_active_groups": n_active,
         },
-        "level_universes": build_level_universes(model._specs, model._interaction_specs),
+        "level_universes": TermResults(
+            build_level_universes(model._specs, model._interaction_specs)
+        ),
     }
 
     penalty = fitted_penalty(model)

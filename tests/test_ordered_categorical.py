@@ -1078,12 +1078,11 @@ class TestOrderedCategoricalShapeDispatch:
                 interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
             )
 
-        with pytest.raises(NotImplementedError, match=r"stated twice"):
-            grouped_factor_smooth("ps").fit_reml(X, y)
-
-        qp_model = grouped_factor_smooth("cr")
-        qp_model.fit_reml(X, y)
-        assert qp_model.result.converged
+        # A term on a factor smooth's group duplicates its per-level
+        # intercepts, so either engine is now refused at declaration.
+        for kind in ("ps", "cr"):
+            with pytest.raises(ValueError, match=r"'g'.*duplicates.*group-intercept"):
+                grouped_factor_smooth(kind)
 
         # Either engine pairs with a random effect, and neither is refused. The
         # grouping is drawn independently of ``g``: nesting it inside the

@@ -249,9 +249,9 @@ def test_invalid_helper_names_and_types_fail_at_declaration():
         with pytest.raises(TypeError, match="hashable"):
             helper(["x"])
     with pytest.raises(ValueError, match="non-empty strings"):
-        ti("x", "")
-    with pytest.raises(ValueError, match=r"X.rename\(columns=str\)"):
-        ti(0, 1)
+        interaction(ti("x", "z").spec, name="")
+    with pytest.raises(TypeError, match="hashable"):
+        ti("x", ["z"])
     with pytest.raises(TypeError):
         term("x", object())
     with pytest.raises(TypeError):
@@ -388,3 +388,109 @@ def test_superlss_refuses_two_labels_with_one_text():
     family = GaussianLS()
     with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
         family.location({0: Numeric(), "0": Numeric()})
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+@pytest.mark.parametrize("helper", ["cat", "re"])
+def test_superlss_refuses_a_term_on_a_factor_smooth_group(basis, helper):
+    """As SuperGLM does: the term duplicates the per-level intercepts. Master accepted it."""
+    from superglm import FactorSmooth, GaussianLS
+    from superglm import terms as term_helpers
+
+    family = GaussianLS()
+    declared = getattr(term_helpers, helper)("group")
+    smooth = term_helpers.interaction(FactorSmooth("x", group="group", basis=basis))
+    with pytest.raises(
+        ValueError,
+        match=rf"duplicates that group-intercept geometry; remove {helper}\('group'\) "
+        r"from the 'location' predictor",
+    ):
+        family.location(term_helpers.s("x"), declared, smooth)
+
+
+def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
+    """Plain pickle refused SuperLSS's read-only mappings on master, fitted or not."""
+    import copy
+    import io
+    import pickle
+
+    import joblib
+
+    from superglm import GaussianLS, SuperLSS
+    from superglm.terms import cat, s
+
+    rng = np.random.default_rng(13)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(size=n), "g": rng.choice(list("abc"), n)})
+    y = np.sin(3.0 * frame["x"].to_numpy()) + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x", k=6), cat("g")), family.scale())
+    unfitted = pickle.loads(pickle.dumps(model))
+    model.fit_reml(frame, y)
+    expected = model.predict(frame)
+    stream = io.BytesIO()
+    joblib.dump(model, stream)
+    stream.seek(0)
+    for restored in (
+        pickle.loads(pickle.dumps(model)),
+        copy.deepcopy(model),
+        joblib.load(stream),
+        unfitted.fit_reml(frame, y),
+    ):
+        assert np.array_equal(restored.predict(frame), expected)
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame), expected)
+
+
+def test_superlss_interactions_take_integer_column_labels():
+    """Master refused a non-string interaction parent in a SuperLSS predictor."""
+    import pickle
+
+    from superglm import GaussianLS, SuperLSS
+    from superglm.features.interaction import SplineCategorical
+    from superglm.terms import cat, interaction, s, ti
+
+    rng = np.random.default_rng(17)
+    n = 600
+    frame = pd.DataFrame(
+        {0: rng.uniform(size=n), 1: rng.choice(list("abc"), n), 2: rng.uniform(size=n)}
+    )
+    y = np.sin(3.0 * frame[0].to_numpy()) * frame[2].to_numpy() + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    location = family.location(
+        s(0, k=6), cat(1), s(2, k=6), ti(0, 2), interaction(SplineCategorical(0, 1))
+    )
+    model = SuperLSS(family, location, family.scale()).fit_reml(frame, y)
+    assert {"0:2", "0:1[a]"} <= set(model.summary()["term"])
+    assert model.term_test("location", "0:2").rank > 0
+    expected = model.predict(frame.head(5))
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), expected)
+    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
+
+
+def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loads():
+    """The refusal is the declaration's; a template restored from an artifact is not re-refused."""
+    from superglm import Categorical, FactorSmooth, GaussianLS, SuperLSS
+    from superglm.distributional import Predictor
+    from superglm.features import Spline
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(23)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n), "g": rng.choice(list("abc"), n)})
+    y = np.sin(2.0 * frame["x"].to_numpy()) + 0.3 * rng.standard_normal(n)
+    legacy = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor(
+                "location",
+                {"x": Spline("cr", k=6), "g": Categorical()},
+                interaction_specs={"x:g:fs": FactorSmooth("x", group="g", k=6)},
+            ),
+            Predictor("scale", {}),
+        ],
+    )
+    lambdas = {name: 1.0 for name in ("location:x#wiggle", "location:x:g:fs#wiggle")}
+    lambdas |= {"location:x:g:fs#null_0": 1.0, "location:x:g:fs#null_1": 1.0}
+    fitted = legacy.fit(frame, y, lambdas=lambdas)
+    restored = SuperLSS.from_bytes(fitted.to_bytes())
+    assert np.array_equal(restored.predict(frame), fitted.predict(frame))

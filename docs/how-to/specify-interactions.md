@@ -131,11 +131,13 @@ source of duplicate main-effect geometry.
 `group=` names the factor whose levels receive curves. It corresponds to the
 factor argument in mgcv's `s(x, factor, bs=...)`; it is not a generic `by=`
 multiplier. The group needs no term of its own: the factor smooth reads the
-column itself. SuperGLM rejects a `Categorical` or `RandomEffect` main effect on
-that same grouping column, `cat(...)` or `re(...)` in `terms=`, because FS
-already contains its constant direction and SZ's uncentered level curves
-contain lower-order factor geometry. A random effect for a different column is
-supported.
+column itself. SuperGLM and SuperLSS reject any main effect on that same
+grouping column, such as `cat(...)` or `re(...)`: both bases give every level
+its own intercept (FS in its penalized null space, SZ in its uncentered level
+curves), so a term that depends on the level alone repeats columns the factor
+smooth already has. mgcv's documentation says the same of `bs="sz"`: adding the
+factor's main effect gives a rank-deficient model. A random effect for a
+different column is supported.
 
 ## Level universes are inherited, never redeclared
 

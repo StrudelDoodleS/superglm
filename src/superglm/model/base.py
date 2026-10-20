@@ -889,10 +889,12 @@ def validate_factor_smooth_configuration(
     ``terms_form`` says the model was declared with ``terms=``, so a refusal
     names the change in that form.
     """
-    from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.random_effect import RandomEffect
+    from superglm.features.factor_smooth import (
+        FactorSmooth,
+        refuse_terms_on_factor_smooth_groups,
+    )
     from superglm.features.spline import _SplineBase
+    from superglm.terms import declaration_text
 
     terms = [
         spec
@@ -912,22 +914,17 @@ def validate_factor_smooth_configuration(
     if not features_resolved:
         return
 
+    def group_remedy(group, spec) -> str:
+        if terms_form:
+            where = f"{declaration_text(group, spec)} from terms="
+        elif model._splines is None:
+            where = f"{group!r} from features="
+        else:
+            where = f"{group!r} from the auto-detected features: declare features= without it"
+        return f"remove {where}; the factor smooth reads its group column itself."
+
+    refuse_terms_on_factor_smooth_groups(model._specs, terms, group_remedy)
     for term in terms:
-        group_spec = model._specs.get(term.group)
-        if isinstance(group_spec, (Categorical, RandomEffect)):
-            helper = "cat" if isinstance(group_spec, Categorical) else "re"
-            remedy = (
-                f"remove {helper}({term.group!r}) from terms=; the factor smooth reads "
-                "its group column itself and needs no term for it."
-                if terms_form
-                else "remove that group main effect and use an explicit features map "
-                "containing only the intended main effects."
-            )
-            raise ValueError(
-                f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
-                "the constant null-space group-intercept geometry of "
-                f"{type(group_spec).__name__} on the same column; {remedy}"
-            )
         if term.basis == "sz" and not isinstance(
             model._specs.get(term.variable),
             _SplineBase,
@@ -1135,11 +1132,10 @@ def init_model(
     pending_interactions: list[tuple[str, str]] = []
     explicit_interactions: list[tuple[str, Any]] = declared_interactions
     for interaction in interactions or ():
-        if (
-            isinstance(interaction, tuple)
-            and len(interaction) == 2
-            and all(isinstance(name, str) for name in interaction)
-        ):
+        if isinstance(interaction, tuple) and len(interaction) == 2:
+            # Two column labels, under the rule main terms follow.
+            for name in interaction:
+                check_column_label(name)
             pending_interactions.append(interaction)
             continue
         parent_names = getattr(interaction, "parent_names", None)
@@ -1147,7 +1143,6 @@ def init_model(
         if (
             not isinstance(parent_names, tuple)
             or len(parent_names) != 2
-            or not all(isinstance(parent, str) and parent for parent in parent_names)
             or not isinstance(interaction_name, str)
             or not interaction_name
         ):
@@ -1155,6 +1150,8 @@ def init_model(
                 "interactions entries must be (left, right) tuples or explicit "
                 "interaction specs with parent_names and name"
             )
+        for parent in parent_names:
+            check_column_label(parent)
         if interaction_name in model._interaction_specs or any(
             name == interaction_name for name, _ in explicit_interactions
         ):

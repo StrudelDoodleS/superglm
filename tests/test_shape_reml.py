@@ -299,33 +299,28 @@ def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_colu
     ``OrderedCategorical`` SCOP constraint, since that is what lets a
     categorical column be shape-constrained at all.
 
+    Any term on the grouping column now duplicates the factor smooth's
+    per-level intercepts and is refused when the model is declared, before the
+    fit-time guard is reached.
+
     Measured 0/6 across seed, rows, level count and basis size. A guard keyed on
     ``spec.variable`` alone passes this straight through to that failure, which
     is what an earlier form of this change did.
     """
     from superglm import OrderedCategorical
 
-    rng = np.random.default_rng(0)
-    n, n_levels = 1500, 10
-    levels = [f"L{index:02d}" for index in range(n_levels)]
-    codes = rng.integers(0, n_levels, n)
-    x = rng.uniform(0.0, 1.0, n)
-    y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
-    X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
-
-    model = SuperGLM(
-        family="gaussian",
-        features={
-            "g": OrderedCategorical(
-                order=levels,
-                basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
-            )
-        },
-        interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
-    )
-
-    with pytest.raises(NotImplementedError, match=r"stated twice"):
-        model.fit_reml(X, y)
+    levels = [f"L{index:02d}" for index in range(10)]
+    with pytest.raises(ValueError, match=r"'g'.*duplicates.*group-intercept"):
+        SuperGLM(
+            family="gaussian",
+            features={
+                "g": OrderedCategorical(
+                    order=levels,
+                    basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
+                )
+            },
+            interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+        )
 
 
 @pytest.mark.parametrize(

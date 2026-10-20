@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from numpy.typing import ArrayLike
 
@@ -49,12 +49,9 @@ _INTERACTION_TYPES = (
 
 
 def _validate_name(name: str) -> None:
-    """An interaction's name or parent column: a non-empty string, as under interactions=."""
+    """An interaction's name: a non-empty string, as results name it by text."""
     if not isinstance(name, str) or not name.strip():
-        raise ValueError(
-            f"Interaction names and their columns must be non-empty strings, got {name!r}; "
-            "name the columns by strings, as in X.rename(columns=str)"
-        )
+        raise ValueError(f"Interaction names must be non-empty strings, got {name!r}")
 
 
 def check_column_label(label: object) -> None:
@@ -132,7 +129,7 @@ class BoundInteraction:
         if not isinstance(self._spec, _INTERACTION_TYPES):
             raise TypeError("interaction() requires a supported explicit interaction specification")
         for parent in self._spec.parent_names:
-            _validate_name(parent)
+            check_column_label(parent)
         object.__setattr__(self, "_spec", deepcopy(self._spec))
 
     @property
@@ -442,14 +439,14 @@ def interaction(spec: InteractionSpec, *, name: str | None = None) -> BoundInter
         if not isinstance(parents, tuple) or len(parents) != 2:
             raise TypeError("interaction() requires a supported explicit interaction specification")
         for parent in parents:
-            _validate_name(parent)
-        name = ":".join(parents)
+            check_column_label(parent)
+        name = ":".join(map(str, parents))
     return BoundInteraction(name, spec)
 
 
 def ti(
-    left: str,
-    right: str,
+    left: Hashable,
+    right: Hashable,
     *,
     n_knots: tuple[int, int] | None = None,
     decompose: bool = False,
@@ -462,8 +459,8 @@ def ti(
 
     Parameters
     ----------
-    left, right : str
-        Names of two columns with declared spline terms.
+    left, right : hashable
+        Labels of two columns with declared spline terms.
     n_knots : tuple of int, optional
         Interior-knot counts for the left and right tensor margins. By
         default, inherit the parent terms' counts.
@@ -481,11 +478,12 @@ def ti(
     TensorInteraction : Tensor construction and penalty details.
     interaction : Other supported interaction specifications.
     """
-    _validate_name(left)
-    _validate_name(right)
+    check_column_label(left)
+    check_column_label(right)
     return BoundInteraction(
         f"{left}:{right}",
-        TensorInteraction(left, right, n_knots=n_knots, decompose=decompose),
+        # Typed by the interaction classes' str convention; any label works.
+        TensorInteraction(cast(str, left), cast(str, right), n_knots=n_knots, decompose=decompose),
         _requires_spline_parents=True,
     )
 
@@ -504,6 +502,52 @@ def _expand_mappings(terms: Sequence[TermInput]) -> tuple[object, ...]:
         else:
             expanded.append(declaration)
     return tuple(expanded)
+
+
+def resolve_label(key: object, labels: Iterable[Hashable]) -> object:
+    """The label among ``labels`` that ``key`` names: ``key`` itself, or the one whose text it is.
+
+    Results name a term by its label's text, so a term can be looked up by
+    either: ``0`` and ``"0"`` find the term on column ``0``. A model holds no
+    two labels with one text, so the text names at most one. A key naming
+    nothing comes back as it is, for the caller's own not-found error.
+    """
+    try:
+        if key in labels:
+            return key
+    except TypeError:
+        return key
+    text = str(key)
+    return next((label for label in labels if str(label) == text), key)
+
+
+class TermResults(dict):
+    """Per-term results keyed by label, which also find a term by its label's text."""
+
+    def __missing__(self, key: object) -> Any:
+        label = resolve_label(key, dict.keys(self))
+        if label is key:
+            raise KeyError(key)
+        return dict.__getitem__(self, label)
+
+    def __contains__(self, key: object) -> bool:
+        return dict.__contains__(self, resolve_label(key, dict.keys(self)))
+
+    def get(self, key: object, default: Any = None) -> Any:
+        return dict.get(self, resolve_label(key, dict.keys(self)), default)
+
+
+def declaration_text(column: Hashable, spec: object) -> str:
+    """How a main term on ``column`` reads in a terms list, for messages."""
+    from superglm.features.categorical import Categorical as _Categorical
+
+    if isinstance(spec, RandomEffect):
+        return f"re({column!r})"
+    if isinstance(spec, _Categorical) and not isinstance(spec, OrderedCategorical):
+        return f"cat({column!r})"
+    if isinstance(spec, _SplineBase):
+        return f"s({column!r})"
+    return f"term({column!r}, {type(spec).__name__}(...))"
 
 
 def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str]) -> str:

@@ -310,7 +310,7 @@ def test_constructor_rejects_duplicate_explicit_interaction_names() -> None:
 
 
 def test_factor_smooth_rejects_duplicate_random_intercept_geometry() -> None:
-    with pytest.raises(ValueError, match="duplicates the constant null-space"):
+    with pytest.raises(ValueError, match="duplicates that group-intercept geometry"):
         SuperGLM(
             features={"broker": RandomEffect()},
             interactions=[FactorSmooth("age", group="broker")],

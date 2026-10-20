@@ -201,15 +201,40 @@ def test_an_sz_smooth_without_its_global_spline_is_refused_in_the_form_declared(
     assert messages[0].split(";")[0] == messages[1].split(";")[0]
 
 
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_a_factor_smooth_spans_every_level_intercept_of_its_group(data, basis):
+    """The premise of the refusal below, checked on the built design.
+
+    With the model intercept, each level's indicator column lies in the factor
+    smooth's column space, so a reference-coded or random-effect term on the
+    group adds no column of its own (mgcv documents the same for sz).
+    """
+    X, y = data
+    features = {"x": Spline(kind="ps", k=7)} if basis == "sz" else {}
+    smooth = FactorSmooth("x", group="g", basis=basis, k=6)
+    model = SuperGLM(features=features, interactions=[smooth], selection_penalty=0.0)
+    model.fit_reml(X, y)
+    design = model._dm.toarray()
+    columns = [np.arange(g.start, g.end) for g in model._groups if g.feature_name == smooth.name]
+    spanned = np.hstack([np.ones((len(X), 1)), design[:, np.concatenate(columns)]])
+    indicators = pd.get_dummies(X["g"]).to_numpy(dtype=float)
+    rank = np.linalg.matrix_rank(spanned)
+    assert np.linalg.matrix_rank(np.hstack([spanned, indicators])) == rank
+    assert np.linalg.matrix_rank(np.hstack([spanned, indicators[:, 1:]])) == rank
+
+
 @pytest.mark.parametrize(("helper", "spec"), [(cat, "Categorical"), (re, "RandomEffect")])
 def test_a_main_effect_on_a_factor_smooth_group_is_refused_naming_the_term(helper, spec):
     """SuperGLM refuses it in both forms; through terms= the message names the term to drop."""
     smooth = FactorSmooth("x", group="g")
     with pytest.raises(
-        ValueError, match=rf"{spec} on the same column; remove {helper.__name__}\('g'\) from terms="
+        ValueError,
+        match=rf"{spec} term on 'g' duplicates.*remove {helper.__name__}\('g'\) from terms=",
     ):
         SuperGLM(terms=[s("x"), helper("g"), interaction(smooth)])
-    with pytest.raises(ValueError, match=rf"{spec} on the same column; remove that group"):
+    with pytest.raises(
+        ValueError, match=rf"{spec} term on 'g' duplicates.*remove 'g' from features="
+    ):
         SuperGLM(features={"x": Spline(), "g": helper("g").spec}, interactions=[smooth])
 
 
@@ -384,3 +409,94 @@ def test_a_bare_entry_that_is_not_a_string_names_the_declaration_to_write():
         SuperGLM(terms=[0])
     with pytest.raises(TypeError, match=r"needs its column: write term\(column, spec\)"):
         SuperGLM(terms=[Spline()])
+
+
+def test_any_term_on_a_factor_smooth_group_is_refused_in_both_forms():
+    """An ordinal term on the group is a function of the level too; master fitted it."""
+    from superglm import OrderedCategorical, term
+
+    ordinal = OrderedCategorical(order=["a", "b", "c"])
+    smooth = FactorSmooth("x", group="g")
+    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'g' duplicates"):
+        SuperGLM(features={"g": ordinal}, interactions=[smooth])
+    with pytest.raises(ValueError, match=r"remove term\('g', OrderedCategorical\(...\)\)"):
+        SuperGLM(terms=[term("g", ordinal), interaction(smooth)])
+
+
+def _labelled_interaction_pair() -> tuple[SuperGLM, SuperGLM]:
+    """Interactions on integer-labelled columns, as (left, right) pairs and as terms."""
+    from superglm.features.interaction import CategoricalInteraction
+
+    features = {0: Spline(k=6), 1: Categorical(), "z": Spline(k=6), "b": Categorical()}
+    terms = [
+        s(0, k=6),
+        cat(1),
+        s("z", k=6),
+        cat("b"),
+        ti(0, "z"),
+        interaction(SplineCategorical(0, 1)),
+        interaction(CategoricalInteraction(1, "b")),
+    ]
+    options = {"selection_penalty": 0.0}
+    as_dict = SuperGLM(features=features, interactions=[(0, "z"), (0, 1), (1, "b")], **options)
+    return as_dict, SuperGLM(terms=terms, **options)
+
+
+def test_interactions_take_integer_column_labels_in_both_forms(labelled):
+    """Master refused a non-string interaction column in either form."""
+    X, y = labelled
+    as_dict, as_list = _labelled_interaction_pair()
+    as_dict.fit(X, y)
+    as_list.fit(X, y)
+    _assert_same_fit(as_dict, as_list, X, reml=False)
+    assert as_list._interaction_order == ["0:z", "0:1", "1:b"]
+    assert str(as_list.summary()) == str(as_dict.summary())
+    for name, table in as_dict.relativities().items():
+        pd.testing.assert_frame_equal(as_list.relativities()[name], table)
+    for name in ("0:z", "1:b"):
+        plots = [m.plot_data(name, ci=None) for m in (as_list, as_dict)]
+        assert plots[0].keys() == plots[1].keys()
+    # SplineCategorical has no rating table, whatever its labels; a tensor has.
+    exportable = SuperGLM(terms=[s(0, k=6), s("z", k=6), ti(0, "z")], selection_penalty=0.0)
+    blocks = exportable.fit(X, y).rating_table_payload(X, y).interactions
+    assert [block.name for block in blocks] == ["0:z"]
+    text = Structure.from_model(as_list).to_json()
+    applied = Structure.from_json(text).apply(as_list).fit(X, y)
+    assert np.array_equal(applied.result.beta, as_list.result.beta)
+    restored = pickle.loads(pickle.dumps(as_list))
+    assert np.array_equal(restored.predict(X), as_list.predict(X))
+    table = as_list.drop1(X, y).set_index("feature")
+    assert table.loc[1, "deviance_reduced"] > as_list.result.deviance
+
+
+def test_a_factor_smooth_takes_integer_column_labels(labelled):
+    X, y = labelled
+    smooth = FactorSmooth(0, group=1, k=6)
+    as_dict = SuperGLM(
+        features={0: Spline(kind="ps", k=7)}, interactions=[smooth], selection_penalty=0.0
+    )
+    as_list = SuperGLM(terms=[s(0, kind="ps", k=7), interaction(smooth)], selection_penalty=0.0)
+    as_dict.fit_reml(X, y)
+    as_list.fit_reml(X, y)
+    _assert_same_fit(as_dict, as_list, X, reml=True)
+    assert as_list.factor_smooth("0:1:fs").curves is not None
+
+
+def test_accessors_find_a_term_by_its_label_or_its_text(labelled):
+    """One resolver serves SuperGLM and SuperLSS; master's SuperGLM took only the label."""
+    X, y = labelled
+    _, model = _labelled_interaction_pair()
+    model.fit(X, y)
+    relativities = model.relativities()
+    pd.testing.assert_frame_equal(relativities["0"], relativities[0])
+    assert "1" in relativities and relativities.get("1") is relativities[1]
+    for accessor in (
+        lambda name: model.plot_data(name, ci=None)["terms"][0]["effect"],
+        lambda name: model.term_inference(name, with_se=False).log_relativity,
+        lambda name: model.reconstruct_feature(name)["x"],
+    ):
+        assert np.array_equal(np.asarray(accessor("0")), np.asarray(accessor(0)))
+    assert model.plot_data(["0", "z"], ci=None).keys() == model.plot_data([0, "z"], ci=None).keys()
+    assert model.summary()["level_universes"]["1"] == model.summary()["level_universes"][1]
+    with pytest.raises(KeyError):
+        relativities["9"]
