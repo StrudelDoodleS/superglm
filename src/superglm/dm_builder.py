@@ -1009,12 +1009,16 @@ def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order)
     on_scop = [name for name, spec in inner.items() if scop(spec)]
     if not on_scop:
         return
-    on_qp = {
-        name: kindless_as_ps(spec)
-        for name, spec in inner.items()
-        if shaped(spec) and not scop(spec)
-    }
-    if not on_qp or None in on_qp.values():
+    shaped_qp = {name: spec for name, spec in inner.items() if shaped(spec) and not scop(spec)}
+    if not shaped_qp or any(
+        getattr(spec, "_kindless_args", None) is None for spec in shaped_qp.values()
+    ):
+        return
+    try:
+        on_qp = {name: kindless_as_ps(spec) for name, spec in shaped_qp.items()}
+    except (
+        ValueError
+    ):  # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands
         return
     for name, replacement in on_qp.items():
         reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"

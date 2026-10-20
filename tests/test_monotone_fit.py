@@ -500,6 +500,66 @@ class TestMonotoneFitPSpline:
         assert not [w for w in recwarn if "names no kind" in str(w.message)]
         assert np.all(np.diff(model.predict(df.sort_values("x"))) >= -1e-12)
 
+    def test_an_editor_knot_change_on_a_kindless_term_beside_scop_reaches_the_refit(self):
+        """The editor changes the knots of a copy of the declared spline. The ``ps`` that
+        replaces a kindless spline is built from that copy's knots and keeps its marks.
+        Fails on df503618, where the replacement was rebuilt from the arguments the spline
+        was first declared with (10 knots, no mark)."""
+        from superglm import Spline
+        from superglm.features.rebuild import (
+            EDITOR_KNOTS_ATTRIBUTE,
+            declared_spline,
+            respaced_spline,
+        )
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
+        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+
+        def model(x1):
+            return SuperGLM(
+                family=Gaussian(),
+                selection_penalty=0,
+                features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=inc)},
+            )
+
+        first = model(Spline(constraint=inc))
+        with pytest.warns(UserWarning, match="x1.*names no kind"):
+            first.fit(df, y)
+        edited = respaced_spline(declared_spline(first, "x1"), n_knots=4)
+        setattr(edited, EDITOR_KNOTS_ATTRIBUTE, True)
+        refit = model(edited)
+        with pytest.warns(UserWarning, match="x1.*names no kind"):
+            refit.fit(df, y)
+        assert isinstance(refit._specs["x1"], PSpline)
+        assert refit._specs["x1"].n_knots == 4
+        assert getattr(refit._specs["x1"], EDITOR_KNOTS_ATTRIBUTE, False)
+
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    def test_a_kindless_spline_ps_cannot_build_beside_scop_keeps_the_scop_qp_refusal(
+        self, fit_method
+    ):
+        """``k=4`` is a ``cr`` the QP takes and a ``ps`` cannot be (``k >= 5``). Beside a
+        SCOP term 0.40 refused the model with the SCOP + QP error; so does this, rather
+        than the ``ps`` construction error. Fails on df503618 with ``ValueError``."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
+        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
+        inc = Constraint.fit.increasing
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={
+                "x1": Spline(k=4, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="SCOP.*QP"):
+            getattr(model, fit_method)(df, y)
+
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
     def test_scop_plus_qp_raises(self, fit_method):
         """Every fit entry point rejects mixed SCOP and QP engines."""
