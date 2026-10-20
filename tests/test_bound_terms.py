@@ -577,3 +577,9 @@ def test_superlss_saves_a_model_whose_labels_are_not_json_values():
     ).fit_reml(frame, y)
     restored = SuperLSS.from_bytes(model.to_bytes())
     assert np.array_equal(restored.predict(frame), model.predict(frame))
+    # Term payloads name the term by its text, so they stay JSON (0481c3e5 put the date in).
+    import json
+
+    payload = model.plot_data("term", parameter="location", term=day)
+    assert json.loads(json.dumps(payload))["term"] == str(day)
+    assert model.term_test("location", day).term == str(day)

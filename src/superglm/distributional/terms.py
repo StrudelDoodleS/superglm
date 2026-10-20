@@ -671,7 +671,7 @@ def _term_effect_from_covariance(
     return ParameterTermEffect(
         parameter=prepared.parameter,
         link=prepared.link,
-        term=prepared.term,
+        term=str(prepared.term),  # results name a term by its label's text
         kind=prepared.kind,
         x=prepared.x,
         levels=prepared.levels,
@@ -790,7 +790,7 @@ def _term_test_from_covariance(
 
     return TermTest(
         parameter=prepared.parameter,
-        term=prepared.term,
+        term=str(prepared.term),  # results name a term by its label's text
         statistic=float(statistic),
         rank=float(rank),
         p_value=float(p_value),
