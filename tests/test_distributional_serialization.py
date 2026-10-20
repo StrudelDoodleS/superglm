@@ -1811,6 +1811,93 @@ def test_schema_eight_missing_curvature_scope_preserves_legacy_manifest() -> Non
     np.testing.assert_array_equal(restored.result.coefficients, model.result.coefficients)
 
 
+def test_published_negative_binomial_artifact_loads_after_gaining_expected_information() -> None:
+    """Kills the read barrier: the parent commit refused every NB2 artifact saved by 0.40.0.
+
+    The fixture was written by the published superglm 0.40.0, whose
+    NegativeBinomialLS declared no expected information. NB2 gained it since,
+    so its recomputed manifest differs from the stored one only there.
+    """
+    from pathlib import Path
+
+    from superglm import SuperLSS
+    from superglm.distributional.fit_diagnostics import _LSSDiagnosticContext
+
+    artifact = Path(__file__).with_name("fixtures") / "superlss-nb2-v0.40.0.json"
+    stored = json.loads(artifact.read_bytes())
+    assert stored["manifest"]["family"]["capabilities"]["expected_information"] is False
+
+    restored = SuperLSS.from_bytes(artifact.read_bytes())
+
+    fitted = restored._require_fitted()
+    assert type(fitted.family) is NegativeBinomialLS
+    assert fitted.recorded_expected_information is False
+    np.testing.assert_array_equal(fitted.coefficients, stored["manifest"]["fit"]["coefficients"])
+    assert fitted.result.terminal_curvature.matrix_kind == "penalized"
+    assert _LSSDiagnosticContext.from_model(fitted).terminal_policy_matrix_kind == "penalized"
+    restored.diagnose()
+    # Re-saving writes today's capability and keeps the record it was loaded with.
+    again = deserialize_distributional_model(serialize_distributional_model(fitted))
+    assert again.recorded_expected_information is False
+
+
+def test_schema_eight_negative_binomial_scope_follows_the_recorded_capability(
+    negative_binomial_artifact_model,
+) -> None:
+    """Kills the class-based scope: schema-8 NB2 telemetry assessed penalized curvature.
+
+    Schema 8 did not record the curvature scope; its terminal policy assessed
+    the data curvature only for families with expected information, which NB2
+    then lacked. The scope is read from the capability the artifact recorded.
+    """
+    from superglm.distributional.fit_diagnostics import _LSSDiagnosticContext
+
+    model, _, _ = negative_binomial_artifact_model
+    artifact = json.loads(serialize_distributional_model(model))
+
+    def remove_scope(restored):
+        seen = set()
+
+        def visit(value):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            if isinstance(value, CurvatureTelemetry):
+                if "matrix_kind" in vars(value):
+                    object.__delattr__(value, "matrix_kind")
+            elif is_dataclass(value):
+                for field in fields(value):
+                    visit(getattr(value, field.name))
+            elif isinstance(value, Mapping):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, tuple):
+                for item in value:
+                    visit(item)
+
+        visit(restored)
+
+    artifact = json.loads(_rehash_pickled_artifact(artifact, remove_scope))
+    artifact["schema_version"] = "8.0.0"
+
+    def strip_manifest(value):
+        if isinstance(value, dict):
+            value.pop("matrix_kind", None)
+            for item in value.values():
+                strip_manifest(item)
+        elif isinstance(value, list):
+            for item in value:
+                strip_manifest(item)
+
+    strip_manifest(artifact["manifest"])
+    artifact["manifest"]["family"]["capabilities"]["expected_information"] = False
+    restored = deserialize_distributional_model(json.dumps(artifact).encode())
+
+    assert restored.result.terminal_curvature.matrix_kind is None
+    assert restored.recorded_expected_information is False
+    assert _LSSDiagnosticContext.from_model(restored).terminal_policy_matrix_kind == "penalized"
+
+
 def test_unreleased_previous_major_is_refused_before_unpickling() -> None:
     model, _, _, _ = _fixed_model()
     artifact = _with_unpickle_sentinel(json.loads(serialize_distributional_model(model)))

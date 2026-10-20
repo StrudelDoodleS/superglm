@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
@@ -219,6 +219,11 @@ class DenseDistributionalModel:
 
     family: DistributionalFamily
     _fit_state: DistributionalFitState
+    # Whether the family supplied expected information when this model was
+    # fitted, as a loaded artifact's manifest records it; None for a model
+    # fitted in this process. Schema-8 telemetry did not record its curvature
+    # scope, which depended on this, and a family can gain the capability later.
+    recorded_expected_information: bool | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.family, DistributionalFamily):

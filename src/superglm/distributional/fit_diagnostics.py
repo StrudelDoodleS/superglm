@@ -102,7 +102,7 @@ class _LSSDiagnosticContext:
             family_name=type(model.family).__name__,
             terminal_policy_matrix_kind=(
                 state.solver_result.terminal_curvature.matrix_kind
-                or ("data" if isinstance(model.family, ExpectedInformationFamily) else "penalized")
+                or _legacy_policy_matrix_kind(model)
             ),
             layout=state.layout,
             linear_spline_terms=tuple(
@@ -118,6 +118,20 @@ class _LSSDiagnosticContext:
             null_converged=state.null_model.converged,
             null_convergence_reason=str(state.null_model.convergence_reason),
         )
+
+
+def _legacy_policy_matrix_kind(model: DenseDistributionalModel) -> _CurvatureMatrixKind:
+    """The curvature scope schema-8 telemetry left unrecorded.
+
+    Before schema 9 the terminal policy assessed the data curvature when the
+    family supplied expected information and the penalized curvature
+    otherwise. That is decided by what the artifact recorded about the family
+    when it was fitted, not by what the family declares today (NB2 gained
+    expected information later).
+    """
+    recorded = model.recorded_expected_information
+    expected = isinstance(model.family, ExpectedInformationFamily) if recorded is None else recorded
+    return "data" if expected else "penalized"
 
 
 _WHOLE_FIT_SUBJECT = DiagnosticSubject(
