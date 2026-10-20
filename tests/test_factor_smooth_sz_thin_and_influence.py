@@ -1399,7 +1399,8 @@ def test_a_separated_sz_level_predicts_what_its_rows_identify(family, discrete) 
     2.8e31 on the test book: 12 of its 22 regions separate, and the fit walks
     each one's unpenalized line until the link's overflow guard stops it, in
     a direction the data do not choose.  R43, 13 policies without a claim at
-    ``VehAge`` 0, 4 and 5, walked to ``eta = -80`` there and to ``+80`` at 15.
+    ``VehAge`` 0, 4 and 5, walked to ``eta = -80`` there and to ``+80`` from
+    VehAge 8 up.
     Here, on master (3681b0c1), g001's walked line reached the guard both
     ways, ``eta = -80`` on its own rows and ``+80`` above its claim (``-20``
     and ``+20``, the logit's guard, under the binomial), and g000 predicted
