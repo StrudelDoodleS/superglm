@@ -456,7 +456,7 @@ def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
     # copy keeps it, by reference; a shallow copy shares every member.
     restored = pickle.loads(pickle.dumps(model))
     assert restored._training_frame is None
-    with pytest.raises(RuntimeError, match="X_train"):
+    with pytest.raises(RuntimeError, match="from_bytes, pickle or joblib.*X_train"):
         restored.summary()
     assert restored.summary(X_train=frame).equals(model.summary())
     assert copy.deepcopy(model)._training_frame is model._training_frame

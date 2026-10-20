@@ -434,7 +434,7 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
             raise ValueError(
                 "candidates entries must pair two distinct screenable fitted "
                 f"features; got {raw!r} (screenable features: "
-                f"{sorted(margin_kinds)})"
+                f"{sorted(margin_kinds, key=repr)})"
             )
         if _pair_kind(margin_kinds[pair[0]], margin_kinds[pair[1]]) is None:
             raise ValueError(
@@ -770,7 +770,7 @@ def screen_interactions(
             spec = spec._spline
         return getattr(spec, "select", False)
 
-    selected = sorted({name for pair in pairs for name in pair if _select_flag(name)})
+    selected = sorted({name for pair in pairs for name in pair if _select_flag(name)}, key=repr)
     if selected:
         raise ValueError(
             f"screen_interactions requires single-penalty parent smooths, but {selected} were "
@@ -839,7 +839,7 @@ def screen_interactions(
             return model._specs[name]
         return _margin_source(name)[0]
 
-    for name in sorted({name for pair in pairs for name in pair}):
+    for name in sorted({name for pair in pairs for name in pair}, key=repr):
         # A categorical margin is read through its level labels; every other
         # margin through its resolved source, which maps an OrderedCategorical's
         # labels to scores rather than casting them.  Reading them all here

@@ -1329,7 +1329,8 @@ class SuperLSS:
         if self._training_frame is None:
             raise RuntimeError(
                 "term inference sweeps a covariate over its training range, and this model "
-                "carries no training frame -- a model restored with from_bytes never does. "
+                "carries no training frame -- a model restored with from_bytes, pickle or "
+                "joblib never does. "
                 "Pass X_train= the frame the model was fitted on."
             )
         return self._training_frame

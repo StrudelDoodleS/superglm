@@ -557,3 +557,12 @@ def test_plot_data_and_plot_draw_a_factor_smooth_as_level_curves(data, basis, la
     assert list(effect[group].unique()) == list(curves["level"].unique())
     figure = model.plot(smooth.name, n_points=25)
     assert len(figure.axes[0].lines) >= len(curves["level"].unique())
+
+
+def test_screening_reads_a_model_with_mixed_int_and_str_labels(labelled):
+    """sorted() over {0, "z", 1} raised TypeError before anything was screened (19362389)."""
+    X, y = labelled
+    model = SuperGLM(terms=[s(0, k=6), s("z", k=6), cat(1)], selection_penalty=0.0).fit(X, y)
+    table = model.screen_interactions(X, y)
+    pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}
+    assert pairs == {frozenset((0, "z")), frozenset((0, 1)), frozenset(("z", 1))}
