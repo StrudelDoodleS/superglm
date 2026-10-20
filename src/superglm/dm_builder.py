@@ -1176,6 +1176,7 @@ def build_design_matrix(
     if separation_records:
         from superglm.diagnostics.separation import (
             emit_curve_separation,
+            emit_level_curve_separation,
             emit_separation_findings,
             scan_categorical_term,
             scan_interaction_term,
@@ -1184,6 +1185,7 @@ def build_design_matrix(
 
         findings = []
         curves = []
+        level_curves = []
         for record in separation_records:
             term_name = record[1]
             if record[0] == "curve":
@@ -1200,6 +1202,11 @@ def build_design_matrix(
                 # A nonzero lambda1 reaches this block: the penalty grows
                 # without bound along any recession direction, so the
                 # penalised optimum is finite and the term is estimable.
+                if record[0] == "level_curve":
+                    compiled.interaction_specs[term_name]._separated_ranges = {}
+                continue
+            if record[0] == "level_curve":
+                level_curves.append(record[1:])
                 continue
             if record[0] == "cat":
                 _, name_c, spec_c, x_c = record
@@ -1226,6 +1233,7 @@ def build_design_matrix(
                 )
         emit_separation_findings(findings, separation)
         emit_curve_separation(curves, separation)
+        emit_level_curve_separation(level_curves)
 
     return BuildResult(
         dm=compiled.design,

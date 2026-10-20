@@ -1610,6 +1610,55 @@ def test_a_redundant_group_term_carries_no_separated_walk() -> None:
     assert np.all(np.abs(after - before) <= bound)
 
 
+@pytest.mark.parametrize("family", ["poisson", "binomial"])
+@pytest.mark.parametrize("kind", ["numeric", "polynomial"])
+def test_a_separated_varying_coefficient_level_is_held_to_its_rows_range(kind, family) -> None:
+    """A level whose varying-coefficient curve separates is held beyond its rows (sz_explosion round 2).
+
+    ``NumericCategorical`` and ``PolynomialCategorical`` give each non-base
+    level its own unpenalized curve beside the ``Categorical``'s constant, so
+    a level without a claim (g000), or with its claim at its largest ``x``
+    (g001), walks to the guard; beyond its rows the walked curve ran on, and
+    on the trigger's 3,000 freMTPL2 rows the test book's mean predicted rate
+    was 6.2e31 (numeric) and 4.8e33 (polynomial).  The build now records
+    each such level with its rows' ``x`` range, and prediction holds the
+    level's curve there, as ``extrapolation="clip"`` does: against the base
+    level, so the main effects cancel, g000 and g001 predict at ``x = 1`` as
+    at their largest ``x``.  Mutation: no hold.
+    """
+    from superglm import Polynomial
+    from superglm.diagnostics.separation import SeparationWarning
+    from superglm.model import base
+
+    frame, y, claims = _trigger_shaped(family)
+    main = Numeric() if kind == "numeric" else Polynomial(degree=2)
+    model = SuperGLM(
+        family=family,
+        features={"x": main, "g": Categorical()},
+        interactions=[("x", "g")],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, y)
+    term = model._interaction_specs["x:g"]
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    tops = {"g000": float(frame.loc[frame["g"] == "g000", "x"].max()), "g001": claims["g001"]}
+    for level, top in tops.items():
+        rows = pd.DataFrame({"x": [1.0, top, 1.0, top], "g": [level] * 2 + [term._base_level] * 2})
+        eta = base.predict_eta_exact(model, rows, warn=False)
+        reach = (
+            8.0
+            * np.sum(np.abs(beta))
+            * (1.0 + np.max(np.abs(term._poly_basis(rows["x"]))) if kind == "polynomial" else 2.0)
+        )
+        assert abs((eta[0] - eta[2]) - (eta[1] - eta[3])) <= _gamma(len(beta) + 8) * reach
+    assert {"g000", "g001"} <= set(term._separated_ranges)
+    assert any(
+        isinstance(w.message, SeparationWarning) and "g001" in str(w.message) for w in caught
+    )
+
+
 def test_an_sz_term_whose_every_level_separates_predicts_without_its_walk() -> None:
     """Every level separated: the canonical population, which no walk moves (sz_explosion).
 

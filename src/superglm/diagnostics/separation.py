@@ -478,6 +478,107 @@ def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: 
     return np.ascontiguousarray(right[rank:].T)
 
 
+def _level_recession(
+    natural: NDArray, lower: NDArray, upper: NDArray, inside: NDArray, null_space: NDArray
+) -> NDArray | None:
+    """One level's directions of recession, read from its rows: ``None`` when it has none.
+
+    ``natural`` holds the level's rows ``b(x)'`` and ``lower``, ``upper`` and
+    ``inside`` their responses' sides; ``null_space`` the unpenalized
+    coordinates.  Some ``g = b(x)' N_P h`` recedes when it is ``<= 0`` on the
+    rows at the lower boundary, ``>= 0`` on those at the upper one, zero on
+    the interior rows and not zero throughout (Geyer 2009, Theorem 4):
+    ``_recedes`` on the level's distinct rows.  Returns the span of the
+    directions in natural coordinates (``_recession_span``).
+    """
+    nullity = null_space.shape[1]
+    unique, inverse = np.unique(natural, axis=0, return_inverse=True)
+    inverse = np.asarray(inverse).reshape(-1)
+    at_lower = np.zeros(len(unique), dtype=bool)
+    at_upper = np.zeros(len(unique), dtype=bool)
+    within = np.zeros(len(unique), dtype=bool)
+    np.logical_or.at(at_lower, inverse, lower)
+    np.logical_or.at(at_upper, inverse, upper)
+    np.logical_or.at(within, inverse, inside)
+    # an x with responses on both boundaries holds g at zero as an interior one does
+    anchor = within | (at_lower & at_upper)
+    anchored = unique[anchor] @ null_space
+    held = min(len(anchored), nullity)
+    if held >= nullity:
+        return None
+    free = np.eye(nullity) if not held else np.linalg.svd(anchored, full_matrices=True)[2][held:].T
+    side = np.where(anchor, 0.0, np.where(at_lower, -1.0, 1.0))
+    edge = side != 0.0
+    if not (np.any(edge) and _recedes(side[edge], unique[edge], null_space, free)):
+        return None
+    span = _recession_span(side[edge], unique[edge], null_space, free)
+    return np.ascontiguousarray(null_space @ free @ span)
+
+
+def separated_level_ranges(
+    spec: Any, x: NDArray, x_cat: NDArray, prior_weights: NDArray | None, y: NDArray, boundaries
+) -> dict[Any, tuple[float, float]]:
+    """The levels of a varying-coefficient term whose own curve separates, with their ``x`` range.
+
+    ``NumericCategorical`` and ``PolynomialCategorical`` give each non-base
+    level an unpenalized curve ``phi(x)' theta``, ``phi(x) = (1, x)`` or
+    ``(1, P(x))`` with the ``Categorical`` main effect's constant.  A level
+    whose curve has a direction of recession (``_level_recession``, every
+    coordinate unpenalized) has no finite estimate, and its fitted curve is
+    where its walk stopped: inside the range of its rows the walk only takes
+    fitted values toward the boundary its responses sit on, but beyond it the
+    curve runs on toward the other.  Returns ``{level: (min x, max x)}``,
+    which prediction holds the level's ``x`` to.
+    """
+    from superglm.features.interaction import PolynomialCategorical, _categorical_predict_labels
+
+    x = np.asarray(x, dtype=np.float64).ravel()
+    labels = _categorical_predict_labels(
+        x_cat,
+        grouping=spec._cat_grouping,
+        universe=spec._cat_levels,
+        unseen=spec._cat_unseen,
+        context=spec.cat_name,
+    )
+    phi = spec._poly_basis(x) if isinstance(spec, PolynomialCategorical) else x[:, None]
+    basis = np.column_stack([np.ones(len(x)), phi])
+    weights = np.ones(len(x)) if prior_weights is None else np.asarray(prior_weights, np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    positive = weights > 0.0
+    lower = positive & (response <= 0.0) if "zero" in boundaries else np.zeros(len(x), bool)
+    upper = positive & (response >= 1.0) if "one" in boundaries else np.zeros(len(x), bool)
+    inside = positive & ~lower & ~upper
+    ranges = {}
+    for level in spec._non_base:
+        rows = np.flatnonzero(positive & (labels == level))
+        if np.any(lower[rows] | upper[rows]) and (
+            _level_recession(
+                basis[rows], lower[rows], upper[rows], inside[rows], np.eye(basis.shape[1])
+            )
+            is not None
+        ):
+            ranges[level] = (float(x[rows].min()), float(x[rows].max()))
+    return ranges
+
+
+def emit_level_curve_separation(terms: list) -> None:
+    """Name the varying-coefficient levels whose curve separates (``separated_level_ranges``).
+
+    Never refused: prediction holds each such level's curve to its rows' range.
+    """
+    if terms:
+        lines = "; ".join(f"{name!r} levels {_format_labels(labels)}" for name, labels in terms)
+        warnings.warn(
+            "Separation in a varying-coefficient term: these levels' own curves separate the "
+            f"response and have no finite estimate: {lines}. Predictions hold each such curve "
+            "at its values over the x range of the level's rows, as extrapolation='clip' "
+            "does; merging the levels (Categorical(grouping=...)) or a penalized term "
+            "(FactorSmooth) gives them finite curves.",
+            SeparationWarning,
+            stacklevel=3,
+        )
+
+
 def separated_factor_smooth_levels(
     dominant: Any,
     null_space: NDArray,
@@ -577,32 +678,16 @@ def separated_factor_smooth_spans(
         stops = np.searchsorted(codes[rows], general, side="right")
         for level, start, stop in zip(general, starts, stops, strict=True):
             level_rows = rows[start:stop]
-            natural = level_natural_rows(dominant, level_rows)
-            unique, inverse = np.unique(natural, axis=0, return_inverse=True)
-            inverse = np.asarray(inverse).reshape(-1)
-            at_lower = np.zeros(len(unique), dtype=bool)
-            at_upper = np.zeros(len(unique), dtype=bool)
-            within = np.zeros(len(unique), dtype=bool)
-            np.logical_or.at(at_lower, inverse, lower[level_rows])
-            np.logical_or.at(at_upper, inverse, upper[level_rows])
-            np.logical_or.at(within, inverse, inside[level_rows])
-            # an x with responses on both boundaries holds g at zero as an interior one does
-            anchor = within | (at_lower & at_upper)
-            anchored = unique[anchor] @ null_space
-            held = min(len(anchored), nullity)
-            if held >= nullity:
-                continue
-            free = (
-                np.eye(nullity)
-                if not held
-                else np.linalg.svd(anchored, full_matrices=True)[2][held:].T
+            found = _level_recession(
+                level_natural_rows(dominant, level_rows),
+                lower[level_rows],
+                upper[level_rows],
+                inside[level_rows],
+                null_space,
             )
-            side = np.where(anchor, 0.0, np.where(at_lower, -1.0, 1.0))
-            edge = side != 0.0
-            if np.any(edge) and _recedes(side[edge], unique[edge], null_space, free):
+            if found is not None:
                 separated[level] = True
-                span = _recession_span(side[edge], unique[edge], null_space, free)
-                spans[int(level)] = np.ascontiguousarray(null_space @ free @ span)
+                spans[int(level)] = found
     whole = np.ascontiguousarray(null_space)
     return {int(level): spans.get(int(level), whole) for level in np.flatnonzero(separated)}
 

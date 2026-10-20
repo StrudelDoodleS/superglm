@@ -1009,6 +1009,26 @@ class SplineCategorical:
         }
 
 
+def _held_to_level_ranges(spec: Any, x: NDArray, labels: NDArray) -> NDArray:
+    """``x`` with each separated level's rows held to the range they covered at fit.
+
+    A ``NumericCategorical`` or ``PolynomialCategorical`` level whose curve
+    separates has no finite estimate (``separation.separated_level_ranges``);
+    within its rows' range its walked curve gives fitted values toward the
+    boundary its responses sit on, and is held there beyond it, as
+    ``extrapolation="clip"`` holds a spline.  A model saved before 0.41 has no
+    such record and predicts as it did.
+    """
+    ranges = getattr(spec, "_separated_ranges", None)
+    if not ranges:
+        return x
+    x = np.array(x, dtype=np.float64, copy=True)
+    for level, (lo, hi) in ranges.items():
+        rows = labels == level
+        x[rows] = np.clip(x[rows], lo, hi)
+    return x
+
+
 # ── PolynomialCategorical ─────────────────────────────────────
 
 
@@ -1112,6 +1132,7 @@ class PolynomialCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_poly = _held_to_level_ranges(self, x_poly, x_cat)
         P = self._poly_basis(x_poly)
 
         blocks = []
@@ -1129,6 +1150,7 @@ class PolynomialCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_poly = _held_to_level_ranges(self, x_poly, x_cat)
         P = self._poly_basis(x_poly)
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_poly), dtype=np.float64)
@@ -1240,6 +1262,7 @@ class NumericCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_num = _held_to_level_ranges(self, x_num, x_cat)
 
         cols = []
         for level in self._non_base:
@@ -1256,6 +1279,7 @@ class NumericCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_num = _held_to_level_ranges(self, x_num, x_cat)
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_num), dtype=np.float64)
         for i, level in enumerate(self._non_base):
