@@ -1576,7 +1576,9 @@ def optimize_direct_reml(
         if max_delta > max_newton_step:
             delta *= max_newton_step / max_delta
         if exact_hessian_available:
-            contraction = proj_grad_norm / previous_gradient_norm
+            contraction = (
+                proj_grad_norm / previous_gradient_norm if previous_gradient_norm > 0.0 else np.inf
+            )
             excess_decrease = np.inf
             if previous_model is not None:
                 rho_before, grad_before, hess_before, obj_before = previous_model
