@@ -17,13 +17,13 @@ from superglm.types import LambdaPolicy
 # public signatures (which spell each ``Literal`` out) and the spec.
 type SplineKindName = Literal["cr", "ps", "bs", "ns", "cr_cardinal"]
 type KnotStrategyName = Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"]
-type PenaltyName = Literal["ssp", "none"]
+type PenaltyName = Literal["ssp", "none"] | None
 type ExtrapolationName = Literal["clip", "extend", "error"]
 
 # The ``extrapolation=`` policies a spline takes.
 EXTRAPOLATIONS = ("clip", "extend", "error")
 # The ``penalty=`` values a spline takes: "ssp" reparametrizes the basis
-# (``dm_builder``), and "none" builds it without.
+# (``dm_builder``), and "none" (or None) builds it without.
 PENALTIES = ("ssp", "none")
 # The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
 KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
@@ -110,7 +110,7 @@ def initialize_spec(
     n_knots: int,
     degree: int,
     knot_strategy: str,
-    penalty: str,
+    penalty: str | None,
     knots: ArrayLike | None,
     discrete: bool | None,
     n_bins: int | None,
@@ -161,7 +161,8 @@ def initialize_spec(
     validate_select(spec)
 
     spec.degree = degree
-    if penalty not in PENALTIES:
+    # None disables SSP as "none" does; 0.40 built it so, and scripts pass it.
+    if penalty is not None and penalty not in PENALTIES:
         raise ValueError(f"penalty must be one of {PENALTIES}, got {penalty!r}")
     spec.penalty = penalty
     spec.discrete = discrete
@@ -192,7 +193,9 @@ def configure_knots(
     boundary: tuple[float, float] | None,
 ) -> None:
     """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
-    if knot_strategy not in KNOT_STRATEGIES:
+    # Stated knots make the rule moot, and it was never read then; a rule that
+    # places knots must be one the placement knows, or a typo places uniform.
+    if knots is None and knot_strategy not in KNOT_STRATEGIES:
         raise ValueError(f"knot_strategy must be one of {KNOT_STRATEGIES}, got {knot_strategy!r}")
     if knots is not None and _knots_contain_names(knots):
         # Level-name knots: resolvable only against an OrderedCategorical's

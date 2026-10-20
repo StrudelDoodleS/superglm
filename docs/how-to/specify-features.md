@@ -67,7 +67,8 @@ lss = SuperLSS(family, family.mean(features, ti("DrivAge", "VehAge")), family.sc
 
 A factor smooth goes in the list as `interaction(FactorSmooth(...))`. It reads
 its variable and group columns itself, so its group needs no term, and with
-`basis="fs"` its variable needs none either:
+`basis="fs"` its variable needs none either. A term on the group is redundant:
+the factor smooth carries each level's intercept.
 
 ```python
 from superglm import FactorSmooth, SuperGLM, interaction, re
@@ -113,9 +114,10 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
 - `n_knots=`, `degree=` and `categorical_base=` configure only the
   `splines=` shorthand. With `terms=`, set them on each term, as in
   `s("DrivAge", n_knots=8)`.
-- A factor smooth's group needs no term, and `SuperGLM` and `SuperLSS` both
-  refuse one: the factor smooth already gives every level its own intercept,
-  so any term on that column, `cat(...)`, `re(...)` or another, repeats it.
+- A factor smooth's group needs no term: a term on the group is redundant,
+  because the factor smooth already carries each level's intercept.
+  `SuperGLM` refuses `cat(...)` or `re(...)` there; any other term, and any
+  term in `SuperLSS`, fits with a warning that names the term to drop.
   `basis="sz"` needs a spline on its variable, as in
   `s("DrivAge", kind="ps", k=7)`.
 

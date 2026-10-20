@@ -411,16 +411,29 @@ def test_a_bare_entry_that_is_not_a_string_names_the_declaration_to_write():
         SuperGLM(terms=[Spline()])
 
 
-def test_any_term_on_a_factor_smooth_group_is_refused_in_both_forms():
-    """An ordinal term on the group is a function of the level too; master fitted it."""
-    from superglm import OrderedCategorical, term
+def test_an_ordinal_term_on_a_factor_smooth_group_fits_with_a_warning_in_both_forms(data):
+    """0.40 fitted it, so it keeps fitting; the warning names the redundant term.
 
-    ordinal = OrderedCategorical(order=["a", "b", "c"])
-    smooth = FactorSmooth("x", group="g")
-    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'g' duplicates"):
-        SuperGLM(features={"g": ordinal}, interactions=[smooth])
-    with pytest.raises(ValueError, match=r"remove term\('g', OrderedCategorical\(...\)\)"):
-        SuperGLM(terms=[term("g", ordinal), interaction(smooth)])
+    It repeats the level intercepts the factor smooth carries. Round 2 refused
+    it; both forms warn alike and fit to the bit.
+    """
+    from superglm import OrderedCategorical, term
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
+
+    X, y = data
+    ordinal = OrderedCategorical(order=["a", "b", "c"], basis=Spline(kind="cr", n_knots=2))
+    smooth = FactorSmooth("x", group="g", k=6)
+    reason = r"term on 'g' is redundant: FactorSmooth 'x:g:fs' already carries each level's"
+    with pytest.warns(FactorSmoothGroupTermWarning, match=rf"{reason}.*Drop 'g' from features="):
+        as_dict = SuperGLM(features={"g": ordinal}, interactions=[smooth], selection_penalty=0.0)
+    with pytest.warns(
+        FactorSmoothGroupTermWarning,
+        match=rf"{reason}.*Drop term\('g', OrderedCategorical\(...\)\) from terms=",
+    ):
+        as_list = SuperGLM(terms=[term("g", ordinal), interaction(smooth)], selection_penalty=0.0)
+    as_dict.fit_reml(X, y)
+    as_list.fit_reml(X, y)
+    _assert_same_fit(as_dict, as_list, X, reml=True)
 
 
 def _labelled_interaction_pair() -> tuple[SuperGLM, SuperGLM]:

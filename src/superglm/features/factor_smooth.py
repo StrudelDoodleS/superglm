@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -28,6 +30,8 @@ SZ_POPULATION_PREDICTION = (
     "the population value: "
 )
 _MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
+# Warnings about a declaration point at the first frame outside the package.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The values each enumerated option of ``FactorSmooth`` takes.
 BASES = ("fs", "sz")
 KINDS = ("ps",)
@@ -110,8 +114,19 @@ def _natural_parameterization_from_r(
     return natural_map, tuple(components)
 
 
-def refuse_terms_on_factor_smooth_groups(features: Any, smooths: Any, remedy: Any) -> None:
-    """Refuse a main term on a factor smooth's group column, in either model.
+class FactorSmoothGroupTermWarning(UserWarning):
+    """A term on a factor smooth's group repeats the level intercepts the factor smooth carries."""
+
+
+def check_terms_on_factor_smooth_groups(
+    features: Any,
+    smooths: Any,
+    where: Any,
+    *,
+    refused: tuple[type, ...] = (),
+    note: Any = None,
+) -> None:
+    """Refuse or warn about a main term on a factor smooth's group column.
 
     Both bases give every level its own intercept: with the model intercept,
     the per-level indicator columns lie in the factor smooth's column space
@@ -122,17 +137,40 @@ def refuse_terms_on_factor_smooth_groups(features: Any, smooths: Any, remedy: An
     deficient, whatever the term's type. mgcv documents the same for ``sz``:
     adding the factor's main effect "will lead to a rank deficient model".
 
-    ``remedy(group, spec, smooth)`` names the change in the form the model
-    was declared in.
+    A term of a ``refused`` type is refused, as the caller always refused it;
+    any other term fits as it always has, with a warning, so a model that used
+    to fit keeps fitting. ``where(group, spec)`` names the declaration to drop
+    in the form the model was declared in; ``note(group, spec, smooth)`` adds
+    a caller's sentence.
     """
     for smooth in smooths:
         if smooth.group not in features:
             continue
-        spec = features[smooth.group]
-        raise ValueError(
-            f"FactorSmooth {smooth.name!r} gives every level of {smooth.group!r} its own "
-            f"intercept, so the {type(spec).__name__} term on {smooth.group!r} duplicates "
-            f"that group-intercept geometry; {remedy(smooth.group, spec, smooth)}"
+        group = smooth.group
+        spec = features[group]
+        if isinstance(spec, refused):
+            raise ValueError(
+                f"FactorSmooth {smooth.name!r} gives every level of {group!r} its own "
+                f"intercept, so the {type(spec).__name__} term on {group!r} duplicates "
+                f"that group-intercept geometry; remove {where(group, spec)}; the factor "
+                "smooth reads its group column itself."
+            )
+        from superglm.features.random_effect import RandomEffect
+
+        competing = (
+            " A random effect there competes with the factor smooth's penalty for those "
+            "columns: measured, its smoothing parameter runs to the upper bound and "
+            "smoothing selection can fail to converge."
+            if isinstance(spec, RandomEffect)
+            else ""
+        )
+        extra = "" if note is None else note(group, spec, smooth)
+        warnings.warn(
+            f"The {type(spec).__name__} term on {group!r} is redundant: FactorSmooth "
+            f"{smooth.name!r} already carries each level's intercept, so the term repeats "
+            f"columns the factor smooth has. Drop {where(group, spec)}.{competing}{extra}",
+            FactorSmoothGroupTermWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
         )
 
 

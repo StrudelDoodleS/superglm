@@ -392,20 +392,27 @@ def test_superlss_refuses_two_labels_with_one_text():
 
 @pytest.mark.parametrize("basis", ["fs", "sz"])
 @pytest.mark.parametrize("helper", ["cat", "re"])
-def test_superlss_refuses_a_term_on_a_factor_smooth_group(basis, helper):
-    """As SuperGLM does: the term duplicates the per-level intercepts. Master accepted it."""
+def test_superlss_warns_about_a_term_on_a_factor_smooth_group(basis, helper):
+    """0.40 required the term, so it keeps fitting; the warning names it as redundant.
+
+    Master gave no warning. A random effect there also gets its measured
+    convergence note.
+    """
     from superglm import FactorSmooth, GaussianLS
     from superglm import terms as term_helpers
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 
     family = GaussianLS()
     declared = getattr(term_helpers, helper)("group")
     smooth = term_helpers.interaction(FactorSmooth("x", group="group", basis=basis))
-    with pytest.raises(
-        ValueError,
-        match=rf"duplicates that group-intercept geometry; remove {helper}\('group'\) "
+    with pytest.warns(
+        FactorSmoothGroupTermWarning,
+        match=rf"already carries each level's intercept.*Drop {helper}\('group'\) "
         r"from the 'location' predictor",
-    ):
+    ) as caught:
         family.location(term_helpers.s("x"), declared, smooth)
+    converging = "smoothing selection can fail to converge"
+    assert (converging in str(caught[0].message)) is (helper == "re")
 
 
 def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
@@ -497,14 +504,15 @@ def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loa
 
 
 @pytest.mark.parametrize(("basis", "intercept"), [("sz", False), ("sz", True), ("fs", False)])
-def test_the_group_refusal_names_intercept_true_for_sz_without_an_intercept(basis, intercept):
+def test_the_group_warning_names_intercept_true_for_sz_without_an_intercept(basis, intercept):
     """Only sz without an intercept leaves the overall level to the group term."""
     from superglm import FactorSmooth, GaussianLS
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
     from superglm.terms import cat, interaction, s
 
     family = GaussianLS()
     smooth = interaction(FactorSmooth("x", group="g", basis=basis))
-    with pytest.raises(ValueError, match=r"remove cat\('g'\)") as caught:
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"Drop cat\('g'\)") as caught:
         family.location(s("x"), cat("g"), smooth, intercept=intercept)
     sentence = "With intercept=False, the same model is intercept=True without the term on 'g'."
-    assert (sentence in str(caught.value)) is (basis == "sz" and not intercept)
+    assert (sentence in str(caught[0].message)) is (basis == "sz" and not intercept)

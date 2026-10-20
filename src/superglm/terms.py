@@ -188,7 +188,7 @@ def s(
     n_knots: int | None = None,
     degree: int = 3,
     knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"] = "uniform",
-    penalty: Literal["ssp", "none"] = "ssp",
+    penalty: Literal["ssp", "none"] | None = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
@@ -228,8 +228,9 @@ default="uniform"
         ``"quantile"`` places them at quantiles of the distinct values,
         ``"quantile_rows"`` follows the training data and
         ``"quantile_tempered"`` tempers that concentration.
-    penalty : {"ssp", "none"}, default="ssp"
-        Enable SSP basis reparametrization, or disable it with ``"none"``.
+    penalty : {"ssp", "none"} or None, default="ssp"
+        Enable SSP basis reparametrization, or disable it with ``"none"``
+        (``None`` also disables it).
     select : bool, default=False
         Add a penalty on the spline's null space so that smoothing can also
         shrink directions left unpenalized by the ordinary wiggle penalty.

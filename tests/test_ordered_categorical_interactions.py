@@ -9,7 +9,7 @@ from superglm.dm_builder import (
     should_discretize_spline_categorical_interaction,
     should_discretize_tensor_interaction,
 )
-from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
 from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import (
     OrderedCategorical,
@@ -317,27 +317,21 @@ def test_factor_smooth_keeps_label_levels_over_an_oc_group_main():
     mapped level scores -- but a FactorSmooth factorizes its group column into
     the term's own level set, so resolving it would silently re-key that
     identity to ``[0.0, 0.25, ...]`` and every by-label lookup its inference
-    exposes would fail on the fitted labels.  An OC main on the group was the
-    one main a FactorSmooth's group could carry; it is now refused like any
-    other, since every term on the group repeats the per-level intercepts the
-    factor smooth spans.  The factor smooth keeps its label levels without it.
+    exposes would fail on the fitted labels.  Reachable from public API: an OC
+    main is the ONLY main a FactorSmooth's group column may carry (a
+    Categorical there is rejected as duplicated group-intercept geometry).
     """
     from superglm import FactorSmooth
 
     df, y = _frame()
-    smooth = FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)
-    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'age_band' duplicates"):
-        SuperGLM(
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'age_band' is redundant"):
+        model = SuperGLM(
             family="poisson",
             features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-            interactions=[smooth],
+            interactions=[FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)],
+            selection_penalty=0.0,
         )
-    model = SuperGLM(
-        family="poisson",
-        features={"power": Spline(kind="ps", n_knots=5)},
-        interactions=[smooth],
-        selection_penalty=0.0,
-    )
     model.fit_reml(df, y)
 
     spec = model._interaction_specs["power:age_band:fs"]
@@ -543,14 +537,19 @@ def test_a_specials_term_may_still_be_a_factor_smooth_group():
     with pytest.raises(NotImplementedError, match="specials"):
         resolve_interaction_parent_of(TensorInteraction("age_band", "power"), spec, labels)
 
-    # The model itself is now refused at declaration: an OC main on a factor
-    # smooth's group repeats the per-level intercepts the factor smooth spans.
-    with pytest.raises(ValueError, match=r"OrderedCategorical term on 'age_band' duplicates"):
-        SuperGLM(
+    df, y = _specials_frame()
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'age_band' is redundant"):
+        model = SuperGLM(
             family="poisson",
             features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
             interactions=[FactorSmooth(variable="power", group="age_band")],
         )
+    model.fit_reml(df, y)
+    assert np.isfinite(model._result.effective_df)
+    # The group kept its label identity, the special included as a level of it.
+    fs = model._interaction_specs["power:age_band:fs"]
+    assert set(fs._levels) == set(BANDS) | {"MISSING"}
 
 
 def test_resolver_reads_a_level_the_way_transform_reads_it():

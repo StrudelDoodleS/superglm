@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, SuperGLM
+from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
@@ -168,33 +169,32 @@ def test_oc_margin_screens_beside_its_spline_siblings():
 
 
 def test_factor_smooth_pair_is_excluded():
-    # The group column can carry no main effect -- any term there repeats the
-    # per-level intercepts the factor smooth spans, and is refused -- so the
-    # factor smooth's pair never has two screenable margins.
+    # The group column cannot also be a Categorical main -- the model rejects
+    # that as duplicated group-intercept geometry -- so the grouping margin is
+    # a spline-mode OrderedCategorical, which _margin_kind screens as a spline.
     from superglm import FactorSmooth
 
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
-    smooth = FactorSmooth("age", group="band", basis="fs", kind="ps", k=5)
-    with pytest.raises(ValueError, match=r"term on 'band' duplicates"):
-        SuperGLM(
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'band' is redundant"):
+        model = SuperGLM(
             family="poisson",
             features={
                 "age": Spline(kind="ps", n_knots=6, m=2),
                 "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=4)),
             },
-            interactions=[smooth],
+            interactions=[FactorSmooth("age", group="band", basis="fs", kind="ps", k=5)],
+            selection_penalty=0.0,
         )
-    model = SuperGLM(
-        family="poisson",
-        features={"age": Spline(kind="ps", n_knots=6, m=2), "region": Categorical()},
-        interactions=[smooth],
-        selection_penalty=0.0,
-    )
     model.fit_reml(df, y)
     table = model.screen_interactions(df, y)
     pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}
     assert frozenset(("age", "band")) not in pairs
+    # Positive proof: both margins ARE screenable, so the pair is dropped as
+    # already fitted rather than as ineligible.
+    with pytest.raises(ValueError, match="already fitted"):
+        model.screen_interactions(df, y, candidates=[("age", "band")])
 
 
 def test_cat_cat_planted_table_ranks_first_with_exact_df():

@@ -239,6 +239,9 @@ model = SuperGLM(
 model.fit_reml(df, y, offset=np.log(df["Exposure"]))
 ```
 
+`Region` needs no term of its own: a term on the group is redundant, because
+the factor smooth carries each level's intercept.
+
 The compact solver handles one large credibility term beside narrow dense
 features, global splines and other random effects. It works with every family
 and link, and with both `basis="fs"` and `basis="sz"` factor smooths. See

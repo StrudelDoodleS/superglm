@@ -855,7 +855,7 @@ class OrderedCategorical:
         return self._basis_spline.select
 
     @property
-    def penalty(self) -> str:
+    def penalty(self) -> str | None:
         """Penalty type of the inner spline."""
         return self._basis_spline.penalty
 

@@ -142,7 +142,7 @@ class _SplineBase:
     degree: int
     knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"]
     knot_alpha: float
-    penalty: Literal["ssp", "none"]
+    penalty: Literal["ssp", "none"] | None
     discrete: bool | None
     n_bins: int | None
     extrapolation: Literal["clip", "extend", "error"]
@@ -190,7 +190,7 @@ class _SplineBase:
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
         n_bins: int | None = None,
@@ -632,7 +632,7 @@ class PSpline(_BSplineBase):
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -745,7 +745,7 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -814,7 +814,7 @@ class NaturalSpline(_SplineBase):
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -904,7 +904,7 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -1032,7 +1032,7 @@ class CardinalCRSpline(_SplineBase):
         knot_strategy: Literal[
             "uniform", "quantile", "quantile_rows", "quantile_tempered"
         ] = "uniform",
-        penalty: Literal["ssp", "none"] = "ssp",
+        penalty: Literal["ssp", "none"] | None = "ssp",
         select: bool = False,
         knots: ArrayLike | None = None,
         discrete: bool | None = None,
@@ -1153,7 +1153,7 @@ def Spline(
     n_knots: int | None = None,
     degree: int = 3,
     knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"] = "uniform",
-    penalty: Literal["ssp", "none"] = "ssp",
+    penalty: Literal["ssp", "none"] | None = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,

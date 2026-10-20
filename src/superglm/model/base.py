@@ -889,10 +889,12 @@ def validate_factor_smooth_configuration(
     ``terms_form`` says the model was declared with ``terms=``, so a refusal
     names the change in that form.
     """
+    from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import (
         FactorSmooth,
-        refuse_terms_on_factor_smooth_groups,
+        check_terms_on_factor_smooth_groups,
     )
+    from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
     from superglm.terms import declaration_text
 
@@ -914,16 +916,18 @@ def validate_factor_smooth_configuration(
     if not features_resolved:
         return
 
-    def group_remedy(group, spec, smooth) -> str:
+    def where(group, spec) -> str:
         if terms_form:
-            where = f"{declaration_text(group, spec)} from terms="
-        elif model._splines is None:
-            where = f"{group!r} from features="
-        else:
-            where = f"{group!r} from the auto-detected features: declare features= without it"
-        return f"remove {where}; the factor smooth reads its group column itself."
+            return f"{declaration_text(group, spec)} from terms="
+        if model._splines is None:
+            return f"{group!r} from features="
+        return f"{group!r} from the auto-detected features: declare features= without it"
 
-    refuse_terms_on_factor_smooth_groups(model._specs, terms, group_remedy)
+    # A Categorical or RandomEffect there was always refused; any other term
+    # fitted, and keeps fitting with a warning.
+    check_terms_on_factor_smooth_groups(
+        model._specs, terms, where, refused=(Categorical, RandomEffect)
+    )
     for term in terms:
         if term.basis == "sz" and not isinstance(
             model._specs.get(term.variable),
@@ -1251,35 +1255,41 @@ def clone_without_features(
         source_family = fit_state.distribution
         source_link = fit_state.projections.get("_link", model._link)
 
-    new_model = type(model)(
-        family=source_family,
-        link=source_link,
-        penalty=new_penalty,
-        features=new_features,
-        interactions=keep_interactions if keep_interactions else None,
-        active_set=model._active_set,
-        direct_solve=model._direct_solve,
-        discrete=model._discrete,
-        n_bins=model._n_bins,
-        tol=model._tol,
-        max_iter=model._max_iter,
-        convergence=model._convergence,
-        retain_fit_state=model._retain_fit_state,
-        # A clone is the SAME model with fewer terms, so it must be fitted
-        # under the same likelihood. Falling through to the constructor
-        # default silently turned every frequency-contract model into a prior
-        # one the moment a term was dropped -- which is the path `drop1`,
-        # term importance and `refit_unpenalised` all take.
-        weight_semantics=model_weight_semantics(model),
-        # Its other model-level rules too: falling through, `separation="error"`
-        # became "warn" and `group_pricing="spanned"` became "rank" on every
-        # clone (and the editor's Refit and `Structure.apply`, which clone
-        # here), refitting a different pricing rule. A model pickled before
-        # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
-        # reads it.
-        separation=getattr(model, "_separation", "warn"),
-        group_pricing=getattr(model, "_group_pricing", "spanned"),
-    )
+    # The source model already gave any declaration warning; its clones
+    # (drop1, the editor, Structure.apply) do not repeat it.
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FactorSmoothGroupTermWarning)
+        new_model = type(model)(
+            family=source_family,
+            link=source_link,
+            penalty=new_penalty,
+            features=new_features,
+            interactions=keep_interactions if keep_interactions else None,
+            active_set=model._active_set,
+            direct_solve=model._direct_solve,
+            discrete=model._discrete,
+            n_bins=model._n_bins,
+            tol=model._tol,
+            max_iter=model._max_iter,
+            convergence=model._convergence,
+            retain_fit_state=model._retain_fit_state,
+            # A clone is the SAME model with fewer terms, so it must be fitted
+            # under the same likelihood. Falling through to the constructor
+            # default silently turned every frequency-contract model into a prior
+            # one the moment a term was dropped -- which is the path `drop1`,
+            # term importance and `refit_unpenalised` all take.
+            weight_semantics=model_weight_semantics(model),
+            # Its other model-level rules too: falling through, `separation="error"`
+            # became "warn" and `group_pricing="spanned"` became "rank" on every
+            # clone (and the editor's Refit and `Structure.apply`, which clone
+            # here), refitting a different pricing rule. A model pickled before
+            # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
+            # reads it.
+            separation=getattr(model, "_separation", "warn"),
+            group_pricing=getattr(model, "_group_pricing", "spanned"),
+        )
     if kept_declarations:
         for iname, ispec in kept_declarations:
             new_model._interaction_specs[iname] = ispec

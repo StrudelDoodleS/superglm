@@ -160,3 +160,12 @@ def test_a_misspelled_spline_option_is_refused_naming_the_accepted_values(option
         with pytest.raises(ValueError, match=rf"{option} must be one of .*got '{typo}'") as caught:
             build(**{option: typo})
         assert all(repr(value) in str(caught.value) for value in values)
+
+
+def test_what_040_fitted_as_intended_still_builds():
+    """penalty=None disabled SSP as "none" does, and stated knots never read the rule."""
+    import numpy as np
+
+    x = np.linspace(0.0, 1.0, 200)
+    superglm.Spline(penalty=None, k=8).build(x)
+    superglm.Spline(knots=[0.25, 0.5, 0.75], knot_strategy="explicit").build(x)
