@@ -428,12 +428,19 @@ def _inverse(N):
 
 
 def _inverse_pair(pair):
-    """Exact inverse of ``N / d`` as a pair, or ``None`` when singular."""
+    """Exact inverse of ``N / d`` as a pair, or ``None`` when singular.
+
+    The pair is divided by the gcd of its integers, which leaves the rational
+    matrix unchanged. Unreduced, an inverse of a block of an inverse carries the
+    first determinant's digits, and F7's references took 100 s to build, not 4.
+    """
     inverse = _inverse(pair[0])
     if inverse is None:
         return None
     adj, det = inverse
-    return adj * pair[1], det
+    N = adj * pair[1]
+    g = math.gcd(*(int(v) for v in N.flat), int(det))
+    return N // g, det // g
 
 
 def _log_det(pair):

@@ -647,3 +647,20 @@ def test_tests_that_read_or_set_thread_pools_run_unpinned() -> None:
     stale = sorted(set(allowed) - touched.keys())
     assert not unmarked, f"mark these @pytest.mark.threads or allowlist them: {unmarked}"
     assert not stale, f"these allowlist entries match no test that touches a pool API: {stale}"
+
+
+def test_the_durations_refresh_drops_the_runtime_ci_measures_under_coverage() -> None:
+    """scripts/update_test_durations.py leaves out the coverage shards by artifact name."""
+    from scripts.update_test_durations import COVERAGE_RUNTIME
+
+    job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
+        "test-compatibility"
+    ]
+    covered = [step for step in job["steps"] if "--cov=" in step.get("run", "")]
+    assert covered and all(
+        f"'{COVERAGE_RUNTIME.strip('-py')}'" in step["if"]
+        and "github.event_name == 'push'" in step["if"]
+        for step in covered
+    )
+    upload = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
+    assert "-py${{ matrix.runtime.python-version }}-" in upload["with"]["name"]
