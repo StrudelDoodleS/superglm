@@ -280,26 +280,31 @@ def test_the_certificate_refuses_a_grey_value_within_its_shift():
     assert info["k"] == 2.0 and info["margin"] <= info["shift"]
 
 
-@pytest.mark.parametrize("bound", [0.0, 1.0], ids=["certified", "too_loose"])
-def test_the_certificate_carries_the_structural_residual(bound):
+@pytest.mark.parametrize("case", ["certified", "residual_only", "too_loose"])
+def test_the_certificate_carries_the_structural_residual(case):
     """A structural null whose bound reaches the cut sends the decision to the full factor.
 
     The alias ``y`` passes as a structural null with bound ``||A y|| <=
     bound``.  At bound 0 the grey subspace (a ``1e-12`` direction) decides
     as the full factor; at bound 1, ``bound^2`` is above ``cut_low`` and the
-    certificate refuses.  Mutation check: certifying regardless fails the
-    second.
+    certificate refuses.  At 4 ``factor_rcond`` the grey margin still clears
+    the shift, so only the residual clause refuses.  Mutation checks:
+    certifying regardless fails the last two; deleting only the residual
+    clause fails ``residual_only``.
     """
+    bound = {"certified": 0.0, "too_loose": 1.0}.get(case, 4 * rank.SHARED_RANK_POLICY.factor_rcond)
     A, gram, project = _coupled_gram(grey_ratio=1e-12, coupling=0.0)
     structural = [(slice(4, 6), np.array([[np.sqrt(0.5)], [-np.sqrt(0.5)]]), bound)]
     deflated, info = rank.decompose_gram_deflated(gram, project, rows=10**6, structural=structural)
     assert info["structural"] == 1.0
-    if bound == 0.0:
+    if case == "certified":
         assert deflated is not None
         _assert_same_decisions(deflated, rank.decompose_factor(A))
     else:
         assert deflated is None
         assert info["structural_residual"] >= rank.SHARED_RANK_POLICY.factor_rcond
+    if case == "residual_only":
+        assert info["margin"] > info["shift"]
 
 
 @pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])

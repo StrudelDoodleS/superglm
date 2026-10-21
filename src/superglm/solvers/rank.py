@@ -2529,7 +2529,8 @@ def decompose_gram_deflated(
     w_k - e`` (Weyl), ``H2 = B'B`` with ``B = A V2`` is factored by a TSQR of
     the ``n x k`` block (``project``; row-QR resolution, ``n T k + 2 n k^2``),
     and ``E = V1'A'B`` is formed from ``A'B``, the same pass's cross product.
-    By Li & Li (*Linear Algebra Appl.* 2005, arXiv 2508.08203) each
+    By Li & Li (*Linear Algebra Appl.* 395, 2005, 183-190; the authors'
+    corrected version is arXiv 2508.08203, 2025) each
     eigenvalue of the full matrix lies within ``2||E||^2 / (eta + sqrt(eta^2 +
     4 ||E||^2))`` of the block-diagonal matrix's, ``eta = L1 - ||H2||`` the
     gap between the blocks; ``E`` is small because ``V2`` is an invariant
@@ -2740,7 +2741,8 @@ def decide_data_rank(
     :func:`decompose_gram_deflated` reads.  The order is the Gram when it
     certifies itself (:func:`decompose_gram_if_authoritative`), then the
     grey-subspace certificate, then the full factor, which runs only when that
-    certificate fails.  ``certify`` goes straight to the full factor: a caller
+    certificate fails.  ``certify`` skips the grey-subspace certificate, so a
+    Gram that cannot certify itself goes straight to the full factor: a caller
     that already holds it (an unpenalized fit, whose Hessian is this Gram)
     pays nothing for it.
     """
