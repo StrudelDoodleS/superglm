@@ -281,6 +281,28 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
     )
 
 
+def lss_corrected_covariance_nonstationary_message(reason: str) -> str:
+    """What a corrected covariance means when smoothing did not stop at a certified stationary point."""
+    return (
+        f"SuperLSS corrected covariance: smoothing stopped with reason {reason!r}, not at a "
+        "certified stationary point of the Laplace objective, so V_rho inverts the Hessian in "
+        "log smoothing parameters at the fitted smoothing parameters rather than at the maximum "
+        "Wood, Pya and Saefken (2016, section 4) expand about. V + J V_rho J' is a first-order "
+        "correction about this point. Refit with outer='efs+newton' to stop at a certified "
+        "stationary point; model.diagnose() explains the stop."
+    )
+
+
+def lss_corrected_covariance_unavailable_message(cause: str) -> str:
+    """The disclosure when no smoothing-parameter correction can be formed for a fit."""
+    return (
+        f"SuperLSS corrected covariance is unavailable for this fit: {cause}. Returned the "
+        "conditional covariance at the fitted smoothing parameters, as covariance='fixed' "
+        "gives, so it omits smoothing-parameter uncertainty and intervals built on it are no "
+        "wider than corrected ones would be."
+    )
+
+
 def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     """The statement for an unconverged coefficient fit with no smoothing selection."""
     if fit_result is None or bool(getattr(fit_result, "converged", True)):

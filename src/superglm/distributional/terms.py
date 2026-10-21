@@ -95,6 +95,7 @@ from superglm.distributional.posterior import (
     CovarianceKind,
     _posterior_draw_count,
     _posterior_draws_from_covariance,
+    _resolved_posterior_covariance,
     posterior_covariance,
     simultaneous_critical_value,
 )
@@ -251,7 +252,6 @@ class _PreparedTermEffect:
     multiplier: NDArray[np.float64] | None
     edf: float
     lambdas: Mapping[str, float]
-    covariance_kind: CovarianceKind
     alpha: float
     pointwise_critical: float
     draw_count: int | None
@@ -555,15 +555,14 @@ def term_effect(
         X_train,
         parameter,
         term,
-        covariance=covariance,
         n_points=n_points,
         alpha=alpha,
         n_sim=n_sim,
         seed=seed,
         simultaneous=simultaneous,
     )
-    matrix = posterior_covariance(fitted, kind=covariance)
-    return _term_effect_from_covariance(fitted, prepared, matrix)
+    matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
+    return _term_effect_from_covariance(fitted, prepared, matrix, resolved)
 
 
 def _prepare_term_effect(
@@ -572,7 +571,6 @@ def _prepare_term_effect(
     parameter: str,
     term: str,
     *,
-    covariance: CovarianceKind = "fixed",
     n_points: int = 200,
     alpha: float = 0.05,
     n_sim: int = 2000,
@@ -627,7 +625,6 @@ def _prepare_term_effect(
         lambdas={
             key: value for name in names for key, value in _term_lambdas(fitted, name).items()
         },
-        covariance_kind=covariance,
         alpha=resolved_alpha,
         pointwise_critical=float(stats.norm.isf(0.5 * resolved_alpha)),
         draw_count=draw_count,
@@ -639,8 +636,13 @@ def _term_effect_from_covariance(
     fitted: Any,
     prepared: _PreparedTermEffect,
     matrix: NDArray[np.float64],
+    covariance_kind: CovarianceKind,
 ) -> ParameterTermEffect:
-    """Evaluate one fully prepared term effect from a resolved covariance."""
+    """Evaluate one fully prepared term effect from a resolved covariance.
+
+    ``covariance_kind`` is the kind ``matrix`` is, which is ``"fixed"`` where a
+    corrected request fell back to the conditional covariance.
+    """
     design = prepared.design
     columns = prepared.columns
     effect = prepared.effect
@@ -655,7 +657,7 @@ def _term_effect_from_covariance(
             fitted,
             matrix,
             prepared.draw_count,
-            covariance=prepared.covariance_kind,
+            covariance=covariance_kind,
             seed=prepared.seed,
         )
         critical = simultaneous_critical_value(
@@ -687,7 +689,7 @@ def _term_effect_from_covariance(
         multiplier=prepared.multiplier,
         edf=prepared.edf,
         lambdas=prepared.lambdas,
-        covariance_kind=prepared.covariance_kind,
+        covariance_kind=covariance_kind,
         alpha=prepared.alpha,
     )
 

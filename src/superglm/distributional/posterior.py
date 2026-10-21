@@ -11,9 +11,10 @@ coverage is the subject of Marra and Wood (2012), *Scandinavian Journal of
 Statistics* 39(1), 53-74, and Wood (2017), *Generalized Additive Models: An
 Introduction with R*, 2nd ed., section 6.10.  ``kind="corrected"`` adds the
 first-order smoothing-parameter term of Wood, Pya and Saefken (2016), *Journal
-of the American Statistical Association* 111(516), 1548-1563, which needs a
-certified terminal smoothing Hessian, either published by the Newton endgame or
-replayed on demand from retained fit rows.  The max-deviation critical value of
+of the American Statistical Association* 111(516), 1548-1563, from a certified
+terminal smoothing Hessian, either published by the Newton endgame or replayed
+on demand from retained fit rows; where none can be formed the fixed covariance
+is returned and the cause disclosed.  The max-deviation critical value of
 :func:`simultaneous_critical_value` is Ruppert, Wand and Carroll (2003),
 *Semiparametric Regression*, section 6.5.  Expected shortfall is the quantile
 integral above the level, the representation of Acerbi and Tasche (2002),
@@ -35,7 +36,9 @@ from scipy import linalg, stats
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import (
     ConvergenceWarning,
+    lss_corrected_covariance_nonstationary_message,
     lss_corrected_covariance_substitute_message,
+    lss_corrected_covariance_unavailable_message,
 )
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import (
@@ -197,12 +200,6 @@ def _smoothing_hessian_names(smoothing: Any) -> tuple[str, ...]:
 
 def _authenticated_terminal_fit(fitted: Any, smoothing: Any) -> tuple[Any, Any]:
     """Return the immutable fit state and terminal result eligible for correction."""
-    reason = smoothing.convergence_reason
-    if not smoothing.converged or reason != "stationary":
-        raise RuntimeError(
-            "corrected covariance requires a converged stationary smoothing result; "
-            f"this fit stopped with reason {reason!r} (see model.diagnose())"
-        )
     try:
         state = fitted.fit_state
         terminal = fitted.result
@@ -370,16 +367,24 @@ def _trusted_smoothing_hessian(
 def _replayed_smoothing_hessian(
     fitted: Any,
     smoothing: Any,
-    names: tuple[str, ...],
+    names: tuple[str, ...] | None,
     state: Any,
     terminal: Any,
-) -> NDArray[np.float64]:
-    """Replay terminal smoothing curvature once, without publishing or caching it."""
+) -> tuple[tuple[str, ...], NDArray[np.float64]]:
+    """Replay terminal smoothing curvature once, without publishing or caching it.
+
+    ``names`` is the row order a stationary stop published with its terminal
+    gradient, which the replay must reproduce. A stop that is not stationary
+    published no gradient for its terminal point (an earlier endgame's, if
+    any, may describe an earlier iterate), so it passes ``None`` and the
+    replay's own names and curvature are used.
+    """
     rows = state.retained_rows
     if rows is None:
         raise RuntimeError(
-            "corrected covariance needs retained training rows when no smoothing Hessian "
-            "was published; refit with retain_rows=True"
+            "it kept no retained training rows to replay the smoothing Hessian at its fitted "
+            "smoothing parameters and published no Hessian for that point; refit with "
+            "retain_rows=True (the default) to get the correction"
         )
     weights = rows.likelihood_weights
     provenance = weights.provenance
@@ -437,7 +442,7 @@ def _replayed_smoothing_hessian(
         raise RuntimeError("smoothing derivative replay failed for corrected covariance") from exc
     if not isinstance(derivatives, LamlDerivatives):
         raise RuntimeError("smoothing derivative replay returned an invalid result")
-    if derivatives.names != names:
+    if names is not None and derivatives.names != names:
         raise RuntimeError(
             "smoothing derivative replay did not preserve the ordered smoothing names"
         )
@@ -450,6 +455,15 @@ def _replayed_smoothing_hessian(
     )
     if derivatives.provenance != expected_provenance:
         raise RuntimeError("smoothing derivative replay changed the terminal derivative provenance")
+    replayed_names = tuple(derivatives.names)
+    if names is None:
+        return replayed_names, _trusted_smoothing_hessian(
+            derivatives.hessian,
+            derivatives.hessian_certificate,
+            count=len(replayed_names),
+            certificate_fraction=smoothing.config.hessian_certificate_fraction,
+            replayed=True,
+        )
     stored_gradient = smoothing.terminal_gradient
     stored_certificate = smoothing.terminal_gradient_certificate
     if stored_gradient is None or stored_certificate is None:
@@ -470,7 +484,7 @@ def _replayed_smoothing_hessian(
         raise RuntimeError(
             "replayed smoothing derivatives disagree with the stored terminal gradient"
         )
-    return _trusted_smoothing_hessian(
+    return names, _trusted_smoothing_hessian(
         derivatives.hessian,
         derivatives.hessian_certificate,
         count=len(names),
@@ -479,30 +493,36 @@ def _replayed_smoothing_hessian(
     )
 
 
-def _resolved_smoothing_hessian(
-    fitted: Any,
-    smoothing: Any,
-    names: tuple[str, ...],
-    *,
-    replay_authority: tuple[Any, Any] | None,
-) -> NDArray[np.float64]:
-    """Use trusted published curvature or one authenticated ephemeral replay.
+def _correction_inputs(
+    fitted: Any, smoothing: Any
+) -> tuple[tuple[str, ...], NDArray[np.float64], str | None]:
+    """Return the smoothing names, the trusted LAML Hessian in log lambda, and any open stop.
 
-    Both are formed with the curvature the terminal fit accepted: the Newton
-    endgame and the replay differentiate it, observed or substitute.
+    A stationary stop uses the Hessian its Newton endgame published, or replays
+    it from retained rows against the stored terminal gradient. Any other stop
+    replays the Hessian at its own terminal point, because a Hessian an earlier
+    endgame published may describe an earlier iterate; its reason is returned
+    for the disclosure. Both are formed with the curvature the terminal fit
+    accepted, observed or substitute.
     """
+    state, terminal = _authenticated_terminal_fit(fitted, smoothing)
+    if not smoothing.converged or smoothing.convergence_reason != "stationary":
+        names, hessian = _replayed_smoothing_hessian(fitted, smoothing, None, state, terminal)
+        return names, hessian, str(smoothing.convergence_reason)
     if smoothing.smoothing_hessian is None:
-        if replay_authority is None:
-            raise RuntimeError("corrected covariance has no authenticated terminal replay state")
-        state, terminal = replay_authority
-        return _replayed_smoothing_hessian(fitted, smoothing, names, state, terminal)
-    return _trusted_smoothing_hessian(
+        names, hessian = _replayed_smoothing_hessian(
+            fitted, smoothing, _smoothing_gradient_names(smoothing), state, terminal
+        )
+        return names, hessian, None
+    names = _smoothing_hessian_names(smoothing)
+    hessian = _trusted_smoothing_hessian(
         smoothing.smoothing_hessian,
         smoothing.smoothing_hessian_certificate,
         count=len(names),
         certificate_fraction=smoothing.config.hessian_certificate_fraction,
         replayed=False,
     )
+    return names, hessian, None
 
 
 def _add_covariance_correction(covariance: NDArray, root: NDArray) -> NDArray:
@@ -545,13 +565,25 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
 
     ``kind="fixed"`` is the Bayesian covariance at the fitted smoothing
     parameters.  ``kind="corrected"`` adds the first-order smoothing-parameter
-    term of Wood, Pya and Saefken (2016), ``V + J V_rho J'``, with
+    term of Wood, Pya and Saefken (2016, section 4), ``V + J V_rho J'``, with
     ``J = d beta_hat / d rho`` from the implicit function theorem applied to the
     penalised score, and ``V_rho`` the inverse negative-LAML Hessian in
-    ``rho = log lambda``.  It refuses rather than silently returning the fixed
-    covariance when terminal smoothing curvature cannot be authenticated.  A
-    stationary fit with retained training rows replays that curvature only for
-    this request when the Newton endgame stopped before forming a Hessian.
+    ``rho = log lambda``.  A stationary fit uses the Hessian its Newton endgame
+    published, or replays it once from retained training rows; the replay is
+    checked against the stored terminal gradient and never cached.
+
+    A fit whose smoothing did not stop at a certified stationary point (every
+    ``outer="efs"`` fit, and any unconverged one) has the Hessian replayed at
+    its fitted smoothing parameters from retained rows, and the correction is
+    computed about that point and disclosed with a ``ConvergenceWarning``: the
+    paper's normal approximation for ``rho`` is centred at the maximum. Where no
+    correction can be formed -- no retained rows and no Hessian for the fitted
+    point, an unconverged coefficient fit, a replay or Hessian that fails its
+    certificate, or a correction that cannot be represented -- the conditional
+    covariance is returned with a ``ConvergenceWarning`` naming the cause, as
+    mgcv's ``vcov(unconditional=TRUE)`` returns ``Vp`` when no corrected matrix
+    is available, but disclosed.  A fit with no estimated smoothing parameter
+    has no smoothing uncertainty, so its corrected covariance is the fixed one.
 
     When the observed curvature at the final coefficients was materially
     indefinite and the fit accepted a substitute (Fisher information, or the
@@ -562,34 +594,76 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     computed, not refused, and disclosed with a ``ConvergenceWarning`` saying
     what the result means.
     """
+    return _resolved_posterior_covariance(fitted, kind)[0]
+
+
+def _resolved_posterior_covariance(
+    fitted: Any, kind: CovarianceKind
+) -> tuple[NDArray[np.float64], CovarianceKind]:
+    """Return the covariance with the kind it is, which a fallback makes ``"fixed"``."""
     covariance = np.array(fitted.inference.covariance, dtype=np.float64, copy=True)
     if kind == "fixed":
-        return covariance
+        return covariance, "fixed"
     if kind != "corrected":
         raise ValueError("covariance must be 'fixed' or 'corrected'")
 
     smoothing = fitted.smoothing
-    if smoothing is None:
-        raise RuntimeError(
-            "corrected covariance requires a converged stationary smoothing result; "
-            "this fit has no smoothing result"
+    if smoothing is None or smoothing.convergence_reason == "fixed_only":
+        return covariance, "corrected"
+    terminal = fitted.result
+    if not terminal.converged:
+        cause = (
+            f"its final coefficient fit did not converge (reason "
+            f"{terminal.convergence_reason!r}), and J = d beta / d rho exists by the implicit "
+            "function theorem only at a maximum of the penalized likelihood; model.diagnose() "
+            "explains the stop"
         )
-    terminal_authority = _authenticated_terminal_fit(fitted, smoothing)
-    substitute = _substitute_curvature(terminal_authority[1])
-    if smoothing.smoothing_hessian is None:
-        names = _smoothing_gradient_names(smoothing)
-    else:
-        names = _smoothing_hessian_names(smoothing)
+        return _conditional_covariance(covariance, cause)
+    try:
+        corrected, open_stop, substitute = _smoothing_corrected_covariance(
+            fitted, smoothing, covariance
+        )
+    except RuntimeError as exc:
+        return _conditional_covariance(covariance, str(exc))
+    if corrected is None:
+        return covariance, "corrected"
+    if open_stop is not None:
+        warnings.warn(
+            lss_corrected_covariance_nonstationary_message(open_stop),
+            ConvergenceWarning,
+            stacklevel=3,
+        )
+    if substitute is not None:
+        warnings.warn(
+            lss_corrected_covariance_substitute_message(substitute),
+            ConvergenceWarning,
+            stacklevel=3,
+        )
+    return _posterior_symmetric_matrix(corrected), "corrected"
+
+
+def _conditional_covariance(
+    covariance: NDArray[np.float64], cause: str
+) -> tuple[NDArray[np.float64], CovarianceKind]:
+    """Disclose why no correction was formed and return the conditional covariance."""
+    warnings.warn(
+        lss_corrected_covariance_unavailable_message(cause),
+        ConvergenceWarning,
+        stacklevel=4,
+    )
+    return covariance, "fixed"
+
+
+def _smoothing_corrected_covariance(
+    fitted: Any, smoothing: Any, covariance: NDArray[np.float64]
+) -> tuple[NDArray[np.float64] | None, str | None, str | None]:
+    """Form ``V + J V_rho J'``; ``None`` when no smoothing parameter was estimated."""
+    names, rho_hessian, open_stop = _correction_inputs(fitted, smoothing)
+    substitute = _substitute_curvature(fitted.result)
     components = {component.name: component for component in fitted.layout.penalties}
     missing = [name for name in names if name not in components]
     if missing:
         raise RuntimeError(f"the smoothing Hessian names no layout penalty: {missing}")
-    rho_hessian = _resolved_smoothing_hessian(
-        fitted,
-        smoothing,
-        names,
-        replay_authority=(terminal_authority if smoothing.smoothing_hessian is None else None),
-    )
 
     beta = np.asarray(fitted.result.coefficients, dtype=np.float64)
     columns = []
@@ -601,7 +675,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
         rhs[block] = float(smoothing.lambdas[name]) * (omega @ beta[block])
         columns.append(-np.asarray(fitted.result.solve_terminal(rhs), dtype=np.float64))
     if not columns:
-        return covariance
+        return None, None, None
     jacobian = np.column_stack(columns)
 
     # Apply every admitted smoothing direction. Forming H^-1 separately both
@@ -622,13 +696,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
             raise ValueError("the corrected posterior covariance is nonfinite")
     except (ValueError, np.linalg.LinAlgError) as exc:
         raise RuntimeError("the corrected posterior covariance could not be represented") from exc
-    if substitute is not None:
-        warnings.warn(
-            lss_corrected_covariance_substitute_message(substitute),
-            ConvergenceWarning,
-            stacklevel=2,
-        )
-    return _posterior_symmetric_matrix(corrected)
+    return corrected, open_stop, substitute
 
 
 def _posterior_draw_count(n_draws: int) -> int:
@@ -754,12 +822,12 @@ def posterior_draws(
     result never depends on how a later pushforward chunks its rows.
     """
     count = _posterior_draw_count(n_draws)
-    matrix = posterior_covariance(fitted, kind=covariance)
+    matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
     return _posterior_draws_from_covariance(
         fitted,
         matrix,
         count,
-        covariance=covariance,
+        covariance=resolved,
         seed=seed,
     )
 

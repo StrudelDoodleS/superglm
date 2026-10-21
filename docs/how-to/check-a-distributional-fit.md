@@ -294,8 +294,15 @@ Wood, Pya and Säfken (2016). Fit with `outer="efs+newton"` when this correction
 will be requested. A stationary fit can use a trusted smoothing Hessian
 published by the Newton endgame, or authenticate the terminal fit and replay
 that Hessian once from retained training rows. The replay is ephemeral: it does
-not mutate, cache, or republish fit state. A compact fit without a published
-Hessian refuses, as does a non-stationary or unauthenticated fit. If the fit
+not mutate, cache, or republish fit state. A fit whose smoothing did not stop at
+a certified stationary point, such as any `outer="efs"` fit, replays the
+Hessian at its fitted smoothing parameters, and a `ConvergenceWarning` says the
+correction is first order about that point rather than about the maximum.
+Where no correction can be formed (a fit saved without its training rows and
+with no Hessian for its fitted point, an unconverged coefficient fit, or a
+Hessian that fails its certificate), the fixed covariance comes back with a
+`ConvergenceWarning` naming the cause, and bands and draws carry
+`covariance_kind="fixed"`. If the fit
 had to replace an indefinite final curvature with Fisher information or the
 nearest positive semidefinite curvature, the correction uses that replacement
 too, whether from the published Hessian or a replay, and a `ConvergenceWarning`

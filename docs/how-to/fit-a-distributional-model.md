@@ -841,7 +841,8 @@ matrix as `smoothing_hessian`, with its certificate, for smoothing-parameter
 uncertainty. A stationary fit can stop before that Hessian pass. If it retained
 the authenticated training rows, corrected-covariance inference can replay the
 Hessian once without mutating or republishing fit state; a compact fit without
-a published Hessian refuses corrected covariance.
+a published Hessian gets the fixed covariance and a `ConvergenceWarning` saying
+why.
 
 With `practical_reml=True`, practical convergence requires small relative LAML
 and fitted-parameter changes over the configured number of accepted updates
@@ -959,8 +960,10 @@ bounds = model.posterior_bounds(X_new, ("quantile", 0.99), level=0.9)
 By default the suite holds smoothing parameters fixed. With
 `covariance="corrected"`, it uses a trusted smoothing Hessian published by a
 stationary fit or performs one authenticated, on-demand replay from retained
-training rows. That replay is ephemeral. A compact fit without a published
-Hessian refuses, as does a fit whose terminal state cannot be authenticated.
+training rows. That replay is ephemeral. A fit that did not stop stationary is
+corrected about its fitted smoothing parameters, with a warning. A compact fit
+without a published Hessian, or one whose terminal state cannot be
+authenticated, gets the fixed covariance and a warning naming the cause.
 A fit whose final curvature fell back is corrected with the curvature it used,
 whether from its published Hessian or a replay, and warns that it did.
 Term effects, plots and summaries validate their requested work before
