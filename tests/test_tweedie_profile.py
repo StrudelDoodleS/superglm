@@ -2343,18 +2343,18 @@ class TestProfileFitParity:
         assert cloned._marginal1 is not original._marginal1
         assert cloned._marginal2 is not original._marginal2
         assert cloned._R_inv is not original._R_inv
-        np.testing.assert_allclose(cloned._marginal1.basis, original._marginal1.basis)
-        np.testing.assert_allclose(cloned._marginal2.basis, original._marginal2.basis)
+        np.testing.assert_allclose(cloned._marginal1.projection, original._marginal1.projection)
+        np.testing.assert_allclose(cloned._marginal2.projection, original._marginal2.projection)
         np.testing.assert_allclose(cloned._R_inv, original._R_inv)
 
-        original_basis = original._marginal1.basis.copy()
+        original_projection = original._marginal1.projection.copy()
         original_R_inv = original._R_inv.copy()
-        cloned._marginal1.basis[0, 0] += 1.0
+        cloned._marginal1.projection[0, 0] += 1.0
         cloned._R_inv[0, 0] += 1.0
         cloned._n_knots = (8, 9)
         cloned._decompose = False
 
-        np.testing.assert_array_equal(original._marginal1.basis, original_basis)
+        np.testing.assert_array_equal(original._marginal1.projection, original_projection)
         np.testing.assert_array_equal(original._R_inv, original_R_inv)
         assert original._n_knots == (3, 4)
         assert original._decompose is True

@@ -1322,7 +1322,10 @@ def test_prior_ordinary_spline_identifiable_geometry_follows_physical_rows(
     )
 
 
-def _tensor_centering_moments(compiled, geometry: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _tensor_centering_moments(
+    compiled, geometry: np.ndarray, frame: pd.DataFrame
+) -> tuple[np.ndarray, np.ndarray]:
+    """Geometry-weighted column sums of each margin's basis on the fit rows ``frame``."""
     predictor = compiled[0]
     interaction = predictor.compiled.interaction_specs["x1:x2"]
     group_index = next(
@@ -1331,13 +1334,16 @@ def _tensor_centering_moments(compiled, geometry: np.ndarray) -> tuple[np.ndarra
         if group.feature_name == "x1:x2"
     )
     matrix = predictor.compiled.design.group_matrices[group_index]
-    marginal1 = np.asarray(interaction._marginal1.basis, dtype=np.float64)
-    marginal2 = np.asarray(interaction._marginal2.basis, dtype=np.float64)
     if hasattr(matrix, "idx1"):
+        marginal1 = np.asarray(interaction._marginal1.basis, dtype=np.float64)
+        marginal2 = np.asarray(interaction._marginal2.basis, dtype=np.float64)
         mass1 = np.bincount(matrix.idx1, weights=geometry, minlength=len(marginal1))
         mass2 = np.bincount(matrix.idx2, weights=geometry, minlength=len(marginal2))
         return mass1 @ marginal1, mass2 @ marginal2
-    return geometry @ marginal1, geometry @ marginal2
+    # a dense spec keeps no training-row basis: the margins' rows are evaluated
+    left = interaction._centered_marginal_basis(frame["x1"], interaction._marginal1).toarray()
+    right = interaction._centered_marginal_basis(frame["x2"], interaction._marginal2).toarray()
+    return geometry @ left, geometry @ right
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "discrete"])
@@ -1376,8 +1382,12 @@ def test_frequency_tensor_identifiable_geometry_matches_literal_expansion(discre
             atol=tolerance,
         )
     for moment in (
-        *_tensor_centering_moments(compact, compact_weights.geometry_values),
-        *_tensor_centering_moments(expanded, expanded_weights.geometry_values),
+        *_tensor_centering_moments(compact, compact_weights.geometry_values, tensor_frame),
+        *_tensor_centering_moments(
+            expanded,
+            expanded_weights.geometry_values,
+            tensor_frame.iloc[repeated].reset_index(drop=True),
+        ),
     ):
         np.testing.assert_allclose(
             moment,
@@ -1430,7 +1440,7 @@ def test_prior_tensor_identifiable_geometry_follows_physical_rows(discrete: bool
                 mass=float(len(frame)),
             ),
         )
-    for moment in _tensor_centering_moments(weighted, resolved.geometry_values):
+    for moment in _tensor_centering_moments(weighted, resolved.geometry_values, tensor_frame):
         np.testing.assert_allclose(
             moment,
             0.0,
