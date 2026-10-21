@@ -74,15 +74,6 @@ class GlobalMomentBuild:
 
 
 @njit(cache=True)
-def _finite_bounded_1d(values):
-    for i in range(values.shape[0]):
-        value = values[i]
-        if value != 0.0 and not _MIN_ABS <= abs(value) <= _MAX_ABS:
-            return False
-    return True
-
-
-@njit(cache=True)
 def _finite_bounded_2d(values):
     for i in range(values.shape[0]):
         for j in range(values.shape[1]):
@@ -92,54 +83,13 @@ def _finite_bounded_2d(values):
     return True
 
 
-@njit(cache=True)
-def _accumulate_vector(out, bins, weights):
-    active = 0
-    for i in range(bins.shape[0]):
-        index = bins[i]
-        if index >= 0:
-            out[index] += weights[i]
-            active += 1
-    return active
-
-
-@njit(cache=True)
-def _accumulate_histogram(out, left_bins, right_bins, weights):
-    active = 0
-    for i in range(left_bins.shape[0]):
-        left = left_bins[i]
-        right = right_bins[i]
-        if left >= 0 and right >= 0:
-            out[left, right] += weights[i]
-            active += 1
-    return active
-
-
-@njit(cache=True)
-def _accumulate_directional(out, bins, ordinary, weights):
-    active = 0
-    for i in range(bins.shape[0]):
-        index = bins[i]
-        if index >= 0:
-            weight = weights[i]
-            for j in range(ordinary.shape[1]):
-                out[index, j] += weight * ordinary[i, j]
-            active += 1
-    return active
-
-
 # One signature serves the solver-support table and every likelihood channel
 # layout a caller passes.
 _CHANNEL_CHECK = (_finite_bounded_2d, (types.Array(types.float64, 2, "A", readonly=True),))
 
 
 def _warmup_global_moments():
-    """Compile the plan's writers, channel check and batched reducers.
-
-    ``_finite_bounded_1d`` and the serial ``_accumulate_*`` reducers are not
-    warmed: no fit calls them (the batched reducers replaced them; their tests
-    keep them as references).
-    """
+    """Compile the plan's writers, channel check and batched reducers."""
     _warmup_batched_moments()
     compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
 

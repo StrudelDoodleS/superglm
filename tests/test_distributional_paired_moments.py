@@ -7,11 +7,36 @@ import pytest
 from numba import config, get_num_threads, set_num_threads
 
 from superglm.distributional.solver import _batched_moments as batch_api
-from superglm.distributional.solver._global_moments import (
-    _accumulate_directional,
-    _accumulate_histogram,
-    _accumulate_vector,
-)
+
+
+# The serial reductions the batched kernel replaced, as row-order references:
+# each adds a target's rows one at a time, in the order the kernel does.
+def _accumulate_vector(out, bins, weights):
+    active = 0
+    for i in range(bins.shape[0]):
+        if bins[i] >= 0:
+            out[bins[i]] += weights[i]
+            active += 1
+    return active
+
+
+def _accumulate_histogram(out, left_bins, right_bins, weights):
+    active = 0
+    for i in range(left_bins.shape[0]):
+        if left_bins[i] >= 0 and right_bins[i] >= 0:
+            out[left_bins[i], right_bins[i]] += weights[i]
+            active += 1
+    return active
+
+
+def _accumulate_directional(out, bins, ordinary, weights):
+    active = 0
+    for i in range(bins.shape[0]):
+        if bins[i] >= 0:
+            for j in range(ordinary.shape[1]):
+                out[bins[i], j] += weights[i] * ordinary[i, j]
+            active += 1
+    return active
 
 
 def _buffered(values):

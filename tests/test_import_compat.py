@@ -72,13 +72,17 @@ def test_toplevel_reexports():
 # that reaches it, with the reason.  tests/_numba_dispatchers.py finds every
 # kernel, so one added without that decision fails the test below.
 _STRUCTURED = "superglm.solvers._structured."
+_GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
 _FIRST_USE: dict[str, str] = {
-    # Measured 2026-10-20 over 71 cold first fits on the freMTPL2 book (every
-    # family and link, SuperGLM and SuperLSS, exact and binned, RandomEffect
-    # and FactorSmooth terms): which fits reach each kernel, its compile time
-    # on top of warmup(), and its load from a filled cache.
+    # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
+    # (every family and link, SuperGLM and SuperLSS, exact and binned,
+    # RandomEffect and FactorSmooth terms) and 17 more on 2026-10-21 for the
+    # routes those missed (continuous covariates, tensors over disjoint and
+    # P-spline margins, a decomposed and a lone tensor, factor smooths on the
+    # Gram backend and beside numerics only): which fits reach each kernel,
+    # its compile time on top of warmup(), and its load from a filled cache.
     **dict.fromkeys(
         [
             *(
@@ -182,17 +186,27 @@ _FIRST_USE: dict[str, str] = {
     _STRUCTURED + "leaf_kernels._sparse_rows": (
         "a RandomEffect leaf pass whose border has a row its tables cannot code: none in the census"
     ),
-    "superglm._group_matrix._group_matrix_kernels._operand_exponent_bounds": (
+    _GROUP + "_operand_exponent_bounds": (
         "the non-float64 scan: fits pass float64 operands to _float64_operand_exponent_bounds"
     ),
     **dict.fromkeys(
         (
-            "superglm.distributional.solver._global_moments._finite_bounded_1d",
-            "superglm.distributional.solver._global_moments._accumulate_vector",
-            "superglm.distributional.solver._global_moments._accumulate_histogram",
-            "superglm.distributional.solver._global_moments._accumulate_directional",
+            _GROUP + "_dense_small_weighted_moments",
+            _GROUP + "_factor_smooth_support_dense_cell_aggregates",
+            _GROUP + "_factor_smooth_csr_dense_cross",
+            _GROUP + "_factor_smooth_support_dense_cross",
         ),
-        "no fit calls it: the batched reducers replaced it, and their tests keep it as a reference",
+        "a FactorSmooth moment system built without its leaf layout, or crossed with a dense "
+        "term of two or more columns: no census fit reaches either (fs or sz, exact or binned, "
+        "beside numerics, splines or a polynomial)",
+    ),
+    _GROUP + "_fused_2d_bincount_2": (
+        "a discrete tensor's two weight grids on the chunked moment route, which the raw-moment "
+        "and pattern routes now serve: no census fit reaches it"
+    ),
+    "superglm.solvers._exact_sums.scaled_exact_sum": (
+        "the overflow fallback: only a sum whose products or partials leave float64's range "
+        "reaches it (0.6 s)"
     ),
     "superglm.distributional.solver._small_group_panels._checked_factor_scatter": (
         "only an explicit panel budget renders a FactorSmooth group; no public fit sets one (0.4 s)"
@@ -244,18 +258,17 @@ for diagonal, expected in (([0.0, 0.0, 0.0], 0.0), ([0.0, 2.0, 0.0], 4.0), ([0.0
     for coefficients in (np.array([1.0, 2.0, 3.0]), readonly(np.array([1.0, 2.0, 3.0]))[0]):
         assert _half_penalty_quadratic(penalty, coefficients, entries) == expected
 
-for values in (
+# C operands of either mutability, a decomposed tensor's Fortran maps, and
+# SuperLSS's read-only strided channel columns.
+for operand in (
     np.ones((3, 4)),
+    *readonly(
+        np.ones((3, 4)), np.ones((6, 4))[::2, ::2], np.ones((3, 4))[::-1], np.ones(9)[::2, None]
+    ),
     np.asfortranarray(np.ones((3, 4))),
-    np.ones((6, 4))[::2, ::2],
-    np.ones((3, 4))[::-1],
-    np.ones(9)[::2, None],
 ):
-    frozen = values.view()
-    frozen.setflags(write=False)
-    for operand in (values, frozen):
-        assert group_kernels._tensor_operand_in_reassociation_range(operand)
-        assert group_algebra._operand_exponent_bounds(operand) == (0, 1)
+    assert group_kernels._tensor_operand_in_reassociation_range(operand)
+    assert group_algebra._operand_exponent_bounds(operand) == (0, 1)
 
 frozen_response, frozen_mean = readonly(np.array([0.0, 1.0, 2.5]), np.ones(3))
 assert np.all(np.isfinite(superglm.tweedie_logpdf(frozen_response, frozen_mean, 1.0, 1.5)))
@@ -265,23 +278,9 @@ codes = np.array([0, 1], dtype=np.intp)
 csr_indices = np.array([0, 1], dtype=np.int32)
 csr_indptr = np.array([0, 1, 2], dtype=np.int32)
 cell_ptr, cell_order = group_kernels._cell_csr(codes, codes, 2, 2)
-frozen_codes, = readonly(codes.copy())
-for first in (codes, frozen_codes):
-    for second in (codes, frozen_codes):
-        assert group_kernels._cell_csr_matches(cell_ptr, cell_order, first, second, 2, 2)
+assert group_kernels._cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
 group_kernels._csr_weighted_gram(
     values, csr_indices, csr_indptr, values, 2, absolute_weights=True
-)
-dense_small, = readonly(np.eye(2, dtype=np.float64))
-group_kernels._dense_small_weighted_moments(dense_small, values, values)
-group_kernels._factor_smooth_csr_dense_cross(
-    values, csr_indices, csr_indptr, codes, values, dense_small, 2, 2
-)
-group_kernels._factor_smooth_support_dense_cross(
-    np.eye(2, dtype=np.float64), codes, codes, values, dense_small, 2
-)
-group_kernels._factor_smooth_support_dense_cell_aggregates(
-    codes, codes, values, dense_small, 2, 2
 )
 
 row_patterns, unique_codes, offsets, pair_left, pair_right, pair_offsets, right_sizes = readonly(

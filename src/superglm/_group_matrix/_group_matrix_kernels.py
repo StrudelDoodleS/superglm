@@ -1301,21 +1301,16 @@ def _warmup_group_matrix_kernels() -> None:
     frozen_matrix.setflags(write=False)
     frozen_codes = codes.copy()
     frozen_codes.setflags(write=False)
-    # Maps and packed curvature columns also supply Fortran and strided
-    # operands. Cover both mutabilities so their first fit need not compile,
-    # and call the float64 scan as fits do: directly, never through the
-    # generic ``_operand_exponent_bounds``, which only a non-float64 operand
-    # reaches.
-    for operand in (matrix, np.asfortranarray(matrix), np.ones((3, 4))[:, ::2]):
+    # The range scans see C operands, a decomposed tensor's Fortran maps and
+    # SuperLSS's read-only channel columns, plain and strided.  Call the
+    # float64 scan as fits do: directly, never through the generic
+    # ``_operand_exponent_bounds``, which only a non-float64 operand reaches.
+    frozen_strided = np.ones((3, 4))[:, ::2]
+    frozen_strided.setflags(write=False)
+    for operand in (matrix, frozen_matrix, np.asfortranarray(matrix), frozen_strided):
         _tensor_operand_in_reassociation_range(operand)
         _float64_operand_exponent_bounds(operand)
-        frozen_operand = operand.view()
-        frozen_operand.setflags(write=False)
-        _tensor_operand_in_reassociation_range(frozen_operand)
-        _float64_operand_exponent_bounds(frozen_operand)
-    for support in (matrix, frozen_matrix):
-        for indices in (codes, frozen_codes):
-            _indexed_row_dot(matrix, support, indices, indices)
+    _indexed_row_dot(matrix, matrix, codes, codes)
     # A TSQR leaf writes its block whole (no response) or less its last column.
     for block in (np.empty((2, 2)), np.empty((2, 3))[:, :2]):
         for centre in (values, values[:0]):
@@ -1360,10 +1355,8 @@ def _warmup_group_matrix_kernels() -> None:
         values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, matrix, 0, 2, 2, 2
     )
     _csr_weighted_bincount_channels(values, csr_indices, csr_indptr, 2, codes, matrix, 0, 2, 2)
-    for first in (codes, frozen_codes):
-        _weighted_hist_channels(first, None, matrix, 0, 2, 2, 1)
-        for second in (codes, frozen_codes):
-            _weighted_hist_channels(first, second, matrix, 0, 2, 2, 2)
+    _weighted_hist_channels(codes, None, matrix, 0, 2, 2, 1)
+    _weighted_hist_channels(codes, codes, matrix, 0, 2, 2, 2)
     _weighted_bincount_2d(codes, values, matrix, 2)
     # Support crosses pass read-only C-contiguous operands and a fresh output.
     frozen_values = values.copy()
@@ -1375,9 +1368,7 @@ def _warmup_group_matrix_kernels() -> None:
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
     cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
-    for first in (codes, frozen_codes):
-        for second in (codes, frozen_codes):
-            _cell_csr_matches(cell_ptr, cell_order, first, second, 2, 2)
+    _cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
     bin1, bin2 = _gather_cell_order(cell_order, codes, codes)
     w = values[cell_order]
     # Two raw columns per margin at band width two: every window starts at 0.
@@ -1394,13 +1385,6 @@ def _warmup_group_matrix_kernels() -> None:
         values, csr_indices, csr_indptr, codes, values, values, 2, 2
     )
     _factor_smooth_support_cell_aggregates(codes, codes, values, values, 2, 2)
-    _factor_smooth_csr_dense_cross(
-        values, csr_indices, csr_indptr, codes, values, frozen_matrix, 2, 2
-    )
-    _factor_smooth_support_dense_cross(matrix, codes, codes, values, frozen_matrix, 2)
-    _factor_smooth_support_dense_cell_aggregates(codes, codes, values, frozen_matrix, 2, 2)
-    _dense_small_weighted_moments(frozen_matrix, values, values)
-    _fused_2d_bincount_2(codes, codes, values, values, 2, 2)
     _pattern_support_summaries(
         row_patterns,
         unique_codes,
@@ -1416,9 +1400,8 @@ def _warmup_group_matrix_kernels() -> None:
     _cat_cat_weighted_crosstab(codes, codes, values, 2, 2)
     frozen_weights = values.copy()
     frozen_weights.setflags(write=False)
-    for level_codes in (codes, frozen_codes):
-        for level_weights in (values, frozen_weights):
-            _level_sums(level_codes, level_weights, 3)
+    for level_weights in (values, frozen_weights):
+        _level_sums(codes, level_weights, 3)
     # SuperLSS hands over its packed curvature and score channels as they are:
     # read-only columns (binned), read-only strided ones (exact), and writable
     # strided score columns.  Copying them into SuperGLM's form at the predictor
