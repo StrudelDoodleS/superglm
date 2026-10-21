@@ -162,15 +162,16 @@ def test_the_route_moves_no_fitted_value(kind):
 
 
 def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
-    """On each grey-zone kind: the deflated route decides as the full factor; the Gram's tolerance may not.
+    """On each grey-zone kind: the deflated route decides as the full factor; the Gram cannot.
 
     Thin levels and tensor cells are exact nulls (equilibrated eigenvalues of
     round-off, ~1e-17 of the largest), far below either cut.  The
     near-collinear pair has ``sigma^2 / sigma_max^2`` near ``1e-15``: above
-    the factor's boundary ``eps`` and below the Gram's tolerance ``n eps``.
+    the factor's boundary ``eps`` and below the Gram's resolution ``n eps``.
     The full factor keeps it and so does the deflated route, which factors
-    those rows; ``decompose_gram`` alone drops it and reports both
-    coefficients not estimable.
+    those rows; the Gram cannot certify that direction, so it is not
+    authoritative there.  Which side of its own cut ``eigh`` puts an
+    eigenvalue below its resolution is round-off, so that is not asserted.
     """
     grams = []
     decide = rank.decide_data_rank
@@ -191,8 +192,7 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
         if kind == "near_collinear_pair":
             assert deflated.grey_subspace is not None
             assert full.rank == full.width
-            assert tolerance.rank == full.rank - 1
-            assert int(np.sum(~tolerance.coefficient_estimable())) == 2
+            assert rank.decompose_gram_if_authoritative(grams[0], psd_by_construction=True) is None
         else:
             assert tolerance.rank == full.rank
 
@@ -302,9 +302,10 @@ def test_the_certificate_carries_the_structural_residual(bound):
         assert info["structural_residual"] >= rank.SHARED_RANK_POLICY.factor_rcond
 
 
+@pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
-def test_grey_projection_is_the_rows_product(kind, discrete):
+def test_grey_projection_is_the_rows_product(kind, discrete, blocks, monkeypatch):
     """``grouped_projected_factor`` is ``R`` of ``A V`` and ``A'A V``, against the dense design.
 
     ``A = sqrt(W) (X - c)``.  Each entry of ``A'(AV)`` is within
@@ -312,6 +313,10 @@ def test_grey_projection_is_the_rows_product(kind, discrete):
     the routine's rounding count plus the dense reference's own ``n + p``;
     ``R'R`` adds the TSQR's backward error.  Exact and binned designs
     reach the gather, one-hot, spline-by-level and dense-rows routes.
+    ``many_blocks`` cuts the rows into 64-row blocks and 256-row spans
+    (about 24 and 6 here), so the per-block row offsets and the span flush
+    run.  Mutation check: dropping ``- offset`` in ``_gather_table_rows_at``
+    fails it.
     """
     frame, y, features, interactions = FIXTURES[kind]()
     model = SuperGLM(
@@ -324,6 +329,9 @@ def test_grey_projection_is_the_rows_product(kind, discrete):
     X = dm.toarray()
     centre = (W @ X) / W.sum()
     basis = rng.normal(size=(dm.p, 3))
+    if blocks == "many_blocks":
+        monkeypatch.setattr(centered_system, "_GREY_LEAF_ROWS", 64)
+        monkeypatch.setattr(centered_system, "_GREY_SPAN_ROWS", 256)
     factor, cross, roundings, _ = centered_system.grouped_projected_factor(
         dm, W, basis, center=centre
     )

@@ -771,8 +771,10 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
         calls.append(len(W))
         return original_projection(dm, W, basis, **kwargs)
 
-    # The data rank reads the rows once, through its grey subspace
-    # (``rank.decompose_gram_deflated``) or, failing that, the full factor.
+    # The grey-subspace pass (``rank.decompose_gram_deflated``) reads the
+    # rows once; a failed certificate would add the full factor's pass, so
+    # ``[n]`` also says the certificate passes here (the nulls are exact
+    # aliases, far from the cut).
     monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
     monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
     model = SuperGLM(
@@ -889,8 +891,10 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
         calls.append(len(W))
         return original_projection(dm, W, basis, **kwargs)
 
-    # The data rank reads the rows once, through its grey subspace
-    # (``rank.decompose_gram_deflated``) or, failing that, the full factor.
+    # The grey-subspace pass (``rank.decompose_gram_deflated``) reads the
+    # rows once; a failed certificate would add the full factor's pass, so
+    # ``[n]`` also says the certificate passes here (the nulls are exact
+    # aliases, far from the cut).
     monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
     monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
     model = SuperGLM(
