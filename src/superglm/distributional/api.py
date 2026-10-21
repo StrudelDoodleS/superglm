@@ -66,8 +66,8 @@ from superglm.distributional.posterior import (
     CovarianceKind,
     PosteriorDraws,
     Quantity,
+    _resolved_posterior_covariance,
     posterior_bounds,
-    posterior_covariance,
     posterior_draws,
     posterior_predictive,
 )
@@ -1682,9 +1682,12 @@ class SuperLSS:
         parameters held at their estimates; ``covariance="corrected"`` asks
         instead for the smoothing-uncertainty correction of Wood, Pya and
         Säfken (2016), using either trusted published curvature or one
-        authenticated replay from a stationary fit's retained rows.  Compact
-        fits without published curvature and untrusted fits refuse.  One draw
-        set can be reused across quantities.
+        authenticated replay from the fit's retained rows.  A fit whose
+        smoothing did not stop stationary is corrected about its own point
+        with a ``ConvergenceWarning``; where no correction can be formed the
+        draws use the fixed covariance, say so in a ``ConvergenceWarning``,
+        and carry ``covariance_kind="fixed"``.  One draw set can be reused
+        across quantities.
         """
         return posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
 
@@ -1967,14 +1970,13 @@ class SuperLSS:
                     frame,
                     name,
                     term,
-                    covariance=covariance,
                     **kwargs,
                 )
                 for term in selected
             )
             for name, selected in selections.items()
         }
-        matrix = posterior_covariance(fitted, kind=covariance)
+        matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
         figures: dict[str, Any] = {}
         for name, panels in prepared.items():
             figures[name] = render(
@@ -1983,6 +1985,7 @@ class SuperLSS:
                         fitted,
                         panel,
                         matrix,
+                        resolved,
                     )
                     for panel in panels
                 ],

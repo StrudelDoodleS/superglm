@@ -12,6 +12,7 @@ from scipy import special, stats
 
 from superglm import Categorical, Spline
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
@@ -253,14 +254,17 @@ def test_draws_come_from_the_fitted_bayesian_posterior(fit_case) -> None:
     assert not np.array_equal(posterior_draws(fitted, 500, seed=2).coefficients, drawn.coefficients)
 
 
-def test_corrected_covariance_refuses_a_compact_fit_without_a_smoothing_hessian(fit_case) -> None:
+def test_corrected_covariance_discloses_a_compact_fit_without_a_smoothing_hessian(
+    fit_case,
+) -> None:
     fitted, _, _ = fit_case
     assert fitted.smoothing.smoothing_hessian is None
     compact_state = dataclasses.replace(fitted.fit_state, retained_rows=None)
     compact = DenseDistributionalModel(family=fitted.family, _fit_state=compact_state)
 
-    with pytest.raises(RuntimeError, match="retained training rows"):
-        posterior_covariance(compact, kind="corrected")
+    with pytest.warns(ConvergenceWarning, match="unavailable.*retained training rows"):
+        covariance = posterior_covariance(compact, kind="corrected")
+    np.testing.assert_array_equal(covariance, posterior_covariance(fitted, kind="fixed"))
     with pytest.raises(ValueError, match="'fixed' or 'corrected'"):
         posterior_covariance(fitted, kind="bogus")
 
@@ -816,6 +820,7 @@ def _corrected_shim(*, lambdas, gradient, hessian, penalties=()) -> SimpleNamesp
     shim = _covariance_shim(np.eye(2))
     terminal = shim.result
     terminal.solve_terminal = lambda rhs: np.asarray(rhs, dtype=float)
+    terminal.converged = True
     terminal.family_likelihood_plan_identifier = "authenticated-shim-plan"
     terminal.coefficient_face = None
     terminal.config = SimpleNamespace(coefficient_curvature="observed")
@@ -848,32 +853,28 @@ def _corrected_shim(*, lambdas, gradient, hessian, penalties=()) -> SimpleNamesp
 
 
 def test_the_smoothing_hessian_row_order_is_asserted_not_assumed() -> None:
+    """A Hessian whose rows cannot be matched to its smoothing parameters is not applied.
+
+    The conditional covariance comes back with the cause disclosed; the parent raised it.
+    """
     lambdas = {"location:x#wiggle": 1.0, "scale:x#wiggle": 2.0}
     names = tuple(lambdas)
-
-    with pytest.raises(RuntimeError, match="no row order"):
-        posterior_covariance(
-            _corrected_shim(lambdas=lambdas, gradient=None, hessian=np.eye(2)), kind="corrected"
-        )
-    with pytest.raises(RuntimeError, match="lambda order"):
-        posterior_covariance(
-            _corrected_shim(
-                lambdas=lambdas,
-                gradient={names[1]: 0.0, names[0]: 0.0},
-                hessian=np.eye(2),
-            ),
-            kind="corrected",
-        )
-    with pytest.raises(RuntimeError, match="square"):
-        posterior_covariance(
-            _corrected_shim(lambdas=lambdas, gradient={names[0]: 0.0}, hessian=np.eye(2)),
-            kind="corrected",
-        )
-    with pytest.raises(RuntimeError, match="no layout penalty"):
-        posterior_covariance(
-            _corrected_shim(lambdas=lambdas, gradient={names[0]: 0.0}, hessian=np.eye(1)),
-            kind="corrected",
-        )
+    shims = {
+        "no row order": _corrected_shim(lambdas=lambdas, gradient=None, hessian=np.eye(2)),
+        "lambda order": _corrected_shim(
+            lambdas=lambdas,
+            gradient={names[1]: 0.0, names[0]: 0.0},
+            hessian=np.eye(2),
+        ),
+        "square": _corrected_shim(lambdas=lambdas, gradient={names[0]: 0.0}, hessian=np.eye(2)),
+        "no layout penalty": _corrected_shim(
+            lambdas=lambdas, gradient={names[0]: 0.0}, hessian=np.eye(1)
+        ),
+    }
+    for cause, shim in shims.items():
+        with pytest.warns(ConvergenceWarning, match=f"unavailable for this fit: .*{cause}"):
+            covariance = posterior_covariance(shim, kind="corrected")
+        np.testing.assert_array_equal(covariance, np.eye(2))
 
 
 def test_posterior_draws_defend_their_own_shape() -> None:

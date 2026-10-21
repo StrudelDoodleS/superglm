@@ -12,6 +12,7 @@ import pytest
 from scipy import stats
 
 from superglm import Categorical, Numeric, Spline
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional import terms as terms_module
 from superglm.distributional.families.gaussian import GaussianLS
@@ -443,11 +444,11 @@ def test_summary_prepares_a_later_missing_term_column_before_covariance(
     ordered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
     calls: list[str] = []
 
-    def covariance_spy(model, *, kind="fixed") -> np.ndarray:
+    def covariance_spy(model, kind="fixed") -> tuple[np.ndarray, str]:
         calls.append(kind)
-        return np.asarray(model.inference.covariance)
+        return np.asarray(model.inference.covariance), kind
 
-    monkeypatch.setattr(terms_module, "posterior_covariance", covariance_spy)
+    monkeypatch.setattr(terms_module, "_resolved_posterior_covariance", covariance_spy)
     with pytest.raises(KeyError, match="w"):
         summary_table(ordered, frame.drop(columns="w"), covariance="corrected")
 
@@ -679,10 +680,13 @@ def test_absorption_note_finds_the_interaction_on_integer_labels() -> None:
     assert module._absorption_note(fitted, "location", "1", 0.0, np.ones(1)) == "absorbed by 0:1:sz"
 
 
-def test_corrected_covariance_refuses_without_retained_rows(fit_case) -> None:
+def test_corrected_covariance_without_retained_rows_discloses_fixed_bands(fit_case) -> None:
     fitted, frame = fit_case
     compact_state = dataclasses.replace(fitted.fit_state, retained_rows=None)
     compact = DenseDistributionalModel(family=fitted.family, _fit_state=compact_state)
 
-    with pytest.raises(RuntimeError, match="retained training rows"):
-        term_effect(compact, frame, "location", "x", covariance="corrected", n_points=8)
+    with pytest.warns(ConvergenceWarning, match="unavailable.*retained training rows"):
+        effect = term_effect(compact, frame, "location", "x", covariance="corrected", n_points=8)
+    fixed = term_effect(fitted, frame, "location", "x", covariance="fixed", n_points=8)
+    assert effect.covariance_kind == "fixed"
+    np.testing.assert_array_equal(effect.se, fixed.se)

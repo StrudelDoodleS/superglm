@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import warnings
 from collections.abc import Callable
 
@@ -18,15 +19,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from superglm import Spline, SuperLSS
-from superglm.diagnostics.convergence import ConvergenceWarning
+from superglm.diagnostics.convergence import (
+    ConvergenceWarning,
+    lss_corrected_covariance_nonstationary_message,
+)
 from superglm.distributional import Predictor
 from superglm.distributional import api as api_module
 from superglm.distributional import posterior as posterior_module
 from superglm.distributional import terms as terms_module
+from superglm.distributional.efs import DistributionalEFSConfig
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
-from superglm.distributional.model import DenseDistributionalModel
-from superglm.distributional.posterior import posterior_covariance
+from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
+from superglm.distributional.posterior import posterior_covariance, posterior_draws
 from superglm.distributional.serialization import distributional_manifest
 from superglm.distributional.smoothing.derivatives import (
     LamlDerivativeError,
@@ -37,6 +42,8 @@ from superglm.distributional.smoothing.derivatives import (
 )
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.distributional.terms import summary_table, term_effect, term_test
+from superglm.distributional.weights import WeightContract
+from superglm.types import LambdaPolicy
 
 
 @pytest.fixture(scope="module")
@@ -175,14 +182,52 @@ def _install_derivative_spy(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 
 
 def _install_covariance_spy(monkeypatch: pytest.MonkeyPatch, module) -> list[str]:
+    """Record every covariance resolution ``module`` makes, by either entry point."""
     calls: list[str] = []
 
     def spy(fitted, *, kind="fixed") -> np.ndarray:
         calls.append(kind)
         return posterior_covariance(fitted, kind=kind)
 
-    monkeypatch.setattr(module, "posterior_covariance", spy)
+    def resolved_spy(fitted, kind):
+        calls.append(kind)
+        return posterior_module._resolved_posterior_covariance(fitted, kind)
+
+    if hasattr(module, "posterior_covariance"):
+        monkeypatch.setattr(module, "posterior_covariance", spy)
+    monkeypatch.setattr(module, "_resolved_posterior_covariance", resolved_spy)
     return calls
+
+
+def _assert_conditional_disclosure(fitted: DenseDistributionalModel, cause: str) -> np.ndarray:
+    """A correction that cannot be formed returns the conditional covariance and names why.
+
+    The parent raised ``RuntimeError`` with ``cause`` instead.
+    """
+    with pytest.warns(ConvergenceWarning, match="corrected covariance is unavailable") as record:
+        covariance = posterior_covariance(fitted, kind="corrected")
+    assert any(re.search(cause, str(item.message)) for item in record), [
+        str(item.message) for item in record
+    ]
+    assert np.all(np.isfinite(covariance))
+    np.testing.assert_array_equal(covariance, covariance.T)
+    np.testing.assert_array_equal(covariance, posterior_covariance(fitted, kind="fixed"))
+    posterior_module._posterior_covariance_factor(covariance)  # semidefinite at resolution
+    return covariance
+
+
+def _assert_open_stop_disclosure(
+    fitted: DenseDistributionalModel, reason: str, expected: np.ndarray
+) -> None:
+    """A stop that is not certified stationary is corrected about its own point, disclosed.
+
+    The parent refused every such stop (``"stationary smoothing result"``).
+    """
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        covariance = posterior_covariance(fitted, kind="corrected")
+    assert any(f"reason {reason!r}" in str(item.message) for item in record)
+    assert not any("unavailable" in str(item.message) for item in record)
+    np.testing.assert_array_equal(covariance, expected)
 
 
 def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationary_case) -> None:
@@ -206,40 +251,78 @@ def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationa
     assert distributional_manifest(fitted) == manifest
 
 
-def test_compact_fit_refuses_lazy_corrected_covariance(stationary_case) -> None:
+def test_compact_fit_discloses_the_conditional_covariance(stationary_case) -> None:
     fitted, _ = stationary_case
     compact_state = dataclasses.replace(fitted.fit_state, retained_rows=None)
     compact = DenseDistributionalModel(family=fitted.family, _fit_state=compact_state)
 
-    with pytest.raises(RuntimeError, match="retained training rows"):
-        posterior_covariance(compact, kind="corrected")
+    _assert_conditional_disclosure(compact, "retained training rows.*retain_rows=True")
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        draws = posterior_draws(compact, 8, covariance="corrected")
+    assert draws.covariance_kind == "fixed"
 
 
 @pytest.mark.parametrize(
     ("reason", "converged"),
     [("practical_plateau", True), ("gradient_unresolved", False)],
 )
-def test_nonstationary_or_failed_stop_refuses_replay(
+def test_nonstationary_or_failed_stop_is_corrected_about_its_own_point(
     stationary_case,
     reason: str,
     converged: bool,
 ) -> None:
     fitted, _ = stationary_case
     altered = _with_smoothing_stop(fitted, reason=reason, converged=converged)
+    expected = posterior_covariance(fitted, kind="corrected")
 
-    with pytest.raises(RuntimeError, match="stationary smoothing result"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_open_stop_disclosure(altered, reason, expected)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        draws = posterior_draws(altered, 8, covariance="corrected")
+    assert draws.covariance_kind == "corrected"
 
 
-def test_failed_stop_without_terminal_gradient_refuses_before_row_replay(stationary_case) -> None:
+def test_failed_stop_without_terminal_gradient_replays_its_own_names(stationary_case) -> None:
     fitted, _ = stationary_case
-    altered = _with_smoothing_stop(fitted, reason="efs_not_converged", converged=False)
+    altered = _with_smoothing_stop(fitted, reason="max_iterations", converged=False)
     assert altered.smoothing is not None
     object.__setattr__(altered.smoothing, "terminal_gradient", None)
     object.__setattr__(altered.smoothing, "terminal_gradient_certificate", None)
 
-    with pytest.raises(RuntimeError, match="stationary smoothing result"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_open_stop_disclosure(
+        altered, "max_iterations", posterior_covariance(fitted, kind="corrected")
+    )
+
+
+def test_open_stop_without_retained_rows_discloses_the_conditional_covariance(
+    published_case,
+) -> None:
+    """A Hessian published before a stop that is not stationary may describe an earlier iterate."""
+    published, _ = published_case
+    altered = _with_smoothing_stop(published, reason="lambda_change", converged=True)
+    compact = DenseDistributionalModel(
+        family=altered.family,
+        _fit_state=dataclasses.replace(altered.fit_state, retained_rows=None),
+    )
+    assert compact.smoothing is not None and compact.smoothing.smoothing_hessian is not None
+
+    _assert_conditional_disclosure(compact, "retained training rows")
+
+
+def test_unconverged_coefficient_fit_discloses_the_conditional_covariance(
+    stationary_case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J = d beta / d rho needs a maximum of the penalized likelihood; none was reached."""
+    fitted, _ = stationary_case
+    terminal = dataclasses.replace(fitted.result)
+    object.__setattr__(terminal, "converged", False)
+    altered = _with_terminal_result(fitted, terminal)
+    assert altered.smoothing is not None
+    object.__setattr__(altered.smoothing, "convergence_reason", "coefficient_not_converged")
+    object.__setattr__(altered.smoothing, "converged", False)
+    calls = _install_derivative_spy(monkeypatch)
+
+    _assert_conditional_disclosure(altered, "final coefficient fit did not converge")
+    assert calls == []
 
 
 @pytest.mark.parametrize("source", ["fit_state", "terminal_result"])
@@ -259,8 +342,7 @@ def test_plan_identifier_must_match_fit_state_and_terminal_result(
         )
         altered = _with_terminal_result(fitted, terminal)
 
-    with pytest.raises(RuntimeError, match="likelihood plan identifier"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "likelihood plan identifier")
 
 
 def test_rebound_plan_identifier_must_match_both_stored_authorities(stationary_case) -> None:
@@ -276,8 +358,7 @@ def test_rebound_plan_identifier_must_match_both_stored_authorities(stationary_c
         "forged-plan",
     )
 
-    with pytest.raises(RuntimeError, match="replay produced a different likelihood plan"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "replay produced a different likelihood plan")
 
 
 def test_retained_rows_must_preserve_root_weight_provenance(stationary_case) -> None:
@@ -287,8 +368,7 @@ def test_retained_rows_must_preserve_root_weight_provenance(stationary_case) -> 
     object.__setattr__(state, "weight_provenance", forged)
     altered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
 
-    with pytest.raises(RuntimeError, match="root weight provenance"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "root weight provenance")
 
 
 def test_terminal_result_identity_must_match_the_smoothing_authority(stationary_case) -> None:
@@ -297,8 +377,7 @@ def test_terminal_result_identity_must_match_the_smoothing_authority(stationary_
     object.__setattr__(state, "solver_result", dataclasses.replace(fitted.result))
     altered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
 
-    with pytest.raises(RuntimeError, match="terminal-result provenance"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "terminal-result provenance")
 
 
 def test_terminal_lambda_mapping_must_match_the_smoothing_authority(stationary_case) -> None:
@@ -310,8 +389,7 @@ def test_terminal_lambda_mapping_must_match_the_smoothing_authority(stationary_c
     object.__setattr__(state, "lambdas", lambdas)
     altered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
 
-    with pytest.raises(RuntimeError, match="smoothing provenance"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "smoothing provenance")
 
 
 def test_terminal_face_must_match_the_fit_state_authority(stationary_case) -> None:
@@ -321,8 +399,7 @@ def test_terminal_face_must_match_the_fit_state_authority(stationary_case) -> No
     object.__setattr__(state, "exact_face_components", (fitted.layout.penalty_names[0],))
     altered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
 
-    with pytest.raises(RuntimeError, match="active-face provenance"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "active-face provenance")
 
 
 @pytest.mark.parametrize("source", ["fisher", "nearest_semidefinite"])
@@ -355,8 +432,7 @@ def test_a_substitute_replay_is_authenticated_against_the_stored_gradient(
         return real_laml_derivatives(*args, **kwargs)
 
     monkeypatch.setattr(posterior_module, "laml_derivatives", spy, raising=False)
-    with pytest.raises(RuntimeError, match="disagree with the stored terminal gradient"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, "disagree with the stored terminal gradient")
 
     assert sources == ["terminal"]
     # A request for observed derivatives (laml_derivatives' default) refuses it outright.
@@ -402,18 +478,22 @@ def test_observed_terminal_curvature_needs_no_substitute(stationary_case, mutati
     ],
     ids=["reason", "converged", "gradient-unresolved", "objective-rejected"],
 )
-def test_published_hessian_requires_a_converged_stationary_stop(
+def test_published_hessian_serves_only_a_converged_stationary_stop(
     published_case,
+    monkeypatch: pytest.MonkeyPatch,
     reason: str,
     converged: bool,
 ) -> None:
+    """Any other stop replays its own terminal point instead of trusting the published Hessian."""
     published, _ = published_case
     altered = _with_smoothing_stop(published, reason=reason, converged=converged)
     assert altered.smoothing is not None
     assert altered.smoothing.smoothing_hessian is not None
+    expected = posterior_covariance(published, kind="corrected")
+    calls = _install_derivative_spy(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="stationary smoothing result"):
-        posterior_covariance(altered, kind="corrected")
+    _assert_open_stop_disclosure(altered, reason, expected)
+    assert calls == [True]
 
 
 def _published_terminal_identity_mismatch(
@@ -503,8 +583,7 @@ def test_published_hessian_authenticates_every_terminal_authority(
     assert altered.smoothing is not None
     assert altered.smoothing.smoothing_hessian is not None
 
-    with pytest.raises(RuntimeError, match=message):
-        posterior_covariance(altered, kind="corrected")
+    _assert_conditional_disclosure(altered, message)
 
 
 @pytest.mark.parametrize(
@@ -591,8 +670,7 @@ def test_replayed_derivatives_must_authenticate_terminal_evidence(
     fitted, _ = stationary_case
     _install_derivative_transform(monkeypatch, transform)
 
-    with pytest.raises(RuntimeError, match=message):
-        posterior_covariance(fitted, kind="corrected")
+    _assert_conditional_disclosure(fitted, message)
 
 
 @pytest.mark.parametrize("coordinate", ["rank", "source", "face"])
@@ -615,8 +693,7 @@ def test_replayed_derivative_provenance_coordinates_are_authenticated_independen
 
     _install_derivative_transform(monkeypatch, alter_one_coordinate)
 
-    with pytest.raises(RuntimeError, match="derivative provenance"):
-        posterior_covariance(fitted, kind="corrected")
+    _assert_conditional_disclosure(fitted, "derivative provenance")
 
 
 def test_replayed_gradient_agrees_within_the_sum_of_certificates(
@@ -678,11 +755,10 @@ def test_replayed_hessian_and_certificate_must_be_trusted(
     fitted, _ = stationary_case
     _install_derivative_transform(monkeypatch, transform)
 
-    with pytest.raises(RuntimeError, match=message):
-        posterior_covariance(fitted, kind="corrected")
+    _assert_conditional_disclosure(fitted, message)
 
 
-def test_derivative_replay_failure_is_a_clear_refusal(
+def test_derivative_replay_failure_is_disclosed_with_its_root_cause(
     stationary_case,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -692,8 +768,50 @@ def test_derivative_replay_failure_is_a_clear_refusal(
         raise LamlDerivativeError("adversarial derivative failure")
 
     monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
-    with pytest.raises(RuntimeError, match="smoothing derivative replay failed"):
-        posterior_covariance(fitted, kind="corrected")
+    _assert_conditional_disclosure(
+        fitted,
+        r"smoothing derivative replay failed.*LamlDerivativeError: adversarial derivative failure",
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "advises_newton"),
+    [
+        ("lambda_change", True),
+        ("objective_plateau", True),
+        ("practical_plateau", True),
+        ("max_iterations", False),
+        ("gradient_unresolved", False),
+        ("endpoint_revalidation_failed", False),
+    ],
+)
+def test_the_newton_remedy_is_offered_only_to_stops_it_can_improve(
+    reason: str, advises_newton: bool
+) -> None:
+    """A stop the efs+newton endgame itself produced is not told to refit with it."""
+    message = lss_corrected_covariance_nonstationary_message(reason)
+    assert f"reason {reason!r}" in message
+    assert ("outer='efs+newton'" in message) is advises_newton
+    assert "model.diagnose()" in message
+
+
+@pytest.mark.parametrize("defect", [TypeError, AttributeError, KeyError, IndexError])
+def test_a_programming_error_in_the_replay_is_not_disclosed_as_unavailable(
+    stationary_case,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: type[Exception],
+) -> None:
+    """A defect raises as itself; only numerical and derivative failures read as a disclosure."""
+    fitted, _ = stationary_case
+
+    def fail(*args, **kwargs):
+        raise defect("replay defect")
+
+    monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        with pytest.raises(defect, match="replay defect"):
+            posterior_covariance(fitted, kind="corrected")
 
 
 @pytest.mark.parametrize("operation", ["effect", "test"])
@@ -1078,8 +1196,7 @@ def test_published_hessian_still_passes_the_trust_gate(
         certificate=certificate,
     )
 
-    with pytest.raises(RuntimeError, match=message):
-        posterior_covariance(published, kind="corrected")
+    _assert_conditional_disclosure(published, message)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1190,3 +1307,157 @@ def test_fisher_fallback_corrected_covariance_is_computed_and_disclosed(
     with pytest.warns(ConvergenceWarning, match="first-order correction") as record:
         term_effect(fitted, frame, "location", "x", covariance="corrected", n_points=5)
     assert len(record) == 1
+
+
+def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
+    """A default ``outer="efs"`` fit: Fellner--Schall stops, never certified stationary."""
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 320)
+    frame = pd.DataFrame({"x": x})
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0 + 0.5 * np.cos(1.8 * x)) * rng.standard_normal(
+        len(x)
+    )
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor("location", {"x": Spline("cr", k=7)}),
+            Predictor("scale", {"x": Spline("cr", k=5)}),
+        ],
+    ).fit_reml(frame, response, retain_rows=retain_rows)
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None and smoothing.convergence_reason != "stationary"
+    return model, frame
+
+
+def test_a_default_efs_fit_is_corrected_about_its_own_stop() -> None:
+    """The parent refused every ``outer="efs"`` fit ("requires a converged stationary ...")."""
+    model, frame = _efs_fit(retain_rows=True)
+    fitted = model._require_fitted()
+    assert fitted.smoothing is not None
+    reason = fitted.smoothing.convergence_reason
+    fixed = posterior_covariance(fitted, kind="fixed")
+
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert [f"reason {reason!r}" in str(item.message) for item in record] == [True]
+    assert np.all(np.isfinite(corrected))
+    np.testing.assert_array_equal(corrected, corrected.T)
+    posterior_module._posterior_covariance_factor(corrected)
+    # V + R R' adds a nonnegative square to every diagonal entry, exactly monotone.
+    assert np.all(np.diag(corrected) >= np.diag(fixed))
+    assert np.any(np.diag(corrected) > np.diag(fixed))
+
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        effect = model.term_inference("location", "x", covariance="corrected", n_points=5)
+    assert effect.covariance_kind == "corrected"
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        model.summary(covariance="corrected", X_train=frame)
+
+
+def test_an_efs_fit_without_retained_rows_discloses_fixed_inference() -> None:
+    """The parent raised "needs retained training rows" from every public surface."""
+    model, frame = _efs_fit(retain_rows=False)
+    fitted = model._require_fitted()
+
+    _assert_conditional_disclosure(fitted, "retained training rows.*retain_rows=True")
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    _assert_conditional_disclosure(restored._require_fitted(), "retained training rows")
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        draws = model.posterior_draws(16, covariance="corrected")
+    assert draws.covariance_kind == "fixed"
+    np.testing.assert_array_equal(
+        draws.coefficients, model.posterior_draws(16, covariance="fixed").coefficients
+    )
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        effect = model.term_inference(
+            "location", "x", covariance="corrected", n_points=5, X_train=frame
+        )
+    assert effect.covariance_kind == "fixed"
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        curves = model.risk_curves({}, "x", n_draws=8, covariance="corrected")
+    assert curves.covariance == "fixed"
+    assert curves.to_json()["covariance"] == "fixed"
+
+    note = "corrected covariance unavailable: fixed shown"
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        table = model.summary(covariance="corrected", X_train=frame)
+    assert len(table) > 0 and all(note in text for text in table["note"])
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        outcome = model.term_test("location", "x", covariance="corrected", X_train=frame)
+    assert outcome.note == note
+    assert outcome.to_json()["note"] == note
+    fixed_table = model.summary(covariance="fixed", X_train=frame)
+    assert not any("unavailable" in text for text in fixed_table["note"])
+    assert model.term_test("location", "x", X_train=frame).note == ""
+
+
+def test_a_corrected_covariance_that_is_formed_carries_no_unavailable_note() -> None:
+    """The note and the resolved kind appear only on a fallback."""
+    model, frame = _efs_fit(retain_rows=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        curves = model.risk_curves({}, "x", n_draws=8, covariance="corrected")
+    assert curves.covariance == "corrected"
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        table = model.summary(covariance="corrected", X_train=frame)
+    assert not any("unavailable" in text for text in table["note"])
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        outcome = model.term_test("location", "x", covariance="corrected", X_train=frame)
+    assert outcome.note == ""
+
+
+def test_a_fixed_only_fit_is_corrected_without_a_replay_or_a_warning() -> None:
+    """Every smoothing component fixed: nothing is uncertain, so nothing is replayed.
+
+    Without the ``fixed_only`` clause this fit takes the non-stationary replay,
+    where ``laml_derivatives`` finds no estimated component and the call warns
+    that the correction is unavailable and returns the ``"fixed"`` kind.
+    """
+    x = np.linspace(0.0, 1.0, 72)
+    rng = np.random.default_rng(1823)
+    response = 0.35 + 0.8 * np.sin(2.0 * np.pi * x) + rng.normal(scale=0.3, size=len(x))
+    fitted = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=(
+            Predictor(
+                "location",
+                {
+                    "x": Spline(
+                        kind="cr", n_knots=6, lambda_policy={"wiggle": LambdaPolicy.fixed(0.75)}
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ),
+        lambdas={"location:x#wiggle": 99.0},
+        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=3),
+    )
+    assert fitted.smoothing is not None
+    assert fitted.smoothing.convergence_reason == "fixed_only"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        corrected = posterior_covariance(fitted, kind="corrected")
+        draws = posterior_draws(fitted, 8, covariance="corrected")
+    np.testing.assert_array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
+    assert draws.covariance_kind == "corrected"
+    assert posterior_module._resolved_posterior_covariance(fitted, "corrected")[1] == "corrected"
+
+
+def test_a_fixed_smoothing_fit_has_no_smoothing_uncertainty_to_correct() -> None:
+    """With every lambda supplied, V is already the corrected covariance (the parent raised)."""
+    model, frame = _efs_fit(retain_rows=True)
+    lambdas = dict(model._require_fitted().lambdas)
+    fixed_model = model_from_templates(
+        family=GaussianLS(),
+        predictors=model._require_fitted().fit_state.predictor_templates,
+    ).fit(frame, model._require_fitted().fit_state.retained_rows.response, lambdas=lambdas)
+    fitted = fixed_model._require_fitted()
+    assert fitted.smoothing is None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        corrected = posterior_covariance(fitted, kind="corrected")
+    np.testing.assert_array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
