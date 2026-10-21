@@ -238,6 +238,7 @@ def test_the_criterion_change_exempts_only_bases_that_predate_it() -> None:
     assert release_differential.flags(name, _record(), worse, "v0.40.0") == []
     assert release_differential.flags(name, _record(), worse, "v0.41.0")
     assert release_differential.flags(name, _record(), worse, "v0.42.0")
+    assert release_differential.flags(name, _record(), worse, "v0.41")  # read as 0.41.0
 
 
 @pytest.mark.parametrize("ref", ["master", "3681b0c1", "v0.41.0rc1"])
@@ -248,11 +249,15 @@ def test_a_base_that_is_not_a_release_tag_is_compared_without_a_criterion_exempt
     assert release_differential.flags(name, _record(), _record(objective=1001.0), ref)
 
 
+@pytest.mark.parametrize(
+    ("ref", "stem"), [("v0.40.0", "v0.40.0"), ("origin/master", "origin_master")]
+)
 def test_the_release_command_gives_the_baseline_an_absolute_output_path(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, ref, stem
 ) -> None:
     """The baseline runs with its own tree as the working directory, so a relative --out
-    would point inside that tree. Fails on eedfa48e, which passed the path as given."""
+    would point inside that tree. Fails on eedfa48e, which passed the path as given. A
+    ref with a slash names a flat file (fails on 951f0e4: ``results/origin/master``)."""
     from types import SimpleNamespace
 
     launched = []
@@ -270,10 +275,10 @@ def test_the_release_command_gives_the_baseline_an_absolute_output_path(
     monkeypatch.setattr(release_differential, "load", lambda path: {})
     monkeypatch.chdir(tmp_path)
 
-    assert release_differential.main(["release", "v0.40.0", "--out", "results"]) == 0
+    assert release_differential.main(["release", ref, "--out", "results"]) == 0
     baseline = Path(launched[0][launched[0].index("--out") + 1])
     assert baseline.is_absolute()
-    assert baseline == tmp_path / "results" / "v0.40.0.jsonl"
+    assert baseline == tmp_path / "results" / f"{stem}.jsonl"
 
 
 @pytest.mark.slow
