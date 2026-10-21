@@ -7,7 +7,7 @@ import itertools
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Any, Literal
 
@@ -1147,6 +1147,29 @@ class RankInfo:
     feature_edf: NDArray
     group_edf: Mapping[str, float]
     objective_loss: float | None
+    # The centred data Gram ``data`` was decided from, at the fit's final
+    # weights. Owner: this record, from the fit until the first retained-fit
+    # inference (or the fit's release) takes it with ``take_data_gram``, which
+    # clears it. A record replaced after a refit starts without one, and the
+    # reader forms its own. ``None`` for a record not built from a dense
+    # centred system.
+    data_gram: NDArray | None = field(default=None, repr=False, compare=False)
+
+    def take_data_gram(self, W: NDArray) -> NDArray | None:
+        """Hand the fit's data Gram to its one reader, leaving none behind.
+
+        ``W`` are the weights the reader works at. The Gram is returned only
+        when their sum is the one the fit's centred system recorded, formed the
+        same way (``build_centered_system``): a copy of the record that is read
+        against other weights, such as an edited design, forms its own Gram.
+        """
+        gram = self.data_gram
+        if gram is None:
+            return None
+        object.__setattr__(self, "data_gram", None)
+        if gram.shape != (len(self.mean_x), len(self.mean_x)):
+            return None
+        return gram if float(np.sum(W, dtype=np.float64)) == self.sum_w else None
 
     @property
     def total_edf(self) -> float:

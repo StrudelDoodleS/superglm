@@ -530,7 +530,11 @@ def fit_inference_info(model):
                 "group_edf_map": dict(rank_info.group_edf),
                 "coefficient_estimable": rank_info.coefficient_estimable(),
             }
-        data_gram = _rank_centered_data_gram(X_active, W)
+        # The fit formed this Gram to decide the data rank, at the weights it
+        # ended on; only a record without it forms the Gram again.
+        data_gram = rank_info.take_data_gram(W)
+        if data_gram is None:
+            data_gram = _rank_centered_data_gram(X_active, W)
         edf = rank_info.feature_edf[rank_info.selected_columns].copy()
         edf1 = _rank_edf1(rank_info, data_gram, edf)
         eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))

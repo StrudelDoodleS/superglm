@@ -4883,6 +4883,7 @@ def _fit_irls_direct_once(
                     feature_edf=feature_edf,
                     group_edf=group_edf,
                     objective_loss=None,
+                    data_gram=centered_final.data_gram,
                 )
 
             if compute_rank_info or (_defer_rank_info is not None and _use_qr):
