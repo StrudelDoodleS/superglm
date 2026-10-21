@@ -24,9 +24,10 @@ class ConvergenceWarning(UserWarning):
     ``note`` column says so (``SuperLSS.fit``, with fixed smoothing, reports
     it there without a warning). ``SuperLSS`` also warns, and keeps the text
     in ``result_.warnings``, on a fit that may itself have converged: when
-    its final curvature is a substitute (Fisher information or the nearest
-    semidefinite matrix), when its null model did not converge, and when an
-    inner fit stops with ``no_ascent_direction``. The message names the
+    its final curvature is the nearest semidefinite matrix, or is Fisher
+    information for ``NegativeBinomialLS`` (other families' Fisher fallback
+    is silent, as in 0.40), when its null model did not converge, and when
+    an inner fit stops with ``no_ascent_direction``. The message names the
     reason and what to change. Silence it with ``warnings.filterwarnings``
     once the reason is understood.
     """
