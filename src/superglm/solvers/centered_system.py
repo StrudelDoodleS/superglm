@@ -704,10 +704,14 @@ def grouped_structural_nulls(
     candidates are the right singular vectors of ``S_occ`` below ``n_s eps``
     of its largest singular value, and a candidate is kept only when its
     residual is exact to the rounding that measures it: the weighted
-    ``||(S + c) n||`` over the occupied rows and the rows off a level no
+    ``||(S - c) n||`` over the occupied rows and the rows off a level no
     larger than ``gamma_(w + 3)`` of ``(|S| + |c|) |n|`` weighted the same
-    way.  That is LAPACK's deflation rule, which drops only what is at the
-    algorithm's own rounding (``dsteqr``, ``dlaed2``), so the rotation a
+    way.  That is a componentwise form of the rule LAPACK's symmetric
+    tridiagonal QR applies (``dsteqr`` splits only when an off-diagonal is
+    within ``eps sqrt(|d_i d_(i+1)|)``): drop only what is at the
+    algorithm's own rounding.  (``dlaed2``'s divide-and-conquer deflation is
+    normwise, ``8 eps max(|D|, |Z|)``; a normwise allowance is a recorded
+    follow-up.)  So the rotation a
     deflated null causes in the null basis, ``||A n||`` over the weakest
     retained singular value (Wedin, *BIT* 12, 1972), is the full factor's
     own backward error over that value.  A near null, ``n_s eps`` small but

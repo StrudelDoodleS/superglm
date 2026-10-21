@@ -411,7 +411,7 @@ def test_a_near_structural_null_stays_with_its_coupling():
     exactly on columns 0 and 1 and flagged 2 and 3 estimable.  Its residual
     is about 18 times its own rounding, so it stays in the Gram and the grey
     block resolves the pair.  Mutation check: deflating every candidate
-    (5ba183c3) flags ``[F, F, T, T, T]``.
+    that passes the support's ``n_s eps`` cut flags ``[F, F, T, T, T]``.
     """
     from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
     from superglm.group_matrix import DesignMatrix
