@@ -4,6 +4,7 @@ import re
 
 import pytest
 from tests.editor._chart_layout import wait_for_chart_to_fit
+from tests.editor._editor_waits import hold_requests, wait_for_interception
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -202,12 +203,11 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
         select_chart_tool(page, "Select")
         initial_revision = session.model_revision
         select_requests = []
-        held_routes = []
         page.on(
             "request",
             lambda request: select_requests.append(request) if is_select_request(request) else None,
         )
-        page.route("**/select", lambda route: held_routes.append(route))
+        held_routes = hold_requests(page, "**/select")
         remember_selection_dom(page)
         point = page.locator("#chart circle.point[data-index]").first
         selected_index = int(point.get_attribute("data-index"))
@@ -215,6 +215,7 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
         with page.expect_request(is_select_request):
             point.click()
 
+        held_routes.wait()
         assert len(held_routes) == 1
         assert session.selection("curve").tolist() == []
         page.wait_for_function(
@@ -276,14 +277,14 @@ def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_
 
         remember_selection_dom(page)
         authoritative_visuals = selection_visual_state(page)
-        held_routes = []
-        page.route("**/select", lambda route: held_routes.append(route))
+        held_routes = hold_requests(page, "**/select")
         candidate = page.locator("#chart circle.point[data-index]").nth(1)
         candidate_index = int(candidate.get_attribute("data-index"))
 
         with page.expect_request(is_select_request) as request_info:
             candidate.click()
 
+        held_routes.wait()
         assert len(held_routes) == 1
         assert request_info.value.post_data_json == {
             "term": term,
@@ -358,14 +359,14 @@ def test_collapsed_categorical_selection_posts_exact_source_indices_without_redr
         assert [levels[index] for index in source_indices] == list(collapsed_levels)
         assert session.selection("territory").tolist() == []
 
-        held_routes = []
-        page.route("**/select", lambda route: held_routes.append(route))
+        held_routes = hold_requests(page, "**/select")
         remember_selection_dom(page)
         point = page.locator(f'#chart circle.point[data-index="{display_index}"]')
 
         with page.expect_request(is_select_request) as request_info:
             point.click()
 
+        held_routes.wait()
         assert len(held_routes) == 1
         assert request_info.value.post_data_json == {
             "term": "territory",
@@ -729,7 +730,6 @@ def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_e
         initial_markers = page.locator("#chart circle.point[data-index]").count()
         select_requests = []
         select_all_ops = []
-        held_routes = []
 
         def record_request(request) -> None:
             if is_select_request(request):
@@ -742,12 +742,13 @@ def test_select_all_is_incremental_bounded_and_keeps_bounds_behind_points(open_e
                 select_all_ops.append(request)
 
         page.on("request", record_request)
-        page.route("**/select", lambda route: held_routes.append(route))
+        held_routes = hold_requests(page, "**/select")
         remember_selection_dom(page)
 
         with page.expect_request(is_select_request, timeout=1500):
             page.locator('button[data-op="select_all"]').click()
 
+        held_routes.wait()
         assert len(held_routes) == 1
         assert session.selection("curve").tolist() == []
         page.wait_for_function(
@@ -1010,12 +1011,12 @@ def test_tool_rail_popover_closes_when_tool_is_activated(open_editor_page):
 
 def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page, choose_feature):
     with open_editor_page() as (page, _session):
-        held_select = []
-        page.route("**/select", lambda route: held_select.append(route))
+        held_select = hold_requests(page, "**/select")
         point = page.locator("#chart circle.point[data-index]").first
         with page.expect_request(is_select_request):
             point.click()
 
+        held_select.wait()
         assert len(held_select) == 1
         assert page.locator("#appBusyOverlay").is_hidden()
         assert page.locator("#editorView").get_attribute("inert") is None
@@ -1025,8 +1026,7 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page,
         page.unroute("**/select")
 
         select_chart_tool(page, "Handles")
-        held_control = []
-        page.route("**/control", lambda route: held_control.append(route))
+        held_control = hold_requests(page, "**/control")
         handle = page.locator("#chart .control-handle").first
         box = handle.bounding_box()
         assert box is not None
@@ -1037,7 +1037,7 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page,
             page.mouse.down()
             page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2 - 12)
             page.mouse.up()
-        page.wait_for_timeout(50)
+        held_control.wait()
         assert len(held_control) == 1
         assert page.locator("#appBusyOverlay").is_hidden()
         assert page.locator("#editorView").get_attribute("inert") is None
@@ -1048,14 +1048,13 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page,
             held_control[0].continue_()
         page.unroute("**/control")
 
-        held_term = []
-        page.route("**/term", lambda route: held_term.append(route))
+        held_term = hold_requests(page, "**/term")
         with page.expect_request(
             lambda request: request.method == "POST" and request.url.endswith("/term")
         ):
             choose_feature(page, "territory")
 
-        page.wait_for_timeout(50)
+        held_term.wait()
         assert len(held_term) == 1
         assert page.locator("#appBusyOverlay").is_hidden()
         assert page.locator("#editorView").get_attribute("inert") is None
@@ -1201,8 +1200,7 @@ def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_pag
                 };
             }"""
         )
-        held_summary = []
-        page.route("**/summary", lambda route: held_summary.append(route))
+        held_summary = hold_requests(page, "**/summary")
 
         page.locator("#summarySource").evaluate(
             """node => {
@@ -1210,7 +1208,7 @@ def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_pag
                 node.dispatchEvent(new Event('change', { bubbles: true }));
             }"""
         )
-        page.wait_for_timeout(50)
+        held_summary.wait()
         assert len(held_summary) == 1
         page.wait_for_function(
             "() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'true'"
@@ -1756,6 +1754,7 @@ def test_failed_summary_level_display_refresh_remains_retryable(open_editor_page
             else:
                 route.continue_()
 
+        wait_for_interception(page)
         page.route("**/summary", fail_grouped_summary)
         grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
             "radio", name="Grouped"
@@ -1870,6 +1869,7 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
                 },
             )
 
+        wait_for_interception(page)
         page.route("**/summary", fulfill_summary)
         page.evaluate("delete document.documentElement.dataset.summarySandboxEscape")
 
@@ -2168,6 +2168,7 @@ def test_same_term_control_loss_falls_back_to_select_before_drawing(open_editor_
             payload["terms"]["curve"]["controls"] = None
             route.fulfill(response=response, json=payload)
 
+        wait_for_interception(page)
         page.route("**/op", remove_controls)
         with page.expect_response(
             lambda response: (

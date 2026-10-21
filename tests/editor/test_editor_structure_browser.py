@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 import pytest
+from tests.editor._editor_waits import hold_requests
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
 from superglm import read_structure
@@ -826,3 +827,21 @@ def test_new_levels_goes_into_the_structure_file_and_undo_takes_it_back(
                 "term => document.querySelector('#status')?.dataset.term === term", arg=term
             )
             assert control.is_hidden(), term
+
+
+def test_a_directory_typed_before_the_default_arrives_is_kept(open_editor_page, tmp_path):
+    """The dialog fills in the kernel's default directory only if the field is still empty."""
+    with open_editor_page() as (page, _session):
+        default = hold_requests(page, "**/save_directory")
+        page.locator("#exportAction").click()
+        default.wait()
+        directory = page.locator("#exportDirectory")
+        directory.fill(str(tmp_path))
+
+        with page.expect_response(_posted("/save_directory")):
+            default[0].continue_()
+        # Two frames: the page has read the answer and acted on it by then.
+        page.evaluate(
+            "() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))"
+        )
+        assert directory.input_value() == str(tmp_path)

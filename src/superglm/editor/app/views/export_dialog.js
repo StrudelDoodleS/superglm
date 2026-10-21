@@ -188,7 +188,8 @@ export function bindExportDialog({
     if (nodes.directory.value) return;
     try {
       const payload = await client.postJSON("/save_directory", { path: "" });
-      if (hasPath(payload)) nodes.directory.value = payload.path;
+      // A path typed while the default was on its way stays.
+      if (hasPath(payload) && !nodes.directory.value) nodes.directory.value = payload.path;
     } catch (error) {
       nodes.status.textContent = errorMessage(error);
     }
