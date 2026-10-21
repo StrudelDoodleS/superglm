@@ -53,11 +53,12 @@ from superglm.distributional.families.two_piece import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
+from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
 from superglm.features.constraint import ConstraintSpec as ConstraintSpec
-from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
     CategoricalInteraction as CategoricalInteraction,
@@ -159,6 +160,7 @@ from superglm.structure import FeatureStructure, Structure, StructureError, read
 from superglm.terms import (
     BoundInteraction,
     BoundTerm,
+    RedundantInteractionWarning,
     cat,
     interaction,
     re,
@@ -336,6 +338,9 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "ConvergenceWarning",
+    "FactorSmoothGroupTermWarning",
+    "RedundantInteractionWarning",
+    "SplineOptionWarning",
     "SeparationError",
     "SeparationWarning",
     "SlowFitWarning",

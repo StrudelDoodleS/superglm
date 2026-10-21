@@ -72,12 +72,13 @@ def test_interactions_resolve_later_parents_and_keep_partition_order():
         "missing",
         "numeric_parent",
         "invalid",
-        "empty",
+        "same_text",
         "duplicate_interaction",
     ],
 )
 def test_invalid_declarations_are_refused(case):
-    from superglm.terms import cat, normalize_terms, s, ti
+    from superglm.features import Numeric
+    from superglm.terms import cat, normalize_terms, s, term, ti
 
     cases = {
         "duplicate": ("x", cat("x")),
@@ -85,7 +86,7 @@ def test_invalid_declarations_are_refused(case):
         "missing": (s("x"), ti("x", "z")),
         "numeric_parent": ("x", s("z"), ti("x", "z")),
         "invalid": (42,),
-        "empty": ("",),
+        "same_text": (term(0, Numeric()), "0"),
         "duplicate_interaction": (s("x"), s("z"), ti("x", "z"), ti("x", "z")),
     }
     with pytest.raises((ValueError, TypeError)):
@@ -147,6 +148,54 @@ def test_explicit_factor_smooth_retains_its_configured_name():
     assert normalized.interaction_order == ("by_group",)
 
 
+def test_a_factor_smooth_needs_no_parent_terms():
+    """It reads its own columns, as under interactions=; master required both as terms."""
+    from superglm.features import FactorSmooth
+    from superglm.terms import interaction, normalize_terms
+
+    normalized = normalize_terms([interaction(FactorSmooth("x", group="group"))])
+    assert normalized.features == {}
+    assert normalized.interaction_order == ("x:group:fs",)
+
+
+def test_superlss_fits_a_factor_smooth_without_a_term_on_its_group():
+    """A SuperLSS factor smooth no longer needs a main effect on its group.
+
+    The factor smooth already spans every level's intercept, so the main
+    effect master required duplicated it (a random effect there pushes its
+    smoothing parameter to the cap). Master refused this declaration.
+    """
+    from superglm import FactorSmooth, GaussianLS, SuperLSS
+    from superglm.terms import interaction, s
+
+    rng = np.random.default_rng(5)
+    n = 600
+    frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n), "group": rng.choice(list("abcd"), n)})
+    shift = frame["group"].map({"a": 0.4, "b": -0.3, "c": 0.1, "d": 0.0}).to_numpy()
+    y = np.sin(2.0 * frame["x"].to_numpy()) + shift + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="group", k=6))
+    model = SuperLSS(family, family.location(s("x", kind="ps", k=7), smooth), family.scale())
+    model.fit_reml(frame, y)
+    assert "location:x:group:fs#wiggle" in model.smoothing_parameters_
+    predicted = model.predict(frame.head(5))
+    assert np.all(np.isfinite(predicted))
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert np.array_equal(restored.predict(frame.head(5)), predicted)
+
+
+def test_superlss_sz_smooth_still_needs_a_term_on_its_variable():
+    """As on master, now with the term to add; the group needs none."""
+    from superglm import FactorSmooth, GaussianLS
+    from superglm.terms import interaction
+
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="group", basis="sz"))
+    with pytest.raises(ValueError, match=r"needs a term on 'x'.*add s\('x'\)"):
+        family.location(smooth)
+    assert family.location("x", smooth).template.interaction_order == ("x:group:sz",)
+
+
 @pytest.mark.parametrize(
     "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
 )
@@ -197,10 +246,12 @@ def test_invalid_helper_names_and_types_fail_at_declaration():
     from superglm.terms import cat, interaction, re, s, term, ti
 
     for helper in (cat, re, s):
-        with pytest.raises(ValueError):
-            helper(" ")
-    with pytest.raises(ValueError):
-        ti("x", "")
+        with pytest.raises(TypeError, match="hashable"):
+            helper(["x"])
+    with pytest.raises(ValueError, match="non-empty strings"):
+        interaction(ti("x", "z").spec, name="")
+    with pytest.raises(TypeError, match="hashable"):
+        ti("x", ["z"])
     with pytest.raises(TypeError):
         term("x", object())
     with pytest.raises(TypeError):
@@ -278,9 +329,307 @@ def test_invalid_feature_mappings_are_refused(case):
             TypeError,
             "interaction",
         ),
-        "column": (({0: Numeric()},), ValueError, "non-empty strings"),
+        "column": (({0: Numeric(), "0": Numeric()},), ValueError, "both read as '0'"),
         "bare": ({"x": Numeric()}, TypeError, "inside"),
     }
     terms, error, message = cases[case]
     with pytest.raises(error, match=message):
         normalize_terms(terms)
+
+
+def test_superlss_takes_integer_column_labels_end_to_end():
+    """A SuperLSS predictor takes the labels SuperGLM's features= takes; master refused them.
+
+    Results name the term by its text, as in ``"location:0#wiggle"``, and a
+    term is found by its label or that text.
+    """
+    from superglm import Categorical, GaussianLS, Numeric, Spline, SuperLSS
+
+    rng = np.random.default_rng(11)
+    n = 500
+    frame = pd.DataFrame(
+        {0: rng.uniform(size=n), 1: rng.choice(list("abc"), n), 2: rng.uniform(size=n)}
+    )
+    y = (
+        np.sin(3.0 * frame[0].to_numpy())
+        + 0.3 * (frame[1].to_numpy() == "a")
+        + (0.3 + 0.2 * frame[2].to_numpy()) * rng.standard_normal(n)
+    )
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location({0: Spline(k=6), 1: Categorical()}),
+        family.scale({2: Numeric()}),
+        discrete=True,
+        n_bins={0: 32},
+    )
+    model.fit_reml(frame, y)
+    assert list(model.smoothing_parameters_) == ["location:0#wiggle"]
+    assert any(name.startswith("location:1[") for name in model.coef_)
+    predicted = model.predict(frame.head(5))
+    assert np.all(np.isfinite(predicted))
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), predicted)
+    summary = model.summary()
+    assert {"0", "1"} <= {str(term) for term in summary["term"]}
+    by_label = model.term_inference("location", 0)
+    by_text = model.term_inference("location", "0")
+    assert np.array_equal(by_label.effect, by_text.effect)
+    assert model.term_test("location", 0).p_value == model.term_test("location", "0").p_value
+    assert model.term_test("location", 1).rank > 0
+    # Diagnostics name a covariate by its column label.
+    for check in (model.actual_expected, model.check):
+        assert check(frame, y, 1) is not None
+    # The label's text names the column too, as it names the term.
+    by_text, by_label = (model.actual_expected(frame, y, key) for key in ("1", 1))
+    assert by_text.levels == by_label.levels
+    assert np.array_equal(by_text.ratio, by_label.ratio)
+    assert model.plot_data("term", parameter="location", term=0) is not None
+    # A reference value is found by its column's label or text.
+    curves = model.risk_curves({1: "c", 2: 0.9}, 0)
+    assert curves.reference == {1: "c", 2: 0.9}
+    # So is the swept covariate.
+    by_text = model.risk_curves({1: "c", 2: 0.9}, "0")
+    assert by_text.reference == curves.reference
+    # A term to plot and a segmentation column are found the same way.
+    assert len(model.plot("location", terms=0, n_sim=16).axes) >= 1
+    assert len(model.plot("location", terms=[0, "0"], n_sim=16).axes) >= 1
+    by_label = model.portfolio(frame, n_draws=16, by=1, seed=5)
+    by_text = model.portfolio(frame, n_draws=16, by="1", seed=5)
+    assert by_label.by == by_text.by == "1"
+    assert by_label.by_segment.equals(by_text.by_segment)
+    assert list(by_label.by_segment["segment"]) == ["a", "b", "c"]
+    # Per-row labels in a polars Series stay per-row labels, as before.
+    pl = pytest.importorskip("polars")
+    by_rows = model.portfolio(frame, n_draws=16, by=pl.Series(frame[1].to_numpy()), seed=5)
+    assert list(by_rows.by_segment["segment"]) == ["a", "b", "c"]
+
+
+def test_superlss_plot_reads_a_tuple_selector_as_one_label():
+    """``terms=("a", "b")`` names the tuple-labelled term, as SuperGLM.plot reads it."""
+    from superglm import GaussianLS, Numeric, SuperLSS
+
+    rng = np.random.default_rng(17)
+    n = 300
+    frame = pd.DataFrame({"x": rng.uniform(size=n), "a": rng.uniform(size=n)})
+    frame = frame.rename(columns={"x": ("a", "b")})
+    y = frame[("a", "b")].to_numpy() + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(
+        family, family.location({("a", "b"): Numeric(), "a": Numeric()}), family.scale()
+    )
+    model.fit_reml(frame, y)
+    one = model.plot("location", terms=[("a", "b")], n_sim=16)
+    assert len(model.plot("location", terms=("a", "b"), n_sim=16).axes) == len(one.axes)
+
+
+def test_superlss_refuses_two_labels_with_one_text():
+    from superglm import GaussianLS, Numeric, SuperLSS
+
+    family = GaussianLS()
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        family.location({0: Numeric(), "0": Numeric()})
+    # The text is how results name a term, so it must be unique across predictors too.
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        SuperLSS(family, family.location({0: Numeric()}), family.scale({"0": Numeric()}))
+    SuperLSS(family, family.location({0: Numeric()}), family.scale({0: Numeric()}))
+    # A factor smooth reads its columns without terms of their own; they count too.
+    from superglm import FactorSmooth
+    from superglm.terms import interaction
+
+    with pytest.raises(ValueError, match=r"Columns 0 and '0' both read as '0'"):
+        SuperLSS(
+            family,
+            family.location(interaction(FactorSmooth(0, group="g"))),
+            family.scale({"0": Numeric()}),
+        )
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+@pytest.mark.parametrize("helper", ["cat", "re"])
+def test_superlss_warns_about_a_term_on_a_factor_smooth_group(basis, helper):
+    """0.40 required the term, so it keeps fitting; the warning names it as redundant.
+
+    Master gave no warning. A random effect there also gets its measured
+    convergence note.
+    """
+    from superglm import FactorSmooth, GaussianLS
+    from superglm import terms as term_helpers
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
+
+    family = GaussianLS()
+    declared = getattr(term_helpers, helper)("group")
+    smooth = term_helpers.interaction(FactorSmooth("x", group="group", basis=basis))
+    with pytest.warns(
+        FactorSmoothGroupTermWarning,
+        match=rf"already carries each level's intercept.*Drop {helper}\('group'\) "
+        r"from the 'location' predictor",
+    ) as caught:
+        family.location(term_helpers.s("x"), declared, smooth)
+    converging = "smoothing selection can fail to converge"
+    assert (converging in str(caught[0].message)) is (helper == "re")
+
+
+def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
+    """Plain pickle refused SuperLSS's read-only mappings on master, fitted or not."""
+    import copy
+    import io
+    import pickle
+
+    import joblib
+
+    from superglm import GaussianLS, SuperLSS
+    from superglm.terms import cat, s
+
+    rng = np.random.default_rng(13)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(size=n), "g": rng.choice(list("abc"), n)})
+    y = np.sin(3.0 * frame["x"].to_numpy()) + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x", k=6), cat("g")), family.scale())
+    unfitted = pickle.loads(pickle.dumps(model))
+    model.fit_reml(frame, y)
+    expected = model.predict(frame)
+    stream = io.BytesIO()
+    joblib.dump(model, stream)
+    stream.seek(0)
+    for restored in (
+        pickle.loads(pickle.dumps(model)),
+        copy.deepcopy(model),
+        joblib.load(stream),
+        unfitted.fit_reml(frame, y),
+    ):
+        assert np.array_equal(restored.predict(frame), expected)
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame), expected)
+
+    # As to_bytes, a pickle leaves the training frame out (its parent pickled
+    # every row and column of it): a restored model takes X_train=. A deep
+    # copy keeps it, by reference; a shallow copy shares every member.
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored._training_frame is None
+    with pytest.raises(RuntimeError, match="from_bytes, pickle or joblib.*X_train"):
+        restored.summary()
+    assert restored.summary(X_train=frame).equals(model.summary())
+    assert copy.deepcopy(model)._training_frame is model._training_frame
+    assert copy.deepcopy(model).summary().equals(model.summary())
+    shallow = copy.copy(model)
+    assert shallow._model is model._model and shallow._training_frame is model._training_frame
+
+
+def test_superlss_interactions_take_integer_column_labels():
+    """Master refused a non-string interaction parent in a SuperLSS predictor."""
+    import pickle
+
+    from superglm import GaussianLS, SuperLSS
+    from superglm.features.interaction import SplineCategorical
+    from superglm.terms import cat, interaction, s, ti
+
+    rng = np.random.default_rng(17)
+    n = 600
+    frame = pd.DataFrame(
+        {0: rng.uniform(size=n), 1: rng.choice(list("abc"), n), 2: rng.uniform(size=n)}
+    )
+    y = np.sin(3.0 * frame[0].to_numpy()) * frame[2].to_numpy() + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    location = family.location(
+        s(0, k=6), cat(1), s(2, k=6), ti(0, 2), interaction(SplineCategorical(0, 1))
+    )
+    model = SuperLSS(family, location, family.scale()).fit_reml(frame, y)
+    assert {"0:2", "0:1[a]"} <= set(model.summary()["term"])
+    assert model.term_test("location", "0:2").rank > 0
+    expected = model.predict(frame.head(5))
+    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), expected)
+    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
+
+
+def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loads():
+    """The refusal is the declaration's; a template restored from an artifact is not re-refused."""
+    from superglm import Categorical, FactorSmooth, GaussianLS, SuperLSS
+    from superglm.distributional import Predictor
+    from superglm.features import Spline
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(23)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n), "g": rng.choice(list("abc"), n)})
+    y = np.sin(2.0 * frame["x"].to_numpy()) + 0.3 * rng.standard_normal(n)
+    legacy = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor(
+                "location",
+                {"x": Spline("cr", k=6), "g": Categorical()},
+                interaction_specs={"x:g:fs": FactorSmooth("x", group="g", k=6)},
+            ),
+            Predictor("scale", {}),
+        ],
+    )
+    lambdas = {name: 1.0 for name in ("location:x#wiggle", "location:x:g:fs#wiggle")}
+    lambdas |= {"location:x:g:fs#null_0": 1.0, "location:x:g:fs#null_1": 1.0}
+    fitted = legacy.fit(frame, y, lambdas=lambdas)
+    restored = SuperLSS.from_bytes(fitted.to_bytes())
+    assert np.array_equal(restored.predict(frame), fitted.predict(frame))
+
+
+@pytest.mark.parametrize(("basis", "intercept"), [("sz", False), ("sz", True), ("fs", False)])
+def test_the_group_warning_names_intercept_true_for_sz_without_an_intercept(basis, intercept):
+    """Only sz without an intercept leaves the overall level to the group term."""
+    from superglm import FactorSmooth, GaussianLS
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
+    from superglm.terms import cat, interaction, s
+
+    family = GaussianLS()
+    smooth = interaction(FactorSmooth("x", group="g", basis=basis))
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"Drop cat\('g'\)") as caught:
+        family.location(s("x"), cat("g"), smooth, intercept=intercept)
+    sentence = "With intercept=False, the same model is intercept=True without the term on 'g'."
+    assert (sentence in str(caught[0].message)) is (basis == "sz" and not intercept)
+
+
+@pytest.mark.parametrize(
+    "second", ["transposed", "renamed"], ids=["ti(z, x)", "ti(x, z, name=...)"]
+)
+def test_superlss_keeps_a_repeated_interaction_pair_with_a_warning(second):
+    """0.40 fitted both; #503 refused them. SuperLSS keeps both, and warns (bit for bit with 0.40)."""
+    from superglm import GaussianLS
+    from superglm.features.interaction import TensorInteraction
+    from superglm.terms import RedundantInteractionWarning, interaction, s, ti
+
+    other = (
+        ti("z", "x")
+        if second == "transposed"
+        else interaction(TensorInteraction("x", "z"), name="x_by_z")
+    )
+    family = GaussianLS()
+    with pytest.warns(RedundantInteractionWarning, match="the second is redundant"):
+        location = family.location(s("x"), s("z"), ti("x", "z"), other)
+    assert len(location.template.interaction_order) == 2
+
+
+def test_superlss_saves_a_model_whose_labels_are_not_json_values():
+    """A date or NumPy integer label fits and survives to_bytes; the parent refused saving it."""
+    import datetime
+
+    from superglm import Categorical, GaussianLS, Numeric, Spline, SuperLSS
+    from superglm.terms import ti
+
+    rng = np.random.default_rng(31)
+    n = 400
+    day, code = datetime.date(2026, 1, 1), np.int64(7)
+    frame = pd.DataFrame(
+        {day: rng.uniform(size=n), code: rng.uniform(size=n), "g": rng.choice(list("abc"), n)}
+    )
+    y = np.sin(3.0 * frame[day].to_numpy()) + 0.3 * rng.standard_normal(n)
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location({day: Spline(k=6), code: Spline(k=6), "g": Categorical()}, ti(day, code)),
+        family.scale({code: Numeric()}),
+    ).fit_reml(frame, y)
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert np.array_equal(restored.predict(frame), model.predict(frame))
+    # Term payloads name the term by its text, so they stay JSON (0481c3e5 put the date in).
+    import json
+
+    payload = model.plot_data("term", parameter="location", term=day)
+    assert json.loads(json.dumps(payload))["term"] == str(day)
+    assert model.term_test("location", day).term == str(day)

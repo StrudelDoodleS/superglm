@@ -8,8 +8,9 @@ import importlib
 import json
 import math
 import operator
+import pickle
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -115,6 +116,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.links import Link, resolve_link
+from superglm.terms import check_column_texts, resolve_label
 
 
 @dataclass(frozen=True)
@@ -355,6 +357,21 @@ def _owned_predictors(
     if not values or not all(isinstance(predictor, Predictor) for predictor in values):
         raise TypeError("predictors must contain only Predictor values")
     _predictor_error(parameters, values)
+    # Results name a term by its label's text, and every predictor's terms share
+    # one namespace, so one text may not name two different labels. A factor
+    # smooth reads its two columns without terms of their own, so they count too.
+    check_column_texts(
+        label
+        for predictor in values
+        for label in (
+            *predictor.features,
+            *(
+                parent
+                for spec in predictor.interaction_specs.values()
+                for parent in spec.parent_names
+            ),
+        )
+    )
     for parameter, predictor in zip(parameters, values, strict=True):
         _validate_link_support(parameter, predictor)
     return _clone_predictor_templates(values)
@@ -420,12 +437,28 @@ def _positive_n_bins(value: Any, *, name: str) -> int:
     return int(result)
 
 
+def _restore_superlss(cls: type[SuperLSS], state: bytes) -> SuperLSS:
+    """Rebuild a pickled ``SuperLSS`` from the state ``__reduce__`` wrote."""
+    model = cls.__new__(cls)
+    model.__dict__.update(pickle.loads(state))
+    return model
+
+
+def _names_a_column(covariate: object, frame: EagerFrame) -> bool:
+    """Whether ``covariate`` is a column label of ``frame`` rather than a row of values."""
+    if isinstance(covariate, np.ndarray | pd.Series | list):
+        return False
+    try:
+        return covariate in frame.columns
+    except TypeError:
+        return False
+
+
 def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
     if isinstance(value, Mapping):
+        # Keyed by column label: any label a predictor's term takes, as in SuperGLM.
         result: dict[str, int] = {}
         for name, count in value.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("n_bins keys must be non-empty feature names")
             result[name] = _positive_n_bins(count, name=f"n_bins[{name!r}]")
         return MappingProxyType(result)
     return _positive_n_bins(value, name="n_bins")
@@ -588,6 +621,33 @@ class SuperLSS:
         # saw.  It is kept by reference, not copied, and serialization does not
         # carry it: a restored model is given one through ``X_train=``.
         self._training_frame: FrameLike | EagerFrame | None = None
+
+    def __reduce__(self) -> tuple[Any, tuple[type[SuperLSS], bytes]]:
+        """Pickle (and so joblib) through the artifact pickler.
+
+        The model keeps its configuration in read-only mappings, which the
+        standard pickler refuses; ``to_bytes``'s pickler carries them. As in
+        ``to_bytes``, the training frame stays out: it is the caller's data,
+        every column and row of it, and a restored model takes ``X_train=``.
+        """
+        from superglm.distributional.serialization import pickle_state
+
+        state = {**self.__dict__, "_training_frame": None}
+        return _restore_superlss, (type(self), pickle_state(state))
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> SuperLSS:
+        """A deep copy that keeps the training frame, by reference as the model does."""
+        _, (cls, state) = self.__reduce__()
+        copied = _restore_superlss(cls, state)
+        copied._training_frame = self._training_frame
+        memo[id(self)] = copied
+        return copied
+
+    def __copy__(self) -> SuperLSS:
+        """A shallow copy, sharing every member, as ``copy.copy`` gives other objects."""
+        copied = type(self).__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        return copied
 
     @property
     def family(self) -> DistributionalFamily:
@@ -1115,7 +1175,13 @@ class SuperLSS:
         artifact = json.loads(serialize_distributional_model(fitted))
         config = {
             "discrete": state.requested_discrete,
-            "n_bins": state_n_bins,
+            # JSON keys a column's bins by the label's text; from_bytes compares
+            # them so, and restores the labels from the fitted state.
+            "n_bins": (
+                state_n_bins
+                if isinstance(state_n_bins, int)
+                else {str(name): count for name, count in state_n_bins.items()}
+            ),
             "separation": self._separation,
             "weight_contract": {
                 "schema_version": state.weight_contract.schema_version,
@@ -1144,12 +1210,18 @@ class SuperLSS:
             if isinstance(state.requested_n_bins, int)
             else dict(state.requested_n_bins)
         )
+        # The public JSON keys a column's bins by the label's text.
         public_n_bins = n_bins if isinstance(n_bins, int) else dict(n_bins)
+        stated_n_bins = (
+            state_n_bins
+            if isinstance(state_n_bins, int)
+            else {str(name): count for name, count in state_n_bins.items()}
+        )
         if public_contract != state.weight_contract:
             raise DistributionalSerializationError(
                 "SuperLSS public weight contract does not match accepted fitted state"
             )
-        if discrete is not state.requested_discrete or public_n_bins != state_n_bins:
+        if discrete is not state.requested_discrete or public_n_bins != stated_n_bins:
             raise DistributionalSerializationError(
                 "SuperLSS public execution configuration does not match accepted fitted state"
             )
@@ -1226,9 +1298,15 @@ class SuperLSS:
         """One value per row of ``X`` from a column name or an array, and its label."""
         frame = as_eager_frame(X)
         if isinstance(covariate, str):
-            if covariate not in {str(column) for column in frame.columns}:
+            # A column found by its label or by its label's text, as terms are.
+            column = resolve_label(covariate, frame.columns)
+            if column not in frame.columns:
                 raise ValueError(f"covariate {covariate!r} is not a column of X")
-            return frame.column_array(covariate), covariate if name is None else str(name)
+            return frame.column_array(column), covariate if name is None else str(name)
+        if _names_a_column(covariate, frame):
+            # Another column label a frame takes, such as an integer.
+            label = str(covariate) if name is None else str(name)
+            return frame.column_array(covariate), label
         values = np.asarray(covariate)
         if values.shape != (len(frame),):
             raise ValueError("covariate must name a column of X or give one value per row of X")
@@ -1266,7 +1344,8 @@ class SuperLSS:
         if self._training_frame is None:
             raise RuntimeError(
                 "term inference sweeps a covariate over its training range, and this model "
-                "carries no training frame -- a model restored with from_bytes never does. "
+                "carries no training frame -- a model restored with from_bytes, pickle or "
+                "joblib never does. "
                 "Pass X_train= the frame the model was fitted on."
             )
         return self._training_frame
@@ -1855,7 +1934,7 @@ class SuperLSS:
     def plot(
         self,
         parameter: str | None = None,
-        terms: str | Sequence[str] | None = None,
+        terms: Hashable | Iterable[Hashable] | None = None,
         *,
         engine: str = "matplotlib",
         covariance: CovarianceKind = "fixed",
@@ -1879,7 +1958,21 @@ class SuperLSS:
             if parameter is None
             else (parameter,)
         )
-        asked = None if terms is None else (terms,) if isinstance(terms, str) else tuple(terms)
+        # A tuple can be one column label, as SuperGLM.plot reads it: it names
+        # one term when its text is a term of the selected parameters.
+        texts = {
+            qualified[len(name) + 1 :]
+            for name in names
+            for qualified in fitted.layout.term_slices
+            if qualified.startswith(f"{name}:")
+        }
+        asked = (
+            None
+            if terms is None
+            else (str(terms),)
+            if isinstance(terms, str) or not isinstance(terms, Iterable) or str(terms) in texts
+            else tuple(str(term) for term in terms)
+        )
         selections: dict[str, tuple[str, ...]] = {}
         for name in names:
             selected = self._parameter_terms(name, asked)

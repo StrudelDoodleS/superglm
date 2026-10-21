@@ -651,6 +651,34 @@ def test_summary_table_keeps_the_level_term_an_sz_smooth_aliases(absorbed_case) 
     assert module._absorption_note(fitted, "location", "g", 0.0, np.ones(1)) == "absorbed by x:g:sz"
 
 
+def test_absorption_note_finds_the_interaction_on_integer_labels() -> None:
+    """The note's feature text resolves to the label the interaction's parents hold."""
+    from superglm.distributional import terms as module
+
+    rng = np.random.default_rng(1)
+    n = 900
+    x = rng.uniform(-1.0, 1.0, n)
+    g = rng.choice(["a", "b", "c"], n)
+    level = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.0}).to_numpy()
+    frame = pd.DataFrame({0: x, 1: g})
+    y = 0.7 * np.sin(2.2 * x) + level + level * x + 0.3 * rng.standard_normal(n)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor(
+                "location",
+                {0: Spline("cr", k=6), 1: Categorical()},
+                interaction_specs={"0:1:sz": FactorSmooth(0, group=1, basis="sz", k=6)},
+            ),
+            Predictor("scale", {}),
+        ],
+    ).fit(frame, y, lambdas={"location:0#wiggle": 1.0, "location:0:1:sz#wiggle": 1.0})
+    fitted = model._require_fitted()
+    for feature in (1, "1"):
+        assert module._interaction_on(fitted, "location", feature) == "0:1:sz"
+    assert module._absorption_note(fitted, "location", "1", 0.0, np.ones(1)) == "absorbed by 0:1:sz"
+
+
 def test_corrected_covariance_refuses_without_retained_rows(fit_case) -> None:
     fitted, frame = fit_case
     compact_state = dataclasses.replace(fitted.fit_state, retained_rows=None)

@@ -1653,7 +1653,9 @@ def test_a_declared_empty_sz_level_is_weightless_when_the_term_selects_its_lines
 def _superlss_with_a_declared_empty_sz_level():
     """A SuperLSS location with a ``select=True`` sz term whose declared level ``d`` has no weight.
 
-    The ``g`` main effect declares ``d`` too, so public prediction accepts it.
+    The term's ``levels=`` declares ``d``, so public prediction accepts it. The
+    fixture once declared a ``g`` main effect too, which duplicates the level
+    intercepts the sz term spans and is now refused.
     """
     from superglm.distributional import Predictor
     from superglm.distributional.families.gaussian import GaussianLS
@@ -1673,7 +1675,7 @@ def _superlss_with_a_declared_empty_sz_level():
         predictors=[
             Predictor(
                 "location",
-                {"x": Spline("cr", k=6), "g": Categorical(levels=declared)},
+                {"x": Spline("cr", k=6)},
                 interaction_specs={
                     "x:g:sz": FactorSmooth(
                         "x", group="g", basis="sz", k=6, select=True, levels=declared

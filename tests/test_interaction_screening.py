@@ -2329,3 +2329,34 @@ def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
         f"the clamped low-edge edf of a I against I is p/(1 + 1e-10) = "
         f"{p / (1.0 + 1e-10):.15f} exactly; the ladder returned {rung.edf0:.15f}"
     )
+
+
+def test_a_binning_size_tie_bins_the_margin_0_40_binned():
+    """Columns 9 and 10 tie on support; binning picks 10, as natural order did on 0.40.
+
+    cf35b46d broke the tie on text ("9" > "10") and binned 9, which moved the
+    statistic. Labels "a9"/"b10" keep the numeric order in text, so the
+    statistic must equal theirs.
+    """
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(21)
+    n = 700
+    x9, x10 = rng.uniform(size=n), rng.uniform(size=n)
+    y = rng.poisson(np.exp(-0.5 + 0.4 * x9 * x10)).astype(float)
+    statistics = []
+    for left, right in ((9, 10), ("a9", "b10")):
+        frame = pd.DataFrame({left: x9, right: x10})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={left: Spline(kind="ps", k=6), right: Spline(kind="ps", k=6)},
+        ).fit_reml(frame, y)
+        # 700 x 700 cells exceed the budget; 700 x 256 fit it, so one margin is binned.
+        table = model.screen_interactions(frame, y, max_cells=200_000)
+        assert bool(table.iloc[0]["approx"])
+        statistics.append(table.iloc[0]["statistic"])
+    assert statistics[0] == statistics[1]

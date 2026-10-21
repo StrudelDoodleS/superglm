@@ -9,7 +9,7 @@ from superglm.dm_builder import (
     should_discretize_spline_categorical_interaction,
     should_discretize_tensor_interaction,
 )
-from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
 from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import (
     OrderedCategorical,
@@ -324,12 +324,14 @@ def test_factor_smooth_keeps_label_levels_over_an_oc_group_main():
     from superglm import FactorSmooth
 
     df, y = _frame()
-    model = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)],
-        selection_penalty=0.0,
-    )
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'age_band' is redundant"):
+        model = SuperGLM(
+            family="poisson",
+            features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
+            interactions=[FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)],
+            selection_penalty=0.0,
+        )
     model.fit_reml(df, y)
 
     spec = model._interaction_specs["power:age_band:fs"]
@@ -536,11 +538,13 @@ def test_a_specials_term_may_still_be_a_factor_smooth_group():
         resolve_interaction_parent_of(TensorInteraction("age_band", "power"), spec, labels)
 
     df, y = _specials_frame()
-    model = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
-        interactions=[FactorSmooth(variable="power", group="age_band")],
-    )
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'age_band' is redundant"):
+        model = SuperGLM(
+            family="poisson",
+            features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
+            interactions=[FactorSmooth(variable="power", group="age_band")],
+        )
     model.fit_reml(df, y)
     assert np.isfinite(model._result.effective_df)
     # The group kept its label identity, the special included as a level of it.

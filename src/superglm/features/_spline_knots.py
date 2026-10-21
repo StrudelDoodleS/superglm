@@ -8,6 +8,11 @@ from numpy.typing import NDArray
 _MAX_EXACT_FREQUENCY_MASS = float(2**53)
 
 
+# The data-driven ``knot_strategy=`` rules; any other value places knots
+# uniformly, as "uniform" names.
+QUANTILE_STRATEGIES = ("quantile", "quantile_rows", "quantile_tempered")
+
+
 def knot_geometry_data(
     x: NDArray,
     sample_weight: NDArray | None,
@@ -137,7 +142,7 @@ def resolve_interior_knots(
     if explicit_knots is not None:
         return explicit_knots, "explicit"
 
-    if knot_strategy in ("quantile", "quantile_rows", "quantile_tempered"):
+    if knot_strategy in QUANTILE_STRATEGIES:
         if explicit_boundary is not None:
             inside = (x >= lo) & (x <= hi)
             x_q = x[inside]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -281,6 +282,10 @@ def _dispatch_plotly(
 def _reconstruct_interaction(model, name: str, *, n_points: int) -> dict:
     """Reconstruct an interaction, threading grid size when supported."""
     ispec = model._interaction_specs[name]
+    from superglm.features.factor_smooth import FactorSmooth
+
+    if isinstance(ispec, FactorSmooth):
+        return _factor_smooth_curves(model, name, n_points=n_points)
     groups = [g for g in model._groups if g.feature_name == name]
     beta = np.concatenate([model.result.beta[g.sl] for g in groups])
 
@@ -288,6 +293,32 @@ def _reconstruct_interaction(model, name: str, *, n_points: int) -> dict:
     if "n_points" in params:
         return ispec.reconstruct(beta, n_points=n_points)
     return ispec.reconstruct(beta)
+
+
+def _factor_smooth_curves(model, name: str, *, n_points: int) -> dict:
+    """A factor smooth's level curves in the varying-coefficient shape.
+
+    The curves and their posterior standard errors are the ones
+    ``SuperGLM.factor_smooth`` reports, on its grid of ``n_points`` values of
+    the smoothed variable: each level's own curve for ``basis="fs"``, its
+    deviation from the population curve for ``basis="sz"``. Every level has a
+    curve, so there is no base level.
+    """
+    from superglm.inference.factor_smooths import factor_smooth_result
+
+    ispec = model._interaction_specs[name]
+    curves = factor_smooth_result(model, name, grid=n_points).curves
+    per_level: dict[Any, dict[str, NDArray]] = {}
+    x = np.empty(0, dtype=np.float64)
+    for level, rows in curves.groupby("level", sort=False):
+        x = rows[ispec.variable].to_numpy(dtype=np.float64)
+        effect = rows["effect"].to_numpy(dtype=np.float64)
+        per_level[level] = {
+            "log_relativity": effect,
+            "relativity": np.exp(effect),
+            "se_log_relativity": rows["posterior_se"].to_numpy(dtype=np.float64),
+        }
+    return {"x": x, "levels": list(per_level), "per_level": per_level, "base_level": ""}
 
 
 # ── matplotlib helpers ────────────────────────────────────────────

@@ -1763,7 +1763,8 @@ def _factor_smooth_geometry_compilation(
         (
             Predictor(
                 "location",
-                {"x": Numeric(), "g": Categorical(base="a")},
+                # No term on ``g``: the factor smooth spans its level intercepts.
+                {"x": Numeric()},
                 interaction_specs={
                     term_name: FactorSmooth("x", group="g", k=6),
                 },

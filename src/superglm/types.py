@@ -55,6 +55,10 @@ class LinearConstraintSet:
         return LinearConstraintSet(A=self.A @ P, b=self.b.copy())
 
 
+# The ``LambdaPolicy.mode`` values.
+LAMBDA_POLICY_MODES = ("estimate", "fixed")
+
+
 # ── Per-component lambda control ────────────────────────────────
 @dataclass(frozen=True)
 class LambdaPolicy:
@@ -74,7 +78,7 @@ class LambdaPolicy:
     def __post_init__(self):
         if self.mode == "fixed" and self.value is None:
             raise ValueError("LambdaPolicy(mode='fixed') requires a value")
-        if self.mode not in ("estimate", "fixed"):
+        if self.mode not in LAMBDA_POLICY_MODES:
             raise ValueError(f"Invalid LambdaPolicy mode: {self.mode!r}")
 
     @classmethod

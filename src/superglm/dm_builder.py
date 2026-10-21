@@ -512,7 +512,11 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
 
 
 def refuse_unsupported_interaction_parents(
-    feat1: str, feat2: str, specs: Mapping[str, FeatureSpec]
+    feat1: str,
+    feat2: str,
+    specs: Mapping[str, FeatureSpec],
+    *,
+    ranged_margins: bool = False,
 ) -> None:
     """Refuse a main-effect spec that cannot parent an interaction.
 
@@ -521,6 +525,12 @@ def refuse_unsupported_interaction_parents(
     (``terms=``, the family helpers' ``ti`` and ``interaction``), except a
     ``FactorSmooth``, which builds its own marginal and reads its group as
     labels.  A parent absent from ``specs`` is left to the caller's own check.
+
+    ``ranged_margins`` lets a parent with polynomial ranges through, as
+    SuperLSS's declared interactions always did. Its margin keeps the ranges
+    (``interaction_spline_spec`` keeps a ranged ``cr`` parent's constrained
+    basis rather than the cardinal one), so the fitted predictor stays
+    polynomial on them.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
@@ -563,11 +573,16 @@ def refuse_unsupported_interaction_parents(
                 "with; use basis=Spline(...) for an interactable ordinal parent, or "
                 "a Categorical feature for level-by-level structure."
             )
-        # A cr margin is rebuilt as a cardinal spline without the ranges and a
-        # bs margin keeps them, unpenalised, in every level or cross-section;
-        # neither is certified, so ranges stay on main effects in this version.
+        # Both margins keep the ranges in an interaction (a ranged cr parent
+        # keeps its constrained basis). SuperGLM still refuses a ranged parent,
+        # as it always did: allowing it would be new behaviour, and the
+        # interaction screen's probe (keep_ranges=False) would then need the
+        # constrained basis too. SuperLSS, which always fitted them, passes
+        # ranged_margins.
         spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
         if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
+            if ranged_margins:
+                continue
             raise NotImplementedError(
                 f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} has "
                 "polynomial_ranges, which shape a main effect only in this version; "

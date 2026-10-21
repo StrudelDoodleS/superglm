@@ -227,9 +227,9 @@ solver.
 ```python
 model = SuperGLM(
     family="poisson",
-    features={"VehBrand": RandomEffect()},
-    interactions=[
-        FactorSmooth("DrivAge", group="Region", basis="fs", k=6)
+    terms=[
+        re("VehBrand"),
+        interaction(FactorSmooth("DrivAge", group="Region", basis="fs", k=6)),
     ],
     discrete=True,
     n_bins=256,
@@ -238,6 +238,9 @@ model = SuperGLM(
 )
 model.fit_reml(df, y, offset=np.log(df["Exposure"]))
 ```
+
+`Region` needs no term of its own: a term on the group is redundant, because
+the factor smooth carries each level's intercept.
 
 The compact solver handles one large credibility term beside narrow dense
 features, global splines and other random effects. It works with every family
@@ -287,16 +290,9 @@ For `basis="sz"`, configure the matching global spline explicitly:
 ```python
 model = SuperGLM(
     family="poisson",
-    features={"DrivAge": Spline(kind="ps", k=7, m=2)},
-    interactions=[
-        FactorSmooth(
-            "DrivAge",
-            group="Region",
-            basis="sz",
-            kind="ps",
-            k=6,
-            m=2,
-        )
+    terms=[
+        s("DrivAge", kind="ps", k=7, m=2),
+        interaction(FactorSmooth("DrivAge", group="Region", basis="sz", kind="ps", k=6, m=2)),
     ],
     direct_solve="auto",
     selection_penalty=0.0,

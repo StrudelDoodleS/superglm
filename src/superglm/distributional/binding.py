@@ -6,11 +6,14 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MethodType
+from typing import Literal, cast
 
 from superglm.distributional.family import DistributionalFamily, validate_family
 from superglm.distributional.predictor import Predictor
+from superglm.features.factor_smooth import FactorSmooth, check_terms_on_factor_smooth_groups
 from superglm.links import Link
-from superglm.terms import TermInput, normalize_terms
+from superglm.terms import TermInput, declaration_text, normalize_terms
+from superglm.types import FeatureSpec
 
 
 def _copy_template(template: Predictor) -> Predictor:
@@ -70,7 +73,19 @@ def bind_predictor(
     name: str,
     *terms: TermInput,
     intercept: bool = True,
-    link: str | Link | None = None,
+    link: Literal[
+        "log",
+        "identity",
+        "logit",
+        "probit",
+        "cloglog",
+        "cauchit",
+        "inverse",
+        "inverse_squared",
+        "sqrt",
+    ]
+    | Link
+    | None = None,
 ) -> BoundPredictor:
     """Declare a predictor by parameter name, including for custom families.
 
@@ -111,12 +126,31 @@ def bind_predictor(
     >>> family.location("age").name
     'location'
     """
-    normalized = normalize_terms(terms)
+    # SuperLSS fitted two interactions of a class over one column pair before
+    # the declaration language refused them, so they keep fitting, with a warning.
+    normalized = normalize_terms(terms, repeated_pairs="warn")
+    # Checked where a predictor is declared. SuperLSS once required a term on
+    # the group, so every one keeps fitting, with a warning.
+    check_terms_on_factor_smooth_groups(
+        normalized.features,
+        [spec for spec in normalized.interaction_specs.values() if isinstance(spec, FactorSmooth)],
+        lambda group, spec: f"{declaration_text(group, spec)} from the {name!r} predictor",
+        note=lambda group, spec, smooth: (
+            # Without an intercept an sz term's sum-to-zero level constants
+            # leave the overall level to the group term, which the intercept
+            # carries instead.
+            f" With intercept=False, the same model is intercept=True without "
+            f"the term on {group!r}."
+            if smooth.basis == "sz" and not intercept
+            else ""
+        ),
+    )
     return BoundPredictor(
         family,
         Predictor(
             name,
-            normalized.features,
+            # Column labels of any hashable type, as Predictor checks them.
+            cast("Mapping[str, FeatureSpec]", normalized.features),
             intercept=intercept,
             link=link,
             interaction_specs=normalized.interaction_specs,

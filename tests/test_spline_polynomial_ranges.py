@@ -817,20 +817,67 @@ def test_an_interaction_beside_ranged_terms_still_fits():
     assert "veh:region" in model._interaction_specs
 
 
-def test_a_ranged_spline_cannot_parent_a_superlss_tensor():
-    # The family helpers declare interactions as specs, so SuperLSS reaches
-    # the same refusal through the design compiler.
+@pytest.mark.parametrize("override", [None, (5, 4)], ids=["parent-knots", "n_knots-override"])
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_superlss_tensor_on_a_ranged_parent_keeps_the_ranges(kind, override):
+    """0.40 fitted it; master refused it. It fits, and the ranges hold in the interaction.
+
+    The location predictor stays a polynomial of the declared degree on the
+    range at every value of the other margin. On 0.40 a cr margin (rebuilt on
+    the cardinal basis) and any margin rebuilt for an n_knots override dropped
+    the ranges and bent the predictor there (second differences 1e-3 of its
+    range against round-off); this asserts the fix, so 0.40 fails it.
+    """
     from superglm import GaussianLS, SuperLSS, s, term, ti
 
     rng = np.random.default_rng(12)
-    n = 400
+    n = 1200
     X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "veh": rng.uniform(0.0, 20.0, n)})
-    ranged = Spline(kind="bs", k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    y = np.sin(X["age"] / 6.0) * (1.0 + X["veh"] / 10.0) + 0.2 * rng.normal(size=n)
+    ranged = Spline(kind=kind, k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
     family = GaussianLS()
     model = SuperLSS(
         family,
-        family.location(term("age", ranged), s("veh", k=6), ti("age", "veh")),
+        family.location(term("age", ranged), s("veh", k=6), ti("age", "veh", n_knots=override)),
         family.scale(),
     )
-    with pytest.raises(NotImplementedError, match="'age' has polynomial_ranges"):
-        model.fit_reml(X, rng.normal(size=n))
+    model.fit_reml(X, y)
+    ages = np.linspace(30.0, 50.0, 21)
+    for veh in (1.0, 10.0, 19.0):
+        eta = np.asarray(model.predict_link(pd.DataFrame({"age": ages, "veh": veh})))[:, 0]
+        # eta sums a few dozen basis products, so its rounding is a small
+        # multiple of u * max|eta|; a second difference triples that.
+        tolerance = 1.0e3 * np.finfo(np.float64).eps * np.max(np.abs(eta))
+        assert np.max(np.abs(np.diff(eta, 2))) <= tolerance
+
+
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_superlss_spline_categorical_on_a_ranged_parent_keeps_the_ranges(kind):
+    """The varying-coefficient route (``_varying_coefficient_spline_spec``) keeps them too.
+
+    Each level's location predictor is a polynomial of the declared degree on
+    the range; on 0.40 a cr parent's per-level curves bent there (5.9e-3 of
+    their range), and master refused the declaration.
+    """
+    from superglm import GaussianLS, SplineCategorical, SuperLSS, cat, interaction, term
+
+    rng = np.random.default_rng(14)
+    n = 1500
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "region": rng.choice(list("abc"), n)})
+    level = X["region"].map({"a": 0.0, "b": 1.0, "c": -1.0}).to_numpy()
+    y = np.sin(X["age"] / 6.0) + level * np.cos(X["age"] / 5.0) + 0.2 * rng.normal(size=n)
+    ranged = Spline(kind=kind, k=10, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(
+            term("age", ranged), cat("region"), interaction(SplineCategorical("age", "region"))
+        ),
+        family.scale(),
+    ).fit_reml(X, y)
+    ages = np.linspace(30.0, 50.0, 21)
+    for region in ("a", "b", "c"):
+        eta = np.asarray(model.predict_link(pd.DataFrame({"age": ages, "region": region})))[:, 0]
+        # As for the tensor: a few dozen products, differenced three at a time.
+        tolerance = 1.0e3 * np.finfo(np.float64).eps * np.max(np.abs(eta))
+        assert np.max(np.abs(np.diff(eta, 2))) <= tolerance

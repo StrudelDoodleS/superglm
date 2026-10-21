@@ -16,6 +16,7 @@ from superglm.constraints import (
     shape_constraint_certificate,
     shape_constraint_is_roundoff_feasible,
 )
+from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 
 
 def test_qp_convex_fit_reml_auto_lambda_constrained_refit():
@@ -313,16 +314,18 @@ def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_colu
     y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
     X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
 
-    model = SuperGLM(
-        family="gaussian",
-        features={
-            "g": OrderedCategorical(
-                order=levels,
-                basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
-            )
-        },
-        interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
-    )
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'g' is redundant"):
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "g": OrderedCategorical(
+                    order=levels,
+                    basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
+                )
+            },
+            interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+        )
 
     with pytest.raises(NotImplementedError, match=r"stated twice"):
         model.fit_reml(X, y)

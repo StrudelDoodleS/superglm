@@ -48,7 +48,7 @@ from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
-from superglm.terms import TermInput, normalize_terms
+from superglm.terms import TermInput, check_column_label, check_column_texts, normalize_terms
 from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -881,12 +881,22 @@ def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
     return dict(zip(spline_cols, model._n_knots))
 
 
-def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> None:
-    """Validate factor-smooth geometry after explicit or inferred features exist."""
+def validate_factor_smooth_configuration(
+    model, *, features_resolved: bool, terms_form: bool = False
+) -> None:
+    """Validate factor-smooth geometry after explicit or inferred features exist.
+
+    ``terms_form`` says the model was declared with ``terms=``, so a refusal
+    names the change in that form.
+    """
     from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import (
+        FactorSmooth,
+        check_terms_on_factor_smooth_groups,
+    )
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
+    from superglm.terms import declaration_text
 
     terms = [
         spec
@@ -906,24 +916,31 @@ def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> N
     if not features_resolved:
         return
 
+    def where(group, spec) -> str:
+        if terms_form:
+            return f"{declaration_text(group, spec)} from terms="
+        if model._splines is None:
+            return f"{group!r} from features="
+        return f"{group!r} from the auto-detected features: declare features= without it"
+
+    # A Categorical or RandomEffect there was always refused; any other term
+    # fitted, and keeps fitting with a warning.
+    check_terms_on_factor_smooth_groups(
+        model._specs, terms, where, refused=(Categorical, RandomEffect)
+    )
     for term in terms:
-        group_spec = model._specs.get(term.group)
-        if isinstance(group_spec, (Categorical, RandomEffect)):
-            raise ValueError(
-                f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
-                "the constant null-space group-intercept geometry of "
-                f"{type(group_spec).__name__} on the same column; remove that "
-                "group main effect and use an explicit features map containing "
-                "only the intended main effects."
-            )
         if term.basis == "sz" and not isinstance(
             model._specs.get(term.variable),
             _SplineBase,
         ):
+            remedy = (
+                f"add s({term.variable!r}) to terms=."
+                if terms_form
+                else f"use features={{{term.variable!r}: Spline(...)}}."
+            )
             raise ValueError(
                 f"FactorSmooth {term.name!r} with basis='sz' requires a global "
-                f"Spline for {term.variable!r}; use "
-                f"features={{{term.variable!r}: Spline(...)}}."
+                f"Spline for {term.variable!r}; {remedy}"
             )
 
 
@@ -1119,11 +1136,10 @@ def init_model(
     pending_interactions: list[tuple[str, str]] = []
     explicit_interactions: list[tuple[str, Any]] = declared_interactions
     for interaction in interactions or ():
-        if (
-            isinstance(interaction, tuple)
-            and len(interaction) == 2
-            and all(isinstance(name, str) for name in interaction)
-        ):
+        if isinstance(interaction, tuple) and len(interaction) == 2:
+            # Two column labels, under the rule main terms follow.
+            for name in interaction:
+                check_column_label(name)
             pending_interactions.append(interaction)
             continue
         parent_names = getattr(interaction, "parent_names", None)
@@ -1131,7 +1147,6 @@ def init_model(
         if (
             not isinstance(parent_names, tuple)
             or len(parent_names) != 2
-            or not all(isinstance(parent, str) and parent for parent in parent_names)
             or not isinstance(interaction_name, str)
             or not interaction_name
         ):
@@ -1139,6 +1154,8 @@ def init_model(
                 "interactions entries must be (left, right) tuples or explicit "
                 "interaction specs with parent_names and name"
             )
+        for parent in parent_names:
+            check_column_label(parent)
         if interaction_name in model._interaction_specs or any(
             name == interaction_name for name, _ in explicit_interactions
         ):
@@ -1146,8 +1163,11 @@ def init_model(
         explicit_interactions.append((interaction_name, interaction))
     model._pending_interactions = tuple(pending_interactions)
 
-    # Register explicit features dict
+    # Register explicit features dict, under the column-label rule terms= keeps.
     if features is not None:
+        for name in features:
+            check_column_label(name)
+        check_column_texts(features)
         for name, spec in features.items():
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
@@ -1160,6 +1180,7 @@ def init_model(
     validate_factor_smooth_configuration(
         model,
         features_resolved=model._splines is None,
+        terms_form=terms is not None,
     )
 
     from superglm.model.fit_state import ModelConfig
@@ -1234,35 +1255,41 @@ def clone_without_features(
         source_family = fit_state.distribution
         source_link = fit_state.projections.get("_link", model._link)
 
-    new_model = type(model)(
-        family=source_family,
-        link=source_link,
-        penalty=new_penalty,
-        features=new_features,
-        interactions=keep_interactions if keep_interactions else None,
-        active_set=model._active_set,
-        direct_solve=model._direct_solve,
-        discrete=model._discrete,
-        n_bins=model._n_bins,
-        tol=model._tol,
-        max_iter=model._max_iter,
-        convergence=model._convergence,
-        retain_fit_state=model._retain_fit_state,
-        # A clone is the SAME model with fewer terms, so it must be fitted
-        # under the same likelihood. Falling through to the constructor
-        # default silently turned every frequency-contract model into a prior
-        # one the moment a term was dropped -- which is the path `drop1`,
-        # term importance and `refit_unpenalised` all take.
-        weight_semantics=model_weight_semantics(model),
-        # Its other model-level rules too: falling through, `separation="error"`
-        # became "warn" and `group_pricing="spanned"` became "rank" on every
-        # clone (and the editor's Refit and `Structure.apply`, which clone
-        # here), refitting a different pricing rule. A model pickled before
-        # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
-        # reads it.
-        separation=getattr(model, "_separation", "warn"),
-        group_pricing=getattr(model, "_group_pricing", "spanned"),
-    )
+    # The source model already gave any declaration warning; its clones
+    # (drop1, the editor, Structure.apply) do not repeat it.
+    from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FactorSmoothGroupTermWarning)
+        new_model = type(model)(
+            family=source_family,
+            link=source_link,
+            penalty=new_penalty,
+            features=new_features,
+            interactions=keep_interactions if keep_interactions else None,
+            active_set=model._active_set,
+            direct_solve=model._direct_solve,
+            discrete=model._discrete,
+            n_bins=model._n_bins,
+            tol=model._tol,
+            max_iter=model._max_iter,
+            convergence=model._convergence,
+            retain_fit_state=model._retain_fit_state,
+            # A clone is the SAME model with fewer terms, so it must be fitted
+            # under the same likelihood. Falling through to the constructor
+            # default silently turned every frequency-contract model into a prior
+            # one the moment a term was dropped -- which is the path `drop1`,
+            # term importance and `refit_unpenalised` all take.
+            weight_semantics=model_weight_semantics(model),
+            # Its other model-level rules too: falling through, `separation="error"`
+            # became "warn" and `group_pricing="spanned"` became "rank" on every
+            # clone (and the editor's Refit and `Structure.apply`, which clone
+            # here), refitting a different pricing rule. A model pickled before
+            # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
+            # reads it.
+            separation=getattr(model, "_separation", "warn"),
+            group_pricing=getattr(model, "_group_pricing", "spanned"),
+        )
     if kept_declarations:
         for iname, ispec in kept_declarations:
             new_model._interaction_specs[iname] = ispec

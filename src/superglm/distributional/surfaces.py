@@ -57,6 +57,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
+from superglm.terms import resolve_label
 
 #: Payload schema version shared by the surface serializers.
 SCHEMA_VERSION = 1
@@ -326,7 +327,7 @@ def _reference_values(
     # A reference taken from a training row carries the swept covariate as well;
     # the sweep overrides it rather than refusing the row.
     return {
-        name: supplied[name] if name in supplied else _default_value(frame, name)
+        name: supplied[str(name)] if str(name) in supplied else _default_value(frame, name)
         for name in columns
         if name != covariate
     }
@@ -361,6 +362,8 @@ def _sweep(
     """Build the one-covariate sweep frame every surface is evaluated on."""
     frame = as_eager_frame(X_train)
     columns = _model_columns(fitted)
+    # The covariate's label or its text names the column (a label need not be a str).
+    covariate = cast(Any, resolve_label(covariate, columns))
     if covariate not in columns:
         raise ValueError(f"the model does not use column {covariate!r}; it reads {list(columns)}")
     frame.require_columns(columns)
@@ -842,16 +845,29 @@ class _SegmentTotals:
         return pd.DataFrame(data)
 
 
+def _segment_column(by: object, frame: EagerFrame) -> Any:
+    """The column of ``frame`` that ``by`` names, by its label or its text, else ``None``."""
+    try:
+        hash(by)
+    except TypeError:
+        return None  # per-row labels: an array, a pandas or polars Series, a list
+    if by is None:
+        return None
+    column = resolve_label(by, frame.columns)
+    return column if column in frame.columns else None
+
+
 def _resolved_segments(
     frame: EagerFrame, by: str | NDArray | None, rows: int
 ) -> _Segmentation | None:
     if by is None:
         return None
-    if isinstance(by, str):
-        if by not in {str(name) for name in frame.columns}:
-            raise ValueError(f"by={by!r} is not a column of X")
-        labels = frame.column_array(by)
-        name: str | None = by
+    column = _segment_column(by, frame)
+    if column is not None:
+        labels = frame.column_array(column)
+        name: str | None = str(column)
+    elif isinstance(by, str):
+        raise ValueError(f"by={by!r} is not a column of X")
     else:
         labels = np.asarray(by)
         if labels.shape != (rows,):
@@ -910,7 +926,7 @@ def portfolio(
         weights, len(frame), contract=WeightContract("prior"), name="weights"
     )
     positions = resolved.input_positions
-    if by is not None and not isinstance(by, str):
+    if by is not None and _segment_column(by, frame) is None and not isinstance(by, str):
         labels = np.asarray(by)
         if labels.shape != (len(frame),):
             raise ValueError("by must give one segment label per row of X")

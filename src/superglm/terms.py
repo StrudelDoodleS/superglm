@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping, Sequence
+import os
+import warnings
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from numpy.typing import ArrayLike
 
@@ -49,8 +51,40 @@ _INTERACTION_TYPES = (
 
 
 def _validate_name(name: str) -> None:
+    """An interaction's name: a non-empty string, as results name it by text."""
     if not isinstance(name, str) or not name.strip():
-        raise ValueError("Term and column names must be non-empty strings")
+        raise ValueError(f"Interaction names must be non-empty strings, got {name!r}")
+
+
+def check_column_label(label: object) -> None:
+    """Refuse a main-term column label that cannot name a column.
+
+    A label is any hashable value, as a ``features=`` key is: a string, or an
+    integer, tuple or even ``None`` a pandas frame names its columns by.
+    """
+    try:
+        hash(label)
+    except TypeError:
+        raise TypeError(
+            f"A column label must be hashable, as a dict key is; got {type(label).__name__}"
+        ) from None
+
+
+def check_column_texts(labels: Iterable[Hashable]) -> None:
+    """Refuse two column labels that read as the same text, such as ``0`` and ``"0"``.
+
+    Results name a term by its label's text: coefficient groups, smoothing
+    parameters, summaries and structure files. Two labels with one text would
+    name two terms alike, so both forms refuse them where they are declared.
+    """
+    seen: dict[str, Hashable] = {}
+    for label in labels:
+        first = seen.setdefault(str(label), label)
+        if first is not label and first != label:
+            raise ValueError(
+                f"Columns {first!r} and {label!r} both read as {str(label)!r}, which is how "
+                "results name a term; rename one of the columns"
+            )
 
 
 @dataclass(frozen=True)
@@ -62,11 +96,11 @@ class BoundTerm:
     specification. It reads no data and has no fitted coefficients.
     """
 
-    column: str
+    column: Hashable
     _spec: FeatureSpec = field(repr=False)
 
     def __post_init__(self) -> None:
-        _validate_name(self.column)
+        check_column_label(self.column)
         if isinstance(self._spec, _INTERACTION_TYPES):
             raise TypeError("Use interaction(spec) to bind an interaction specification")
         if not isinstance(self._spec, FeatureSpec):
@@ -84,7 +118,8 @@ class BoundInteraction:
     """An interaction declaration for use inside a family predictor.
 
     Create one with ``ti`` or ``interaction``. Its parent terms must also be
-    declared in that predictor. ``name`` identifies the interaction in results.
+    declared in that predictor, except a ``FactorSmooth``'s, which reads its
+    two columns itself. ``name`` identifies the interaction in results.
     """
 
     name: str
@@ -96,7 +131,7 @@ class BoundInteraction:
         if not isinstance(self._spec, _INTERACTION_TYPES):
             raise TypeError("interaction() requires a supported explicit interaction specification")
         for parent in self._spec.parent_names:
-            _validate_name(parent)
+            check_column_label(parent)
         object.__setattr__(self, "_spec", deepcopy(self._spec))
 
     @property
@@ -105,19 +140,19 @@ class BoundInteraction:
         return deepcopy(self._spec)
 
 
-type TermInput = str | BoundTerm | BoundInteraction | Mapping[str, FeatureSpec]
+type TermInput = str | BoundTerm | BoundInteraction | Mapping[Hashable, FeatureSpec]
 
 
 @dataclass(frozen=True)
 class NormalizedTerms:
     """Owned compiler inputs in main-effect and interaction declaration order."""
 
-    features: dict[str, FeatureSpec]
+    features: dict[Hashable, FeatureSpec]
     interaction_specs: dict[str, InteractionSpec]
     interaction_order: tuple[str, ...]
 
 
-def term(column: str, spec: FeatureSpec) -> BoundTerm:
+def term(column: Hashable, spec: FeatureSpec) -> BoundTerm:
     """Attach an existing feature specification to an input column.
 
     Use this for specifications without a shorthand, such as ``Polynomial``,
@@ -126,8 +161,9 @@ def term(column: str, spec: FeatureSpec) -> BoundTerm:
 
     Parameters
     ----------
-    column : str
-        Name of a column in the fit and prediction frames.
+    column : hashable
+        Label of a column in the fit and prediction frames: a string, or any
+        other label a ``features=`` key may be, such as an integer.
     spec : FeatureSpec
         A main-effect specification. Use ``interaction`` for interactions.
 
@@ -147,19 +183,19 @@ def term(column: str, spec: FeatureSpec) -> BoundTerm:
 
 
 def s(
-    column: str,
+    column: Hashable,
     *,
-    kind: str = "cr",
+    kind: Literal["cr", "ps", "bs", "ns", "cr_cardinal"] = "cr",
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
-    knot_strategy: str = "uniform",
-    penalty: str = "ssp",
+    knot_strategy: Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"] = "uniform",
+    penalty: Literal["ssp", "none"] | None = "ssp",
     select: bool = False,
     knots: ArrayLike | None = None,
     discrete: bool | None = None,
     n_bins: int | None = None,
-    extrapolation: str = "clip",
+    extrapolation: Literal["clip", "extend", "error"] = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
     constraint: ConstraintSpec | None = None,
@@ -175,9 +211,9 @@ def s(
 
     Parameters
     ----------
-    column : str
-        Name of the numeric input column.
-    kind : str, default="cr"
+    column : hashable
+        Label of the numeric input column, usually its name.
+    kind : {"cr", "ps", "bs", "ns", "cr_cardinal"}, default="cr"
         Spline basis. Common choices are ``"cr"`` for cubic regression splines
         and ``"ps"`` for P-splines. See ``Spline`` for the other bases.
     k : int, optional
@@ -188,12 +224,15 @@ def s(
     degree : int, default=3
         Polynomial degree for bases that support this option. Cubic
         regression splines remain cubic.
-    knot_strategy : str, default="uniform"
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, \
+default="uniform"
         Knot-placement rule. ``"uniform"`` spaces knots evenly;
+        ``"quantile"`` places them at quantiles of the distinct values,
         ``"quantile_rows"`` follows the training data and
         ``"quantile_tempered"`` tempers that concentration.
-    penalty : {"ssp", "none"}, default="ssp"
-        Enable SSP basis reparametrization, or disable it with ``"none"``.
+    penalty : {"ssp", "none"} or None, default="ssp"
+        Enable SSP basis reparametrization, or disable it with ``"none"``
+        (``None`` also disables it).
     select : bool, default=False
         Add a penalty on the spline's null space so that smoothing can also
         shrink directions left unpenalized by the ordinary wiggle penalty.
@@ -269,12 +308,12 @@ def s(
 
 
 def cat(
-    column: str,
+    column: Hashable,
     *,
-    base: str = "most_exposed",
+    base: Literal["most_exposed", "first"] | str = "most_exposed",
     grouping: LevelGrouping | None = None,
     levels: Any = None,
-    unseen: str = "error",
+    unseen: Literal["error", "base"] | str = "error",
 ) -> BoundTerm:
     """Declare a categorical effect with a reference level.
 
@@ -284,9 +323,9 @@ def cat(
 
     Parameters
     ----------
-    column : str
-        Name of the categorical input column.
-    base : str, default="most_exposed"
+    column : hashable
+        Label of the categorical input column, usually its name.
+    base : {"most_exposed", "first"} or str, default="most_exposed"
         Reference level. Use the level with the greatest total sample weight,
         ``"first"`` for the first level, or a specific level name.
     grouping : LevelGrouping, optional
@@ -294,7 +333,7 @@ def cat(
     levels : sequence, data column or categorical dtype, optional
         Declare the allowed input levels. With ``grouping``, these are the
         original levels before grouping.
-    unseen : str, default="error"
+    unseen : {"error", "base"} or str, default="error"
         Prediction policy for levels outside the fitted level universe.
         ``"base"`` uses the reference level and emits a warning. The label of
         a group of ``grouping`` gives them that group's effect, also with a
@@ -314,7 +353,7 @@ def cat(
 
 
 def re(
-    column: str,
+    column: Hashable,
     *,
     levels: Any = None,
     unseen: Literal["population", "error"] = "population",
@@ -330,8 +369,8 @@ def re(
 
     Parameters
     ----------
-    column : str
-        Name of the grouping column.
+    column : hashable
+        Label of the grouping column, usually its name.
     levels : sequence, data column or categorical dtype, optional
         Declare the allowed levels, including levels with no training rows.
     unseen : {"population", "error"}, default="population"
@@ -373,7 +412,10 @@ def interaction(spec: InteractionSpec, *, name: str | None = None) -> BoundInter
 
     Declare the specification's parent terms in the same predictor. Their
     order within the specification is preserved, even when the predictor's
-    declarations appear in a different order.
+    declarations appear in a different order. A ``FactorSmooth`` needs no
+    parent terms: it reads its variable and group columns itself, as it does
+    under ``interactions=``, so ``interaction(FactorSmooth("age",
+    group="region"))`` can stand alone in a predictor.
 
     Parameters
     ----------
@@ -400,14 +442,14 @@ def interaction(spec: InteractionSpec, *, name: str | None = None) -> BoundInter
         if not isinstance(parents, tuple) or len(parents) != 2:
             raise TypeError("interaction() requires a supported explicit interaction specification")
         for parent in parents:
-            _validate_name(parent)
-        name = ":".join(parents)
+            check_column_label(parent)
+        name = ":".join(map(str, parents))
     return BoundInteraction(name, spec)
 
 
 def ti(
-    left: str,
-    right: str,
+    left: Hashable,
+    right: Hashable,
     *,
     n_knots: tuple[int, int] | None = None,
     decompose: bool = False,
@@ -420,8 +462,8 @@ def ti(
 
     Parameters
     ----------
-    left, right : str
-        Names of two columns with declared spline terms.
+    left, right : hashable
+        Labels of two columns with declared spline terms.
     n_knots : tuple of int, optional
         Interior-knot counts for the left and right tensor margins. By
         default, inherit the parent terms' counts.
@@ -439,11 +481,12 @@ def ti(
     TensorInteraction : Tensor construction and penalty details.
     interaction : Other supported interaction specifications.
     """
-    _validate_name(left)
-    _validate_name(right)
+    check_column_label(left)
+    check_column_label(right)
     return BoundInteraction(
         f"{left}:{right}",
-        TensorInteraction(left, right, n_knots=n_knots, decompose=decompose),
+        # Typed by the interaction classes' str convention; any label works.
+        TensorInteraction(cast(str, left), cast(str, right), n_knots=n_knots, decompose=decompose),
         _requires_spline_parents=True,
     )
 
@@ -464,6 +507,52 @@ def _expand_mappings(terms: Sequence[TermInput]) -> tuple[object, ...]:
     return tuple(expanded)
 
 
+def resolve_label(key: object, labels: Iterable[Hashable]) -> object:
+    """The label among ``labels`` that ``key`` names: ``key`` itself, or the one whose text it is.
+
+    Results name a term by its label's text, so a term can be looked up by
+    either: ``0`` and ``"0"`` find the term on column ``0``. A model holds no
+    two labels with one text, so the text names at most one. A key naming
+    nothing comes back as it is, for the caller's own not-found error.
+    """
+    try:
+        if key in labels:
+            return key
+    except TypeError:
+        return key
+    text = str(key)
+    return next((label for label in labels if str(label) == text), key)
+
+
+class TermResults(dict):
+    """Per-term results keyed by label, which also find a term by its label's text."""
+
+    def __missing__(self, key: object) -> Any:
+        label = resolve_label(key, dict.keys(self))
+        if label is key:
+            raise KeyError(key)
+        return dict.__getitem__(self, label)
+
+    def __contains__(self, key: object) -> bool:
+        return dict.__contains__(self, resolve_label(key, dict.keys(self)))
+
+    def get(self, key: object, default: Any = None) -> Any:
+        return dict.get(self, resolve_label(key, dict.keys(self)), default)
+
+
+def declaration_text(column: Hashable, spec: object) -> str:
+    """How a main term on ``column`` reads in a terms list, for messages."""
+    from superglm.features.categorical import Categorical as _Categorical
+
+    if isinstance(spec, RandomEffect):
+        return f"re({column!r})"
+    if isinstance(spec, _Categorical) and not isinstance(spec, OrderedCategorical):
+        return f"cat({column!r})"
+    if isinstance(spec, _SplineBase):
+        return f"s({column!r})"
+    return f"term({column!r}, {type(spec).__name__}(...))"
+
+
 def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str]) -> str:
     """Why ``ti`` refuses ``parent``, and what declares the intended interaction."""
     if isinstance(spec, OrderedCategorical) and spec.basis_kind == "spline":
@@ -481,12 +570,28 @@ def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str])
     return f"ti parent {parent!r} must be a declared spline; use s({parent!r})"
 
 
-def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
+# Warnings about a declaration point at the first frame outside the package.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+
+class RedundantInteractionWarning(UserWarning):
+    """Two interactions of one class over the same two columns span one column space."""
+
+
+def normalize_terms(
+    terms: Sequence[TermInput],
+    *,
+    repeated_pairs: Literal["refuse", "warn"] = "refuse",
+) -> NormalizedTerms:
     """Resolve declarations without reading data or constructing row designs.
 
     A ``{column: spec}`` mapping among the declarations stands for
     ``term(column, spec)`` for each entry, in the mapping's order. Main terms
     keep their declaration order, and interactions keep theirs.
+
+    Two interactions of one class over the same two columns are refused, or,
+    with ``repeated_pairs="warn"`` (SuperLSS, which always fitted them), kept
+    with a warning that the second is redundant.
     """
     if isinstance(terms, Mapping):
         raise TypeError(
@@ -495,7 +600,7 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
         )
     if isinstance(terms, str | bytes) or not isinstance(terms, Sequence):
         raise TypeError("terms must be a sequence of term declarations")
-    features: dict[str, FeatureSpec] = {}
+    features: dict[Hashable, FeatureSpec] = {}
     interactions: dict[str, InteractionSpec] = {}
     spline_parent_interactions: set[str] = set()
     # One interaction of a class per unordered parent pair: ti("x", "z") and
@@ -505,7 +610,6 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
     # Copy the complete graph once, retaining aliases within the owned graph.
     for declaration in deepcopy(_expand_mappings(terms)):
         if isinstance(declaration, str):
-            _validate_name(declaration)
             name, spec = declaration, Numeric()
         elif isinstance(declaration, BoundTerm):
             name, spec = declaration.column, declaration._spec
@@ -514,30 +618,60 @@ def normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms:
                 raise ValueError(f"Duplicate interaction declaration: {declaration.name!r}")
             pair = (type(declaration._spec), frozenset(declaration._spec.parent_names))
             if pair in pair_owners:
-                raise ValueError(
+                same = (
                     f"Interactions {pair_owners[pair]!r} and {declaration.name!r} are both "
-                    f"{pair[0].__name__} over the same two columns, in either order; "
-                    "declare one"
+                    f"{pair[0].__name__} over the same two columns, in either order"
                 )
-            pair_owners[pair] = declaration.name
+                if repeated_pairs != "warn":
+                    raise ValueError(f"{same}; declare one")
+                warnings.warn(
+                    f"{same}, so the second is redundant: it repeats the first's "
+                    "columns. Declare one.",
+                    RedundantInteractionWarning,
+                    skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+                )
+            pair_owners.setdefault(pair, declaration.name)
             interactions[declaration.name] = declaration._spec
             if declaration._requires_spline_parents:
                 spline_parent_interactions.add(declaration.name)
             continue
+        elif isinstance(declaration, _INTERACTION_TYPES):
+            raise TypeError(
+                f"A {type(declaration).__name__} in terms= is declared as interaction(spec)"
+            )
+        elif isinstance(declaration, FeatureSpec):
+            raise TypeError(
+                f"A {type(declaration).__name__} in terms= needs its column: write "
+                "term(column, spec), or put it in a {column: spec} mapping"
+            )
         else:
-            raise TypeError("Expected a numeric column string or a bound term declaration")
+            raise TypeError(
+                "A bare entry in terms= is a numeric column named by a string, got "
+                f"{declaration!r}; declare another label as term({declaration!r}, Numeric()) "
+                f"or in a mapping, {{{declaration!r}: Numeric()}}"
+            )
         if name in features:
             raise ValueError(f"Duplicate main term declaration for column {name!r}")
         features[name] = spec
+    check_column_texts(features)
 
     for name, ispec in interactions.items():
         if name in features:
             raise ValueError(
                 f"Term name {name!r} identifies both a main feature and an interaction"
             )
+        if isinstance(ispec, FactorSmooth):
+            # A factor smooth reads its variable and group columns itself, as
+            # under interactions=, so neither needs a main term. SuperGLM's own
+            # rules on those terms (a global spline for basis="sz", no main
+            # effect on the group) are the model's, checked where it is built.
+            continue
         for parent in ispec.parent_names:
             if parent not in features:
-                raise ValueError(f"Interaction {name!r} requires declared parent {parent!r}")
+                raise ValueError(
+                    f"Interaction {name!r} requires declared parent {parent!r}; declare it "
+                    f"in the same list, as in s({parent!r}) or cat({parent!r})"
+                )
             parent_spec = features[parent]
             if name in spline_parent_interactions and not isinstance(parent_spec, _SplineBase):
                 raise TypeError(_ti_parent_message(parent, parent_spec, ispec.parent_names))

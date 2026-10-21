@@ -7,7 +7,7 @@ simultaneously), which is the correct variable selection behavior.
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +16,8 @@ from superglm.types import GroupInfo
 
 # The named unseen policies; any other `unseen=` text names a group.
 _UNSEEN_POLICIES = ("error", "base")
+# The named base policies; any other `base=` names a level.
+_BASE_POLICIES = ("most_exposed", "first")
 
 
 def _validate_observed_categorical_levels(
@@ -298,11 +300,11 @@ class Categorical:
 
     def __init__(
         self,
-        base: str = "most_exposed",
+        base: Literal["most_exposed", "first"] | str = "most_exposed",
         grouping=None,
         *,
         levels=None,
-        unseen: str = "error",
+        unseen: Literal["error", "base"] | str = "error",
     ):
         from superglm.features._level_source import resolve_level_source
 
@@ -567,7 +569,7 @@ class Categorical:
             requested = self._base_level
         else:
             requested = self.base
-            if not self._base_is_level and requested in ("most_exposed", "first"):
+            if not self._base_is_level and requested in _BASE_POLICIES:
                 policy = requested
 
         if policy == "most_exposed":

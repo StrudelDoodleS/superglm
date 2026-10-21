@@ -281,7 +281,7 @@ class Structure:
     Parameters
     ----------
     features : dict[str, FeatureStructure]
-        The decisions for each feature, by feature name.
+        The decisions for each feature, by the text of its column label.
     superglm_version : str
         The superglm version that exported the structure.
 
@@ -328,8 +328,9 @@ class Structure:
         Returns
         -------
         Structure
-            One entry per categorical, ordered and spline feature. Other
-            features carry no structural decisions and are left out.
+            One entry per categorical, ordered and spline feature, keyed by
+            its column label's text (a column labelled ``0`` as ``"0"``).
+            Other features carry no structural decisions and are left out.
 
         Raises
         ------
@@ -351,18 +352,19 @@ class Structure:
             kind = _kind(spec)
             if kind is None:
                 continue
-            if not isinstance(name, str):
-                raise StructureError(_NOT_WRITABLE.format(value=name, feature=name))
+            # A file names a term by its label's text, as results do; a model
+            # holds no two labels with one text, so apply() finds it again.
+            text = str(name)
             if kind == "spline":
                 # An unfitted spline has no placed knots to write; the model is refused below.
-                features[name] = FeatureStructure(
+                features[text] = FeatureStructure(
                     kind=kind,
                     ranges=list(current_ranges(spec)),
                     knots=_knots_entry(spec) if fitted else None,
                     basis=_basis_entry(spec),
                 )
             else:
-                features[name] = _level_structure(name, spec, kind, frame)
+                features[text] = _level_structure(name, spec, kind, frame)
         if not fitted:
             # A model with no categorical or ordered term to name says so here.
             raise StructureError(_MODEL_UNFITTED)
@@ -503,11 +505,14 @@ class Structure:
         specs = getattr(model, "_specs", None) or {}
         declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ()))
         replacements = {}
-        for name in sorted(self.features):
-            entry = self.features[name]
-            _check_feature(name, entry)
-            if name not in specs:
-                raise StructureError(_ABSENT.format(feature=name))
+        # The file names each term by its label's text (``0`` as "0").
+        labels = {str(label): label for label in specs}
+        for text in sorted(self.features):
+            entry = self.features[text]
+            _check_feature(text, entry)
+            if text not in labels:
+                raise StructureError(_ABSENT.format(feature=text))
+            name = labels[text]
             spec = declared.get(name, specs[name])
             if _kind(spec) != entry.kind:
                 raise StructureError(_KIND.format(feature=name, kind=entry.kind))

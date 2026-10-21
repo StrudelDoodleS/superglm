@@ -31,6 +31,18 @@ def _is_scalar_term_selector(model, terms) -> bool:
     return False
 
 
+def _resolved_selector(model, terms):
+    """``terms`` with each term named by its label, found by label or by text."""
+    if terms is TERMS_UNSET or terms is None:
+        return terms
+    from superglm.terms import resolve_label
+
+    labels = [*model._specs, *model._interaction_specs]
+    if _is_scalar_term_selector(model, terms):
+        return resolve_label(terms, labels)
+    return [resolve_label(term, labels) for term in terms]
+
+
 def resolve_ci(ci):
     """Normalize the ``ci`` parameter to an interval string or None."""
     if ci is None or ci is False:
@@ -88,6 +100,7 @@ def plot(
         raise ValueError(f"scale={scale!r} is not valid, expected one of {sorted(valid_scales)}")
 
     interval = resolve_ci(ci)
+    terms = _resolved_selector(model, terms)
 
     if terms is TERMS_UNSET or (
         terms is None and None not in model._specs and None not in model._interaction_specs
@@ -263,6 +276,7 @@ def plot_data(
         )
 
     interval = resolve_ci(ci)
+    terms = _resolved_selector(model, terms)
 
     if terms is TERMS_UNSET or (
         terms is None and None not in model._specs and None not in model._interaction_specs

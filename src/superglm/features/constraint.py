@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+# The values ``ConstraintSpec`` takes; spline construction validates against them.
+CONSTRAINT_MODES = ("fit", "postfit")
+CONSTRAINT_KINDS = ("increasing", "decreasing", "convex", "concave")
 
 
 @dataclass(frozen=True)
 class ConstraintSpec:
     """A single shape constraint: when it is applied, and what it requires."""
 
-    mode: str
-    kind: str
+    mode: Literal["fit", "postfit"]
+    kind: Literal["increasing", "decreasing", "convex", "concave"]
 
 
 class _ConstraintKindNamespace:
-    def __init__(self, mode: str):
+    def __init__(self, mode: Literal["fit", "postfit"]):
         self.increasing = ConstraintSpec(mode=mode, kind="increasing")
         self.decreasing = ConstraintSpec(mode=mode, kind="decreasing")
         self.convex = ConstraintSpec(mode=mode, kind="convex")

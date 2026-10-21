@@ -423,7 +423,7 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
             # the screenable features would send the caller hunting for a
             # misspelling that isn't there.  The reason quoted here is the same
             # string the result table reports.
-            deferred_names = sorted(name for name in pair if name in deferred_features)
+            deferred_names = sorted((name for name in pair if name in deferred_features), key=repr)
             if deferred_names:
                 detail = "; ".join(f"{n} — {deferred_features[n]}" for n in deferred_names)
                 raise ValueError(
@@ -434,7 +434,7 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
             raise ValueError(
                 "candidates entries must pair two distinct screenable fitted "
                 f"features; got {raw!r} (screenable features: "
-                f"{sorted(margin_kinds)})"
+                f"{sorted(margin_kinds, key=repr)})"
             )
         if _pair_kind(margin_kinds[pair[0]], margin_kinds[pair[1]]) is None:
             raise ValueError(
@@ -770,7 +770,7 @@ def screen_interactions(
             spec = spec._spline
         return getattr(spec, "select", False)
 
-    selected = sorted({name for pair in pairs for name in pair if _select_flag(name)})
+    selected = sorted({name for pair in pairs for name in pair if _select_flag(name)}, key=repr)
     if selected:
         raise ValueError(
             f"screen_interactions requires single-penalty parent smooths, but {selected} were "
@@ -839,7 +839,7 @@ def screen_interactions(
             return model._specs[name]
         return _margin_source(name)[0]
 
-    for name in sorted({name for pair in pairs for name in pair}):
+    for name in sorted({name for pair in pairs for name in pair}, key=repr):
         # A categorical margin is read through its level labels; every other
         # margin through its resolved source, which maps an OrderedCategorical's
         # labels to scores rather than casting them.  Reading them all here
@@ -956,7 +956,14 @@ def screen_interactions(
         if key not in marginal_cache:
             s = _support(name, binned)
             m = TensorInteraction._marginal_from_spec(
-                _margin_spec(name), s["x"], None, support=s["uniq"], counts=s["counts"]
+                _margin_spec(name),
+                s["x"],
+                None,
+                support=s["uniq"],
+                counts=s["counts"],
+                # The probe's geometry as it was: SuperGLM refits no
+                # interaction on a ranged parent.
+                keep_ranges=False,
             )
             S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
             basis = m.basis
@@ -1404,14 +1411,19 @@ def screen_interactions(
                         break
                 # bin the largest not-yet-binned margin that binning can shrink;
                 # a categorical margin is never binnable, whatever its level count
-                binnable = sorted(
-                    (
-                        (n, name)
-                        for n, name in ((n_l, left), (n_r, right))
-                        if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
-                    ),
-                    reverse=True,
-                )
+                binnable = [
+                    (n, name)
+                    for n, name in ((n_l, left), (n_r, right))
+                    if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
+                ]
+                try:
+                    # A size tie breaks on the labels' own order, as on 0.40.
+                    binnable = sorted(binnable, reverse=True)
+                except TypeError:
+                    # Labels that do not order (0 and "z") break it on their text.
+                    binnable = sorted(
+                        binnable, key=lambda item: (item[0], str(item[1])), reverse=True
+                    )
                 if not binnable:
                     if arrow_lookahead:
                         # The speculative handoff has now run out of support

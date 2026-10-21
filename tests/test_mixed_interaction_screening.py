@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, SuperGLM
+from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
@@ -175,15 +176,17 @@ def test_factor_smooth_pair_is_excluded():
 
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
-    model = SuperGLM(
-        family="poisson",
-        features={
-            "age": Spline(kind="ps", n_knots=6, m=2),
-            "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=4)),
-        },
-        interactions=[FactorSmooth("age", group="band", basis="fs", kind="ps", k=5)],
-        selection_penalty=0.0,
-    )
+    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'band' is redundant"):
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "age": Spline(kind="ps", n_knots=6, m=2),
+                "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=4)),
+            },
+            interactions=[FactorSmooth("age", group="band", basis="fs", kind="ps", k=5)],
+            selection_penalty=0.0,
+        )
     model.fit_reml(df, y)
     table = model.screen_interactions(df, y)
     pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}

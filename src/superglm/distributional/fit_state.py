@@ -78,10 +78,9 @@ def _positive_integer(value: Any, *, name: str) -> int:
 
 def _frozen_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
     if isinstance(value, Mapping):
+        # Keyed by column label: any label a predictor's term takes.
         result: dict[str, int] = {}
         for name, count in value.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("requested_n_bins keys must be non-empty feature names")
             result[name] = _positive_integer(
                 count,
                 name=f"requested_n_bins[{name!r}]",

@@ -2,15 +2,41 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from superglm.features._spline_knots import QUANTILE_STRATEGIES
 from superglm.features._spline_ranges import PolynomialRange
-from superglm.features.constraint import ConstraintSpec
+from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
 from superglm.types import LambdaPolicy
+
+
+class SplineOptionWarning(UserWarning):
+    """A spline option outside its accepted values, built as it always was."""
+
+
+# Warnings about a declaration point at the first frame outside the package.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The enumerated spline options as types, for the private helpers between the
+# public signatures (which spell each ``Literal`` out) and the spec.
+type SplineKindName = Literal["cr", "ps", "bs", "ns", "cr_cardinal"]
+type KnotStrategyName = Literal["uniform", "quantile", "quantile_rows", "quantile_tempered"]
+type PenaltyName = Literal["ssp", "none"] | None
+type ExtrapolationName = Literal["clip", "extend", "error"]
+
+# The ``extrapolation=`` policies a spline takes.
+EXTRAPOLATIONS = ("clip", "extend", "error")
+# The ``penalty=`` values a spline takes: "ssp" reparametrizes the basis
+# (``dm_builder``), and "none" (or None) builds it without.
+PENALTIES = ("ssp", "none")
+# The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
+KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
 
 
 def _iter_knots(knots: Any) -> list[Any]:
@@ -81,9 +107,9 @@ def _normalize_constraint(constraint: ConstraintSpec | None) -> tuple[str | None
         raise TypeError(
             "constraint must be None or a Constraint token such as Constraint.fit.increasing"
         )
-    if constraint.kind not in ("increasing", "decreasing", "convex", "concave"):
+    if constraint.kind not in CONSTRAINT_KINDS:
         raise ValueError(f"Unsupported constraint kind: {constraint.kind!r}")
-    if constraint.mode not in ("fit", "postfit"):
+    if constraint.mode not in CONSTRAINT_MODES:
         raise ValueError(f"Unsupported constraint mode: {constraint.mode!r}")
     return constraint.kind, constraint.mode
 
@@ -94,7 +120,7 @@ def initialize_spec(
     n_knots: int,
     degree: int,
     knot_strategy: str,
-    penalty: str,
+    penalty: str | None,
     knots: ArrayLike | None,
     discrete: bool | None,
     n_bins: int | None,
@@ -145,10 +171,19 @@ def initialize_spec(
     validate_select(spec)
 
     spec.degree = degree
+    # Any other value builds without SSP, as it always has (None among them);
+    # a value outside the accepted ones also says so, since it may be a typo.
+    if penalty is not None and penalty not in PENALTIES:
+        warnings.warn(
+            f"penalty={penalty!r} is not one of {PENALTIES}; it was treated as 'none': "
+            "no SSP reparametrization.",
+            SplineOptionWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
     spec.penalty = penalty
     spec.discrete = discrete
     spec.n_bins = n_bins
-    if extrapolation not in {"clip", "extend", "error"}:
+    if extrapolation not in EXTRAPOLATIONS:
         raise ValueError(
             f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
         )
@@ -174,6 +209,17 @@ def configure_knots(
     boundary: tuple[float, float] | None,
 ) -> None:
     """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
+    # Stated knots make the rule moot, and it was never read then. A rule the
+    # placement does not know places uniform knots, as it always has, and says
+    # so, since it may be a typo.
+    if knots is None and knot_strategy not in KNOT_STRATEGIES:
+        warnings.warn(
+            f"knot_strategy={knot_strategy!r} is not one of {KNOT_STRATEGIES}; it was "
+            "treated as 'uniform': uniform knots everywhere, including a cr spline's "
+            "interaction margins, where 'uniform' itself places quantile knots.",
+            SplineOptionWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
     if knots is not None and _knots_contain_names(knots):
         # Level-name knots: resolvable only against an OrderedCategorical's
         # declared levels, so resolution is deferred to that host (which

@@ -281,12 +281,21 @@ def _lambda_policy_manifest(policy: LambdaPolicy | None) -> dict[str, Any] | Non
     return {"mode": policy.mode, "value": policy.value}
 
 
+def _label_manifest(label: Any) -> Any:
+    """A column label as JSON: a string as it is, any other label as its text.
+
+    A predictor holds no two labels with one text (``check_column_texts``),
+    so the text names the term, as results do; the payload keeps the label.
+    """
+    return label if isinstance(label, str) else str(label)
+
+
 def _group_manifest(group: GroupSlice) -> dict[str, Any]:
     return {
         "name": group.name,
         "slice": [group.start, group.end],
         "size": group.size,
-        "feature_name": group.feature_name,
+        "feature_name": _label_manifest(group.feature_name),
         "penalized": group.penalized,
         "subgroup_type": group.subgroup_type,
         "monotone_engine": group.monotone_engine,
@@ -344,14 +353,14 @@ def _predictors_manifest(model: DenseDistributionalModel) -> list[dict[str, Any]
     ):
         template_features = [
             {
-                "name": name,
+                "name": _label_manifest(name),
                 **ownership.describe(template.features[name]),
             }
             for name in template.features
         ]
         compiled_features = [
             {
-                "name": name,
+                "name": _label_manifest(name),
                 **ownership.describe(compiled.compiled.specs[name]),
             }
             for name in compiled.compiled.feature_order
@@ -368,14 +377,18 @@ def _predictors_manifest(model: DenseDistributionalModel) -> list[dict[str, Any]
                 "name": state.name,
                 "parameter_index": state.parameter_index,
                 "intercept": compiled.intercept,
-                "interactions": [list(pair) for pair in template.interactions],
+                "interactions": [
+                    [_label_manifest(label) for label in pair] for pair in template.interactions
+                ],
                 "coefficient_slice": _slice_manifest(state.coefficient_slice),
                 "intercept_index": state.intercept_index,
                 "link": _object_state(state.link),
                 "template_features": template_features,
                 "compiled_features": compiled_features,
                 "compiled_interactions": compiled_interactions,
-                "feature_order": list(compiled.compiled.feature_order),
+                "feature_order": [
+                    _label_manifest(name) for name in compiled.compiled.feature_order
+                ],
                 "interaction_order": list(compiled.compiled.interaction_order),
                 "groups": [_group_manifest(group) for group in state.groups],
                 "design": {
@@ -821,6 +834,13 @@ def _reduce_mapping_proxy(value: Mapping[Any, Any]) -> tuple[Any, tuple[dict[Any
 class _DistributionalPickler(pickle.Pickler):
     dispatch_table = copyreg.dispatch_table.copy()
     dispatch_table[_MAPPING_PROXY_TYPE] = _reduce_mapping_proxy
+
+
+def pickle_state(value: Any) -> bytes:
+    """Pickle ``value`` with the read-only mappings the standard pickler refuses."""
+    stream = io.BytesIO()
+    _DistributionalPickler(stream, protocol=pickle.HIGHEST_PROTOCOL).dump(value)
+    return stream.getvalue()
 
 
 def _pickle_model(model: DenseDistributionalModel) -> bytes:

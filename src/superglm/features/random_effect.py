@@ -11,6 +11,10 @@ from numpy.typing import NDArray
 
 from superglm.types import GroupInfo, LambdaPolicy
 
+# The values ``unseen=`` and ``missing=`` take.
+UNSEEN_POLICIES = ("population", "error")
+MISSING_POLICIES = ("error",)
+
 
 class RandomEffect:
     """All-level categorical effect with a REML-estimated variance component.
@@ -59,9 +63,9 @@ class RandomEffect:
 
         if nested_in is not None and not isinstance(nested_in, Hashable):
             raise TypeError("nested_in must be the name of another RandomEffect feature or None")
-        if unseen not in ("population", "error"):
+        if unseen not in UNSEEN_POLICIES:
             raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
-        if missing != "error":
+        if missing not in MISSING_POLICIES:
             raise ValueError(f"missing must be 'error', got {missing!r}")
         if lambda_policy is not None and not isinstance(lambda_policy, LambdaPolicy):
             raise TypeError("lambda_policy must be a LambdaPolicy or None")

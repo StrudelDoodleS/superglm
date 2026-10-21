@@ -16,6 +16,7 @@ from superglm import (
     collapse_levels,
 )
 from superglm.constraints import shape_constraint_certificate
+from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -1072,11 +1073,13 @@ class TestOrderedCategoricalShapeDispatch:
             )
 
         def grouped_factor_smooth(kind):
-            return SuperGLM(
-                family="gaussian",
-                features={"g": band(kind)},
-                interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
-            )
+            # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
+            with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'g' is redundant"):
+                return SuperGLM(
+                    family="gaussian",
+                    features={"g": band(kind)},
+                    interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+                )
 
         with pytest.raises(NotImplementedError, match=r"stated twice"):
             grouped_factor_smooth("ps").fit_reml(X, y)

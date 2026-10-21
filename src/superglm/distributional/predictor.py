@@ -17,6 +17,7 @@ from superglm._parallel import parallel_config
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.random_effect import validate_declared_nesting
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
@@ -28,6 +29,7 @@ from superglm.group_matrix import (
 from superglm.links import Link, resolve_link
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.penalty_algebra import build_penalty_components
+from superglm.terms import check_column_label, check_column_texts
 from superglm.types import FeatureSpec, PenaltyComponent
 
 
@@ -71,18 +73,21 @@ class Predictor:
             raise TypeError("features must be a mapping")
         owned_features = dict(self.features)
         for name, feature in owned_features.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError("feature names must be non-empty strings")
+            # Any column label SuperGLM's features= takes; results name the
+            # term by its text, as in "location:0#wiggle".
+            check_column_label(name)
             if not isinstance(feature, FeatureSpec):
                 raise TypeError(f"feature {name!r} does not implement FeatureSpec")
+
+        check_column_texts(owned_features)
 
         interactions: list[tuple[str, str]] = []
         for pair in self.interactions:
             if not isinstance(pair, tuple) or len(pair) != 2:
                 raise ValueError("each interaction must be a two-name tuple")
             left, right = pair
-            if not isinstance(left, str) or not isinstance(right, str):
-                raise TypeError("interaction names must be strings")
+            check_column_label(left)
+            check_column_label(right)
             missing = [name for name in pair if name not in owned_features]
             if missing:
                 raise ValueError(f"interaction references unknown features: {missing}")
@@ -95,12 +100,24 @@ class Predictor:
             if not isinstance(interaction_name, str) or not interaction_name:
                 raise ValueError("interaction spec names must be non-empty strings")
             parents = getattr(interaction, "parent_names", None)
-            if (
-                not isinstance(parents, tuple)
-                or len(parents) != 2
-                or not all(isinstance(parent, str) for parent in parents)
-            ):
-                raise TypeError("interaction specs must expose two string parent_names")
+            if not isinstance(parents, tuple) or len(parents) != 2:
+                raise TypeError("interaction specs must expose two parent_names")
+            for parent in parents:
+                check_column_label(parent)
+            if isinstance(interaction, FactorSmooth):
+                # It reads its variable and group columns itself and builds
+                # without their specs, as in SuperGLM; requiring them as
+                # features forced a main effect on the group, whose level
+                # intercepts the factor smooth already spans. An sz term
+                # still needs a term on its variable: its deviations sum to
+                # zero, so that term carries the population curve.
+                if interaction.basis == "sz" and interaction.variable not in owned_features:
+                    raise ValueError(
+                        f"FactorSmooth {interaction.name!r} with basis='sz' needs a term on "
+                        f"{interaction.variable!r} for the population curve its deviations "
+                        f"sum around; add s({interaction.variable!r})"
+                    )
+                continue
             missing = [parent for parent in parents if parent not in owned_features]
             if missing:
                 raise ValueError(f"interaction spec references unknown features: {missing}")
@@ -294,7 +311,6 @@ def _record_selected_sz_levels(compiled: CompiledPredictorDesign, weights: NDArr
     read at prediction by ``prediction_design._score_interaction``).  Terms
     with unpenalized lines keep their SuperLSS prediction.
     """
-    from superglm.features.factor_smooth import FactorSmooth
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
     matrices = compiled.design.group_matrices
@@ -557,6 +573,9 @@ def compile_predictors(
             lambda2=lambda2,
             separation_boundaries=boundary_tuple[parameter_index],
             first_tensor_id=first_tensor_id,
+            # SuperLSS fitted an interaction on a ranged parent before declared
+            # interactions met the pair refusals, and keeps fitting it.
+            ranged_margins=True,
         )
         tensor_ids = [getattr(matrix, "tensor_id", -1) for matrix in compiled.design.group_matrices]
         first_tensor_id = max(first_tensor_id, 1 + max(tensor_ids, default=-1))

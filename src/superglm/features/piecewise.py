@@ -21,12 +21,13 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm.features._spline_config import EXTRAPOLATIONS
 from superglm.features._spline_knots import weighted_quantile_knots
 from superglm.types import GroupInfo
 
@@ -300,16 +301,16 @@ class Piecewise:
         self,
         breaks: Sequence[float | str] | int,
         *,
-        base: float | str = "most_exposed",
-        strategy: str = "quantile",
+        base: float | Literal["most_exposed", "first"] | str = "most_exposed",
+        strategy: Literal["quantile"] = "quantile",
         lower: float | None = None,
         upper: float | None = None,
-        extrapolation: str = "clip",
+        extrapolation: Literal["clip", "extend", "error"] = "clip",
         degrees: Sequence[int] | None = None,
     ):
         # Validated here, not in build(): a typo'd mode must fail where it is
         # written.  The message mirrors Spline's for the same parameter.
-        if extrapolation not in {"clip", "extend", "error"}:
+        if extrapolation not in EXTRAPOLATIONS:
             raise ValueError(
                 f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
             )

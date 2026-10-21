@@ -148,6 +148,7 @@ def compile_predictor_design(
     alias_prune: bool = True,
     own_specs: bool = True,
     first_tensor_id: int = 0,
+    ranged_margins: bool = False,
     separation_response: NDArray | None = None,
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
@@ -178,6 +179,10 @@ def compile_predictor_design(
     finding comes back as a ``("curve", name, curves)`` record.  ``group_pricing`` and ``alias_prune`` are
     passed through to the dimension pricing and the categorical-interaction
     pruning exactly as ``build_design_matrix`` documents them.
+
+    ``ranged_margins`` lets a declared interaction take a parent with
+    polynomial ranges (``refuse_unsupported_interaction_parents``), as
+    SuperLSS always allowed.
 
     ``first_tensor_id`` numbers this design's discrete tensors from that
     value. Groups with equal ids are parts of one tensor and share its
@@ -592,7 +597,9 @@ def compile_predictor_design(
             # A declared spec skips the refusals a (left, right) pair meets in
             # add_interaction, so they run here before any interaction builds.
             left, right = ispec.parent_names
-            refuse_unsupported_interaction_parents(left, right, specs)
+            refuse_unsupported_interaction_parents(
+                left, right, specs, ranged_margins=ranged_margins
+            )
         for parent in ispec.parent_names:
             X.column_array(parent)
         binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)

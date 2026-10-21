@@ -399,7 +399,11 @@ def _reject_structured_fit_constraints(model) -> None:
     0/7); along ``group`` it is the per-level null-space blocks, which are a
     per-level effect of the grouping column, reachable when that column carries
     an ``OrderedCategorical`` SCOP constraint (measured 0/6). Testing only
-    ``variable`` would let the second through.
+    ``variable`` would let the second through. Declaration refuses only a
+    ``Categorical`` or ``RandomEffect`` on a factor smooth's group and warns
+    about any other term there, so an ``OrderedCategorical`` SCOP term on the
+    group reaches this branch from a new declaration, as well as from an older
+    pickle or ``clone_unfitted`` (``ModelConfig.materialize``).
 
     Everything adjacent converges (7/7 each): ``basis="sz"``, which excludes the
     main effect and so states it once; and an ``fs`` factor smooth sharing
@@ -457,7 +461,7 @@ def _reject_structured_fit_constraints(model) -> None:
     # effect, and a factor smooth sharing neither parent states nothing twice.
     constrained_set = set(scop_constrained)
     duplicated = [
-        (sorted(set(spec.parent_names) & constrained_set), name)
+        (sorted(set(spec.parent_names) & constrained_set, key=repr), name)
         for name, spec in model._interaction_specs.items()
         if isinstance(spec, FactorSmooth)
         and spec.basis == "fs"

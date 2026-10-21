@@ -65,6 +65,21 @@ family = GammaLS()
 lss = SuperLSS(family, family.mean(features, ti("DrivAge", "VehAge")), family.scale())
 ```
 
+A factor smooth goes in the list as `interaction(FactorSmooth(...))`. It reads
+its variable and group columns itself, so its group needs no term, and with
+`basis="fs"` its variable needs none either. A term on the group is redundant:
+the factor smooth carries each level's intercept.
+
+```python
+from superglm import FactorSmooth, SuperGLM, interaction, re
+
+terms = [
+    re("VehBrand"),
+    interaction(FactorSmooth("DrivAge", group="Region", basis="fs", k=6)),
+]
+glm = SuperGLM(family="poisson", terms=terms, selection_penalty=0.0)
+```
+
 One list can declare a frequency model and the mean of a severity model:
 
 ```python
@@ -83,9 +98,14 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
   in the dict's order.
 - A column can be declared once. A second declaration, in a dict or as a term,
   raises an error.
+- A column label can be anything a dict key can be, so a frame whose columns
+  are numbered takes `s(0)` or `{0: Spline()}`. Results show a term by its
+  label's text, so two labels that read alike, such as `0` and `"0"`, raise an
+  error. Interactions take the same labels.
 - Declare each interaction once per pair of columns. `ti("DrivAge", "VehAge")`
-  and `ti("VehAge", "DrivAge")` are the same term, and a second one raises an
-  error.
+  and `ti("VehAge", "DrivAge")` are the same term. In `SuperGLM` a second one
+  raises an error; a `SuperLSS` family helper keeps both and warns that the
+  second is redundant.
 - An interaction cannot go in a dict. Put it in the list as `ti(...)` or
   `interaction(spec)`.
 - `ti` takes two `s(...)` terms. For an `OrderedCategorical` with a spline
@@ -95,9 +115,12 @@ severity = SuperLSS(family, family.mean(*terms), family.scale(s("DrivAge", k=8))
 - `n_knots=`, `degree=` and `categorical_base=` configure only the
   `splines=` shorthand. With `terms=`, set them on each term, as in
   `s("DrivAge", n_knots=8)`.
-- In `SuperGLM`, declare a factor smooth with `features=` and `interactions=`.
-  Through `terms=` its group must be declared as a term, and `SuperGLM` refuses
-  a categorical or random effect on a factor smooth's group.
+- A factor smooth's group needs no term: a term on the group is redundant,
+  because the factor smooth already carries each level's intercept.
+  `SuperGLM` refuses `cat(...)` or `re(...)` there; any other term, and any
+  term in `SuperLSS`, fits with a warning that names the term to drop.
+  `basis="sz"` needs a spline on its variable, as in
+  `s("DrivAge", kind="ps", k=7)`.
 
 ## Splines
 
@@ -220,8 +243,10 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   shrunk towards a line.
 - Only `kind="bs"` and `kind="cr"` take ranges.
 - Ranges cannot be combined with `select=True` or with a shape constraint.
-- A spline with ranges cannot be a parent of an interaction in this version.
-  Declare the interaction on a spline without them.
+- In `SuperGLM` a spline with ranges cannot be a parent of an interaction in
+  this version. Declare the interaction on a spline without them.
+- In `SuperLSS` an interaction can take a parent with ranges, and keeps the
+  ranges: the interaction is a polynomial of the declared degree there too.
 
 On an `OrderedCategorical` with a spline basis, the edges may be band names;
 each name resolves to that band's position on the axis:

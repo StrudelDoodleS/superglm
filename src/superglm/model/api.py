@@ -18,7 +18,7 @@ from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
 from superglm.solvers.pirls import PIRLSResult
-from superglm.terms import TermInput
+from superglm.terms import TermInput, TermResults, resolve_label
 from superglm.types import FeatureSpec
 
 from . import (
@@ -1178,7 +1178,7 @@ class SuperGLM:
 
             return random_effect_result(
                 self,
-                name,
+                self._term_label(name),
                 exposure=exposure,
                 X=X,
                 y=y,
@@ -1200,7 +1200,7 @@ class SuperGLM:
 
             return factor_smooth_result(
                 self,
-                name,
+                cast(str, self._term_label(name)),
                 grid=grid,
                 levels=levels,
                 confidence_level=confidence_level,
@@ -1332,6 +1332,11 @@ class SuperGLM:
                 level_display=level_display,
             )
 
+    def _term_label(self, name: Hashable) -> Any:
+        """The term ``name`` names, by its label or by its label's text."""
+        model = cast(Any, self)
+        return resolve_label(name, [*model._specs, *model._interaction_specs])
+
     def _feature_groups(self, name: Hashable) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""
         return report_ops.feature_groups(self, cast(Any, name))
@@ -1339,11 +1344,11 @@ class SuperGLM:
     def reconstruct_feature(self, name: Hashable) -> dict[str, Any]:
         """Reconstruct a fitted feature's curve or effect on its original scale."""
         with self._parallel_scope():
-            return report_ops.reconstruct_feature(self, cast(Any, name))
+            return report_ops.reconstruct_feature(self, self._term_label(name))
 
     def knot_summary(self) -> dict[str, dict[str, Any]]:
         """Return fitted knot metadata for all spline features."""
-        return report_ops.knot_summary(self)
+        return TermResults(report_ops.knot_summary(self))
 
     # ── Inference ─────────────────────────────────────────────────
 
@@ -1433,7 +1438,7 @@ class SuperGLM:
             with it: it becomes the error of the centered contrast.
         """
         with self._parallel_scope():
-            return explain_ops.relativities(self, with_se, centering=centering)
+            return TermResults(explain_ops.relativities(self, with_se, centering=centering))
 
     def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
         return explain_ops.model_feature_se_from_cov(
@@ -1452,7 +1457,12 @@ class SuperGLM:
         """Simultaneous confidence bands for a spline feature."""
         with self._parallel_scope():
             return explain_ops.simultaneous_bands(
-                self, feature, alpha=alpha, n_sim=n_sim, n_points=n_points, seed=seed
+                self,
+                self._term_label(feature),
+                alpha=alpha,
+                n_sim=n_sim,
+                n_points=n_points,
+                seed=seed,
             )
 
     def term_inference(
@@ -1483,7 +1493,7 @@ class SuperGLM:
         with self._parallel_scope():
             return explain_ops.term_inference(
                 self,
-                name,
+                self._term_label(name),
                 with_se=with_se,
                 simultaneous=simultaneous,
                 n_points=n_points,
@@ -1936,6 +1946,16 @@ class SuperGLM:
         contributions. For interactions, it includes the reconstructed effect
         data and, for continuous x continuous surfaces, optional density / HDR
         grid data when ``X`` and ``sample_weight`` are supplied.
+
+        A ``FactorSmooth`` term exports like a ``SplineCategorical``, with
+        ``plot_kind="varying_coefficient"``: ``effect`` has one row per level
+        and grid value of the smoothed variable (``n_points`` values), with
+        columns named by the variable and the group, ``log_relativity``,
+        ``relativity``, ``is_base_level`` (always ``False``: every level has a
+        curve) and ``se_log_relativity``, the curve's posterior standard error.
+        These are the curves :meth:`factor_smooth` reports: each level's own
+        curve for ``basis="fs"``, its deviation from the population curve for
+        ``basis="sz"``.
 
         With ``centering="native"`` (default), relativity values are
         the exponentiated fitted term contributions under the model's
