@@ -319,8 +319,8 @@ def diagonal_of_square(matrix: NDArray) -> NDArray:
 # ``dgeqrf`` works in); the third is the budget from when ``numpy.linalg.qr``
 # was the leaf, kept because the leaf row count, and so the tree and the
 # rounding, are a function of it.  A leaf has at least ``2 * width`` rows, a
-# floor reached above width 1,322, where it holds ``48 width^2`` bytes, above
-# the budget.  The leaves, and so the tree, depend only on the row count and
+# floor reached above width 1,322, where it budgets ``48 width^2`` bytes (it
+# holds ``32 width^2``), above the budget.  The leaves, and so the tree, depend only on the row count and
 # the width -- never on the worker count -- so the factor is bitwise the same
 # however many workers factor the leaves.
 _TSQR_LEAF_BYTES = 80 << 20
