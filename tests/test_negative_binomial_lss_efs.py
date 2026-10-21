@@ -5,23 +5,17 @@ from __future__ import annotations
 import math
 import warnings
 from fractions import Fraction
-from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import nbinom, poisson
 
-import superglm.distributional.api as distributional_api_module
 import superglm.distributional.families.negative_binomial as negative_binomial_family
 from superglm import SuperLSS, cat, s
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import NegativeBinomialLS, Predictor
-from superglm.distributional.curvature import (
-    CurvaturePolicyError,
-    RepeatedCurvatureIndefinitenessError,
-)
-from superglm.distributional.weights import WeightContract
+from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
@@ -171,16 +165,23 @@ def test_poisson_like_fit_finishes_and_discloses_the_boundary(dropped_rows: int)
     assert np.all(np.isfinite(model.covariance_))
 
 
+def _family_diagnosis(family, response, *, sample_weight, contract):
+    """The family's own diagnosis, which a fit reaches through ``_curvature_disclosures``."""
+    weights = resolve_likelihood_weights(
+        sample_weight, n_observations=len(response), contract=contract
+    )
+    return family.diagnose_repeated_curvature_failure(response, weights)
+
+
 def test_finite_overdispersion_does_not_classify_a_curvature_failure_as_poisson_like() -> None:
     response = np.array([0.0, 0.0, 1.0, 2.0, 4.0, 8.0])
     assert float(np.var(response)) > float(np.mean(response))
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=None,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -190,55 +191,25 @@ def test_nb2_diagnosis_drops_zero_weight_rows_before_response_validation() -> No
     response = np.array([0.5, 1.0, 1.0, 1.0])
     sample_weight = np.array([0.0, 1.0, 1.0, 1.0])
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert type(result) is negative_binomial_family.NegativeBinomialPoissonBoundaryError
-
-
-def test_nb2_diagnosis_keeps_the_exact_failure_guard() -> None:
-    response = np.array([0.5, 1.0, 1.0, 1.0])
-    sample_weight = np.array([0.0, 1.0, 1.0, 1.0])
-    arguments = {
-        "sample_weight": sample_weight,
-        "weight_contract": WeightContract("prior"),
-    }
-
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
-        NegativeBinomialLS(),
-        response,
-        failure=CurvaturePolicyError("synthetic base-class curvature failure"),
-        **arguments,
-    )
-    assert result is None
-
-    class DerivedRepeatedCurvatureIndefinitenessError(RepeatedCurvatureIndefinitenessError):
-        pass
-
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
-        NegativeBinomialLS(),
-        response,
-        failure=DerivedRepeatedCurvatureIndefinitenessError("synthetic derived failure"),
-        **arguments,
-    )
-    assert result is None
 
 
 def test_nb2_diagnosis_keeps_the_exact_family_guard() -> None:
     class DerivedNegativeBinomialLS(NegativeBinomialLS):
         pass
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         DerivedNegativeBinomialLS(),
         np.array([0.5, 1.0, 1.0, 1.0]),
         sample_weight=np.array([0.0, 1.0, 1.0, 1.0]),
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -260,12 +231,11 @@ def test_prior_moment_direction_does_not_override_positive_poisson_face_directio
     np.testing.assert_array_equal(sample_weight * response, [11.0, 2.0])
     assert moment_direction == pytest.approx(-0.5)
     assert boundary_direction == pytest.approx(2.0 / 3.0)
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -283,48 +253,21 @@ def test_cancellation_limited_frequency_moment_direction_fails_closed() -> None:
 
     assert exact_direction > 0
     assert exact_numerator / exact_direction == 2 * large_weight - 2
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("frequency"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("frequency"),
     )
     assert result is None
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=np.ones(2),
-        weight_contract=WeightContract("frequency"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("frequency"),
     )
     assert result is None
-
-
-class _RaisingDiagnosticNegativeBinomial(NegativeBinomialLS):
-    def diagnose_repeated_curvature_failure(self, y, weights):
-        raise RuntimeError("sentinel diagnostic failure")
-
-
-def test_diagnostic_failure_preserves_the_original_curvature_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original = RepeatedCurvatureIndefinitenessError("original repeated failure")
-    monkeypatch.setattr(
-        distributional_api_module,
-        "fit_dense_distributional",
-        Mock(side_effect=original),
-    )
-    model = model_from_templates(
-        family=_RaisingDiagnosticNegativeBinomial(),
-        predictors=(Predictor("mean", {}), Predictor("theta", {})),
-    )
-
-    with pytest.raises(RepeatedCurvatureIndefinitenessError) as caught:
-        model.fit(pd.DataFrame(index=range(3)), np.ones(3), lambdas={})
-
-    assert caught.value is original
 
 
 def _claims_book_fixture(seed: int = 7, n_rows: int = 1500):

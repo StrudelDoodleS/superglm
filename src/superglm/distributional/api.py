@@ -50,7 +50,6 @@ from superglm.distributional.checks.worm import WormPayload, worm_payload
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
-    FitFailureDiagnosingFamily,
     ParameterSpec,
     _validated_complete_fit_configuration,
     validate_family,
@@ -86,7 +85,6 @@ from superglm.distributional.serialization import (
     deserialize_distributional_model,
     serialize_distributional_model,
 )
-from superglm.distributional.solver.curvature import RepeatedCurvatureIndefinitenessError
 from superglm.distributional.surfaces import (
     DensityFan,
     Portfolio,
@@ -387,7 +385,9 @@ def _coefficient_curvature(
     requested, and a request needs the expected-information capability.  The
     fallback is unchanged and lives in the solver: a materially indefinite
     terminal penalized observed Hessian falls back to penalized expected
-    information when the family supplies it and is refused otherwise.
+    information when the family supplies it, and otherwise to the nearest
+    positive semidefinite curvature.  The fit is not refused, and
+    ``result_.warnings`` records each fallback it discloses.
     """
     if requested not in ("observed", "fisher"):
         raise ValueError("coefficient_curvature must be 'observed' or 'fisher'")
@@ -396,33 +396,6 @@ def _coefficient_curvature(
             "coefficient_curvature='fisher' requires a family with expected information capability"
         )
     return cast(Literal["fisher", "observed"], requested)
-
-
-def _diagnosed_repeated_curvature_failure(
-    family: DistributionalFamily,
-    y: NDArray,
-    *,
-    sample_weight: NDArray | None,
-    weight_contract: WeightContract,
-    failure: RepeatedCurvatureIndefinitenessError,
-) -> Exception | None:
-    if type(failure) is not RepeatedCurvatureIndefinitenessError or not isinstance(
-        family, FitFailureDiagnosingFamily
-    ):
-        return None
-    try:
-        response = np.asarray(y)
-        if response.ndim != 1:
-            return None
-        weights = resolve_likelihood_weights(
-            sample_weight,
-            n_observations=len(response),
-            contract=weight_contract,
-        )
-        candidate = family.diagnose_repeated_curvature_failure(response, weights)
-    except Exception:
-        return None
-    return candidate if isinstance(candidate, Exception) else None
 
 
 def _positive_n_bins(value: Any, *, name: str) -> int:
@@ -687,7 +660,9 @@ class SuperLSS:
         for every family; ``"fisher"`` requests Fisher scoring and needs a
         family with expected information.  Under either policy a materially
         indefinite terminal penalized observed Hessian falls back to penalized
-        expected information when the family supplies it, and is refused otherwise.
+        expected information when the family supplies it, and otherwise to the
+        nearest positive semidefinite curvature; the fit is not refused, and
+        ``result_.warnings`` records each fallback it discloses.
         """
         return self._coefficient_curvature
 
@@ -734,37 +709,25 @@ class SuperLSS:
         # The profile is the fit's own stretch of the recorder: a caller's
         # phases open around it stay out, and its measurements during it count once.
         with solver_blas_threads(), recorder._fit_window() as window:
-            try:
-                candidate = fit_dense_distributional(
-                    X,
-                    y,
-                    family=self._family,
-                    predictors=self._predictors,
-                    sample_weight=sample_weight,
-                    weight_contract=self._weight_contract,
-                    offsets=offsets,
-                    lambdas={} if lambdas is None and efs_config is None else lambdas,
-                    config=solver_config,
-                    efs_config=efs_config,
-                    retain_rows=retain_rows,
-                    discrete=self._discrete,
-                    n_bins=self._n_bins_config(),
-                    chunk_size="auto" if self._discrete else None,
-                    phase_recorder=recorder,
-                    separation=self._separation,
-                    revision=next_revision,
-                )
-            except RepeatedCurvatureIndefinitenessError as failure:
-                translated = _diagnosed_repeated_curvature_failure(
-                    self._family,
-                    y,
-                    sample_weight=sample_weight,
-                    weight_contract=self._weight_contract,
-                    failure=failure,
-                )
-                if translated is not None:
-                    raise translated from failure
-                raise
+            candidate = fit_dense_distributional(
+                X,
+                y,
+                family=self._family,
+                predictors=self._predictors,
+                sample_weight=sample_weight,
+                weight_contract=self._weight_contract,
+                offsets=offsets,
+                lambdas={} if lambdas is None and efs_config is None else lambdas,
+                config=solver_config,
+                efs_config=efs_config,
+                retain_rows=retain_rows,
+                discrete=self._discrete,
+                n_bins=self._n_bins_config(),
+                chunk_size="auto" if self._discrete else None,
+                phase_recorder=recorder,
+                separation=self._separation,
+                revision=next_revision,
+            )
         phase_snapshot = window.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
