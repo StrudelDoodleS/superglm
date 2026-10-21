@@ -235,3 +235,111 @@ def test_curvature_policy_rejects_bad_source_and_shape() -> None:
         resolve_curvature("automatic", np.eye(2))  # ty: ignore[invalid-argument-type]
     with pytest.raises(CurvaturePolicyError, match="square"):
         resolve_curvature("observed", np.ones((2, 3)))
+
+
+def test_repeated_indefiniteness_without_fisher_accepts_the_nearest_semidefinite_matrix() -> None:
+    """Kills the refusal: after the retry the caller's projected curvature is accepted."""
+    indefinite = np.array([[1.0, 2.0], [2.0, 1.0]])
+    projected = np.array([[1.5, 1.5], [1.5, 1.5]])
+    calls = []
+
+    def fallback() -> np.ndarray:
+        calls.append(None)
+        return projected
+
+    first = resolve_curvature("observed", indefinite, semidefinite_fallback=fallback)
+    assert first.retry_required and not calls
+    second = resolve_curvature(
+        "observed",
+        indefinite,
+        semidefinite_fallback=fallback,
+        state=first.state,
+        matrix_kind="penalized",
+    )
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(second.matrix, projected)
+    assert second.telemetry.requested_source == "observed"
+    assert second.telemetry.actual_source == "nearest_semidefinite"
+    assert second.telemetry.reason == "material_indefiniteness_after_retry"
+    assert second.telemetry.minimum_eigenvalue == pytest.approx(-1.0)
+    assert second.telemetry.rank == 1
+    assert second.telemetry.fallback_count == 1
+    assert second.telemetry.to_dict()["actual_source"] == "nearest_semidefinite"
+    with pytest.raises(RuntimeError, match="fallback"):
+        second.telemetry.assert_no_fallback()
+
+
+def test_semidefinite_fallback_is_not_built_when_fisher_is_usable() -> None:
+    state = CurvaturePolicyState(retry_attempted=True)
+
+    def fallback() -> np.ndarray:
+        raise AssertionError("Fisher was usable; the projection must not be built")
+
+    decision = resolve_curvature(
+        "observed",
+        np.array([[1.0, 2.0], [2.0, 1.0]]),
+        fisher_matrix=np.eye(2),
+        semidefinite_fallback=fallback,
+        state=state,
+    )
+    assert decision.telemetry.actual_source == "fisher"
+
+
+def test_materially_indefinite_fisher_falls_through_to_the_semidefinite_matrix() -> None:
+    decision = resolve_curvature(
+        "observed",
+        np.array([[1.0, 2.0], [2.0, 1.0]]),
+        fisher_matrix=np.array([[1.0, 3.0], [3.0, 1.0]]),
+        semidefinite_fallback=lambda: np.eye(2),
+        state=CurvaturePolicyState(retry_attempted=True),
+    )
+    assert decision.telemetry.actual_source == "nearest_semidefinite"
+    np.testing.assert_array_equal(decision.matrix, np.eye(2))
+
+
+def test_row_projection_keeps_semidefinite_rows_and_clips_the_rest() -> None:
+    """Higham's Frobenius projection per row: exact rows untouched, negative spectrum dropped."""
+    from superglm.distributional.solver.derivatives import nearest_semidefinite_curvature
+
+    packed = np.array(
+        [
+            [2.0, 0.5, 1.0],  # positive definite
+            [1.0, 1.0, 1.0],  # singular, semidefinite
+            [1.0, 2.0, 1.0],  # eigenvalues 3 and -1
+            [-1.0, 0.0, -2.0],  # negative definite
+        ]
+    )
+    projected = nearest_semidefinite_curvature(packed)
+    np.testing.assert_array_equal(projected[:2], packed[:2])
+    # [[1, 2], [2, 1]] keeps only its eigenvalue 3 on (1, 1)/sqrt(2).
+    np.testing.assert_allclose(
+        projected[2], [1.5, 1.5, 1.5], rtol=0.0, atol=8 * np.finfo(float).eps
+    )
+    np.testing.assert_array_equal(projected[3], [0.0, 0.0, 0.0])
+    blocks = np.array([[[row[0], row[1]], [row[1], row[2]]] for row in projected])
+    assert np.all(np.linalg.eigvalsh(blocks) >= -8 * np.finfo(float).eps)
+
+    three = np.array([[1.0, 0.0, 0.0, -1.0, 0.0, 2.0]])  # diag(1, -1, 2)
+    np.testing.assert_allclose(
+        nearest_semidefinite_curvature(three), [[1.0, 0.0, 0.0, 0.0, 0.0, 2.0]], atol=1e-15
+    )
+
+
+def test_zero_diagonal_with_coupling_is_indefinite_not_a_policy_crash() -> None:
+    """A zero diagonal entry beside a nonzero off-diagonal one makes the matrix indefinite.
+
+    The rank decomposition refuses such a matrix outright ("nonzero offdiagonal
+    entry on a zero diagonal"); the policy used to turn that refusal into a
+    CurvaturePolicyError that ended the fit. It is ordinary indefiniteness: a
+    semidefinite matrix with a zero diagonal entry has that whole row zero.
+    """
+    observed = np.array([[1.0, 0.5], [0.5, 0.0]])
+
+    first = resolve_curvature("observed", observed, fisher_matrix=np.eye(2))
+    assert first.retry_required is True
+    assert first.telemetry.reason == "material_indefiniteness_retry_required"
+
+    second = resolve_curvature("observed", observed, fisher_matrix=np.eye(2), state=first.state)
+    assert second.telemetry.actual_source == "fisher"
+    np.testing.assert_array_equal(second.matrix, np.eye(2))

@@ -13,8 +13,18 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.diagnostics.convergence import (
+    lss_fisher_curvature_message,
+    lss_no_ascent_direction_message,
+    lss_null_model_nonconvergence_message,
+    lss_semidefinite_curvature_message,
+)
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
-from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
+from superglm.distributional.family import (
+    DistributionalFamily,
+    FamilyLikelihoodPlan,
+    FitFailureDiagnosingFamily,
+)
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
@@ -451,6 +461,48 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _curvature_disclosures(
+    family: DistributionalFamily,
+    solver_result: DenseSolverResult,
+    response: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+) -> tuple[str, ...]:
+    """What a fit whose final curvature fell back discloses instead of refusing.
+
+    Every fallback the fit used to refuse is disclosed, with the family's own
+    diagnosis of repeated curvature failure when it has one. A projected
+    (nearest semidefinite) curvature always used to refuse: after the retry no
+    expected information was usable. A Fisher fallback was accepted silently
+    before fits stopped refusing, and still is, except for a family that
+    declares ``diagnoses_any_curvature_fallback``: one that gained expected
+    information after fits stopped refusing, so every fallback of it used to
+    refuse and is disclosed whether or not its diagnosis fires.
+    """
+    telemetry = solver_result.terminal_curvature
+    messages: list[str] = []
+    projected = telemetry.actual_source == "nearest_semidefinite"
+    used_to_refuse = telemetry.fallback_count > 0 and getattr(
+        family, "diagnoses_any_curvature_fallback", False
+    )
+    if projected:
+        messages.append(lss_semidefinite_curvature_message(type(family).__name__))
+    elif used_to_refuse and telemetry.actual_source == "fisher":
+        messages.append(lss_fisher_curvature_message(type(family).__name__))
+    diagnosed = projected or used_to_refuse
+    if diagnosed and isinstance(family, FitFailureDiagnosingFamily):
+        weights = likelihood_plan.weights
+        # The diagnosis reads the supplied rows at their input positions.
+        supplied = np.zeros(weights.provenance.original_count, dtype=np.float64)
+        supplied[weights.input_positions] = response
+        try:
+            diagnosis = family.diagnose_repeated_curvature_failure(supplied, weights)
+        except Exception:  # noqa: BLE001 - a failed diagnosis must not fail the fit
+            diagnosis = None
+        if isinstance(diagnosis, Exception) and str(diagnosis):
+            messages.append(str(diagnosis))
+    return tuple(messages)
+
+
 def prepare_distributional_fit_state(
     family: DistributionalFamily,
     predictor_templates: Sequence[Predictor],
@@ -534,6 +586,23 @@ def prepare_distributional_fit_state(
         rank=inference.rank,
         curvature_telemetry=solver_result.terminal_curvature,
         exact_face_components=exact_face_components,
+        warnings=(
+            *(
+                (lss_no_ascent_direction_message(type(family).__name__),)
+                if solver_result.convergence_reason == "no_ascent_direction"
+                else ()
+            ),
+            *_curvature_disclosures(family, solver_result, response, likelihood_plan),
+            *(
+                ()
+                if compact_null.converged
+                else (
+                    lss_null_model_nonconvergence_message(
+                        type(family).__name__, compact_null.convergence_reason
+                    ),
+                )
+            ),
+        ),
     )
     rows = None
     if retain_rows:

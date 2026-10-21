@@ -22,6 +22,7 @@ from superglm.reml.penalty_algebra import (
     _PenaltyLogdetEvaluation,
     penalty_component_dense_matrix,
 )
+from superglm.solvers.rank import RankDecomposition, _eigensolver_relative_bar
 from superglm.types import LambdaPolicy
 
 
@@ -61,6 +62,152 @@ def joint_laplace_objective(
         layout, result, lambdas=lambdas, evaluation=penalty_evaluation, objective=float(objective)
     )
     return float(objective)
+
+
+def _discarded_space_error(rank: RankDecomposition) -> float:
+    """Bound on the sine between a computed discarded subspace and the exact one.
+
+    Measured in the decomposition's equilibrated coordinates, where ``eigh``
+    is backward stable: the computed eigenvectors are exact for ``G + E``
+    with ``||E||_2 <= p(n) u ||G||_2`` (*LAPACK Users' Guide*, 3rd ed., sec.
+    4.7, whose ``epsilon`` is ``u``). ``cutoff`` is
+    ``_eigensolver_relative_bar(n) * max|w|``, i.e. ``2 n u ||G||``, so it
+    bounds ``||E||`` with ``p(n) = 2n``. By Weyl the exact retained
+    eigenvalues are at least ``min(retained) - cutoff`` and the computed
+    discarded ones are at most ``cutoff``, so the sin theta theorem (Davis
+    and Kahan, SIAM J. Numer. Anal. 7, 1970; Stewart and Sun, *Matrix
+    Perturbation Theory*, 1990, ch. V) gives
+    ``cutoff / (min(retained) - 2 cutoff)``; ``inf`` when that separation is
+    not positive. Structural (zero-diagonal) columns are discarded as exact
+    unit vectors and add nothing.
+    """
+    if rank.rank == 0 or int(np.count_nonzero(rank.column_scale)) == rank.rank:
+        return 0.0
+    gap = float(np.min(cast(NDArray, rank.retained_values))) - 2.0 * rank.cutoff
+    return rank.cutoff / gap if gap > 0.0 else math.inf
+
+
+def _restricted_objective(
+    result: DenseSolverResult,
+    objective: float,
+    other: RankDecomposition,
+) -> float | None:
+    """``objective`` with its log-determinant taken off the other fit's discarded span.
+
+    The Laplace log-determinant is the pseudo-determinant of the penalized
+    curvature ``C`` over the subspace it retains. Restricting it to the
+    orthogonal complement of the other fit's discarded directions ``N`` puts
+    both fits on the same retained subspace when this fit's own discarded
+    directions lie in ``span(N)``. Otherwise (fits that discard different
+    directions) ``None``: compare as computed.
+
+    Containment is tested to the accuracy the two decompositions determine
+    their discarded spaces. In this fit's equilibrated coordinates its own
+    space is within ``e_own`` of exact and the other's within ``k e_other``
+    (:func:`_discarded_space_error`; ``k`` is the condition number of the
+    diagonal map between the two fits' equilibrations, which stretches a
+    sine by at most ``k``). Exactly nested spaces then have principal sines
+    at most ``e_own + k e_other``, plus ``2 n u`` for forming the sines; a
+    larger sine shows the spaces are not nested. Near a vanishing curvature
+    the gap is small and the bound wide, so a pair is restricted unless the
+    decompositions resolve that it is not nested. Measured in parameter
+    coordinates the sines mislead: on the 20k freMTPL NB2 sample a pair at
+    5.1e-4 there is at 3e-10 in either fit's equilibrated coordinates.
+
+    For nested spaces Jacobi's complementary-minor identity (Brualdi and
+    Schneider, Linear Algebra Appl. 52/53, 1983), in its pseudo-determinant
+    form, gives the restriction without rotating ``C``:
+    ``log det(Q'CQ) = log pdet(C) + log det(B'C^+B)``, with ``B`` an
+    orthonormal basis of the part of ``span(N)`` orthogonal to this fit's own
+    null space. ``C^+`` comes from the fit's own equilibrated decomposition,
+    and ``B`` is formed from the columns of ``N``, so a coefficient whose
+    curvature is ``1e-30`` beside ``1e9`` (a size near its Poisson limit) keeps
+    the exact zeros the rotated ``Q'CQ`` would fill with rounding.
+
+    Within the tolerance ``own`` may still be turned out of ``span(N)``, by
+    principal angles ``theta_i`` in parameter coordinates (the coordinates
+    of ``log pdet``). Write its principal vectors as
+    ``u_i = cos theta_i n_i + sin theta_i r_i``, with ``n_i`` in ``span(N)``
+    and ``r_i`` in ``R = span(N)^perp``. The identity covers
+    ``(own + B)^perp``, which is ``R`` with each ``r_i`` replaced by
+    ``w_i = r_i / cos theta_i - tan theta_i u_i``; ``C u_i = 0`` gives
+    ``C w_i = C r_i / cos theta_i``, so its log-determinant exceeds the one
+    over ``R`` by ``-2 sum log cos theta_i``. Adding ``sum log cos theta_i``
+    to the half log-determinant makes the value exact at any admitted angle,
+    including those a vacuous bound admits. The cosines are the singular
+    values of ``Q_own' Q_N`` (Bjorck and Golub, Math. Comp. 27, 1973); their
+    absolute error of order ``u`` is one of ``u / cos theta_i`` in the log.
+    """
+    null = np.asarray(other.parameter_null_basis, dtype=np.float64)
+    rank = result.terminal_rank
+    own = rank.parameter_null_basis
+    alignment = 0.0
+    if own is not None and own.shape[1]:
+        own = np.asarray(own, dtype=np.float64)
+        scale, other_scale = rank.column_scale, other.column_scale
+        weight = np.where(scale > 0.0, scale, np.where(other_scale > 0.0, other_scale, 1.0))
+        stretch = weight[other_scale > 0.0] / other_scale[other_scale > 0.0]
+        other_error = _discarded_space_error(other)
+        tolerance = _discarded_space_error(rank) + _eigensolver_relative_bar(rank.width)
+        if other_error:
+            tolerance += float(stretch.max() / stretch.min()) * other_error
+        basis = np.linalg.qr(weight[:, None] * null)[0]
+        own_basis = np.linalg.qr(weight[:, None] * own)[0]
+        sines = np.linalg.svd(own_basis - basis @ (basis.T @ own_basis), compute_uv=False)
+        if sines.max() > tolerance:
+            return None
+        cosines = np.linalg.svd(np.linalg.qr(own)[0].T @ np.linalg.qr(null)[0], compute_uv=False)
+        # A vacuous bound admits any angle, and the correction falls without
+        # limit as one nears 90 degrees: a pair closer to orthogonal than to
+        # nested compares as computed, which caps the correction at log(2)/2
+        # per discarded direction.
+        if float(np.min(cosines)) ** 2 <= 0.5:
+            return None
+        alignment = float(np.sum(np.log(cosines)))
+        null = null @ np.linalg.svd(own.T @ null)[2][own.shape[1] :].T
+    inverse = np.column_stack([rank.solve(column) for column in null.T])
+    sign, log_det = np.linalg.slogdet(null.T @ inverse)
+    _, log_gram = np.linalg.slogdet(null.T @ null)
+    value = objective + 0.5 * (log_det - log_gram) + alignment
+    return value if sign > 0 and math.isfinite(value) else None
+
+
+def rank_matched_objectives(
+    current: DenseSolverResult,
+    current_objective: float,
+    trial: DenseSolverResult,
+    trial_objective: float,
+) -> tuple[float, float]:
+    """Two fits' Laplace objectives over the same retained curvature subspace.
+
+    A coefficient direction whose curvature vanishes (a size heading to its
+    Poisson limit, a level whose rows all sit on the response boundary) is
+    retained while its eigenvalue is above the rank cutoff and discarded once
+    below it; the pseudo-determinant then drops a log-eigenvalue near the
+    cutoff's, a jump the smoothing parameters did not cause. Wood, Pya and
+    Saefken (JASA 111, 2016, sec. 3.1.2) drop such unidentifiable
+    coefficients and evaluate the criterion in the reduced space; two fits
+    are compared there, the higher-rank one restricted to the complement of
+    the lower-rank one's discarded directions. Equal ranks, active faces, and
+    fits whose discarded spaces are not nested compare as computed.
+    """
+
+    current_rank, trial_rank = current.terminal_rank, trial.terminal_rank
+    if (
+        current_rank.rank == trial_rank.rank
+        or current.coefficient_face is not None
+        or trial.coefficient_face is not None
+    ):
+        return current_objective, trial_objective
+    if trial_rank.rank < current_rank.rank:
+        if trial_rank.parameter_null_basis is None:
+            return current_objective, trial_objective
+        restricted = _restricted_objective(current, current_objective, trial_rank)
+        return (current_objective if restricted is None else restricted), trial_objective
+    if current_rank.parameter_null_basis is None:
+        return current_objective, trial_objective
+    restricted = _restricted_objective(trial, trial_objective, current_rank)
+    return current_objective, (trial_objective if restricted is None else restricted)
 
 
 def _laplace_objective(

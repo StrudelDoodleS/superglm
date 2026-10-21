@@ -88,6 +88,8 @@ class _LSSDiagnosticContext:
     terminal_fit: DenseSolverResult
     smoothing: DistributionalEFSResult | None
     exact_face_components: tuple[str, ...]
+    null_converged: bool
+    null_convergence_reason: str
 
     @classmethod
     def from_model(cls, model: DenseDistributionalModel) -> _LSSDiagnosticContext:
@@ -100,7 +102,7 @@ class _LSSDiagnosticContext:
             family_name=type(model.family).__name__,
             terminal_policy_matrix_kind=(
                 state.solver_result.terminal_curvature.matrix_kind
-                or ("data" if isinstance(model.family, ExpectedInformationFamily) else "penalized")
+                or _legacy_policy_matrix_kind(model)
             ),
             layout=state.layout,
             linear_spline_terms=tuple(
@@ -113,7 +115,23 @@ class _LSSDiagnosticContext:
             terminal_fit=state.solver_result,
             smoothing=state.smoothing,
             exact_face_components=state.exact_face_components,
+            null_converged=state.null_model.converged,
+            null_convergence_reason=str(state.null_model.convergence_reason),
         )
+
+
+def _legacy_policy_matrix_kind(model: DenseDistributionalModel) -> _CurvatureMatrixKind:
+    """The curvature scope schema-8 telemetry left unrecorded.
+
+    Before schema 9 the terminal policy assessed the data curvature when the
+    family supplied expected information and the penalized curvature
+    otherwise. That is decided by what the artifact recorded about the family
+    when it was fitted, not by what the family declares today (NB2 gained
+    expected information later).
+    """
+    recorded = model.recorded_expected_information
+    expected = isinstance(model.family, ExpectedInformationFamily) if recorded is None else recorded
+    return "data" if expected else "penalized"
 
 
 _WHOLE_FIT_SUBJECT = DiagnosticSubject(
@@ -318,7 +336,12 @@ def _not_converged_finding(
         impacts=("fit_validity",),
         headline=f"The accepted {loop} loop did not converge.",
         observed=f"The authoritative {loop} result stopped with reason {reason!r}.",
-        interpretation="The reported parameter state did not satisfy its governing fit contract.",
+        interpretation=(
+            "No damping of the coefficient curvature gave a certified ascent direction, so the "
+            "solver stopped at its last accepted coefficients."
+            if reason == "no_ascent_direction"
+            else "The reported parameter state did not satisfy its governing fit contract."
+        ),
         caveats=("This evidence does not identify a statistical cause for the failure.",),
         evidence=_evidence_set(
             provenance,
@@ -328,10 +351,37 @@ def _not_converged_finding(
         ),
         action_kind="inspect_fit_configuration",
         action_question=(
-            f"Which data or configuration change lets the {loop} loop satisfy its declared "
+            "Do larger starting smoothing parameters (initial_lambda), simpler terms or, "
+            "where the family supplies expected information, coefficient_curvature='fisher' "
+            "give the solver an ascent direction?"
+            if reason == "no_ascent_direction"
+            else f"Which data or configuration change lets the {loop} loop satisfy its declared "
             "convergence contract?"
         ),
         action_metrics=("convergence reason", "iterations", "fit objective"),
+    )
+
+
+def _null_model_not_converged_finding(reason: str) -> DiagnosticFinding:
+    return _finding(
+        "fit.null_model_not_converged",
+        priority=2,
+        severity="warning",
+        impacts=("null_comparison",),
+        headline="The intercept-only null model did not converge.",
+        observed=f"The null coefficient fit stopped with reason {reason!r}.",
+        interpretation=(
+            "The fitted model is unaffected. The null objective and every comparison with the "
+            "null model are based on the unconverged null's last accepted iterate."
+        ),
+        evidence=_evidence_set(
+            "fit_result",
+            ("loop", "null_model"),
+            ("terminal_reason", reason),
+        ),
+        action_kind="inspect_fit_configuration",
+        action_question="Does a larger max_inner_iter let the null fit converge?",
+        action_metrics=("null convergence reason", "null objective"),
     )
 
 
@@ -389,6 +439,11 @@ def _negative_eigenvalue_resolution(matrix: np.ndarray) -> float:
     return relative_bar * scale
 
 
+def _accepted_source_label(source: str) -> str:
+    """Name an accepted curvature source in prose."""
+    return "nearest positive semidefinite observed" if source == "nearest_semidefinite" else source
+
+
 def _curvature_indefinite_finding(
     context: _LSSDiagnosticContext,
 ) -> DiagnosticFinding | None:
@@ -428,7 +483,7 @@ def _curvature_indefinite_finding(
             f"The {source_label} in {coordinate_phrase} recorded raw minimum eigenvalue "
             f"{minimum:.3e}; the terminal policy's diagonally equilibrated analysis classified "
             f"the requested matrix as materially indefinite before accepting "
-            f"{telemetry.actual_source} curvature."
+            f"{_accepted_source_label(telemetry.actual_source)} curvature."
         )
         minimum_evidence = DiagnosticEvidence(
             metric="minimum_eigenvalue",
@@ -441,7 +496,8 @@ def _curvature_indefinite_finding(
             "The raw minimum eigenvalue and the policy's diagonally equilibrated rank analysis "
             "are different diagnostics. The requested matrix norm and numerical threshold are "
             "not retained after fallback; materiality comes from the terminal curvature-policy "
-            f"decision, not from the accepted {telemetry.actual_source} rank or condition estimate."
+            "decision, not from the accepted "
+            f"{_accepted_source_label(telemetry.actual_source)} rank or condition estimate."
         )
     else:
         headline = f"The {source_label} has a resolved negative eigenvalue."
@@ -552,6 +608,8 @@ def _analyze_fit_status(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindi
     curvature = _curvature_indefinite_finding(context)
     if curvature is not None:
         findings.append(curvature)
+    if not context.null_converged:
+        findings.append(_null_model_not_converged_finding(context.null_convergence_reason))
     return tuple(findings)
 
 
@@ -1479,7 +1537,7 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
     if condition is not None and condition >= _CONDITION_WARNING_THRESHOLD:
         accepted_source = fit.terminal_curvature.actual_source
         matrix_kind = context.terminal_policy_matrix_kind
-        source_label = f"accepted {accepted_source} {matrix_kind} curvature"
+        source_label = f"accepted {_accepted_source_label(accepted_source)} {matrix_kind} curvature"
         findings.append(
             _finding(
                 "numerics.conditioning_warning",

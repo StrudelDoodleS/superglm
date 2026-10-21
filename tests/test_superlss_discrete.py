@@ -194,13 +194,21 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
     )
 
 
-@pytest.mark.parametrize("kind", ["nb2", "tweedie"])
-def test_public_discrete_explicit_fisher_still_requires_capability(kind: str) -> None:
-    _, _, _, _, family, predictors = _fixture(kind, "prior")
+def test_public_discrete_explicit_fisher_still_requires_capability() -> None:
+    _, _, _, _, family, predictors = _fixture("tweedie", "prior")
     with pytest.raises(ValueError, match="expected information"):
         model_from_templates(
             family=family, predictors=predictors, discrete=True, coefficient_curvature="fisher"
         )
+
+
+def test_public_discrete_nb2_accepts_explicit_fisher() -> None:
+    """NB2 supplies expected information, so a discrete Fisher request is honoured."""
+    _, _, _, _, family, predictors = _fixture("nb2", "prior")
+    model = model_from_templates(
+        family=family, predictors=predictors, discrete=True, coefficient_curvature="fisher"
+    )
+    assert model.coefficient_curvature == "fisher"
 
 
 @pytest.mark.parametrize("discrete", [False, True])

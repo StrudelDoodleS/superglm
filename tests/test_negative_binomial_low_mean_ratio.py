@@ -1,4 +1,4 @@
-"""Finite NB2 arithmetic below the former mean/theta ratio boundary."""
+"""NB2 arithmetic at every mean/theta ratio, and its Poisson limit."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import pytest
 
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
+from superglm.distributional.kernels import negative_binomial as nb_kernel
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialNumericalDomainError,
-    NegativeBinomialPoissonBoundaryError,
     evaluate_negative_binomial_rows,
 )
 from superglm.distributional.smoothing.endpoint_direction import (
@@ -27,7 +27,8 @@ from superglm.links import LogLink
 def _decimal_count_oracle(count, mean, theta, weight, semantics):
     """Independent finite gamma recurrence, differentiated in natural coordinates."""
     with localcontext() as context:
-        context.prec = 220
+        # The theta score cancels to O((mean/theta)^2): keep that many more digits.
+        context.prec = 220 + 2 * math.ceil(abs(math.log10(float(mean) / float(theta))))
         mean, theta, weight = map(Decimal.from_float, map(float, (mean, theta, weight)))
         scale = weight if semantics == "prior" else Decimal(1)
         multiplier = Decimal(1) if semantics == "prior" else weight
@@ -230,25 +231,184 @@ def test_low_ratio_curvature_directions_match_independent_high_order_oracle(thet
     )
 
 
+def _row(count, mean, theta, weight, semantics, order=2):
+    return evaluate_negative_binomial_rows(
+        np.array([count]),
+        np.array([mean]),
+        np.array([theta]),
+        np.array([weight]),
+        semantics,
+        derivative_order=order,
+    )
+
+
+def _log_channels(result, mean, theta):
+    score, hessian = result.score[0], result.hessian_packed[0]
+    log_score = score * [mean, theta]
+    log_hessian = np.array(
+        [
+            (hessian[0] * mean) * mean + log_score[0],
+            (hessian[1] * mean) * theta,
+            (hessian[2] * theta) * theta + log_score[1],
+        ]
+    )
+    return log_score, log_hessian
+
+
+@pytest.mark.parametrize("count", [0, 1, 7])
+@pytest.mark.parametrize("mean", [0.0020498669992843285, 1.0, 37.5])
+@pytest.mark.parametrize("excess_exponent", [53, 80, 300])
+@pytest.mark.parametrize("semantics,weight", [("prior", 0.25), ("frequency", 4.0)])
+def test_rows_past_the_poisson_limit_evaluate_as_that_limit(
+    count, mean, excess_exponent, semantics, weight
+):
+    """Past mean/theta = 2^-52 a row is its Poisson limit: no theta channels, no refusal.
+
+    The former domain refused these rows. The limit's value and mean channels
+    agree with exact NB2 at the row's own size, and the theta channels it drops
+    are below one unit roundoff of the row's own channels.
+    """
+    scale = weight if semantics == "prior" else 1.0
+    reach = max(scale * mean, count - 1.0)
+    theta = math.ldexp(reach, excess_exponent) / scale
+    expected_value, _, expected_hessian, expected_log_score, expected_log_hessian = (
+        _decimal_count_oracle(count, mean, theta, weight, semantics)
+    )
+    result = _row(count, mean, theta, weight, semantics)
+    eps = np.finfo(float).eps
+    relative_bound = 4096 * eps * (1 + count)
+    np.testing.assert_allclose(
+        result.optimizing_log_likelihood, [expected_value], rtol=relative_bound, atol=0.0
+    )
+    np.testing.assert_array_equal(result.score[0, 1], 0.0)
+    np.testing.assert_array_equal(result.hessian_packed[0, 1:], [0.0, 0.0])
+    log_score, log_hessian = _log_channels(result, mean, theta)
+    row_scale = max(abs(expected_value), abs(expected_log_score[0]), abs(expected_log_hessian[0]))
+    np.testing.assert_allclose(
+        log_score[0], expected_log_score[0], rtol=relative_bound, atol=relative_bound * row_scale
+    )
+    np.testing.assert_allclose(
+        log_hessian[0],
+        expected_log_hessian[0],
+        rtol=relative_bound,
+        atol=relative_bound * row_scale,
+    )
+    # What the limit drops is below the row's own resolution.
+    assert abs(expected_log_score[1]) <= 2 * eps * row_scale
+    assert np.all(np.abs(expected_log_hessian[1:]) <= 2 * eps * row_scale)
+    # The limit is flat in theta: any larger size, even beyond the numerical
+    # domain, evaluates identically.
+    farther = _row(count, mean, 1.0e300, weight, semantics)
+    np.testing.assert_array_equal(
+        farther.optimizing_log_likelihood, result.optimizing_log_likelihood
+    )
+    np.testing.assert_array_equal(farther.score, result.score)
+    np.testing.assert_array_equal(farther.hessian_packed, result.hessian_packed)
+
+
+@pytest.mark.parametrize("count", [0, 1, 7])
+def test_poisson_limit_drops_the_theta_columns_of_every_kernel(count):
+    mean, theta, weight = 0.0020498669992843285, 1.0e30, np.ones(1)
+    arguments = (np.array([count]), np.array([mean]), np.array([theta]), weight, "prior")
+    third, third_error = nb_kernel.negative_binomial_log_third_derivatives(*arguments)
+    fourth, fourth_error = nb_kernel.negative_binomial_log_fourth_derivatives(*arguments)
+    np.testing.assert_array_equal(third[0, 1:], 0.0)
+    np.testing.assert_array_equal(fourth[0, 1:], 0.0)
+    assert third[0, 0] != 0.0 and fourth[0, 0] != 0.0
+    assert np.all(np.isfinite(third_error)) and np.all(third_error >= 0.0)
+    assert np.all(np.isfinite(fourth_error)) and np.all(fourth_error >= 0.0)
+    information = nb_kernel.negative_binomial_expected_information(
+        np.array([mean]), np.array([theta]), weight, "prior"
+    )
+    np.testing.assert_array_equal(information[0, 1:], [0.0, 0.0])
+    np.testing.assert_allclose(information[0, 0], 1.0 / mean, rtol=4 * np.finfo(float).eps)
+
+
+@pytest.mark.parametrize("count", [1, 2, 7, 40])
+@pytest.mark.parametrize("mean", [1.0, 37.5, 2.0**40])
+@pytest.mark.parametrize("deficit_exponent", [27, 40, 100, 300])
+@pytest.mark.parametrize("semantics,weight", [("prior", 0.25), ("frequency", 4.0)])
+def test_sizes_far_below_the_mean_keep_exact_values_and_log_channels(
+    count, mean, deficit_exponent, semantics, weight
+):
+    """theta/mean below the former 2^-26 bound: the recurrence keeps its accuracy.
+
+    Near theta/mean -> 0 the value recurrence's log1p argument nears -1; its
+    quotient form keeps the value, and the log-link channels, to rounding of
+    the row's own scale.
+    """
+    theta = math.ldexp(mean, -deficit_exponent)
+    expected_value, _, _, expected_log_score, expected_log_hessian = _decimal_count_oracle(
+        count, mean, theta, weight, semantics
+    )
+    result = _row(count, mean, theta, weight, semantics)
+    relative_bound = 4096 * np.finfo(float).eps * (1 + count)
+    np.testing.assert_allclose(
+        result.optimizing_log_likelihood, [expected_value], rtol=relative_bound, atol=0.0
+    )
+    log_score, log_hessian = _log_channels(result, mean, theta)
+    row_scale = max(
+        abs(expected_value),
+        np.max(np.abs(expected_log_score)),
+        np.max(np.abs(expected_log_hessian)),
+    )
+    np.testing.assert_allclose(
+        log_score, expected_log_score, rtol=0.0, atol=relative_bound * row_scale
+    )
+    np.testing.assert_allclose(
+        log_hessian, expected_log_hessian, rtol=0.0, atol=relative_bound * row_scale
+    )
+
+
 @pytest.mark.parametrize(
-    "mean,theta,error",
+    "mean,theta",
     [
-        (1.0, np.nextafter(2.0**52, np.inf), NegativeBinomialPoissonBoundaryError),
-        (np.nextafter(2.0**26, np.inf), 1.0, NegativeBinomialNumericalDomainError),
-        (2.0**-450, 2.0**450, NegativeBinomialPoissonBoundaryError),
-        (np.nextafter(2.0**-450, 0.0), 1.0, NegativeBinomialNumericalDomainError),
-        (1.0, np.nextafter(2.0**450, np.inf), NegativeBinomialNumericalDomainError),
+        (np.nextafter(2.0**-450, 0.0), 1.0),
+        (np.nextafter(2.0**450, np.inf), 1.0),
+        # Not yet at its Poisson limit, so the size itself must be in range.
+        (2.0**420, np.nextafter(2.0**450, np.inf)),
     ],
 )
-def test_low_ratio_extension_keeps_bounded_underflow_and_reciprocal_domain_refusals(
-    mean, theta, error
-):
-    with pytest.raises(error):
-        evaluate_negative_binomial_rows(
-            np.zeros(1, dtype=int),
-            np.array([mean]),
-            np.array([theta]),
-            np.ones(1),
-            "prior",
-            derivative_order=2,
+def test_parameters_outside_the_numerical_domain_are_still_refused(mean, theta):
+    with pytest.raises(NegativeBinomialNumericalDomainError):
+        _row(0, mean, theta, 1.0, "prior")
+
+
+def test_value_recurrence_takes_the_quotient_logarithm_only_in_tiles_that_use_it(monkeypatch):
+    """A recurrence tile with no cell below -1/2 evaluates log1p alone.
+
+    The quotient form is needed only where mean > theta + 2j; a tile with such
+    a cell evaluates both forms and selects. The values are those of
+    evaluating both forms and selecting per cell, bit for bit.
+    """
+    counts = np.array([3, 5, 2, 7, 4], dtype=np.int64)
+    mean = np.array([0.5, 40.0, 1.0, 900.0, 0.02])
+    theta = np.array([2.0, 1.0, 3.0, 0.5, 1.0e9])
+    total = (mean + theta)[:, None]
+    offsets = np.arange(int(counts.max()), dtype=float)[None, :]
+    argument = (offsets - mean[:, None]) / total
+    used = offsets < counts[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        selected = np.where(
+            argument < -0.5, np.log((theta[:, None] + offsets) / total), np.log1p(argument)
         )
+    expected_value = np.sum(np.where(used, selected, 0.0), axis=1)
+    tile_cells_needing_log = 0
+    for rows, start, width in nb_kernel._iter_recurrence_tiles(counts):
+        cells = (start + np.arange(width)[None, :] - mean[rows, None]) / total[rows] < -0.5
+        tile_cells_needing_log += cells.size if cells.any() else 0
+    assert 0 < tile_cells_needing_log < int(np.count_nonzero(used))
+
+    evaluated = []
+    real_log = np.log
+
+    def counting_log(values, *args, **kwargs):
+        evaluated.append(np.size(values))
+        return real_log(values, *args, **kwargs)
+
+    monkeypatch.setattr(np, "log", counting_log)
+    value, _, _ = nb_kernel._recurrences(counts, mean, theta, 0, np.zeros(len(counts), bool))
+    monkeypatch.undo()
+
+    assert sum(evaluated) == tile_cells_needing_log
+    np.testing.assert_array_equal(value, expected_value)

@@ -564,7 +564,11 @@ class AtomFamily(Protocol):
 
 @runtime_checkable
 class FitFailureDiagnosingFamily(Protocol):
-    """Optional diagnosis after repeated complete-fit curvature failure."""
+    """Optional family diagnosis of a final-curvature fallback.
+
+    A fit whose terminal curvature fell back finishes and warns; a returned
+    exception's text is appended to ``result_.warnings``, never raised.
+    """
 
     def diagnose_repeated_curvature_failure(
         self,

@@ -1581,6 +1581,178 @@ def test_material_indefiniteness_still_falls_back_to_fisher() -> None:
     assert model.training_telemetry().curvature.fallback_count >= 1
 
 
+@dataclass(frozen=True)
+class _IndefiniteObservedNoFisherLS:
+    """The indefinite-observed GaussianLS with no expected information at all.
+
+    Its observed curvature stays materially indefinite after the retry and it
+    has no Fisher fallback: the case the terminal policy used to refuse.
+    """
+
+    inner: _IndefiniteObservedGaussianLS = _IndefiniteObservedGaussianLS()
+
+    @property
+    def parameters(self):
+        return self.inner.parameters
+
+    @property
+    def capabilities(self):
+        return replace(self.inner.capabilities, expected_information=False)
+
+    @property
+    def default_prediction_name(self):
+        return self.inner.default_prediction_name
+
+    def to_config(self):
+        return {"type": "IndefiniteObservedNoFisherLS"}
+
+    def bind_likelihood(self, y, weights, observation):
+        return self.inner.bind_likelihood(y, weights, observation)
+
+    def initialize(self, y, plan):
+        return self.inner.initialize(y, plan)
+
+    def evaluate_natural(self, y, theta, plan, *, derivative_order=2):
+        return self.inner.evaluate_natural(y, theta, plan, derivative_order=derivative_order)
+
+    def default_prediction(self, theta):
+        return self.inner.default_prediction(theta)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_repeated_indefiniteness_without_fisher_finishes_and_discloses(discrete) -> None:
+    """Kills the refusal: master raised RepeatedCurvatureIndefinitenessError here.
+
+    The accepted curvature is the observed one with each row projected onto the
+    semidefinite cone, recorded in telemetry and in ``result_.warnings``, and
+    warned at fit time.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=_IndefiniteObservedNoFisherLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+        discrete=discrete,
+    )
+    with pytest.warns(ConvergenceWarning, match="nearest positive semidefinite"):
+        model.fit(frame, response, lambdas={}, max_inner_iter=5)
+    fitted = model._require_fitted()
+    telemetry = fitted.fit_state.solver_result.terminal_curvature
+    assert telemetry.requested_source == "observed"
+    assert telemetry.actual_source == "nearest_semidefinite"
+    assert telemetry.fallback_count == 1
+    assert len(model.result_.warnings) == 1
+    assert "nearest positive semidefinite" in model.result_.warnings[0]
+    assert model.result_.curvature_telemetry.actual_source == "nearest_semidefinite"
+    # The published curvature is the projected observed curvature, so it is
+    # semidefinite and the covariance is finite.
+    curvature = fitted.fit_state.solver_result.terminal_penalized_curvature
+    scale = np.sqrt(np.diag(curvature))
+    assert np.min(np.linalg.eigvalsh(curvature / np.outer(scale, scale))) > -1.0e-12
+    assert np.all(np.isfinite(model.covariance_))
+    findings = [f for f in model.diagnose().findings if f.code == "fit.curvature_indefinite"]
+    assert findings and "nearest positive semidefinite observed" in findings[0].observed
+
+
+def test_unconverged_null_model_finishes_and_discloses(monkeypatch) -> None:
+    """Kills the refusal: the parent commit raised NullModelFitError from the fit.
+
+    The intercept-only null fit is made to stop on its iteration budget. The
+    fit is returned; the disclosure is warned, kept in ``result_.warnings``,
+    reported by ``diagnose()`` and carried through serialization with the
+    null's own convergence record.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.distributional import null_model as null_module
+
+    solve = null_module.fit_dense_fixed_lambda
+
+    def starved(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        return replace(result, converged=False, convergence_reason="max_iterations")
+
+    monkeypatch.setattr(null_module, "fit_dense_fixed_lambda", starved)
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+    )
+    with pytest.warns(ConvergenceWarning, match="null model did not converge"):
+        model.fit(frame, response, lambdas={})
+
+    fitted = model._require_fitted()
+    assert fitted.null_model.converged is False
+    assert fitted.null_model.convergence_reason == "max_iterations"
+    assert model.result_.converged
+    assert model.result_.null_objective == fitted.null_model.objective
+    assert [m for m in model.result_.warnings if "null model did not converge" in m]
+    codes = [finding.code for finding in model.diagnose().findings]
+    assert "fit.null_model_not_converged" in codes
+
+    restored = SuperLSS.from_bytes(model.to_bytes())
+    assert restored.result_.warnings == model.result_.warnings
+    assert restored._require_fitted().null_model.converged is False
+    assert restored._require_fitted().null_model.convergence_reason == "max_iterations"
+    assert "fit.null_model_not_converged" in [f.code for f in restored.diagnose().findings]
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_no_ascent_direction_stops_at_the_accepted_iterate_and_discloses(
+    monkeypatch, discrete
+) -> None:
+    """Kills the escape: the parent commit raised DenseSolverError from the fit.
+
+    The coefficient direction solve refuses on the second iteration, as it does
+    when no Levenberg damping gives a certified ascent direction. The fit keeps
+    the coefficients the first iteration accepted and discloses the stop.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.distributional.solver import solver as solver_module
+
+    solve = solver_module._solve_coefficient_direction
+    calls = 0
+
+    def refuse_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise solver_module.DenseSolverError("unable to construct a certified ascent direction")
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(solver_module, "_solve_coefficient_direction", refuse_second)
+    frame, response, _, _ = _fixture()
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+        discrete=discrete,
+    )
+    with pytest.warns(ConvergenceWarning, match="found no ascent direction"):
+        model.fit(frame, response, lambdas={})
+
+    terminal = model._require_fitted().result
+    assert (terminal.resolved_chunk_size is not None) == discrete
+    assert terminal.converged is False
+    assert terminal.convergence_reason == "no_ascent_direction"
+    assert len(terminal.history) == 1
+    assert terminal.history[0].objective_after > terminal.history[0].objective_before
+    assert np.array_equal(terminal.coefficients, model._require_fitted().coefficients)
+    assert not model.result_.converged
+    assert any("no_ascent_direction" in message for message in model.result_.warnings)
+    findings = [f for f in model.diagnose().findings if f.code == "fit.not_converged"]
+    assert findings and "ascent direction" in findings[0].interpretation
+    assert "coefficient_curvature='fisher'" in findings[0].actions[0].question
+
+
 def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame, response, _, _ = _fixture()
     model = model_from_templates(

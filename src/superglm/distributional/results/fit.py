@@ -58,6 +58,8 @@ class DistributionalFitResult:
     rank: int
     curvature_telemetry: CurvatureTelemetry
     exact_face_components: tuple[str, ...] = ()
+    # Disclosures a fit makes instead of refusing, each also warned at fit time.
+    warnings: tuple[str, ...] = ()
     fit_id: str = field(default_factory=lambda: str(uuid4()), repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -148,6 +150,7 @@ class DistributionalFitResult:
         if not isinstance(self.curvature_telemetry, CurvatureTelemetry):
             raise TypeError("curvature_telemetry must be CurvatureTelemetry")
 
+        object.__setattr__(self, "warnings", tuple(self.warnings))
         object.__setattr__(self, "coefficients", coefficients)
         object.__setattr__(self, "covariance", covariance)
         object.__setattr__(self, "coefficient_names", coefficient_names)

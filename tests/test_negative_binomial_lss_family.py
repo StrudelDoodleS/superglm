@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 from unittest.mock import Mock
 
 import numpy as np
@@ -30,6 +31,7 @@ from superglm.distributional.weights import (
 )
 from superglm.features import Categorical
 from superglm.links import LogLink
+from tests._negative_binomial_information_oracle import pmf_values, size_information
 from tests._negative_binomial_lss_oracles import NEGATIVE_BINOMIAL_LSS_CASES
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -74,7 +76,10 @@ def test_family_declares_the_public_nb2_mean_theta_contract() -> None:
     assert all(type(parameter.default_link) is LogLink for parameter in parameters)
     assert family.default_prediction_name == "conditional_mean"
     assert family.capabilities.max_derivative_order == 2
-    assert family.capabilities.expected_information is False
+    assert family.capabilities.expected_information is True
+    # The expected information is the terminal curvature fallback; it does not
+    # recalibrate NB2's starting penalties.
+    assert family.information_scaled_start is False
     assert family.to_config() == {
         "type": "NegativeBinomialLS",
         "parameterization": "nb2_mean_theta",
@@ -536,3 +541,126 @@ def test_response_validation_is_exact_without_a_row_loop() -> None:
     np.testing.assert_array_equal(validated(np.array([1, 2.0], dtype=object)), [1.0, 2.0])
     with pytest.raises(ValueError, match="losslessly"):
         validated(np.array([2**53 + 1], dtype=object))
+
+
+_U = np.finfo(np.float64).eps / 2.0
+
+# (mean, integer size): ordinary claim counts, an overdispersed tail, the
+# near-Poisson regime where Lawless's two sums agree to five digits, and a
+# P(0) below the normal range.
+_INFORMATION_CASES = (
+    (Fraction(7, 100), 1),
+    (Fraction(7, 100), 3),
+    (Fraction(1), 1),
+    (Fraction(3), 2),
+    (Fraction(40), 3),
+    (Fraction(1, 1000), 50),
+    (Fraction(1200), 1200),
+)
+
+
+@pytest.mark.parametrize(("mean", "size"), _INFORMATION_CASES)
+def test_size_information_matches_the_exact_lawless_series(mean: Fraction, size: int) -> None:
+    """Kills a wrong series term, a dropped scaling exponent, or an early truncation."""
+    from superglm.distributional.kernels._negative_binomial_numba import (
+        expected_size_information,
+    )
+
+    values, terms = expected_size_information(
+        np.array([float(mean)]), np.array([float(size)]), 1 << 26
+    )
+    assert terms[0] > 0
+    exact, tail = size_information(mean, size, int(terms[0]) + 256)
+    reference = float(exact)
+    assert float(tail) <= _U * reference
+    # Each pmf step rounds about five times and each series term about nine; the
+    # P(0) exponent -theta log1p(mu/theta) carries its magnitude in units of u,
+    # and truncation adds at most u relative.
+    log_p0 = float(size) * math.log1p(float(mean) / size)
+    operations = 16 * int(terms[0]) + 2 * math.ceil(log_p0) + 16
+    bound = operations * _U / (1.0 - operations * _U) * reference + float(tail)
+    assert abs(values[0] - reference) <= bound
+
+
+def test_size_information_has_no_poisson_limit_cancellation() -> None:
+    """Lawless's difference loses the near-Poisson information to cancellation; the series keeps it."""
+    from superglm.distributional.kernels._negative_binomial_numba import (
+        expected_size_information,
+    )
+
+    mean, size = Fraction(1, 1000), 50
+    values, _ = expected_size_information(np.array([0.001]), np.array([50.0]), 1 << 26)
+    exact, _ = size_information(mean, size, 64)
+    # theta**2 I ~ mu**2/(2 theta**2): seven orders below either of Lawless's sums.
+    assert float(exact) < 1.0e-6 * float(size**2 * mean / (size * (size + mean)))
+    assert values[0] == pytest.approx(float(exact), rel=1.0e-12)
+
+
+@pytest.mark.parametrize("semantics", ["frequency", "prior"])
+def test_family_expected_information_is_the_weighted_natural_fisher_matrix(semantics) -> None:
+    """Kills a weight applied on the wrong scale or a nonzero mean-size cross term."""
+    mean = np.array([0.07, 1.5, 4.0])
+    # Integer effective sizes keep the exact oracle rational under either law.
+    theta = np.array([1.5, 0.5, 2.5]) if semantics == "prior" else np.array([1.0, 3.0, 2.0])
+    weights = np.array([2.0, 4.0, 2.0])
+    response = np.array([0.0, 1.0, 3.0])
+    if semantics == "prior":
+        response = np.array([0.0, 0.25, 1.5])
+    plan = _plan(response, weights, semantics)
+    information = NegativeBinomialLS().expected_information_natural(
+        np.column_stack((mean, theta)), plan
+    )
+    assert np.all(information[:, 1] == 0.0)
+    for row in range(len(mean)):
+        scale, multiplier = (weights[row], 1.0) if semantics == "prior" else (1.0, weights[row])
+        effective_mean = Fraction(scale * mean[row]).limit_denominator(10**6)
+        effective_size = round(scale * theta[row])
+        assert effective_size == scale * theta[row]
+        exact, tail = size_information(effective_mean, effective_size, 400)
+        mean_information = multiplier * scale * theta[row] / (mean[row] * (mean[row] + theta[row]))
+        size_reference = multiplier * float(exact) / theta[row] ** 2
+        assert information[row, 0] == pytest.approx(mean_information, rel=64 * _U)
+        assert abs(information[row, 2] - size_reference) <= (
+            1.0e-12 * size_reference + multiplier * float(tail) / theta[row] ** 2
+        )
+
+
+def test_expected_information_has_no_cap_on_its_row_count(monkeypatch) -> None:
+    """Only a row's own term budget can refuse it, never the number of rows in a call.
+
+    A dense fit evaluates every row in one call. The parent also capped the sum
+    of the per-row term predictions (64 or more each) at the recurrence-cell
+    budget, so a large enough book was refused whatever each row cost. The cap
+    is shrunk here so that 64 cheap rows would cross it.
+    """
+    from superglm.distributional.kernels import negative_binomial as kernel
+
+    monkeypatch.setattr(kernel, "_MAX_RECURRENCE_CELLS", 1000)
+    rows = 64
+    mean = np.full(rows, 0.05)
+    theta = np.full(rows, 1.0)
+    together = kernel.negative_binomial_expected_information(mean, theta, np.ones(rows), "prior")
+    alone = kernel.negative_binomial_expected_information(mean[:1], theta[:1], np.ones(1), "prior")
+    np.testing.assert_array_equal(together, np.repeat(alone, rows, axis=0))
+
+
+@pytest.mark.parametrize(("mean", "size"), [(Fraction(7, 100), 1), (Fraction(3), 2)])
+def test_expected_information_is_the_mean_of_the_observed_information(mean, size) -> None:
+    """Fisher information is E[-Hessian]: checked against the family's own observed rows."""
+    counts = 160
+    pmf = np.array([float(value) for value in pmf_values(mean, size, counts)])
+    response = np.arange(counts, dtype=np.float64)
+    plan = _plan(response, np.ones(counts), "frequency")
+    parameters = np.tile([float(mean), float(size)], (counts, 1))
+    family = NegativeBinomialLS()
+    hessian = np.asarray(family.evaluate_natural(response, parameters, plan).hessian_packed)
+    expected_observed = -(pmf @ hessian)
+    scale = pmf @ np.abs(hessian)
+    omitted = 1.0 - float(sum(pmf_values(mean, size, counts)))
+    fisher = family.expected_information_natural(
+        parameters[:1], _plan(np.zeros(1), np.ones(1), "frequency")
+    )[0]
+    # Each observed row errs by a small multiple of u times its magnitude; the
+    # omitted pmf mass past 160 counts is below 1e-30 for these laws.
+    assert omitted < 1.0e-30
+    assert np.all(np.abs(fisher - expected_observed) <= 1024 * _U * scale + 1.0e-300)

@@ -756,7 +756,7 @@ def test_negative_binomial_manifest_pair_and_round_trip_preserve_complete_state(
         _expected_family_manifest(
             "superglm.distributional.families.negative_binomial.NegativeBinomialLS",
             {"type": "NegativeBinomialLS", "parameterization": "nb2_mean_theta"},
-            expected_information=False,
+            expected_information=True,
             distribution_functions=False,
         ),
     )
@@ -1509,7 +1509,7 @@ def test_resolution_limited_exact_face_reason_round_trips_without_certification(
     serialized = serialize_distributional_model(resolution_limited_model)
     restored = deserialize_distributional_model(serialized)
     restored_smoothing = restored.smoothing
-    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "10.0.0"
+    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "11.0.0"
     assert restored_smoothing is not None
     assert restored_smoothing.terminal_fit.convergence_reason == "resolution_limited_stationarity"
     np.testing.assert_array_equal(
@@ -1811,6 +1811,123 @@ def test_schema_eight_missing_curvature_scope_preserves_legacy_manifest() -> Non
     np.testing.assert_array_equal(restored.result.coefficients, model.result.coefficients)
 
 
+def test_published_negative_binomial_artifact_loads_after_gaining_expected_information() -> None:
+    """Kills the read barrier: the parent commit refused every NB2 artifact saved by 0.40.0.
+
+    The fixture was written by the published superglm 0.40.0, whose
+    NegativeBinomialLS declared no expected information. NB2 gained it since,
+    so its recomputed manifest differs from the stored one only there.
+    """
+    from pathlib import Path
+
+    from superglm import SuperLSS
+    from superglm.distributional.fit_diagnostics import _LSSDiagnosticContext
+
+    artifact = Path(__file__).with_name("fixtures") / "superlss-nb2-v0.40.0.json"
+    stored = json.loads(artifact.read_bytes())
+    assert stored["manifest"]["family"]["capabilities"]["expected_information"] is False
+
+    restored = SuperLSS.from_bytes(artifact.read_bytes())
+
+    fitted = restored._require_fitted()
+    assert type(fitted.family) is NegativeBinomialLS
+    assert fitted.recorded_expected_information is False
+    np.testing.assert_array_equal(fitted.coefficients, stored["manifest"]["fit"]["coefficients"])
+    assert fitted.result.terminal_curvature.matrix_kind == "penalized"
+    assert _LSSDiagnosticContext.from_model(fitted).terminal_policy_matrix_kind == "penalized"
+    restored.diagnose()
+    # Re-saving writes today's capability and keeps the record it was loaded with.
+    again = deserialize_distributional_model(serialize_distributional_model(fitted))
+    assert again.recorded_expected_information is False
+
+
+def test_a_schema_ten_reader_refuses_newer_artifacts_at_its_version_gate(monkeypatch) -> None:
+    """Kills the silent manifest change: 0.40 reads schema 10, which has no disclosures.
+
+    A fit's disclosures are part of the schema-11 manifest. Written under the
+    parent's schema 10, an artifact carrying them passed a 0.40 reader's version
+    gate and then failed its manifest comparison, the error reserved for
+    tampering. Under schema 11 the 0.40 reader (modelled here: schema 10,
+    reading 8 and 9) refuses it before unpickling, naming both versions.
+    """
+    fixed = _fixed_model()[0]
+    state = fixed.fit_state
+    disclosed = replace(
+        fixed,
+        _fit_state=replace(state, result=replace(state.result, warnings=("a disclosure",))),
+    )
+    artifact = serialize_distributional_model(disclosed)
+    assert json.loads(artifact)["manifest"]["fit"]["warnings"] == ["a disclosure"]
+    assert deserialize_distributional_model(artifact).fitted_result.warnings == ("a disclosure",)
+
+    monkeypatch.setattr(serialization_module, "SCHEMA_VERSION", "10.0.0")
+    monkeypatch.setattr(serialization_module, "READABLE_PREVIOUS_MAJORS", frozenset({8, 9}))
+
+    def unexpected_unpickle(*args, **kwargs):
+        raise AssertionError("the schema-10 reader must refuse before unpickling")
+
+    monkeypatch.setattr(serialization_module.pickle, "loads", unexpected_unpickle)
+    with pytest.raises(DistributionalSerializationError, match="major versions differ"):
+        deserialize_distributional_model(artifact)
+
+
+def test_schema_eight_negative_binomial_scope_follows_the_recorded_capability(
+    negative_binomial_artifact_model,
+) -> None:
+    """Kills the class-based scope: schema-8 NB2 telemetry assessed penalized curvature.
+
+    Schema 8 did not record the curvature scope; its terminal policy assessed
+    the data curvature only for families with expected information, which NB2
+    then lacked. The scope is read from the capability the artifact recorded.
+    """
+    from superglm.distributional.fit_diagnostics import _LSSDiagnosticContext
+
+    model, _, _ = negative_binomial_artifact_model
+    artifact = json.loads(serialize_distributional_model(model))
+
+    def remove_scope(restored):
+        seen = set()
+
+        def visit(value):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            if isinstance(value, CurvatureTelemetry):
+                if "matrix_kind" in vars(value):
+                    object.__delattr__(value, "matrix_kind")
+            elif is_dataclass(value):
+                for field in fields(value):
+                    visit(getattr(value, field.name))
+            elif isinstance(value, Mapping):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, tuple):
+                for item in value:
+                    visit(item)
+
+        visit(restored)
+
+    artifact = json.loads(_rehash_pickled_artifact(artifact, remove_scope))
+    artifact["schema_version"] = "8.0.0"
+
+    def strip_manifest(value):
+        if isinstance(value, dict):
+            value.pop("matrix_kind", None)
+            for item in value.values():
+                strip_manifest(item)
+        elif isinstance(value, list):
+            for item in value:
+                strip_manifest(item)
+
+    strip_manifest(artifact["manifest"])
+    artifact["manifest"]["family"]["capabilities"]["expected_information"] = False
+    restored = deserialize_distributional_model(json.dumps(artifact).encode())
+
+    assert restored.result.terminal_curvature.matrix_kind is None
+    assert restored.recorded_expected_information is False
+    assert _LSSDiagnosticContext.from_model(restored).terminal_policy_matrix_kind == "penalized"
+
+
 def test_unreleased_previous_major_is_refused_before_unpickling() -> None:
     model, _, _, _ = _fixed_model()
     artifact = _with_unpickle_sentinel(json.loads(serialize_distributional_model(model)))
@@ -2001,16 +2118,48 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
     _decomposition_models,
     _joint_exact_face_model,
 ) -> None:
-    """Pin the schema-10 manifest, including historical row retention.
+    """Pin the schema-11 manifest, including historical row retention and disclosures.
 
     ``deserialize_distributional_model`` compares the recomputed manifest to the
     stored one for equality, so omitting a behavior-driving key leaves that state
     unauthenticated. Deliberate manifest changes must bump the major component
     and update these key sets together.
     """
-    assert SCHEMA_VERSION == "10.0.0"
+    assert SCHEMA_VERSION == "11.0.0"
 
-    manifest = distributional_manifest(_fixed_model()[0])
+    fixed = _fixed_model()[0]
+    manifest = distributional_manifest(fixed)
+    fit_fields = {
+        "revision",
+        "coefficients",
+        "predictor_coefficients",
+        "smoothing_parameters",
+        "covariance",
+        "total_effective_df",
+        "predictor_edf",
+        "intercept_edf",
+        "term_edf",
+        "log_likelihood",
+        "penalized_log_likelihood",
+        "null_objective",
+        "converged",
+        "coefficient_converged",
+        "smoothing_converged",
+        "n_inner_iter",
+        "n_smoothing_iter",
+        "rank",
+        "curvature_telemetry",
+    }
+    assert set(manifest["fit"]) == fit_fields
+    # Schema 11: a fit that disclosed something records it.
+    state = fixed.fit_state
+    disclosed = replace(
+        fixed,
+        _fit_state=replace(state, result=replace(state.result, warnings=("a disclosure",))),
+    )
+    disclosed_fit = distributional_manifest(disclosed)["fit"]
+    assert set(disclosed_fit) == fit_fields | {"warnings"}
+    assert disclosed_fit["warnings"] == ["a disclosure"]
     assert set(manifest) == {
         "family",
         "fit",

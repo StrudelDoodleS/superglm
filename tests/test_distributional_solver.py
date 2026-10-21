@@ -10,7 +10,6 @@ import pytest
 import superglm.distributional.solver.assembly as assembly_module
 import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
-from superglm.distributional.curvature import CurvaturePolicyError
 from superglm.distributional.efs import joint_laplace_objective
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
@@ -777,10 +776,16 @@ def test_expected_information_terminal_policy_assesses_penalized_curvature_on_fa
 
 
 @pytest.mark.parametrize("chunk_size", [None, 2])
-def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
+def test_observed_only_terminal_policy_falls_back_to_the_nearest_semidefinite_curvature(
     monkeypatch: pytest.MonkeyPatch,
     chunk_size: int | None,
 ) -> None:
+    """Kills the refusal: master raised RepeatedCurvatureIndefinitenessError here.
+
+    The forced observed curvature stays indefinite through the retry and the
+    family has no Fisher information, so the policy accepts the row-projected
+    observed curvature and records the fallback.
+    """
     base_family, layout = _intercept_layout(4)
     family = _ObservedOnlyGaussian(base_family)
     scale = base_family.scale_floor + 1.0
@@ -811,20 +816,70 @@ def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
         )
 
     monkeypatch.setattr(solver_module, "_geometry", force_indefinite_observed_data)
-    with pytest.raises(CurvaturePolicyError, match=r"Fisher.*required"):
-        fit_dense_fixed_lambda(
-            family,
-            layout,
-            response,
-            _plan(family, response, np.ones(len(response))),
-            np.zeros((layout.n_coefficients, layout.n_coefficients)),
-            initial=np.zeros(layout.n_coefficients),
-            config=DenseSolverConfig(coefficient_curvature="observed"),
-            chunk_size=chunk_size,
-        )
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        chunk_size=chunk_size,
+    )
 
     assert run_calls == 2
     assert observed_geometry_calls >= 1
+    telemetry = result.terminal_curvature
+    assert telemetry.requested_source == "observed"
+    assert telemetry.actual_source == "nearest_semidefinite"
+    assert telemetry.reason == "material_indefiniteness_after_retry"
+    assert telemetry.fallback_count == 1
+    assert np.all(np.linalg.eigvalsh(result.terminal_penalized_curvature) >= 0.0) or (
+        np.min(np.linalg.eigvalsh(result.terminal_penalized_curvature))
+        >= -64 * np.finfo(np.float64).eps * np.max(np.abs(result.terminal_penalized_curvature))
+    )
+
+
+def test_chunked_trial_whose_geometry_is_refused_is_backtracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills the crash: master accepted a chunked trial on its value, then raised.
+
+    A chunked trial is screened on its log likelihood alone; when the family
+    then refuses the trial's derivatives (TweedieLSS on a binned 3,000-row
+    freMTPL2 sample: "required float64 work is not representable") the
+    solver backtracks, as a dense trial whose derivatives fail is rejected.
+    """
+    base_family, layout = _intercept_layout(4)
+    family = _ObservedOnlyGaussian(base_family)
+    scale = base_family.scale_floor + 1.0
+    response = np.array([-scale, -scale, scale, scale]) + 0.4
+    original_geometry = solver_module._measured_geometry
+    calls = []
+
+    def refuse_first_trial(context, state, source, phase_recorder):
+        calls.append(state.coefficients.copy())
+        if len(calls) == 2:
+            raise ValueError("numerical evaluation refused: derivatives not representable")
+        return original_geometry(context, state, source, phase_recorder)
+
+    monkeypatch.setattr(solver_module, "_measured_geometry", refuse_first_trial)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        chunk_size=2,
+    )
+
+    assert len(calls) >= 3
+    # The refused trial is never the state the next geometry is measured at.
+    assert not np.array_equal(calls[2], calls[1])
+    assert result.converged
+    assert result.history[0].backtracks >= 1
 
 
 def test_solver_result_plan_and_execution_fields_are_required() -> None:

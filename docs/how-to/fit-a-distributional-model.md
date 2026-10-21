@@ -303,16 +303,31 @@ likelihood exact: aggregate identical rows and fit them with
 `weight_semantics="frequency"`, or move exposure into an offset so that the
 counts themselves stay small.
 
-The finite kernel permits `2**-52 <= mean/theta <= 2**26`, subject to its
-unchanged absolute/effective exponent, weight, overflow, and numerical
-retention checks. The extended low-mean range uses the existing checked
-finite-NB2 recurrences and series. It lets low-exposure rows remain in a
-distributional fit without substituting a Poisson density. Ratios below this
-range still raise `NegativeBinomialPoissonBoundaryError`.
+The kernel evaluates NB2 at every `mean/theta` ratio. A row whose
+`max(mean, count - 1)` is below `2**-52` times its size has reached its
+Poisson limit at working precision: its likelihood and mean derivatives are
+the Poisson ones to within one rounding of the row's own values, and it has no
+size derivatives. It is evaluated as that limit, so any larger size, even one
+beyond the numerical range, gives the same row, and a size heading to infinity
+(a Poisson-like group of rows) stops there instead of being refused. Sizes far
+below the mean keep full accuracy too. Means, weights and sizes not at the
+Poisson limit must lie in `[2**-450, 2**450]`.
+
+When a size reaches that limit during smoothing selection, the coefficients
+that only it determined lose their curvature and the fit's rank drops. Two
+smoothing iterates are then compared over the coefficients both retain, as
+Wood, Pya and Säfken (2016) drop unidentifiable coefficients, so the drop is
+not mistaken for a worse fit.
 
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
-observed curvature. `NegativeBinomialLS` does not supply Fisher information. This family is not zero-inflated and does not claim an exact Poisson
-active face, CDF or quantile methods, random generation, or complete-fit speed.
+observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
+1987): the solver falls back to it when the observed curvature at the end of a
+fit is not a proper maximum, and says so with a `ConvergenceWarning` kept in
+`result_.warnings`; `coefficient_curvature="fisher"` can request it. Its
+starting smoothing parameters stay at the 0.1 start rather than the
+information-scaled one. This family is not zero-inflated and does not claim an
+exact Poisson active face, CDF or quantile methods, random generation, or
+complete-fit speed.
 
 ## Generalized gamma mean–scale–shape model
 
@@ -341,8 +356,9 @@ only redistribute mass within a cell and never touch the mean table. The mean
 must exist: cells with `shape < 0` and `scale·|shape| ≥ 1` are outside the
 model, the solver's line search backs away from them, and a repeated curvature
 failure is diagnosed with a message naming that boundary. A book whose tail
-genuinely has no mean drives the intercept-only null fit into that boundary
-and the fit stops with `NullModelFitError`; use the location form for it.
+genuinely has no mean drives the intercept-only null fit into that boundary.
+The fit still finishes, warns that its null model did not converge, and keeps
+that warning in `result_.warnings`; use the location form for such a book.
 
 **Location form.** `GeneralizedGammaLSS(parametrisation="location")` puts the
 identity-linked log-scale location first (`log Y = location + scale·W`); its
@@ -592,8 +608,10 @@ and artifact. They must satisfy `1 < power_lower < power_upper < 2`, and the
 power link keeps fitted values strictly inside those walls.
 
 Both fixed smoothing parameters and automatic smoothing support dense or grouped
-discrete execution with observed coefficient curvature. There is no Fisher
-fallback for `TweedieLSS`.
+discrete execution with observed coefficient curvature. `TweedieLSS` has no
+Fisher information; when the observed curvature at the end of a fit is not a
+proper maximum, the fit uses the nearest positive semidefinite curvature
+instead and warns (see "Curvature choice").
 
 The example sets the outer iteration policy explicitly for reproducibility.
 Always inspect reported convergence, the terminal residual, and curvature
@@ -943,6 +961,8 @@ By default the suite holds smoothing parameters fixed. With
 stationary fit or performs one authenticated, on-demand replay from retained
 training rows. That replay is ephemeral. A compact fit without a published
 Hessian refuses, as does a fit whose terminal state cannot be authenticated.
+A fit whose final curvature fell back is corrected with the curvature it used,
+whether from its published Hessian or a replay, and warns that it did.
 Term effects, plots and summaries validate their requested work before
 resolving the covariance, and resolve it at most once per top-level call. The
 simultaneous critical value is floored at the pointwise normal critical value,
@@ -1083,9 +1103,9 @@ preregistered confirmatory result.
 Set `discrete=True, n_bins=256` on `SuperLSS` to compile marginal spline designs
 and use bounded row chunks for joint fitting. This route assembles the coupled
 observed Hessian, including signed cross-predictor blocks, through the existing
-grouped design machinery. It supports observed-only `TweedieLSS` and
-`NegativeBinomialLS`; requesting Fisher curvature still requires the family's
-expected-information capability.
+grouped design machinery. It supports observed-only `TweedieLSS`; requesting
+Fisher curvature requires the family's expected-information capability, which
+`TweedieLSS` lacks.
 
 ```python
 from superglm import GaussianLS, SuperLSS, s
@@ -1139,14 +1159,19 @@ meaning on both execution routes.
 The coefficient solve is Newton's method on the observed Hessian for
 every family. `coefficient_curvature="fisher"` on `SuperLSS` asks for Fisher
 scoring instead and is accepted only for a family that supplies expected
-information. Every current built-in except `NegativeBinomialLS` and
-`TweedieLSS` supplies it; a family implementing that capability does not change
-the default solve. Under either policy the accepted terminal point is
-re-examined with the penalized observed Hessian `A + S`, restricted to the
-active coefficient subspace when needed. If it is materially indefinite the
-solver retries with a tighter tolerance, then falls back to penalized expected
-information `F + S` when the family supplies it and refuses the fit otherwise.
-The requested policy
+information. Every current built-in except `TweedieLSS` supplies it; a family
+implementing that capability does not change the default solve. Under either
+policy the accepted terminal point is re-examined with the penalized observed
+Hessian `A + S`, restricted to the active coefficient subspace when needed. If
+it is materially indefinite the solver retries with a tighter tolerance, then
+falls back to penalized expected information `F + S` when the family supplies
+it. Without usable expected information the fit is not refused: each row's
+observed curvature is replaced by its nearest positive semidefinite matrix
+(Wood and Fasiolo, 2017; Higham, 1988), the fit warns, and the warning is kept
+in `result_.warnings`; telemetry then reports `actual_source` as
+`"nearest_semidefinite"`. A `NegativeBinomialLS` fit that ends on Fisher
+information warns the same way, converged or not, because 0.40 refused such
+fits. The requested policy
 is `training_telemetry().curvature_policy`;
 the terminal source and any fallback are in `training_telemetry().curvature`
 (`actual_source`, `fallback_count`, `matrix_kind`).
@@ -1260,10 +1285,12 @@ make hostile pickle safe.
 
 Artifacts carry two independent version numbers. The envelope's
 `schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier unless explicitly supported**. This build writes envelope `10.0.0`
-and also reads `8.0.0` and `9.0.0`. Schema 10 permits compact historical row
-arrays and records the full-history opt-in; older readers refuse this format
-before loading its payload. New fits record whether curvature diagnostics assessed
+barrier unless explicitly supported**. This build writes envelope `11.0.0`
+and also reads `8.0.0`, `9.0.0` and `10.0.0`, so models saved by 0.40 load.
+Schema 11 records what a fit disclosed (`result_.warnings`) and that
+`NegativeBinomialLS` supplies Fisher information; schema 10 permitted compact
+historical row arrays and recorded the full-history opt-in. Older readers
+refuse a newer format before loading its payload. New fits record whether curvature diagnostics assessed
 the data matrix or the penalized matrix; older fits keep their original
 family-dependent interpretation. Unsupported majors receive a version error
 naming both versions. MINOR and PATCH promise readability. Because the loader
@@ -1333,10 +1360,10 @@ order you are likely to meet them.
   `LogNormalLS` is the supported way to make it.
 - **Negative binomial has no zero-inflated variant**, and its size parameter
   cannot run to infinity to become an exact Poisson.
-- **Tweedie and negative binomial fit on exact curvature only.** Dense,
-  chunked and discrete designs all work, but these two families have no
-  Fisher approximation to fall back on: if a fit ends where the exact
-  curvature does not describe a proper maximum, it refuses rather than guess.
+- **Tweedie has no Fisher approximation.** Dense, chunked and discrete
+  designs all work. If a fit ends where the exact curvature does not describe
+  a proper maximum, its standard errors and effective degrees of freedom use
+  the nearest positive semidefinite curvature, and the fit warns.
 - **`smoothing_certified_` is strict, and `False` is not a defect on its
   own.** It is `True` only for a converged interior stop with every check
   passed: no `practical_plateau` stop (the default `practical_reml=True`

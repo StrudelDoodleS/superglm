@@ -171,3 +171,117 @@ def test_uncapped_gamma_explicit_weak_start_refuses_unresolved_stationarity(unca
     assert not model.result_.converged
     report = model.diagnose()
     assert any(finding.identifier == "fit.not_converged:coefficient" for finding in report.findings)
+
+
+@pytest.fixture(scope="module")
+def frequency_book_train():
+    """The training rows of the books.py frequency book (seed 20261012, 80/20 split)."""
+    freq = _datasets.load_freq_corrected()
+    freq["LogDensity"] = np.log1p(freq["Density"].to_numpy(dtype=np.float64))
+    for column in ("DrivAge", "VehAge", "BonusMalus", "VehPower"):
+        freq[column] = freq[column].astype(np.float64)
+    for column in ("VehBrand", "Region", "VehGas", "Area"):
+        freq[column] = freq[column].astype(str)
+    order = np.random.default_rng(20261012).permutation(len(freq))
+    train = np.zeros(len(freq), dtype=bool)
+    train[order[: int(round(0.8 * len(freq)))]] = True
+    return freq[train].reset_index(drop=True)
+
+
+def _book_location_terms():
+    from superglm import cat, s
+
+    return (
+        s("DrivAge", kind="cr", k=10),
+        s("VehAge", kind="cr", k=10),
+        s("BonusMalus", kind="cr", k=10),
+        s("LogDensity", kind="cr", k=8),
+        s("VehPower", kind="cr", k=6),
+        cat("VehBrand"),
+        cat("Region"),
+        cat("VehGas"),
+        cat("Area"),
+    )
+
+
+def _fit_disclosing(model, sample, response, **options):
+    """Fit, then check the result is usable and any non-convergence was warned."""
+    import warnings
+
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(sample, response, **options)
+    assert np.all(np.isfinite(model.covariance_))
+    offsets = options.get("offsets")
+    assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=offsets))))
+    if not model.result_.converged:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    # Every final-curvature fallback of these families used to refuse (NB2 had
+    # no expected information, Tweedie has none), so each one is disclosed.
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    if telemetry.fallback_count > 0:
+        assert model.result_.warnings
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    for message in model.result_.warnings:
+        assert any(str(item.message) == message for item in caught)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_negative_binomial_book_sample_finishes_instead_of_refusing(frequency_book_train, discrete):
+    """Kills the refusal on the 20,000-row freMTPL2 sample of the lss_nb benchmark case.
+
+    Master raised RepeatedCurvatureIndefinitenessError on this sample, dense
+    and binned: its unpenalized start fitted -log(exposure) with vehicle-age
+    spline coefficients near 2e5, the solver stalled there, and the terminal
+    observed curvature stayed indefinite with no Fisher fallback. The fit now
+    returns and predicts finite means, and both routes end on Fisher
+    curvature, disclosed. The dense route converges; the binned route stops
+    with a smoothing parameter at its cap (lambda_cap_unresolved), also
+    disclosed. The test pins the disclosures, not those outcomes.
+    """
+    from superglm import NegativeBinomialLS, SuperLSS, cat, s
+
+    sample = frequency_book_train.iloc[:20000]
+    log_exposure = np.log(sample["Exposure"].to_numpy(dtype=np.float64))
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(*_book_location_terms()),
+        family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
+        discrete=discrete,
+    )
+    _fit_disclosing(
+        model,
+        sample,
+        sample["ClaimNb"].to_numpy(dtype=np.float64),
+        offsets={"mean": log_exposure, "theta": log_exposure},
+    )
+
+
+def test_binned_tweedie_book_sample_finishes_instead_of_refusing(frequency_book_train):
+    """Kills the refusal on a 3,000-row binned TweedieLSS fit of the frequency book.
+
+    Master accepted a chunked line-search trial on its value, then raised when
+    the family refused that trial's derivatives ("required float64 work is not
+    representable"). The trial is now backtracked from, as a dense one is.
+    """
+    from superglm import SuperLSS, TweedieLSS, cat, s
+
+    sample = frequency_book_train.iloc[:3000]
+    exposure = sample["Exposure"].to_numpy(dtype=np.float64)
+    family = TweedieLSS()
+    model = SuperLSS(
+        family,
+        family.mu(*_book_location_terms()),
+        family.phi(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
+        family.p(),
+        discrete=True,
+    )
+    _fit_disclosing(
+        model,
+        sample,
+        sample["ClaimTotal"].to_numpy(dtype=np.float64) / exposure,
+        sample_weight=exposure,
+    )

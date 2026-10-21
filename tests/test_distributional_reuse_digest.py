@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import sys
 import threading
 import tracemalloc
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
-import numba
 import numpy as np
 import pytest
 
@@ -404,39 +407,74 @@ def test_worker_failure_cancels_queued_leaves_and_joins_running_leaves(monkeypat
     assert all(not thread.is_alive() for pool in pools for thread in pool._threads)
 
 
+# The check runs in a fresh interpreter whose numba pool has exactly two
+# workers, so it never depends on the runner's NUMBA_NUM_THREADS: benchboard
+# starts processes with one, and numba cannot raise its thread count above the
+# pool size it was launched with.
+_WORKER_BUDGET_PROBE = """
+import hashlib
+import threading
+
+import numba
+
+import superglm.distributional.solver.solver as solver
+from tests.test_distributional_chunk_reuse import _problem
+
+assert numba.config.NUMBA_NUM_THREADS == 2, numba.config.NUMBA_NUM_THREADS
+problem = _problem(n=24_000)
+context = solver._validated_context(
+    *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+)
+real_sha256 = hashlib.sha256
+caller = threading.get_ident()
+readers = set()
+
+
+class ObservedHash:
+    def __init__(self, data=b""):
+        self._hash = real_sha256(data)
+
+    def update(self, data):
+        if isinstance(data, memoryview) and data.nbytes >= 64 * 1024:
+            readers.add(threading.get_ident())
+        self._hash.update(data)
+
+    def digest(self):
+        return self._hash.digest()
+
+    def hexdigest(self):
+        return self._hash.hexdigest()
+
+
+hashlib.sha256 = ObservedHash
+numba.set_num_threads(2)
+assert solver._chunk_reuse_data_certificate(context) is not None
+assert readers
+assert caller not in readers
+assert len(readers) <= 2
+print("ok")
+"""
+
+
 @pytest.mark.threads
-def test_certificate_array_reads_use_the_current_numba_worker_budget(monkeypatch):
+def test_certificate_array_reads_use_the_current_numba_worker_budget():
     """The old single hash streams every payload on the caller thread."""
-    problem = _problem(n=24_000)
-    context = solver._validated_context(
-        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    root = Path(__file__).resolve().parent.parent
+    environment = {
+        **os.environ,
+        "NUMBA_NUM_THREADS": "2",
+        "PYTHONPATH": os.pathsep.join(
+            item for item in (str(root), os.environ.get("PYTHONPATH")) if item
+        ),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", _WORKER_BUDGET_PROBE],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
     )
-    real_sha256 = hashlib.sha256
-    caller = threading.get_ident()
-    readers = set()
-
-    class ObservedHash:
-        def __init__(self, data=b""):
-            self._hash = real_sha256(data)
-
-        def update(self, data):
-            if isinstance(data, memoryview) and data.nbytes >= 64 * 1024:
-                readers.add(threading.get_ident())
-            self._hash.update(data)
-
-        def digest(self):
-            return self._hash.digest()
-
-        def hexdigest(self):
-            return self._hash.hexdigest()
-
-    monkeypatch.setattr(hashlib, "sha256", ObservedHash)
-    previous = numba.get_num_threads()
-    numba.set_num_threads(2)
-    try:
-        assert solver._chunk_reuse_data_certificate(context) is not None
-    finally:
-        numba.set_num_threads(previous)
-    assert readers
-    assert caller not in readers
-    assert len(readers) <= 2
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().endswith("ok")

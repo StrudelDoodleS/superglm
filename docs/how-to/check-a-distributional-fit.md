@@ -295,7 +295,11 @@ will be requested. A stationary fit can use a trusted smoothing Hessian
 published by the Newton endgame, or authenticate the terminal fit and replay
 that Hessian once from retained training rows. The replay is ephemeral: it does
 not mutate, cache, or republish fit state. A compact fit without a published
-Hessian refuses, as does a non-stationary or unauthenticated fit.
+Hessian refuses, as does a non-stationary or unauthenticated fit. If the fit
+had to replace an indefinite final curvature with Fisher information or the
+nearest positive semidefinite curvature, the correction uses that replacement
+too, whether from the published Hessian or a replay, and a `ConvergenceWarning`
+says so.
 `term_inference()`, `term_test()`, `plot()` and `summary()` validate their term,
 grid and frame inputs first, then resolve corrected covariance at most once per
 top-level call; a multi-panel plot or summary cannot replay it term by term.

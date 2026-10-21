@@ -116,7 +116,8 @@ def prepare_distributional_initialization(
 ) -> tuple[dict[str, float], NDArray | None]:
     """Resolve overrides, then calibrate missing starts at admitted coefficients.
 
-    Families without expected information and blocks with unresolved numerical
+    Families without expected information, families that set
+    ``information_scaled_start = False``, and blocks with unresolved numerical
     rank retain the previous 0.1 start, clipped to the requested bounds.
     """
     if config.initial_lambda is not None:
@@ -131,7 +132,11 @@ def prepare_distributional_initialization(
         if (supplied is None or component.name not in supplied)
         and (component.lambda_policy is None or component.lambda_policy.mode != "fixed")
     }
-    if not automatic or not isinstance(family, ExpectedInformationFamily):
+    if (
+        not automatic
+        or not isinstance(family, ExpectedInformationFamily)
+        or not getattr(family, "information_scaled_start", True)
+    ):
         return resolved, initial
     matrices = (
         reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)

@@ -19,6 +19,7 @@ from superglm.distributional.family import (
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.result import (
@@ -55,6 +56,7 @@ from superglm.distributional.solver.curvature import (
 )
 from superglm.distributional.solver.derivatives import (
     PredictorLikelihoodEvaluation,
+    nearest_semidefinite_curvature,
     transform_natural_derivatives,
     transform_natural_information,
 )
@@ -872,6 +874,18 @@ def _evaluate_fused_trial(
 
 
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
+    """Starting coefficients: the family's starting parameters, projected with the penalty.
+
+    Each predictor's link-scale starting values, less its offset, are fitted by
+    penalized weighted least squares with the starting penalty, as the first
+    working regression of penalized IRLS and of GAMLSS's RS algorithm fits them
+    (Stasinopoulos and Rigby, J. Statist. Softw. 23(7), 2007, section 1.5).
+    The starting values are constant per predictor, so without an offset this
+    is the intercept alone. An offset makes the target vary by row; projecting
+    it without the penalty let a spline basis with sparse tail data absorb
+    ``-log(exposure)`` with coefficients near 1e5, a penalty of 2e10 against a
+    log likelihood of 4e3, and fitted means the NB2 kernel cannot evaluate.
+    """
     initialized = context.family.initialize(context.response, context.likelihood_plan)
     initialized.validate_shape(
         n_observations=len(context.response),
@@ -894,7 +908,8 @@ def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
                 dtype=np.float64,
             )
             target = target - state.offset
-            gram = plan.diagonal_moment(weights)
+            block = context.penalty[state.coefficient_slice, state.coefficient_slice]
+            gram = plan.diagonal_moment(weights) + block
             rhs = plan.score(weights * target)
             coefficients[state.coefficient_slice] = decompose_gram(gram).solve(rhs)
         return _readonly(coefficients)
@@ -911,20 +926,19 @@ def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
         target = np.asarray(link.link(initialized.theta[:, parameter_index]), dtype=np.float64)
         target = target - state.offset
         weighted_matrix = matrix * square_root_weight[:, None]
-        weighted_target = target * square_root_weight
-        local = np.linalg.lstsq(weighted_matrix, weighted_target, rcond=None)[0]
-        coefficients[state.coefficient_slice] = local
+        block = context.penalty[state.coefficient_slice, state.coefficient_slice]
+        gram = weighted_matrix.T @ weighted_matrix + block
+        rhs = weighted_matrix.T @ (target * square_root_weight)
+        coefficients[state.coefficient_slice] = decompose_gram(gram).solve(rhs)
     return _readonly(coefficients)
 
 
 def _geometry(
     context: _SolverContext,
     state: _AcceptedState,
-    source: str,
+    source: chunking.CurvatureSource,
 ) -> DenseJointGeometry:
     if context.chunk_size is not None:
-        if source not in ("observed", "fisher"):
-            raise ValueError("curvature source must be 'observed' or 'fisher'")
         return chunking.assemble_chunked_geometry(
             context.family,
             context.layout,
@@ -938,8 +952,8 @@ def _geometry(
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
-    if source == "observed":
-        curvature = state.derivatives.curvature_packed
+    if source == "nearest_semidefinite":
+        curvature = nearest_semidefinite_curvature(state.derivatives.curvature_packed)
     elif source == "fisher":
         curvature = state.fisher_curvature_packed
         if curvature is None:
@@ -955,7 +969,7 @@ def _geometry(
                 context.links,
             )
     else:
-        raise ValueError("curvature source must be 'observed' or 'fisher'")
+        curvature = state.derivatives.curvature_packed
     if context.dense_matrices is None:
         raise RuntimeError("dense solver context is missing predictor matrices")
     return _assemble_dense_geometry_from_matrices(
@@ -971,7 +985,7 @@ def _geometry(
 def _measured_geometry(
     context: _SolverContext,
     state: _AcceptedState,
-    source: str,
+    source: chunking.CurvatureSource,
     phase_recorder: FitPhaseRecorder | None,
 ) -> DenseJointGeometry:
     with measure_phase(phase_recorder, "curvature_gradient_assembly"):
@@ -1272,12 +1286,28 @@ def _run_iterations(
                 step_relative=step_relative,
             )
 
-        with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
-            direction = _solve_coefficient_direction(
-                context,
-                geometry.penalized_curvature,
-                geometry.score_penalized,
-                config,
+        try:
+            with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
+                direction = _solve_coefficient_direction(
+                    context,
+                    geometry.penalized_curvature,
+                    geometry.score_penalized,
+                    config,
+                )
+        except DenseSolverError:
+            # No Levenberg damping of the curvature gives a certified ascent
+            # direction. The accepted state is the best one reached: stop there,
+            # unconverged, and let the fit disclose why instead of raising.
+            return _OptimizationRun(
+                state=state,
+                geometry=geometry,
+                observed_geometry=observed_geometry,
+                history=tuple(history),
+                converged=False,
+                reason="no_ascent_direction",
+                score_relative=score_relative,
+                objective_relative_change=objective_relative_change,
+                step_relative=step_relative,
             )
         optimization_score = _optimization_score(context, geometry.score_penalized)
         if (
@@ -1387,10 +1417,26 @@ def _run_iterations(
                     > state.penalized_optimizing_log_likelihood
                 )
             ):
-                accepted = candidate
                 accepted_geometry = None if fused is None else fused[1]
-                fused = None
-                break
+                if accepted_geometry is None and context.chunk_size is not None:
+                    # A chunked trial is screened on its value alone. Its
+                    # derivatives are part of its validity, as they are for a
+                    # dense trial (whose evaluation returns None when they
+                    # cannot be formed), so a trial whose geometry the family
+                    # refuses is backtracked from, not accepted and raised.
+                    try:
+                        accepted_geometry = _measured_geometry(
+                            context,
+                            candidate,
+                            config.coefficient_curvature,
+                            phase_recorder,
+                        )
+                    except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+                        accepted_geometry = None
+                if accepted_geometry is not None or context.chunk_size is None:
+                    accepted = candidate
+                    fused = None
+                    break
             fused = None
             if attempt == config.max_backtracks:
                 break
@@ -1824,6 +1870,8 @@ def _fit_dense_fixed_lambda_core(
         fisher_available = context.fisher_family is not None
         requested_terminal_curvature = observed_geometry.penalized_curvature
         terminal_fisher_geometry: DenseJointGeometry | None = None
+        # Filled only if the policy asks for its last fallback.
+        terminal_semidefinite_geometry: list[DenseJointGeometry] = []
         if context.coefficient_face is not None and context.coefficient_face.reduced_width == 0:
             empty_matrix = _readonly(np.zeros((0, 0), dtype=np.float64))
             empty_rank = decompose_gram(empty_matrix)
@@ -1876,6 +1924,10 @@ def _fit_dense_fixed_lambda_core(
                 # accepted state and let the explicit curvature policy record the
                 # Fisher fallback rather than relabeling a failed solve as success.
                 retry = None
+            if retry is not None and retry.reason == "no_ascent_direction":
+                # A retry that ran out of ascent directions is a failed solve
+                # too, handled as one: the main run's state and verdict stand.
+                retry = None
             if retry is not None:
                 state = retry.state
                 coefficient_geometry = retry.geometry
@@ -1901,24 +1953,48 @@ def _fit_dense_fixed_lambda_core(
             fisher_matrix = None
             # A dense reused endpoint carries no row derivatives (see
             # _reuse_observed_initial_result), and a failed retry keeps that
-            # state.  Dense Fisher geometry cannot be measured from it, so the
-            # policy sees no Fisher fallback -- the same guard the retry above
-            # applies when it reuses the accepted geometry instead.  Chunked
-            # geometry is assembled from rows and never needs the derivatives.
-            fisher_measurable = context.chunk_size is not None or state.derivatives is not None
-            if fisher_available and fisher_measurable:
-                fisher_geometry = (
-                    coefficient_geometry
-                    if retry_config.coefficient_curvature == "fisher"
-                    else _measured_geometry(
-                        context,
-                        state,
-                        "fisher",
-                        phase_recorder,
-                    )
+            # state.  Both fallbacks are row geometry, so that state is
+            # evaluated once more, at the same coefficients, to measure them.
+            # Chunked geometry is assembled from rows and never needs this.
+            fallback_state = state
+            if context.chunk_size is None and state.derivatives is None:
+                evaluated = _evaluate_state(
+                    context,
+                    state.coefficients,
+                    phase_recorder=phase_recorder,
                 )
-                terminal_fisher_geometry = fisher_geometry
-                fisher_matrix = fisher_geometry.penalized_curvature
+                if evaluated is not None:
+                    fallback_state = evaluated
+            if fisher_available:
+                try:
+                    fisher_geometry = (
+                        coefficient_geometry
+                        if retry_config.coefficient_curvature == "fisher"
+                        else _measured_geometry(
+                            context,
+                            fallback_state,
+                            "fisher",
+                            phase_recorder,
+                        )
+                    )
+                except (_NumericalEvaluationError, FloatingPointError, OverflowError):
+                    # Expected information the family cannot represent at this
+                    # state is no fallback; the semidefinite one below is.
+                    fisher_geometry = None
+                if fisher_geometry is not None:
+                    terminal_fisher_geometry = fisher_geometry
+                    fisher_matrix = fisher_geometry.penalized_curvature
+
+            def _nearest_semidefinite() -> NDArray[np.float64]:
+                geometry = _measured_geometry(
+                    context,
+                    fallback_state,
+                    "nearest_semidefinite",
+                    phase_recorder,
+                )
+                terminal_semidefinite_geometry.append(geometry)
+                return _policy_curvature(context, geometry.penalized_curvature)
+
             requested_terminal_curvature = observed_geometry.penalized_curvature
             curvature = resolve_curvature(
                 "observed",
@@ -1926,6 +2002,7 @@ def _fit_dense_fixed_lambda_core(
                 fisher_matrix=(
                     None if fisher_matrix is None else _policy_curvature(context, fisher_matrix)
                 ),
+                semidefinite_fallback=_nearest_semidefinite,
                 state=curvature.state,
                 matrix_kind="penalized",
             )
@@ -1936,6 +2013,8 @@ def _fit_dense_fixed_lambda_core(
             if terminal_fisher_geometry is None:
                 raise RuntimeError("Fisher fallback is missing its full curvature geometry")
             accepted_geometry = terminal_fisher_geometry
+        elif curvature.telemetry.actual_source == "nearest_semidefinite":
+            accepted_geometry = terminal_semidefinite_geometry[0]
         else:
             accepted_geometry = observed_geometry
         terminal_data_curvature = np.asarray(

@@ -11,9 +11,12 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier unless explicitly supported.** Schemas 8 and 9
-  retain full historical rows. Schema 8 also retains its original telemetry
-  encoding and family-dependent curvature scope. Known
+* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9 and
+  10 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
+  retains its original telemetry encoding and family-dependent curvature
+  scope. Schema 11 added a fit's disclosures and NegativeBinomialLS's expected
+  information to the manifest, so readers of schema 10 refuse its artifacts
+  at their version gate instead of reporting a manifest mismatch. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
@@ -31,6 +34,14 @@ fails a test instead of shipping.
 That is what buys the invariant the manifest check exists to provide: once the
 version gate has passed, a manifest mismatch means the artifact was tampered
 with or corrupted, and never merely that it is old.
+
+One family capability is read as the artifact recorded it rather than as the
+family now declares it: ``expected_information`` may be gained after an
+artifact was written (NegativeBinomialLS gained it in schema 11.0.0; schema 10
+artifacts record it absent). A fit's telemetry records which curvature it used,
+so the gain changes nothing the artifact holds; the recorded value is kept on
+the loaded model (``recorded_expected_information``) for the schema-8
+curvature scope, which depended on it.
 """
 
 from __future__ import annotations
@@ -803,6 +814,7 @@ def distributional_manifest(model: DenseDistributionalModel) -> dict[str, Any]:
             "n_smoothing_iter": fit.n_smoothing_iter,
             "rank": fit.rank,
             "curvature_telemetry": _telemetry_manifest(fit.curvature_telemetry),
+            **({"warnings": list(fit.warnings)} if fit.warnings else {}),
         },
         "solver": _solver_manifest(model.result),
         "smoothing": _smoothing_manifest(model.smoothing),
@@ -1489,12 +1501,33 @@ def deserialize_distributional_model(
             f"manifest does not match a valid fitted model payload: {detail}"
         ) from exc
     restored_manifest = distributional_manifest(validated)
+    recorded_expected_information = _recorded_capability(manifest, "expected_information")
+    if recorded_expected_information is False:
+        capabilities = restored_manifest["family"]["capabilities"]
+        if capabilities.get("expected_information") is True:
+            # Gained after the artifact was written; compare it as recorded.
+            capabilities["expected_information"] = False
     if not hmac.compare_digest(
         _canonical_json(restored_manifest),
         _canonical_json(manifest),
     ):
         raise DistributionalSerializationError("manifest does not match fitted model payload")
+    # A model re-saved after loading keeps the record of the artifact it came from.
+    carried = getattr(restored, "recorded_expected_information", None)
+    object.__setattr__(
+        validated,
+        "recorded_expected_information",
+        recorded_expected_information if carried is None else carried,
+    )
     return validated
+
+
+def _recorded_capability(manifest: Mapping[str, Any], name: str) -> bool | None:
+    """A family capability as the artifact's manifest recorded it, if it did."""
+    family = manifest.get("family")
+    capabilities = family.get("capabilities") if isinstance(family, Mapping) else None
+    value = capabilities.get(name) if isinstance(capabilities, Mapping) else None
+    return value if isinstance(value, bool) else None
 
 
 __all__ = [

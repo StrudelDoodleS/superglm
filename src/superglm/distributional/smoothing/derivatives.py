@@ -16,7 +16,13 @@ chooses the inner iteration's geometry), so ``H = -grad^2 l(beta_hat) + S`` is
 the matrix inside ``F`` and the one the implicit derivative of the mode goes
 through; a fit whose terminal curvature fell back to Fisher had a materially
 indefinite observed Hessian, where that derivative does not exist, and is
-refused.
+refused by default.  ``curvature="terminal"`` differentiates the curvature the
+fit accepted instead: the expected information, or the observed curvature with
+each row's block projected onto the semidefinite cone, as Wood, Pya and Saefken
+(2016, section 3.3.1) and Wood and Fasiolo (2017, section 3) substitute for an
+observed Hessian that is not positive definite.  ``F`` is then the Laplace
+objective of that substitute and every implicit derivative of the mode goes
+through it, a first-order approximation to the true one.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,6 +44,7 @@ from superglm.distributional.family import (
     CertifiedCurvatureDirectionalFamily,
     CertifiedCurvatureSecondDirectionalFamily,
     DistributionalFamily,
+    ExpectedInformationFamily,
     FamilyLikelihoodPlan,
     PredictorCurvatureDirectionalFamily,
     PredictorCurvatureSecondDirectionalFamily,
@@ -49,6 +57,7 @@ from superglm.distributional.smoothing.endpoint_direction import (
     _curvature_packed,
     _first_difference,
     _second_difference,
+    _theta_from_eta,
     _unit_directions,
     analytic_curvature_direction,
     analytic_curvature_second_direction,
@@ -60,6 +69,10 @@ from superglm.distributional.smoothing.endpoint_laml import (
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states, _estimated_names
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver.derivatives import (
+    nearest_semidefinite_curvature,
+    transform_natural_information,
+)
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.reml.efs_update import EFSComponentState
@@ -72,6 +85,12 @@ _PackedRows = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 _Stencil = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
 #: Rows per chunk of the row-chunked assemblies (scratch of ``chunk * m * P_r`` doubles).
 _ROW_CHUNK = 4096
+#: Which terminal curvature ``laml_derivatives`` differentiates: always the
+#: observed one, or whatever the fit accepted (see the module docstring).
+LamlCurvature = Literal["observed", "terminal"]
+#: Accepted terminal curvatures other than the observed one whose rows can be
+#: re-evaluated at a perturbed predictor state.
+_SUBSTITUTE_SOURCES = ("fisher", "nearest_semidefinite")
 
 
 class LamlDerivativeError(RuntimeError):
@@ -553,6 +572,38 @@ def _analytic_second_derivatives(
     )
 
 
+def _substitute_rows(
+    family: DistributionalFamily,
+    y: NDArray,
+    links: tuple,
+    likelihood_plan: FamilyLikelihoodPlan,
+    source: str,
+) -> _PackedRows:
+    """Packed rows of an accepted substitute curvature, as a function of ``eta``.
+
+    The same rows the coefficient solver assembled at its terminal state:
+    the expected information through the inverse links, or each observed row
+    block projected onto the semidefinite cone.
+    """
+    if source == "nearest_semidefinite":
+
+        def projected(values: NDArray[np.float64]) -> NDArray[np.float64]:
+            return nearest_semidefinite_curvature(
+                _curvature_packed(family, y, values, links, likelihood_plan)
+            )
+
+        return projected
+    fisher_family = cast(ExpectedInformationFamily, family)
+
+    def information(values: NDArray[np.float64]) -> NDArray[np.float64]:
+        natural = fisher_family.expected_information_natural(
+            _theta_from_eta(values, links), likelihood_plan
+        )
+        return np.asarray(transform_natural_information(natural, values, links), dtype=np.float64)
+
+    return information
+
+
 @dataclass
 class _GradientPass:
     """Everything one gradient pass computed, for a Hessian pass at the same fit.
@@ -579,6 +630,8 @@ class _GradientPass:
     rank_hessian: dict[tuple[str, str], float]
     penalty_hessian_error: NDArray[np.float64]
     rows: _PackedRows
+    # The rows are a substitute curvature, which no family derivative describes.
+    substitute: bool
     eta: NDArray[np.float64]
     matrices: tuple[PredictorMatrix, ...]
     slices: tuple[slice, ...]
@@ -659,6 +712,7 @@ def _gradient_pass(
     from superglm.reml.penalty_support import PenaltyNumericalError
 
     source = fit.terminal_curvature.actual_source
+    substitute = source != "observed"
     face = fit.coefficient_face
     try:
         penalty_evaluation = (
@@ -707,12 +761,20 @@ def _gradient_pass(
     def observed_rows(values: NDArray[np.float64]) -> NDArray[np.float64]:
         return _curvature_packed(family, y, values, links, likelihood_plan)
 
-    analytic_first = _analytic_first_derivative(
-        family, y, eta, links, likelihood_plan, n_observations, k_parameters
+    curvature_rows = (
+        _substitute_rows(family, y, links, likelihood_plan, source) if substitute else observed_rows
+    )
+    # A family's analytic directions differentiate its observed curvature only.
+    analytic_first = (
+        None
+        if substitute
+        else _analytic_first_derivative(
+            family, y, eta, links, likelihood_plan, n_observations, k_parameters
+        )
     )
     try:
         first, first_certificate, stencils, evaluations = _first_derivatives(
-            observed_rows, eta, step, analytic_first=analytic_first
+            curvature_rows, eta, step, analytic_first=analytic_first
         )
     except (ValueError, FloatingPointError, OverflowError) as exc:
         raise LamlDerivativeError("the row curvature could not be differentiated") from exc
@@ -838,7 +900,8 @@ def _gradient_pass(
         estimated=estimated,
         rank_hessian=rank_hessian,
         penalty_hessian_error=penalty_hessian_error,
-        rows=observed_rows,
+        rows=curvature_rows,
+        substitute=substitute,
         eta=eta,
         matrices=matrices,
         slices=slices,
@@ -898,8 +961,12 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     one pass over the rows or ``O(m P^3)`` once.
     """
     p = gradient_pass
-    analytic_second = _analytic_second_derivatives(
-        p.family, p.y, p.eta, p.links, p.likelihood_plan, step=p.step
+    analytic_second = (
+        None
+        if p.substitute
+        else _analytic_second_derivatives(
+            p.family, p.y, p.eta, p.links, p.likelihood_plan, step=p.step
+        )
     )
     if analytic_second is not None:
         second, second_certificate = analytic_second
@@ -1088,6 +1155,7 @@ def laml_derivatives(
     step: float = DEFAULT_STEP,
     want_hessian: bool = True,
     reuse: LamlDerivativeWorkspace | None = None,
+    curvature: LamlCurvature = "observed",
 ) -> LamlDerivatives:
     """Exact gradient (and Hessian) of the negative LAML in log lambda at ``fit``.
 
@@ -1103,6 +1171,11 @@ def laml_derivatives(
     chunks; coefficient-space Hessians and pair directions retain ``O(m P^2 +
     P m^2)`` values. The bounded design path does not retain an ``n by P`` design
     or an ``n by m`` smoothing-direction array.
+
+    ``curvature="observed"`` refuses a fit whose terminal curvature fell back.
+    ``curvature="terminal"`` differentiates the substitute it accepted (Fisher
+    or nearest semidefinite) by finite differences of its rows; the module
+    docstring says what the result then means.
     """
     if not isinstance(fit, DenseSolverResult):
         raise TypeError("fit must be a DenseSolverResult")
@@ -1119,7 +1192,7 @@ def laml_derivatives(
     if reuse is not None and not isinstance(reuse, LamlDerivativeWorkspace):
         raise TypeError("reuse must be a LamlDerivativeWorkspace")
     source = fit.terminal_curvature.actual_source
-    if source != "observed":
+    if source != "observed" and not (curvature == "terminal" and source in _SUBSTITUTE_SOURCES):
         raise LamlDerivativeError(
             "derivatives require observed terminal curvature; the fit published "
             f"{source!r}, so its observed Hessian was materially indefinite"

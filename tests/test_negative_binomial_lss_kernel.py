@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -18,7 +20,6 @@ NegativeBinomialDerivativeRepresentationError = (
     nb_kernel.NegativeBinomialDerivativeRepresentationError
 )
 NegativeBinomialNumericalDomainError = nb_kernel.NegativeBinomialNumericalDomainError
-NegativeBinomialPoissonBoundaryError = nb_kernel.NegativeBinomialPoissonBoundaryError
 evaluate_negative_binomial_rows = nb_kernel.evaluate_negative_binomial_rows
 
 
@@ -294,8 +295,12 @@ _DOMAIN_HIGH = math.ldexp(1.0, 450)
         (0, 1.0, 1.0, np.nextafter(_DOMAIN_HIGH, np.inf), NegativeBinomialNumericalDomainError),
         (0, 1.0, np.nextafter(2.0**26, np.inf), 1.0, None),
         (0, 1.0, 2.0**52, 1.0, None),
-        (0, 1.0, np.nextafter(2.0**52, np.inf), 1.0, NegativeBinomialPoissonBoundaryError),
-        (0, np.nextafter(2.0**26, np.inf), 1.0, 1.0, NegativeBinomialNumericalDomainError),
+        # Past the Poisson limit a size of any magnitude is valid.
+        (0, 1.0, np.nextafter(2.0**52, np.inf), 1.0, None),
+        (0, 1.0, np.nextafter(_DOMAIN_HIGH, np.inf), 1.0, None),
+        (3, 1.0, 1.0e300, 1.0, None),
+        (0, np.nextafter(2.0**26, np.inf), 1.0, 1.0, None),
+        (2, 2.0**40, 1.0, 1.0, None),
     ],
 )
 def test_numerical_domain_endpoints_and_ratio_boundary(
@@ -589,3 +594,46 @@ def test_a_single_large_count_is_no_longer_refused_below_the_budget() -> None:
         counts, ones * 10.0, ones, ones, "prior", derivative_order=2
     )
     assert np.isfinite(out.optimizing_log_likelihood[0])
+
+
+def test_public_warmup_compiles_the_expected_information_kernel() -> None:
+    """warmup() compiles the NB2 Fisher kernel with the signature a fit calls it with."""
+    script = r"""
+import numpy as np
+import superglm
+from superglm.distributional.kernels import _negative_binomial_numba as compiled
+from superglm.distributional.kernels.negative_binomial import (
+    negative_binomial_expected_information,
+)
+
+kernel = compiled.expected_size_information
+assert not kernel.nopython_signatures
+superglm.warmup()
+signatures = tuple(kernel.nopython_signatures)
+assert len(signatures) == 1, signatures
+negative_binomial_expected_information(
+    np.array([0.1, 2.0]), np.array([1.5, 30.0]), np.ones(2), "prior"
+)
+assert tuple(kernel.nopython_signatures) == signatures
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script], check=False, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_a_quotient_cell_raises_no_divide_warning_from_the_discarded_log1p():
+    """Count 1, mean 1 and size 2^-100 put log1p's argument at exactly -1.
+
+    The quotient form is the one kept there; the discarded log1p(-1) = -inf
+    must not surface as a divide-by-zero under warnings-as-errors.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with np.errstate(divide="raise"):
+            evaluated = evaluate_negative_binomial_rows(
+                np.array([1.0]), np.array([1.0]), np.array([2.0**-100]), np.ones(1), "prior"
+            )
+    assert np.all(np.isfinite(evaluated.optimizing_log_likelihood))

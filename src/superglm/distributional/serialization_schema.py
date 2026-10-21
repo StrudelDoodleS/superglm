@@ -7,13 +7,17 @@ holds the data that policy consults, so the reader and the writer agree on it.
 
 from __future__ import annotations
 
-# 10.0.0 permits compact historical rows and the full-history retention flag.
-SCHEMA_VERSION = "10.0.0"
+# 11.0.0 records a fit's disclosures (``fit.warnings``) and NegativeBinomialLS's
+# expected information in the manifest. 10.0.0 permitted compact historical
+# rows and the full-history retention flag.
+SCHEMA_VERSION = "11.0.0"
 
 # Schema 8 remains readable: its missing scope retains the family-dependent
 # interpretation, and omission from telemetry preserves the original manifest.
 # Schema 9 has full historical rows; migration derives their original shapes.
-READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8, 9})
+# Schema 10 (0.40) carries no disclosures, and its NegativeBinomialLS manifest
+# records no expected information, which the reader compares as recorded.
+READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8, 9, 10})
 
 #: Manifest type names are the classes' canonical compatibility paths, held
 #: fixed across the package reorganisation so the manifest authenticates fitted

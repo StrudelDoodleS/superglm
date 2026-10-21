@@ -1,7 +1,19 @@
-"""Auditable terminal-curvature retry and fallback policy."""
+"""Auditable terminal-curvature retry and fallback policy.
+
+Observed curvature that is materially indefinite at a terminal coefficient
+state gets one tighter retry. If it is still indefinite, the policy accepts
+the family's expected (Fisher) information when that is supplied and
+semidefinite, and otherwise the nearest positive semidefinite matrix to the
+observed curvature, as the generalized Fellner-Schall method prescribes for
+an indefinite observed Hessian (Wood and Fasiolo, *Biometrics* 73(4), 2017,
+section 3; Wood, Pya and Saefken, *JASA* 111, 2016, section 3.3.1). The
+solver supplies that matrix; this module only decides which one is accepted
+and records the decision.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -9,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.family import CurvatureKind
-from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
@@ -26,7 +38,9 @@ class CurvaturePolicyError(ValueError):
 class RepeatedCurvatureIndefinitenessError(CurvaturePolicyError):
     """Requested non-Fisher curvature remained materially indefinite.
 
-    Its retry was exhausted and no Fisher fallback was available.
+    Its retry was exhausted and the caller supplied neither a Fisher nor a
+    nearest-semidefinite fallback. The coefficient solver always supplies the
+    second, so a fit never raises this.
     """
 
 
@@ -104,7 +118,10 @@ def _analyze_curvature(
     try:
         decomposition = decompose_gram(symmetric, policy=policy)
     except ValueError as exc:
-        if "materially" not in str(exc).lower():
+        # A zero diagonal with a nonzero off-diagonal entry is indefinite: a
+        # semidefinite matrix with a zero diagonal entry has that row zero.
+        message = str(exc).lower()
+        if "materially" not in message and "zero diagonal" not in message:
             raise CurvaturePolicyError(f"{label} curvature rank analysis failed: {exc}") from exc
         materially_indefinite = True
         try:
@@ -131,7 +148,7 @@ def _analyze_curvature(
 
 def _telemetry(
     requested_source: CurvatureKind,
-    actual_source: CurvatureKind,
+    actual_source: AcceptedCurvatureKind,
     *,
     reason: str | None,
     minimum_eigenvalue: float,
@@ -156,6 +173,7 @@ def resolve_curvature(
     requested_matrix: NDArray,
     *,
     fisher_matrix: NDArray | None = None,
+    semidefinite_fallback: Callable[[], NDArray] | None = None,
     state: CurvaturePolicyState | None = None,
     policy: RankPolicy = SHARED_RANK_POLICY,
     matrix_kind: Literal["data", "penalized"] | None = None,
@@ -165,6 +183,13 @@ def resolve_curvature(
     ``hybrid`` is already constructed and documented by the family.  Generic
     policy code diagnoses that matrix as supplied; it does not invent a new
     block combination.
+
+    After the retry, ``fisher_matrix`` is accepted when it is semidefinite.
+    Otherwise ``semidefinite_fallback`` is called, once, for the caller's
+    nearest positive semidefinite matrix to the requested one, which is then
+    accepted with ``actual_source="nearest_semidefinite"``. It is called only
+    on that path, so a caller can defer building the matrix until it is
+    needed. With neither fallback usable the policy raises, as before.
     """
     if requested_source not in ("observed", "fisher", "hybrid"):
         raise ValueError(f"invalid curvature source: {requested_source!r}")
@@ -225,27 +250,41 @@ def resolve_curvature(
             ),
         )
 
-    if fisher_matrix is None:
-        raise RepeatedCurvatureIndefinitenessError(
-            "Fisher curvature is required after repeated material indefiniteness"
+    accepted: _CurvatureAnalysis | None = None
+    actual_source: AcceptedCurvatureKind = "fisher"
+    if fisher_matrix is not None:
+        fisher = _analyze_curvature(fisher_matrix, label="Fisher", policy=policy)
+        if not fisher.materially_indefinite:
+            accepted = fisher
+        elif semidefinite_fallback is None:
+            raise CurvaturePolicyError("Fisher curvature is materially indefinite")
+    if accepted is None:
+        if semidefinite_fallback is None:
+            raise RepeatedCurvatureIndefinitenessError(
+                "Fisher curvature is required after repeated material indefiniteness"
+            )
+        accepted = _analyze_curvature(
+            semidefinite_fallback(),
+            label="Nearest semidefinite",
+            policy=policy,
         )
-    fisher = _analyze_curvature(fisher_matrix, label="Fisher", policy=policy)
-    if fisher.materially_indefinite:
-        raise CurvaturePolicyError("Fisher curvature is materially indefinite")
+        if accepted.materially_indefinite:
+            raise CurvaturePolicyError("nearest semidefinite curvature is materially indefinite")
+        actual_source = "nearest_semidefinite"
 
     fallback_count = current_state.fallback_count + 1
     telemetry = _telemetry(
         requested_source,
-        "fisher",
+        actual_source,
         reason="material_indefiniteness_after_retry",
         minimum_eigenvalue=requested.minimum_eigenvalue,
-        analysis=fisher,
+        analysis=accepted,
         fallback_count=fallback_count,
         matrix_kind=matrix_kind,
     )
     return CurvatureDecision(
-        matrix=fisher.matrix,
-        decomposition=fisher.decomposition,
+        matrix=accepted.matrix,
+        decomposition=accepted.decomposition,
         telemetry=telemetry,
         retry_required=False,
         state=CurvaturePolicyState(retry_attempted=False, fallback_count=fallback_count),

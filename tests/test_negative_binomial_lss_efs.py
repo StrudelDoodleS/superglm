@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import math
+import warnings
 from fractions import Fraction
-from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import nbinom, poisson
 
-import superglm.distributional as distributional_api
-import superglm.distributional.api as distributional_api_module
 import superglm.distributional.families.negative_binomial as negative_binomial_family
-from superglm import SuperLSS
+from superglm import SuperLSS, cat, s
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import NegativeBinomialLS, Predictor
-from superglm.distributional.curvature import (
-    CurvaturePolicyError,
-    RepeatedCurvatureIndefinitenessError,
-)
-from superglm.distributional.weights import WeightContract
+from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
@@ -80,10 +75,16 @@ def _model() -> SuperLSS:
     )
 
 
-def _fit_reml(model: SuperLSS, frame: pd.DataFrame, response: np.ndarray) -> SuperLSS:
+def _fit_reml(
+    model: SuperLSS,
+    frame: pd.DataFrame,
+    response: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> SuperLSS:
     return model.fit_reml(
         frame,
         response,
+        sample_weight=sample_weight,
         lambdas=_INITIAL_LAMBDAS,
         max_reml_iter=100,
         reml_tol=1.0e-6,
@@ -134,35 +135,53 @@ def test_public_fit_reml_accepts_updates_and_publishes_observed_inference() -> N
     assert result.rank == terminal.terminal_rank.rank == len(result.coefficients)
 
 
-def test_poisson_like_fit_has_a_typed_public_boundary_diagnostic() -> None:
-    """Poisson-like theta non-identification is not EFS-lambda convergence."""
+@pytest.mark.parametrize("dropped_rows", [0, 3])
+def test_poisson_like_fit_finishes_and_discloses_the_boundary(dropped_rows: int) -> None:
+    """Poisson-like theta non-identification is disclosed, not refused (it used to raise).
 
+    The fit returns, its final curvature records the fallback it took, and the
+    family's Poisson-boundary diagnosis is warned and kept in result_.warnings.
+    Zero-weight rows are dropped before fitting; the diagnosis still reads the
+    retained rows at their input positions.
+    """
     frame, response = _poisson_like_fixture()
     assert float(np.var(response)) <= float(np.mean(response))
+    weights = None
+    if dropped_rows:
+        frame = pd.concat([frame.iloc[:dropped_rows], frame], ignore_index=True)
+        response = np.r_[np.full(dropped_rows, 40.0), response]
+        weights = np.r_[np.zeros(dropped_rows), np.ones(len(response) - dropped_rows)]
 
-    boundary_error = getattr(distributional_api, "NegativeBinomialPoissonBoundaryError")
-    with pytest.raises(boundary_error) as caught:
-        _fit_reml(_model(), frame, response)
+    with pytest.warns(ConvergenceWarning, match="Poisson-like at the diagnostic boundary"):
+        model = _fit_reml(_model(), frame, response, weights)
 
-    assert caught.type is boundary_error
-    assert getattr(negative_binomial_family, "NegativeBinomialPoissonBoundaryError") is caught.type
-    assert type(caught.value.__cause__) is RepeatedCurvatureIndefinitenessError
-    message = str(caught.value).lower()
-    assert "could not establish a stable finite theta" in message
-    assert "poisson-like at the diagnostic boundary" in message
-    assert "smoothing parameter" not in message
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    assert telemetry.requested_source == "observed"
+    assert telemetry.fallback_count >= 1
+    assert telemetry.actual_source in ("fisher", "nearest_semidefinite")
+    assert any(
+        "could not establish a stable finite theta" in message for message in model.result_.warnings
+    )
+    assert np.all(np.isfinite(model.covariance_))
+
+
+def _family_diagnosis(family, response, *, sample_weight, contract):
+    """The family's own diagnosis, which a fit reaches through ``_curvature_disclosures``."""
+    weights = resolve_likelihood_weights(
+        sample_weight, n_observations=len(response), contract=contract
+    )
+    return family.diagnose_repeated_curvature_failure(response, weights)
 
 
 def test_finite_overdispersion_does_not_classify_a_curvature_failure_as_poisson_like() -> None:
     response = np.array([0.0, 0.0, 1.0, 2.0, 4.0, 8.0])
     assert float(np.var(response)) > float(np.mean(response))
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=None,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -172,55 +191,25 @@ def test_nb2_diagnosis_drops_zero_weight_rows_before_response_validation() -> No
     response = np.array([0.5, 1.0, 1.0, 1.0])
     sample_weight = np.array([0.0, 1.0, 1.0, 1.0])
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert type(result) is negative_binomial_family.NegativeBinomialPoissonBoundaryError
-
-
-def test_nb2_diagnosis_keeps_the_exact_failure_guard() -> None:
-    response = np.array([0.5, 1.0, 1.0, 1.0])
-    sample_weight = np.array([0.0, 1.0, 1.0, 1.0])
-    arguments = {
-        "sample_weight": sample_weight,
-        "weight_contract": WeightContract("prior"),
-    }
-
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
-        NegativeBinomialLS(),
-        response,
-        failure=CurvaturePolicyError("synthetic base-class curvature failure"),
-        **arguments,
-    )
-    assert result is None
-
-    class DerivedRepeatedCurvatureIndefinitenessError(RepeatedCurvatureIndefinitenessError):
-        pass
-
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
-        NegativeBinomialLS(),
-        response,
-        failure=DerivedRepeatedCurvatureIndefinitenessError("synthetic derived failure"),
-        **arguments,
-    )
-    assert result is None
 
 
 def test_nb2_diagnosis_keeps_the_exact_family_guard() -> None:
     class DerivedNegativeBinomialLS(NegativeBinomialLS):
         pass
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         DerivedNegativeBinomialLS(),
         np.array([0.5, 1.0, 1.0, 1.0]),
         sample_weight=np.array([0.0, 1.0, 1.0, 1.0]),
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -242,12 +231,11 @@ def test_prior_moment_direction_does_not_override_positive_poisson_face_directio
     np.testing.assert_array_equal(sample_weight * response, [11.0, 2.0])
     assert moment_direction == pytest.approx(-0.5)
     assert boundary_direction == pytest.approx(2.0 / 3.0)
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("prior"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("prior"),
     )
 
     assert result is None
@@ -265,45 +253,214 @@ def test_cancellation_limited_frequency_moment_direction_fails_closed() -> None:
 
     assert exact_direction > 0
     assert exact_numerator / exact_direction == 2 * large_weight - 2
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=sample_weight,
-        weight_contract=WeightContract("frequency"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("frequency"),
     )
     assert result is None
 
-    result = distributional_api_module._diagnosed_repeated_curvature_failure(
+    result = _family_diagnosis(
         NegativeBinomialLS(),
         response,
         sample_weight=np.ones(2),
-        weight_contract=WeightContract("frequency"),
-        failure=RepeatedCurvatureIndefinitenessError("synthetic repeated failure"),
+        contract=WeightContract("frequency"),
     )
     assert result is None
 
 
-class _RaisingDiagnosticNegativeBinomial(NegativeBinomialLS):
-    def diagnose_repeated_curvature_failure(self, y, weights):
-        raise RuntimeError("sentinel diagnostic failure")
+def _claims_book_fixture(seed: int = 7, n_rows: int = 1500):
+    """A small synthetic motor book shaped like freMTPL2: exposure offsets and sparse tails.
 
-
-def test_diagnostic_failure_preserves_the_original_curvature_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original = RepeatedCurvatureIndefinitenessError("original repeated failure")
-    monkeypatch.setattr(
-        distributional_api_module,
-        "fit_dense_distributional",
-        Mock(side_effect=original),
+    Vehicle age has a geometric tail, exposure is short for new vehicles, and
+    claims are rare, so on this seed master's terminal observed curvature stayed
+    indefinite after its retry and the fit raised
+    RepeatedCurvatureIndefinitenessError.
+    """
+    rng = np.random.default_rng(seed)
+    vehicle_age = np.minimum(rng.geometric(0.12, n_rows) - 1, 99).astype(np.float64)
+    driver_age = rng.uniform(18.0, 90.0, n_rows)
+    bonus = np.minimum(50 + rng.geometric(0.15, n_rows) - 1, 230).astype(np.float64)
+    exposure = np.clip(rng.beta(0.9, 0.7, n_rows), 0.0027, 1.0)
+    exposure = np.where(vehicle_age == 0, exposure * 0.4, exposure).clip(0.0027, 1.0)
+    brand = rng.choice([f"B{k}" for k in range(11)], n_rows, p=np.r_[np.full(10, 0.0995), 0.005])
+    gas = rng.choice(["Diesel", "Regular"], n_rows)
+    area = rng.choice(list("ABCDEF"), n_rows)
+    eta = (
+        -2.3
+        + 0.2 * np.sin(driver_age / 15.0)
+        - 0.02 * vehicle_age
+        + 0.006 * (bonus - 50.0)
+        + np.where(gas == "Diesel", 0.1, 0.0)
     )
-    model = model_from_templates(
-        family=_RaisingDiagnosticNegativeBinomial(),
-        predictors=(Predictor("mean", {}), Predictor("theta", {})),
+    mean = exposure * np.exp(eta)
+    size = exposure * np.exp(0.3)
+    counts = rng.negative_binomial(size, size / (size + mean)).astype(np.float64)
+    frame = pd.DataFrame(
+        {
+            "DrivAge": driver_age,
+            "VehAge": vehicle_age,
+            "BonusMalus": bonus,
+            "VehBrand": brand,
+            "VehGas": gas,
+            "Area": area,
+        }
+    )
+    return frame, counts, np.log(exposure)
+
+
+def _claims_book_model() -> SuperLSS:
+    family = NegativeBinomialLS()
+    return SuperLSS(
+        family,
+        family.mean(
+            s("DrivAge", kind="cr", k=10),
+            s("VehAge", kind="cr", k=10),
+            s("BonusMalus", kind="cr", k=10),
+            cat("VehBrand"),
+            cat("VehGas"),
+            cat("Area"),
+        ),
+        family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
     )
 
-    with pytest.raises(RepeatedCurvatureIndefinitenessError) as caught:
-        model.fit(pd.DataFrame(index=range(3)), np.ones(3), lambdas={})
 
-    assert caught.value is original
+def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
+    """Kills the refusal on ordinary-looking data: the fit returns, predicts and discloses."""
+    frame, counts, log_exposure = _claims_book_fixture()
+    model = _claims_book_model()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, counts, offsets={"mean": log_exposure, "theta": log_exposure})
+
+    assert np.all(np.isfinite(model.covariance_))
+    offsets = {"mean": log_exposure, "theta": log_exposure}
+    assert np.all(np.isfinite(np.asarray(model.predict(frame, offsets=offsets))))
+    if not model.result_.converged:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    # Every NB2 final-curvature fallback used to refuse, so each one is disclosed.
+    if model._require_fitted().fit_state.solver_result.terminal_curvature.fallback_count > 0:
+        assert model.result_.warnings
+    for message in model.result_.warnings:
+        assert any(str(item.message) == message for item in caught)
+
+
+def test_offset_start_is_projected_with_the_starting_penalty(monkeypatch) -> None:
+    """Kills an unpenalized starting projection of an offset-shifted target.
+
+    Penalized least squares cannot pay more penalty than the intercept-only
+    start's residual sum of squares, which is feasible at zero penalty. The
+    unpenalized projection let the vehicle-age spline absorb -log(exposure)
+    with a starting penalty 7.6 times that bound on this seed (and 2.3e10
+    against a log likelihood of 3.8e3 on the 20,000-row freMTPL2 sample).
+    """
+    import superglm.distributional.solver.solver as solver_module
+
+    starts = []
+    original = solver_module._initial_coefficients
+
+    def record(context):
+        coefficients = original(context)
+        starts.append((context, coefficients))
+        return coefficients
+
+    monkeypatch.setattr(solver_module, "_initial_coefficients", record)
+    frame, counts, log_exposure = _claims_book_fixture(seed=3, n_rows=4000)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _claims_book_model().fit_reml(
+            frame, counts, offsets={"mean": log_exposure, "theta": log_exposure}, max_reml_iter=1
+        )
+
+    context, coefficients = starts[0]
+    initial = context.family.initialize(context.response, context.likelihood_plan).theta
+    weights = context.likelihood_plan.weights.values
+    state = context.layout.predictors[0]
+    target = np.log(initial[:, 0]) - state.offset
+    centred = target - np.sum(weights * target) / np.sum(weights)
+    block = state.coefficient_slice
+    start = coefficients[block]
+    penalty = float(start @ context.penalty[block, block] @ start)
+    residual = float(np.sum(weights * centred**2))
+    assert penalty <= residual * (1.0 + 1.0e-8), (penalty, residual)
+
+
+def _poisson_group_fixture() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """One group Poisson (its size heads to the Poisson limit), the other NB2 with size 2."""
+    rng = np.random.default_rng(2)
+    n_rows = 2000
+    x, z = rng.uniform(0.0, 1.0, n_rows), rng.uniform(0.0, 1.0, n_rows)
+    group = rng.integers(0, 2, n_rows)
+    exposure = rng.uniform(0.2, 1.0, n_rows)
+    mean = exposure * np.exp(-1.5 + np.sin(2.0 * np.pi * x))
+    response = np.where(
+        group == 0,
+        rng.poisson(mean),
+        rng.negative_binomial(2.0, 2.0 / (2.0 + mean)),
+    ).astype(np.float64)
+    frame = pd.DataFrame({"x": x, "z": z, "g": pd.Categorical(group.astype(str))})
+    return frame, response, np.log(exposure)
+
+
+def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> None:
+    """A rank drop from a size reaching its Poisson limit is not an objective increase.
+
+    The Poisson group's size direction loses its curvature as it heads to the
+    limit, and the terminal rank drops between smoothing iterations. Compared
+    as computed, the pseudo-determinant over the smaller subspace read as a
+    worse criterion and every later proposal was rejected (objective_rejected);
+    compared over the common subspace, selection converges.
+    """
+    frame, response, log_exposure = _poisson_group_fixture()
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="cr", k=8)),
+        family.theta(s("z", kind="cr", k=5), cat("g")),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+
+    smoothing = model._require_fitted().fit_state.smoothing
+    ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
+    if len(ranks) == 1:
+        # The drop sits at a rank cutoff that another BLAS build can round past;
+        # the forced unit test in test_distributional_efs.py covers the comparison.
+        pytest.skip("this build's trajectory never dropped rank")
+    assert smoothing.converged, smoothing.convergence_reason
+
+
+def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None:
+    """An NB2 fit that ends on Fisher information says so, as master's refusal did.
+
+    The observed size curvature is sign-flipped at every state, so the final
+    observed curvature stays indefinite after the retry and the policy accepts
+    the expected information. The data are overdispersed, so the Poisson-boundary
+    diagnosis does not fire; the parent then disclosed nothing at all.
+    """
+    from dataclasses import replace
+
+    evaluate = NegativeBinomialLS.evaluate_natural
+
+    def indefinite(self, y, theta, plan, *, derivative_order=2):
+        result = evaluate(self, y, theta, plan, derivative_order=derivative_order)
+        if result.hessian_packed is None:
+            return result
+        hessian = np.array(result.hessian_packed, copy=True)
+        hessian[:, 2] = -hessian[:, 2]
+        return replace(result, hessian_packed=hessian)
+
+    monkeypatch.setattr(NegativeBinomialLS, "evaluate_natural", indefinite)
+    frame, response = _overdispersed_fixture()
+    assert float(np.var(response)) > float(np.mean(response))
+    model = _model()
+    with pytest.warns(ConvergenceWarning, match="expected \\(Fisher\\) information"):
+        model.fit(frame, response, lambdas=_INITIAL_LAMBDAS, max_inner_iter=20)
+
+    telemetry = model._require_fitted().fit_state.solver_result.terminal_curvature
+    assert telemetry.actual_source == "fisher"
+    assert telemetry.fallback_count >= 1
+    assert any("expected (Fisher) information" in message for message in model.result_.warnings)
+    assert not any("Poisson-like" in message for message in model.result_.warnings)

@@ -323,6 +323,44 @@ def test_diagnosis_names_the_infinite_mean_boundary_for_the_mean_form():
     )
 
 
+@pytest.mark.parametrize(
+    ("actual_source", "hinted"),
+    [("nearest_semidefinite", True), ("fisher", False)],
+)
+def test_infinite_mean_hint_is_disclosed_only_where_the_fit_used_to_refuse(
+    actual_source: str, hinted: bool
+) -> None:
+    """The mean form's data-independent hint follows the refusal it replaced.
+
+    Before fits stopped refusing, a terminal curvature that stayed indefinite
+    after its retry raised unless the family's expected information was
+    usable; an accepted Fisher fallback did not raise. The hint is disclosed
+    with the projected curvature and not with an accepted Fisher fallback.
+    """
+    from types import SimpleNamespace
+
+    from superglm.distributional.fit_state import _curvature_disclosures
+    from superglm.distributional.telemetry import CurvatureTelemetry
+
+    family = GeneralizedGammaLSS()
+    response = np.array([1.0, 2.0, 3.0])
+    plan = family.bind_likelihood(response, _weights(np.ones(3), "frequency"), COMPLETE_OBSERVATION)
+    telemetry = CurvatureTelemetry(
+        requested_source="observed",
+        actual_source=actual_source,
+        reason="material_indefiniteness_after_retry",
+        minimum_eigenvalue=-1.0,
+        rank=3,
+        condition_estimate=None,
+        fallback_count=1,
+        matrix_kind="penalized",
+    )
+    messages = _curvature_disclosures(
+        family, SimpleNamespace(terminal_curvature=telemetry), response, plan
+    )
+    assert any("infinite-mean" in message for message in messages) is hinted
+
+
 def test_artifact_round_trip_preserves_predictions_and_config():
     rng = np.random.default_rng(9)
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 150)})

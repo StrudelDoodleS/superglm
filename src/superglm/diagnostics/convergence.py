@@ -22,9 +22,14 @@ class ConvergenceWarning(UserWarning):
     ``SuperLSS.fit_reml`` warns when its coefficient or smoothing loop stops
     unconverged; ``result_.converged`` then reads ``False`` and the summary's
     ``note`` column says so (``SuperLSS.fit``, with fixed smoothing, reports
-    it there without a warning). The message names the reason and what to
-    change. Silence it with ``warnings.filterwarnings`` once the reason is
-    understood.
+    it there without a warning). ``SuperLSS`` also warns, and keeps the text
+    in ``result_.warnings``, on a fit that may itself have converged: when
+    its final curvature is the nearest semidefinite matrix, or is Fisher
+    information for ``NegativeBinomialLS`` (other families' Fisher fallback
+    is silent, as in 0.40), when its null model did not converge, and when
+    an inner fit stops with ``no_ascent_direction``. The message names the
+    reason and what to change. Silence it with ``warnings.filterwarnings``
+    once the reason is understood.
     """
 
 
@@ -204,6 +209,75 @@ def lss_nonconvergence_message(fitted_result: Any, smoothing_reason: str | None)
         "can then be negative. model.diagnose() explains the stop. Refit with other "
         "starting smoothing parameters (initial_lambda or lambdas), or simplify the "
         "terms it names, before reading the summary."
+    )
+
+
+def lss_semidefinite_curvature_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its final curvature had to be projected."""
+    return (
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
+        "indefinite after a tighter retry, and no usable expected information was available, "
+        "so the standard errors, effective degrees of freedom and smoothing updates use the "
+        "nearest positive semidefinite approximation of the observed curvature. Indefinite "
+        "curvature usually means the coefficient fit stopped short of a maximum; "
+        "model.diagnose() explains the stop. Refit with a larger max_inner_iter, larger "
+        "starting smoothing parameters (initial_lambda), or simpler terms before reading the "
+        "summary."
+    )
+
+
+def lss_fisher_curvature_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its final curvature fell back to Fisher information."""
+    return (
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
+        "indefinite after a tighter retry, so the standard errors, effective degrees of freedom "
+        "and smoothing updates use the expected (Fisher) information instead. Indefinite "
+        "observed curvature means the fit is not at a proper maximum of the observed "
+        "likelihood: it stopped short of one, or the maximum lies on a boundary such as a "
+        "size at its Poisson limit; model.diagnose() explains the stop. Refit with a larger "
+        "max_inner_iter, larger starting smoothing parameters (initial_lambda), or simpler "
+        "terms before reading the summary."
+    )
+
+
+def lss_no_ascent_direction_message(family_name: str) -> str:
+    """The disclosure a SuperLSS fit makes when its coefficient solver found no ascent direction."""
+    return (
+        f"SuperLSS {family_name} fit: the coefficient solver found no ascent direction (no "
+        "damping of the curvature gave a step certified to increase the penalized likelihood), "
+        "so it stopped unconverged at its last accepted coefficients with reason "
+        "'no_ascent_direction'. model.diagnose() reports the stop. Refit with "
+        "coefficient_curvature='fisher' where the family supplies expected information, larger "
+        "starting smoothing parameters (initial_lambda), or simpler terms."
+    )
+
+
+def lss_null_model_nonconvergence_message(family_name: str, reason: str) -> str:
+    """The disclosure a SuperLSS fit makes when its intercept-only null fit did not converge."""
+    return (
+        f"SuperLSS {family_name} fit: the intercept-only null model did not converge "
+        f"(reason {reason!r}). The fitted model is unaffected, but result_.null_objective, "
+        "the null model kept with the fit and anything compared with it are based on the "
+        "unconverged null's last accepted iterate. Refit with a larger max_inner_iter to let "
+        "the null fit converge; model.diagnose() reports the stop."
+    )
+
+
+def lss_corrected_covariance_substitute_message(source: str) -> str:
+    """What a corrected covariance means when the final curvature fell back."""
+    curvature = (
+        "expected (Fisher) information"
+        if source == "fisher"
+        else "nearest positive semidefinite approximation of the observed curvature"
+    )
+    return (
+        "SuperLSS corrected covariance: the observed curvature at the final coefficients was "
+        f"materially indefinite, so the fit used the {curvature} instead, and the correction "
+        "uses it too. V is that curvature's inverse, J = d beta / d rho is the implicit "
+        "derivative of the coefficients under it rather than under the observed Hessian, and "
+        "V_rho inverts the Hessian in log smoothing parameters of the Laplace objective formed "
+        "with it. V + J V_rho J' is a first-order correction "
+        "for the substitute curvature; model.diagnose() explains the fallback."
     )
 
 
