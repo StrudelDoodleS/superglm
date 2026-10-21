@@ -323,9 +323,11 @@ Fixed-smoothing and EFS fits support dense or grouped discrete execution with
 observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
 1987): the solver falls back to it when the observed curvature at the end of a
 fit is not a proper maximum, and says so with a `ConvergenceWarning` kept in
-`result_.warnings`, and `coefficient_curvature="fisher"` can request it. Its starting smoothing parameters stay at the 0.1 start rather than the
-information-scaled one. This family is not zero-inflated and does not claim an exact Poisson
-active face, CDF or quantile methods, random generation, or complete-fit speed.
+`result_.warnings`; `coefficient_curvature="fisher"` can request it. Its
+starting smoothing parameters stay at the 0.1 start rather than the
+information-scaled one. This family is not zero-inflated and does not claim an
+exact Poisson active face, CDF or quantile methods, random generation, or
+complete-fit speed.
 
 ## Generalized gamma mean–scale–shape model
 
