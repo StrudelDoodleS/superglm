@@ -222,18 +222,23 @@ def psum_chisq(
     #
     # For numerical stability, compute log(rho) and use exp.
 
-    def _phase_and_log_rho(u: float) -> tuple[float, float]:
+    # Plain floats, with the two powers-of-two multiples of each degree of
+    # freedom formed once: the same products the loop below would form, without
+    # a NumPy scalar per term per abscissa.
+    terms = list(zip(scaled_lb.tolist(), (0.5 * n).tolist(), (0.25 * n).tolist(), strict=True))
+
+    def _phase_and_log_rho_at(u: float) -> tuple[float, float]:
         phase = 0.0
         log_rho = 0.0
-        for lj, nj in zip(scaled_lb, n, strict=True):
-            lu = float(lj) * u
-            phase += 0.5 * float(nj) * math.atan(lu)
+        for lj, half_nj, quarter_nj in terms:
+            lu = lj * u
+            phase += half_nj * math.atan(lu)
             abs_lu = abs(lu)
             if abs_lu < square_safe_limit:
                 log_one_plus_square = math.log1p(lu * lu)
             else:
                 log_one_plus_square = 2.0 * math.log(abs_lu)
-            log_rho += 0.25 * float(nj) * log_one_plus_square
+            log_rho += quarter_nj * log_one_plus_square
 
         if sigsq > 0.0:
             sigma_u = scaled_sigma * u
@@ -241,6 +246,18 @@ def psum_chisq(
                 return phase, math.inf
             log_rho += 0.125 * sigma_u * sigma_u
         return phase, log_rho
+
+    # The cosine and sine Fourier passes below visit the same abscissae, so one
+    # pass's evaluations serve the other. Owner and lifetime: this call; the
+    # entries depend on nothing but the scaled weights, degrees of freedom and
+    # sigma fixed above, so nothing invalidates them.
+    phase_memo: dict[float, tuple[float, float]] = {}
+
+    def _phase_and_log_rho(u: float) -> tuple[float, float]:
+        value = phase_memo.get(u)
+        if value is None:
+            value = phase_memo[u] = _phase_and_log_rho_at(u)
+        return value
 
     def _integrand(u: float) -> float:
         if u == 0.0:

@@ -1,6 +1,7 @@
 """Tests for Davies' algorithm and Wood (2013) Bayesian p-values."""
 
 import inspect
+import math
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from scipy.stats import chi2 as chi2_dist
 from scipy.stats import exponnorm
 from scipy.stats import f as f_dist
 
+from superglm.stats import davies as davies_module
 from superglm.stats import wood_pvalue as wood_pvalue_module
 from superglm.stats.davies import psum_chisq, satterthwaite
 from superglm.stats.wood_pvalue import (
@@ -962,3 +964,25 @@ class TestWoodIntegration:
             assert np.isfinite(row.wald_p)
             assert row.ref_df is not None
             assert row.ref_df > 0
+
+
+def test_davies_fourier_passes_share_their_abscissae(monkeypatch):
+    """Each abscissa of one p-value is evaluated once, not once per Fourier pass.
+
+    Counted on ``atan`` of the first term (one call per evaluation): master's
+    sine pass repeated every abscissa the cosine pass had visited.
+    """
+    arguments = []
+    atan = math.atan
+
+    def recorded(x):
+        arguments.append(x)
+        return atan(x)
+
+    monkeypatch.setattr(davies_module.math, "atan", recorded)
+    weights = np.array([3.1, 1.7, 0.9, 0.35, 0.12])
+    p, ifault = psum_chisq(4.0, weights)
+    assert ifault == 0
+    assert 0.0 < p < 1.0
+    # distinct weights: a repeated argument is a repeated evaluation
+    assert len(arguments) == len(set(arguments))
