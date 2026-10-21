@@ -207,9 +207,13 @@ Some SZ levels do not carry enough information for their whole curve:
   penalty leaves unpenalized (with the default `m=2`, a single distinct value).
 
 With `select=True`, only a level without weight is in this position. It is
-predicted at the population curve, which stays the main effect, and the
-report's `thin_levels` and `predict` name it; the solver does not name it at
-fit. The rest of this section describes terms without `select=True`.
+predicted at the population curve, and the report's `thin_levels` and `predict`
+name it; the solver does not name it at fit. The population curve is the main
+effect, unless a plain `sz` term on the same group has a thin or separated
+level, or does not know a declared level: the two terms then share the levels
+they leave out and hold, and the selected term's population is the mean of the
+levels both identify. The rest of this section describes terms without
+`select=True`.
 
 For such a level, part of its curve can trade places with the global curve
 without changing any fitted value, so the data do not decide that part. A
@@ -293,8 +297,11 @@ therefore the same model.
   as its rows and the other levels support.
 - When every level is thin, the global curve is fitted through the trend
   across the levels, and the fit is the same on every solver.
-- The population curve is the global curve, and every level with data
-  predicts its own fitted curve. A level whose rows all have zero weight, or
+- The population curve is the global curve, unless a plain `sz` term on the
+  same group has a thin or separated level, or does not know a declared level.
+  The terms then share the levels they leave out and hold, and the population is
+  the mean of the levels both identify. Every level with data predicts its own
+  fitted curve. A level whose rows all have zero weight, or
   a level declared through `levels=` with no rows, is predicted at the
   population curve, and `predict` names it.
 - No level's line is unpenalized, so the fit gives no `SeparationWarning`
@@ -354,6 +361,10 @@ intercept, which is what `re()` fits, and their deviances are 34,200.7 and
   covered.
 - To keep a categorical term, merge sparse levels into similar ones with
   `Categorical(grouping=...)`.
+- When no level of a group is identified, every level being thin or separated,
+  the population curve is a convention, not an estimate. With several `sz`
+  terms on that group it is not unique, because the fit splits each level's
+  constant between the terms. Use `select=True` or `basis="fs"` there.
 
 ## Separated cells: exposure without response
 
