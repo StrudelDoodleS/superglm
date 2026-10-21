@@ -427,6 +427,53 @@ def test_grey_projection_is_the_rows_product(kind, discrete, blocks, monkeypatch
     assert np.all(np.abs(factor.T @ factor - product.T @ product) <= tolerance)
 
 
+def test_chunked_projection_is_the_rows_product(monkeypatch):
+    """``chunked_projected_factor`` is ``R`` of ``A V`` and ``A'A V``, against the dense design.
+
+    ``A = sqrt(W) ((X - c) - c_lo)`` with the exact centre pair of two
+    columns at 1e16 (``c_lo`` nonzero) and a third that is not, in 25 blocks
+    of 32 rows, so the per-block centring, both ``sqrt(w)`` scalings and the
+    block-order sum all run.  The aliased columns leave ``A V`` of order one,
+    so ``A'(A V)`` is not a rounding.  The rows are centred first, so each
+    entry of ``A'(AV)`` is within ``gamma_m |A|' |A| |V|`` of the dense
+    product, ``m`` the routine's rounding count plus the reference's own
+    ``n + p``; ``R'R`` adds the TSQR's backward error.  Mutation checks (each
+    fails it): dropping one ``sqrt(w)`` factor from ``cross``, and centring
+    without ``center_lo``.
+    """
+    from superglm.inference import _metrics_design
+    from superglm.inference import metrics as metrics_module
+
+    n = 800
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], n // 4)
+    s = np.tile([0.1, 0.7, 0.3, 0.9, 0.5], n // 5)
+    X = np.column_stack((1e16 + z, 1e16 + z + 2.0, s))
+    W = np.random.default_rng(7).uniform(0.1, 2.0, n)
+    center, center_lo = metrics_module._centre_pair(X, W)
+    assert center_lo is not None and np.any(center_lo != 0.0)
+    monkeypatch.setattr(_metrics_design, "_bounded_chunk_rows", lambda **_: 32)
+    basis = np.random.default_rng(5).normal(size=(3, 2))
+    factor, cross, roundings, _ = centered_system.chunked_projected_factor(
+        lambda: _metrics_design.iter_dense_chunks(X),
+        n,
+        W,
+        basis,
+        center=center,
+        center_lo=center_lo,
+    )
+    A = np.sqrt(W)[:, None] * ((X - center) - center_lo)
+    product = A @ basis
+    scale = np.abs(A).T @ (np.abs(A) @ np.abs(basis))
+    gamma = (roundings + n + 3) * np.finfo(float).eps / 2
+    gamma /= 1.0 - gamma
+    assert np.linalg.norm(A.T @ product) > 1.0
+    assert np.all(np.abs(cross - A.T @ product) <= 2.0 * gamma * scale)
+    norms = np.sqrt(np.diag(np.abs(basis).T @ scale))
+    qr_gamma = 4 * (n * basis.shape[1] + roundings) * np.finfo(float).eps / 2
+    tolerance = 4.0 * (gamma + qr_gamma) * np.outer(norms, norms)
+    assert np.all(np.abs(factor.T @ factor - product.T @ product) <= tolerance)
+
+
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 def test_structural_nulls_are_nulls_of_the_rows(discrete):
     """A group's occupied support rows give ``A N_g = 0``; each bound covers ``||A N_g||_F``.
