@@ -324,6 +324,7 @@ def _drop_term_holdout(
 
     plan = base._prediction_plan(model)
     terms = [*plan["features"], *plan["interactions"]]
+    features = {term["name"]: term for term in plan["features"]}
     # The public predictor (``base._predict_eta``): the fit's centred intercept,
     # a term whose dense columns keep a centre scored about it, a compensated
     # intercept's remainder added at the rows' scale and the offset last, so
@@ -354,7 +355,7 @@ def _drop_term_holdout(
         if isinstance(spec, FactorSmooth) and spec._has_population_offset:
             # as ``predict`` scores it (#432): thin and unseen levels from the population
             contribution, _ = base._score_unidentified_factor_smooth(
-                term, X_val, beta, population=False
+                term, X_val, beta, population=False, features=features
             )
             handle = accumulated.add(contribution)
         elif block is not None and np.any(block != 0.0):

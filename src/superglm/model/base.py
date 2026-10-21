@@ -404,15 +404,17 @@ def _score_unidentified_factor_smooth(
     beta_all: NDArray,
     *,
     population: bool,
-    group_term: dict[str, Any] | None = None,
+    features: dict[str, dict[str, Any]],
 ) -> tuple[NDArray[np.floating], tuple]:
     """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``).
 
-    ``group_term`` is a main effect on the term's group (an
-    ``OrderedCategorical``, which the model accepts as redundant): its value
-    at each level is read as part of that level's line
-    (``level_constants``), so its share of a separated level's walk does not
-    reach the prediction.
+    ``features`` are the prediction plan's main-effect terms by name.  The
+    term that folds its group's redundant main effect (an
+    ``OrderedCategorical``, which the model accepts as redundant) reads its
+    value at each level as part of that level's line (``level_constants``),
+    so its share of a separated level's walk does not reach the prediction.
+    Every path that predicts an ``sz`` term calls this, so none can score it
+    without the fold.
     """
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
@@ -421,6 +423,7 @@ def _score_unidentified_factor_smooth(
     _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     constants = None
+    group_term = features.get(spec.group) if spec._folds_group_term else None
     if group_term is not None:
         from superglm.features.factor_smooth import group_term_level_values
 
@@ -729,13 +732,12 @@ def _predict_eta(
     for term in plan["interactions"]:
         spec = term["spec"]
         if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
-            group_term = features.get(spec.group) if spec._folds_group_term else None
             contribution, named = _score_unidentified_factor_smooth(
                 term,
                 frame,
                 beta_all,
                 population=random_effects == "population",
-                group_term=group_term,
+                features=features,
             )
             eta += contribution
             if named:

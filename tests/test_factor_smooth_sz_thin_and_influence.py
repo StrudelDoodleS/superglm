@@ -4199,3 +4199,100 @@ def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
     missing = _nan_mask(model, frame, y, weight)
     assert missing.any()
     assert np.array_equal(missing, _structurally_non_estimable(model, weight))
+
+
+def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_term() -> None:
+    """The holdout's full model is ``predict``'s, group-term fold included (PR 508 round 4).
+
+    ``_drop_term_holdout`` scored an sz term with a separated level without
+    the redundant ``OrderedCategorical`` on its group, so its full predictor
+    kept the group term's share of the separated walk and every term's loss
+    delta, an unrelated numeric one's too, was computed against a wrong full
+    model (Codex: 1.61 where predict-based arithmetic gave -2.19).  Both paths
+    now score through ``_score_unidentified_factor_smooth``, which finds the
+    group term itself.  The share is forced as in the ``predict`` test: the
+    group term moves by a random ``d``, the sz constants take back its
+    centred pattern and the intercept its mean, which leaves every fitted
+    value where it was.  The numeric ``z``'s holdout delta is then the Poisson
+    deviance of the public predictor without ``z`` less that of the public
+    predictor, both from the raw coordinates; they agree within the
+    deviance's slope ``2 (max(mu) + y)`` times the predictor's roundings.
+    Mutation: no group term passed to the holdout's sz scoring.
+    """
+    from superglm.model import base
+
+    frame, y, _ = _trigger_shaped("poisson")
+    frame["z"] = np.random.default_rng(6).normal(size=len(frame))
+    order = sorted(set(frame["g"]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "z": Numeric(),
+                "g": OrderedCategorical(order=order, basis=Polynomial(degree=2)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    k=5,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+        )
+        model.fit_reml(frame, y)
+        spec = model._interaction_specs["x:g:sz"]
+        assert {0, 1} <= set(spec._separated_levels) and spec._folds_group_term
+        groups = {g.name if g.name == "x:g:sz" else g.feature_name: g for g in model._groups}
+        pattern_gamma = np.random.default_rng(3).normal(size=groups["g"].size)
+        pattern = np.asarray(
+            model._specs["g"].transform(np.asarray(spec._levels, dtype=object)) @ pattern_gamma
+        ).ravel()
+        one = spec._lowest_order_null_space(1)[:, 0]
+        beta = np.array(model.result.beta)
+        blocks = spec._level_blocks(beta[groups["x:g:sz"].sl]) - np.outer(
+            pattern - pattern.mean(), one
+        )
+        beta[groups["g"].sl] += pattern_gamma
+        beta[groups["x:g:sz"].sl] = blocks[:-1].ravel()
+        intercept = float(model.result.intercept) - float(pattern.mean())
+        original = model._result
+
+        def raw(coefficients):
+            return dataclasses.replace(
+                original,
+                beta=coefficients,
+                intercept=intercept,
+                centred_intercept=None,
+                state_center=None,
+            )
+
+        def deviance(coefficients):
+            model._result = raw(coefficients)
+            eta = base.predict_eta_exact(model, frame, warn=False)
+            mu = np.exp(eta)
+            unit = 2.0 * (np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0) - y + mu)
+            return float(unit.sum()), mu, _eta_magnitude(model, frame)
+
+        dropped = np.array(beta)
+        dropped[groups["z"].sl] = 0.0
+        dev_full, mu_full, magnitude = deviance(beta)
+        dev_drop, mu_drop, _ = deviance(dropped)
+        model._result = raw(beta)
+        holdout = model.term_drop_diagnostics(
+            frame, y, mode="holdout", X_val=frame.copy(), y_val=y.copy()
+        ).set_index("feature")["delta_deviance"]
+        model._result = original
+    count = len(beta) + len(spec._levels) * 5 + 4 * 5 + 2
+    slope = 2.0 * (np.maximum(mu_full, mu_drop) + y)
+    bound = 2.0 * float(
+        np.sum(
+            slope * 4.0 * _gamma(count) * magnitude
+            + 4.0 * _gamma(count) * np.abs(pattern).max() * slope
+        )
+    )
+    assert abs(float(holdout["z"]) - (dev_drop - dev_full)) <= bound
