@@ -501,9 +501,27 @@ class TestMonotoneFitPSpline:
         assert not [w for w in recwarn if "names no kind" in str(w.message)]
         assert np.all(np.diff(model.predict(df.sort_values("x"))) >= -1e-12)
 
+    @staticmethod
+    def _kindless_beside_scop(x1):
+        """A Gaussian fit of ``x1`` beside a SCOP ``ps`` term, with its data."""
+        from superglm import Spline
+
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
+        y = (df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)).to_numpy()
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(df, y)
+        return model, df, y
+
     def test_an_editor_knot_change_on_a_kindless_term_beside_scop_reaches_the_refit(self):
-        """The editor changes the knots of a copy of the declared spline. The ``ps`` that
-        replaces a kindless spline is built from that copy's knots and keeps its marks.
+        """The editor edits the ``ps`` the fit used, as an explicit spline: a change to the
+        knots refits those knots and keeps the mark, with no kindless rewrite left to apply.
         Fails on df503618, where the replacement was rebuilt from the arguments the spline
         was first declared with (10 knots, no mark)."""
         from superglm import Spline
@@ -513,69 +531,69 @@ class TestMonotoneFitPSpline:
             respaced_spline,
         )
 
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
-        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
         inc = Constraint.fit.increasing
-
-        def model(x1):
-            return SuperGLM(
-                family=Gaussian(),
-                selection_penalty=0,
-                features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=inc)},
-            )
-
-        first = model(Spline(constraint=inc))
-        with pytest.warns(UserWarning, match="x1.*names no kind"):
-            first.fit(df, y)
+        first, df, y = self._kindless_beside_scop(Spline(constraint=inc))
         edited = respaced_spline(declared_spline(first, "x1"), n_knots=4)
         setattr(edited, EDITOR_KNOTS_ATTRIBUTE, True)
-        refit = model(edited)
-        with pytest.warns(UserWarning, match="x1.*names no kind"):
-            refit.fit(df, y)
+        refit, *_ = self._kindless_beside_scop(edited)
         assert isinstance(refit._specs["x1"], PSpline)
         assert refit._specs["x1"].n_knots == 4
         assert getattr(refit._specs["x1"], EDITOR_KNOTS_ATTRIBUTE, False)
 
+    def test_an_editor_rule_edit_of_a_kindless_k_term_beside_scop_refits_the_asked_count(self):
+        """``k=8`` is 6 knots as ``cr`` and 4 as ``ps``; the knots tool shows the 4. A rule
+        edit to 6 evenly spaced knots refits a ``ps`` with 6. Fails on 4ff7a63d: 4."""
+        from superglm import Spline
+        from superglm.editor import EditorSession
+
+        inc = Constraint.fit.increasing
+        opened, df, y = self._kindless_beside_scop(Spline(k=8, constraint=inc))
+        assert opened._specs["x1"].n_knots == 4
+        session = EditorSession.from_model(opened, train_data=(df, y, np.ones(200)))
+        session.stage_structural("knots", "x1", {"count": 6, "strategy": "uniform"})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            session.refit_pending()
+        assert isinstance(session.model._specs["x1"], PSpline)
+        assert session.model._specs["x1"].n_knots == 6
+
+    def test_a_waiting_basis_change_beside_scop_is_not_rewritten_to_ps_by_a_knot_reset(self):
+        """A basis change to ``bs`` waits, then a knot edit and a reset. The refit is the ``bs``
+        the user asked for, which beside SCOP is refused as an explicit ``bs`` is; it is not
+        quietly fitted as ``ps``. Fails on 4ff7a63d: the reset carried the kindless arguments
+        onto the ``bs`` and the refit fitted ``ps``."""
+        from superglm import Spline
+        from superglm.editor import EditorSession
+
+        inc = Constraint.fit.increasing
+        opened, df, y = self._kindless_beside_scop(Spline(k=8, constraint=inc))
+        session = EditorSession.from_model(opened, train_data=(df, y, np.ones(200)))
+        session.stage_structural("basis", "x1", {"kind": "bs"})
+        session.stage_structural("knots", "x1", {"count": 6, "strategy": "uniform"})
+        session.stage_structural("knots", "x1", {"reset": True})
+        draft = next(step.draft_spec for step in session.pending if step.term == "x1")
+        assert type(draft).__name__ == "BSplineSmooth"
+        assert getattr(draft, "_kindless_args", None) is None
+        with pytest.raises(NotImplementedError, match="SCOP.*QP"):
+            session.refit_pending()
+
     def test_an_editor_reset_of_a_kindless_k_term_beside_scop_refits_the_original(self):
-        """``k=8`` is 6 knots as ``cr`` and 4 as ``ps``. A reset hands the ``cr`` template's
-        count to the edited copy; the refit is the opened model's ``ps``, not a 6-knot one.
-        Fails on adf356cd: the reset refits 6 knots."""
+        """``k=8`` is 6 knots as ``cr`` and 4 as ``ps``. The opened fit is the ``ps``; an edit
+        to 5 knots and a reset refit it bit for bit, and so does an explicit ``ps`` of ``k=8``."""
         from superglm import Spline
         from superglm.editor.knots import _reset_basis
         from superglm.features.rebuild import declared_spline, respaced_spline
 
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
-        y = df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)
         inc = Constraint.fit.increasing
-
-        def fitted(x1):
-            model = SuperGLM(
-                family=Gaussian(),
-                selection_penalty=0,
-                features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=inc)},
-            )
-            with pytest.warns(UserWarning, match="x1.*names no kind"):
-                model.fit(df, y)
-            return model
-
-        opened = fitted(Spline(k=8, constraint=inc))
-        explicit = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            features={
-                "x1": Spline(kind="ps", k=8, constraint=inc),
-                "x2": Spline(kind="ps", k=8, constraint=inc),
-            },
-        ).fit(df, y)
+        opened, *_ = self._kindless_beside_scop(Spline(k=8, constraint=inc))
+        explicit, *_ = self._kindless_beside_scop(Spline(kind="ps", k=8, constraint=inc))
         assert opened._specs["x1"].n_knots == 4
-        unchanged = respaced_spline(declared_spline(opened, "x1"), knot_alpha=0.3)
-        assert unchanged._kindless_args["k"] == 8  # a count left alone keeps the declaration
-        edited = fitted(respaced_spline(declared_spline(opened, "x1"), n_knots=5))
+        edited, *_ = self._kindless_beside_scop(
+            respaced_spline(declared_spline(opened, "x1"), n_knots=5)
+        )
         assert edited._specs["x1"].n_knots == 5
         reset, _ = _reset_basis(opened, "x1", declared_spline(edited, "x1"))
-        refit = fitted(reset)
+        refit, *_ = self._kindless_beside_scop(reset)
         assert refit._specs["x1"].n_knots == 4
         np.testing.assert_array_equal(refit.result.beta, opened.result.beta)
         np.testing.assert_array_equal(refit.result.beta, explicit.result.beta)

@@ -10,6 +10,16 @@ run --subset`` on 542f5826): every case converged there, so each must converge
 here, at an objective and held-out results no worse than the harness's
 tolerances.
 
+``fixtures/release_differential_history_v0_39_0.jsonl`` holds v0.39.0's outcomes
+on the three history cases rows 2, 3 and 13 of the release-history sweep. It was
+produced on the v0.39.0 release (tag commit 30167bfb), installed non-editable
+into a venv from its frozen lock (``git archive v0.39.0``, ``uv sync --frozen
+--no-dev --no-editable``), by running this branch's harness with that venv's
+interpreter: ``python benchmarks/release_differential.py run --only '^hist/'
+--out FILE``. The harness needs only the public API, so no shim was used; the
+three rows were kept from the output. Rerunning it reproduces the file's
+objectives and held-out deviances bit for bit.
+
 ``fixtures/saved_v0_17_0``, ``saved_v0_18_0`` and ``saved_v0_25_0`` hold small
 models those releases saved (the same script, run with each release): one per
 class and era of a term that gained predict-time state after its saver, which

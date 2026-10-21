@@ -433,10 +433,6 @@ def _reset_basis(reference_model, name: str, source: _SplineBase) -> tuple[_Spli
         knot_strategy=reference.knot_strategy,
         knot_alpha=reference.knot_alpha,
     )
-    declared = getattr(reference, "_kindless_args", None)
-    if declared is not None:
-        # The declaration restored exactly: its ``k`` is not the ``cr`` template's count.
-        setattr(basis, "_kindless_args", dict(declared))
     return basis, bool(getattr(reference, EDITOR_KNOTS_ATTRIBUTE, False))
 
 
