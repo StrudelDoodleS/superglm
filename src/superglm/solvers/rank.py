@@ -376,21 +376,61 @@ def _tsqr_leaf(
     del source
     if response is not None:
         np.multiply(sqrt_weights, response, out=block[:, width])
-    return np.linalg.qr(block, mode="r")
+    return _leaf_qr(block)
 
 
-_DTPQRT: list = []
+def _leaf_qr(block: NDArray) -> NDArray:
+    """``R`` of ``block``, as ``np.linalg.qr(block, mode="r")``, by SciPy's ``dgeqrf`` without the GIL.
+
+    ``np.linalg.qr`` holds the GIL while LAPACK runs, so the pooled TSQR's
+    leaves ran one at a time: 64 leaves of 1,734 x 178 took 0.44 s on eight
+    worker threads and 0.43 s on one, where this call took 0.068 s and
+    0.36 s.  It is the same Householder QR (``dgeqrf``, the routine NumPy
+    calls) from SciPy's LAPACK, so ``R`` rounds as that build rounds, the
+    same at every worker count, with the same backward error bound.
+    """
+    function = _lapack_nogil("dgeqrf", 8)
+    rows, width = block.shape
+    if function is None or rows == 0 or width == 0:  # pragma: no cover - SciPy without the pointer
+        return np.linalg.qr(block, mode="r")
+    matrix = np.array(block, dtype=np.float64, order="F")
+    del block
+    tau = np.empty(min(rows, width))
+    # m, n, lda, lwork, info: Fortran arguments by reference; lwork -1 queries
+    ints = np.array([rows, width, rows, -1, 0], dtype=np.intc)
+    address, size = ints.ctypes.data, ints.itemsize
+    work = np.empty(1)
+    for _ in range(2):
+        function(
+            address,
+            address + size,
+            matrix.ctypes.data,
+            address + 2 * size,
+            tau.ctypes.data,
+            work.ctypes.data,
+            address + 3 * size,
+            address + 4 * size,
+        )
+        if ints[3] == -1:
+            ints[3] = max(int(work[0]), width)
+            work = np.empty(int(ints[3]))
+    if ints[4] != 0:  # pragma: no cover - LAPACK argument contract
+        raise RuntimeError(f"dgeqrf failed with info={int(ints[4])}")
+    return np.triu(matrix[: min(rows, width)])
 
 
-def _dtpqrt_nogil():
-    """SciPy's ``dtpqrt`` through its Cython LAPACK pointer, called without the GIL.
+_NOGIL_LAPACK: dict[str, Callable | None] = {}
 
-    The f2py wrapper (``scipy.linalg.lapack.dtpqrt``) holds the GIL, so merges
-    on worker threads would run one at a time; a ``ctypes.CFUNCTYPE`` call
+
+def _lapack_nogil(name: str, arguments: int) -> Callable | None:
+    """SciPy's LAPACK ``name`` through its Cython LAPACK pointer, called without the GIL.
+
+    The f2py wrappers (``scipy.linalg.lapack``) hold the GIL, so calls on
+    worker threads would run one at a time; a ``ctypes.CFUNCTYPE`` call
     releases it.  Both reach the same routine in SciPy's LAPACK, so the
     result is bitwise the same.  ``None`` where the pointer is unavailable.
     """
-    if not _DTPQRT:
+    if name not in _NOGIL_LAPACK:
         function = None
         try:
             import ctypes
@@ -404,20 +444,20 @@ def _dtpqrt_nogil():
             api.PyCapsule_GetName.argtypes = [ctypes.py_object]
             api.PyCapsule_GetPointer.restype = ctypes.c_void_p
             api.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
-            capsule = cython_lapack.__pyx_capi__["dtpqrt"]
+            capsule = cython_lapack.__pyx_capi__[name]
             pointer = api.PyCapsule_GetPointer(capsule, api.PyCapsule_GetName(capsule))
             if pointer:
-                function = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * 12))(pointer)
+                function = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * arguments))(pointer)
         except Exception:  # pragma: no cover - SciPy without its Cython LAPACK
             function = None
-        _DTPQRT.append(function)
-    return _DTPQRT[0]
+        _NOGIL_LAPACK[name] = function
+    return _NOGIL_LAPACK[name]
 
 
 def _structured_merge(upper: NDArray, lower: NDArray, width: int) -> NDArray:
     """``dtpqrt`` of two ``width``-square triangles: ``R`` in the upper triangle of ``a``."""
     block = min(width, _TSQR_MERGE_BLOCK)
-    function = _dtpqrt_nogil()
+    function = _lapack_nogil("dtpqrt", 12)
     if function is None:  # pragma: no cover - SciPy without its Cython LAPACK
         from scipy.linalg.lapack import dtpqrt
 
@@ -471,7 +511,7 @@ def _tsqr_merge(upper: NDArray, lower: NDArray) -> NDArray:
     width = upper.shape[1]
     if width and upper.shape[0] == width and lower.shape[0] == width:
         return _structured_merge(upper, lower, width)
-    return np.linalg.qr(np.vstack((upper, lower)), mode="r")
+    return _leaf_qr(np.vstack((upper, lower)))
 
 
 class _TSQRTree:
