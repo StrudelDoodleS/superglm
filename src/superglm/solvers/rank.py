@@ -2554,7 +2554,9 @@ def decompose_gram_deflated(
     is ``(H1 - Lambda1) Lambda1^(-1) E``, smaller by ``e / w_k`` (at most a
     quarter at the floor, 0.01 to 0.04 on the freMTPL2 books), and the grey
     block's own shift ``E' K``, which turns its null directions within it by
-    ``||E|| ||K||`` over their spacing.  Neither is certified against the
+    ``||E|| ||K||`` over their spacing; a deflated structural null, whose
+    residual is at its own rounding, turns the null basis by at most that
+    over the weakest retained singular value.  None is certified against the
     estimability tolerance; nor is the full factor's null basis, whose own
     error bound on the books exceeds the 7e-11 to 1.2e-10 by which its
     nearest flag clears that tolerance.  The surrogate's singular values are

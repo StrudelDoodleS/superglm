@@ -702,11 +702,21 @@ def grouped_structural_nulls(
     rows that carry weight; then ``c_g' v``, a weighted mean of those rows
     times ``v``, is zero too, so ``A v = 0`` with no pass over the rows.  The
     candidates are the right singular vectors of ``S_occ`` below ``n_s eps``
-    of its largest singular value; each group returns ``(columns, N_g,
-    bound)`` with ``bound >= ||A N_g||_F``, formed from the support rows'
-    weight sums: the residual of every occupied row and of the rows off a
-    level, plus the rounding of forming them (``gamma_(w + 2)`` of
-    ``(|S| + |c|) |N_g|``, Higham 2002, sec. 3.5).
+    of its largest singular value, and a candidate is kept only when its
+    residual is exact to the rounding that measures it: the weighted
+    ``||(S + c) n||`` over the occupied rows and the rows off a level no
+    larger than ``gamma_(w + 3)`` of ``(|S| + |c|) |n|`` weighted the same
+    way.  That is LAPACK's deflation rule, which drops only what is at the
+    algorithm's own rounding (``dsteqr``, ``dlaed2``), so the rotation a
+    deflated null causes in the null basis, ``||A n||`` over the weakest
+    retained singular value (Wedin, *BIT* 12, 1972), is the full factor's
+    own backward error over that value.  A near null, ``n_s eps`` small but
+    above its rounding, stays in the Gram, where the grey subspace resolves
+    its coupling to other weak directions at row resolution.  Each group
+    returns ``(columns, N_g, bound)`` with ``bound >= ||A N_g||_F``, formed
+    from the support rows' weight sums: the residual of every occupied row
+    and of the rows off a level, plus the rounding of forming them
+    (``gamma_(w + 3)`` of ``(|S| + |c|) |N_g|``, Higham 2002, sec. 3.5).
     """
     from superglm._group_matrix._group_matrix_discretized import (
         DiscretizedSplineCategoricalGroupMatrix,
@@ -755,10 +765,19 @@ def grouped_structural_nulls(
         residual = np.abs((support + shift[None, :]) @ null)
         scale = (np.abs(support) + np.abs(shift)[None, :]) @ np.abs(null)
         gamma = (width + 3) * _UNIT / (1.0 - (width + 3) * _UNIT)
-        row_bound = residual + gamma * scale
-        off = np.abs(shift @ null) + gamma * (np.abs(shift) @ np.abs(null))
+        rounding = gamma * scale
+        off, off_rounding = np.abs(shift @ null), gamma * (np.abs(shift) @ np.abs(null))
+        # Deflate a candidate only when its residual is within its own
+        # rounding; a near null, which the rows can tell from zero, stays in
+        # the Gram for the grey subspace to turn with its coupling.
+        exact = (
+            mass @ residual**2 + outside * off**2 <= mass @ rounding**2 + outside * off_rounding**2
+        )
+        if not np.any(exact):
+            continue
+        row_bound, off = (residual + rounding)[:, exact], (off + off_rounding)[exact]
         squared = float(mass @ np.sum(row_bound**2, axis=1)) + outside * float(np.sum(off**2))
-        found.append((columns, null, float(np.nextafter(math.sqrt(squared), np.inf))))
+        found.append((columns, null[:, exact], float(np.nextafter(math.sqrt(squared), np.inf))))
     return found
 
 

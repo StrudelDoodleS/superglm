@@ -248,7 +248,7 @@ def test_the_published_null_basis_is_the_rows_not_the_grams():
 
     The Gram's null vector carries ``3e-6`` of ``w`` on the estimable
     columns 0 to 3; a surrogate whose null space is the Gram's grey
-    eigenvectors (005481cd) flags every coefficient not estimable, though
+    eigenvectors flags every coefficient not estimable, though
     its rank certificate passes.  The first-order correction ``V2 n - V1
     Lambda1^-1 E n`` takes that component out with the coupling ``E`` the
     projection already formed.
@@ -398,3 +398,51 @@ def test_structural_nulls_are_nulls_of_the_rows(discrete):
     for columns, null, bound in found:
         np.testing.assert_allclose(null.T @ null, np.eye(null.shape[1]), atol=1e-12)
         assert np.linalg.norm(A[:, columns] @ null) <= bound
+
+
+def test_a_near_structural_null_stays_with_its_coupling():
+    """A near alias in one support turns the null basis through another's weak direction.
+
+    Supports ``[u, u + 2e-14 v]`` and ``[z, z + 1e-7 v, w]`` (centred
+    orthonormal columns, unit weights): the rows' one null is ``(-1, 1,
+    2e-7, -2e-7, 0)``, so the full factor flags columns 2 and 3 not
+    estimable, 9 tolerances clear.  The first block's ``2e-14`` null passed
+    the support's ``n_s eps`` cut; deflated, it left the surrogate's null
+    exactly on columns 0 and 1 and flagged 2 and 3 estimable.  Its residual
+    is about 18 times its own rounding, so it stays in the Gram and the grey
+    block resolves the pair.  Mutation check: deflating every candidate
+    (5ba183c3) flags ``[F, F, T, T, T]``.
+    """
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+    from superglm.group_matrix import DesignMatrix
+
+    n = 100
+    rng = np.random.default_rng(0)
+    u, v, z, w = np.linalg.qr(np.column_stack((np.ones(n), rng.normal(size=(n, 4)))))[0][:, 1:].T
+    rows = np.arange(n)
+    supports = (np.column_stack((u, u + 2e-14 * v)), np.column_stack((z, z + 1e-7 * v, w)))
+    groups = [DiscretizedSSPGroupMatrix(S, np.eye(S.shape[1]), rows) for S in supports]
+    dm = DesignMatrix(groups, n, 5)
+    W = np.ones(n)
+    system = centered_system.build_centered_system(
+        dm=dm, W=W, z_off=np.zeros(n), penalty=np.zeros((5, 5))
+    )
+    centre, lo = system.centre_pair()
+    full = rank.decompose_factor(
+        centered_system.grouped_weighted_factor(dm, W, center=centre, center_lo=lo)
+    )
+    decided = rank.decide_data_rank(
+        system.data_gram,
+        lambda: full,
+        project=lambda basis: centered_system.grouped_projected_factor(
+            dm, W, basis, center=centre, center_lo=lo
+        ),
+        structural=lambda: centered_system.grouped_structural_nulls(
+            dm, W, center=centre, center_lo=lo
+        ),
+        rows=n,
+    )
+    np.testing.assert_array_equal(full.coefficient_estimable(), [False] * 4 + [True])
+    assert decided.grey_subspace is not None
+    _assert_same_decisions(decided, full)
+    assert decided.grey_subspace["structural"] == 0.0 and decided.grey_subspace["k"] == 2.0
