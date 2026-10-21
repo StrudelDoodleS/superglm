@@ -449,7 +449,7 @@ def risk_curves(
         level=float(level),
         n_draws=int(draws.n_draws),
         seed=int(seed),
-        covariance=str(covariance),
+        covariance=draws.covariance_kind,
     )
 
 

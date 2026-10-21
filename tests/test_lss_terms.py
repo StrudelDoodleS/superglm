@@ -444,11 +444,11 @@ def test_summary_prepares_a_later_missing_term_column_before_covariance(
     ordered = DenseDistributionalModel(family=fitted.family, _fit_state=state)
     calls: list[str] = []
 
-    def covariance_spy(model, *, kind="fixed") -> np.ndarray:
+    def covariance_spy(model, kind="fixed") -> tuple[np.ndarray, str]:
         calls.append(kind)
-        return np.asarray(model.inference.covariance)
+        return np.asarray(model.inference.covariance), kind
 
-    monkeypatch.setattr(terms_module, "posterior_covariance", covariance_spy)
+    monkeypatch.setattr(terms_module, "_resolved_posterior_covariance", covariance_spy)
     with pytest.raises(KeyError, match="w"):
         summary_table(ordered, frame.drop(columns="w"), covariance="corrected")
 

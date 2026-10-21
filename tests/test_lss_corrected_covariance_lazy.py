@@ -19,14 +19,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from superglm import Spline, SuperLSS
-from superglm.diagnostics.convergence import ConvergenceWarning
+from superglm.diagnostics.convergence import (
+    ConvergenceWarning,
+    lss_corrected_covariance_nonstationary_message,
+)
 from superglm.distributional import Predictor
 from superglm.distributional import api as api_module
 from superglm.distributional import posterior as posterior_module
 from superglm.distributional import terms as terms_module
+from superglm.distributional.efs import DistributionalEFSConfig
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
-from superglm.distributional.model import DenseDistributionalModel
+from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.posterior import posterior_covariance, posterior_draws
 from superglm.distributional.serialization import distributional_manifest
 from superglm.distributional.smoothing.derivatives import (
@@ -38,6 +42,8 @@ from superglm.distributional.smoothing.derivatives import (
 )
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.distributional.terms import summary_table, term_effect, term_test
+from superglm.distributional.weights import WeightContract
+from superglm.types import LambdaPolicy
 
 
 @pytest.fixture(scope="module")
@@ -752,7 +758,7 @@ def test_replayed_hessian_and_certificate_must_be_trusted(
     _assert_conditional_disclosure(fitted, message)
 
 
-def test_derivative_replay_failure_is_a_clear_refusal(
+def test_derivative_replay_failure_is_disclosed_with_its_root_cause(
     stationary_case,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -762,7 +768,50 @@ def test_derivative_replay_failure_is_a_clear_refusal(
         raise LamlDerivativeError("adversarial derivative failure")
 
     monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
-    _assert_conditional_disclosure(fitted, "smoothing derivative replay failed")
+    _assert_conditional_disclosure(
+        fitted,
+        r"smoothing derivative replay failed.*LamlDerivativeError: adversarial derivative failure",
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason", "advises_newton"),
+    [
+        ("lambda_change", True),
+        ("objective_plateau", True),
+        ("practical_plateau", True),
+        ("max_iterations", False),
+        ("gradient_unresolved", False),
+        ("endpoint_revalidation_failed", False),
+    ],
+)
+def test_the_newton_remedy_is_offered_only_to_stops_it_can_improve(
+    reason: str, advises_newton: bool
+) -> None:
+    """A stop the efs+newton endgame itself produced is not told to refit with it."""
+    message = lss_corrected_covariance_nonstationary_message(reason)
+    assert f"reason {reason!r}" in message
+    assert ("outer='efs+newton'" in message) is advises_newton
+    assert "model.diagnose()" in message
+
+
+@pytest.mark.parametrize("defect", [TypeError, AttributeError, KeyError, IndexError])
+def test_a_programming_error_in_the_replay_is_not_disclosed_as_unavailable(
+    stationary_case,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: type[Exception],
+) -> None:
+    """A defect raises as itself; only numerical and derivative failures read as a disclosure."""
+    fitted, _ = stationary_case
+
+    def fail(*args, **kwargs):
+        raise defect("replay defect")
+
+    monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        with pytest.raises(defect, match="replay defect"):
+            posterior_covariance(fitted, kind="corrected")
 
 
 @pytest.mark.parametrize("operation", ["effect", "test"])
@@ -1324,6 +1373,77 @@ def test_an_efs_fit_without_retained_rows_discloses_fixed_inference() -> None:
             "location", "x", covariance="corrected", n_points=5, X_train=frame
         )
     assert effect.covariance_kind == "fixed"
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        curves = model.risk_curves({}, "x", n_draws=8, covariance="corrected")
+    assert curves.covariance == "fixed"
+    assert curves.to_json()["covariance"] == "fixed"
+
+    note = "corrected covariance unavailable: fixed shown"
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        table = model.summary(covariance="corrected", X_train=frame)
+    assert len(table) > 0 and all(note in text for text in table["note"])
+    with pytest.warns(ConvergenceWarning, match="unavailable"):
+        outcome = model.term_test("location", "x", covariance="corrected", X_train=frame)
+    assert outcome.note == note
+    assert outcome.to_json()["note"] == note
+    fixed_table = model.summary(covariance="fixed", X_train=frame)
+    assert not any("unavailable" in text for text in fixed_table["note"])
+    assert model.term_test("location", "x", X_train=frame).note == ""
+
+
+def test_a_corrected_covariance_that_is_formed_carries_no_unavailable_note() -> None:
+    """The note and the resolved kind appear only on a fallback."""
+    model, frame = _efs_fit(retain_rows=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        curves = model.risk_curves({}, "x", n_draws=8, covariance="corrected")
+    assert curves.covariance == "corrected"
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        table = model.summary(covariance="corrected", X_train=frame)
+    assert not any("unavailable" in text for text in table["note"])
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+        outcome = model.term_test("location", "x", covariance="corrected", X_train=frame)
+    assert outcome.note == ""
+
+
+def test_a_fixed_only_fit_is_corrected_without_a_replay_or_a_warning() -> None:
+    """Every smoothing component fixed: nothing is uncertain, so nothing is replayed.
+
+    Without the ``fixed_only`` clause this fit takes the non-stationary replay,
+    where ``laml_derivatives`` finds no estimated component and the call warns
+    that the correction is unavailable and returns the ``"fixed"`` kind.
+    """
+    x = np.linspace(0.0, 1.0, 72)
+    rng = np.random.default_rng(1823)
+    response = 0.35 + 0.8 * np.sin(2.0 * np.pi * x) + rng.normal(scale=0.3, size=len(x))
+    fitted = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=(
+            Predictor(
+                "location",
+                {
+                    "x": Spline(
+                        kind="cr", n_knots=6, lambda_policy={"wiggle": LambdaPolicy.fixed(0.75)}
+                    )
+                },
+            ),
+            Predictor("scale", {}),
+        ),
+        lambdas={"location:x#wiggle": 99.0},
+        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=3),
+    )
+    assert fitted.smoothing is not None
+    assert fitted.smoothing.convergence_reason == "fixed_only"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        corrected = posterior_covariance(fitted, kind="corrected")
+        draws = posterior_draws(fitted, 8, covariance="corrected")
+    np.testing.assert_array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
+    assert draws.covariance_kind == "corrected"
+    assert posterior_module._resolved_posterior_covariance(fitted, "corrected")[1] == "corrected"
 
 
 def test_a_fixed_smoothing_fit_has_no_smoothing_uncertainty_to_correct() -> None:

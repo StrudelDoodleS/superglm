@@ -961,9 +961,13 @@ By default the suite holds smoothing parameters fixed. With
 `covariance="corrected"`, it uses a trusted smoothing Hessian published by a
 stationary fit or performs one authenticated, on-demand replay from retained
 training rows. That replay is ephemeral. A fit that did not stop stationary is
-corrected about its fitted smoothing parameters, with a warning. A compact fit
-without a published Hessian, or one whose terminal state cannot be
-authenticated, gets the fixed covariance and a warning naming the cause.
+corrected about its fitted smoothing parameters, with a warning. A fit saved
+without its training rows and with no Hessian for its fitted point (a compact
+fit that did not stop stationary has none, even if an earlier endgame published
+one), or one whose terminal state cannot be authenticated, gets the fixed
+covariance and a warning naming the cause. `summary()` then says
+"corrected covariance unavailable: fixed shown" in the `note` of every row, and
+`term_test()` carries the same text in its `note`.
 A fit whose final curvature fell back is corrected with the curvature it used,
 whether from its published Hessian or a replay, and warns that it did.
 Term effects, plots and summaries validate their requested work before

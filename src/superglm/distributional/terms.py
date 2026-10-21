@@ -96,7 +96,6 @@ from superglm.distributional.posterior import (
     _posterior_draw_count,
     _posterior_draws_from_covariance,
     _resolved_posterior_covariance,
-    posterior_covariance,
     simultaneous_critical_value,
 )
 from superglm.distributional.prediction_design import (
@@ -211,7 +210,11 @@ class ParameterTermEffect:
 
 @dataclass(frozen=True)
 class TermTest:
-    """The Wood (2013) test of a term against zero, or its Wald analogue."""
+    """The Wood (2013) test of a term against zero, or its Wald analogue.
+
+    ``note`` is empty unless ``covariance="corrected"`` could not be formed, and
+    then it says that the fixed covariance was used.
+    """
 
     parameter: str
     term: str
@@ -220,6 +223,7 @@ class TermTest:
     p_value: float
     edf: float
     schema_version: int = field(default=_SCHEMA_VERSION)
+    note: str = ""
 
     def to_json(self) -> dict[str, Any]:
         """Emit the payload as floats, strings and ``None`` only."""
@@ -231,6 +235,7 @@ class TermTest:
             "rank": _json_number(self.rank),
             "p_value": _json_number(self.p_value),
             "edf": _json_number(self.edf),
+            "note": self.note,
         }
 
 
@@ -720,8 +725,8 @@ def term_test(
         term,
         n_points=n_points,
     )
-    matrix = posterior_covariance(fitted, kind=covariance)
-    return _term_test_from_covariance(prepared, matrix)
+    matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
+    return _term_test_from_covariance(prepared, matrix, note=_covariance_note(covariance, resolved))
 
 
 def _prepare_term_test(
@@ -771,6 +776,7 @@ def _prepare_term_test(
 def _term_test_from_covariance(
     prepared: _PreparedTermTest,
     matrix: NDArray[np.float64],
+    note: str = "",
 ) -> TermTest:
     """Evaluate one fully prepared term test from a resolved covariance."""
     block = matrix[prepared.term_slice, prepared.term_slice]
@@ -798,6 +804,7 @@ def _term_test_from_covariance(
         rank=float(rank),
         p_value=float(p_value),
         edf=prepared.edf,
+        note=note,
     )
 
 
@@ -873,6 +880,13 @@ def _negative_edf_note(edf: float) -> str:
     return f"negative EDF ({float(edf):.3g}) is not interpretable" if float(edf) < 0.0 else ""
 
 
+def _covariance_note(requested: CovarianceKind, resolved: CovarianceKind) -> str:
+    """Say so when the covariance a row reads is not the kind that was asked for."""
+    if resolved == requested:
+        return ""
+    return f"{requested} covariance unavailable: {resolved} shown"
+
+
 def _join_notes(*notes: str) -> str:
     return "; ".join(note for note in notes if note)
 
@@ -900,7 +914,10 @@ def summary_table(
     it; ``"fit not converged: ..."`` on every row of a fit that stopped before
     its convergence test passed (``result_.converged`` is False); and
     ``"negative EDF (...) is not interpretable"`` where a term's EDF is below
-    zero. Notes join with ``"; "``, and a row with none reads ``""``.
+    zero. Where ``covariance="corrected"`` could not be formed, every row says
+    ``"corrected covariance unavailable: fixed shown"``, because its ``se``,
+    statistic and p-value are then the conditional ones. Notes join with
+    ``"; "``, and a row with none reads ``""``.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     frame = as_eager_frame(X_train)
@@ -924,7 +941,8 @@ def summary_table(
 
     if not has_intercept and not prepared_tests:
         return pd.DataFrame(columns=list(_SUMMARY_COLUMNS))
-    matrix = posterior_covariance(fitted, kind=covariance)
+    matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
+    covariance_note = _covariance_note(covariance, resolved)
 
     rows: list[dict[str, Any]] = []
     for state in fitted.layout.predictors:
@@ -935,7 +953,7 @@ def summary_table(
                 matrix,
                 fitted.inference.intercept_edf,
             )
-            row["note"] = _join_notes(row["note"], convergence_note)
+            row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
             namespace, _, term = qualified.partition(":")
@@ -968,6 +986,7 @@ def summary_table(
                     "note": _join_notes(
                         _absorption_note(fitted, state.name, term, outcome.edf, beta[term_slice]),
                         convergence_note,
+                        covariance_note,
                         _negative_edf_note(outcome.edf),
                     ),
                 }

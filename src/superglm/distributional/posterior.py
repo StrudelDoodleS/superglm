@@ -77,6 +77,11 @@ Quantity = str | tuple[Any, ...] | Callable[[NDArray], NDArray]
 
 #: Natural-parameter scratch per row chunk stays under this many bytes.
 _CHUNK_BYTES = 256_000_000
+#: What a replay of the fit's own derivatives can legitimately fail with: the
+#: numerical and derivative errors of this package (RuntimeError, ValueError,
+#: LinAlgError, FloatingPointError).  A TypeError, AttributeError or LookupError
+#: is a defect, and propagates rather than reading as a convergence condition.
+_REPLAY_FAILURES = (RuntimeError, ValueError, ArithmeticError)
 #: Predictive uniforms are drawn strictly inside ``(0, 1)`` by this margin.
 _PROBABILITY_MARGIN = 1.0e-12
 #: Floor on a pointwise standard error before it divides a deviation.
@@ -407,9 +412,10 @@ def _replayed_smoothing_hessian(
             COMPLETE_OBSERVATION,
         )
         replay_identifier = likelihood_plan.plan_identifier
-    except Exception as exc:
+    except _REPLAY_FAILURES as exc:
         raise RuntimeError(
-            "corrected covariance could not rebind the fitted likelihood plan"
+            "corrected covariance could not rebind the fitted likelihood plan "
+            f"({type(exc).__name__}: {exc})"
         ) from exc
     if (
         replay_identifier != state.family_likelihood_plan_identifier
@@ -438,8 +444,11 @@ def _replayed_smoothing_hessian(
             want_hessian=True,
             curvature="terminal",
         )
-    except Exception as exc:
-        raise RuntimeError("smoothing derivative replay failed for corrected covariance") from exc
+    except _REPLAY_FAILURES as exc:
+        raise RuntimeError(
+            "smoothing derivative replay failed for corrected covariance "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
     if not isinstance(derivatives, LamlDerivatives):
         raise RuntimeError("smoothing derivative replay returned an invalid result")
     if names is not None and derivatives.names != names:
