@@ -351,8 +351,9 @@ def _not_converged_finding(
         ),
         action_kind="inspect_fit_configuration",
         action_question=(
-            "Does coefficient_curvature='fisher', larger starting smoothing parameters "
-            "(initial_lambda) or simpler terms give the solver an ascent direction?"
+            "Do larger starting smoothing parameters (initial_lambda), simpler terms or, "
+            "where the family supplies expected information, coefficient_curvature='fisher' "
+            "give the solver an ascent direction?"
             if reason == "no_ascent_direction"
             else f"Which data or configuration change lets the {loop} loop satisfy its declared "
             "convergence contract?"
