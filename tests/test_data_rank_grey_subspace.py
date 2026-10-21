@@ -280,6 +280,25 @@ def test_the_certificate_refuses_a_grey_value_within_its_shift():
     assert info["k"] == 2.0 and info["margin"] <= info["shift"]
 
 
+def test_rows_louder_than_the_grams_split_leave_no_gap():
+    """Grey rows whose singular value reaches the retained block's give no gap: the full factor decides.
+
+    ``project`` returns the grey block of rows that disagree with the Gram,
+    ``1e4`` times louder, so ``sigma_grey^2`` passes the smallest retained
+    eigenvalue and the gap between the blocks is negative.  Mutation check:
+    without the gap refusal the quadratic shift divides by zero.
+    """
+    _, gram, project = _coupled_gram(grey_ratio=1e-12, coupling=0.0)
+
+    def louder(basis):
+        R, cross, n, norms = project(basis)
+        return 1e4 * R, cross, n, norms
+
+    deflated, info = rank.decompose_gram_deflated(gram, louder, rows=10**6)
+    assert deflated is None
+    assert info["gap"] <= 0.0
+
+
 @pytest.mark.parametrize("case", ["certified", "residual_only", "too_loose"])
 def test_the_certificate_carries_the_structural_residual(case):
     """A structural null whose bound reaches the cut sends the decision to the full factor.
