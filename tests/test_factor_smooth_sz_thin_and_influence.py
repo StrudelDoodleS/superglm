@@ -1659,6 +1659,49 @@ def test_a_separated_varying_coefficient_level_is_held_to_its_rows_range(kind, f
     )
 
 
+def test_a_gapped_polynomial_level_whose_anchors_are_dependent_is_held() -> None:
+    """A level's anchors are counted by rank, not by number (PR 508 round 1, Codex P2 and review).
+
+    ``Polynomial(powers=[1, 3])`` on a symmetric book is the span of ``1, x,
+    x^3``.  A level with interior responses at ``x = -0.5, 0, 0.5`` and none
+    at ``0.9`` has three distinct anchors but they have rank two (the odd
+    columns are dependent there): ``x - 4 x^3`` vanishes at all three and is
+    negative at 0.9, a direction of recession.  The scan took the anchors'
+    count as their rank, found nothing free, and recorded no separation, so
+    prediction ran the walked curve on past 0.9.  Mutation: the count.
+    """
+    from superglm import Polynomial
+    from superglm.diagnostics.separation import SeparationWarning
+    from superglm.model import base
+
+    rng = np.random.default_rng(1)
+    # the book is symmetric about zero, so the odd powers' span is exact
+    x_a = np.append(np.repeat(np.linspace(-1.0, 1.0, 21), 30), [-0.9] * 5)
+    y_a = np.append(rng.poisson(0.5, 630).astype(float), [1.0] * 5)
+    x_b = np.array([-0.5, 0.0, 0.5] * 5 + [0.9] * 5)
+    y_b = np.array([1.0, 2.0, 1.0, 2.0, 1.0] * 3 + [0.0] * 5)
+    frame = pd.DataFrame(
+        {"x": np.concatenate([x_a, x_b]), "g": ["A"] * len(x_a) + ["B"] * len(x_b)}
+    )
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Polynomial(powers=[1, 3]), "g": Categorical()},
+        interactions=[("x", "g")],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, np.concatenate([y_a, y_b]))
+    term = model._interaction_specs["x:g"]
+    assert term._separated_ranges == {"B": (-0.5, 0.9)}
+    assert any(isinstance(w.message, SeparationWarning) and "B" in str(w.message) for w in caught)
+    rows = pd.DataFrame({"x": [3.0, 0.9, 3.0, 0.9], "g": ["B", "B", "A", "A"]})
+    eta = base.predict_eta_exact(model, rows, warn=False)
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    reach = 8.0 * np.sum(np.abs(beta)) * (1.0 + np.max(np.abs(term._poly_basis(rows["x"]))))
+    assert abs((eta[0] - eta[2]) - (eta[1] - eta[3])) <= _gamma(len(beta) + 8) * reach
+
+
 def test_an_sz_term_whose_every_level_separates_predicts_without_its_walk() -> None:
     """Every level separated: the canonical population, which no walk moves (sz_explosion).
 

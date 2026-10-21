@@ -473,9 +473,12 @@ def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: 
     if not len(implicit):
         return np.eye(q)
     _, values, right = np.linalg.svd(implicit, full_matrices=True)
-    # the rank rule of ``numpy.linalg.matrix_rank``: ``max(n, q) eps`` of the largest value
-    rank = int(np.sum(values > 2.0 * max(implicit.shape) * _rounding(1) * values[0]))
-    return np.ascontiguousarray(right[rank:].T)
+    return np.ascontiguousarray(right[_numerical_rank(values, implicit.shape) :].T)
+
+
+def _numerical_rank(values: NDArray, shape: tuple[int, ...]) -> int:
+    """Rank from singular ``values``: the rule of ``numpy.linalg.matrix_rank``, ``max(shape) eps`` of the largest."""
+    return int(np.sum(values > 2.0 * max(shape) * _rounding(1) * values[0])) if len(values) else 0
 
 
 def _level_recession(
@@ -503,10 +506,13 @@ def _level_recession(
     # an x with responses on both boundaries holds g at zero as an interior one does
     anchor = within | (at_lower & at_upper)
     anchored = unique[anchor] @ null_space
-    held = min(len(anchored), nullity)
+    # the anchors' rank, not their count: a gapped ``Polynomial(powers=...)``
+    # has distinct anchors that are linearly dependent in ``b(x)' N_P``
+    _, values, right = np.linalg.svd(anchored, full_matrices=True)
+    held = _numerical_rank(values, anchored.shape)
     if held >= nullity:
         return None
-    free = np.eye(nullity) if not held else np.linalg.svd(anchored, full_matrices=True)[2][held:].T
+    free = right[held:].T
     side = np.where(anchor, 0.0, np.where(at_lower, -1.0, 1.0))
     edge = side != 0.0
     if not (np.any(edge) and _recedes(side[edge], unique[edge], null_space, free)):
