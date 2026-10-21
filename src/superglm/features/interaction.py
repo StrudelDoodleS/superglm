@@ -1164,15 +1164,26 @@ class PolynomialCategorical:
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        """Each level's curve on the global grid.
+
+        A level whose curve separates at fit (``_separated_ranges``) is read at
+        its own rows' range and held there beyond it, as ``score`` holds it,
+        so every report of the curve (relativities, plots, term inference)
+        agrees with ``predict``.
+        """
         x_grid = np.linspace(self._lo, self._hi, n_points)
         P_grid = self._poly_basis(x_grid)
+        held = getattr(self, "_separated_ranges", None) or {}
 
         per_level: dict[str, dict[str, Any]] = {}
         offset = 0
         for level in self._non_base:
             b_level = beta[offset : offset + self._n_poly_cols]
             offset += self._n_poly_cols
-            log_rels = P_grid @ b_level
+            P_level = (
+                P_grid if level not in held else self._poly_basis(np.clip(x_grid, *held[level]))
+            )
+            log_rels = P_level @ b_level
             per_level[level] = {
                 "log_relativity": log_rels,
                 "relativity": np.exp(log_rels),
@@ -1300,6 +1311,10 @@ class NumericCategorical:
             "base_level": self._base_level,
             "log_relativities_per_unit": log_rels_per_unit,
             "relativities_per_unit": rels_per_unit,
+            # a level whose slope separates at fit is held to its rows' range
+            # (``_held_to_level_ranges``); the per-unit rate is that of the
+            # curve inside it, and the line stops there
+            "held_ranges": dict(getattr(self, "_separated_ranges", None) or {}),
             "interaction": True,
         }
 

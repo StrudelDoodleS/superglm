@@ -1659,6 +1659,67 @@ def test_a_separated_varying_coefficient_level_is_held_to_its_rows_range(kind, f
     )
 
 
+@pytest.mark.parametrize("kind", ["numeric", "polynomial"])
+def test_the_reported_curve_of_a_held_level_is_the_one_predict_prices(kind) -> None:
+    """``relativities`` and ``reconstruct_feature`` report the held curve (PR 508 round 1).
+
+    The hold reached ``transform`` and ``score`` only: ``reconstruct`` of a
+    ``PolynomialCategorical`` still evaluated the walked curve over the whole
+    grid (up to e^80 beyond a separated level's rows), and a
+    ``NumericCategorical`` reported a slope with no range.  Against the base
+    level the main effects cancel, so ``predict``'s level-minus-base
+    difference at ``x`` is the ``Categorical``'s constant plus the reported
+    curve; they agree beyond the level's range, at the grid points past its
+    largest ``x``.  Mutation: ``reconstruct`` without the hold.
+    """
+    from superglm import Polynomial
+    from superglm.model import base
+
+    frame, y, claims = _trigger_shaped("poisson")
+    main = Numeric() if kind == "numeric" else Polynomial(degree=2)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": main, "g": Categorical()},
+        interactions=[("x", "g")],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    term = model._interaction_specs["x:g"]
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    constants = model.reconstruct_feature("g")["log_relativities"]
+    raw = model.reconstruct_feature("x:g")
+    held = term._separated_ranges
+    assert {"g000", "g001"} <= set(held)
+    if kind == "numeric":
+        assert raw["held_ranges"] == held
+        grid = np.linspace(0.0, 1.0, 11)
+    else:
+        grid = np.asarray(raw["x"])
+    size = 1.0 if kind == "numeric" else float(np.max(np.abs(term._poly_basis(grid))))
+    reach = 8.0 * np.sum(np.abs(beta)) * (2.0 + size)
+    for level in ("g000", "g001"):
+        lo, hi = held[level]
+        beyond = grid > hi
+        assert beyond.any()
+        rows = pd.DataFrame(
+            {"x": np.tile(grid, 2), "g": [level] * len(grid) + [term._base_level] * len(grid)}
+        )
+        eta = base.predict_eta_exact(model, rows, warn=False)
+        difference = eta[: len(grid)] - eta[len(grid) :]
+        if kind == "numeric":
+            slope = raw["log_relativities_per_unit"][level]
+            curve = slope * np.clip(grid, lo, hi)
+        else:
+            curve = raw["per_level"][level]["log_relativity"]
+        # below the rows' largest x the walked eta sits at the link guard
+        # (-80), which ``predict`` clamps and the curve does not
+        gap = np.abs(constants[level] + curve - difference)[beyond]
+        assert np.all(gap <= _gamma(len(beta) + 8) * reach)
+        assert np.ptp(curve[beyond]) <= _gamma(len(beta) + 8) * reach
+
+
 def test_a_gapped_polynomial_level_whose_anchors_are_dependent_is_held() -> None:
     """A level's anchors are counted by rank, not by number (PR 508 round 1, Codex P2 and review).
 
