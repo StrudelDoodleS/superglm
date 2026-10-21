@@ -1009,6 +1009,26 @@ class SplineCategorical:
         }
 
 
+def _held_to_level_ranges(spec: Any, x: NDArray, labels: NDArray) -> NDArray:
+    """``x`` with each separated level's rows held to the range they covered at fit.
+
+    A ``NumericCategorical`` or ``PolynomialCategorical`` level whose curve
+    separates has no finite estimate (``separation.separated_level_ranges``);
+    within its rows' range its walked curve gives fitted values toward the
+    boundary its responses sit on, and is held there beyond it, as
+    ``extrapolation="clip"`` holds a spline.  A model saved before 0.41 has no
+    such record and predicts as it did.
+    """
+    ranges = getattr(spec, "_separated_ranges", None)
+    if not ranges:
+        return x
+    x = np.array(x, dtype=np.float64, copy=True)
+    for level, (lo, hi) in ranges.items():
+        rows = labels == level
+        x[rows] = np.clip(x[rows], lo, hi)
+    return x
+
+
 # ── PolynomialCategorical ─────────────────────────────────────
 
 
@@ -1112,6 +1132,7 @@ class PolynomialCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_poly = _held_to_level_ranges(self, x_poly, x_cat)
         P = self._poly_basis(x_poly)
 
         blocks = []
@@ -1129,6 +1150,7 @@ class PolynomialCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_poly = _held_to_level_ranges(self, x_poly, x_cat)
         P = self._poly_basis(x_poly)
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_poly), dtype=np.float64)
@@ -1142,15 +1164,26 @@ class PolynomialCategorical:
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        """Each level's curve on the global grid.
+
+        A level whose curve separates at fit (``_separated_ranges``) is read at
+        its own rows' range and held there beyond it, as ``score`` holds it,
+        so every report of the curve (relativities, plots, term inference)
+        agrees with ``predict``.
+        """
         x_grid = np.linspace(self._lo, self._hi, n_points)
         P_grid = self._poly_basis(x_grid)
+        held = getattr(self, "_separated_ranges", None) or {}
 
         per_level: dict[str, dict[str, Any]] = {}
         offset = 0
         for level in self._non_base:
             b_level = beta[offset : offset + self._n_poly_cols]
             offset += self._n_poly_cols
-            log_rels = P_grid @ b_level
+            P_level = (
+                P_grid if level not in held else self._poly_basis(np.clip(x_grid, *held[level]))
+            )
+            log_rels = P_level @ b_level
             per_level[level] = {
                 "log_relativity": log_rels,
                 "relativity": np.exp(log_rels),
@@ -1240,6 +1273,7 @@ class NumericCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_num = _held_to_level_ranges(self, x_num, x_cat)
 
         cols = []
         for level in self._non_base:
@@ -1256,6 +1290,7 @@ class NumericCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
+        x_num = _held_to_level_ranges(self, x_num, x_cat)
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_num), dtype=np.float64)
         for i, level in enumerate(self._non_base):
@@ -1276,6 +1311,10 @@ class NumericCategorical:
             "base_level": self._base_level,
             "log_relativities_per_unit": log_rels_per_unit,
             "relativities_per_unit": rels_per_unit,
+            # a level whose slope separates at fit is held to its rows' range
+            # (``_held_to_level_ranges``); the per-unit rate is that of the
+            # curve inside it, and the line stops there
+            "held_ranges": dict(getattr(self, "_separated_ranges", None) or {}),
             "interaction": True,
         }
 

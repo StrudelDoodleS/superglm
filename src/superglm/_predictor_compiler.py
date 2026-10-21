@@ -29,6 +29,8 @@ from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import (
     CategoricalInteraction,
+    NumericCategorical,
+    PolynomialCategorical,
     SplineCategorical,
     TensorInteraction,
 )
@@ -715,6 +717,23 @@ def compile_predictor_design(
             result = ispec.build(x1, x2, parent_specs, **build_kwargs)
         if isinstance(ispec, SplineCategorical) and ispec._separated_curves:
             records.append(("curve", iname, ispec._separated_curves))
+        if isinstance(ispec, NumericCategorical | PolynomialCategorical):
+            from superglm.diagnostics.separation import separated_level_ranges
+
+            ispec._separated_ranges = (
+                separated_level_ranges(
+                    ispec,
+                    x1,
+                    x2,
+                    sample_weight,
+                    cast(NDArray, separation_response),
+                    separation_boundaries,
+                )
+                if scan_curves
+                else {}
+            )
+            if ispec._separated_ranges:
+                records.append(("level_curve", iname, list(ispec._separated_ranges)))
 
         pi_kwargs: dict[str, Any] = dict(
             B_unique=B_unique_inter,

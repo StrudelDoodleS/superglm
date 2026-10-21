@@ -494,6 +494,7 @@ def compile_predictors(
     n_bins_config: int | dict[str, int] = 256,
     lambda2: float | dict[str, float] = 0.1,
     separation_boundaries: Sequence[tuple[str, ...]] | None = None,
+    separation_response: NDArray | None = None,
 ) -> tuple[CompiledPredictor, ...]:
     """Compile retained predictors under one resolved likelihood-weight root.
 
@@ -505,7 +506,10 @@ def compile_predictors(
     ``separation_boundaries`` carries one response-boundary tuple per
     predictor; a predictor with a non-empty tuple records its categorical
     terms on ``CompiledPredictorDesign.separation_records`` for the fit
-    boundary to scan.  ``None`` records nothing.
+    boundary to scan.  ``None`` records nothing.  With ``separation_response``
+    too, each varying-coefficient term holds the levels whose curves
+    separate under that predictor's boundaries, as SuperGLM's build does
+    (``compile_predictor_design``).
     """
     parameter_tuple = tuple(parameters)
     predictor_tuple = tuple(predictors)
@@ -572,6 +576,7 @@ def compile_predictors(
             n_bins_config=n_bins_config,
             lambda2=lambda2,
             separation_boundaries=boundary_tuple[parameter_index],
+            separation_response=separation_response,
             first_tensor_id=first_tensor_id,
             # SuperLSS fitted an interaction on a ranged parent before declared
             # interactions met the pair refusals, and keeps fitting it.

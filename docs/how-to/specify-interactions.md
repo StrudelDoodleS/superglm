@@ -141,6 +141,14 @@ factor's main effect gives a rank-deficient model. SuperGLM rejects a
 warning that names the term to drop. A random effect for a different column is
 supported.
 
+Beside an `sz` term, `predict` prices a held level (one with no claims, no
+weight, or whose line separates) at the group term's mean over the levels the
+data identify, whatever value the fit left it. The group term's
+`relativities()`, `term_inference()`, `reconstruct_feature()` and
+`term_importance()` read a held level there too, and `factor_smooth()` lists
+held levels in its diagnostics as `held_levels`. The term's coefficients for a
+held level are not an estimate; drop the redundant term to avoid reading them.
+
 ## Level universes are inherited, never redeclared
 
 A `Categorical`-parented interaction — `SplineCategorical`,
@@ -202,9 +210,13 @@ Some SZ levels do not carry enough information for their whole curve:
   penalty leaves unpenalized (with the default `m=2`, a single distinct value).
 
 With `select=True`, only a level without weight is in this position. It is
-predicted at the population curve, which stays the main effect, and the
-report's `thin_levels` and `predict` name it; the solver does not name it at
-fit. The rest of this section describes terms without `select=True`.
+predicted at the population curve, and the report's `thin_levels` and `predict`
+name it; the solver does not name it at fit. The population curve is the main
+effect, unless a plain `sz` term on the same group has a thin or separated
+level, or does not know a declared level: the two terms then share the levels
+they leave out and hold, and the selected term's population is the mean of the
+levels both identify. The rest of this section describes terms without
+`select=True`.
 
 For such a level, part of its curve can trade places with the global curve
 without changing any fitted value, so the data do not decide that part. A
@@ -227,7 +239,8 @@ and `relativities()` report on the same footing: each level's curve is its
 deviation from the population curve, and the global curve is the population
 curve.
 
-If every level is in this position, no level identifies the population curve.
+If every level is in this position, or has a line that separates the response
+(next section), no level identifies the population curve.
 Its unpenalized part is then set by a convention: each level's unidentified
 part is zero. Away from the levels' own values, the curves still depend on
 where the fit landed along the global smooth's unpenalized curve, wherever
@@ -251,6 +264,15 @@ move toward zero (or one) for as long as the fit runs.
   refuse the fit for this case.
 - The population curve leaves these levels out of its average, so it does not
   follow their lines.
+- `predict` does not follow those lines either: where the fit stopped along a
+  line says nothing about the data, and away from the level's own rows the
+  line can rise as steeply as it falls there.
+- Along that line the level follows the shape of the population curve, and it
+  keeps what its other rows identify. A level whose claims all sit at one value
+  keeps its fitted value there.
+- A level whose every row is on the boundary, such as a level with no claims,
+  is predicted at the population curve.
+- Each call to `predict` that meets such a level warns once and names it.
 
 To give such levels finite estimates, pass `select=True` to the term, or use
 `basis="fs"`.
@@ -278,8 +300,11 @@ therefore the same model.
   as its rows and the other levels support.
 - When every level is thin, the global curve is fitted through the trend
   across the levels, and the fit is the same on every solver.
-- The population curve is the global curve, and every level with data
-  predicts its own fitted curve. A level whose rows all have zero weight, or
+- The population curve is the global curve, unless a plain `sz` term on the
+  same group has a thin or separated level, or does not know a declared level.
+  The terms then share the levels they leave out and hold, and the population is
+  the mean of the levels both identify. Every level with data predicts its own
+  fitted curve. A level whose rows all have zero weight, or
   a level declared through `levels=` with no rows, is predicted at the
   population curve, and `predict` names it.
 - No level's line is unpenalized, so the fit gives no `SeparationWarning`
@@ -301,6 +326,48 @@ therefore the same model.
   `select=False` for unpenalized lines.
 - `basis="fs"` already penalizes every level's polynomial part, so
   `select=True` applies to `basis="sz"` only.
+
+### Groups with sparse levels
+
+A level with few rows, or few claims, gives an unpenalized part of its curve
+little or nothing to estimate it from. On the first 3,000 training policies of
+the French motor book, with a vehicle-age curve by region, 12 of the 22
+regions had no claim or had all their claims at a single vehicle age. These
+are the held-out results on the remaining policies (Poisson, claim frequency):
+
+| How the region enters | Held-out deviance | Gini |
+|---|---|---|
+| `FactorSmooth(basis="sz")`, lines unpenalized | 40,604 | 0.076 |
+| `FactorSmooth(basis="sz", select=True)` | 34,201 | 0.163 |
+| `FactorSmooth(basis="fs")` | 34,332 | 0.182 |
+| `re("Region")`, no factor smooth | 34,201 | 0.163 |
+| `cat("Region")`, no factor smooth | 79,099 | 0.075 |
+| `cat("Region")` with a vehicle-age curve by region (`SplineCategorical`) | 80,724 | 0.084 |
+
+The `select=True` and `re("Region")` rows are different models that nearly
+coincide: `select=True` shrinks each region's vehicle-age curve to about an
+intercept, which is what `re()` fits, and their deviances are 34,200.7 and
+34,200.8.
+
+- For a curve by level, pass `select=True` to an SZ term or use
+  `basis="fs"`. Both penalize every level's line, so a sparse level stays
+  close to the population curve.
+- For a level effect alone, use `re()`. It shrinks a sparse level toward the
+  average.
+- A plain categorical level with exposure and no claim has no finite effect.
+  The fit warns, the level is predicted close to zero, and `predict` names it.
+  The same holds for a spline-by-category interaction, whose levels take their
+  constant from the categorical main effect.
+- A numeric or polynomial curve by category gives each level its own slope or
+  curve. When a level's claims cannot fix it, the fit warns, and `predict` and
+  the reported curves hold that level's curve flat beyond the values its rows
+  covered.
+- To keep a categorical term, merge sparse levels into similar ones with
+  `Categorical(grouping=...)`.
+- When no level of a group is identified, every level being thin or separated,
+  the population curve is a convention, not an estimate. With several `sz`
+  terms on that group it is not unique, because the fit splits each level's
+  constant between the terms. Use `select=True` or `basis="fs"` there.
 
 ## Separated cells: exposure without response
 

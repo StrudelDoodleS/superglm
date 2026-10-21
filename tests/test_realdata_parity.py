@@ -681,3 +681,91 @@ def test_brand_b12_past_vehicle_age_22_is_held_not_priced_at_the_floor():
         rtol=0,
         atol=64 * unit * 16,
     )
+
+
+@GAMMA_SKIP
+@pytest.mark.slow
+def test_sz_regions_whose_lines_separate_are_not_priced_along_their_walk():
+    """The 0.41 compile census's trigger: an ``sz`` term on 3,000 rows of the corrected book.
+
+    The first 3,000 rows of ``benchmarks/books.py``'s 80% training split, a
+    Poisson frequency fit with a VehAge by Region ``sz`` term, binned.  Twelve
+    of its 22 regions separate: eight have no claim, and four hold their claims
+    at one VehAge with their other rows to one side.  On master (3681b0c1) the
+    fit walked each one's line to the log link's guard and ``predict`` priced
+    the walk: R43, 13 policies without a claim at VehAge 0, 4 and 5, at
+    ``eta = +80`` from VehAge 8 up, and the test book's mean predicted rate was
+    2.8e31.  A region whose every row separates now predicts the population
+    curve exactly, and moving any separated region's line along its span of
+    directions of recession, the walk itself, moves no prediction
+    (``_assert_rule_follows``).
+    """
+    import warnings
+
+    from superglm import FactorSmooth
+
+    from .test_factor_smooth_sz_thin_and_influence import (
+        _assert_rule_follows,
+        _recession_oracle,
+        _walk,
+    )
+
+    df = _datasets.load_freq_corrected()
+    for column in ("DrivAge", "VehAge", "BonusMalus"):
+        df[column] = df[column].astype(np.float64)
+    df["Region"] = df["Region"].astype(str)
+    perm = np.random.default_rng(20261012).permutation(len(df))
+    is_train = np.zeros(len(df), dtype=bool)
+    is_train[perm[: int(round(0.8 * len(df)))]] = True
+    train = df[is_train].reset_index(drop=True).iloc[:3000]
+    test = df[~is_train].reset_index(drop=True)
+    exposure = train["Exposure"].to_numpy(dtype=np.float64)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "DrivAge": Spline(n_knots=8),
+            "BonusMalus": Spline(n_knots=10),
+            "VehAge": Spline(n_knots=8),
+        },
+        interactions=[FactorSmooth("VehAge", group="Region", basis="sz", k=5)],
+        weight_semantics="frequency",
+        discrete=True,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            train, train["ClaimNb"].to_numpy(dtype=np.float64) / exposure, sample_weight=exposure
+        )
+        eta = np.log(model.predict(test))
+        population = np.log(model.predict(test, random_effects="population"))
+    spec = model._interaction_specs["VehAge:Region:sz"]
+    separated = [spec._levels[code] for code in spec._separated_levels]
+    assert "R43" in separated
+    # Read from the data, not the scan: a region without a claim has every
+    # row on the boundary, along the constant; one whose claims sit at one
+    # VehAge leaves the line through zero there.
+    claims = train.loc[train["ClaimNb"] > 0, ["Region", "VehAge"]]
+    no_claim = sorted(set(train["Region"]) - set(claims["Region"]))
+    assert set(no_claim) <= set(separated)
+    rows = test["Region"].isin(no_claim).to_numpy()
+    assert np.array_equal(eta[rows], population[rows])
+    assert np.all(np.isfinite(eta))
+
+    group = next(g for g in model._groups if g.name == "VehAge:Region:sz")
+    blocks = spec._level_blocks(np.asarray(model.result.beta[group.sl]))
+    scale = float(np.max(np.abs(blocks)))
+    wiggle = np.diag(dict(spec._base_penalty_components)["wiggle"])
+    null_space = np.eye(len(wiggle))[:, wiggle == 0.0]
+    rng = np.random.default_rng(0)
+    moves = {}
+    for code in spec._separated_levels:
+        region = spec._levels[code]
+        at = claims.loc[claims["Region"] == region, "VehAge"].unique()
+        if len(at) == 0:
+            move = null_space @ rng.normal(size=null_space.shape[1])
+            moves[code] = scale * move / np.linalg.norm(move)
+        elif len(at) == 1:
+            moves[code] = scale * _recession_oracle(spec, float(at[0]))
+    assert len(moves) == len(separated)
+    shifted, step = _walk(spec, blocks, moves)
+    _assert_rule_follows(spec, blocks, shifted, step)

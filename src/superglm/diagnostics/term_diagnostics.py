@@ -82,10 +82,20 @@ def term_importance(
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
     lambda2 = getattr(model, "lambda2", None)
 
+    from superglm.features.factor_smooth import FactorSmooth
     from superglm.model import base
+    from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
+    _ensure_factor_smooth_levels_recorded(model)
     plan = base._prediction_plan(model)
     terms_by_name = {term["name"]: term for term in (*plan["features"], *plan["interactions"])}
+    main_names = {term["name"] for term in plan["features"]}
+    # each term's share of ``predict`` as the reports split it: an sz term by
+    # the rule ``predict`` applies (#432), unfolded, and a main term it folds
+    # with its held levels at the identified mean (``base._held_level_shift``)
+    features = base.report_features(
+        {term["name"]: term for term in plan["features"]}, model._interaction_specs
+    )
 
     def _diag_lambda(g_name):
         return _resolve_group_lambda(g_name, reml_lam, lambda2)
@@ -121,7 +131,22 @@ def term_importance(
             )
         term_beta = np.zeros(len(term_indices), dtype=np.float64)
         term_beta[group_positions] = beta[term_indices[group_positions]]
-        eta_g = base._score_prediction_term_local_exact(term, frame, term_beta)
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            eta_g, _ = base._score_unidentified_factor_smooth(
+                term, frame, beta, population=False, features=features
+            )
+        else:
+            eta_g = base._score_prediction_term_local_exact(term, frame, term_beta)
+        if term["name"] in main_names:
+            eta_g = eta_g + base._held_level_shift(
+                term,
+                frame,
+                lambda labels, term=term, local=term_beta: base._score_prediction_term_local_exact(
+                    term, as_eager_frame(pd.DataFrame({term["name"]: labels})), local
+                ),
+                model._interaction_specs,
+            )
 
         # Centered weighted variance
         wmean = np.sum(weights * eta_g) / w_sum
@@ -324,6 +349,13 @@ def _drop_term_holdout(
 
     plan = base._prediction_plan(model)
     terms = [*plan["features"], *plan["interactions"]]
+    # ``predict`` split as the reports split it: a main term an sz term folds
+    # reads its held levels at its identified mean, the sz term unfolded
+    # (``base._held_level_shift``), so dropping either drops no walk
+    main_names = {term["name"] for term in plan["features"]}
+    features = base.report_features(
+        {term["name"]: term for term in plan["features"]}, model._interaction_specs
+    )
     # The public predictor (``base._predict_eta``): the fit's centred intercept,
     # a term whose dense columns keep a centre scored about it, a compensated
     # intercept's remainder added at the rows' scale and the offset last, so
@@ -354,7 +386,7 @@ def _drop_term_holdout(
         if isinstance(spec, FactorSmooth) and spec._has_population_offset:
             # as ``predict`` scores it (#432): thin and unseen levels from the population
             contribution, _ = base._score_unidentified_factor_smooth(
-                term, X_val, beta, population=False
+                term, X_val, beta, population=False, features=features
             )
             handle = accumulated.add(contribution)
         elif block is not None and np.any(block != 0.0):
@@ -366,6 +398,17 @@ def _drop_term_holdout(
         else:
             handle = accumulated.add(base._score_prediction_term_exact(term, X_val, beta))
         contributions[term["name"]] = [handle]
+        if term["name"] in main_names:
+            shift = base._held_level_shift(
+                term,
+                X_val,
+                lambda labels, term=term: base._score_prediction_term_exact(
+                    term, as_eager_frame(pd.DataFrame({term["name"]: labels})), beta
+                ),
+                model._interaction_specs,
+            )
+            if np.any(shift != 0.0):
+                contributions[term["name"]].append(accumulated.add(shift))
         if accumulated.compensated and centre_shifts[term["name"]] != 0.0:
             # A compensated pair holds a carried c dbeta that the dropped term's
             # c' beta cancels: subtract it inside the sum, as exact products,

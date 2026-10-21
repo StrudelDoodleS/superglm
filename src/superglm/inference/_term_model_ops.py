@@ -46,7 +46,9 @@ def relativities(
             from superglm.features.factor_smooth import with_population_curve
 
             raw = cast(dict[str, Any], specs[name].reconstruct(beta_combined))
-            return with_population_curve(raw, name, interaction_specs, groups, result.beta)
+            return with_population_curve(
+                raw, name, interaction_specs, groups, result.beta, specs[name]
+            )
         if name in interaction_specs:
             return cast(dict[str, Any], interaction_specs[name].reconstruct(beta_combined))
         raise KeyError(f"Feature not found: {name}")

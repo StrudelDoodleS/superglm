@@ -773,19 +773,19 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     named in a ``SeparationWarning`` (never refused: the population curve
     leaves them out, ``FactorSmooth._population_map``), unless the model's
     ``separation`` is ``"ignore"``; a population fixed by the canonical
-    convention, or by separated lines alone, is named in a ``UserWarning``.
+    convention is named in a ``UserWarning``.
     Each names the term's remedy, ``select=True`` (#444): a term that
     selects its lines has none of these, and nothing here warns for it.
     """
     import warnings
 
     from superglm.diagnostics.separation import (
-        SZ_SELECT_REMEDY,
         SeparationWarning,
+        format_factor_smooth_canonical,
         format_factor_smooth_separation,
         response_boundaries,
     )
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import FactorSmooth, share_group_levels
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
     level = _FIT_WARNING_STACKLEVEL if stacklevel is None else stacklevel
@@ -804,27 +804,13 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 SeparationWarning,
                 stacklevel=level,
             )
-        convention = spec._population_convention
-        if convention == "canonical":
+        if spec._population_convention == "canonical":
             warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level holds fewer distinct x "
-                "values than the penalty's null space, so no level identifies the population "
-                "curve. Its polynomial part is fixed by convention (each level's unidentified "
-                "polynomial part zero); away from the levels' own x values the population curve, "
-                "and every level's curve, still follow the fit's point along the main effect's "
-                "unpenalized curve wherever that curve is not a polynomial. Predictions on the "
-                f"training rows reproduce the fit. {SZ_SELECT_REMEDY}",
+                format_factor_smooth_canonical(group.name, bool(spec._separated_levels)),
                 UserWarning,
                 stacklevel=level,
             )
-        elif convention == "separated_mean":
-            warnings.warn(
-                f"FactorSmooth {group.name!r} (basis='sz'): every level the data identify has "
-                "an unpenalized line that separates the response, so the population curve is "
-                f"their mean and moves with how far the fit walked those lines. {SZ_SELECT_REMEDY}",
-                UserWarning,
-                stacklevel=level,
-            )
+    share_group_levels(specs.values())
 
 
 def _ensure_factor_smooth_levels_recorded(model) -> None:
@@ -832,13 +818,15 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
 
     A pickle from v0.35.0 or earlier carries no record and would predict its
     thin levels at the fit's arbitrary point.  The fit's design and prior
-    weights, which such a model keeps, rebuild it at the first prediction;
-    its response is not kept, so separated lines stay in its population.
+    weights, which such a model keeps, rebuild it at the first prediction,
+    under the conventions of the release that rebuilt it (the orthogonal
+    projector, no group-term fold); its response is not kept, so separated
+    lines stay in its population.
     Without them the model cannot be repaired and says so.
     """
     import warnings
 
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import FactorSmooth, share_group_levels
 
     specs = getattr(model, "_interaction_specs", {}) or {}
     stale = [
@@ -852,12 +840,18 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
         return
     if getattr(model, "_dm", None) is not None and getattr(model, "_fit_weights", None) is not None:
         _record_unidentified_factor_smooth_levels(model, model._fit_weights)
+        for spec in stale:
+            # the first prediction of 0.36 to 0.40 rebuilt this record with the
+            # orthogonal projector; the 0.41 conventions are a refit's
+            spec._free_complement = "orthogonal"
+        share_group_levels(specs.values())
         return
     for spec in stale:
         spec._unidentified_levels = ()
         spec._free_directions = ()
         spec._weightless_levels = ()
         spec._separated_levels = ()
+        spec._separated_directions = ()
         spec._population_null_space = None
     warnings.warn(
         "This model was saved before superglm recorded which FactorSmooth basis='sz' levels "

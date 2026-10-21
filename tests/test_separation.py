@@ -149,6 +149,133 @@ def test_main_effect_level_detected():
     assert "'c6'" in message
 
 
+def test_predict_names_a_separated_categorical_level_it_meets():
+    """``predict`` names a main-effect level that had only zero responses at fit (sz_explosion round 2).
+
+    The fit warns at build; the level has no finite effect, and its
+    predictions sit near zero wherever the walk stopped.  ``predict`` said
+    nothing.  It now names the level when its rows reach it, and stays
+    silent on rows of other levels.  Mutation: no record of the level.
+    """
+    rng = np.random.default_rng(5)
+    n = 2500
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    w = np.ones(n)
+    y = _tweedie_response(rng, n)
+    y = np.where(c == "c6", 0.0, np.where(y == 0.0, 0.4, y))
+    model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}, max_iter=60)
+    fit_catching(model, pd.DataFrame({"c": c}), y, w)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
+    named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    assert len(named) == 1 and "'c' levels c6" in str(named[0].message)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
+    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+
+
+def test_predict_names_a_separated_grouped_level_by_its_members():
+    """``predict`` names a collapsed level that separates when a member's raw value meets it (PR 508 round 1).
+
+    ``Categorical(grouping=...)`` is the remedy the guide recommends for
+    sparse levels, and the separation scan records the COLLAPSED label
+    ("c67"), while ``predict`` reads the frame's raw values ("c6", "c7").  The
+    check compared the two directly, so no row ever matched a group.  It now
+    resolves the column as ``score`` does: raw to collapsed to fitted.
+    Mutation: the raw values matched against the recorded labels.
+    """
+    from superglm import collapse_levels
+
+    rng = np.random.default_rng(5)
+    n = 2500
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    y = _tweedie_response(rng, n)
+    y = np.where(np.isin(c, ["c6", "c7"]), 0.0, np.where(y == 0.0, 0.4, y))
+    grouping = collapse_levels(sorted(set(c)), groups={"c67": ["c6", "c7"]})
+    model = SuperGLM(
+        family=Tweedie(p=1.5), features={"c": Categorical(grouping=grouping)}, max_iter=60
+    )
+    fit_catching(model, pd.DataFrame({"c": c}), y, np.ones(n))
+    assert model._specs["c"]._separated_levels_at_fit == ("c67",)
+    for member in ("c6", "c7"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.predict(pd.DataFrame({"c": [member, "c1"]}))
+        named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+        assert len(named) == 1 and "'c' levels c67" in str(named[0].message)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
+    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+
+
+@pytest.fixture
+def program_sizes(monkeypatch):
+    """``(stored entries, rows)`` of every linear program ``linprog`` is handed."""
+    from scipy import optimize, sparse
+
+    stored: list[tuple[int, int]] = []
+    real = optimize.linprog
+
+    def spy(c, *, A_ub, **kwargs):
+        stored.append((A_ub.nnz if sparse.issparse(A_ub) else A_ub.size, A_ub.shape[0]))
+        return real(c, A_ub=A_ub, **kwargs)
+
+    monkeypatch.setattr(optimize, "linprog", spy)
+    return stored
+
+
+def test_a_levels_recession_span_program_stores_a_linear_number_of_entries(program_sizes):
+    """A level with many distinct x builds a sparse span program (PR 508 round 1).
+
+    ``_recession_span`` joined ``-D`` (``n x q``) to ``np.eye(n)``, ``n`` the
+    level's distinct boundary values: ``n (q + n)`` stored entries, about
+    800 MB at 10,000 values of a continuous covariate.  The slack identity is
+    sparse, ``n (q + 1)`` entries in all.  Mutation: the dense identity.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    natural = np.column_stack([np.ones(n), x, x**2])
+    lower = np.ones(n, dtype=bool)
+    none = np.zeros(n, dtype=bool)
+    found = _level_recession(natural, lower, none, none, np.eye(3))
+    assert found is not None and found.shape == (3, 3)
+    # a row holds its q = 3 coefficients and its own slack, at most
+    assert program_sizes and all(entries <= rows * 4 for entries, rows in program_sizes)
+
+
+def test_detecting_separated_varying_coefficient_levels_solves_no_span_program(program_sizes):
+    """A Numeric x Categorical build reads only whether a level recedes (PR 508 round 1).
+
+    ``separated_level_ranges`` keeps a level's rows' range and discards the
+    span, but solved the span's program for every level whose curve recedes,
+    zero-claim levels included.  Here a level with 300 distinct x and no claim
+    is recorded without one; the programs left store at most the ``q = 2``
+    coefficients per row.  Mutation: the span computed.
+    """
+    rng = np.random.default_rng(2)
+    m = 300
+    g = np.concatenate([rng.choice(["a", "c"], 1500), np.full(m, "b")])
+    x = np.concatenate([rng.uniform(size=1500), np.linspace(0.0, 1.0, m)])
+    y = np.concatenate([rng.poisson(0.5, 1500).astype(float), np.zeros(m)])
+    y[:1500][g[:1500] == "c"] += 1.0
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Numeric(), "g": Categorical(base="a")},
+        interactions=[("x", "g")],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"x": x, "g": g}), y)
+    assert set(model._interaction_specs["x:g"]._separated_ranges) == {"b"}
+    assert all(entries <= rows * 2 for entries, rows in program_sizes)
+
+
 def test_gaussian_identity_never_fires():
     df, y, w, _ = separated_crossed_design()
     model = SuperGLM(
@@ -445,3 +572,59 @@ def test_the_runtime_gate_reads_expected_curvature_under_observed_newton_rows():
     common = {"family": Tweedie(p=1.5), "link": LogLink(), "mu": mu, "eta": eta}
     assert _separation_weight_ratio("observed", 1e13, weights=weights, **common) == 1.0
     assert _separation_weight_ratio("fisher", 1e13, weights=weights, **common) == 1e13
+
+
+def test_a_levels_anchor_rank_is_read_from_an_economy_factorization(monkeypatch):
+    """A level with many distinct anchors allocates no square left factor (PR 508 round 4).
+
+    ``_level_recession`` took the SVD of its ``(n, k)`` anchor rows with
+    ``full_matrices=True`` and read only the rank and the right null space:
+    an ``(n, n)`` left factor, about 3.2 GB at 20,000 anchors.  The work is
+    bounded by the factors' sizes, not time.  Mutation: ``full_matrices=True``.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    sizes: list[int] = []
+    real = np.linalg.svd
+
+    def spy(a, *args, **kwargs):
+        factors = real(a, *args, **kwargs)
+        sizes.append(max(factor.size for factor in factors))
+        return factors
+
+    monkeypatch.setattr(np.linalg, "svd", spy)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    natural = np.column_stack([np.ones(n), x])
+    inside = np.ones(n, dtype=bool)
+    none = np.zeros(n, dtype=bool)
+    assert _level_recession(natural, none, none, inside, np.eye(2)) is None
+    assert sizes and max(sizes) <= n * 2
+    from superglm.diagnostics.separation import _rank_and_null_space
+
+    # fewer rows than columns still returns the whole null space
+    rank, null = _rank_and_null_space(np.array([[1.0, 0.0, 0.0, 1.0]]))
+    assert rank == 1 and null.shape == (4, 3)
+    assert np.allclose(np.array([[1.0, 0.0, 0.0, 1.0]]) @ null, 0.0)
+
+
+@pytest.mark.parametrize("origin", [0.0, 1e8])
+def test_two_positive_anchors_fix_a_lines_both_coefficients_at_any_origin(origin):
+    """Moving the covariate's origin does not make a level separate (PR 508 round 4).
+
+    Positive responses at ``x = origin`` and ``origin + 1`` fix both affine
+    coefficients of the level's line, so the zero at ``origin + 2`` cannot
+    recede.  The anchors' rank was decided on the unscaled ``[1, x]``, where at
+    ``1e8`` the second singular value falls below ``max(shape) eps`` of the
+    first: rank one, and a false direction of recession.  The columns are now
+    equilibrated.  Mutation: the columns unscaled.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    x = origin + np.array([0.0, 1.0, 2.0])
+    natural = np.column_stack([np.ones(3), x])
+    inside = np.array([True, True, False])
+    lower = np.array([False, False, True])
+    none = np.zeros(3, dtype=bool)
+    assert _level_recession(natural, lower, none, inside, np.eye(2)) is None
+    assert _level_recession(natural, lower, none, inside, np.eye(2), span=False) is None

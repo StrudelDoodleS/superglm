@@ -10,6 +10,7 @@ from collections.abc import Hashable, Mapping, Sequence
 from typing import Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
@@ -397,21 +398,79 @@ def _score_prediction_term_exact(
 _PREDICTION_WARNING_STACKLEVEL = 6
 
 
+def _held_level_shift(term: dict[str, Any], X: EagerFrame, score, interaction_specs) -> NDArray:
+    """Per row, what a main term an ``sz`` term folds gains read as the reports split ``predict``.
+
+    ``held_group_levels``: the term's held levels at its mean over the
+    identified levels, the sz term unfolded (``report_features``); the two
+    add to ``predict``.  ``score(labels)`` scores the term at those labels.
+    Zero for a term no ``sz`` term folds.
+    """
+    from superglm.features.factor_smooth import group_term_level_values, held_group_levels
+
+    labels = np.asarray(X.column_array(term["name"]), dtype=object)
+    shift = np.zeros(len(labels), dtype=np.float64)
+    record = held_group_levels(term["name"], interaction_specs)
+    if record is None:
+        return shift
+    held, identified = record
+    values = group_term_level_values(score, [*identified, *held])
+    codes = pd.Index(list(held)).get_indexer(labels)
+    rows = codes >= 0
+    shift[rows] = float(np.mean(values[: len(identified)])) - values[len(identified) + codes[rows]]
+    return shift
+
+
+def report_features(
+    features: dict[str, dict[str, Any]], interaction_specs
+) -> dict[str, dict[str, Any]]:
+    """The main terms an ``sz`` term still folds when the reports split ``predict`` (``_held_level_shift``)."""
+    from superglm.features.factor_smooth import held_group_levels
+
+    return {
+        name: term
+        for name, term in features.items()
+        if held_group_levels(name, interaction_specs) is None
+    }
+
+
 def _score_unidentified_factor_smooth(
     term: dict[str, Any],
     X: EagerFrame,
     beta_all: NDArray,
     *,
     population: bool,
+    features: dict[str, dict[str, Any]],
 ) -> tuple[NDArray[np.floating], tuple]:
-    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``)."""
+    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``).
+
+    ``features`` are the prediction plan's main-effect terms by name.  The
+    term that folds its group's redundant main effect (an
+    ``OrderedCategorical``, which the model accepts as redundant) reads its
+    value at each level as part of that level's line (``level_constants``),
+    so its share of a separated level's walk does not reach the prediction.
+    Every path that predicts an ``sz`` term calls this, so none can score it
+    without the fold.
+    """
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
     spec = term["spec"]
     _, left = resolve_interaction_parent_of(spec, left_spec, X.column_array(left_name))
     _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
-    return spec._score_identified(left, right, beta, population=population)
+    constants = None
+    group_term = features.get(spec.group) if spec._folds_group_term else None
+    if group_term is not None:
+        from superglm.features.factor_smooth import group_term_level_values
+
+        def score(labels):
+            frame = as_eager_frame(pd.DataFrame({group_term["name"]: list(labels)}))
+            return _score_prediction_term_exact(group_term, frame, beta_all)
+
+        constants = group_term_level_values(score, spec._levels)
+    return spec._score_identified(
+        left, right, beta, population=population, level_constants=constants
+    )
 
 
 def prediction_centred_state(result) -> tuple[float, NDArray | None, float | None]:
@@ -676,22 +735,45 @@ def _predict_eta(
         else:
             eta.add(lambda: scorer(term, frame, beta_all))
 
+    separated_levels: list[str] = []
     for term in plan["features"]:
         if random_effects == "population" and isinstance(term["spec"], RandomEffect):
             term["spec"].validate_prediction_values(frame.column_array(term["name"]))
             continue
         score(term)
+        held = getattr(term["spec"], "_separated_levels_at_fit", ())
+        if held and not fitted and warn:
+            # the level each row is scored at: raw values go through the spec's
+            # grouping and unseen policy, as ``score`` reads them
+            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
+            named = [label for label in held if label in met]
+            if named:
+                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    if separated_levels:
+        warnings.warn(
+            "Categorical levels that had exposure but only boundary responses at fit have no "
+            "finite effect; the fit's value for them is where its walk stopped, so their "
+            "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
+            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term.",
+            UserWarning,
+            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
+        )
 
     if not fitted:
         from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
         _ensure_factor_smooth_levels_recorded(model)
     unidentified: list[str] = []
+    features = {feature["name"]: feature for feature in plan["features"]}
     for term in plan["interactions"]:
         spec = term["spec"]
         if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
             contribution, named = _score_unidentified_factor_smooth(
-                term, frame, beta_all, population=random_effects == "population"
+                term,
+                frame,
+                beta_all,
+                population=random_effects == "population",
+                features=features,
             )
             eta += contribution
             if named:

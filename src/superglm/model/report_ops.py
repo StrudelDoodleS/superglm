@@ -809,7 +809,9 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
     _ensure_factor_smooth_levels_recorded(model)
     if in_main:
         raw = cast(dict[str, Any], model._specs[name].reconstruct(beta_combined))
-        return with_population_curve(raw, name, model._interaction_specs, model._groups, res.beta)
+        return with_population_curve(
+            raw, name, model._interaction_specs, model._groups, res.beta, model._specs[name]
+        )
     if in_inter:
         return cast(dict[str, Any], model._interaction_specs[name].reconstruct(beta_combined))
     raise KeyError(f"Feature not found: {name}")

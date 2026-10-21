@@ -156,6 +156,60 @@ def _population_curve_se(
     return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
 
 
+def _held_level_se(
+    spec, name, feature_groups, active_groups, Cov_active, interaction_specs, *, center: bool
+) -> NDArray | None:
+    """The level errors of a main term an ``sz`` term folds, or ``None``.
+
+    Its held levels report the mean over the identified levels
+    (``factor_smooth.with_held_group_levels``), so each reported level is
+    ``(L_l - L_base) gamma`` with ``L`` the term's rows at its levels and a
+    held level's row the identified rows' mean: the errors are those of that
+    map, and centring maps it through ``I - 11'/n``.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import (
+        at_each_level,
+        group_term_report_levels,
+        held_group_levels,
+    )
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    record = held_group_levels(name, interaction_specs)
+    active_subs = [ag for ag in active_groups if ag.feature_name == name]
+    if (
+        record is None
+        or not active_subs
+        or not isinstance(spec, Categorical | OrderedCategorical)
+        or spec._grouping is not None
+    ):
+        return None
+    levels = list(spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels)
+    held, identified = record
+    keys = [key for key in group_term_report_levels(spec, held) if key in levels]
+    if not keys:
+        return None
+    columns = _active_subgroup_columns(name, feature_groups, active_subs)
+
+    def rows(labels):
+        return np.asarray(spec.transform(labels), dtype=np.float64)[:, columns]
+
+    L = rows(np.asarray(levels, dtype=object))
+    base = L[levels.index(spec._base_level)]
+    L = L - base
+    # the identified levels' rows as ``predict`` scores them: a level the term
+    # does not know has the zero row an unseen level gets
+    found = at_each_level(rows, identified)
+    mean = np.mean([np.zeros(L.shape[1]) if row is None else row for row in found], axis=0) - base
+    L[[levels.index(key) for key in keys]] = mean
+    indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+    Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
+    if center:
+        L = L - L.mean(axis=0)
+    variance = np.einsum("ij,jk,ik->i", L, Cov_g, L, optimize=True)
+    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
@@ -188,7 +242,11 @@ def feature_se_from_cov(
     beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
-
+    held = _held_level_se(
+        spec, name, feature_groups, active_groups, Cov_active, interaction_specs, center=center
+    )
+    if held is not None:
+        return held
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
             return _spline_se(

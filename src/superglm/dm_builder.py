@@ -1173,9 +1173,15 @@ def build_design_matrix(
         separation_response=y,
     )
     separation_records = compiled.separation_records
+    from superglm.features.categorical import Categorical
+
+    for spec in compiled.specs.values():
+        if isinstance(spec, Categorical):
+            spec._separated_levels_at_fit = ()
     if separation_records:
         from superglm.diagnostics.separation import (
             emit_curve_separation,
+            emit_level_curve_separation,
             emit_separation_findings,
             scan_categorical_term,
             scan_interaction_term,
@@ -1184,6 +1190,7 @@ def build_design_matrix(
 
         findings = []
         curves = []
+        level_curves = []
         for record in separation_records:
             term_name = record[1]
             if record[0] == "curve":
@@ -1200,13 +1207,21 @@ def build_design_matrix(
                 # A nonzero lambda1 reaches this block: the penalty grows
                 # without bound along any recession direction, so the
                 # penalised optimum is finite and the term is estimable.
+                if record[0] == "level_curve":
+                    compiled.interaction_specs[term_name]._separated_ranges = {}
+                continue
+            if record[0] == "level_curve":
+                level_curves.append(record[1:])
                 continue
             if record[0] == "cat":
                 _, name_c, spec_c, x_c = record
-                findings.extend(
-                    scan_categorical_term(
-                        name_c, spec_c, x_c, y, sample_weight, separation_boundaries
-                    )
+                found = scan_categorical_term(
+                    name_c, spec_c, x_c, y, sample_weight, separation_boundaries
+                )
+                findings.extend(found)
+                # predict names these levels when it meets them (_predict_eta)
+                spec_c._separated_levels_at_fit = tuple(
+                    label for finding in found for label in finding.labels
                 )
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
@@ -1226,6 +1241,7 @@ def build_design_matrix(
                 )
         emit_separation_findings(findings, separation)
         emit_curve_separation(curves, separation)
+        emit_level_curve_separation(level_curves)
 
     return BuildResult(
         dm=compiled.design,
