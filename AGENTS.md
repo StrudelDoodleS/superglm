@@ -50,6 +50,17 @@ spawning agent keeps working while sub-agents run and owns the final answer.
 Sub-agents run the focused tests for their stage; the full suite takes many
 minutes and runs once at the end.
 
+An agent's cost is mostly its context, not its reasoning. Each call re-sends
+the whole context, which the provider caches only for a few minutes
+(Anthropic: 5 by default). A call after the cache has expired writes the
+whole context again at full price. On one measured session those rewrites
+were 44% of all sub-agent cost, against 6-8% for output tokens. So a
+sub-agent never waits more than about 4 minutes on one command and never
+polls on a timer. It hands a long run (the full suite, benchmarks, CI) back
+to the spawning agent with a note of what it changed, the exact command and
+what to decide from the result. If more work follows, a fresh agent gets
+the note and the result rather than the old agent being resumed.
+
 ## Code and tests
 
 Package code lives under `src/superglm/`, tests under `tests/`, and
