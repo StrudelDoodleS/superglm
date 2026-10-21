@@ -4941,3 +4941,18 @@ def test_rank_matched_restriction_is_exact_at_an_admitted_tilt():
     assert reference != current_objective
     other_error = smoothing_objective._discarded_space_error(trial.terminal_rank)
     assert abs(reference - expected) <= other_error
+
+
+def test_rank_matched_restriction_compares_a_near_orthogonal_pair_as_computed():
+    """A vacuous bound admits a pair at 60 degrees, closer to orthogonal than nested.
+
+    The angle correction would grow without limit as such an angle nears 90
+    degrees, so the pair compares as computed instead of being restricted.
+    """
+    current, trial, _ = _turned_pair(math.radians(60.0), 1.0e9)
+    current_objective = 0.5 * current.terminal_rank.log_pdet
+    trial_objective = 0.5 * trial.terminal_rank.log_pdet
+    reference, _ = smoothing_objective.rank_matched_objectives(
+        current, current_objective, trial, trial_objective
+    )
+    assert reference == current_objective

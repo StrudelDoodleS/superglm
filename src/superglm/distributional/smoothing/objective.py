@@ -157,6 +157,12 @@ def _restricted_objective(
         if sines.max() > tolerance:
             return None
         cosines = np.linalg.svd(np.linalg.qr(own)[0].T @ np.linalg.qr(null)[0], compute_uv=False)
+        # A vacuous bound admits any angle, and the correction falls without
+        # limit as one nears 90 degrees: a pair closer to orthogonal than to
+        # nested compares as computed, which caps the correction at log(2)/2
+        # per discarded direction.
+        if float(np.min(cosines)) ** 2 <= 0.5:
+            return None
         alignment = float(np.sum(np.log(cosines)))
         null = null @ np.linalg.svd(own.T @ null)[2][own.shape[1] :].T
     inverse = np.column_stack([rank.solve(column) for column in null.T])

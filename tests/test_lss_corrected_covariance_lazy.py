@@ -466,19 +466,6 @@ def _published_requested_source_mismatch(
     )
 
 
-def _published_actual_source_mismatch(
-    fitted: DenseDistributionalModel,
-) -> DenseDistributionalModel:
-    curvature = dataclasses.replace(
-        fitted.result.terminal_curvature,
-        actual_source="fisher",
-    )
-    return _with_terminal_result(
-        fitted,
-        dataclasses.replace(fitted.result, terminal_curvature=curvature),
-    )
-
-
 def _published_fallback_mismatch(fitted: DenseDistributionalModel) -> DenseDistributionalModel:
     curvature = dataclasses.replace(
         fitted.result.terminal_curvature,
