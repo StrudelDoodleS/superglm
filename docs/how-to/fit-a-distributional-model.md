@@ -322,8 +322,8 @@ not mistaken for a worse fit.
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
 observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
 1987): the solver falls back to it when the observed curvature at the end of a
-fit is not a proper maximum, and `coefficient_curvature="fisher"` can request
-it. Its starting smoothing parameters stay at the 0.1 start rather than the
+fit is not a proper maximum, and says so with a `ConvergenceWarning` kept in
+`result_.warnings`, and `coefficient_curvature="fisher"` can request it. Its starting smoothing parameters stay at the 0.1 start rather than the
 information-scaled one. This family is not zero-inflated and does not claim an exact Poisson
 active face, CDF or quantile methods, random generation, or complete-fit speed.
 
@@ -1167,7 +1167,9 @@ it. Without usable expected information the fit is not refused: each row's
 observed curvature is replaced by its nearest positive semidefinite matrix
 (Wood and Fasiolo, 2017; Higham, 1988), the fit warns, and the warning is kept
 in `result_.warnings`; telemetry then reports `actual_source` as
-`"nearest_semidefinite"`. The requested policy
+`"nearest_semidefinite"`. A `NegativeBinomialLS` fit that ends on Fisher
+information warns the same way, converged or not, because 0.40 refused such
+fits. The requested policy
 is `training_telemetry().curvature_policy`;
 the terminal source and any fallback are in `training_telemetry().curvature`
 (`actual_source`, `fallback_count`, `matrix_kind`).
