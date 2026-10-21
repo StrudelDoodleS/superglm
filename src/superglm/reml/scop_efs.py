@@ -304,6 +304,7 @@ class _SCOPREMLMode:
     hessian_rank: int
     curvature_source: str
     mode_score: SCOPModeScore
+    fisher_centre: tuple[NDArray, NDArray | None] | None = None
 
     @property
     def objective(self) -> float:
@@ -882,6 +883,7 @@ def _evaluate_scop_reml_mode(
     mode_score: SCOPModeScore | None = None,
     eta_unclipped: NDArray | None = None,
     curvature: str | None = None,
+    fisher_centre: tuple[NDArray, NDArray | None] | None = None,
 ) -> _SCOPREMLMode:
     """Assemble and evaluate LAML from one lambda-coherent fitted mode.
 
@@ -1042,6 +1044,7 @@ def _evaluate_scop_reml_mode(
         hessian_rank=hessian_rank,
         curvature_source=curvature_source,
         mode_score=mode_score,
+        fisher_centre=fisher_centre,
     )
 
 
@@ -1328,6 +1331,7 @@ def _scop_mode_from_fit(fit: _SCOPInnerFit, *, curvature: str | None = None) -> 
         mode_score=mode_score,
         eta_unclipped=working_cache.get("eta_unclipped"),
         curvature=curvature,
+        fisher_centre=working_cache.get("centre_pair"),
     )
 
 
@@ -1574,16 +1578,20 @@ def _hydrate_scop_terminal_rank_info(
 
     # The fit's data-rank route (``rank.decide_data_rank``): the Gram, else
     # its grey subspace, else the full factor; unpenalized, the full factor.
-    centre = mode.fisher_mean_x
+    centre, centre_lo = mode.fisher_centre or (mode.fisher_mean_x, None)
     data_rank = decide_data_rank(
         mode.centered_xtwx,
         lambda: decompose_factor(
-            grouped_weighted_factor(context.dm, fisher_weights(), center=centre)
+            grouped_weighted_factor(
+                context.dm, fisher_weights(), center=centre, center_lo=centre_lo
+            )
         ),
         project=lambda basis: grouped_projected_factor(
-            context.dm, fisher_weights(), basis, center=centre
+            context.dm, fisher_weights(), basis, center=centre, center_lo=centre_lo
         ),
-        structural=lambda: grouped_structural_nulls(context.dm, fisher_weights(), center=centre),
+        structural=lambda: grouped_structural_nulls(
+            context.dm, fisher_weights(), center=centre, center_lo=centre_lo
+        ),
         rows=context.dm.n,
         certify=not np.any(mode.penalty),
     )
@@ -1593,7 +1601,8 @@ def _hydrate_scop_terminal_rank_info(
             context.dm,
             fisher_weights(),
             mode.penalty,
-            center=mode.fisher_mean_x,
+            center=centre,
+            center_lo=centre_lo,
         ),
     )
     coefficient_rank = _certified_terminal_rank(

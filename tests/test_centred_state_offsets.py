@@ -26,6 +26,7 @@ from numpy.typing import NDArray
 
 from superglm import (
     Categorical,
+    Constraint,
     FactorSmooth,
     LambdaPolicy,
     Numeric,
@@ -1409,7 +1410,7 @@ def test_metrics_certify_the_rank_about_the_exact_pair():
     assert profile_rank.rank == 2
 
 
-@pytest.mark.parametrize("fit", ["gram", "gram_reml", "gamma_reml", "proximal"])
+@pytest.mark.parametrize("fit", ["gram", "gram_reml", "gamma_reml", "proximal", "scop_reml"])
 def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
     """Two Numeric columns at 1e16, ``b = 2 a - 1e16``, beside a P-spline.
 
@@ -1423,26 +1424,40 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
     m_b`` rounds away from the offset and the pair stops aliasing (the proximal certificate
     read rank 9 against 8 at no offset, Codex).  The certified rank and the
     NaN standard errors of the pair match the fit at no offset.  Mutation:
-    the one-float centre at a certification site.
+    the one-float centre at a certification site.  ``scop_reml`` takes
+    ``b = a + 2`` with a monotone spline and unit weights: the means
+    ``1e16 + 1`` and ``1e16 + 3`` then tie and round apart, so the one-float
+    rows alias with a constant offset and SCOP's terminal data rank read 13
+    against 12.
     """
     rng = np.random.default_rng(5)
     n = 800
     z = np.tile([-2.0, 0.0, 2.0, 4.0], n // 4)
-    s = rng.uniform(size=n)
+    s = np.tile(np.linspace(0.02, 0.98, 50), n // 50) if fit == "scop_reml" else rng.uniform(size=n)
     eta = 0.3 + 0.1 * z + 0.4 * np.sin(2 * np.pi * s)
-    if fit == "proximal":
+    if fit in ("proximal", "scop_reml"):
         y = 3.0 + eta + 0.3 * rng.normal(size=n)
     elif fit == "gamma_reml":
         y = rng.gamma(3.0, np.exp(eta) / 3.0)
     else:
         y = rng.poisson(np.exp(eta)).astype(float)
-    family = {"proximal": "gaussian", "gamma_reml": "gamma"}.get(fit, "poisson")
+    family = {"proximal": "gaussian", "scop_reml": "gaussian", "gamma_reml": "gamma"}.get(
+        fit, "poisson"
+    )
+    spline = (
+        PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        if fit == "scop_reml"
+        else Spline(kind="ps", k=8)
+    )
+    second = (
+        (lambda shift: shift + z + 2.0) if fit == "scop_reml" else (lambda shift: shift + 2.0 * z)
+    )
     ranks = []
     for shift in (0.0, 1e16):
-        frame = pd.DataFrame({"a": shift + z, "b": shift + 2.0 * z, "s": s})
+        frame = pd.DataFrame({"a": shift + z, "b": second(shift), "s": s})
         model = SuperGLM(
             family=family,
-            features={"a": Numeric(), "b": Numeric(), "s": Spline(kind="ps", k=8)},
+            features={"a": Numeric(), "b": Numeric(), "s": spline},
             selection_penalty=0.01 if fit == "proximal" else 0,
             **({"link": "log"} if fit == "gamma_reml" else {}),
         )
