@@ -79,7 +79,8 @@ def _release_tuple(release: str) -> tuple[int, ...]:
     sha, as a version after every criterion change, so none of them is exempted."""
     if not re.fullmatch(r"v?\d+(\.\d+)*", release):
         return (sys.maxsize,)
-    return tuple(int(part) for part in release.lstrip("v").split("."))
+    parts = tuple(int(part) for part in release.lstrip("v").split("."))
+    return (*parts, 0, 0)[: max(3, len(parts))]  # ``v0.41`` reads as 0.41.0
 
 
 def glm_cases() -> list[str]:
@@ -802,7 +803,7 @@ def main(argv=None) -> int:
         *(["--subset"] if args.subset else []),
         *(["--shard", args.shard] if args.shard else []),
     ]
-    base, candidate = out / f"{args.ref}.jsonl", out / "candidate.jsonl"
+    base, candidate = out / f"{args.ref.replace('/', '_')}.jsonl", out / "candidate.jsonl"
     for path in (base, candidate):
         path.unlink(missing_ok=True)
     script = str(Path(__file__).resolve())
