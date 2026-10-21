@@ -313,14 +313,16 @@ def diagonal_of_square(matrix: NDArray) -> NDArray:
 # Householder QR of two stacked triangles (LAPACK ``dtpqrt`` with ``l = n``,
 # the triangle-on-triangle kernel of TSQR's reduction).
 #
-# A leaf holds ``_TSQR_LEAF_COPIES`` copies of its rows while it is factored
-# (the weighted rows, ``numpy.linalg.qr``'s working copy and its Fortran
-# buffer), so its row count is ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,293
-# rows at width 814.  A leaf has at least ``2 * width`` rows, a floor reached
-# above width 1,322, where it holds ``48 width^2`` bytes, above the budget.
-# The leaves, and so the tree, depend only on the row count
-# and the width -- never on the worker count -- so the factor is bitwise the
-# same however many workers factor the leaves.
+# A leaf budgets ``_TSQR_LEAF_COPIES`` copies of its rows, so its row count is
+# ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,293 rows at width 814.  It holds
+# two while it is factored (the weighted rows, and the Fortran-order copy
+# ``dgeqrf`` works in); the third is the budget from when ``numpy.linalg.qr``
+# was the leaf, kept because the leaf row count, and so the tree and the
+# rounding, are a function of it.  A leaf has at least ``2 * width`` rows, a
+# floor reached above width 1,322, where it holds ``48 width^2`` bytes, above
+# the budget.  The leaves, and so the tree, depend only on the row count and
+# the width -- never on the worker count -- so the factor is bitwise the same
+# however many workers factor the leaves.
 _TSQR_LEAF_BYTES = 80 << 20
 _TSQR_LEAF_COPIES = 3
 # Block size of the structured merge (``dtpqrt``'s ``nb``); fixed, so the merge
@@ -347,8 +349,8 @@ def _tsqr_leaf(
     """``R`` of one leaf's weighted, centred rows (with the weighted response appended).
 
     The rows are taken out of ``slot`` and released once copied, so the leaf
-    holds its weighted copy and LAPACK's two working copies, never the input
-    as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
+    holds its weighted copy and ``dgeqrf``'s Fortran-order copy, never the
+    input as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
     exactly as the chunked factor formed it.  A slot may hold a deferred leaf
     (``centered_system.iter_grouped_design_leaves``) instead of rows: it
     writes the same entries straight into the block, on the worker that
@@ -394,7 +396,6 @@ def _leaf_qr(block: NDArray) -> NDArray:
     if function is None or rows == 0 or width == 0:  # pragma: no cover - SciPy without the pointer
         return np.linalg.qr(block, mode="r")
     matrix = np.array(block, dtype=np.float64, order="F")
-    del block
     tau = np.empty(min(rows, width))
     # m, n, lda, lwork, info: Fortran arguments by reference; lwork -1 queries
     ints = np.array([rows, width, rows, -1, 0], dtype=np.intc)
