@@ -263,7 +263,7 @@ def term_inference(
             # plus a smooth_curve for plotting the fitted spline.
             inner = spec._spline
             raw = with_population_curve(
-                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
             )
             levels = raw["levels"]
             level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
@@ -405,7 +405,7 @@ def term_inference(
         else:
             # Step mode: categorical-style output
             raw = with_population_curve(
-                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
             )
             levels = raw["levels"]
             log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
@@ -460,7 +460,7 @@ def term_inference(
     if isinstance(spec, _SplineBase):
         raw = spec.reconstruct(beta_combined, n_points=n_points)
         # the population curve when an sz term moves it (#432), as its errors are
-        raw = with_population_curve(raw, name, interaction_specs, groups, beta)
+        raw = with_population_curve(raw, name, interaction_specs, groups, beta, spec)
         x_grid = raw["x"]
         log_rel = raw["log_relativity"]
         rel = raw["relativity"]
@@ -552,7 +552,7 @@ def term_inference(
     # ── Categorical ──────────────────────────────────────────────
     elif isinstance(spec, Categorical):
         raw = with_population_curve(
-            spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+            spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
         )
         levels = raw["levels"]
         log_rels = np.array([raw["log_relativities"][lv] for lv in levels])

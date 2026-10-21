@@ -168,7 +168,11 @@ def _held_level_se(
     map, and centring maps it through ``I - 11'/n``.
     """
     from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import held_group_levels
+    from superglm.features.factor_smooth import (
+        at_each_level,
+        group_term_report_levels,
+        held_group_levels,
+    )
     from superglm.features.ordered_categorical import OrderedCategorical
 
     record = held_group_levels(name, interaction_specs)
@@ -182,15 +186,22 @@ def _held_level_se(
         return None
     levels = list(spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels)
     held, identified = record
-    if not set(held) | set(identified) <= set(levels):
+    keys = [key for key in group_term_report_levels(spec, held) if key in levels]
+    if not keys:
         return None
-    labels = np.asarray(levels, dtype=object)
-    L = np.asarray(spec.transform(labels), dtype=np.float64)
-    L = L[:, _active_subgroup_columns(name, feature_groups, active_subs)]
-    L = L - L[levels.index(spec._base_level)]
-    L[[levels.index(level) for level in held]] = L[[levels.index(lv) for lv in identified]].mean(
-        axis=0
-    )
+    columns = _active_subgroup_columns(name, feature_groups, active_subs)
+
+    def rows(labels):
+        return np.asarray(spec.transform(labels), dtype=np.float64)[:, columns]
+
+    L = rows(np.asarray(levels, dtype=object))
+    base = L[levels.index(spec._base_level)]
+    L = L - base
+    # the identified levels' rows as ``predict`` scores them: a level the term
+    # does not know has the zero row an unseen level gets
+    found = at_each_level(rows, identified)
+    mean = np.mean([np.zeros(L.shape[1]) if row is None else row for row in found], axis=0) - base
+    L[[levels.index(key) for key in keys]] = mean
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
     Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
     if center:

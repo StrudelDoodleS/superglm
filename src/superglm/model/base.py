@@ -406,7 +406,7 @@ def _held_level_shift(term: dict[str, Any], X: EagerFrame, score, interaction_sp
     add to ``predict``.  ``score(labels)`` scores the term at those labels.
     Zero for a term no ``sz`` term folds.
     """
-    from superglm.features.factor_smooth import held_group_levels
+    from superglm.features.factor_smooth import group_term_level_values, held_group_levels
 
     labels = np.asarray(X.column_array(term["name"]), dtype=object)
     shift = np.zeros(len(labels), dtype=np.float64)
@@ -414,7 +414,7 @@ def _held_level_shift(term: dict[str, Any], X: EagerFrame, score, interaction_sp
     if record is None:
         return shift
     held, identified = record
-    values = np.asarray(score(np.asarray([*identified, *held], dtype=object)), dtype=np.float64)
+    values = group_term_level_values(score, [*identified, *held])
     codes = pd.Index(list(held)).get_indexer(labels)
     rows = codes >= 0
     shift[rows] = float(np.mean(values[: len(identified)])) - values[len(identified) + codes[rows]]

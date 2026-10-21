@@ -1794,7 +1794,8 @@ def test_superglm_predict_folds_a_redundant_group_term_out_of_the_sz_rule() -> N
     levels (g000, g001), whose walk is the level constants the group term
     aliases: ``predict`` does not move, conditionally and under
     ``population``, within the rule's rounding.  Mutation:
-    ``group_term=group_term`` dropped at the SuperGLM call site.
+    ``group_term = features.get(spec.group) ...`` replaced by ``None`` in
+    ``_score_unidentified_factor_smooth``.
     """
     from superglm import OrderedCategorical, Polynomial
     from superglm.model import base
@@ -2117,17 +2118,12 @@ def test_a_selected_and_a_plain_sz_term_hold_each_others_levels() -> None:
     )
 
 
-def test_superglm_scores_the_group_term_only_at_levels_it_knows() -> None:
-    """A declared empty sz level the group term never saw neither raises nor warns (PR 508 round 3, Claude review).
+def _unknown_declared_level_model():
+    """``select=True`` sz term declaring a rowless level ``d``, beside ``OrderedCategorical(order=["a", "b", "c"])``.
 
-    A ``select=True`` sz term may declare a level with no rows (``levels=``),
-    which makes it weightless and gives the term a population offset, so the
-    rule reads the group term's value at every sz level.  An
-    ``OrderedCategorical(order=["a", "b", "c"])`` does not know ``d``, and
-    every ``predict``, even of rows of ``a`` only, raised its unknown-level
-    error: 0.40 predicted that model.  The group term is now scored at the
-    levels it knows, and ``d`` takes the value an unseen row gets, 0 under
-    base routing, without its warnings.  Fails on b551a656.
+    ``d`` is weightless, so the term holds it and reads the group term at every
+    level, and the group term does not know ``d``.  Returns the model, the
+    frame and the response.
     """
     rng = np.random.default_rng(7)
     n = 900
@@ -2135,6 +2131,7 @@ def test_superglm_scores_the_group_term_only_at_levels_it_knows() -> None:
     g = rng.choice(["a", "b", "c"], n)
     slope = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.1}).to_numpy()
     y = 0.7 * np.sin(2.2 * x) + slope * x + 0.3 * rng.standard_normal(n)
+    frame = pd.DataFrame({"x": x, "g": g})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # the redundant group term's warning
         model = SuperGLM(
@@ -2154,13 +2151,88 @@ def test_superglm_scores_the_group_term_only_at_levels_it_knows() -> None:
                 )
             ],
             selection_penalty=0,
-        ).fit_reml(pd.DataFrame({"x": x, "g": g}), y)
+        ).fit_reml(frame, y)
     assert model._interaction_specs["x:g:sz"]._weightless_levels == (3,)
+    return model, frame, y
+
+
+def test_superglm_scores_the_group_term_only_at_levels_it_knows() -> None:
+    """A declared empty sz level the group term never saw neither raises nor warns (PR 508 round 3, Claude review).
+
+    A ``select=True`` sz term may declare a level with no rows (``levels=``),
+    which makes it weightless and gives the term a population offset, so the
+    rule reads the group term's value at every sz level.  An
+    ``OrderedCategorical(order=["a", "b", "c"])`` does not know ``d``, and
+    every ``predict``, even of rows of ``a`` only, raised its unknown-level
+    error: 0.40 predicted that model.  The group term is now scored at the
+    levels it knows, and ``d`` takes the value an unseen row gets, 0 under
+    base routing, without its warnings.  Fails on b551a656.
+    """
+    model, _, _ = _unknown_declared_level_model()
     probe = pd.DataFrame({"x": np.linspace(-0.9, 0.9, 7), "g": "a"})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         predicted = model.predict(probe)
     assert np.all(np.isfinite(predicted)) and not caught
+
+
+def test_importance_and_holdout_run_on_a_declared_level_the_group_term_does_not_know() -> None:
+    """The reports score a held level as ``predict`` does, the unseen value for one the group term lacks (PR 508 round 7).
+
+    On the fixture above ``d`` is held and nothing is left out, so the
+    reports' split of ``predict`` scores the group term at ``a, b, c, d, d``.
+    ``term_importance`` and the holdout drop-term diagnostics scored it at
+    those labels directly and raised the group term's unknown-level error,
+    though both ran on the model before round 6 (Claude, Codex).  They now
+    read ``d`` through ``group_term_level_values``.  The group term is moved
+    by a random ``d_gamma`` and the sz constants take it back (the predictor
+    stays where it was); ``g``'s importance is then the weighted spread of
+    its own score, and the holdout's deltas for ``x`` and ``g`` are the
+    Gaussian deviance of the public predictor without that term less that of
+    the public predictor, within the deviance's slope
+    ``2 (|y| + |mu_full| + |mu_drop|)`` times the predictor's roundings.
+    Fails on 8f4d0d7c with the unknown-level ``ValueError``.
+    """
+    from superglm.model import base
+
+    model, frame, y = _unknown_declared_level_model()
+    spec = model._interaction_specs["x:g:sz"]
+    d_gamma = np.random.default_rng(3).normal(size=len(_feature_columns(model, "g")))
+    traded, reach = _traded_group_term(model, "x:g:sz", d_gamma)
+    model._result = traded
+    beta = np.asarray(traded.beta, dtype=np.float64)
+
+    def predicted(coefficients):
+        model._result = dataclasses.replace(traded, beta=coefficients)
+        return base.predict_eta_exact(model, frame, warn=False)
+
+    full = predicted(beta)
+    mu = {"full": full}
+    for term in ("x", "g"):
+        dropped = np.array(beta)
+        dropped[_feature_columns(model, term)] = 0.0
+        mu[term] = predicted(dropped)
+    model._result = traded
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        importance = model.term_importance(frame).set_index("term")["sd_eta"]
+        holdout = model.term_drop_diagnostics(
+            frame, y, mode="holdout", X_val=frame.copy(), y_val=y.copy()
+        ).set_index("feature")["delta_deviance"]
+    count = len(beta) + len(spec._levels) * spec.k + 4 * spec.k + 2
+    magnitude = _eta_magnitude(model, frame) + 4.0 * reach
+    own = np.asarray(
+        model._specs["g"].score(frame["g"].to_numpy(), beta[_feature_columns(model, "g")])
+    )
+    assert (
+        abs(float(importance["g"]) - float(np.std(own)))
+        <= 4.0 * _gamma(count) * float(np.max(magnitude)) * 2.0
+    )
+    for term in ("x", "g"):
+        slope = 2.0 * (np.abs(y) + np.abs(mu["full"]) + np.abs(mu[term]))
+        bound = 2.0 * float(np.sum(slope * 4.0 * _gamma(count) * magnitude))
+        expected = float(np.sum((y - mu[term]) ** 2) - np.sum((y - mu["full"]) ** 2))
+        assert abs(float(holdout[term]) - expected) <= bound, term
 
 
 @pytest.mark.parametrize("family", ["poisson", "binomial"])
@@ -4218,7 +4290,10 @@ def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_ter
     deviance of the public predictor without ``z`` less that of the public
     predictor, both from the raw coordinates; they agree within the
     deviance's slope ``2 (max(mu) + y)`` times the predictor's roundings.
-    Mutation: no group term passed to the holdout's sz scoring.
+    Mutations (each fails it): ``_held_level_shift`` dropped, which leaves the
+    sz term unfolded and the group term without its held-level share; the
+    unreduced ``features`` passed while the shift is kept, which folds the
+    share in twice.
     """
     from superglm.model import base
 
@@ -4299,13 +4374,17 @@ def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_ter
     assert abs(float(holdout["z"]) - (dev_drop - dev_full)) <= bound
 
 
-def _folded_group_term_model(group_term):
+def _folded_group_term_model(group_term, *, integers: bool = False):
     """The 3k trigger's Poisson sz term beside a redundant ``OrderedCategorical`` on its group.
 
     g000 (no claim, every row separated) is held at the population, so
     ``predict`` prices it at the group term's mean over the identified levels.
+    With ``integers`` the group column holds the integers ``0 .. 11`` for
+    g000 .. g011, which an ``order=`` of ``"0" .. "11"`` declares.
     """
     frame, y, _ = _trigger_shaped("poisson")
+    if integers:
+        frame["g"] = frame["g"].str[1:].astype(int).to_numpy()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # the redundant group term's warning
         model = SuperGLM(
@@ -4341,7 +4420,7 @@ def _special_trade(model, d: float = 5.0):
     return _traded_group_term(model, "x:g:sz", move)
 
 
-@pytest.mark.parametrize("trade", ["special", "polynomial"])
+@pytest.mark.parametrize("trade", ["special", "polynomial", "integers"])
 def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) -> None:
     """A held level's group-term relativity is ``predict``'s level-minus-reference arithmetic (PR 508 round 6).
 
@@ -4356,17 +4435,24 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
     every ``x``, ``dev`` the ``factor_smooth()`` curves, within ``8
     gamma_count`` of the magnitudes ``predict`` touches (Higham 2002, sections
     3.1 and 3.5).  Fails on 4a2ed996: the reports read 5.0 (special) and
-    -17.99 (polynomial) where ``predict`` prices 0.0 and -2.88.
+    -17.99 (polynomial) where ``predict`` prices 0.0 and -2.88.  With
+    ``integers`` the group column holds the integers ``0 .. 11`` beside an
+    ``OrderedCategorical(order=["0", ..., "11"])``, which the model accepts
+    and canonicalizes for scoring; the reports resolved the sz term's integer
+    labels against the term's strings, found none, and read the walked value
+    (PR 508 round 7, Codex).  Fails on 8f4d0d7c.
     """
     from superglm.model import base
 
-    order = [f"g{i:03d}" for i in range(12)]
+    integers = trade == "integers"
+    order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
     group_term = (
         OrderedCategorical(order=order, specials=["g000"], basis=Polynomial(degree=1))
         if trade == "special"
         else OrderedCategorical(order=order, basis=Polynomial(degree=2))
     )
-    model, _, _ = _folded_group_term_model(group_term)
+    model, _, _ = _folded_group_term_model(group_term, integers=integers)
+    held, other = (0, 5) if integers else ("g000", "g005")
     if trade == "special":
         traded, reach = _special_trade(model)
     else:
@@ -4374,7 +4460,7 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
         traded, reach = _traded_group_term(model, "x:g:sz", d_gamma)
     model._result = traded
     steps = np.linspace(0.0, 1.0, 11)
-    grid = pd.DataFrame({"x": np.tile(steps, 2), "g": np.repeat(["g000", "g005"], len(steps))})
+    grid = pd.DataFrame({"x": np.tile(steps, 2), "g": np.repeat([held, other], len(steps))})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         eta = base._predict_eta(
@@ -4405,13 +4491,13 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
                 model.reconstruct_feature("g")["level_log_relativities"]
             ),
         }
-    dev = {level: curves.loc[level].to_numpy() for level in ("g000", "g005")}
+    dev = {level: curves.loc[level].to_numpy() for level in (held, other)}
     count = len(model.result.beta) + 12 * 5 + 4 * 5 + 2
     magnitude = float(np.max(_eta_magnitude(model, grid))) + 4.0 * reach
     bound = 8.0 * _gamma(count) * (magnitude + max(np.abs(d).max() for d in dev.values()))
     for path, values in reported.items():
-        expected = values["g005"] + eta[0] - eta[1] + dev["g005"] - dev["g000"]
-        assert np.all(np.abs(values["g000"] - expected) <= bound), (path, values["g000"])
+        expected = values[str(other)] + eta[0] - eta[1] + dev[other] - dev[held]
+        assert np.all(np.abs(values[str(held)] - expected) <= bound), (path, values[str(held)])
 
 
 def test_importance_and_holdout_read_a_held_level_of_the_group_term_as_predict_prices() -> None:
@@ -4477,7 +4563,8 @@ def base_eta(model, frame):
     )
 
 
-def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean() -> None:
+@pytest.mark.parametrize("integers", [False, True])
+def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean(integers) -> None:
     """A held level's group-term standard error is that of the value reported there (PR 508 round 6).
 
     An ``OrderedCategorical(basis=Spline)`` group term is penalized, so the
@@ -4487,13 +4574,17 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     base row, so its error is ``sqrt(c' V
     c)``, in ``relativities(with_se=True)`` and ``term_inference()``, within
     ``4 gamma_(2p)`` of ``|c|' |V| |c|``.  Fails on 4a2ed996, which reported
-    the error of g000's own value.
+    the error of g000's own value.  With ``integers`` the group column holds
+    ``0 .. 11`` beside ``order=["0", ..., "11"]`` and the held level is
+    ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.
     """
-    order = [f"g{i:03d}" for i in range(12)]
-    model, _, _ = _folded_group_term_model(OrderedCategorical(order=order, basis=Spline(n_knots=4)))
+    order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
+    model, _, _ = _folded_group_term_model(
+        OrderedCategorical(order=order, basis=Spline(n_knots=4)), integers=integers
+    )
     spec = model._specs["g"]
     sz = model._interaction_specs["x:g:sz"]
-    identified = [level for c, level in enumerate(sz._levels) if c not in sz._left_out]
+    identified = [str(level) for c, level in enumerate(sz._levels) if c not in sz._left_out]
     rows = np.asarray(spec.transform(np.asarray(order, dtype=object)), dtype=np.float64)
     rows = rows - rows[order.index(spec._base_level)]
     c = rows[[order.index(level) for level in identified]].mean(axis=0)
@@ -4507,8 +4598,102 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
         frame_se = model.relativities(with_se=True)["g"].set_index("level")["se_log_relativity"]
         inference = model.term_inference("g")
     inferred = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
-    for se in (frame_se["g000"], inferred["g000"]):
+    held = order[0]
+    for se in (frame_se[held], inferred[held]):
         assert abs(float(se) ** 2 - expected) <= bound
+
+
+def test_reports_fold_a_held_level_beside_a_declared_level_the_group_term_lacks() -> None:
+    """One level the group term does not know does not turn the fold off for the others (PR 508 round 7, Claude).
+
+    The sz term declares ``d`` (rowless) beside the weightless ``c``; both
+    are held, and the identified levels ``a, b, c, e, d`` average the group
+    term's values with ``d`` at the unseen value, as ``predict`` does.
+    ``relativities``, ``term_inference`` and ``reconstruct_feature`` checked
+    that every sz label was in the group term's table, found ``d`` was not,
+    and left ``c`` at its own value; each now reads ``c`` at the mean.
+    Each value is ``predict``'s level-minus-reference arithmetic (as in the
+    round-6 test), and the error that of the mean of the group term's rows
+    (``d``'s the zero row), ``sqrt(c' V c)``.  Fails on 8f4d0d7c.
+    """
+    from superglm.model import base
+
+    rng = np.random.default_rng(7)
+    n = 900
+    x = rng.uniform(-1.0, 1.0, n)
+    g = rng.choice(["a", "b", "c", "e"], n)
+    slope = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.1, "e": 0.2}).to_numpy()
+    y = 0.7 * np.sin(2.2 * x) + slope * x + 0.3 * rng.standard_normal(n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": OrderedCategorical(order=["a", "b", "c", "e"], basis=Spline(n_knots=3)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    levels=["a", "b", "c", "e", "d"],
+                    select=True,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+        ).fit_reml(pd.DataFrame({"x": x, "g": g}), y, sample_weight=np.where(g == "c", 0.0, 1.0))
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._levels_at_population() == (spec._levels.index("c"), spec._levels.index("d"))
+    steps = np.linspace(-0.9, 0.9, 7)
+    grid = pd.DataFrame({"x": np.tile(steps, 2), "g": np.repeat(["c", "a"], len(steps))})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        eta = base._predict_eta(
+            model,
+            grid,
+            None,
+            fast_discrete=False,
+            random_effects="conditional",
+            stabilize=False,
+            warn=False,
+        ).reshape(2, -1)
+        curves = model.factor_smooth("x:g:sz", grid=steps).curves.set_index("level")["effect"]
+        frame_se = model.relativities(with_se=True)["g"].set_index("level")
+        inference = model.term_inference("g")
+        reported = {
+            "relativities": frame_se["log_relativity"],
+            "term_inference": pd.Series(inference.log_relativity, index=inference.levels),
+            "reconstruct_feature": pd.Series(
+                model.reconstruct_feature("g")["level_log_relativities"]
+            ),
+        }
+    dev = {level: curves.loc[level].to_numpy() for level in ("c", "a")}
+    count = len(model.result.beta) + len(spec._levels) * spec.k + 4 * spec.k + 2
+    bound = (
+        8.0
+        * _gamma(count)
+        * (float(np.max(_eta_magnitude(model, grid))) + max(np.abs(d).max() for d in dev.values()))
+    )
+    for path, values in reported.items():
+        expected = values["a"] + eta[0] - eta[1] + dev["a"] - dev["c"]
+        assert np.all(np.abs(values["c"] - expected) <= bound), (path, values["c"])
+    group_spec = model._specs["g"]
+    order = list(group_spec._ordered_levels)
+    rows = np.asarray(group_spec.transform(np.asarray(order, dtype=object)), dtype=np.float64)
+    known = [order.index(level) for level in ("a", "b", "c", "e")]
+    # ``d`` is the zero row, the value an unseen label gets; the reference row is taken off the mean
+    mean = rows[known].sum(axis=0) / 5.0 - rows[order.index(group_spec._base_level)]
+    covariance, active = model._coef_covariance
+    block = next(ag for ag in active if ag.feature_name == "g")
+    V = np.asarray(covariance)[block.start : block.end, block.start : block.end]
+    bound = 4.0 * _gamma(2 * len(mean)) * float(np.abs(mean) @ np.abs(V) @ np.abs(mean))
+    for se in (
+        frame_se["se_log_relativity"]["c"],
+        dict(zip(inference.levels, inference.se_log_relativity))["c"],
+    ):
+        assert abs(float(se) ** 2 - float(mean @ V @ mean)) <= bound
 
 
 def test_factor_smooth_names_a_level_its_group_holds() -> None:

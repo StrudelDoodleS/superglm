@@ -1383,28 +1383,60 @@ def share_group_levels(specs: Any) -> None:
             folded.add(spec.group)
 
 
-def group_term_level_values(score: Any, levels: Any) -> NDArray[np.float64]:
-    """A redundant group term's value at each of an ``sz`` term's levels (``level_constants``).
+def at_each_level(call: Any, levels: Any) -> list:
+    """``call(labels)`` read at each level: its value, or ``None`` where the term refuses the level.
 
-    ``score(labels)`` scores the group term on rows of those labels.  This is
-    internal scoring, not the caller's rows, so the term's unseen-level
-    warnings are silenced.  A level the term does not know (a ``levels=``
-    level with no rows, say) takes the value an unseen row gets, which an
-    ``unseen="error"`` policy does not give: 0, as under ``unseen="base"``.
+    The labels go in together first; if the term refuses any it is asked
+    again one level at a time.  Internal scoring, not the caller's rows, so
+    the term's unseen-level warnings are silenced.
     """
     labels = np.asarray(list(levels), dtype=object)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
-            return np.asarray(score(labels), dtype=np.float64).ravel()
+            return list(call(labels))
         except ValueError:
-            values = np.zeros(len(labels))
-            for index in range(len(labels)):
-                try:
-                    values[index] = np.asarray(score(labels[index : index + 1])).ravel()[0]
-                except ValueError:
-                    continue
-            return values
+            pass
+        found: list = []
+        for index in range(len(labels)):
+            try:
+                found.append(call(labels[index : index + 1])[0])
+            except ValueError:
+                found.append(None)
+    return found
+
+
+def group_term_level_values(score: Any, levels: Any) -> NDArray[np.float64]:
+    """A redundant group term's value at each of an ``sz`` term's levels (``level_constants``).
+
+    ``score(labels)`` scores the group term on rows of those labels.  A level
+    the term does not know (a ``levels=`` level with no rows, say) takes the
+    value an unseen row gets, which an ``unseen="error"`` policy does not
+    give: 0, as under ``unseen="base"``.  Every path that reads the group
+    term at an ``sz`` level, in a prediction or a report, reads it here.
+    """
+    found = at_each_level(
+        lambda labels: np.asarray(score(labels), dtype=np.float64).ravel(), levels
+    )
+    return np.array([0.0 if value is None else value for value in found], dtype=np.float64)
+
+
+def group_term_report_levels(spec: Any, levels: Any) -> list:
+    """The label each of an ``sz`` term's levels carries in main term ``spec``'s reports, or ``None``.
+
+    The term resolves a label as it does to score it: an
+    ``OrderedCategorical`` puts the data's spelling into its declaration's
+    (``0`` for declared ``"0"``), and a level the term does not know has no
+    row in its tables.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    resolve = (
+        spec._resolved_labels
+        if isinstance(spec, OrderedCategorical)
+        else spec._resolve_predict_labels
+    )
+    return at_each_level(resolve, levels)
 
 
 def held_group_levels(name: Any, interaction_specs: Any) -> tuple[tuple, tuple] | None:
@@ -1432,30 +1464,49 @@ def held_group_levels(name: Any, interaction_specs: Any) -> tuple[tuple, tuple] 
 
 
 def with_held_group_levels(
-    raw: dict[str, Any], name: Any, interaction_specs: Any
+    raw: dict[str, Any], name: Any, interaction_specs: Any, spec: Any, beta: NDArray
 ) -> dict[str, Any]:
     """A main term's reconstruction with its held levels at the identified mean (``held_group_levels``).
 
     Reads ``Categorical`` and ``OrderedCategorical`` level tables; their
     values are against the base level, which the mean carries unchanged.
+    ``spec`` is the main term and ``beta`` its coefficients.  The mean is
+    ``predict``'s: the term scored at the sz term's levels through
+    ``group_term_level_values`` (a level it does not know takes its unseen
+    value), less its value at the base level, and a held level is found in
+    the table under the label the term resolves it to
+    (``group_term_report_levels``).  A grouped term keeps its own values: its
+    table has one row per group, where ``predict`` prices each level.
     """
+    from superglm.features.categorical import Categorical
+    from superglm.features.ordered_categorical import OrderedCategorical
+
     record = held_group_levels(name, interaction_specs)
-    if record is None:
+    if (
+        record is None
+        or not isinstance(spec, Categorical | OrderedCategorical)
+        or spec._grouping is not None
+    ):
         return raw
     held, identified = record
+    scores = group_term_level_values(
+        lambda labels: spec.score(labels, beta), [*identified, spec._base_level]
+    )
+    mean = float(np.mean(scores[:-1]) - scores[-1])
+    keys = group_term_report_levels(spec, held)
     shifted = dict(raw)
     for log_key, key in (
         ("log_relativities", "relativities"),
         ("level_log_relativities", "level_relativities"),
     ):
-        values = raw.get(log_key)
-        if not isinstance(values, dict) or not all(
-            level in values for level in (*held, *identified)
-        ):
+        table = raw.get(log_key)
+        if not isinstance(table, dict):
             continue
-        mean = float(np.mean([values[level] for level in identified]))
-        shifted[log_key] = {**values, **dict.fromkeys(held, mean)}
-        shifted[key] = {**raw[key], **dict.fromkeys(held, float(np.exp(mean)))}
+        rows = [k for k in keys if k in table]
+        if not rows:
+            continue
+        shifted[log_key] = {**table, **dict.fromkeys(rows, mean)}
+        shifted[key] = {**raw[key], **dict.fromkeys(rows, float(np.exp(mean)))}
     return shifted
 
 
@@ -1475,7 +1526,7 @@ def population_curve_shift(
 
 
 def with_population_curve(
-    raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray
+    raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray, spec: Any
 ) -> dict[str, Any]:
     """A main-effect curve shifted onto its ``sz`` terms' population curve (#432).
 
@@ -1485,9 +1536,11 @@ def with_population_curve(
     (relativities, reconstruct, term inference, bands) is that one; a curve
     no ``sz`` term moves is returned as it is.  A main term an ``sz`` term
     folds reports its held levels as ``predict`` prices them
-    (``with_held_group_levels``).
+    (``with_held_group_levels``); ``spec`` is the main term and ``beta`` the
+    full coefficient vector.
     """
-    raw = with_held_group_levels(raw, name, interaction_specs)
+    own = np.concatenate([beta[g.sl] for g in groups if g.feature_name == name])
+    raw = with_held_group_levels(raw, name, interaction_specs, spec, own)
     if "x" not in raw or "log_relativity" not in raw:
         return raw
     shift = population_curve_shift(name, raw["x"], interaction_specs, groups, beta)
