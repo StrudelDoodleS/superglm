@@ -1428,7 +1428,8 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
     ``b = a + 2`` with a monotone spline and unit weights: the means
     ``1e16 + 1`` and ``1e16 + 3`` then tie and round apart, so the one-float
     rows alias with a constant offset and SCOP's terminal data rank read 13
-    against 12.
+    against 12; the augmented terminal rank, which an estimated-scale
+    family's ``M_p`` can read, is compared too.
     """
     rng = np.random.default_rng(5)
     n = 800
@@ -1467,7 +1468,8 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
                 model.fit_reml(frame, y)
             else:
                 model.fit(frame, y)
-        ranks.append(int(model.result.rank_info.data.rank))
+        info = model.result.rank_info
+        ranks.append((int(info.data.rank), info.augmented and int(info.augmented.rank)))
         for rows in (frame, frame.copy()):
             se = model.metrics(rows, y).coefficient_se
             assert np.all(np.isnan(se["a"])) and np.all(np.isnan(se["b"]))
