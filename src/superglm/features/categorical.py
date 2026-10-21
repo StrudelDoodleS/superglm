@@ -632,6 +632,21 @@ class Categorical:
             _validate_missing_only(x)
         return x
 
+    def _predicted_levels(self, x: NDArray) -> set:
+        """The fitted levels the rows of raw ``x`` are scored at.
+
+        Resolved as ``score`` resolves them (grouping, then the unseen
+        policy), so a collapsed level is met by its members' raw values.
+        ``score`` has already refused or reported unseen labels, so nothing is
+        said again here.
+        """
+        import pandas as pd
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            resolved = self._resolve_predict_labels(x)
+        return set(pd.unique(pd.Series(resolved, dtype=object)))
+
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""
         codes = _codes_against(x, self._levels)

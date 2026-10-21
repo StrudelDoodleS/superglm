@@ -422,8 +422,6 @@ def _score_unidentified_factor_smooth(
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     constants = None
     if group_term is not None:
-        import pandas as pd
-
         levels = as_eager_frame(pd.DataFrame({group_term["name"]: list(spec._levels)}))
         constants = np.asarray(
             _score_prediction_term_exact(group_term, levels, beta_all), dtype=np.float64
@@ -703,8 +701,10 @@ def _predict_eta(
         score(term)
         held = getattr(term["spec"], "_separated_levels_at_fit", ())
         if held and not fitted and warn:
-            met = pd.unique(pd.Series(frame.column_array(term["name"]), dtype=object))
-            named = [label for label in held if label in set(met)]
+            # the level each row is scored at: raw values go through the spec's
+            # grouping and unseen policy, as ``score`` reads them
+            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
+            named = [label for label in held if label in met]
             if named:
                 separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
     if separated_levels:

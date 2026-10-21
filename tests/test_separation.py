@@ -176,6 +176,41 @@ def test_predict_names_a_separated_categorical_level_it_meets():
     assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
 
 
+def test_predict_names_a_separated_grouped_level_by_its_members():
+    """``predict`` names a collapsed level that separates when a member's raw value meets it (PR 508 round 1).
+
+    ``Categorical(grouping=...)`` is the remedy the guide recommends for
+    sparse levels, and the separation scan records the COLLAPSED label
+    ("c67"), while ``predict`` reads the frame's raw values ("c6", "c7").  The
+    check compared the two directly, so no row ever matched a group.  It now
+    resolves the column as ``score`` does: raw to collapsed to fitted.
+    Mutation: the raw values matched against the recorded labels.
+    """
+    from superglm import collapse_levels
+
+    rng = np.random.default_rng(5)
+    n = 2500
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    y = _tweedie_response(rng, n)
+    y = np.where(np.isin(c, ["c6", "c7"]), 0.0, np.where(y == 0.0, 0.4, y))
+    grouping = collapse_levels(sorted(set(c)), groups={"c67": ["c6", "c7"]})
+    model = SuperGLM(
+        family=Tweedie(p=1.5), features={"c": Categorical(grouping=grouping)}, max_iter=60
+    )
+    fit_catching(model, pd.DataFrame({"c": c}), y, np.ones(n))
+    assert model._specs["c"]._separated_levels_at_fit == ("c67",)
+    for member in ("c6", "c7"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.predict(pd.DataFrame({"c": [member, "c1"]}))
+        named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+        assert len(named) == 1 and "'c' levels c67" in str(named[0].message)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
+    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+
+
 def test_gaussian_identity_never_fires():
     df, y, w, _ = separated_crossed_design()
     model = SuperGLM(
