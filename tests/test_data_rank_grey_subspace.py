@@ -611,6 +611,61 @@ def test_rebuilt_inference_state_decides_the_data_rank_as_the_fit_does(monkeypat
     _assert_same_decisions(data, model.result.rank_info.data)
 
 
+def test_unpenalized_fits_keep_the_data_rank_on_the_full_factor(monkeypatch):
+    """Unpenalized, ``metrics()`` and the rebuilt state certify the data rank on the full factor.
+
+    There the data rank is pseudo-inverted for the published standard errors,
+    so the grey surrogate must not stand in for it.  The near-collinear pair
+    alone (``selection_penalty=0``) is the regime: its Gram cannot certify
+    itself, yet the grey-subspace certificate would pass, so ``certify=``
+    is the only thing that keeps the full factor.
+    Mutation: dropping ``certify=`` from ``metrics._certified_data_rank`` or
+    from ``state_ops._legacy_active_state`` each leaves a grey subspace.
+    """
+    import superglm.inference.metrics as metrics_module
+    from superglm.model import state_ops
+
+    frame, y, _, _ = _near_collinear_pair()
+    frame = frame[["u", "v"]]
+    model = SuperGLM(
+        family="poisson",
+        features={"u": Numeric(), "v": Numeric()},
+        selection_penalty=0,
+    )
+    model.fit(frame, y)
+    calls = []
+
+    def spied(module):
+        decide = module.decide_data_rank
+
+        def wrapper(gram, *args, **kwargs):
+            decided = decide(gram, *args, **kwargs)
+            calls.append((np.array(gram), kwargs, decided))
+            return decided
+
+        monkeypatch.setattr(module, "decide_data_rank", wrapper)
+
+    spied(metrics_module)
+    spied(state_ops)
+    half, y_half = frame.iloc[::2].reset_index(drop=True), y[::2]
+    model.metrics(half, y_half).coefficient_se
+    solver = model._solver_pirls_result()
+    W = state_ops._solver_space_working_weights(model)
+    state_ops._legacy_active_state(model, solver, W)
+    assert len(calls) == 2
+    # the precondition: the Gram is not authoritative and the grey certificate would pass
+    for gram, kwargs, _ in calls:
+        assert rank.decompose_gram_if_authoritative(gram, psd_by_construction=True) is None
+        deflated, _ = rank.decompose_gram_deflated(
+            gram, kwargs["project"], rows=kwargs["rows"], structural=kwargs["structural"]()
+        )
+        assert deflated is not None
+    # the routes: both keep the data rank on the full factor
+    for _, _, decided in calls:
+        assert decided.grey_subspace is None
+        assert decided.rank == 2
+
+
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 def test_scop_terminal_data_rank_takes_the_fits_route(discrete, monkeypatch):
     """SCOP REML's published data rank comes from the grey subspace, as a direct fit's does.
