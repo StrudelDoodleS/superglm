@@ -4545,3 +4545,81 @@ def test_factor_smooth_names_a_level_its_group_holds() -> None:
     assert {"t", "u"} <= set(diagnostics["held_levels"])
     flat = report.curves[report.curves["level"] == "t"]
     assert np.all(flat["effect"] == 0.0) and np.all(flat["posterior_se"] == 0.0)
+
+
+@pytest.mark.parametrize("kind", ["numeric", "polynomial", "spline"])
+def test_superlss_holds_a_separated_varying_coefficient_level_as_superglm_does(kind) -> None:
+    """SuperLSS holds separated NumericCategorical, PolynomialCategorical and SplineCategorical levels (PR 508 round 6).
+
+    SuperGLM's build scans each varying-coefficient level against the
+    response and holds the ones whose curve separates; SuperLSS compiled its
+    predictors without the response, so on the trigger's TweedieLSS mean the
+    zero-claim g000 and g001 (its one claim at ``x = 0.5``, its largest)
+    walked: g001's spline deviation ran from -299 at ``x = 0`` to +300 at
+    ``x = 1``.  The fit now passes the response to the build, under each
+    predictor's response boundaries, and names the levels in a
+    ``SeparationWarning`` without refusing.  A numeric or polynomial level's
+    deviation from the base is held beyond its rows' range (``x = 1`` reads as
+    its largest ``x``), and g001's spline deviation is held below its claim
+    (``x = 0`` reads as ``x = 0.5``), in ``predict_link`` and in the joint
+    prediction design behind draws and standard errors, within ``4
+    gamma_count`` of the design's ``|D| |beta|``.  Fails on 4a2ed996.
+    """
+    import superglm as sg
+    from superglm.diagnostics.separation import SeparationWarning
+    from superglm.distributional.prediction_design import build_joint_prediction_design
+    from superglm.features.interaction import (
+        NumericCategorical,
+        PolynomialCategorical,
+        SplineCategorical,
+    )
+
+    frame, y, claims = _trigger_shaped("tweedie")
+    main, term = {
+        "numeric": (Numeric(), NumericCategorical("x", "g")),
+        "polynomial": (Polynomial(degree=2), PolynomialCategorical("x", "g")),
+        "spline": (Spline(n_knots=6), SplineCategorical("x", "g")),
+    }[kind]
+    family = sg.TweedieLSS()
+    model = sg.SuperLSS(
+        family,
+        family.mu(sg.term("x", main), sg.cat("g"), sg.interaction(term)),
+        family.phi(),
+        family.p(),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+    assert any(
+        isinstance(w.message, SeparationWarning) and "g001" in str(w.message) for w in caught
+    )
+    fitted = model._require_fitted()
+    base_level = fitted.compiled_predictors[0].compiled.specs["g"]._base_level
+    if kind == "spline":
+        pairs = {"g001": (0.0, claims["g001"])}
+    else:
+        top = float(frame.loc[frame["g"] == "g000", "x"].max())
+        pairs = {"g000": (1.0, top), "g001": (1.0, claims["g001"])}
+    xs = [x for pair in pairs.values() for x in pair]
+    probe = pd.DataFrame(
+        {
+            "x": xs * 2,
+            "g": [level for level in pairs for _ in range(2)] + [base_level] * len(xs),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        point = np.asarray(model.predict_link(probe))[:, 0]
+        design = build_joint_prediction_design(probe, fitted.compiled_predictors, fitted.layout)
+    state = fitted.layout.predictors[0]
+    local = np.asarray(fitted.result.coefficients[state.coefficient_slice], dtype=np.float64)
+    magnitude = np.abs(design.local["mean"]) @ np.abs(local)
+    bound = 4.0 * _gamma(len(local) + 8) * magnitude
+    from_design = design.local["mean"] @ local
+    assert np.all(np.abs(from_design - point) <= bound)
+    for eta in (point, from_design):
+        deviation = eta[: len(xs)] - eta[len(xs) :]
+        allowed = bound[: len(xs)] + bound[len(xs) :]
+        for index in range(0, len(xs), 2):
+            moved = abs(deviation[index] - deviation[index + 1])
+            assert moved <= allowed[index] + allowed[index + 1], (kind, index, moved)

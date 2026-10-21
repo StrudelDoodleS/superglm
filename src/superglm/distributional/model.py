@@ -599,6 +599,7 @@ def _fit_candidate(
             model_discrete=discrete,
             n_bins_config=n_bins,
             separation_boundaries=separation_boundaries,
+            separation_response=retained_y,
         )
     if separation_boundaries is not None:
         apply_separation_policy(

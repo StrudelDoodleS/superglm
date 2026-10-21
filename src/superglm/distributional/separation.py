@@ -20,6 +20,8 @@ from superglm.diagnostics.separation import (
     SeparatedTerm,
     SeparationError,
     SeparationWarning,
+    emit_curve_separation,
+    emit_level_curve_separation,
     format_factor_smooth_canonical,
     format_factor_smooth_separation,
     format_separation_message,
@@ -66,7 +68,11 @@ def scan_predictor_separation(
     """Separated levels and crossed cells on every predictor that can separate.
 
     Each compiled predictor recorded its scannable terms with their built
-    specs and raw columns; the scan itself is the scalar path's.
+    specs and raw columns; the scan itself is the scalar path's.  The
+    varying-coefficient levels its build already held (spline-by-factor
+    curves, and numeric or polynomial levels, which ``predict`` holds to
+    their rows' range) are named in a ``SeparationWarning`` here, never
+    refused: 0.40 fitted them without a scan.
     """
     compiled_tuple = tuple(compiled)
     boundary_tuple = tuple(tuple(boundary) for boundary in boundaries)
@@ -75,11 +81,17 @@ def scan_predictor_separation(
     response = np.asarray(y, dtype=np.float64)
     weight_values = np.asarray(weights, dtype=np.float64)
     findings: list[SeparatedTerm] = []
+    curves: list = []
+    level_curves: list = []
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
         for record in predictor.compiled.separation_records:
-            if record[0] == "cat":
+            if record[0] == "curve":
+                curves.extend(record[2])
+            elif record[0] == "level_curve":
+                level_curves.append((f"{predictor.name}:{record[1]}", record[2]))
+            elif record[0] == "cat":
                 _, term, spec, column = record
                 findings.extend(
                     scan_categorical_term(
@@ -107,6 +119,8 @@ def scan_predictor_separation(
                         predictor_boundaries,
                     )
                 )
+    emit_curve_separation(curves, "warn")
+    emit_level_curve_separation(level_curves)
     return findings
 
 
