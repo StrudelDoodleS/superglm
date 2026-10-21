@@ -133,7 +133,7 @@ def record_factor_smooth_levels(
     ``"ignore"``; like SuperGLM it never refuses the fit.  A term no level of
     which identifies the population curve is named in a ``UserWarning``.
     """
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import FactorSmooth, share_group_levels
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
     response = np.asarray(y, dtype=np.float64)
@@ -166,6 +166,8 @@ def record_factor_smooth_levels(
                     UserWarning,
                     stacklevel=stacklevel,
                 )
+        interactions = predictor.compiled.interaction_specs
+        share_group_levels(interactions[key] for key in predictor.compiled.interaction_order)
 
 
 def apply_separation_policy(

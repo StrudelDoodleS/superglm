@@ -192,10 +192,7 @@ def _predict_one_eta(
         group = getattr(interaction, "group", None)
         constants = (
             group_level_values(
-                predictor,
-                name,
-                interaction,
-                slopes[_term_indices(predictor.compiled.groups, group)],
+                predictor, interaction, slopes[_term_indices(predictor.compiled.groups, group)]
             )
             if group in predictor.compiled.feature_order
             else None

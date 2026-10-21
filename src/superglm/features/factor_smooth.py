@@ -360,6 +360,12 @@ class FactorSmooth:
         # How a level left out of the population splits its line (``_free_projectors``).
         self._free_complement: str = "lowest_order"
         self._population_null_space: NDArray | None = None
+        # What the group's sz terms decide together (``share_group_levels``):
+        # the levels any of them leaves out of the population or holds at it,
+        # and whether this term folds the group's redundant main term.
+        self._group_left_out: tuple[int, ...] = ()
+        self._group_held: tuple[int, ...] = ()
+        self._folds_group: bool = False
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -845,6 +851,8 @@ class FactorSmooth:
         self._separated_directions = ()
         self._free_complement = "lowest_order"
         self._population_null_space = None
+        self._group_left_out = self._group_held = ()
+        self._folds_group = False
         if self.basis != "sz":
             return ()
         lines = dict(design.repeated_penalty_components).get("null")
@@ -858,8 +866,8 @@ class FactorSmooth:
                 design.codes, weights=(weights > 0.0).astype(np.float64), minlength=design.n_levels
             )
             self._weightless_levels = tuple(int(level) for level in np.flatnonzero(held == 0.0))
-            if self._weightless_levels:
-                self._population_null_space = np.eye(self.k)[:, np.diag(lines) == 1.0]
+            # kept for every term: a level its group holds needs it (``share_group_levels``)
+            self._population_null_space = np.eye(self.k)[:, np.diag(lines) == 1.0]
             return ()
         rows = sz_level_identification(design, prior_weights)
         spans: dict[int, NDArray] = {}
@@ -873,7 +881,7 @@ class FactorSmooth:
         self._weightless_levels = rows.weightless
         self._separated_levels = separated
         self._separated_directions = tuple(spans.values())
-        self._population_null_space = rows.null_space if (rows.thin or separated) else None
+        self._population_null_space = rows.null_space
         return separated
 
     @property
@@ -904,21 +912,26 @@ class FactorSmooth:
         the weightless one included, which the sum-to-zero constraint makes
         zero: the population is the main effect (``"main"``).
         """
-        return (
-            bool(getattr(self, "_unidentified_levels", ()))
-            or bool(getattr(self, "_separated_levels", ()))
-            or bool(getattr(self, "_weightless_levels", ()))
-        )
+        return bool(self._left_out) or bool(self._levels_at_population())
+
+    @property
+    def _left_out(self) -> set[int]:
+        """The levels the population mean leaves out: thin, separated, or so in another sz term on the group."""
+        return {
+            *getattr(self, "_unidentified_levels", ()),
+            *getattr(self, "_separated_levels", ()),
+            *getattr(self, "_group_left_out", ()),
+        }
 
     @property
     def _folds_group_term(self) -> bool:
         """Whether the rule reads a redundant group term into each level's line (``_score_identified``).
 
-        A 0.41 convention, recorded with the lowest-order projector
-        (``_free_complement``): a model saved before keeps the rule it was
-        saved with, which does not read the group term.
+        One sz term per group does (``share_group_levels``).  A 0.41
+        convention: a model saved before records no such term and keeps the
+        rule it was saved with, which does not read the group term.
         """
-        return getattr(self, "_free_complement", "orthogonal") == "lowest_order"
+        return bool(getattr(self, "_folds_group", False))
 
     @property
     def _population_convention(self) -> str:
@@ -928,9 +941,10 @@ class FactorSmooth:
         constraint makes it), ``"mean"`` (the mean of the levels the data
         identify) or ``"canonical"`` (every level thin or separated).  A term
         that selects its lines (``select=True``, #444) penalizes them
-        instead: always ``"main"``.
+        instead: ``"main"``, unless another sz term on its group leaves a
+        level out (``share_group_levels``).
         """
-        excluded = set(self._unidentified_levels) | set(self._separated_levels)
+        excluded = self._left_out
         if not excluded:
             return "main"
         if len(excluded) < len(self._levels):
@@ -965,6 +979,9 @@ class FactorSmooth:
         if self._spans_recorded:
             spans = getattr(self, "_separated_directions", ())
             directions.update(zip(self._separated_levels, spans, strict=True))
+        # a level the group holds at the population is free along all of N_P
+        held = getattr(self, "_group_held", ())
+        directions.update((level, np.asarray(self._population_null_space)) for level in held)
         return directions
 
     def _levels_at_population(self) -> tuple[int, ...]:
@@ -978,12 +995,14 @@ class FactorSmooth:
         """
         weightless = tuple(getattr(self, "_weightless_levels", ()))
         separated = tuple(getattr(self, "_separated_levels", ()))
-        if not separated or not self._spans_recorded:
-            return weightless
-        nullity = np.asarray(self._population_null_space).shape[1]
-        directions = self._unidentified_directions()
-        whole = tuple(level for level in separated if directions[level].shape[1] == nullity)
-        return weightless + tuple(level for level in whole if level not in weightless)
+        if separated and self._spans_recorded:
+            nullity = np.asarray(self._population_null_space).shape[1]
+            directions = self._unidentified_directions()
+            whole = tuple(level for level in separated if directions[level].shape[1] == nullity)
+            weightless += tuple(level for level in whole if level not in weightless)
+        return weightless + tuple(
+            level for level in getattr(self, "_group_held", ()) if level not in weightless
+        )
 
     def _lowest_order_null_space(self, order: int) -> NDArray:
         """``(k, order)``: the coefficient sequences polynomial below degree ``order``, natural basis.
@@ -1077,7 +1096,7 @@ class FactorSmooth:
         null_space = np.asarray(self._population_null_space, dtype=np.float64)
         projector = null_space @ null_space.T
         thin = tuple(self._unidentified_levels)
-        excluded = set(thin) | set(self._separated_levels)
+        excluded = self._left_out
         identified = [level for level in range(n_levels) if level not in excluded]
         if not identified and not self._spans_recorded:
             identified = [level for level in range(n_levels) if level not in set(thin)]
@@ -1085,6 +1104,8 @@ class FactorSmooth:
             return np.asarray(identified, dtype=np.intp), projector / len(identified)
         unidentified = self._unidentified_directions()
         free = [np.asarray(f, dtype=np.float64) for f in unidentified.values()]
+        if not free:  # every level left out by another term on the group, none free here
+            return np.zeros(0, dtype=np.intp), np.zeros((0, *projector.shape))
         projectors = np.stack([f @ f.T for f in free])
         local = null_space.T @ (np.eye(len(projector)) - projectors.sum(axis=0) / n_levels)
         local = local @ null_space
@@ -1182,7 +1203,8 @@ class FactorSmooth:
         and the contribution returned is that level's predicted line less
         ``a_l``, so the two terms together predict as the term would alone.
         A level the rule leaves alone is scored from its own coefficients.
-        A model saved before the convention (``_folds_group_term``) ignores
+        A term that does not fold its group's main term (``_folds_group_term``:
+        one per group, none in a model saved before 0.41) ignores
         ``level_constants``.  Under ``population`` a row of a known level gives ``a_l`` back too:
         the population is the term's alone, as without the redundant term.
         """
@@ -1224,6 +1246,7 @@ class FactorSmooth:
             *self._unidentified_levels,
             *getattr(self, "_weightless_levels", ()),
             *getattr(self, "_separated_levels", ()),
+            *getattr(self, "_group_held", ()),
         )
         thin = np.isin(codes, np.asarray(unidentified, dtype=np.intp))
         named = tuple(self._levels[code] for code in np.unique(codes[thin]))
@@ -1304,24 +1327,84 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
     ]
 
 
-def group_term_folding_terms(terms: Any) -> dict[str, Any]:
-    """The one ``sz`` term per group that reads that group's redundant main term into its levels.
+def share_group_levels(specs: Any) -> None:
+    """Decide once, for the ``sz`` terms on each group, which levels they treat alike, and who folds.
 
-    ``terms`` is ``(name, spec)`` pairs in interaction order.  A group's main
-    term has one set of per-level values, ``a``, and the rule
-    (``FactorSmooth._score_identified``) hands it back for the levels it
-    moves: every ``sz`` term on the group folding it would take ``a`` back once
-    per term.  One fold is enough, since a level left out of the population is
-    one-sided in every ``sz`` term on its group and each term's own rule
-    removes its own share of the walk; the first term in interaction order
-    with a population offset takes it, the rest score without.  Returns
-    ``{group: name of that term}``.
+    ``specs`` are one model's (or one SuperLSS predictor's) interaction specs
+    in interaction order, each with its own record
+    (``FactorSmooth._record_unidentified_levels``).  Every level's constant
+    in each ``sz`` term on a group aliases its constant in every other, and
+    in a redundant main term on the group, so what one term decides about a
+    level binds all of them:
+
+    - a level one term holds at the population (``_levels_at_population``:
+      without weight, or every row separated) has no row in the limiting
+      conditional model, so none of its coefficients in any term on the
+      group is identified (Correia, Guimaraes & Zylkin 2021, Proposition
+      3(b)): every term holds it there (``_group_held``);
+    - a level one term leaves out of its population mean (``_left_out``),
+      or does not know (a ``levels=`` level with no rows), is left out by
+      every term (``_group_left_out``): the terms average the same levels,
+      so moving a constant between two terms, or between a term and the
+      main term, moves no population;
+    - one term per group, the first with a population offset, folds the
+      redundant main term's values into its levels (``_folds_group_term``),
+      so they are taken back once per held level.
+
+    Only terms with the 0.41 lowest-order projector (``_free_complement``)
+    take part; any other is cleared, as a model saved before records none of it.
     """
-    folding: dict[str, Any] = {}
-    for name, spec in terms:
-        if getattr(spec, "_has_population_offset", False):
-            folding.setdefault(spec.group, name)
-    return folding
+    terms = [spec for spec in specs if isinstance(spec, FactorSmooth) and spec.basis == "sz"]
+    for spec in terms:
+        spec._group_left_out = spec._group_held = ()
+        spec._folds_group = False
+    terms = [spec for spec in terms if getattr(spec, "_free_complement", "") == "lowest_order"]
+    left_out: dict[Any, set] = {}
+    held: dict[Any, set] = {}
+    known: dict[Any, tuple[set, set]] = {}
+    for spec in terms:
+        left_out.setdefault(spec.group, set()).update(spec._levels[c] for c in spec._left_out)
+        held.setdefault(spec.group, set()).update(
+            spec._levels[c] for c in spec._levels_at_population()
+        )
+        labels = set(spec._levels)
+        every, some = known.get(spec.group, (labels, set()))
+        known[spec.group] = (every & labels, some | labels)
+    for group, (every, some) in known.items():
+        left_out[group] |= some - every
+    for spec in terms:
+        codes = range(len(spec._levels))
+        spec._group_left_out = tuple(c for c in codes if spec._levels[c] in left_out[spec.group])
+        spec._group_held = tuple(c for c in codes if spec._levels[c] in held[spec.group])
+    folded: set = set()
+    for spec in terms:
+        if spec._has_population_offset and spec.group not in folded:
+            spec._folds_group = True
+            folded.add(spec.group)
+
+
+def group_term_level_values(score: Any, levels: Any) -> NDArray[np.float64]:
+    """A redundant group term's value at each of an ``sz`` term's levels (``level_constants``).
+
+    ``score(labels)`` scores the group term on rows of those labels.  This is
+    internal scoring, not the caller's rows, so the term's unseen-level
+    warnings are silenced.  A level the term does not know (a ``levels=``
+    level with no rows, say) takes the value an unseen row gets, which an
+    ``unseen="error"`` policy does not give: 0, as under ``unseen="base"``.
+    """
+    labels = np.asarray(list(levels), dtype=object)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return np.asarray(score(labels), dtype=np.float64).ravel()
+        except ValueError:
+            values = np.zeros(len(labels))
+            for index in range(len(labels)):
+                try:
+                    values[index] = np.asarray(score(labels[index : index + 1])).ravel()[0]
+                except ValueError:
+                    continue
+            return values
 
 
 def population_curve_shift(

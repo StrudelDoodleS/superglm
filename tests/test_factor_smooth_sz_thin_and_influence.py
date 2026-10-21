@@ -33,6 +33,8 @@ from superglm import (
     FactorSmooth,
     LambdaPolicy,
     Numeric,
+    OrderedCategorical,
+    Polynomial,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -702,8 +704,8 @@ def _eta_magnitude(model: SuperGLM, frame: pd.DataFrame) -> np.ndarray:
             total += columns @ np.abs(coefficients)
         elif isinstance(spec, FactorSmooth):
             _, _, _, magnitude = _sz_rule(spec, coefficients)
-            codes = pd.Index(spec._levels).get_indexer(frame["g"].to_numpy())
-            basis = np.abs(spec.marginal_basis(frame["x"].to_numpy(dtype=float)))
+            codes = pd.Index(spec._levels).get_indexer(frame[spec.group].to_numpy())
+            basis = np.abs(spec.marginal_basis(frame[spec.variable].to_numpy(dtype=float)))
             total += np.einsum("ij,ij->i", basis, magnitude[np.maximum(codes, 0)])
         else:
             total += np.abs(_score_prediction_term_exact(term, eager, beta))
@@ -1732,7 +1734,7 @@ def test_two_sz_terms_on_one_group_fold_its_redundant_term_once() -> None:
     population (here the zero-claim g000, separated in both terms) predicted
     ``b1'c1 + b2'c2 + 2 mean - a_l``, and under ``population`` the
     prediction of a known level depended on the level through ``-a_l``.  One
-    term per group (the first in interaction order, ``group_term_folding_terms``)
+    term per group (the first in interaction order, ``share_group_levels``)
     folds, so a level at the population predicts at the population, whatever
     values the group term takes: rows of every known level at the same
     ``(x, z)`` give one eta under ``population``, and g000's conditional eta
@@ -1868,6 +1870,296 @@ def test_superglm_predict_folds_a_redundant_group_term_out_of_the_sz_rule() -> N
         moved_by = np.abs(results["after"][index] - results["before"][index])
         magnitude = results["before"][2] + results["after"][2] + 4.0 * reach
         assert np.all(moved_by <= 4.0 * _gamma(count) * magnitude)
+
+
+def _traded_group_term(model, sz_name, d_gamma):
+    """``model.result`` with the group term moved by ``d_gamma`` and sz term ``sz_name`` taking it back.
+
+    The group term's per-level pattern ``p`` (``group_term_level_values``: 0
+    at a level it does not know) leaves the sz term's constants as ``p -
+    mean(p)`` and the intercept as ``mean(p)``, which keeps every fitted
+    value where it was.  Raw coordinates (no centred state), so the result
+    shares one arithmetic with ``_raw_result``.  Returns the result and
+    ``max |p|``.
+    """
+    from superglm.features.factor_smooth import group_term_level_values
+
+    spec = model._interaction_specs[sz_name]
+    term = next(g for g in model._groups if g.name == sz_name)
+    main = _feature_columns(model, spec.group)
+    group_spec = model._specs[spec.group]
+    pattern = group_term_level_values(
+        lambda labels: group_spec.transform(labels) @ d_gamma, spec._levels
+    )
+    one = spec._lowest_order_null_space(1)[:, 0]
+    beta = np.array(model.result.beta)
+    beta[main] += d_gamma
+    blocks = spec._level_blocks(beta[term.sl]) - np.outer(pattern - pattern.mean(), one)
+    beta[term.sl] = blocks[:-1].ravel()
+    intercept = float(model.result.intercept) - float(pattern.mean())
+    return _raw_result(model, beta, intercept), float(np.abs(pattern).max())
+
+
+def _feature_columns(model, feature) -> np.ndarray:
+    """The coefficient indices of every group of main term ``feature``, in order."""
+    groups = [g for g in model._groups if g.feature_name == feature]
+    return np.concatenate([np.arange(g.start, g.end) for g in groups])
+
+
+def _raw_result(model, beta=None, intercept=None):
+    """``model.result`` in raw coordinates: ``beta`` and ``intercept`` without the centred state."""
+    return dataclasses.replace(
+        model.result,
+        beta=np.array(model.result.beta) if beta is None else beta,
+        intercept=float(model.result.intercept) if intercept is None else intercept,
+        centred_intercept=None,
+        state_center=None,
+    )
+
+
+def _assert_trading_the_group_term_moves_nothing(model, grid, terms, d_gamma, count, held) -> None:
+    """Moving the group term against each sz term in ``terms`` moves no prediction on ``grid``.
+
+    The linear predictor before the link guard, which would hide a walked
+    level: conditionally and under ``population``, within ``4 gamma_count``
+    of the magnitudes both predictions touch (``_eta_magnitude``) and four
+    times the moved pattern (Higham 2002, sections 3.1 and 3.5).  Rows of the
+    ``held`` levels predict the population, as an unseen level does.
+    """
+    from superglm.model import base
+
+    def eta(random_effects):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return base._predict_eta(
+                model,
+                grid,
+                None,
+                fast_discrete=False,
+                random_effects=random_effects,
+                stabilize=False,
+                warn=False,
+            )
+
+    fitted = model.result
+    rows = grid["g"].isin(held).to_numpy()
+    for name in terms:
+        traded, reach = _traded_group_term(model, name, d_gamma)
+        results = {}
+        for label, result in (("before", _raw_result(model)), ("after", traded)):
+            model._result = result
+            results[label] = (eta("conditional"), eta("population"), _eta_magnitude(model, grid))
+            model._result = fitted
+        magnitude = results["before"][2] + results["after"][2] + 4.0 * reach
+        bound = 4.0 * _gamma(count) * magnitude
+        for index in (0, 1):
+            moved_by = np.abs(results["after"][index] - results["before"][index])
+            assert np.all(moved_by <= bound), (name, index)
+        conditional, population, _ = results["before"]
+        assert np.all(np.abs(conditional - population)[rows] <= bound[rows]), name
+
+
+def _held_by_one_term_frame(family: str, *, extra_held: bool = True):
+    """Six well-observed levels, a level ``t`` and a zero-claim level ``u``, on two covariates.
+
+    Under ``"binomial"`` ``t`` is the PR 508 round-3 review's level: rows
+    ``(x, z, y) = (1, 5, 0), (2, 1, 0), (3, 3, 1)``.  ``x - 2.5`` clears every
+    row, so the ``x`` term holds ``t`` at the population, while in ``z`` a
+    receding line through ``z = 1, 5`` and ``3`` is zero, so the ``z`` term
+    keeps it.  Under ``"poisson"`` ``t`` has twelve rows and no claim.  ``u``
+    (with ``extra_held``) has twelve rows and no claim.
+    """
+    rng = np.random.default_rng(16)
+    names = [f"L{i}" for i in range(6)]
+    n = 1200
+    g = rng.choice(names, n).astype(object)
+    x, z = rng.uniform(0.0, 6.0, n), rng.uniform(0.0, 6.0, n)
+    eta = -0.5 + 0.6 * np.sin(x) + 0.4 * np.cos(z)
+    if family == "binomial":
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-eta))).astype(float)
+        held = {"g": ["t"] * 3, "x": [1.0, 2.0, 3.0], "z": [5.0, 1.0, 3.0], "y": [0.0, 0.0, 1.0]}
+    else:
+        y = rng.poisson(np.exp(eta)).astype(float)
+        held = {"g": ["t"] * 12, "x": rng.uniform(0, 6, 12), "z": rng.uniform(0, 6, 12)}
+        held["y"] = np.zeros(12)
+    if extra_held:
+        for key, values in (("g", ["u"] * 12), ("x", rng.uniform(0, 6, 12))):
+            held[key] = np.concatenate([held[key], values])
+        held["z"] = np.concatenate([held["z"], rng.uniform(0, 6, 12)])
+        held["y"] = np.concatenate([held["y"], np.zeros(12)])
+    frame = pd.DataFrame(
+        {
+            "x": np.concatenate([x, held["x"]]),
+            "z": np.concatenate([z, held["z"]]),
+            "g": np.concatenate([g, np.asarray(held["g"], dtype=object)]),
+        }
+    )
+    return frame, np.concatenate([y, held["y"]]), names
+
+
+def _level_grid(levels, steps=np.linspace(0.0, 6.0, 13)):
+    """Rows of every level in ``levels`` at the same ``(x, z)`` steps."""
+    return pd.DataFrame(
+        {
+            "x": np.tile(steps, len(levels)),
+            "z": np.tile(steps[::-1], len(levels)),
+            "g": np.repeat(np.asarray(levels, dtype=object), len(steps)),
+        }
+    )
+
+
+def test_a_level_one_sz_term_holds_is_held_by_every_sz_term_on_its_group() -> None:
+    """Held at the population is a property of the group (PR 508 round 3, Claude review).
+
+    Binomial has two response boundaries, so a level can separate in one
+    covariate and not in the other: ``t``'s rows separate along ``x - 2.5``,
+    so the ``x`` term holds ``t`` at the population, while the ``z`` term
+    keeps it as fitted.  With interactions ``[sz(z), sz(x)]`` and the
+    zero-claim ``u`` giving ``z`` a population offset, ``z`` folded the
+    group term but did not move ``t``, so ``t``'s share of the group term
+    (the ``OrderedCategorical`` special) reached ``predict``.  In the
+    limiting conditional model no row of ``t`` is left, so none of its
+    coefficients in any term on the group is identified (Correia, Guimaraes
+    & Zylkin 2021, Proposition 3(b)): every sz term on the group now holds
+    ``t``, and the term that folds the group term takes ``t``'s value back.
+    Moving the special by ``d`` against ``t``'s constants in either sz term
+    then moves no prediction of any level, conditionally and under
+    ``population``.  Fails on b551a656 for the ``x`` term's constants.
+    """
+    frame, y, names = _held_by_one_term_frame("binomial")
+
+    def sz(variable):
+        return FactorSmooth(
+            variable, group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="binomial",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "z": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": OrderedCategorical(
+                    order=[*names, "u", "t"], specials=["t"], basis=Polynomial(degree=1)
+                ),
+            },
+            interactions=[sz("z"), sz("x")],
+            selection_penalty=0,
+        ).fit_reml(frame, y)
+    x_term, z_term = (model._interaction_specs[name] for name in ("x:g:sz", "z:g:sz"))
+    t = x_term._levels.index("t")
+    assert t in x_term._separated_levels and t not in z_term._separated_levels
+    special = model._specs["g"].transform(np.asarray(["t"], dtype=object))[0]
+    levels = [*names, "u", "t"]
+    count = len(model.result.beta) + 2 * (len(levels) * 5 + 4 * 5) + 2
+    _assert_trading_the_group_term_moves_nothing(
+        model, _level_grid(levels), ("x:g:sz", "z:g:sz"), 2.0 * special, count, ["t", "u"]
+    )
+
+
+def test_a_selected_and_a_plain_sz_term_hold_each_others_levels() -> None:
+    """A ``select=True`` term holding a declared empty level beside a plain one holding a zero-claim level.
+
+    The selected ``x`` term records only its weightless ``d`` (``levels=``),
+    so it has a population offset and folded the group term first, but it
+    did not move the zero-claim ``t``, which the plain ``z`` term holds:
+    ``t``'s value in the ``OrderedCategorical`` reached ``predict``.  Both
+    terms now hold ``d`` and ``t``, and the ``x`` term folds the group term
+    once for each.  ``d``, which the plain term and the group term do not
+    know, is left out of both terms' population means, so they average the
+    same levels.  Moving the group term by a random ``d_gamma`` against
+    either sz term's constants moves no prediction of a known level,
+    conditionally and under ``population``.  Fails on b551a656.
+    """
+    frame, y, names = _held_by_one_term_frame("poisson", extra_held=False)
+    declared = [*names, "t", "d"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "z": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": OrderedCategorical(order=[*names, "t"], basis=Polynomial(degree=2)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    k=5,
+                    select=True,
+                    levels=declared,
+                    lambda_policy={
+                        "wiggle": LambdaPolicy.fixed(1.0),
+                        "null": LambdaPolicy.fixed(1.0),
+                    },
+                ),
+                FactorSmooth(
+                    "z",
+                    group="g",
+                    basis="sz",
+                    k=5,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                ),
+            ],
+            selection_penalty=0,
+        ).fit_reml(frame, y)
+    selected, plain = (model._interaction_specs[name] for name in ("x:g:sz", "z:g:sz"))
+    assert selected._weightless_levels == (declared.index("d"),)
+    assert plain._separated_levels == (plain._levels.index("t"),)
+    d_gamma = np.random.default_rng(3).normal(size=len(_feature_columns(model, "g")))
+    count = len(model.result.beta) + len(declared) * 5 + (len(names) + 1) * 5 + 8 * 5 + 2
+    _assert_trading_the_group_term_moves_nothing(
+        model, _level_grid([*names, "t"]), ("x:g:sz", "z:g:sz"), d_gamma, count, ["t"]
+    )
+
+
+def test_superglm_scores_the_group_term_only_at_levels_it_knows() -> None:
+    """A declared empty sz level the group term never saw neither raises nor warns (PR 508 round 3, Claude review).
+
+    A ``select=True`` sz term may declare a level with no rows (``levels=``),
+    which makes it weightless and gives the term a population offset, so the
+    rule reads the group term's value at every sz level.  An
+    ``OrderedCategorical(order=["a", "b", "c"])`` does not know ``d``, and
+    every ``predict``, even of rows of ``a`` only, raised its unknown-level
+    error: 0.40 predicted that model.  The group term is now scored at the
+    levels it knows, and ``d`` takes the value an unseen row gets, 0 under
+    base routing, without its warnings.  Fails on b551a656.
+    """
+    rng = np.random.default_rng(7)
+    n = 900
+    x = rng.uniform(-1.0, 1.0, n)
+    g = rng.choice(["a", "b", "c"], n)
+    slope = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.1}).to_numpy()
+    y = 0.7 * np.sin(2.2 * x) + slope * x + 0.3 * rng.standard_normal(n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": OrderedCategorical(order=["a", "b", "c"]),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    levels=["a", "b", "c", "d"],
+                    select=True,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+        ).fit_reml(pd.DataFrame({"x": x, "g": g}), y)
+    assert model._interaction_specs["x:g:sz"]._weightless_levels == (3,)
+    probe = pd.DataFrame({"x": np.linspace(-0.9, 0.9, 7), "g": "a"})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        predicted = model.predict(probe)
+    assert np.all(np.isfinite(predicted)) and not caught
 
 
 @pytest.mark.parametrize("family", ["poisson", "binomial"])
@@ -2452,6 +2744,73 @@ def _superlss_with_a_declared_empty_sz_level():
     return model, frame, y, weight, lambdas
 
 
+def _assert_superlss_trading_the_group_term_moves_nothing(fitted, probe, terms, seed) -> None:
+    """Moving the mean predictor's ``cat("g")`` against each sz term in ``terms`` moves no prediction.
+
+    A random ``d`` on the group term's coefficients, per-level pattern ``p``
+    (``group_term_level_values``), is taken back by the sz term's constants
+    (``p - mean(p)``) and the intercept (``mean(p)``), which keeps every
+    fitted value where it was (PR 508 round 3: forcing the event, rather
+    than relying on how the fit split the exact alias).  The point
+    prediction (``_predict_one_eta``) and the joint prediction design behind
+    draws and standard errors do not move, within ``4 gamma_count`` times
+    the natural maps' condition number of what both touch: the design's
+    ``|D| |beta|`` before and after, and four times the moved pattern read
+    through each term's constant (Higham 2002, sections 3.1, 3.5 and 7.1).
+    """
+    from types import SimpleNamespace
+
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.model import _predict_one_eta
+    from superglm.distributional.prediction_design import (
+        _score_feature,
+        _term_indices,
+        build_joint_prediction_design,
+    )
+    from superglm.features.factor_smooth import group_term_level_values
+
+    predictor = fitted.compiled_predictors[0]
+    state = fitted.layout.predictors[0]
+    width = int(state.intercept_index is not None)
+    coefficients = np.asarray(fitted.result.coefficients, dtype=np.float64)
+    local = coefficients[state.coefficient_slice]
+    groups = predictor.compiled.groups
+    main = _term_indices(groups, "g") + width
+    rng = np.random.default_rng(seed)
+    design = build_joint_prediction_design(probe, fitted.compiled_predictors, fitted.layout)
+    specs = [predictor.compiled.interaction_specs[name] for name in terms]
+    count = len(local) + sum(len(spec._levels) * spec.k for spec in specs) + 4
+    condition = max(np.linalg.cond(spec._natural_map) for spec in specs)
+
+    def point(values):
+        full = np.array(coefficients, copy=True)
+        full[state.coefficient_slice] = values
+        offset = np.zeros(len(probe))
+        result = SimpleNamespace(coefficients=full)
+        frame = as_eager_frame(probe)
+        return np.asarray(_predict_one_eta(frame, predictor, fitted.layout, result, offset))
+
+    for name, spec in zip(terms, specs, strict=True):
+        d = rng.normal(size=len(main))
+        pattern = group_term_level_values(
+            lambda labels, d=d: _score_feature(predictor.compiled.specs["g"], labels, d),
+            spec._levels,
+        )
+        one = spec._lowest_order_null_space(1)[:, 0]
+        traded = np.array(local, copy=True)
+        traded[main] += d
+        columns = _term_indices(groups, name) + width
+        blocks = spec._level_blocks(traded[columns]) - np.outer(pattern - pattern.mean(), one)
+        traded[columns] = blocks[:-1].ravel()
+        traded[0] -= pattern.mean()
+        basis = np.abs(spec.marginal_basis(probe[spec.variable].to_numpy(dtype=float)))
+        reach = 4.0 * np.abs(pattern).max() * (basis @ np.abs(one) + 1.0)
+        magnitude = np.abs(design.local["mean"]) @ (np.abs(local) + np.abs(traded)) + reach
+        bound = 4.0 * _gamma(count) * condition * magnitude
+        for predict in (point, lambda values: design.local["mean"] @ values):
+            assert np.all(np.abs(predict(traded) - predict(local)) <= bound), name
+
+
 @pytest.mark.parametrize("group_term", [False, True])
 def test_superlss_predicts_a_separated_sz_level_without_its_walk(group_term) -> None:
     """SuperLSS records separated sz levels and predicts them as SuperGLM does (sz_explosion round 2).
@@ -2469,7 +2828,9 @@ def test_superlss_predicts_a_separated_sz_level_without_its_walk(group_term) -> 
     predicts the mean predictor's population, the value an unseen level
     takes, with or without the group term (to the rounding of adding and
     taking back its value); the joint prediction design, which posterior
-    draws and standard errors use, gives the point prediction.  Mutations:
+    draws and standard errors use, gives the point prediction.  With the
+    group term, moving it by a random ``d`` against the sz constants and the
+    intercept moves neither (PR 508 round 3, forcing the event).  Mutations:
     no recording at the SuperLSS fit; the group term left out of the rule;
     its columns left out of the joint design.
     """
@@ -2512,12 +2873,14 @@ def test_superlss_predicts_a_separated_sz_level_without_its_walk(group_term) -> 
         predictor = fitted.compiled_predictors[0]
         slopes = fitted.result.coefficients[fitted.layout.predictors[0].coefficient_slice][1:]
         values = group_level_values(
-            predictor, "x:g:sz", spec, slopes[_term_indices(predictor.compiled.groups, "g")]
+            predictor, spec, slopes[_term_indices(predictor.compiled.groups, "g")]
         )
         constant = np.abs(spec._lowest_order_null_space(1)[:, 0])
         added = abs(values[0]) * (np.abs(spec.marginal_basis(grid)) @ constant + 1.0)
         bound = _gamma(8 * spec.k) * np.linalg.cond(spec._natural_map)
         assert np.all(np.abs(separated - unseen) <= bound * (added + np.abs(unseen)))
+        known = pd.DataFrame({"x": np.tile(grid, 3), "g": np.repeat(["g000", "g001", "g005"], 21)})
+        _assert_superlss_trading_the_group_term_moves_nothing(fitted, known, ["x:g:sz"], 17)
 
     design = build_joint_prediction_design(probe, fitted.compiled_predictors, fitted.layout)
     state = fitted.layout.predictors[0]
@@ -2540,7 +2903,11 @@ def test_superlss_folds_a_redundant_group_term_once_for_two_sz_terms() -> None:
     roundings of adding and taking back the group term's value, in the
     point prediction and in the joint design alike.  Mutations: both terms
     fold in ``group_level_values`` (point prediction and design together);
-    in the design alone.
+    in the design alone.  Moving the group term by a random ``d`` against
+    either sz term's constants and the intercept moves neither, for g000,
+    g001 and an identified level (PR 508 round 3, forcing the event): g001
+    separates in ``x`` and not in ``z``, so this fails unless both terms
+    average the same levels into their populations (``share_group_levels``).
     """
     import superglm as sg
     from superglm.distributional.prediction_design import build_joint_prediction_design
@@ -2583,8 +2950,9 @@ def test_superlss_folds_a_redundant_group_term_once_for_two_sz_terms() -> None:
     from superglm.distributional.prediction_design import _term_indices, group_level_values
 
     slopes = local[1:]
+    folding = next(spec for spec in specs if spec._folds_group_term)
     values = group_level_values(
-        predictor, "x:g:sz", specs[0], slopes[_term_indices(predictor.compiled.groups, "g")]
+        predictor, folding, slopes[_term_indices(predictor.compiled.groups, "g")]
     )
     # g000 adds its categorical value a and takes back b(x)' a 1, each sz term's
     # constant read through its natural map (Higham 2002, section 7.1)
@@ -2597,7 +2965,14 @@ def test_superlss_folds_a_redundant_group_term_once_for_two_sz_terms() -> None:
         separated, unseen = predicted[: len(steps)], predicted[len(steps) :]
         scale = 2.0 * (added + np.abs(unseen)) + magnitude[: len(steps)]
         assert np.all(np.abs(separated - unseen) <= bound * scale)
-    assert abs(values[0]) > 1e-3
+    known = pd.DataFrame(
+        {
+            "x": np.tile(steps, 3),
+            "z": np.tile(steps[::-1], 3),
+            "g": np.repeat(["g000", "g001", "g005"], len(steps)),
+        }
+    )
+    _assert_superlss_trading_the_group_term_moves_nothing(fitted, known, ["x:g:sz", "z:g:sz"], 23)
 
 
 def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() -> None:
@@ -2646,6 +3021,50 @@ def test_superlss_predicts_a_weightless_selected_sz_level_at_the_population() ->
             predict(pd.DataFrame({"x": grid_x, "g": "a"}))
         user = [w for w in caught if issubclass(w.category, UserWarning)]
         assert [(str(w.message).endswith(named), w.filename) for w in user] == [(True, __file__)]
+
+
+@pytest.mark.parametrize("unseen", ["error", "base"])
+def test_superlss_scores_the_group_term_only_at_levels_it_knows(unseen) -> None:
+    """A declared empty sz level ``cat("g")`` never saw neither raises nor warns (PR 508 round 3, Claude review).
+
+    The 0.40 form ``mu(s("x"), cat("g"), interaction(FactorSmooth(...,
+    select=True, levels=[a, b, c, d])))`` with no row of ``d`` (SuperLSS drops
+    rows of zero weight before it builds): ``d`` is weightless, so the term
+    has a population offset and the rule reads ``cat("g")`` at every sz
+    level.  ``cat`` keeps its default ``unseen="error"`` and knows only
+    ``a, b, c``, so every point prediction and every joint design (draws and
+    standard errors), even of rows of ``a`` only, raised its unseen-level
+    error, where 0.40 predicted them; under ``unseen="base"`` each warned
+    that ``d`` was routed to the base level, though no row had ``d``.  The
+    group term is now scored at the levels it knows, ``d`` taking the value
+    an unseen row gets (0, as under base routing) without its warnings; the
+    design gives the point prediction.  Fails on b551a656, both policies.
+    """
+    import superglm as sg
+    from superglm.distributional.prediction_design import build_joint_prediction_design
+
+    _, frame, y, weight, _ = _superlss_with_a_declared_empty_sz_level()
+    family = sg.GaussianLS()
+    sz = FactorSmooth("x", group="g", basis="sz", k=6, select=True, levels=["a", "b", "c", "d"])
+    model = sg.SuperLSS(
+        family,
+        family.location(sg.s("x", kind="cr", k=6), sg.cat("g", unseen=unseen), sg.interaction(sz)),
+        family.scale(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model.fit_reml(frame, y, sample_weight=weight)
+    fitted = model._require_fitted()
+    probe = pd.DataFrame({"x": np.linspace(-0.9, 0.9, 7), "g": "a"})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        eta = np.asarray(model.predict_link(probe))[:, 0]
+        design = build_joint_prediction_design(probe, fitted.compiled_predictors, fitted.layout)
+    assert not caught
+    local = fitted.result.coefficients[fitted.layout.predictors[0].coefficient_slice]
+    magnitude = np.abs(design.local["location"]) @ np.abs(local) + np.abs(eta)
+    count = len(local) + 4 * 6 + 4
+    assert np.all(np.abs(design.local["location"] @ local - eta) <= _gamma(count) * magnitude)
 
 
 @pytest.mark.parametrize("component", ["wiggle", "null"])

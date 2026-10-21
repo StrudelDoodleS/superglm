@@ -191,7 +191,13 @@ def _grid_over_levels(spec):
 
 def _drop_the_0_41_state(spec, *, record: bool) -> None:
     """The attributes a pickle written before 0.41 lacks; ``record`` also those before 0.36."""
-    for name in ("_separated_directions", "_free_complement"):
+    for name in (
+        "_separated_directions",
+        "_free_complement",
+        "_group_left_out",
+        "_group_held",
+        "_folds_group",
+    ):
         delattr(spec, name)
     if record:
         for name in (

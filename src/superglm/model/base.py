@@ -421,11 +421,14 @@ def _score_unidentified_factor_smooth(
     _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     constants = None
-    if group_term is not None and spec._folds_group_term:
-        levels = as_eager_frame(pd.DataFrame({group_term["name"]: list(spec._levels)}))
-        constants = np.asarray(
-            _score_prediction_term_exact(group_term, levels, beta_all), dtype=np.float64
-        ).ravel()
+    if group_term is not None:
+        from superglm.features.factor_smooth import group_term_level_values
+
+        def score(labels):
+            frame = as_eager_frame(pd.DataFrame({group_term["name"]: list(labels)}))
+            return _score_prediction_term_exact(group_term, frame, beta_all)
+
+        constants = group_term_level_values(score, spec._levels)
     return spec._score_identified(
         left, right, beta, population=population, level_constants=constants
     )
@@ -649,11 +652,7 @@ def _predict_eta(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
 
-    from superglm.features.factor_smooth import (
-        SZ_POPULATION_PREDICTION,
-        FactorSmooth,
-        group_term_folding_terms,
-    )
+    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
     from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
@@ -726,18 +725,11 @@ def _predict_eta(
 
         _ensure_factor_smooth_levels_recorded(model)
     unidentified: list[str] = []
-    folding = group_term_folding_terms((t["name"], t["spec"]) for t in plan["interactions"])
+    features = {feature["name"]: feature for feature in plan["features"]}
     for term in plan["interactions"]:
         spec = term["spec"]
         if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
-            group_term = next(
-                (
-                    feature
-                    for feature in plan["features"]
-                    if feature["name"] == spec.group and folding[spec.group] == term["name"]
-                ),
-                None,
-            )
+            group_term = features.get(spec.group) if spec._folds_group_term else None
             contribution, named = _score_unidentified_factor_smooth(
                 term,
                 frame,

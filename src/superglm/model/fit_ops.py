@@ -785,7 +785,7 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
         format_factor_smooth_separation,
         response_boundaries,
     )
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import FactorSmooth, share_group_levels
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
     level = _FIT_WARNING_STACKLEVEL if stacklevel is None else stacklevel
@@ -810,6 +810,7 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
                 UserWarning,
                 stacklevel=level,
             )
+    share_group_levels(specs.values())
 
 
 def _ensure_factor_smooth_levels_recorded(model) -> None:
@@ -825,7 +826,7 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
     """
     import warnings
 
-    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.factor_smooth import FactorSmooth, share_group_levels
 
     specs = getattr(model, "_interaction_specs", {}) or {}
     stale = [
@@ -843,6 +844,7 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
             # the first prediction of 0.36 to 0.40 rebuilt this record with the
             # orthogonal projector; the 0.41 conventions are a refit's
             spec._free_complement = "orthogonal"
+        share_group_levels(specs.values())
         return
     for spec in stale:
         spec._unidentified_levels = ()
