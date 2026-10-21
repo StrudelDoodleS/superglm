@@ -2540,10 +2540,26 @@ def decompose_gram_deflated(
     it by construction.  ``E`` is bounded with its own rounding, ``gamma_m
     sqrt(n_a) ||B||_F`` (``project`` counts ``m``), scaled up where the
     projection added a column's centre after its product.  The decomposition is then
-    :func:`decompose_factor` of the surrogate factor ``[Lambda1^(1/2) V1';
-    R2 V2'] D``, whose singular values are ``sqrt(w)`` above the split and the
-    grey block's below it, so the representatives, the null basis and every
-    other field follow the factor route's own rules.
+    :func:`decompose_factor` of the surrogate factor ``[Lambda1^(1/2) V1' +
+    Lambda1^(-1/2) E V2'; R2 V2'] D``, so the representatives, the null basis
+    and every other field follow the factor route's own rules.  It is block
+    upper triangular in ``V`` coordinates, ``diag(Lambda1^(1/2), R2) [[I,
+    K], [0, I]]`` with ``K = Lambda1^(-1) E``: its null vectors are ``V2 n -
+    V1 K n`` (``R2 n = 0``), the first-order invariant subspace of the full
+    matrix (Stewart, *SIAM Rev.* 15, 1973; Stewart & Sun, *Matrix
+    Perturbation Theory*, 1990, ch. V), not ``V2 n``, which misses the
+    exact null by up to ``||E|| / gap`` (Davis & Kahan, *SIAM J. Numer.
+    Anal.* 7, 1970), the order of the estimability tolerance.  What remains
+    is ``(H1 - Lambda1) Lambda1^(-1) E``, smaller by ``e / w_k`` (at most a
+    quarter at the floor, 0.01 to 0.04 on the freMTPL2 books), and the grey
+    block's own shift ``E' K``, which turns its null directions within it by
+    ``||E|| ||K||`` over their spacing.  Neither is certified against the
+    estimability tolerance; nor is the full factor's null basis, whose own
+    error bound on the books exceeds the 7e-11 to 1.2e-10 by which its
+    nearest flag clears that tolerance.  The surrogate's singular values are
+    the block-diagonal ones within a factor ``1 +- ||K||`` (``sigma_i(DL) /
+    sigma_i(D)`` lies in ``[sigma_min(L), sigma_max(L)]``), which the
+    certificate's margin carries.
 
     Returns ``(None, info)`` whenever the certificate fails (no split, no gap,
     a grey singular value within the shift of the cut): the caller then runs
@@ -2667,26 +2683,33 @@ def decompose_gram_deflated(
     squared = singular**2
     margin = np.minimum(np.abs(squared - cut_low), np.abs(squared - cut_high))
     straddles = (squared >= cut_low) & (squared <= cut_high)
+    # The surrogate's correction ``K``: each of its singular values, and so
+    # its largest, within a factor ``1 +- kappa`` of the block-diagonal ones.
+    kappa = float(np.nextafter(coupling_norm / float(values[split]), np.inf))
+    drift = ((1.0 + kappa) / (1.0 - kappa)) ** 2 - 1.0 if kappa < 0.5 else float("inf")
     # Weyl for the structural block: each singular value moves by at most
     # ``residual``, so its square by ``residual (2 sigma + residual)``.
     moved = residual * (2.0 * np.sqrt(np.maximum(squared, cut_high)) + residual)
+    moved = moved + drift * np.maximum(squared, cut_high)
     slack = np.where(straddles, -np.inf, margin - moved)
     nearest = float(np.min(slack)) if slack.size else float("inf")
     info.update(
         shift=shift / largest,
         margin=nearest / largest,
         rotation=coupling_norm / gap,
+        kappa=kappa,
         structural=float(structural_null.shape[1]),
         structural_residual=residual / math.sqrt(largest),
     )
     if not (nearest > shift and residual * residual < cut_low):
         return None, info
     # The structural nulls are the surrogate's missing rows: zero there.
+    root = np.sqrt(values[split:])[:, None]
     surrogate = np.zeros((values.size, gram.shape[0]))
     surrogate[:, active] = (
         np.vstack(
             (
-                np.sqrt(values[split:])[:, None] * vectors[:, split:].T,
+                root * vectors[:, split:].T + (coupling / root) @ grey.T,
                 factor @ grey.T,
             )
         )

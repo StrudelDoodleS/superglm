@@ -207,6 +207,101 @@ def test_a_failed_certificate_keeps_the_full_factor(monkeypatch, row_factor_pass
     _assert_same_bits(data, rank.decompose_factor(row_factor_passes[0]))
 
 
+def _coupled_gram(grey_ratio=None, coupling=3e-12, n=40, seed=0):
+    """Rows ``A`` with one exact alias, columns 4 and 5, and a Gram coupled across the split.
+
+    ``A`` has squared singular values ``1, 0.8, 0.6, 0.5`` and ``1e-6`` (the
+    split, ``w``), or ``1e-6`` and a grey value placed at ``grey_ratio`` of
+    the largest after Jacobi scaling, and ``0`` on ``y = (e4 - e5) /
+    sqrt(2)``.  The Gram is ``A'A + c (w y' + y w')``: a formation error
+    within its bound (``rows`` below), which turns the Gram's null vector
+    towards ``w`` by about ``c / 1e-6``, on columns 0 to 3.  ``project`` is
+    the exact rows' product.
+    """
+    rng = np.random.default_rng(seed)
+    y = np.zeros(6)
+    y[4], y[5] = np.sqrt(0.5), -np.sqrt(0.5)
+    vectors = np.linalg.qr(np.column_stack((y, rng.normal(size=(6, 5)))))[0]
+    vectors[:, 0] = y
+    left = np.linalg.qr(rng.normal(size=(n, 6)))[0]
+    squared = np.array([0.0, 1e-6, 0.5, 0.6, 0.8, 1.0])
+    if grey_ratio is not None:
+        squared = np.array([0.0, grey_ratio, 1e-6, 0.6, 0.8, 1.0])
+    for _ in range(4 if grey_ratio is not None else 1):
+        A = left @ np.diag(np.sqrt(squared)) @ vectors.T
+        if grey_ratio is not None:
+            # The column scaling moves the grey ratio; it barely depends on it.
+            values = np.linalg.svd(A / np.linalg.norm(A, axis=0), compute_uv=False) ** 2
+            squared[1] *= grey_ratio / (values[-2] / values[0])
+    w = vectors[:, 2 if grey_ratio is not None else 1]
+    gram = A.T @ A + coupling * (np.outer(w, y) + np.outer(y, w))
+
+    def project(basis):
+        B = A @ basis
+        return np.linalg.qr(B, mode="r"), A.T @ B, n, np.linalg.norm(A, axis=0)
+
+    return A, gram, project
+
+
+def test_the_published_null_basis_is_the_rows_not_the_grams():
+    """The surrogate publishes the full factor's estimability flags under a coupled Gram.
+
+    The Gram's null vector carries ``3e-6`` of ``w`` on the estimable
+    columns 0 to 3; a surrogate whose null space is the Gram's grey
+    eigenvectors (005481cd) flags every coefficient not estimable, though
+    its rank certificate passes.  The first-order correction ``V2 n - V1
+    Lambda1^-1 E n`` takes that component out with the coupling ``E`` the
+    projection already formed.
+    """
+    A, gram, project = _coupled_gram()
+    deflated, info = rank.decompose_gram_deflated(gram, project, rows=10**6)
+    full = rank.decompose_factor(A)
+    assert deflated is not None
+    # Precondition: the uncorrected rotation is far above the flag tolerance.
+    assert info["rotation"] > 100 * rank.SHARED_RANK_POLICY.factor_rcond
+    _assert_same_decisions(deflated, full)
+    np.testing.assert_array_equal(
+        deflated.coefficient_estimable(), [True, True, True, True, False, False]
+    )
+
+
+def test_the_certificate_refuses_a_grey_value_within_its_shift():
+    """A grey singular value whose square is within the coupling's shift of the cut: the full factor decides.
+
+    The grey direction sits at ``(1 + 1e-3)`` times the cut, ``2e-19`` of
+    the largest from it, against a shift of ``||E||^2 / gap`` near
+    ``1e-17``.  Mutation check: certifying regardless (the margin test
+    replaced by ``False``) fails this.
+    """
+    cut = rank.SHARED_RANK_POLICY.factor_rcond**2
+    _, gram, project = _coupled_gram(grey_ratio=cut * (1.0 + 1e-3))
+    deflated, info = rank.decompose_gram_deflated(gram, project, rows=10**6)
+    assert deflated is None
+    assert info["k"] == 2.0 and info["margin"] <= info["shift"]
+
+
+@pytest.mark.parametrize("bound", [0.0, 1.0], ids=["certified", "too_loose"])
+def test_the_certificate_carries_the_structural_residual(bound):
+    """A structural null whose bound reaches the cut sends the decision to the full factor.
+
+    The alias ``y`` passes as a structural null with bound ``||A y|| <=
+    bound``.  At bound 0 the grey subspace (a ``1e-12`` direction) decides
+    as the full factor; at bound 1, ``bound^2`` is above ``cut_low`` and the
+    certificate refuses.  Mutation check: certifying regardless fails the
+    second.
+    """
+    A, gram, project = _coupled_gram(grey_ratio=1e-12, coupling=0.0)
+    structural = [(slice(4, 6), np.array([[np.sqrt(0.5)], [-np.sqrt(0.5)]]), bound)]
+    deflated, info = rank.decompose_gram_deflated(gram, project, rows=10**6, structural=structural)
+    assert info["structural"] == 1.0
+    if bound == 0.0:
+        assert deflated is not None
+        _assert_same_decisions(deflated, rank.decompose_factor(A))
+    else:
+        assert deflated is None
+        assert info["structural_residual"] >= rank.SHARED_RANK_POLICY.factor_rcond
+
+
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
 def test_grey_projection_is_the_rows_product(kind, discrete):
