@@ -381,7 +381,7 @@ def test_metrics_rank_helpers_use_factor_certified_subspaces() -> None:
     assert needs_factor_certification(gram_data)
     assert needs_factor_certification(gram_coefficient)
 
-    actual_data = _certified_data_rank(design, weights, centered_gram, xtw1)
+    actual_data = _certified_data_rank(design, weights, centered_gram, xtw1, np.zeros((3, 3)))
     actual_coefficient = _certified_coefficient_rank(
         design,
         weights,

@@ -46,9 +46,17 @@ from superglm.profiling._reporting import (
     profile_cautioned,
     reported_interval,
 )
-from superglm.solvers.centered_system import penalty_factor, weighted_mean_pair
+from superglm.solvers.centered_system import (
+    chunked_projected_factor,
+    grouped_projected_factor,
+    grouped_structural_nulls,
+    penalty_factor,
+    weighted_mean_pair,
+)
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
+    RankDecomposition,
+    decide_data_rank,
     decompose_factor,
     decompose_gram,
     decompose_gram_if_authoritative,
@@ -183,19 +191,62 @@ def _certified_data_rank(
     W: NDArray,
     data_gram: NDArray,
     xtw1: NDArray,
+    penalty: NDArray,
 ):
-    """Certify ambiguous centered data geometry with observation rows."""
-    decomposition = decompose_gram_if_authoritative(data_gram)
-    if decomposition is not None:
-        return decomposition
-    center, center_lo = _centre_pair(design, W)
-    factor = streamed_weighted_factor(
-        iter_dense_chunks(design),
-        W,
-        center=center,
-        center_lo=center_lo,
+    """Certify ambiguous centered data geometry with observation rows.
+
+    The fit's own route (``rank.decide_data_rank``): the Gram when it
+    certifies itself, else its grey subspace, a pass over the rows projected
+    onto the directions the Gram cannot resolve, else the full factor.
+    Unpenalized, the data rank is also the profiled Hessian's, whose
+    pseudo-inverse is the covariance (``_certified_profile_rank``), so the
+    full factor decides it, as in the fit.
+    """
+    centre: list = []
+
+    def centre_pair() -> tuple[NDArray, NDArray | None]:
+        if not centre:
+            centre.extend(_centre_pair(design, W))
+        return centre[0], centre[1]
+
+    def factor() -> RankDecomposition:
+        center, center_lo = centre_pair()
+        return decompose_factor(
+            streamed_weighted_factor(
+                iter_dense_chunks(design), W, center=center, center_lo=center_lo
+            )
+        )
+
+    def project(basis: NDArray):
+        center, center_lo = centre_pair()
+        if isinstance(design, DesignMatrix):
+            return grouped_projected_factor(design, W, basis, center=center, center_lo=center_lo)
+        return chunked_projected_factor(
+            lambda: iter_dense_chunks(design),
+            int(design.shape[0]),
+            W,
+            basis,
+            center=center,
+            center_lo=center_lo,
+        )
+
+    def structural():
+        if not isinstance(design, DesignMatrix):
+            return []
+        center, center_lo = centre_pair()
+        return grouped_structural_nulls(design, W, center=center, center_lo=center_lo)
+
+    rows = int(design.shape[0])
+    return decide_data_rank(
+        data_gram,
+        factor,
+        project=project,
+        structural=structural,
+        # a grouped design's Gram is the fit's (``build_centered_system``);
+        # chunked moments also merge one co-moment per chunk, at most ``n``
+        rows=rows if isinstance(design, DesignMatrix) else 2 * rows,
+        certify=not np.any(penalty),
     )
-    return decompose_factor(factor)
 
 
 def _certified_coefficient_rank(
@@ -948,7 +999,7 @@ class ModelMetrics:
             )
             XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
             self.__dict__["_active_centered_data_gram"] = centered_data_gram
-            data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1)
+            data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
             self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
                 data_rank,
                 self._groups,
@@ -998,7 +1049,7 @@ class ModelMetrics:
         XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
         inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
         self.__dict__["_active_centered_data_gram"] = centered_data_gram
-        data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1)
+        data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
         self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
             data_rank,
             self._groups,

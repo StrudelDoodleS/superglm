@@ -326,6 +326,59 @@ def test_the_certificate_carries_the_structural_residual(case):
         assert info["margin"] > info["shift"]
 
 
+@pytest.mark.parametrize("bound", [0.0, 1.0])
+def test_every_uncertain_direction_structural_reads_no_row(bound):
+    """No grey direction once the structural nulls are deflated: decided with no pass over the rows.
+
+    The alias ``y`` is the only direction below the floor, and it is
+    structural; the next eigenvalue, ``1e-6``, clears the floor and the cut.
+    So rank ``n_active - s`` is certified from the Gram and the residual
+    bound, and the projection is never called (``k = 0``).  A residual bound
+    above the cut still refuses.  Mutation: on the base the empty grey
+    subspace returned ``None``, so the full factor ran.
+    """
+    A, gram, project = _coupled_gram(coupling=0.0)
+    calls = []
+
+    def counted(basis):
+        calls.append(basis.shape[1])
+        return project(basis)
+
+    structural = [(slice(4, 6), np.array([[np.sqrt(0.5)], [-np.sqrt(0.5)]]), bound)]
+    deflated, info = rank.decompose_gram_deflated(gram, counted, rows=10**6, structural=structural)
+    assert calls == []
+    assert info["k"] == 0.0 and info["structural"] == 1.0
+    if bound:
+        assert deflated is None
+        return
+    assert deflated is not None and deflated.grey_subspace["k"] == 0.0
+    _assert_same_decisions(deflated, rank.decompose_factor(A))
+    assert deflated.rank == 5
+
+
+def test_the_grams_eigenpairs_are_read_not_recomputed(monkeypatch):
+    """With no structural null, the grey check reads the eigenpairs the authority check computed.
+
+    One ``eigh`` of the equilibrated Gram serves both, and the decision is
+    the full factor's.  Mutation: the base computed it twice.
+    """
+    A, gram, project = _coupled_gram(grey_ratio=1e-12, coupling=0.0)
+    calls = []
+    eigh = np.linalg.eigh
+
+    def counted(matrix, *args, **kwargs):
+        calls.append(matrix.shape)
+        return eigh(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(rank.np.linalg, "eigh", counted)
+    decided = rank.decide_data_rank(
+        gram, lambda: pytest.fail("ran the full factor"), project=project, rows=10**6
+    )
+    assert calls == [(6, 6)]
+    assert decided.grey_subspace is not None
+    _assert_same_decisions(decided, rank.decompose_factor(A))
+
+
 @pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
@@ -370,6 +423,53 @@ def test_grey_projection_is_the_rows_product(kind, discrete, blocks, monkeypatch
     # Thm 19.4, a small constant c; c = 4 here), on top of B's own.
     norms = np.sqrt(np.diag(np.abs(basis).T @ scale))
     qr_gamma = 4 * (dm.n * basis.shape[1] + roundings) * np.finfo(float).eps / 2
+    tolerance = 4.0 * (gamma + qr_gamma) * np.outer(norms, norms)
+    assert np.all(np.abs(factor.T @ factor - product.T @ product) <= tolerance)
+
+
+def test_chunked_projection_is_the_rows_product(monkeypatch):
+    """``chunked_projected_factor`` is ``R`` of ``A V`` and ``A'A V``, against the dense design.
+
+    ``A = sqrt(W) ((X - c) - c_lo)`` with the exact centre pair of two
+    columns at 1e16 (``c_lo`` nonzero) and a third that is not, in 25 blocks
+    of 32 rows, so the per-block centring, both ``sqrt(w)`` scalings and the
+    block-order sum all run.  The aliased columns leave ``A V`` of order one,
+    so ``A'(A V)`` is not a rounding.  The rows are centred first, so each
+    entry of ``A'(AV)`` is within ``gamma_m |A|' |A| |V|`` of the dense
+    product, ``m`` the routine's rounding count plus the reference's own
+    ``n + p``; ``R'R`` adds the TSQR's backward error.  Mutation checks (each
+    fails it): dropping one ``sqrt(w)`` factor from ``cross``, and centring
+    without ``center_lo``.
+    """
+    from superglm.inference import _metrics_design
+    from superglm.inference import metrics as metrics_module
+
+    n = 800
+    z = np.tile([-2.0, 0.0, 2.0, 4.0], n // 4)
+    s = np.tile([0.1, 0.7, 0.3, 0.9, 0.5], n // 5)
+    X = np.column_stack((1e16 + z, 1e16 + z + 2.0, s))
+    W = np.random.default_rng(7).uniform(0.1, 2.0, n)
+    center, center_lo = metrics_module._centre_pair(X, W)
+    assert center_lo is not None and np.any(center_lo != 0.0)
+    monkeypatch.setattr(_metrics_design, "_bounded_chunk_rows", lambda **_: 32)
+    basis = np.random.default_rng(5).normal(size=(3, 2))
+    factor, cross, roundings, _ = centered_system.chunked_projected_factor(
+        lambda: _metrics_design.iter_dense_chunks(X),
+        n,
+        W,
+        basis,
+        center=center,
+        center_lo=center_lo,
+    )
+    A = np.sqrt(W)[:, None] * ((X - center) - center_lo)
+    product = A @ basis
+    scale = np.abs(A).T @ (np.abs(A) @ np.abs(basis))
+    gamma = (roundings + n + 3) * np.finfo(float).eps / 2
+    gamma /= 1.0 - gamma
+    assert np.linalg.norm(A.T @ product) > 1.0
+    assert np.all(np.abs(cross - A.T @ product) <= 2.0 * gamma * scale)
+    norms = np.sqrt(np.diag(np.abs(basis).T @ scale))
+    qr_gamma = 4 * (n * basis.shape[1] + roundings) * np.finfo(float).eps / 2
     tolerance = 4.0 * (gamma + qr_gamma) * np.outer(norms, norms)
     assert np.all(np.abs(factor.T @ factor - product.T @ product) <= tolerance)
 
@@ -446,3 +546,160 @@ def test_a_near_structural_null_stays_with_its_coupling():
     assert decided.grey_subspace is not None
     _assert_same_decisions(decided, full)
     assert decided.grey_subspace["structural"] == 0.0 and decided.grey_subspace["k"] == 2.0
+
+
+def _forced_full_factor(monkeypatch):
+    """Fail every grey-subspace certificate from here on: the full factor decides."""
+    monkeypatch.setattr(rank, "decompose_gram_deflated", lambda *args, **kwargs: (None, {}))
+
+
+@pytest.mark.parametrize("rows", ["new_rows", "new_weights"])
+def test_metrics_decides_the_data_rank_as_the_fit_does(rows, monkeypatch):
+    """``metrics()`` off the fit's geometry decides its data rank by the fit's route, no row factor.
+
+    New rows read an evaluation design (dense blocks, ``chunked_projected_factor``);
+    the fit's rows under other weights read the grouped design.  Each makes
+    no TSQR of every row, and its decisions are the full factor's.
+    Mutation: on the base both ran ``streamed_weighted_factor`` over every row.
+    """
+    import superglm.inference.metrics as metrics_module
+
+    model = _fit("thin_level_curve", full_factor=False)
+    frame, y, _, _ = _thin_level_curve()
+    weights = None
+    if rows == "new_rows":
+        frame, y = frame.iloc[::2].reset_index(drop=True), y[::2]
+    else:
+        weights = np.linspace(0.7, 1.3, len(y))
+    decided, passes = [], []
+    decide, factor = metrics_module.decide_data_rank, metrics_module.streamed_weighted_factor
+    monkeypatch.setattr(
+        metrics_module,
+        "decide_data_rank",
+        lambda *args, **kwargs: decided.append(decide(*args, **kwargs)) or decided[-1],
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "streamed_weighted_factor",
+        lambda *args, **kwargs: passes.append(1) or factor(*args, **kwargs),
+    )
+    model.metrics(frame, y, sample_weight=weights).coefficient_se
+    assert passes == [] and decided[0].grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    model.metrics(frame, y, sample_weight=weights).coefficient_se
+    assert len(passes) == 1
+    _assert_same_decisions(decided[0], decided[1])
+
+
+def test_rebuilt_inference_state_decides_the_data_rank_as_the_fit_does(monkeypatch):
+    """A fit without rank metadata (``state_ops._legacy_active_state``) takes the fit's route.
+
+    It is what a shape repair rebuilds; its data rank is the fit's, from the
+    grey subspace.  Mutation: on the base it factored every row.
+    """
+    from superglm.model import state_ops
+
+    model = _fit("thin_level_curve", full_factor=False)
+    solver = model._solver_pirls_result()
+    W = state_ops._solver_space_working_weights(model)
+    data = state_ops._legacy_active_state(model, solver, W)[-1]
+    assert data.grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    reference = state_ops._legacy_active_state(model, solver, W)[-1]
+    assert reference.grey_subspace is None and reference.method == "qr_svd"
+    _assert_same_decisions(data, reference)
+    _assert_same_decisions(data, model.result.rank_info.data)
+
+
+def test_unpenalized_fits_keep_the_data_rank_on_the_full_factor(monkeypatch):
+    """Unpenalized, ``metrics()`` and the rebuilt state certify the data rank on the full factor.
+
+    There the data rank is pseudo-inverted for the published standard errors,
+    so the grey surrogate must not stand in for it.  The near-collinear pair
+    alone (``selection_penalty=0``) is the regime: its Gram cannot certify
+    itself, yet the grey-subspace certificate would pass, so ``certify=``
+    is the only thing that keeps the full factor.
+    Mutation: dropping ``certify=`` from ``metrics._certified_data_rank`` or
+    from ``state_ops._legacy_active_state`` each leaves a grey subspace.
+    """
+    import superglm.inference.metrics as metrics_module
+    from superglm.model import state_ops
+
+    frame, y, _, _ = _near_collinear_pair()
+    frame = frame[["u", "v"]]
+    model = SuperGLM(
+        family="poisson",
+        features={"u": Numeric(), "v": Numeric()},
+        selection_penalty=0,
+    )
+    model.fit(frame, y)
+    calls = []
+
+    def spied(module):
+        decide = module.decide_data_rank
+
+        def wrapper(gram, *args, **kwargs):
+            decided = decide(gram, *args, **kwargs)
+            calls.append((np.array(gram), kwargs, decided))
+            return decided
+
+        monkeypatch.setattr(module, "decide_data_rank", wrapper)
+
+    spied(metrics_module)
+    spied(state_ops)
+    half, y_half = frame.iloc[::2].reset_index(drop=True), y[::2]
+    model.metrics(half, y_half).coefficient_se
+    solver = model._solver_pirls_result()
+    W = state_ops._solver_space_working_weights(model)
+    state_ops._legacy_active_state(model, solver, W)
+    assert len(calls) == 2
+    # the precondition: the Gram is not authoritative and the grey certificate would pass
+    for gram, kwargs, _ in calls:
+        assert rank.decompose_gram_if_authoritative(gram, psd_by_construction=True) is None
+        deflated, _ = rank.decompose_gram_deflated(
+            gram, kwargs["project"], rows=kwargs["rows"], structural=kwargs["structural"]()
+        )
+        assert deflated is not None
+    # the routes: both keep the data rank on the full factor
+    for _, _, decided in calls:
+        assert decided.grey_subspace is None
+        assert decided.rank == 2
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_scop_terminal_data_rank_takes_the_fits_route(discrete, monkeypatch):
+    """SCOP REML's published data rank comes from the grey subspace, as a direct fit's does.
+
+    A monotone P-spline beside the thin level's pair: the terminal data Gram
+    cannot certify itself.  No TSQR of every row for it, and the decisions
+    are the full factor's.  Mutation: on the base ``_hydrate_scop_terminal_rank_info``
+    factored every row.
+    """
+    import superglm.reml.scop_efs as scop_efs
+    from superglm import Constraint, PSpline
+
+    frame, y, features, interactions = _thin_level_curve()
+    frame = frame.assign(x=np.random.default_rng(3).uniform(0.0, 1.0, len(y)))
+    features = {**features, "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)}
+    passes = []
+    factor = scop_efs.grouped_weighted_factor
+    monkeypatch.setattr(
+        scop_efs,
+        "grouped_weighted_factor",
+        lambda *args, **kwargs: passes.append(1) or factor(*args, **kwargs),
+    )
+
+    def fit():
+        model = SuperGLM(
+            family="poisson", features=features, interactions=interactions, discrete=discrete
+        )
+        model.fit_reml(frame, y)
+        assert getattr(model.result, "scop_inference", None) is not None
+        return model.result.rank_info.data
+
+    data = fit()
+    assert passes == [] and data.grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    reference = fit()
+    assert len(passes) == 1
+    _assert_same_decisions(data, reference)

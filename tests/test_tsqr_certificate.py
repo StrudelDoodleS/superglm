@@ -359,6 +359,49 @@ def test_tsqr_leaves_and_merges_run_on_the_pool(monkeypatch):
     assert materialising and all(on_pool)
 
 
+@pytest.mark.parametrize("shape", [(5, 1), (50, 7), (7, 50), (300, 300), (1734, 178)])
+def test_leaf_qr_is_scipys_dgeqrf_through_a_gil_free_pointer(shape, monkeypatch):
+    """A leaf's ``R`` is SciPy's ``dgeqrf`` through its Cython LAPACK pointer, not ``np.linalg.qr``.
+
+    ``np.linalg.qr`` holds the GIL while LAPACK runs, so the pooled TSQR's
+    leaves ran one at a time on its workers.  The ctypes call releases it and
+    reaches the routine ``scipy.linalg.qr`` calls with its queried workspace,
+    so ``R`` is that one to the bit, and the leaf leaves its operand as it was.
+    The GIL itself is checked structurally, so no timing is asserted: the
+    routine the leaf calls is a ``ctypes.CFUNCTYPE`` pointer (which releases
+    the GIL around the call), not a ``PYFUNCTYPE`` one or an f2py wrapper
+    (which hold it).  Mutations: the leaf through ``np.linalg.qr`` (the base)
+    fails the ``np.linalg.qr`` hook; ``scipy.linalg.lapack.dgeqrf`` or a
+    ``PYFUNCTYPE`` pointer in its place fails the pointer check.
+    """
+    import ctypes
+
+    import scipy.linalg
+
+    rows = np.random.default_rng(sum(shape)).standard_normal(shape)
+    kept = rows.copy()
+    reference = np.triu(scipy.linalg.qr(rows, mode="r", check_finite=False)[0][: min(shape)])
+    monkeypatch.setattr(
+        rank.np.linalg, "qr", lambda *args, **kwargs: pytest.fail("leaf QR held the GIL")
+    )
+    pointer = rank._lapack_nogil("dgeqrf", 8)
+    assert pointer is not None
+    assert isinstance(pointer, ctypes._CFuncPtr)
+    assert not pointer._flags_ & ctypes._FUNCFLAG_PYTHONAPI
+    called: list[str] = []
+    original = rank._lapack_nogil
+
+    def recorded(name, arguments):
+        called.append(name)
+        return original(name, arguments)
+
+    monkeypatch.setattr(rank, "_lapack_nogil", recorded)
+    factor = rank._leaf_qr(rows)
+    assert called == ["dgeqrf"]
+    assert np.array_equal(factor.view(np.uint64), reference.view(np.uint64))
+    assert np.array_equal(rows, kept)
+
+
 @pytest.mark.parametrize("width", [1, 5, 31, 32, 33, 70])
 def test_structured_merge_is_scipys_dtpqrt_bitwise(width):
     """The merge reaches SciPy's ``dtpqrt`` through its Cython LAPACK pointer, without the GIL.
@@ -373,7 +416,7 @@ def test_structured_merge_is_scipys_dtpqrt_bitwise(width):
     upper = np.linalg.qr(rng.standard_normal((2 * width, width)), mode="r")
     lower = np.linalg.qr(rng.standard_normal((3 * width, width)), mode="r")
     kept = upper.copy(), lower.copy()
-    assert rank._dtpqrt_nogil() is not None
+    assert rank._lapack_nogil("dtpqrt", 12) is not None
     merged = rank._tsqr_merge(upper, lower)
     reference, _, _, info = dtpqrt(
         width, min(width, 32), np.asfortranarray(kept[0]), np.asfortranarray(kept[1])

@@ -1061,10 +1061,15 @@ largest.
 - Otherwise only the few *grey* directions, the eigenvectors with the smallest
   eigenvalues, are checked against the rows. The rows are projected onto those
   $k$ directions and that $n \times k$ block is factored by QR. This costs
-  about $nk^2$, not the $np^2$ of factoring every row.
+  about $nk^2$, not the $np^2$ of factoring every row. When every such
+  direction is one of the exact zeros above, $k = 0$ and no row is read.
 - A perturbation bound for symmetric block matrices (Li and Li, 2005) confirms
   that the other directions cannot change the answer. Where it cannot confirm
   this, the fit factors every row instead.
+
+`metrics()` on rows, weights or offsets other than the fit's, a shape-constrained
+(SCOP) fit's published rank, and a fit's rebuilt inference state decide the
+data rank the same way.
 
 On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
 its 230 directions outside the data rank, 164 are read off the tables, and

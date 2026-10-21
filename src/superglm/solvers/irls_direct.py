@@ -4639,6 +4639,8 @@ def _fit_irls_direct_once(
                 raise RuntimeError("Dense fit did not produce a centered system.")
             cache_out["XtWX"] = XtWX
             cache_out["centered_XtWX"] = centered_final.data_gram
+            # the pair the Gram was centred about (``(mean_x, None)`` without a dense column)
+            cache_out["centre_pair"] = centered_final.centre_pair()
             # mean_x less the state's centre, formed on centred rows: a cached
             # trial's centred intercept (``reml.discrete``) reads it
             cache_out["centre_offset_mean"] = offset_mean_final

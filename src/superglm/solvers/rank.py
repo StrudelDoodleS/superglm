@@ -313,14 +313,16 @@ def diagonal_of_square(matrix: NDArray) -> NDArray:
 # Householder QR of two stacked triangles (LAPACK ``dtpqrt`` with ``l = n``,
 # the triangle-on-triangle kernel of TSQR's reduction).
 #
-# A leaf holds ``_TSQR_LEAF_COPIES`` copies of its rows while it is factored
-# (the weighted rows, ``numpy.linalg.qr``'s working copy and its Fortran
-# buffer), so its row count is ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,293
-# rows at width 814.  A leaf has at least ``2 * width`` rows, a floor reached
-# above width 1,322, where it holds ``48 width^2`` bytes, above the budget.
-# The leaves, and so the tree, depend only on the row count
-# and the width -- never on the worker count -- so the factor is bitwise the
-# same however many workers factor the leaves.
+# A leaf budgets ``_TSQR_LEAF_COPIES`` copies of its rows, so its row count is
+# ``_TSQR_LEAF_BYTES / (3 * 8 * width)``: 4,293 rows at width 814.  It holds
+# two while it is factored (the weighted rows, and the Fortran-order copy
+# ``dgeqrf`` works in); the third is the budget from when ``numpy.linalg.qr``
+# was the leaf, kept because the leaf row count, and so the tree and the
+# rounding, are a function of it.  A leaf has at least ``2 * width`` rows, a
+# floor reached above width 1,322, where it budgets ``48 width^2`` bytes (it
+# holds ``32 width^2``), above the budget.  The leaves, and so the tree, depend only on the row count and
+# the width -- never on the worker count -- so the factor is bitwise the same
+# however many workers factor the leaves.
 _TSQR_LEAF_BYTES = 80 << 20
 _TSQR_LEAF_COPIES = 3
 # Block size of the structured merge (``dtpqrt``'s ``nb``); fixed, so the merge
@@ -347,8 +349,8 @@ def _tsqr_leaf(
     """``R`` of one leaf's weighted, centred rows (with the weighted response appended).
 
     The rows are taken out of ``slot`` and released once copied, so the leaf
-    holds its weighted copy and LAPACK's two working copies, never the input
-    as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
+    holds its weighted copy and ``dgeqrf``'s Fortran-order copy, never the
+    input as well.  Each entry is ``sqrt(w_i) * ((x_ij - c_j) - c_lo_j)``, formed
     exactly as the chunked factor formed it.  A slot may hold a deferred leaf
     (``centered_system.iter_grouped_design_leaves``) instead of rows: it
     writes the same entries straight into the block, on the worker that
@@ -376,21 +378,60 @@ def _tsqr_leaf(
     del source
     if response is not None:
         np.multiply(sqrt_weights, response, out=block[:, width])
-    return np.linalg.qr(block, mode="r")
+    return _leaf_qr(block)
 
 
-_DTPQRT: list = []
+def _leaf_qr(block: NDArray) -> NDArray:
+    """``R`` of ``block``, as ``np.linalg.qr(block, mode="r")``, by SciPy's ``dgeqrf`` without the GIL.
+
+    ``np.linalg.qr`` holds the GIL while LAPACK runs, so the pooled TSQR's
+    leaves ran one at a time: 64 leaves of 1,734 x 178 took 0.44 s on eight
+    worker threads and 0.43 s on one, where this call took 0.068 s and
+    0.36 s.  It is the same Householder QR (``dgeqrf``, the routine NumPy
+    calls) from SciPy's LAPACK, so ``R`` rounds as that build rounds, the
+    same at every worker count, with the same backward error bound.
+    """
+    function = _lapack_nogil("dgeqrf", 8)
+    rows, width = block.shape
+    if function is None or rows == 0 or width == 0:  # pragma: no cover - SciPy without the pointer
+        return np.linalg.qr(block, mode="r")
+    matrix = np.array(block, dtype=np.float64, order="F")
+    tau = np.empty(min(rows, width))
+    # m, n, lda, lwork, info: Fortran arguments by reference; lwork -1 queries
+    ints = np.array([rows, width, rows, -1, 0], dtype=np.intc)
+    address, size = ints.ctypes.data, ints.itemsize
+    work = np.empty(1)
+    for _ in range(2):
+        function(
+            address,
+            address + size,
+            matrix.ctypes.data,
+            address + 2 * size,
+            tau.ctypes.data,
+            work.ctypes.data,
+            address + 3 * size,
+            address + 4 * size,
+        )
+        if ints[3] == -1:
+            ints[3] = max(int(work[0]), width)
+            work = np.empty(int(ints[3]))
+    if ints[4] != 0:  # pragma: no cover - LAPACK argument contract
+        raise RuntimeError(f"dgeqrf failed with info={int(ints[4])}")
+    return np.triu(matrix[: min(rows, width)])
 
 
-def _dtpqrt_nogil():
-    """SciPy's ``dtpqrt`` through its Cython LAPACK pointer, called without the GIL.
+_NOGIL_LAPACK: dict[str, Callable | None] = {}
 
-    The f2py wrapper (``scipy.linalg.lapack.dtpqrt``) holds the GIL, so merges
-    on worker threads would run one at a time; a ``ctypes.CFUNCTYPE`` call
+
+def _lapack_nogil(name: str, arguments: int) -> Callable | None:
+    """SciPy's LAPACK ``name`` through its Cython LAPACK pointer, called without the GIL.
+
+    The f2py wrappers (``scipy.linalg.lapack``) hold the GIL, so calls on
+    worker threads would run one at a time; a ``ctypes.CFUNCTYPE`` call
     releases it.  Both reach the same routine in SciPy's LAPACK, so the
     result is bitwise the same.  ``None`` where the pointer is unavailable.
     """
-    if not _DTPQRT:
+    if name not in _NOGIL_LAPACK:
         function = None
         try:
             import ctypes
@@ -404,20 +445,20 @@ def _dtpqrt_nogil():
             api.PyCapsule_GetName.argtypes = [ctypes.py_object]
             api.PyCapsule_GetPointer.restype = ctypes.c_void_p
             api.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
-            capsule = cython_lapack.__pyx_capi__["dtpqrt"]
+            capsule = cython_lapack.__pyx_capi__[name]
             pointer = api.PyCapsule_GetPointer(capsule, api.PyCapsule_GetName(capsule))
             if pointer:
-                function = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * 12))(pointer)
+                function = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * arguments))(pointer)
         except Exception:  # pragma: no cover - SciPy without its Cython LAPACK
             function = None
-        _DTPQRT.append(function)
-    return _DTPQRT[0]
+        _NOGIL_LAPACK[name] = function
+    return _NOGIL_LAPACK[name]
 
 
 def _structured_merge(upper: NDArray, lower: NDArray, width: int) -> NDArray:
     """``dtpqrt`` of two ``width``-square triangles: ``R`` in the upper triangle of ``a``."""
     block = min(width, _TSQR_MERGE_BLOCK)
-    function = _dtpqrt_nogil()
+    function = _lapack_nogil("dtpqrt", 12)
     if function is None:  # pragma: no cover - SciPy without its Cython LAPACK
         from scipy.linalg.lapack import dtpqrt
 
@@ -471,7 +512,7 @@ def _tsqr_merge(upper: NDArray, lower: NDArray) -> NDArray:
     width = upper.shape[1]
     if width and upper.shape[0] == width and lower.shape[0] == width:
         return _structured_merge(upper, lower, width)
-    return np.linalg.qr(np.vstack((upper, lower)), mode="r")
+    return _leaf_qr(np.vstack((upper, lower)))
 
 
 class _TSQRTree:
@@ -2058,8 +2099,14 @@ def _decompose_gram(
     omit_uncertifiable: bool = False,
     psd_by_construction: bool = False,
     formation_error: NDArray | None = None,
+    spectrum: dict | None = None,
 ) -> RankDecomposition | None:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    ``spectrum``, when given, receives the equilibrated matrix's eigenpairs
+    whenever they are computed (``values``, ``vectors`` and the ``active``
+    columns), for a caller that goes on to decompose the same matrix
+    (:func:`decide_data_rank`).
 
     ``omit_uncertifiable`` is a pure optimization hint, never a semantic one:
     when it is set this may return ``None`` instead of a decomposition that
@@ -2178,6 +2225,8 @@ def _decompose_gram(
             pass
 
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    if spectrum is not None:
+        spectrum.update(values=eigenvalues, vectors=eigenvectors, active=active_columns)
     raw_eigenvalues = eigenvalues
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))
@@ -2475,6 +2524,7 @@ def decompose_gram_if_authoritative(
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
     psd_by_construction: bool = False,
+    spectrum: dict | None = None,
 ) -> RankDecomposition | None:
     """The Gram decomposition when it is authoritative, else ``None``.
 
@@ -2513,6 +2563,7 @@ def decompose_gram_if_authoritative(
         fallback_factor=fallback_factor,
         omit_uncertifiable=True,
         psd_by_construction=psd_by_construction,
+        spectrum=spectrum,
     )
     if decomposition is None or needs_factor_certification(decomposition, policy=policy):
         return None
@@ -2543,6 +2594,7 @@ def decompose_gram_deflated(
     rows: int,
     structural: Sequence[tuple[slice, NDArray, float]] = (),
     policy: RankPolicy = SHARED_RANK_POLICY,
+    spectrum: dict | None = None,
 ) -> tuple[RankDecomposition | None, dict[str, float]]:
     """The factor-route decision from the formed Gram plus one pass over the rows on its grey subspace.
 
@@ -2598,6 +2650,14 @@ def decompose_gram_deflated(
     sigma_i(D)`` lies in ``[sigma_min(L), sigma_max(L)]``), which the
     certificate's margin carries.
 
+    ``spectrum`` holds the equilibrated Gram's eigenpairs where
+    :func:`decompose_gram_if_authoritative` has just computed them; with no
+    structural null to deflate, the eigenproblem here is that one, so they
+    are read rather than computed again.  The two equilibrations round
+    differently (``G / (d_i d_j)`` there, ``G / d_i / d_j`` here), by a few
+    units in the last place of each entry, inside the formation bound the
+    error ``e`` below already carries.
+
     Returns ``(None, info)`` whenever the certificate fails (no split, no gap,
     a grey singular value within the shift of the cut): the caller then runs
     the full factor, so this changes cost, never a certified decision.  A
@@ -2647,6 +2707,8 @@ def decompose_gram_deflated(
         ]
         values, rotation = np.linalg.eigh(_symmetric_part(complement.T @ equilibrated @ complement))
         vectors = complement @ rotation
+    elif spectrum and np.array_equal(spectrum["active"], active):
+        values, vectors = spectrum["values"], spectrum["vectors"]
     else:
         values, vectors = np.linalg.eigh(equilibrated)
     largest = float(values[-1])
@@ -2664,47 +2726,57 @@ def decompose_gram_deflated(
     # Every direction below the floor is grey; the split is searched from the
     # first eigenvalue above it up to the ceiling (that first one at least).
     first = int(np.searchsorted(values, _GREY_FLOOR * error, side="left"))
-    if first == 0 or first >= values.size:
+    if first >= values.size:
         return None, info
-    last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
-    candidates = np.arange(first, min(last, values.size - 1) + 1)
-    # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past twice
-    # the Gram's error, so the split takes the first spacing of
-    # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
-    spacing = values[candidates] - values[candidates - 1]
-    wide = np.flatnonzero(spacing >= _GREY_GAP * error)
-    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
+    if first == 0:
+        # Every direction off the structural nulls clears the floor, and so
+        # the cut: there is no grey subspace, and the rows are not read.
+        split = 0
+    else:
+        last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
+        candidates = np.arange(first, min(last, values.size - 1) + 1)
+        # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past
+        # twice the Gram's error, so the split takes the first spacing of
+        # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
+        spacing = values[candidates] - values[candidates - 1]
+        wide = np.flatnonzero(spacing >= _GREY_GAP * error)
+        split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
     grey = vectors[:, :split]
-    basis = np.zeros((gram.shape[0], split))
-    basis[active] = grey / d[:, None]
-    factor, cross, roundings, magnitudes = project(basis)
-    factor = np.asarray(factor, dtype=np.float64)
-    if factor.shape[0] < split:
-        # Fewer rows than grey directions: the factor's missing rows are zero.
-        factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
-    # The cross product's rows are bounded by |A|'|B|, a column's weighted
-    # norm times ||B||: d itself where rows were centred first, the
-    # projection's (|x| + |c|) norm where they were not.
-    inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
-    singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
-    if singular.size < split:
-        singular = np.concatenate((singular, np.zeros(split - singular.size)))
-    coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
-    coupling_norm = float(
-        np.nextafter(
-            float(np.linalg.norm(coupling, 2))
-            + _gamma_up(roundings + n_active)
-            * inflation
-            * math.sqrt(n_active)
-            * float(np.linalg.norm(factor))
-            + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
-            np.inf,
+    if split:
+        basis = np.zeros((gram.shape[0], split))
+        basis[active] = grey / d[:, None]
+        factor, cross, roundings, magnitudes = project(basis)
+        factor = np.asarray(factor, dtype=np.float64)
+        if factor.shape[0] < split:
+            # Fewer rows than grey directions: the factor's missing rows are zero.
+            factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
+        # The cross product's rows are bounded by |A|'|B|, a column's weighted
+        # norm times ||B||: d itself where rows were centred first, the
+        # projection's (|x| + |c|) norm where they were not.
+        inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
+        singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
+        if singular.size < split:
+            singular = np.concatenate((singular, np.zeros(split - singular.size)))
+        coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
+        coupling_norm = float(
+            np.nextafter(
+                float(np.linalg.norm(coupling, 2))
+                + _gamma_up(roundings + n_active)
+                * inflation
+                * math.sqrt(n_active)
+                * float(np.linalg.norm(factor))
+                + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
+                np.inf,
+            )
         )
-    )
-    gap = float(values[split]) - error - float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+        grey_top = float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+    else:
+        factor, singular = np.zeros((0, 0)), np.zeros(0)
+        coupling, coupling_norm, inflation, grey_top = np.zeros((values.size, 0)), 0.0, 1.0, 0.0
+    gap = float(values[split]) - error - grey_top
     info.update(
         k=float(split),
-        split_low=float(values[split - 1]) / largest,
+        split_low=float(values[split - 1]) / largest if split else 0.0,
         split_high=float(values[split]) / largest,
         gap=gap / largest,
         coupling=coupling_norm / largest,
@@ -2782,14 +2854,20 @@ def decide_data_rank(
     that already holds it (an unpenalized fit, whose Hessian is this Gram)
     pays nothing for it.
     """
+    spectrum: dict = {}
     decomposition = decompose_gram_if_authoritative(
-        gram, policy=policy, psd_by_construction=psd_by_construction
+        gram, policy=policy, psd_by_construction=psd_by_construction, spectrum=spectrum
     )
     if decomposition is not None:
         return decomposition
     if not certify and project is not None:
         deflated, _ = decompose_gram_deflated(
-            gram, project, rows=rows, structural=structural() if structural else (), policy=policy
+            gram,
+            project,
+            rows=rows,
+            structural=structural() if structural else (),
+            policy=policy,
+            spectrum=spectrum,
         )
         if deflated is not None:
             return deflated

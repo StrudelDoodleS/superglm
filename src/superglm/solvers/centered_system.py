@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -979,6 +979,49 @@ def grouped_projected_factor(
         (p + 2) + len(plans) + 3 + span_rows + -(-n // span_rows) + -(-n // block_rows) + widest + 1
     )
     return factor, cross, roundings, magnitudes
+
+
+def chunked_projected_factor(
+    chunks: Callable[[], Iterator[tuple[int, int, NDArray]]],
+    n: int,
+    W: NDArray,
+    basis: NDArray,
+    *,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> tuple[NDArray, NDArray, int, NDArray]:
+    """:func:`grouped_projected_factor` for rows given as dense blocks ``(start, stop, X)``.
+
+    Each block is centred as a TSQR leaf centres it, ``((X - c) - c_lo)``,
+    and is one leaf of the TSQR of ``B = A basis``; ``A'B`` adds the blocks'
+    products in order.  **Error.**  An entry of ``B`` is a centring (two
+    roundings), a product of length ``p`` and a scaling by a rounded
+    ``sqrt(w)``; an entry of ``A'B`` adds one more scaling, a block's ``L``
+    rows and one add per block, so ``gamma`` of the count returned times
+    ``|A|' |B|`` bounds it (``rank.decompose_gram_deflated``).  The rows are
+    centred first, so no column magnitude exceeds its weighted norm.
+    """
+    from superglm.solvers.rank import streamed_weighted_factor
+
+    basis = np.ascontiguousarray(basis, dtype=np.float64)
+    p = basis.shape[0]
+    sqrt_weights = np.sqrt(np.asarray(W, dtype=np.float64))
+    cross = np.zeros((p, basis.shape[1]))
+    longest, count = 0, 0
+
+    def blocks() -> Iterator[tuple[int, int, NDArray]]:
+        nonlocal longest, count
+        for start, stop, rows in chunks():
+            values = _centred_support(
+                np.asarray(rows, dtype=np.float64), center, center_lo, slice(0, p)
+            )
+            projected = (values @ basis) * sqrt_weights[start:stop, None]
+            np.add(cross, values.T @ (projected * sqrt_weights[start:stop, None]), out=cross)
+            longest, count = max(longest, stop - start), count + 1
+            yield start, stop, projected
+
+    factor = streamed_weighted_factor(blocks(), np.ones(n))
+    return factor, cross, p + 5 + longest + count, np.zeros(p)
 
 
 def refresh_centered_rhs(

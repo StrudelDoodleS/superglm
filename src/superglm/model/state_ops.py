@@ -16,6 +16,7 @@ from superglm.inference.covariance import (
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
 from superglm.solvers.rank import (
+    decide_data_rank,
     decompose_factor,
     decompose_gram,
     decompose_gram_if_authoritative,
@@ -148,6 +149,8 @@ def _legacy_active_state(model, solver, W: NDArray):
     from superglm.solvers.centered_system import (
         build_centered_system,
         grouped_augmented_factor,
+        grouped_projected_factor,
+        grouped_structural_nulls,
         grouped_weighted_factor,
     )
 
@@ -202,14 +205,23 @@ def _legacy_active_state(model, solver, W: NDArray):
     )
     raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
-    data_rank = decompose_gram_if_authoritative(centered.data_gram)
     # rows centred about the system's exact centre pair (issue #430)
     centre, centre_lo = centered.centre_pair()
-    if data_rank is None:
-        certified = decompose_factor(
+    # The fit's route (``rank.decide_data_rank``); unpenalized, the data rank
+    # is also the profile rank below, so the full factor decides it, as in
+    # the fit.
+    data_rank = decide_data_rank(
+        centered.data_gram,
+        lambda: decompose_factor(
             grouped_weighted_factor(design, W, center=centre, center_lo=centre_lo)
-        )
-        data_rank = certified
+        ),
+        project=lambda basis: grouped_projected_factor(
+            design, W, basis, center=centre, center_lo=centre_lo
+        ),
+        structural=lambda: grouped_structural_nulls(design, W, center=centre, center_lo=centre_lo),
+        rows=design.n,
+        certify=not np.any(curvature),
+    )
     if coefficient_rank is None:
         certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
         coefficient_rank = certified
