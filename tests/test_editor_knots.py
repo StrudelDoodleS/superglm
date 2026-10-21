@@ -795,13 +795,6 @@ def test_quantile_knots_crowded_where_the_data_is_dense_still_move_by_hand():
     assert str(refused.value).startswith(f"The knot at {a + decade_step(b - a) / 2:g} sits closer")
 
 
-if __name__ == "__main__":
-    KNOT_BASIS_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
-    KNOT_BASIS_FIXTURE.write_text(
-        json.dumps(_knot_basis_fixture(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
 @pytest.mark.parametrize(
     ("term", "count"), [("x1", 6), ("band", 3)], ids=["numeric", "ordered_basis_names_no_kind"]
 )
@@ -843,3 +836,10 @@ def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(
     np.testing.assert_array_equal(applied.predict(X), session.model.predict(X))
     again = EditorSession.from_model(applied, train_data=(X, y, np.ones(n)))
     assert json.loads(again.export_structure())["features"][term]["knots"] == entry
+
+
+if __name__ == "__main__":
+    KNOT_BASIS_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+    KNOT_BASIS_FIXTURE.write_text(
+        json.dumps(_knot_basis_fixture(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
