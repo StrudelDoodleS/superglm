@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, read_structure
+from superglm import (
+    Categorical,
+    Constraint,
+    OrderedCategorical,
+    Spline,
+    SuperGLM,
+    read_structure,
+)
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import decade_step
@@ -792,3 +800,46 @@ if __name__ == "__main__":
     KNOT_BASIS_FIXTURE.write_text(
         json.dumps(_knot_basis_fixture(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+@pytest.mark.parametrize(
+    ("term", "count"), [("x1", 6), ("band", 3)], ids=["numeric", "ordered_basis_names_no_kind"]
+)
+def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(term, count):
+    """Beside a SCOP term a monotone spline with no kind fits as ``ps``, which ``k=8`` makes 4
+    knots. The structure file records the 6 the editor chose; applied to the declaration, the
+    fit must place them rather than rebuild ``ps`` from the declared ``k``. Fails on b563b4c7: 4."""
+    rng = np.random.default_rng(20261021)
+    n = 600
+    x2 = rng.uniform(0, 1, n)
+    X = pd.DataFrame(
+        {"x1": rng.uniform(0, 1, n), "x2": x2, "band": np.array(BANDS)[(x2 * 8).astype(int)]}
+    )
+    y = (X["x1"] + x2 + rng.normal(0, 0.1, n)).to_numpy()
+    inc = Constraint.fit.increasing
+
+    def declared():
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            features={
+                "x1": Spline(k=8, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc),
+                "band": OrderedCategorical(order=BANDS, basis=Spline(k=6, constraint=inc)),
+            },
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = declared().fit(X, y)
+        session = EditorSession.from_model(model, train_data=(X, y, np.ones(n)))
+        session.replace_with_knots(term, {"count": count, "strategy": "uniform"})
+        exported = json.loads(session.export_structure())
+        entry = exported["features"][term]["knots"]
+        assert (entry["n_knots"], entry["strategy"]) == (count, "uniform")
+        applied = read_structure(exported).apply(declared()).fit(X, y)
+    assert _knots(session.model, term).size == count
+    np.testing.assert_array_equal(_knots(applied, term), _knots(session.model, term))
+    np.testing.assert_array_equal(applied.predict(X), session.model.predict(X))
+    again = EditorSession.from_model(applied, train_data=(X, y, np.ones(n)))
+    assert json.loads(again.export_structure())["features"][term]["knots"] == entry

@@ -647,6 +647,26 @@ def respaced_spline(
         knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
         boundary=source._explicit_boundary,
     )
+    declared = getattr(spline, "_kindless_args", None)
+    if declared is not None:
+        # A spline declared with no kind may fit as ``ps``, rebuilt from these arguments. ``k``
+        # is 6 knots as ``cr`` and 4 as ``ps``, so it stays only where no count was passed.
+        stated = spline._named_knots if spline._named_knots is not None else spline._explicit_knots
+        placed = (
+            {}
+            if knots is None and n_knots is None
+            else {"k": None, "n_knots": spline.n_knots, "knots": stated}
+        )
+        setattr(
+            spline,
+            "_kindless_args",
+            {
+                **declared,
+                **placed,
+                "knot_strategy": spline.knot_strategy,
+                "knot_alpha": spline.knot_alpha,
+            },
+        )
     return spline
 
 

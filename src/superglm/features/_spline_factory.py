@@ -52,7 +52,13 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
 def kindless_as_ps(spec: Any) -> _SplineBase | None:
     """The ``ps`` spline a spec declared with no kind would be, or None if it named one."""
     declared = getattr(spec, "_kindless_args", None)  # absent on explicit kinds and 0.40 pickles
-    return None if declared is None else Spline(kind="ps", **declared)
+    if declared is None:
+        return None
+    from superglm.features.rebuild import _carry_marks
+
+    replacement = Spline(kind="ps", **declared)
+    _carry_marks(spec, replacement)
+    return replacement
 
 
 def warn_kindless_ps(reason: str, prefix: str = "") -> None:
