@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import warnings
 from functools import cache
 
 import numpy as np
@@ -462,6 +463,16 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     parent1 = str(table.columns[0])
     parent2 = block.name.split(":")[1]
     assert parent2 in X.columns, f"{block.name!r} names a column the frame does not have"
+
+    if block.kind == "spline_cells":
+        # Intervals down the side, levels across the top: the consumer finds
+        # the interval its numeric value falls in, then the column of its level.
+        edges = _printed_edges(block)
+        row = np.clip(np.digitize(X[parent1].to_numpy(dtype=np.float64), edges), 1, len(edges) - 1)
+        cells = table.iloc[:, 1:]
+        column = pd.Index([str(c) for c in cells.columns]).get_indexer(X[parent2].astype(str))
+        assert (column >= 0).all(), "every level of the frame has a column"
+        return cells.to_numpy(dtype=np.float64)[row - 1, column]
 
     gridded = all(pd.api.types.is_numeric_dtype(X[parent]) for parent in (parent1, parent2))
     if gridded:
@@ -2534,3 +2545,238 @@ def test_error_mode_ppform_scores_the_boundary_through_the_consumer():
     assert np.allclose(scored, expected, rtol=1e-12), (
         f"the boundary scores {scored[0]!r} against predict's {expected[0]!r}"
     )
+
+
+# ── A spline-by-categorical interaction ───────────────────────────────────────
+
+_REGION_LEVELS = ["A", "B", "C", "D"]
+
+
+@cache
+def _spline_categorical_fit(unseen: str = "error"):
+    """``age`` spline crossed with a four-level ``region``, two levels with their own curve."""
+    rng = np.random.default_rng(20261021)
+    n = 1500
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18.0, 80.0, n),
+            "region": rng.choice(_REGION_LEVELS, n),
+        }
+    )
+    age = X["age"].to_numpy()
+    region = X["region"].to_numpy()
+    eta = (
+        -1.4
+        + 0.012 * age
+        + 0.3 * (region == "B")
+        + 0.5 * np.sin(age / 9.0) * (region == "C")
+        - 0.4 * (age - 50.0) / 30.0 * (region == "D")
+    )
+    sample_weight = rng.uniform(0.5, 2.0, n)
+    y = rng.poisson(np.exp(eta) * sample_weight).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6), "region": Categorical(base="first", unseen=unseen)},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    return model, X, y, sample_weight
+
+
+def _representative_rows(block, X: pd.DataFrame, geometry_weight: np.ndarray) -> pd.DataFrame:
+    """One row per (bin, level) at the bin's weighted-mean ``age``, from public inputs alone.
+
+    The representative is recomputed here from the frame and the printed edges
+    instead of being read back from the exporter, so the table is compared with
+    the model at a point the test chose for itself.  The mean is in the
+    binning's own measure (``_geometry_weight``), which for these weights is
+    one unit per physical row.
+    """
+    edges = _printed_edges(block)
+    n_bins = len(edges) - 1
+    age = X["age"].to_numpy(dtype=np.float64)
+    index = np.clip(np.digitize(age, edges), 1, n_bins) - 1
+    mass = np.bincount(index, weights=geometry_weight, minlength=n_bins)
+    moment = np.bincount(index, weights=geometry_weight * age, minlength=n_bins)
+    midpoint = 0.5 * (edges[:-1] + edges[1:])
+    representative = np.where(mass > 0.0, moment / np.where(mass > 0.0, mass, 1.0), midpoint)
+    levels = [str(column) for column in block.table.columns[1:]]
+    return pd.DataFrame(
+        {
+            "age": np.repeat(representative, len(levels)),
+            "region": np.tile(levels, n_bins),
+        }
+    )
+
+
+def test_the_spline_categorical_table_reproduces_predict_at_the_bin_representatives():
+    """Every level's cell is the model at the bin's representative, product and all.
+
+    ``continuous_kind="ppform"`` makes the ``age`` main effect exact, so the
+    product is the prediction wherever the interaction is, and the only
+    approximation left in the workbook is the interaction's binning.  A row AT
+    a representative is where that binning is not an approximation.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native", continuous_kind="ppform")
+
+    (block,) = payload.interactions
+    assert block.name == "age:region"
+    assert block.kind == "spline_cells"
+    assert list(block.table.columns) == ["age", *_REGION_LEVELS]
+
+    rows = _representative_rows(block, X, _geometry_weight(model, sample_weight))
+    assert len(rows) == len(block.table) * len(_REGION_LEVELS)
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows), model.predict(rows), rtol=1e-13, atol=0.0
+    )
+    # Not decorative: without the interaction the same rows are far off, on the
+    # two levels that carry a curve of their own.
+    without = _predict_from_payload(payload, rows, with_interactions=False)
+    assert np.max(np.abs(without / model.predict(rows) - 1.0)) > 0.1
+
+
+def test_the_spline_categorical_ratio_to_the_base_level_is_exact_under_binned_mains():
+    """With a binned ``age`` the product is approximate, but a level-to-base ratio is not.
+
+    The binned main effect cancels in ``predict(level) / predict(base)`` at one
+    ``age``, leaving the categorical main effect and the interaction cell.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    (block,) = payload.interactions
+    rows = _representative_rows(block, X, _geometry_weight(model, sample_weight))
+    base_rows = rows.assign(region="A")
+    categorical = next(b for b in payload.main_effects if b.name == "region")
+    main = dict(zip(categorical.table["region"], categorical.table["Relativity"]))
+    expected = rows["region"].map(main).to_numpy(dtype=np.float64) / main["A"]
+    cells = _interaction_multiplier(block, rows) / _interaction_multiplier(block, base_rows)
+    np.testing.assert_allclose(
+        model.predict(rows) / model.predict(base_rows), expected * cells, rtol=1e-13, atol=0.0
+    )
+
+
+def test_the_spline_categorical_block_is_keyed_on_the_main_effects_bins():
+    """One covariate, one set of intervals: the main block and the interaction agree."""
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    main = next(b for b in payload.main_effects if b.name == "age")
+    (block,) = payload.interactions
+    assert list(block.table["age"]) == list(main.table["age"])
+    assert (block.table["A"] == 1.0).all()
+
+
+@pytest.mark.parametrize("continuous_kind", ["binned", "ppform"])
+@pytest.mark.parametrize("bin_strategy", ["exposure_quantile", "uniform", "exact"])
+def test_the_sheet_measures_the_spline_categorical_workbook(bin_strategy, continuous_kind):
+    """The impact sheet's maximum is how far the workbook the reader holds is off.
+
+    A row of the sheet for ``age:region``, and the joint maximum on it equal to
+    the reconstruction's own, under every banding strategy -- ``"exact"``
+    bands the main effect and gives the interaction the default edges.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        payload = build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            n_bins=20,
+            impact_bins=(10,),
+            bin_strategy=bin_strategy,
+            continuous_kind=continuous_kind,
+        )
+    sheet = payload.discretization_impact
+    assert "age:region" in set(sheet["feature"])
+    exported = sheet[sheet["exported"] & (sheet["feature"] == "age:region")]
+    assert len(exported) == 1
+    # Cells, as a grid's rows are: every bin of every non-base level.
+    block = payload.interactions[0]
+    assert int(exported["actual_bins"].iloc[0]) == len(block.table) * (len(_REGION_LEVELS) - 1)
+
+    predicted = model.predict(X)
+    moved_pct = np.abs(_predict_from_payload(payload, X) / predicted - 1.0) * 100.0
+    assert float(exported["max_abs_prediction_change_pct"].iloc[0]) == pytest.approx(
+        float(moved_pct.max()), rel=1e-9
+    )
+    assert float(exported["mean_abs_prediction_change_pct"].iloc[0]) == pytest.approx(
+        float(moved_pct.mean()), rel=1e-9
+    )
+
+
+def test_a_level_unseen_in_training_is_rated_on_the_base_column():
+    """``unseen="base"`` routes a new level to the base curve; the table has no column for it.
+
+    The model rates the unseen level exactly as the base level, and the base
+    column of the table is ``1.0`` throughout, so a consumer who routes an
+    unlisted level to the base reproduces ``predict``.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit("base")
+    payload = _payload(model, X, y, sample_weight, "native", continuous_kind="ppform")
+    (block,) = payload.interactions
+    assert "Z" not in block.table.columns
+
+    new = pd.DataFrame({"age": [22.0, 41.5, 67.0], "region": ["Z", "Z", "Z"]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        predicted = model.predict(new)
+    routed = new.assign(region="A")
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, routed), predicted, rtol=1e-13, atol=0.0
+    )
+
+
+def test_the_spline_categorical_block_survives_the_workbook(tmp_path):
+    """Intervals and cells read back from the file are the payload's, and nothing moved."""
+    from openpyxl import load_workbook
+
+    model, X, y, sample_weight = _spline_categorical_fit()
+    path = model.export_rating_tables(
+        tmp_path / "tables.xlsx", X, y, sample_weight=sample_weight, n_bins=20
+    )
+    payload = _payload_for(model, X, y, sample_weight, n_bins=20)
+    (block,) = payload.interactions
+
+    ws = load_workbook(path, data_only=True)["Rating Tables"]
+    title_row = next(
+        row for row in range(1, ws.max_row + 1) if ws.cell(row=row, column=1).value == "age:region"
+    )
+    header = [ws.cell(row=title_row + 2, column=c).value for c in range(1, 2 + len(_REGION_LEVELS))]
+    assert header == ["age", *_REGION_LEVELS]
+    for i in range(len(block.table)):
+        row = [
+            ws.cell(row=title_row + 3 + i, column=c).value
+            for c in range(1, 2 + len(_REGION_LEVELS))
+        ]
+        assert row[0] == block.table["age"].iloc[i]
+        # The file keeps 16 significant digits where a binary64 can need 17.
+        np.testing.assert_allclose(
+            row[1:], block.table.iloc[i, 1:].to_numpy(dtype=np.float64), rtol=1e-15, atol=0.0
+        )
+    assert ws.cell(row=title_row + 3 + len(block.table), column=1).value is None
+
+
+def test_the_sweep_takes_a_spline_categorical_only_when_it_is_named():
+    """``features=None`` keeps reporting main effects and grids; the export names the term."""
+    model, X, y, sample_weight = _spline_categorical_fit()
+
+    default = model.discretization_impact(X, y, sample_weight=sample_weight, n_bins=20)
+    assert set(default.tables) == {"age"}
+    assert default.interaction_tables == {}
+
+    named = model.discretization_impact(
+        X, y, sample_weight=sample_weight, n_bins=20, features=["age:region"]
+    )
+    table = named.interaction_tables["age:region"]
+    assert list(table["level"].unique()) == ["B", "C", "D"]
+    assert len(table) == 20 * 3
+    np.testing.assert_allclose(table["relativity"], np.exp(table["log_relativity"]), rtol=1e-15)
+
+
+def _payload_for(model, X, y, sample_weight, **kwargs):
+    return build_rating_table_payload(model, X, y, sample_weight=sample_weight, **kwargs)

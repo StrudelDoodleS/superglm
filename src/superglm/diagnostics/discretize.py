@@ -48,7 +48,11 @@ class DiscretizationResult:
         interchangeable: a main effect is binned into intervals and a
         continuous-by-continuous interaction is SAMPLED at grid nodes, so it
         has axis values where a bin has a half-open interval, and one row per
-        cell rather than per bin.
+        cell rather than per bin.  A spline-by-categorical interaction, named in
+        ``features``, has one row per bin and non-base level: ``bin_from``,
+        ``bin_to``, ``level``, ``relativity`` (the level's curve relative to the
+        base level's at the bin's representative covariate) and
+        ``log_relativity``.
     predictions : NDArray
         Predictions using discretized (binned) curves.
     original_predictions : NDArray
@@ -599,6 +603,91 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     return raw
 
 
+def is_spline_categorical(ispec) -> bool:
+    """Whether ``ispec`` is a ``SplineCategorical``, by EXACT type.
+
+    Exact for the reason ``_grid_reconstruction`` matches exact types: a
+    subclass can override ``reconstruct`` to return a surface, and the exporter
+    then ships it as a grid on the contract.  Both the exporter and the sweep
+    ask this, so the two cannot route one term differently.
+    """
+    from superglm.features.interaction import SplineCategorical
+
+    return type(ispec) is SplineCategorical
+
+
+@dataclass(frozen=True)
+class SplineCategoricalBins:
+    """A per-level spline deviation tabulated on one set of bins.
+
+    ``log_deviation[b, j]`` is non-base level ``levels[j]``'s curve, relative
+    to the base level's, at ``representatives[b]``, the point a consumer's row
+    in bin ``b`` is rated at.
+    """
+
+    edges: NDArray
+    representatives: NDArray
+    levels: list[str]
+    log_deviation: NDArray
+
+    def row_representatives(self, x: NDArray) -> NDArray:
+        """The representative of the bin each ``x`` falls in, as the export's lookup finds it."""
+        n_bins = len(self.representatives)
+        index = np.clip(np.digitize(x, self.edges, right=False), 1, n_bins) - 1
+        return self.representatives[index]
+
+
+def spline_categorical_bins(
+    ispec,
+    beta: NDArray,
+    x: NDArray,
+    geometry_weight: NDArray,
+    n_bins: int,
+    bin_strategy: str,
+) -> SplineCategoricalBins:
+    """Bin a ``SplineCategorical``'s covariate and tabulate every level's curve.
+
+    Shared by the rating-table export and the impact sweep, so the table a
+    workbook ships and the table the sheet measures are one computation.
+
+    The bins are the main effect's: the same covariate, geometry weights,
+    ``n_bins`` and strategy through the same ``_compute_edges``, so a binned
+    main effect on this covariate and this block carry identical intervals.
+    ``bin_strategy="exact"`` bands a main effect against its own fitted curve
+    and has no meaning for a deviation, so the interaction takes the default
+    ``"exposure_quantile"`` edges there; the impact sheet measures what that
+    costs.
+
+    A bin is evaluated at its geometry-weighted mean covariate (its midpoint
+    when it holds no mass), which is a POINT, not an average of the curve over
+    the bin: the table is then the model itself at the representative, for
+    every level, whether or not the level has rows in that bin.
+    """
+    strategy = "exposure_quantile" if bin_strategy == "exact" else bin_strategy
+    x = np.asarray(x, dtype=np.float64)
+    edges = _compute_edges(x, geometry_weight, n_bins, strategy)
+    n_edge_bins = len(edges) - 1
+    index = np.clip(np.digitize(x, edges, right=False), 1, n_edge_bins) - 1
+
+    # Scaled by the largest weight, which only ratios see, as the main effect's
+    # bin average is: a weight near the largest double would overflow w * x.
+    peak = float(np.max(geometry_weight))
+    scaled = geometry_weight / peak if peak > 0.0 else geometry_weight
+    mass = np.bincount(index, weights=scaled, minlength=n_edge_bins)
+    moment = np.bincount(index, weights=scaled * x, minlength=n_edge_bins)
+    midpoint = 0.5 * (edges[:-1] + edges[1:])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(mass > 0.0, moment / mass, midpoint)
+    representatives = np.clip(mean, edges[:-1], edges[1:])
+
+    return SplineCategoricalBins(
+        edges=edges,
+        representatives=representatives,
+        levels=[str(level) for level in ispec._non_base],
+        log_deviation=ispec.level_log_deviations(representatives, beta),
+    )
+
+
 _INTERACTION_TABLE_RESERVED_COLUMNS = ("relativity", "log_relativity", "n_obs", "sample_weight")
 
 
@@ -830,7 +919,10 @@ def discretization_impact(
     features : list[str], optional
         Subset of names to discretize: spline/polynomial features, and
         continuous-by-continuous interaction names as they appear in
-        ``model._interaction_order``. None means every one of both.
+        ``model._interaction_order``. None means every one of both. A
+        spline-by-categorical interaction is discretized only when named: its
+        rating-table block bins the spline covariate, and the sweep measures
+        that table.
     band_se : float
         Under ``"exact"``: the tolerance in pointwise standard errors of the
         term's log relativity (native centering). Default 1.0.
@@ -901,6 +993,10 @@ def discretization_impact(
     # and by the same ``n_bins``, and leaving it out understates the answer.
     target_features: list[str] = []
     target_interactions: list[str] = []
+    # Named explicitly only: ``features=None`` keeps meaning the main effects and
+    # the sampled grids, so a model carrying one of these reports what it did
+    # before.  The rating-table export names the ones it ships.
+    target_spline_categorical: list[str] = []
     if features is not None:
         # De-duplicated, order preserved. A repeated name used to add its
         # replacement delta once per occurrence while writing one table, so
@@ -916,12 +1012,17 @@ def discretization_impact(
                     )
                 target_features.append(name)
             elif name in model._interaction_specs:
-                if _grid_for(name) is None:
+                if _grid_for(name) is not None:
+                    target_interactions.append(name)
+                elif is_spline_categorical(model._interaction_specs[name]):
+                    target_spline_categorical.append(name)
+                else:
                     raise ValueError(
                         f"Interaction '{name}' is not continuous-by-continuous — "
-                        "only interactions exported as a sampled grid can be discretized."
+                        "only interactions exported as a sampled grid, or a "
+                        "spline-by-categorical one exported as a binned table, can be "
+                        "discretized."
                     )
-                target_interactions.append(name)
             else:
                 raise ValueError(f"Unknown feature: {name}")
     else:
@@ -939,7 +1040,7 @@ def discretization_impact(
             target_features
             + [
                 parent
-                for name in target_interactions
+                for name in (*target_interactions, *target_spline_categorical)
                 for parent in model._interaction_specs[name].parent_names
             ]
         )
@@ -1118,6 +1219,42 @@ def discretization_impact(
                 "log_relativity": surface.ravel(),
                 "n_obs": np.bincount(cell, minlength=n_cells),
                 "sample_weight": np.bincount(cell, weights=evaluation_weight, minlength=n_cells),
+            }
+        )
+
+    # A spline-by-categorical interaction is BINNED on its spline covariate, one
+    # factor per bin and level, so a row is rated at its bin's representative on
+    # its own level's curve.  Scoring the term at that representative is the
+    # replacement -- the same arithmetic ``predict`` runs, at the point the
+    # exported table is tabulated at.
+    for name in target_spline_categorical:
+        term = interaction_terms[name]
+        beta_term = _interaction_beta(name)
+        log_rel_exact = np.asarray(
+            base._score_prediction_term_local_exact(term, frame, beta_term),
+            dtype=np.float64,
+        ).ravel()
+        ispec = term["spec"]
+        parent1, parent2 = term["parent_names"]
+        left_spec, right_spec = term.get("parent_specs", (None, None))
+        _, values1 = resolve_interaction_parent_of(ispec, left_spec, frame.column_array(parent1))
+        _, labels = resolve_interaction_parent_of(ispec, right_spec, frame.column_array(parent2))
+        x_values = np.asarray(values1, dtype=np.float64)
+        bins = spline_categorical_bins(
+            ispec, beta_term, x_values, geometry_weight, n_bins, bin_strategy
+        )
+        total_delta += (
+            base._score_interaction(ispec, bins.row_representatives(x_values), labels, beta_term)
+            - log_rel_exact
+        )
+        n_levels = len(bins.levels)
+        interaction_tables[name] = pd.DataFrame(
+            {
+                "bin_from": np.repeat(bins.edges[:-1], n_levels),
+                "bin_to": np.repeat(bins.edges[1:], n_levels),
+                "level": np.tile(bins.levels, len(bins.representatives)),
+                "relativity": np.exp(bins.log_deviation).ravel(),
+                "log_relativity": bins.log_deviation.ravel(),
             }
         )
 

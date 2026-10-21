@@ -73,7 +73,10 @@ class InteractionTableBlock:
 
     ``kind`` says how the block approximates: ``"cells"`` is a full
     categorical-by-categorical cell table and is exact, ``"grid"`` is a
-    continuous surface SAMPLED at ``n_bins`` nodes per axis and is not.  It is
+    continuous surface SAMPLED at ``n_bins`` nodes per axis and is not, and
+    ``"spline_cells"`` is a spline-by-categorical deviation with one row per bin
+    of the spline covariate and one column per level of the categorical, read at
+    each bin's representative, and is not exact between them.  It is
     recorded because ``_interaction_blocks`` is the one place that decides,
     and a second place deciding differently is the shape issue #287 took.
     """
@@ -150,7 +153,10 @@ def _grid_reconstruction_keys() -> frozenset[str]:
 
 
 def _gridded_interaction_names(blocks: list[InteractionTableBlock]) -> list[str]:
-    """The exported blocks that are sampled surfaces, read off the blocks.
+    """The exported blocks that are approximations, read off the blocks.
+
+    A sampled surface (``"grid"``) or a spline deviation binned on its
+    covariate (``"spline_cells"``); a cell table is exact and is not listed.
 
     Derived from what ``_interaction_blocks`` actually BUILT rather than
     re-decided from the specs, so "what the workbook approximates" and "what
@@ -159,7 +165,7 @@ def _gridded_interaction_names(blocks: list[InteractionTableBlock]) -> list[str]
     spec outside the two built-ins exported approximately and off the sheet,
     because the exporter routes on the reconstruction contract, not the class.
     """
-    return [block.name for block in blocks if block.kind == "grid"]
+    return [block.name for block in blocks if block.kind in ("grid", "spline_cells")]
 
 
 def _binned_continuous_names(blocks: list[RatingTableBlock]) -> list[str]:
@@ -238,6 +244,22 @@ def _format_axis_value(value: float) -> str:
     return _format_number(value)
 
 
+def _interval_keys(bin_from, bin_to) -> list[str]:
+    """The printed key of each bin, one rule for every block keyed on intervals."""
+    # A last band holding only the largest value has bin_from == bin_to, and
+    # its half-open key would match nothing, so it alone is closed. Other
+    # zero-width rows (repeated uniform edges) stay half-open and empty.
+    last = len(bin_from) - 1
+    return [
+        _format_interval(
+            float(lower),
+            float(upper),
+            closed_right=index == last and float(lower) == float(upper),
+        )
+        for index, (lower, upper) in enumerate(zip(bin_from, bin_to, strict=True))
+    ]
+
+
 def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) -> RatingTableBlock:
     """A binned block, moved by the same constant every other block moves by.
 
@@ -266,20 +288,9 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     # arrive as that refusal rather than as a ``RuntimeWarning`` from here.
     with np.errstate(over="ignore", under="ignore"):
         factor = float(np.exp(-centering_shift))
-    # A last band holding only the largest value has bin_from == bin_to, and
-    # its half-open key would match nothing, so it alone is closed. Other
-    # zero-width rows (repeated uniform edges) stay half-open and empty.
-    last = len(table) - 1
     out = pd.DataFrame(
         {
-            name: [
-                _format_interval(
-                    float(row.bin_from),
-                    float(row.bin_to),
-                    closed_right=index == last and float(row.bin_from) == float(row.bin_to),
-                )
-                for index, row in enumerate(table.itertuples(index=False))
-            ],
+            name: _interval_keys(table["bin_from"], table["bin_to"]),
             "Relativity": table["relativity"].astype(float).to_numpy() * factor,
             "Weight": table["sample_weight"].astype(float).to_numpy(),
         }
@@ -1627,11 +1638,73 @@ def _continuous_interaction_block(
     return InteractionTableBlock(name=name, table=table, kind="grid")
 
 
-def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBlock]:
+def _spline_categorical_block(
+    model: SuperGLM,
+    name: str,
+    ispec,
+    frame: EagerFrame,
+    sample_weight: NDArray | None,
+    n_bins: int,
+    bin_strategy: str,
+) -> InteractionTableBlock:
+    """A per-level spline deviation as one relativity per bin and level.
+
+    Rows are the spline covariate's bins, keyed as the main effect's are, and
+    the columns are the categorical's levels, base first at ``1.0``: the shape
+    of a categorical-by-categorical cell table with intervals on the left.  A
+    cell is the level's curve relative to the base level's, at the bin's
+    representative (``spline_categorical_bins``), and the product with the main
+    effects is the prediction at that point.  Not exact between
+    representatives, which the impact sheet measures.
+    """
+    from superglm.diagnostics.discretize import (
+        _validated_discretization_weights,
+        spline_categorical_bins,
+    )
+
+    parent1, _ = ispec.parent_names
+    _, geometry_weight = _validated_discretization_weights(model, sample_weight, len(frame))
+    bins = spline_categorical_bins(
+        ispec,
+        _interaction_beta(model, name),
+        frame.column_array(parent1, dtype=np.float64),
+        geometry_weight,
+        n_bins,
+        bin_strategy,
+    )
+    factor = dict(zip(bins.levels, np.exp(bins.log_deviation).T, strict=True))
+    columns = {parent1: _interval_keys(bins.edges[:-1], bins.edges[1:])}
+    ones = np.ones(len(bins.representatives))
+    for level in ispec._cat_levels:
+        columns[str(level)] = factor.get(str(level), ones)
+    return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind="spline_cells")
+
+
+def _interaction_blocks(
+    model: SuperGLM,
+    n_bins: int,
+    *,
+    frame: EagerFrame | None = None,
+    sample_weight: NDArray | None = None,
+    bin_strategy: str = "exposure_quantile",
+) -> list[InteractionTableBlock]:
+    from superglm.diagnostics.discretize import is_spline_categorical
+
     blocks: list[InteractionTableBlock] = []
     for name in model._interaction_order:
         ispec = model._interaction_specs[name]
         parent1, _ = ispec.parent_names
+        # Before the reconstruction below, which would walk every level of the
+        # term to learn it is not a surface; the sweep routes it by the same
+        # exact-type test.
+        if is_spline_categorical(ispec):
+            assert frame is not None
+            blocks.append(
+                _spline_categorical_block(
+                    model, name, ispec, frame, sample_weight, n_bins, bin_strategy
+                )
+            )
+            continue
         raw = _reconstruct_interaction(ispec, _interaction_beta(model, name), n_bins)
         # The sweep's predicate, imported rather than respelled.  Four review
         # rounds found the same failure -- the exporter routes a grid on one
@@ -2069,8 +2142,24 @@ def build_rating_table_payload(
     whose edges are all data values; under ``"uniform"`` on a skewed exposure it
     is the normal case, measured at 123 of 150 bins on an 800-row fit.
 
+    A spline-by-categorical interaction (``SplineCategorical``) is exported as
+    a ``"spline_cells"`` block: one row per bin of the spline covariate, keyed
+    on the same intervals as a binned main effect on that covariate, one column
+    per level of the categorical with the base level at ``1.0``, and in each
+    cell the level's curve relative to the base level's at the bin's
+    representative -- its geometry-weighted mean covariate.  A consumer finds
+    the interval its value falls in and the column of its level, as for a cell
+    table.  It reproduces ``model.predict`` to round-off for a row AT a
+    representative and is approximate between them; the sheet below measures
+    it, and ``bin_strategy="exact"``, which bands a main effect against its own
+    curve, gives it the ``"exposure_quantile"`` edges.  A level unseen in
+    training has no column and is rated as the base level, which is the
+    model's own rule under ``unseen="base"``.  As for every interaction block,
+    the columns are keyed on the grouped levels of a ``grouping=`` parent.
+
     Lossy, by construction, for the approximated FITTED TERMS -- ``Spline``,
-    ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
+    ``Polynomial``, the continuous-by-continuous interaction grid, and the
+    spline-by-categorical block.  Two
     distinct errors ride on those, and the sheet reports the first for all
     three: the sweep is handed ``_continuous_features`` and
     ``_gridded_interaction_names`` -- the second read off the interaction
@@ -2354,7 +2443,8 @@ def build_rating_table_payload(
     NotImplementedError
         If the model carries a term type the export does not support -- a
         ``RandomEffect`` or ``FactorSmooth`` main effect, or an interaction
-        whose reconstruction is neither a cell table nor a grid.
+        whose reconstruction is neither a cell table nor a grid and that is not a
+        ``SplineCategorical``.
     RuntimeError
         If the model has not been fitted.
 
@@ -2555,7 +2645,9 @@ def build_rating_table_payload(
     # place the disciplines this module applies to the base -- reject inf,
     # reject 0.0, reject subnormal -- used to be absent entirely (issue #289).
     # ``_interaction_blocks`` is pure, so the hoist changes nothing else.
-    interactions = _interaction_blocks(model, n_bins)
+    interactions = _interaction_blocks(
+        model, n_bins, frame=frame, sample_weight=sample_weight, bin_strategy=bin_strategy
+    )
 
     # After the blocks are built, because it is the emitted values it checks
     # rather than the coefficients they came from.

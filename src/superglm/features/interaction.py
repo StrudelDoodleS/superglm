@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import inspect
 import warnings
+from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -957,9 +958,30 @@ class SplineCategorical:
     ) -> NDArray:
         """Score labels that are already in the fitted grouped-level domain."""
         B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x_spline))
-        beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_spline), dtype=np.float64)
 
+        for level, beta_raw in self._level_raw_coefficients(beta):
+            mask = x_cat == level
+            if not np.any(mask):
+                continue
+            clip = getattr(self, "_level_clip", {}).get(level)
+            # A level held past a separated range reads its curve at the
+            # clipped covariate there, as its rows did when it was fitted.
+            rows_basis = (
+                B[mask]
+                if clip is None
+                else self._spline_spec._raw_basis_matrix(np.clip(x_spline[mask], *clip))
+            )
+            out[mask] = np.asarray(rows_basis @ beta_raw, dtype=np.float64).ravel()
+        return out
+
+    def _level_raw_coefficients(self, beta: NDArray) -> Iterator[tuple[str, NDArray]]:
+        """Each non-base level with its curve's coefficients on the raw basis.
+
+        The one place the stacked coefficient vector is cut into levels, so
+        scoring rows and tabulating the curves cannot read it two ways.
+        """
+        beta = np.asarray(beta, dtype=np.float64).ravel()
         offset = 0
         for level in self._non_base:
             R_inv = self._R_inv_dict.get(level)
@@ -973,19 +995,25 @@ class SplineCategorical:
                 n_cols = self._n_basis
                 beta_raw = beta[offset : offset + n_cols]
             offset += n_cols
+            yield level, beta_raw
 
-            mask = x_cat == level
-            if not np.any(mask):
-                continue
-            clip = getattr(self, "_level_clip", {}).get(level)
-            # A level held past a separated range reads its curve at the
-            # clipped covariate there, as its rows did when it was fitted.
-            rows_basis = (
-                B[mask]
-                if clip is None
-                else self._spline_spec._raw_basis_matrix(np.clip(x_spline[mask], *clip))
-            )
-            out[mask] = np.asarray(rows_basis @ beta_raw, dtype=np.float64).ravel()
+    def level_log_deviations(self, x: NDArray, beta: NDArray) -> NDArray:
+        """Every non-base level's log deviation from the base curve at ``x``.
+
+        Shape ``(len(x), len(non_base))``, columns in ``_non_base`` order, and
+        the same numbers ``score`` gives a row of that level at that ``x``: it
+        goes through the same coefficients and the same held-range clip.  One
+        basis evaluation serves every level, so the cost is linear in the
+        number of levels, which a loop over ``score`` or ``reconstruct`` is not.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x))
+        clips = getattr(self, "_level_clip", {})
+        out = np.zeros((len(x), len(self._non_base)), dtype=np.float64)
+        for j, (level, beta_raw) in enumerate(self._level_raw_coefficients(beta)):
+            clip = clips.get(level)
+            basis = B if clip is None else self._spline_spec._raw_basis_matrix(np.clip(x, *clip))
+            out[:, j] = np.asarray(basis @ beta_raw, dtype=np.float64).ravel()
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
