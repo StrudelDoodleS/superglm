@@ -1610,6 +1610,66 @@ def test_a_redundant_group_term_carries_no_separated_walk() -> None:
     assert np.all(np.abs(after - before) <= bound)
 
 
+@pytest.mark.parametrize("population", [False, True])
+@pytest.mark.parametrize("variant", ["separated", "thin"])
+def test_a_redundant_group_terms_common_level_trades_against_the_intercept(
+    variant, population
+) -> None:
+    """The group term's mean is the intercept's to trade (PR 508 round 1, Claude review).
+
+    A redundant group term with the intercept has one more alias than the
+    term alone: every level's constant ``+ d`` against the intercept ``- d``,
+    which moves no fitted value.  The rule folded the constants themselves,
+    so ``raw + a 1`` no longer summed to zero across levels and, with every
+    level thin or separated, the canonical population ``c = -(1/K)(I -
+    M/K)^+ sum_t Pi_t folded_t`` moved by ``-(d/K)(I - M/K)^+ M 1`` instead of
+    ``d 1``: unseen levels, and every level's predictions off its own rows,
+    followed the solver's split of the redundant columns.  It now folds the
+    deviations from the mean and carries the mean in the offset, so
+    ``pair(constants + d) - d == pair(constants)`` for the pair of terms,
+    conditionally and under ``population``, to the rule's rounding.
+    Mutation: the constants folded uncentred.
+    """
+    if variant == "separated":
+        frame, y, _ = _trigger_shaped("poisson", every_level=True)
+        fit = _trigger_model("poisson", False).fit_reml
+    else:
+        frame, y = _all_thin_frame()
+        fit = _all_thin_model().fit_reml
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = fit(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x:g:sz")
+    beta = np.asarray(model.result.beta[group.sl])
+    blocks = spec._level_blocks(beta)
+    K = len(spec._levels)
+    assert spec._population_convention == "canonical"
+    rng = np.random.default_rng(12)
+    constants = rng.normal(size=K)
+    shift = 3.0
+    one = spec._lowest_order_null_space(1)[:, 0]
+    x = np.tile(np.linspace(0.0, 1.0, 21), K)
+    g = np.repeat(np.asarray(spec._levels, dtype=object), 21)
+    codes = np.repeat(np.arange(K), 21)
+
+    def pair(level_constants):
+        values, _ = spec._score_identified(
+            x, g, beta, population=population, level_constants=level_constants
+        )
+        return level_constants[codes] + values
+
+    before = pair(constants)
+    after = pair(constants + shift) - shift
+    _, _, _, magnitude = _sz_rule_blocks(spec, blocks)
+    basis = np.abs(spec.marginal_basis(x))
+    size = np.abs(constants).max() + shift
+    reach = basis @ (magnitude + size * np.abs(one)[None, :]).T
+    reach = reach[np.arange(len(x)), codes] + 2.0 * size
+    bound = 2.0 * _gamma((K + 8) * spec.k) * np.linalg.cond(spec._natural_map) * reach
+    assert np.all(np.abs(after - before) <= bound)
+
+
 @pytest.mark.parametrize("family", ["poisson", "binomial"])
 @pytest.mark.parametrize("kind", ["numeric", "polynomial"])
 def test_a_separated_varying_coefficient_level_is_held_to_its_rows_range(kind, family) -> None:

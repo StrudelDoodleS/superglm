@@ -1179,14 +1179,21 @@ class FactorSmooth:
             blocks, offset = self._identified_blocks(raw)
         else:
             constants = np.asarray(level_constants, dtype=np.float64)
+            mean = float(np.mean(constants))
             constant = self._lowest_order_null_space(1)[:, 0]
-            folded, offset = self._identified_blocks(raw + np.outer(constants, constant))
+            # The rule folds the constants' deviations from their mean, so the
+            # lines it reads still sum to zero across levels, as the term's do:
+            # trading the mean against the intercept (every constant + d,
+            # intercept - d) then cannot move the population.  The mean is the
+            # group term's common level, carried in the offset.
+            folded, offset = self._identified_blocks(raw + np.outer(constants - mean, constant))
+            offset = offset + mean * constant
             moved = np.asarray(
                 sorted({*self._unidentified_directions(), *self._levels_at_population()}),
                 dtype=np.intp,
             )
             blocks = np.array(raw, copy=True)
-            blocks[moved] = folded[moved] - np.outer(constants[moved], constant)
+            blocks[moved] = folded[moved] - np.outer(constants[moved] - mean, constant)
         coefficients = blocks[np.maximum(codes, 0)]
         coefficients[codes < 0] = offset
         result = np.einsum("ij,ij->i", basis, coefficients, optimize=True)
