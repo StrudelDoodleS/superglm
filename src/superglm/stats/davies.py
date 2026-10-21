@@ -247,10 +247,14 @@ def psum_chisq(
             log_rho += 0.125 * sigma_u * sigma_u
         return phase, log_rho
 
-    # The cosine and sine Fourier passes below visit the same abscissae, so one
-    # pass's evaluations serve the other. Owner and lifetime: this call; the
-    # entries depend on nothing but the scaled weights, degrees of freedom and
-    # sigma fixed above, so nothing invalidates them.
+    # Only the cosine and sine Fourier passes below visit the same abscissae
+    # (QAWO's Clenshaw-Curtis rule evaluates its interval endpoints, which
+    # both passes share), so one pass's evaluations serve the other. The
+    # Gauss-Kronrod passes (the near-origin and direct-inversion integrals)
+    # never repeat a node, and read ``_phase_and_log_rho_at`` directly. Owner
+    # and lifetime: this call; the entries depend on nothing but the scaled
+    # weights, degrees of freedom and sigma fixed above, so nothing
+    # invalidates them.
     phase_memo: dict[float, tuple[float, float]] = {}
 
     def _phase_and_log_rho(u: float) -> tuple[float, float]:
@@ -263,7 +267,7 @@ def psum_chisq(
         if u == 0.0:
             return 0.5 * (scaled_mean - scaled_q)
 
-        phase, log_rho = _phase_and_log_rho(u)
+        phase, log_rho = _phase_and_log_rho_at(u)
         if log_rho > 745.0:
             return 0.0
 

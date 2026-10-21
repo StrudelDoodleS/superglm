@@ -144,6 +144,7 @@ from superglm.solvers.rank import (
     decompose_gram,
     decompose_gram_if_authoritative,
     decompose_symmetric,
+    weights_fingerprint,
 )
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import (
@@ -4884,6 +4885,7 @@ def _fit_irls_direct_once(
                     group_edf=group_edf,
                     objective_loss=None,
                     data_gram=centered_final.data_gram,
+                    data_gram_weights=weights_fingerprint(W),
                 )
 
             if compute_rank_info or (_defer_rank_info is not None and _use_qr):

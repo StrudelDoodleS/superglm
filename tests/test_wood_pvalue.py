@@ -969,8 +969,9 @@ class TestWoodIntegration:
 def test_davies_fourier_passes_share_their_abscissae(monkeypatch):
     """Each abscissa of one p-value is evaluated once, not once per Fourier pass.
 
-    Counted on ``atan`` of the first term (one call per evaluation): master's
-    sine pass repeated every abscissa the cosine pass had visited.
+    Counted on every ``atan`` call (one per term per evaluation, at distinct
+    weights so a repeated argument is a repeated evaluation): master's sine
+    pass repeated every abscissa the cosine pass had visited.
     """
     arguments = []
     atan = math.atan

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import itertools
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -1130,6 +1131,11 @@ class RankDecomposition:
         return result
 
 
+def weights_fingerprint(W: NDArray) -> bytes:
+    """A 128-bit digest of the weights' float64 bytes (a few ms at n = 500,000)."""
+    return hashlib.blake2b(np.ascontiguousarray(W, dtype=np.float64), digest_size=16).digest()
+
+
 @dataclass(frozen=True)
 class RankInfo:
     """Compact fitted-subspace metadata in solver coefficient coordinates."""
@@ -1148,28 +1154,33 @@ class RankInfo:
     group_edf: Mapping[str, float]
     objective_loss: float | None
     # The centred data Gram ``data`` was decided from, at the fit's final
-    # weights. Owner: this record, from the fit until the first retained-fit
-    # inference (or the fit's release) takes it with ``take_data_gram``, which
-    # clears it. A record replaced after a refit starts without one, and the
-    # reader forms its own. ``None`` for a record not built from a dense
-    # centred system.
+    # weights, and the fingerprint of those weights. Owner: this record, from
+    # the fit until the first inference (or the fit's release) takes the Gram
+    # with ``take_data_gram``, which clears both. A record that
+    # ``dataclasses.replace`` copies carries them along, so every reader that
+    # replaces a record takes or clears the Gram. ``None`` for a record not
+    # built from a dense centred system.
     data_gram: NDArray | None = field(default=None, repr=False, compare=False)
+    data_gram_weights: bytes | None = field(default=None, repr=False, compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
 
-        ``W`` are the weights the reader works at. The Gram is returned only
-        when their sum is the one the fit's centred system recorded, formed the
-        same way (``build_centered_system``): a copy of the record that is read
-        against other weights, such as an edited design, forms its own Gram.
+        Returns the Gram only when ``W`` is bit for bit the weight vector the
+        fit formed it at (``weights_fingerprint``, a 128-bit BLAKE2b digest);
+        otherwise the reader forms its own. The design is not compared: the
+        Gram belongs to the design the fit ended on, and every change to that
+        design installs a new record, which starts without a Gram. Taking
+        clears the Gram whether or not it is returned.
         """
-        gram = self.data_gram
+        gram, held = self.data_gram, self.data_gram_weights
         if gram is None:
             return None
         object.__setattr__(self, "data_gram", None)
+        object.__setattr__(self, "data_gram_weights", None)
         if gram.shape != (len(self.mean_x), len(self.mean_x)):
             return None
-        return gram if float(np.sum(W, dtype=np.float64)) == self.sum_w else None
+        return gram if held == weights_fingerprint(W) else None
 
     @property
     def total_edf(self) -> float:

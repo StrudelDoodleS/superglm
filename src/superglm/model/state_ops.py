@@ -464,10 +464,14 @@ def fit_inference_info(model):
         augmented = _public_augmented_covariance(model, augmented, active_groups)
         edf = np.asarray(scop_inference.feature_edf)[selected].copy()
         edf1 = np.asarray(scop_inference.feature_edf1)[selected].copy()
+        # The fit's Gram, when the SCOP solve left one at these weights; either
+        # way the record holds none afterwards.
+        data_gram = None if rank_info is None else rank_info.take_data_gram(W)
         if X_active.p == 0:
             R_a = np.empty((0, 0))
         else:
-            data_gram = _rank_centered_data_gram(X_active, W)
+            if data_gram is None:
+                data_gram = _rank_centered_data_gram(X_active, W)
             eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
             eigvals = np.maximum(eigvals, 0.0)
             R_a = (eigvecs * np.sqrt(eigvals)).T
@@ -518,6 +522,9 @@ def fit_inference_info(model):
         X_active, active_groups = _rank_active_state(model, rank_info)
         inverse = rank_info.coefficient.pseudo_inverse()
         augmented = _rank_augmented_covariance(model, rank_info, active_groups)
+        # The fit formed this Gram to decide the data rank, at the weights it
+        # ended on; only a record without it forms the Gram again.
+        data_gram = rank_info.take_data_gram(W)
         if X_active.shape[1] == 0:
             return {
                 "W": W,
@@ -530,9 +537,6 @@ def fit_inference_info(model):
                 "group_edf_map": dict(rank_info.group_edf),
                 "coefficient_estimable": rank_info.coefficient_estimable(),
             }
-        # The fit formed this Gram to decide the data rank, at the weights it
-        # ended on; only a record without it forms the Gram again.
-        data_gram = rank_info.take_data_gram(W)
         if data_gram is None:
             data_gram = _rank_centered_data_gram(X_active, W)
         edf = rank_info.feature_edf[rank_info.selected_columns].copy()
