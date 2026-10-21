@@ -460,9 +460,12 @@ def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: 
 
     D = sign[:, None] * (natural @ null_space @ free)
     n = len(D)
+    from scipy import sparse
+
+    # the slack identity is sparse: ``n (q + 1)`` stored entries, not ``n (q + n)``
     program = linprog(
         np.concatenate([np.zeros(q), -np.ones(n)]),
-        A_ub=np.hstack([-D, np.eye(n)]),
+        A_ub=sparse.hstack([sparse.csr_matrix(-D), sparse.identity(n, format="csr")], format="csr"),
         b_ub=np.zeros(n),
         bounds=[(None, None)] * q + [(0.0, 1.0)] * n,
         method="highs",
@@ -482,7 +485,13 @@ def _numerical_rank(values: NDArray, shape: tuple[int, ...]) -> int:
 
 
 def _level_recession(
-    natural: NDArray, lower: NDArray, upper: NDArray, inside: NDArray, null_space: NDArray
+    natural: NDArray,
+    lower: NDArray,
+    upper: NDArray,
+    inside: NDArray,
+    null_space: NDArray,
+    *,
+    span: bool = True,
 ) -> NDArray | None:
     """One level's directions of recession, read from its rows: ``None`` when it has none.
 
@@ -492,7 +501,9 @@ def _level_recession(
     rows at the lower boundary, ``>= 0`` on those at the upper one, zero on
     the interior rows and not zero throughout (Geyer 2009, Theorem 4):
     ``_recedes`` on the level's distinct rows.  Returns the span of the
-    directions in natural coordinates (``_recession_span``).
+    directions in natural coordinates (``_recession_span``).  With ``span``
+    false only whether there is one is decided (``_recedes`` alone), and the
+    array returned is the free directions it was decided on, not their span.
     """
     nullity = null_space.shape[1]
     unique, inverse = np.unique(natural, axis=0, return_inverse=True)
@@ -517,8 +528,10 @@ def _level_recession(
     edge = side != 0.0
     if not (np.any(edge) and _recedes(side[edge], unique[edge], null_space, free)):
         return None
-    span = _recession_span(side[edge], unique[edge], null_space, free)
-    return np.ascontiguousarray(null_space @ free @ span)
+    if not span:
+        return null_space @ free
+    directions = _recession_span(side[edge], unique[edge], null_space, free)
+    return np.ascontiguousarray(null_space @ free @ directions)
 
 
 def separated_level_ranges(
@@ -559,7 +572,12 @@ def separated_level_ranges(
         rows = np.flatnonzero(positive & (labels == level))
         if np.any(lower[rows] | upper[rows]) and (
             _level_recession(
-                basis[rows], lower[rows], upper[rows], inside[rows], np.eye(basis.shape[1])
+                basis[rows],
+                lower[rows],
+                upper[rows],
+                inside[rows],
+                np.eye(basis.shape[1]),
+                span=False,
             )
             is not None
         ):

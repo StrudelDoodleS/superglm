@@ -211,6 +211,71 @@ def test_predict_names_a_separated_grouped_level_by_its_members():
     assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
 
 
+@pytest.fixture
+def program_sizes(monkeypatch):
+    """``(stored entries, rows)`` of every linear program ``linprog`` is handed."""
+    from scipy import optimize, sparse
+
+    stored: list[tuple[int, int]] = []
+    real = optimize.linprog
+
+    def spy(c, *, A_ub, **kwargs):
+        stored.append((A_ub.nnz if sparse.issparse(A_ub) else A_ub.size, A_ub.shape[0]))
+        return real(c, A_ub=A_ub, **kwargs)
+
+    monkeypatch.setattr(optimize, "linprog", spy)
+    return stored
+
+
+def test_a_levels_recession_span_program_stores_a_linear_number_of_entries(program_sizes):
+    """A level with many distinct x builds a sparse span program (PR 508 round 1).
+
+    ``_recession_span`` joined ``-D`` (``n x q``) to ``np.eye(n)``, ``n`` the
+    level's distinct boundary values: ``n (q + n)`` stored entries, about
+    800 MB at 10,000 values of a continuous covariate.  The slack identity is
+    sparse, ``n (q + 1)`` entries in all.  Mutation: the dense identity.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    natural = np.column_stack([np.ones(n), x, x**2])
+    lower = np.ones(n, dtype=bool)
+    none = np.zeros(n, dtype=bool)
+    found = _level_recession(natural, lower, none, none, np.eye(3))
+    assert found is not None and found.shape == (3, 3)
+    # a row holds its q = 3 coefficients and its own slack, at most
+    assert program_sizes and all(entries <= rows * 4 for entries, rows in program_sizes)
+
+
+def test_detecting_separated_varying_coefficient_levels_solves_no_span_program(program_sizes):
+    """A Numeric x Categorical build reads only whether a level recedes (PR 508 round 1).
+
+    ``separated_level_ranges`` keeps a level's rows' range and discards the
+    span, but solved the span's program for every level whose curve recedes,
+    zero-claim levels included.  Here a level with 300 distinct x and no claim
+    is recorded without one; the programs left store at most the ``q = 2``
+    coefficients per row.  Mutation: the span computed.
+    """
+    rng = np.random.default_rng(2)
+    m = 300
+    g = np.concatenate([rng.choice(["a", "c"], 1500), np.full(m, "b")])
+    x = np.concatenate([rng.uniform(size=1500), np.linspace(0.0, 1.0, m)])
+    y = np.concatenate([rng.poisson(0.5, 1500).astype(float), np.zeros(m)])
+    y[:1500][g[:1500] == "c"] += 1.0
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Numeric(), "g": Categorical(base="a")},
+        interactions=[("x", "g")],
+        selection_penalty=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"x": x, "g": g}), y)
+    assert set(model._interaction_specs["x:g"]._separated_ranges) == {"b"}
+    assert all(entries <= rows * 2 for entries, rows in program_sizes)
+
+
 def test_gaussian_identity_never_fires():
     df, y, w, _ = separated_crossed_design()
     model = SuperGLM(
