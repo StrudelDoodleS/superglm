@@ -69,6 +69,8 @@ from superglm.solvers.centered_system import (
     build_centered_system,
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
+    grouped_projected_factor,
+    grouped_structural_nulls,
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
@@ -137,6 +139,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
+    decide_data_rank,
     decompose_factor,
     decompose_gram,
     decompose_gram_if_authoritative,
@@ -4832,24 +4835,36 @@ def _fit_irls_direct_once(
                     # weights are nonnegative: the data Gram is PSD by construction,
                     # so a negative eigenvalue at its null is formation rounding and
                     # sends the rank to the factor below instead of raising.
-                    data_rank = decompose_gram_if_authoritative(
-                        centered_final.data_gram,
-                        psd_by_construction=not _return_working_system,
-                    )
-                    if data_rank is None:
+                    final_centre, final_centre_lo = centered_final.centre_pair()
+
+                    def data_factor_rank() -> RankDecomposition:
                         if not np.any(centered_final.penalty):
-                            certification = certify_centered_factor(centered_final, W)
-                            data_rank = certification.decomposition
-                        else:
-                            final_centre, final_centre_lo = centered_final.centre_pair()
-                            data_rank = decompose_factor(
-                                grouped_weighted_factor(
-                                    dm,
-                                    W,
-                                    center=final_centre,
-                                    center_lo=final_centre_lo,
-                                )
+                            return certify_centered_factor(centered_final, W).decomposition
+                        return decompose_factor(
+                            grouped_weighted_factor(
+                                dm,
+                                W,
+                                center=final_centre,
+                                center_lo=final_centre_lo,
                             )
+                        )
+
+                    # Unpenalized, the data Gram is the Hessian, whose factor
+                    # certificate the fit already holds for its standard
+                    # errors (``reml_slope_rank``); reading it costs nothing.
+                    data_rank = decide_data_rank(
+                        centered_final.data_gram,
+                        data_factor_rank,
+                        project=lambda basis: grouped_projected_factor(
+                            dm, W, basis, center=final_centre, center_lo=final_centre_lo
+                        ),
+                        structural=lambda: grouped_structural_nulls(
+                            dm, W, center=final_centre, center_lo=final_centre_lo
+                        ),
+                        rows=dm.n,
+                        psd_by_construction=not _return_working_system,
+                        certify=not np.any(centered_final.penalty),
+                    )
                 group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
                 selected_columns = np.arange(p, dtype=int)
                 selected_columns.setflags(write=False)

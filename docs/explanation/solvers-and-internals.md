@@ -1038,6 +1038,38 @@ The QR path is basically saying:
 
 There is also pivoted QR in `src/superglm/stats/wood_pvalue.py`, but that is again an inference thing, not a fitting thing. There QR is used to move a smooth term into a numerically stable test space before doing Wood-style significance calculations.
 
+#### 17.3.2 Which coefficients the data can estimate
+
+After the fit, superglm decides which coefficients the data alone can
+identify. This is the *data rank*. A coefficient outside it, such as a spline
+basis function over a corner of a tensor term with no rows, is reported as not
+estimable, and its standard error is shown as missing. Its fitted value and the
+model's predictions do not depend on this decision, which is made after the
+coefficients are solved.
+
+The decision is the numerical rank of the weighted design
+$\mathbf{W}^{1/2}\mathbf{X}$. Columns are scaled to unit length, and a
+direction counts when its singular value is at least $\sqrt{\epsilon}$ of the
+largest.
+
+- The weighted Gram $\mathbf{X}^\top\mathbf{W}\mathbf{X}$ is already formed
+  during the fit. When its eigenvalues are clearly on one side of that cut, it
+  decides on its own.
+- Some directions are exactly zero by construction, such as a tensor cell
+  whose rows sit on fewer distinct points than it has basis functions. These
+  are read off the term's table of distinct rows, without touching the rows.
+- Otherwise only the few *grey* directions, the eigenvectors with the smallest
+  eigenvalues, are checked against the rows. The rows are projected onto those
+  $k$ directions and that $n \times k$ block is factored by QR. This costs
+  about $nk^2$, not the $np^2$ of factoring every row.
+- A perturbation bound for symmetric block matrices (Li and Li, 2005) confirms
+  that the other directions cannot change the answer. Where it cannot confirm
+  this, the fit factors every row instead.
+
+On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
+its 230 directions outside the data rank, 164 are read off the tables, and
+$k = 178$ directions are checked against the rows.
+
 ### 17.4 Kernels: what are they really doing?
 
 The kernels in `src/superglm/group_matrix.py` look intimidating because they are low-level and optimized, but conceptually they are mostly just "fast weighted aggregation."

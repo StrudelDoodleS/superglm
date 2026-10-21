@@ -1215,6 +1215,44 @@ def _weighted_centred_one_hot(out, column, codes, n_levels, first, center, cente
             out[i, column + j] = value * scale
 
 
+@njit(cache=True)
+def _gather_table_rows(out, table, codes, first):
+    """``out[i, :] += table[codes[first + i], :]``: one support's projected rows into a block."""
+    for i in range(out.shape[0]):
+        source = table[codes[first + i]]
+        for j in range(out.shape[1]):
+            out[i, j] += source[j]
+
+
+@njit(cache=True)
+def _scatter_table_rows(accumulator, block, codes, first):
+    """``accumulator[codes[first + i], :] += block[i, :]``: a block's rows summed per support row."""
+    for i in range(block.shape[0]):
+        target = accumulator[codes[first + i]]
+        for j in range(block.shape[1]):
+            target[j] += block[i, j]
+
+
+@njit(cache=True)
+def _gather_table_rows_at(out, table, rows, codes, first, last, offset):
+    """``out[rows[i] - offset, :] += table[codes[i], :]`` for ``i`` in ``[first, last)``."""
+    for i in range(first, last):
+        source = table[codes[i]]
+        target = out[rows[i] - offset]
+        for j in range(out.shape[1]):
+            target[j] += source[j]
+
+
+@njit(cache=True)
+def _scatter_table_rows_at(accumulator, block, rows, codes, first, last, offset):
+    """``accumulator[codes[i], :] += block[rows[i] - offset, :]`` for ``i`` in ``[first, last)``."""
+    for i in range(first, last):
+        source = block[rows[i] - offset]
+        target = accumulator[codes[i]]
+        for j in range(block.shape[1]):
+            target[j] += source[j]
+
+
 _POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
 """The kernels a TSQR leaf (``rank._tsqr_leaf``) runs on its pool worker: ``nogil`` too."""
 
@@ -1284,6 +1322,12 @@ def _warmup_group_matrix_kernels() -> None:
         for centre in (values, values[:0]):
             _weighted_centred_rows(block, 0, matrix, codes, 0, centre, values[:0], values)
             _weighted_centred_one_hot(block, 0, codes, 2, 0, centre, values[:0], values)
+    # The data rank's grey-subspace projection (``grouped_projected_factor``).
+    projected = np.zeros((2, 2))
+    _gather_table_rows(projected, matrix, codes, 0)
+    _scatter_table_rows(projected, matrix, codes, 0)
+    _gather_table_rows_at(projected, matrix, codes, codes, 0, 2, 0)
+    _scatter_table_rows_at(projected, matrix, codes, codes, 0, 2, 0)
     row_patterns = np.array([0, 1], dtype=np.int32)
     unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
     marginal_offsets = np.array([0, 2, 4], dtype=np.intp)

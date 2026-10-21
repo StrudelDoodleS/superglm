@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -37,6 +38,9 @@ from superglm.solvers.mode_score import (
 )
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
+_GREY_LEAF_ROWS = 2048
+_UNIT = float(np.finfo(np.float64).eps) / 2.0
+_GREY_SPAN_ROWS = 65536
 _FACTOR_CHUNK_ROWS = 8192
 
 
@@ -673,6 +677,308 @@ def grouped_augmented_factor_rhs(
     smooth_joint = np.column_stack((smooth_factor, np.zeros(smooth_factor.shape[0])))
     joint_factor = np.linalg.qr(np.vstack((joint, smooth_joint)), mode="r")
     return np.asarray(joint_factor[:, :-1]), np.asarray(joint_factor[:, -1])
+
+
+def _centred_support(values: NDArray, center, center_lo, columns: slice) -> NDArray:
+    """``(values - c) - c_lo`` on ``columns``: a support's rows centred as a TSQR leaf centres them."""
+    centred = values - (0.0 if center is None else center[columns])
+    if center_lo is not None:
+        centred = centred - center_lo[columns]
+    return centred
+
+
+def grouped_structural_nulls(
+    dm: DesignMatrix,
+    W: NDArray,
+    *,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> list[tuple[slice, NDArray, float]]:
+    """Exact nulls of the weighted, centred design read off each group's occupied support rows.
+
+    A group whose rows are rows of a small support table ``S`` (an indexed
+    support, or a spline-by-level block, zero off its level) has ``X_g v = 0``
+    on every row for each ``v`` with ``S_occ v = 0``, ``S_occ`` the support
+    rows that carry weight; then ``c_g' v``, a weighted mean of those rows
+    times ``v``, is zero too, so ``A v = 0`` with no pass over the rows.  The
+    candidates are the right singular vectors of ``S_occ`` below ``n_s eps``
+    of its largest singular value, and a candidate is kept only when its
+    residual is exact to the rounding that measures it: the weighted
+    ``||(S - c) n||`` over the occupied rows and the rows off a level no
+    larger than ``gamma_(w + 3)`` of ``(|S| + |c|) |n|`` weighted the same
+    way.  That is a componentwise form of the rule LAPACK's symmetric
+    tridiagonal QR applies (``dsteqr`` splits only when an off-diagonal is
+    within ``eps sqrt(|d_i d_(i+1)|)``): drop only what is at the
+    algorithm's own rounding.  (``dlaed2``'s divide-and-conquer deflation is
+    normwise, ``8 eps max(|D|, |Z|)``; a normwise allowance is a recorded
+    follow-up.)  So the rotation a
+    deflated null causes in the null basis, ``||A n||`` over the weakest
+    retained singular value (Wedin, *BIT* 12, 1972), is the full factor's
+    own backward error over that value.  A near null, ``n_s eps`` small but
+    above its rounding, stays in the Gram, where the grey subspace resolves
+    its coupling to other weak directions at row resolution.  Each group
+    returns ``(columns, N_g, bound)`` with ``bound >= ||A N_g||_F``, formed
+    from the support rows' weight sums: the residual of every occupied row
+    and of the rows off a level, plus the rounding of forming them
+    (``gamma_(w + 3)`` of ``(|S| + |c|) |N_g|``, Higham 2002, sec. 3.5).
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+
+    weights = np.asarray(W, dtype=np.float64)
+    total = float(np.sum(weights))
+    parts = _design_leaf_parts(dm).parts
+    if len(parts) != len(dm.group_matrices):
+        return []
+    found: list[tuple[slice, NDArray, float]] = []
+    level_type = DiscretizedSplineCategoricalGroupMatrix
+    for (column, kind, first, second), group in zip(parts, dm.group_matrices, strict=True):
+        if kind == "gather":
+            support = np.asarray(first, dtype=np.float64)
+            mass = np.bincount(second, weights=weights, minlength=support.shape[0])
+            outside = 0.0
+        elif kind == "rows" and _is_plain_level(group, level_type):
+            level = cast(DiscretizedSplineCategoricalGroupMatrix, group)
+            support = np.asarray(level.B_unique, dtype=np.float64) @ np.asarray(
+                level.R_inv, dtype=np.float64
+            )
+            rows = np.asarray(level.row_idx)
+            mass = np.bincount(
+                np.asarray(level.bin_idx_level), weights=weights[rows], minlength=support.shape[0]
+            )
+            outside = max(total - float(np.sum(mass)), 0.0)
+        else:
+            continue
+        width = support.shape[1]
+        occupied = support[mass > 0.0]
+        if occupied.shape[0] == 0:
+            continue
+        if occupied.shape[0] > width:
+            # The same right singular vectors from the w x w triangle.
+            occupied = np.linalg.qr(occupied, mode="r")
+        _, singular, right = np.linalg.svd(occupied, full_matrices=True)
+        cut = max(support.shape) * _UNIT * 2.0 * (float(singular[0]) if singular.size else 0.0)
+        rank = int(np.count_nonzero(singular > cut))
+        null = right[rank:].T
+        if null.shape[1] == 0:
+            continue
+        columns = slice(column, column + width)
+        # ``(0 - c) - c_lo``: the centred value of a row off the support
+        shift = _centred_support(np.zeros((1, width)), center, center_lo, columns)[0]
+        residual = np.abs((support + shift[None, :]) @ null)
+        scale = (np.abs(support) + np.abs(shift)[None, :]) @ np.abs(null)
+        gamma = (width + 3) * _UNIT / (1.0 - (width + 3) * _UNIT)
+        rounding = gamma * scale
+        off, off_rounding = np.abs(shift @ null), gamma * (np.abs(shift) @ np.abs(null))
+        # Deflate a candidate only when its residual is within its own
+        # rounding; a near null, which the rows can tell from zero, stays in
+        # the Gram for the grey subspace to turn with its coupling.
+        exact = (
+            mass @ residual**2 + outside * off**2 <= mass @ rounding**2 + outside * off_rounding**2
+        )
+        if not np.any(exact):
+            continue
+        row_bound, off = (residual + rounding)[:, exact], (off + off_rounding)[exact]
+        squared = float(mass @ np.sum(row_bound**2, axis=1)) + outside * float(np.sum(off**2))
+        found.append((columns, null[:, exact], float(np.nextafter(math.sqrt(squared), np.inf))))
+    return found
+
+
+def _is_plain_level(group, level_type) -> bool:
+    """A spline-by-level block whose rows are its support's rows on its level, and zero elsewhere."""
+    kind = type(group)
+    return (
+        isinstance(group, level_type)
+        and kind.toarray is level_type.toarray
+        and kind.row_subset is level_type.row_subset
+    )
+
+
+def grouped_projected_factor(
+    dm: DesignMatrix,
+    W: NDArray,
+    basis: NDArray,
+    *,
+    center: NDArray | None = None,
+    center_lo: NDArray | None = None,
+) -> tuple[NDArray, NDArray, int, NDArray]:
+    """``R`` of ``B = A basis`` (a TSQR), ``A'B``, its rounding count and column magnitudes.
+
+    ``A = sqrt(W) ((X - c) - c_lo)``.
+
+    One pass over the rows.
+
+    ``basis`` is ``p x k``.  Each group block of the design writes its part of
+    ``X basis`` from its compact form (``_design_leaf_parts``): a categorical
+    and an indexed support form one table ``((S - c) - c_lo) basis_g`` of
+    their support rows ``S`` and add the row of it each observation indexes,
+    so a row costs one ``k``-vector add per group, ``n T k`` in all, against
+    ``2 n p^2`` for the TSQR of ``A`` itself; another group writes its dense
+    rows a block at a time, as a TSQR leaf does.  ``A'B`` sums each block's
+    weighted rows of ``B`` per support row, one span of rows at a time, and multiplies
+    the sums by the centred support once.  A spline-by-level block is zero
+    off its level: its raw support's table is added on the level's rows and
+    its centre on every row (``_leverage_rows``' support route), so its
+    entries are bounded by ``(|x| + |c|)' |basis|`` rather than ``|x - c|'
+    |basis|``.
+
+    **Error.**  A table entry is a centring and a dot product of length
+    ``w_g`` (``gamma_(w_g + 2)`` of ``|S - c|' |basis_g|``, Higham 2002,
+    secs. 3.1 and 3.5) and a row of ``B`` sums at most ``T`` groups and is
+    scaled once, so every entry of ``B`` lies within ``gamma_(p + T + 3)``
+    of ``|a_r|' |basis|``; the TSQR of ``B`` is columnwise backward stable
+    (``rank._tsqr_weighted_factor``).  ``A'B`` adds a sum over the rows of one
+    support row's sum over a span's rows, one add per span and a
+    product of length ``s_g``; the third value returned counts every rounding
+    an entry of ``A'B`` carries, so ``gamma`` of it times ``|A|' |B|`` bounds
+    its error (``rank.decompose_gram_deflated``).
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_kernels import (
+        _gather_table_rows,
+        _gather_table_rows_at,
+        _scatter_table_rows,
+        _scatter_table_rows_at,
+    )
+    from superglm.solvers.rank import streamed_weighted_factor, tsqr_leaf_rows
+
+    basis = np.ascontiguousarray(basis, dtype=np.float64)
+    n, p = dm.n, dm.p
+    width = basis.shape[1]
+    sqrt_weights = np.sqrt(np.asarray(W, dtype=np.float64))
+    # Each plan: (columns, kind, table, accumulator, a, b).  "full": every row
+    # indexes a centred support row (a: codes).  "level": a spline-by-level
+    # block, zero outside its level; its raw support table is added on the
+    # level's rows (a: rows, b: codes, both in row order) and its centre
+    # enters every row once through ``base``.  "rows": dense rows a block at
+    # a time (a: the group matrix).
+    plans: list[tuple] = []
+    supports: dict[int, NDArray] = {}
+    magnitudes = np.zeros(p)
+    base = np.zeros(width)
+    level_type = DiscretizedSplineCategoricalGroupMatrix
+    parts = _design_leaf_parts(dm).parts
+    groups = dm.group_matrices if len(parts) == len(dm.group_matrices) else [None] * len(parts)
+    for (column, kind, first, second), group in zip(parts, groups, strict=True):
+        if kind == "rows" and _is_plain_level(group, level_type):
+            level = cast(DiscretizedSplineCategoricalGroupMatrix, group)
+            columns = slice(column, column + int(level.shape[1]))
+            raw = np.asarray(level.B_unique, dtype=np.float64) @ np.asarray(
+                level.R_inv, dtype=np.float64
+            )
+            order = np.argsort(level.row_idx, kind="stable")
+            rows = np.ascontiguousarray(np.asarray(level.row_idx)[order], dtype=np.intp)
+            codes = np.ascontiguousarray(np.asarray(level.bin_idx_level)[order], dtype=np.intp)
+            centre = _centred_support(np.zeros((1, raw.shape[1])), center, center_lo, columns)
+            base += (centre @ basis[columns])[0]
+            level_weight = np.bincount(
+                codes, weights=np.asarray(W, dtype=np.float64)[rows], minlength=raw.shape[0]
+            )
+            magnitudes[columns] = np.sqrt(level_weight @ (raw * raw)) + np.abs(
+                centre[0]
+            ) * math.sqrt(float(np.sum(W)))
+            table = np.ascontiguousarray(raw @ basis[columns])
+            supports[column] = raw
+            plans.append((columns, "level", table, np.zeros((raw.shape[0], width)), rows, codes))
+            continue
+        if kind == "rows":
+            columns = slice(column, column + int(first.shape[1]))
+            plans.append((columns, "rows", None, None, first, None))
+            continue
+        if kind == "one_hot":
+            levels = int(second)
+            columns = slice(column, column + levels)
+            # code ``levels`` is no level: the centred zero row
+            support = _centred_support(
+                np.vstack((np.eye(levels), np.zeros((1, levels)))), center, center_lo, columns
+            )
+            codes = first
+        else:
+            columns = slice(column, column + first.shape[1])
+            support = _centred_support(first, center, center_lo, columns)
+            codes = second
+        table = np.ascontiguousarray(support @ basis[columns])
+        supports[column] = support
+        plans.append((columns, "full", table, np.zeros((support.shape[0], width)), codes, None))
+    cross = np.zeros((p, width))
+    weighted_total = np.zeros(width)
+    # Narrow blocks: a leaf of a few thousand rows keeps LAPACK's panel in
+    # cache (measured 1.5x to 2.6x faster than ``tsqr_leaf_rows`` at k = 55
+    # to 330, 540,000 rows); the reduction tree is the same TSQR's.
+    block_rows = min(tsqr_leaf_rows(width), max(_GREY_LEAF_ROWS, 2 * width))
+    span_rows = max(block_rows, _GREY_SPAN_ROWS)
+    locals_ = {id(plan[3]): np.zeros_like(plan[3]) for plan in plans if plan[3] is not None}
+
+    def blocks() -> Iterator[tuple[int, int, NDArray]]:
+        for start in range(0, n, block_rows):
+            stop = min(start + block_rows, n)
+            projected = np.zeros((stop - start, width))
+            projected += base
+            dense = []
+            spans = []
+            for columns, kind, table, _, first, second in plans:
+                if kind == "full":
+                    _gather_table_rows(projected, table, first, start)
+                elif kind == "level":
+                    low, high = np.searchsorted(first, (start, stop))
+                    spans.append((int(low), int(high)))
+                    _gather_table_rows_at(projected, table, first, second, low, high, start)
+                else:
+                    rows = np.arange(start, stop, dtype=np.intp)
+                    values = _centred_support(
+                        np.asarray(first.row_subset(rows).toarray(), dtype=np.float64),
+                        center,
+                        center_lo,
+                        columns,
+                    )
+                    projected += values @ basis[columns]
+                    dense.append((columns, values))
+            projected *= sqrt_weights[start:stop, None]
+            weighted = projected * sqrt_weights[start:stop, None]
+            weighted_total[:] += weighted.sum(axis=0)
+            level = iter(spans)
+            flush = stop == n or stop // span_rows != start // span_rows
+            for _, kind, _, accumulator, first, second in plans:
+                if kind == "rows":
+                    continue
+                # A span's own sums first, so a support row's total rounds
+                # over one span's rows plus one add per span.
+                local = locals_[id(accumulator)]
+                if kind == "full":
+                    _scatter_table_rows(local, weighted, first, start)
+                else:
+                    low, high = next(level)
+                    _scatter_table_rows_at(local, weighted, first, second, low, high, start)
+                if flush:
+                    accumulator += local
+                    local[...] = 0.0
+            for columns, values in dense:
+                cross[columns] += values.T @ weighted
+            yield start, stop, projected
+        for columns, kind, _, accumulator, _, _ in plans:
+            if kind == "full":
+                cross[columns] += supports[columns.start].T @ accumulator
+            elif kind == "level":
+                cross[columns] += supports[columns.start].T @ accumulator
+                centre = _centred_support(
+                    np.zeros((1, columns.stop - columns.start)), center, center_lo, columns
+                )
+                cross[columns] += centre.T @ weighted_total[None, :]
+
+    factor = streamed_weighted_factor(blocks(), np.ones(n))
+    # Roundings an entry of ``A'B`` can carry beyond ``|A|' |B|``'s scale:
+    # the centring and table product (``p + 2``), at most ``T`` group adds and
+    # two scalings per row of ``B``, one span's rows plus one add per span
+    # (one add per block for the dense rows and the weighted total), and the
+    # product with the widest support.
+    widest = max((plan[2].shape[0] for plan in plans if plan[2] is not None), default=0)
+    roundings = (
+        (p + 2) + len(plans) + 3 + span_rows + -(-n // span_rows) + -(-n // block_rows) + widest + 1
+    )
+    return factor, cross, roundings, magnitudes
 
 
 def refresh_centered_rhs(

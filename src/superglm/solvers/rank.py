@@ -918,6 +918,10 @@ class RankDecomposition:
     # formation bound explains (``decompose_gram(formation_error=...)``): the
     # matrix was taken as the semidefinite one it was formed from.
     formation_limited: bool = False
+    # ``decide_data_rank``'s certificate when the observation rows decided only
+    # the Gram's grey subspace (``decompose_gram_deflated``); ``None`` for a
+    # Gram or full-factor decomposition.
+    grey_subspace: Mapping[str, float] | None = None
 
     @property
     def width(self) -> int:
@@ -2479,6 +2483,283 @@ def decompose_gram_if_authoritative(
     if decomposition is None or needs_factor_certification(decomposition, policy=policy):
         return None
     return decomposition
+
+
+# Grey-subspace certification (``decompose_gram_deflated``): the split is
+# searched from the first eigenvalue past ``_GREY_FLOOR`` times the Gram's
+# error bound up to ``_GREY_CEILING`` of the largest, and taken at the first
+# spacing of ``_GREY_GAP`` error bounds.
+_GREY_FLOOR = 4.0
+_GREY_CEILING = 1e-4
+_GREY_GAP = 8.0
+
+
+def _gamma_up(count: float) -> float:
+    """``gamma_k = k u / (1 - k u)`` (Higham 2002, sec. 3.1), rounded up."""
+    product = float(count) * (_EPS / 2.0)
+    if product >= 1.0:
+        return float("inf")
+    return float(np.nextafter(product / (1.0 - product), np.inf))
+
+
+def decompose_gram_deflated(
+    gram: NDArray,
+    project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]],
+    *,
+    rows: int,
+    structural: Sequence[tuple[slice, NDArray, float]] = (),
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> tuple[RankDecomposition | None, dict[str, float]]:
+    """The factor-route decision from the formed Gram plus one pass over the rows on its grey subspace.
+
+    **The problem.**  The data rank is the numerical rank of the weighted,
+    centred design ``A`` (``n x p``) at ``factor_rcond`` on its
+    Jacobi-equilibrated singular values.  The Gram ``A'A`` is formed already,
+    but its eigenvalues are resolved only to its error bound ``e`` (the
+    eigensolver's ``n_a eps lambda_max``, *LAPACK Users' Guide* sec. 4.7, plus
+    the formation error ``gamma_n |A|'|A|``, Higham 2002 sec. 3.5, at most
+    ``gamma_n n_a`` after equilibration), which is above the boundary ``eps
+    lambda_max`` itself.  The factor route answers at the resolution of a row
+    QR (``u ||A||``) by a TSQR of every row, ``2 n p^2`` flops.
+
+    **The method: deflation onto the grey subspace, with a Rayleigh-Ritz
+    certificate.**  Let ``V = [V1 V2]`` be the Gram's eigenvectors, ``V2`` the
+    ``k`` below a split ``w_k``.  In those coordinates ``A'A`` is
+    ``[[H1, E], [E', H2]]``: ``H1 = V1'A'AV1`` has eigenvalues at least ``L1 =
+    w_k - e`` (Weyl), ``H2 = B'B`` with ``B = A V2`` is factored by a TSQR of
+    the ``n x k`` block (``project``; row-QR resolution, ``n T k + 2 n k^2``),
+    and ``E = V1'A'B`` is formed from ``A'B``, the same pass's cross product.
+    By Li & Li (*Linear Algebra Appl.* 395, 2005, 183-190; the authors'
+    corrected version is arXiv 2508.08203, 2025) each
+    eigenvalue of the full matrix lies within ``2||E||^2 / (eta + sqrt(eta^2 +
+    4 ||E||^2))`` of the block-diagonal matrix's, ``eta = L1 - ||H2||`` the
+    gap between the blocks; ``E`` is small because ``V2`` is an invariant
+    subspace of a matrix within ``e`` of ``A'A``, and the shift is quadratic
+    in it.  So the grey block's singular values decide the rank at row-QR
+    resolution whenever every one of them clears the cut by more than the
+    shift, the certificate checked here; the directions above the split clear
+    it by construction.  ``E`` is bounded with its own rounding, ``gamma_m
+    sqrt(n_a) ||B||_F`` (``project`` counts ``m``), scaled up where the
+    projection added a column's centre after its product.  The decomposition is then
+    :func:`decompose_factor` of the surrogate factor ``[Lambda1^(1/2) V1' +
+    Lambda1^(-1/2) E V2'; R2 V2'] D``, so the representatives, the null basis
+    and every other field follow the factor route's own rules.  It is block
+    upper triangular in ``V`` coordinates, ``diag(Lambda1^(1/2), R2) [[I,
+    K], [0, I]]`` with ``K = Lambda1^(-1) E``: its null vectors are ``V2 n -
+    V1 K n`` (``R2 n = 0``), the first-order invariant subspace of the full
+    matrix (Stewart, *SIAM Rev.* 15, 1973; Stewart & Sun, *Matrix
+    Perturbation Theory*, 1990, ch. V), not ``V2 n``, which misses the
+    exact null by up to ``||E|| / gap`` (Davis & Kahan, *SIAM J. Numer.
+    Anal.* 7, 1970), the order of the estimability tolerance.  What remains
+    is ``(H1 - Lambda1) Lambda1^(-1) E``, smaller by ``e / w_k`` (at most a
+    quarter at the floor, 0.01 to 0.04 on the freMTPL2 books), and the grey
+    block's own shift ``E' K``, which turns its null directions within it by
+    ``||E|| ||K||`` over their spacing; a deflated structural null, whose
+    residual is at its own rounding, turns the null basis by at most that
+    over the weakest retained singular value.  None is certified against the
+    estimability tolerance; nor is the full factor's null basis, whose own
+    error bound on the books exceeds the 7e-11 to 1.2e-10 by which its
+    nearest flag clears that tolerance.  The surrogate's singular values are
+    the block-diagonal ones within a factor ``1 +- ||K||`` (``sigma_i(DL) /
+    sigma_i(D)`` lies in ``[sigma_min(L), sigma_max(L)]``), which the
+    certificate's margin carries.
+
+    Returns ``(None, info)`` whenever the certificate fails (no split, no gap,
+    a grey singular value within the shift of the cut): the caller then runs
+    the full factor, so this changes cost, never a certified decision.  A
+    shifted CholeskyQR3 (Fukaya, Kannan, Nakatsukasa, Yamamoto & Yanagisawa,
+    *SIAM J. Sci. Comput.* 42(1), 2020) would also give a row-resolution
+    factor, but in three ``O(n p^2)`` passes and for full column rank only.
+    """
+    info: dict[str, float] = {"certified": 0.0}
+    gram = np.asarray(gram, dtype=np.float64)
+    diagonal = np.diag(gram)
+    if not np.all(np.isfinite(gram)) or np.any(diagonal < 0.0):
+        return None, info
+    scale = np.sqrt(diagonal)
+    active = np.flatnonzero(scale > 0.0)
+    n_active = int(active.size)
+    if n_active < 2:
+        return None, info
+    d = scale[active]
+    equilibrated = _symmetric_part(gram[np.ix_(active, active)] / d[:, None] / d[None, :])
+    # Structural nulls (``structural``: ``A N_g = 0`` read off a group's
+    # occupied support rows, ``||A N_g||_F <= bound``) leave the eigenproblem
+    # before any arithmetic on the rows: Z spans them in equilibrated
+    # coordinates, orthonormal by group, and the Gram is decomposed on Z's
+    # complement.  ``||A_eq Z||_2 <= residual``, so by Weyl's inequality for
+    # singular values the decision moves by at most ``residual``.
+    position = np.full(gram.shape[0], -1)
+    position[active] = np.arange(n_active)
+    blocks, residual_squared = [], 0.0
+    for columns, null, bound in structural:
+        local = position[columns]
+        if null.shape[1] == 0 or np.any(local < 0):
+            continue
+        block = np.zeros((n_active, null.shape[1]))
+        block[local] = null * d[local, None]
+        orthonormal, triangle = np.linalg.qr(block[local])
+        smallest = float(np.linalg.svd(triangle, compute_uv=False)[-1])
+        if not smallest > 0.0:
+            continue
+        block[local] = orthonormal
+        blocks.append(block)
+        residual_squared += (bound / smallest) ** 2
+    structural_null = np.hstack(blocks) if blocks else np.zeros((n_active, 0))
+    residual = float(np.nextafter(math.sqrt(residual_squared) * (1.0 + _gamma_up(8)), np.inf))
+    if structural_null.shape[1]:
+        complement = np.linalg.qr(structural_null, mode="complete")[0][
+            :, structural_null.shape[1] :
+        ]
+        values, rotation = np.linalg.eigh(_symmetric_part(complement.T @ equilibrated @ complement))
+        vectors = complement @ rotation
+    else:
+        values, vectors = np.linalg.eigh(equilibrated)
+    largest = float(values[-1])
+    if not (largest > 0.0 and math.isfinite(largest)):
+        return None, info
+    # The computed Gram's spectral error, equilibrated: the eigensolver's bar
+    # and the formation bound gamma_n |A|'|A|, whose entries are at most
+    # gamma_n after Jacobi scaling (Cauchy-Schwarz), so ||dG||_2 <= gamma_n n_a.
+    error = float(
+        np.nextafter(
+            _eigensolver_relative_bar(n_active + 1) * largest + _gamma_up(rows + 2) * n_active,
+            np.inf,
+        )
+    )
+    # Every direction below the floor is grey; the split is searched from the
+    # first eigenvalue above it up to the ceiling (that first one at least).
+    first = int(np.searchsorted(values, _GREY_FLOOR * error, side="left"))
+    if first == 0 or first >= values.size:
+        return None, info
+    last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
+    candidates = np.arange(first, min(last, values.size - 1) + 1)
+    # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past twice
+    # the Gram's error, so the split takes the first spacing of
+    # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
+    spacing = values[candidates] - values[candidates - 1]
+    wide = np.flatnonzero(spacing >= _GREY_GAP * error)
+    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
+    grey = vectors[:, :split]
+    basis = np.zeros((gram.shape[0], split))
+    basis[active] = grey / d[:, None]
+    factor, cross, roundings, magnitudes = project(basis)
+    factor = np.asarray(factor, dtype=np.float64)
+    if factor.shape[0] < split:
+        # Fewer rows than grey directions: the factor's missing rows are zero.
+        factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
+    # The cross product's rows are bounded by |A|'|B|, a column's weighted
+    # norm times ||B||: d itself where rows were centred first, the
+    # projection's (|x| + |c|) norm where they were not.
+    inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
+    singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
+    if singular.size < split:
+        singular = np.concatenate((singular, np.zeros(split - singular.size)))
+    coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
+    coupling_norm = float(
+        np.nextafter(
+            float(np.linalg.norm(coupling, 2))
+            + _gamma_up(roundings + n_active)
+            * inflation
+            * math.sqrt(n_active)
+            * float(np.linalg.norm(factor))
+            + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
+            np.inf,
+        )
+    )
+    gap = float(values[split]) - error - float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+    info.update(
+        k=float(split),
+        split_low=float(values[split - 1]) / largest,
+        split_high=float(values[split]) / largest,
+        gap=gap / largest,
+        coupling=coupling_norm / largest,
+        error=error / largest,
+        inflation=inflation,
+    )
+    if not gap > 0.0:
+        return None, info
+    shift = 2.0 * coupling_norm**2 / (gap + math.sqrt(gap * gap + 4.0 * coupling_norm**2))
+    shift = float(np.nextafter(shift, np.inf))
+    boundary = policy.factor_rcond**2
+    cut_low, cut_high = boundary * (largest - error), boundary * (largest + error)
+    squared = singular**2
+    margin = np.minimum(np.abs(squared - cut_low), np.abs(squared - cut_high))
+    straddles = (squared >= cut_low) & (squared <= cut_high)
+    # The surrogate's correction ``K``: each of its singular values, and so
+    # its largest, within a factor ``1 +- kappa`` of the block-diagonal ones.
+    kappa = float(np.nextafter(coupling_norm / float(values[split]), np.inf))
+    drift = ((1.0 + kappa) / (1.0 - kappa)) ** 2 - 1.0 if kappa < 0.5 else float("inf")
+    # Weyl for the structural block: each singular value moves by at most
+    # ``residual``, so its square by ``residual (2 sigma + residual)``.
+    moved = residual * (2.0 * np.sqrt(np.maximum(squared, cut_high)) + residual)
+    moved = moved + drift * np.maximum(squared, cut_high)
+    slack = np.where(straddles, -np.inf, margin - moved)
+    nearest = float(np.min(slack)) if slack.size else float("inf")
+    info.update(
+        shift=shift / largest,
+        margin=nearest / largest,
+        rotation=coupling_norm / gap,
+        kappa=kappa,
+        structural=float(structural_null.shape[1]),
+        structural_residual=residual / math.sqrt(largest),
+    )
+    if not (nearest > shift and residual * residual < cut_low):
+        return None, info
+    # The structural nulls are the surrogate's missing rows: zero there.
+    root = np.sqrt(values[split:])[:, None]
+    surrogate = np.zeros((values.size, gram.shape[0]))
+    surrogate[:, active] = (
+        np.vstack(
+            (
+                root * vectors[:, split:].T + (coupling / root) @ grey.T,
+                factor @ grey.T,
+            )
+        )
+        * d[None, :]
+    )
+    info["certified"] = 1.0
+    decomposition = decompose_factor(surrogate, policy=policy)
+    return replace(decomposition, grey_subspace=dict(info)), info
+
+
+def decide_data_rank(
+    gram: NDArray,
+    factor_decomposition: Callable[[], RankDecomposition],
+    *,
+    project: Callable[[NDArray], tuple[NDArray, NDArray, int, NDArray]] | None = None,
+    structural: Callable[[], Sequence[tuple[slice, NDArray, float]]] | None = None,
+    rows: int = 0,
+    psd_by_construction: bool = False,
+    certify: bool = False,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> RankDecomposition:
+    """The published data-subspace rank, at the factor route's resolution, without a full row factor when it can.
+
+    ``gram`` is a fit's centred data Gram ``X_c'WX_c``, already formed,
+    ``factor_decomposition`` returns :func:`decompose_factor` of the
+    observation factor of the same rows (a TSQR over every row, ``O(n
+    p^2)``), and ``project`` the grey-subspace pass that
+    :func:`decompose_gram_deflated` reads.  The order is the Gram when it
+    certifies itself (:func:`decompose_gram_if_authoritative`), then the
+    grey-subspace certificate, then the full factor, which runs only when that
+    certificate fails.  ``certify`` skips the grey-subspace certificate, so a
+    Gram that cannot certify itself goes straight to the full factor: a caller
+    that already holds it (an unpenalized fit, whose Hessian is this Gram)
+    pays nothing for it.
+    """
+    decomposition = decompose_gram_if_authoritative(
+        gram, policy=policy, psd_by_construction=psd_by_construction
+    )
+    if decomposition is not None:
+        return decomposition
+    if not certify and project is not None:
+        deflated, _ = decompose_gram_deflated(
+            gram, project, rows=rows, structural=structural() if structural else (), policy=policy
+        )
+        if deflated is not None:
+            return deflated
+    return factor_decomposition()
 
 
 def decompose_symmetric(
