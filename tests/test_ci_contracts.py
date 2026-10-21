@@ -657,6 +657,10 @@ def test_the_durations_refresh_drops_the_runtime_ci_measures_under_coverage() ->
         "test-compatibility"
     ]
     covered = [step for step in job["steps"] if "--cov=" in step.get("run", "")]
-    assert covered and all(f"'{COVERAGE_RUNTIME.strip('-py')}'" in step["if"] for step in covered)
+    assert covered and all(
+        f"'{COVERAGE_RUNTIME.strip('-py')}'" in step["if"]
+        and "github.event_name == 'push'" in step["if"]
+        for step in covered
+    )
     upload = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
     assert "-py${{ matrix.runtime.python-version }}-" in upload["with"]["name"]

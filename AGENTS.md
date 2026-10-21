@@ -57,12 +57,14 @@ whole context again at more than the full input price (Anthropic: 1.25×,
 against 0.1× for a cached read). On one measured session those rewrites
 were 44% of all sub-agent cost, against 6-8% for output tokens. So a
 sub-agent never waits more than about 4 minutes on one command and never
-polls on a timer. Where the harness gives an agent a longer cache (Claude
-Code: `experimental.cacheTtl: 1h` in its agent definition), an agent
-spawned for long runs may wait up to that lifetime instead. It hands a long run (the full suite, benchmarks, CI) back
+polls on a timer. It hands a long run (the full suite, benchmarks, CI) back
 to the spawning agent with a note of what it changed, the exact command and
 what to decide from the result. If more work follows, a fresh agent gets
-the note and the result rather than the old agent being resumed.
+the note and the result rather than the old agent being resumed. Where the
+harness gives an agent a longer cache (Claude Code: `cacheTtl: 1h` under
+`experimental:` in its agent definition), an agent spawned for long runs
+waits on them itself, well inside that lifetime: about 50 minutes for an
+hour.
 
 ## Code and tests
 

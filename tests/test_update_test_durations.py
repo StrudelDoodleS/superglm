@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
+import scripts.update_test_durations as refresh
 from scripts.update_test_durations import COVERAGE_RUNTIME, main, node_id, read_times
 
 CASES = """<testsuites><testsuite>
@@ -60,3 +64,25 @@ def test_a_coverage_runtime_given_by_path_is_flagged(tmp_path, capsys) -> None:
     (run / "pytest-results.xml").write_text(CASES, encoding="utf-8")
     main([str(run), "--output", str(tmp_path / "durations.json")])
     assert "ran under coverage" in capsys.readouterr().err
+
+
+def test_a_push_run_drops_its_coverage_shards_and_a_pull_request_run_keeps_them(
+    tmp_path, monkeypatch
+) -> None:
+    def fake(event):
+        def run(cmd, **kwargs):
+            if cmd[:3] == ["gh", "run", "download"]:
+                into = Path(cmd[cmd.index("-D") + 1])
+                for name in (f"pytest-Linux-X64{COVERAGE_RUNTIME}1", "pytest-Linux-X64-py3.14-1"):
+                    (into / name).mkdir(parents=True, exist_ok=True)
+                    (into / name / "pytest-results.xml").write_text(CASES, encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0)
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{event}\n")
+
+        return SimpleNamespace(run=run)
+
+    monkeypatch.setattr(refresh, "subprocess", fake("push"))
+    kept = refresh.download("1", None, tmp_path)
+    assert [f.parent.name for f in kept] == ["pytest-Linux-X64-py3.14-1"]
+    monkeypatch.setattr(refresh, "subprocess", fake("pull_request"))
+    assert len(refresh.download("2", None, tmp_path)) == 2
