@@ -168,9 +168,9 @@ def check_terms_on_factor_smooth_groups(
         )
         extra = "" if note is None else note(group, spec, smooth)
         held = (
-            " Beside an sz term, this term's per-level values for a held (zero-claim, "
-            "weightless or separated) level are not what predict prices: read held levels "
-            "from predict, or drop the term."
+            " Beside an sz term, predict prices a held (zero-claim, weightless or "
+            "separated) level at this term's mean over the identified levels, and its "
+            "reports read it there; its coefficients for that level are not an estimate."
             if smooth.basis == "sz"
             else ""
         )
@@ -1407,6 +1407,58 @@ def group_term_level_values(score: Any, levels: Any) -> NDArray[np.float64]:
             return values
 
 
+def held_group_levels(name: Any, interaction_specs: Any) -> tuple[tuple, tuple] | None:
+    """``(held, identified)``: main term ``name``'s levels an sz term on it folds, and those it averages.
+
+    ``predict`` reads a redundant main term on an sz group into the folding
+    term's level lines (``share_group_levels``, ``_score_identified``):
+    beside the sz term scored without the fold, it prices a held level
+    (``_levels_at_population``) at the main term's mean over the levels the
+    population averages (not ``_left_out``), and every other level at its own
+    value, because a thin or partly separated level's projector leaves its
+    constant to its rows (``_free_projectors``).  So every report of the main
+    term reads its held levels at that mean, and every report of the sz term
+    reads it unfolded.  ``None`` when no sz term folds ``name``, or none of its
+    levels is held or identified (with none identified the population is a
+    convention, ``_population_map``).
+    """
+    for spec in (interaction_specs or {}).values():
+        if isinstance(spec, FactorSmooth) and spec.group == name and spec._folds_group_term:
+            held = tuple(spec._levels[c] for c in spec._levels_at_population())
+            left_out = spec._left_out
+            identified = tuple(level for c, level in enumerate(spec._levels) if c not in left_out)
+            return (held, identified) if held and identified else None
+    return None
+
+
+def with_held_group_levels(
+    raw: dict[str, Any], name: Any, interaction_specs: Any
+) -> dict[str, Any]:
+    """A main term's reconstruction with its held levels at the identified mean (``held_group_levels``).
+
+    Reads ``Categorical`` and ``OrderedCategorical`` level tables; their
+    values are against the base level, which the mean carries unchanged.
+    """
+    record = held_group_levels(name, interaction_specs)
+    if record is None:
+        return raw
+    held, identified = record
+    shifted = dict(raw)
+    for log_key, key in (
+        ("log_relativities", "relativities"),
+        ("level_log_relativities", "level_relativities"),
+    ):
+        values = raw.get(log_key)
+        if not isinstance(values, dict) or not all(
+            level in values for level in (*held, *identified)
+        ):
+            continue
+        mean = float(np.mean([values[level] for level in identified]))
+        shifted[log_key] = {**values, **dict.fromkeys(held, mean)}
+        shifted[key] = {**raw[key], **dict.fromkeys(held, float(np.exp(mean)))}
+    return shifted
+
+
 def population_curve_shift(
     name: Any, x: NDArray, interaction_specs: Any, groups: Any, beta: NDArray
 ) -> NDArray[np.float64] | None:
@@ -1431,8 +1483,11 @@ def with_population_curve(
     predicts for the population is ``main(x) + b(x)' c``
     (``population_curve_shift``), so every report of the main effect's curve
     (relativities, reconstruct, term inference, bands) is that one; a curve
-    no ``sz`` term moves is returned as it is.
+    no ``sz`` term moves is returned as it is.  A main term an ``sz`` term
+    folds reports its held levels as ``predict`` prices them
+    (``with_held_group_levels``).
     """
+    raw = with_held_group_levels(raw, name, interaction_specs)
     if "x" not in raw or "log_relativity" not in raw:
         return raw
     shift = population_curve_shift(name, raw["x"], interaction_specs, groups, beta)

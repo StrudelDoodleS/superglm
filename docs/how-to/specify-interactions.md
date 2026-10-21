@@ -141,10 +141,13 @@ factor's main effect gives a rank-deficient model. SuperGLM rejects a
 warning that names the term to drop. A random effect for a different column is
 supported.
 
-Beside an `sz` term, the group term's per-level values for a held level (one
-with no claims, no weight, or whose line separates) are not what `predict`
-prices, though its `relativities()` and `term_inference()` still report them.
-Read held levels from `predict`, or drop the redundant term.
+Beside an `sz` term, `predict` prices a held level (one with no claims, no
+weight, or whose line separates) at the group term's mean over the levels the
+data identify, whatever value the fit left it. The group term's
+`relativities()`, `term_inference()`, `reconstruct_feature()` and
+`term_importance()` read a held level there too, and `factor_smooth()` lists
+held levels in its diagnostics as `held_levels`. The term's coefficients for a
+held level are not an estimate; drop the redundant term to avoid reading them.
 
 ## Level universes are inherited, never redeclared
 

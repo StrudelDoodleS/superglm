@@ -398,6 +398,42 @@ def _score_prediction_term_exact(
 _PREDICTION_WARNING_STACKLEVEL = 6
 
 
+def _held_level_shift(term: dict[str, Any], X: EagerFrame, score, interaction_specs) -> NDArray:
+    """Per row, what a main term an ``sz`` term folds gains read as the reports split ``predict``.
+
+    ``held_group_levels``: the term's held levels at its mean over the
+    identified levels, the sz term unfolded (``report_features``); the two
+    add to ``predict``.  ``score(labels)`` scores the term at those labels.
+    Zero for a term no ``sz`` term folds.
+    """
+    from superglm.features.factor_smooth import held_group_levels
+
+    labels = np.asarray(X.column_array(term["name"]), dtype=object)
+    shift = np.zeros(len(labels), dtype=np.float64)
+    record = held_group_levels(term["name"], interaction_specs)
+    if record is None:
+        return shift
+    held, identified = record
+    values = np.asarray(score(np.asarray([*identified, *held], dtype=object)), dtype=np.float64)
+    codes = pd.Index(list(held)).get_indexer(labels)
+    rows = codes >= 0
+    shift[rows] = float(np.mean(values[: len(identified)])) - values[len(identified) + codes[rows]]
+    return shift
+
+
+def report_features(
+    features: dict[str, dict[str, Any]], interaction_specs
+) -> dict[str, dict[str, Any]]:
+    """The main terms an ``sz`` term still folds when the reports split ``predict`` (``_held_level_shift``)."""
+    from superglm.features.factor_smooth import held_group_levels
+
+    return {
+        name: term
+        for name, term in features.items()
+        if held_group_levels(name, interaction_specs) is None
+    }
+
+
 def _score_unidentified_factor_smooth(
     term: dict[str, Any],
     X: EagerFrame,

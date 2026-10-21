@@ -1695,12 +1695,13 @@ def _two_sz_terms_model(order):
 
 
 def test_the_redundant_group_term_warning_says_what_predict_prices_for_held_levels() -> None:
-    """Beside an sz term the warning names where held levels are read (PR 508 round 2, Claude review).
+    """Beside an sz term the warning says how held levels are priced and read (PR 508 rounds 2 and 6).
 
-    The group term's ``relativities()`` and ``term_inference()`` report its
-    per-level values, which ``predict`` does not price for a held level (it
-    folds them into the sz rule); the warning says so for ``sz`` only, as the
-    ``fs`` basis folds nothing.  Mutation: the sentence removed.
+    ``predict`` folds the group term into the sz rule, pricing a held level
+    at the group term's identified mean, and its reports read it there
+    (``with_held_group_levels``); its coefficient there is not an estimate.
+    The warning says so for ``sz`` only, as the ``fs`` basis folds nothing.
+    Mutation: the sentence removed.
     """
     from superglm import OrderedCategorical, Polynomial
     from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
@@ -1715,7 +1716,7 @@ def test_the_redundant_group_term_warning_says_what_predict_prices_for_held_leve
             interactions=[FactorSmooth("x", group="g", basis=basis)],
         )
 
-    with pytest.warns(FactorSmoothGroupTermWarning, match="read held levels from predict"):
+    with pytest.warns(FactorSmoothGroupTermWarning, match="its reports read it there"):
         declare("sz")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -4296,3 +4297,251 @@ def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_ter
         )
     )
     assert abs(float(holdout["z"]) - (dev_drop - dev_full)) <= bound
+
+
+def _folded_group_term_model(group_term):
+    """The 3k trigger's Poisson sz term beside a redundant ``OrderedCategorical`` on its group.
+
+    g000 (no claim, every row separated) is held at the population, so
+    ``predict`` prices it at the group term's mean over the identified levels.
+    """
+    frame, y, _ = _trigger_shaped("poisson")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": group_term,
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    k=5,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)},
+                )
+            ],
+            selection_penalty=0,
+        ).fit_reml(frame, y)
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._folds_group_term and spec._levels_at_population() == (0,)
+    return model, frame, y
+
+
+def _special_trade(model, d: float = 5.0):
+    """The group term's g000 special moved by ``d`` and taken back by the sz constants (``_traded_group_term``).
+
+    Only the held level's value moves, so the identified levels' values, and
+    their mean, do not: every report's split of ``predict`` stays where it was.
+    """
+    move = np.zeros(len(_feature_columns(model, "g")))
+    move[-1] = d
+    return _traded_group_term(model, "x:g:sz", move)
+
+
+@pytest.mark.parametrize("trade", ["special", "polynomial"])
+def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) -> None:
+    """A held level's group-term relativity is ``predict``'s level-minus-reference arithmetic (PR 508 round 6).
+
+    ``predict`` folds a redundant group term into the sz rule, so a held
+    level (g000) is priced at the group term's mean over the identified
+    levels, whatever value the fit left it; ``relativities()``,
+    ``term_inference()`` and ``reconstruct_feature()`` read the term's own
+    value there.  The value is forced, as in the ``predict`` tests: the group
+    term moves (g000's special by 5, or a random polynomial pattern) and the
+    sz constants and intercept take it back.  Each report's g000 then equals
+    ``rel(ref) + eta(g000, x) - eta(ref, x) + dev(ref, x) - dev(g000, x)`` at
+    every ``x``, ``dev`` the ``factor_smooth()`` curves, within ``8
+    gamma_count`` of the magnitudes ``predict`` touches (Higham 2002, sections
+    3.1 and 3.5).  Fails on 4a2ed996: the reports read 5.0 (special) and
+    -17.99 (polynomial) where ``predict`` prices 0.0 and -2.88.
+    """
+    from superglm.model import base
+
+    order = [f"g{i:03d}" for i in range(12)]
+    group_term = (
+        OrderedCategorical(order=order, specials=["g000"], basis=Polynomial(degree=1))
+        if trade == "special"
+        else OrderedCategorical(order=order, basis=Polynomial(degree=2))
+    )
+    model, _, _ = _folded_group_term_model(group_term)
+    if trade == "special":
+        traded, reach = _special_trade(model)
+    else:
+        d_gamma = np.random.default_rng(3).normal(size=len(_feature_columns(model, "g")))
+        traded, reach = _traded_group_term(model, "x:g:sz", d_gamma)
+    model._result = traded
+    steps = np.linspace(0.0, 1.0, 11)
+    grid = pd.DataFrame({"x": np.tile(steps, 2), "g": np.repeat(["g000", "g005"], len(steps))})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        eta = base._predict_eta(
+            model,
+            grid,
+            None,
+            fast_discrete=False,
+            random_effects="conditional",
+            stabilize=False,
+            warn=False,
+        ).reshape(2, -1)
+        curves = model.factor_smooth("x:g:sz", grid=steps).curves.set_index("level")["effect"]
+        reported = {
+            "relativities": model.relativities()["g"].set_index("level")["log_relativity"],
+            "term_inference": pd.Series(
+                *reversed(
+                    list(
+                        zip(
+                            *zip(
+                                model.term_inference("g").levels,
+                                model.term_inference("g").log_relativity,
+                            )
+                        )
+                    )
+                )
+            ),
+            "reconstruct_feature": pd.Series(
+                model.reconstruct_feature("g")["level_log_relativities"]
+            ),
+        }
+    dev = {level: curves.loc[level].to_numpy() for level in ("g000", "g005")}
+    count = len(model.result.beta) + 12 * 5 + 4 * 5 + 2
+    magnitude = float(np.max(_eta_magnitude(model, grid))) + 4.0 * reach
+    bound = 8.0 * _gamma(count) * (magnitude + max(np.abs(d).max() for d in dev.values()))
+    for path, values in reported.items():
+        expected = values["g005"] + eta[0] - eta[1] + dev["g005"] - dev["g000"]
+        assert np.all(np.abs(values["g000"] - expected) <= bound), (path, values["g000"])
+
+
+def test_importance_and_holdout_read_a_held_level_of_the_group_term_as_predict_prices() -> None:
+    """``term_importance`` and the holdout split ``predict`` as the reports do (PR 508 round 6).
+
+    ``term_importance`` scored the sz term from its raw coefficients, the
+    walk, and the group term at its own value; the holdout dropped the group
+    term from a full predictor whose sz term still took that value back.
+    Both now read the group term's held level at its identified mean and the
+    sz term by ``predict``'s rule, unfolded (``base._held_level_shift``), which
+    add to ``predict``.  Moving g000's special against the sz constants
+    (``_special_trade``) moves no identified value and shifts the sz term by a
+    constant, so no term's variance and no deviance from dropping the group
+    term or the main effect changes, within
+    the roundings of ``8 gamma_count`` of what ``predict`` touches.  Fails on
+    4a2ed996: the sz term's variance 25.1 became 439, and the group term's
+    holdout delta moved from 0 to -13.5.
+    """
+    order = [f"g{i:03d}" for i in range(12)]
+    model, frame, y = _folded_group_term_model(
+        OrderedCategorical(order=order, specials=["g000"], basis=Polynomial(degree=1))
+    )
+    count = len(model.result.beta) + 12 * 5 + 4 * 5 + 2
+    raw = _raw_result(model)
+    traded, reach = _special_trade(model)
+    magnitude = _eta_magnitude(model, frame) + 4.0 * reach
+    delta = 8.0 * _gamma(count) * magnitude
+    reports = {}
+    for label, result in (("before", raw), ("after", traded)):
+        model._result = result
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reports[label] = (
+                model.term_importance(frame).set_index("term")["sd_eta"],
+                model.term_drop_diagnostics(
+                    frame, y, mode="holdout", X_val=frame.copy(), y_val=y.copy()
+                ).set_index("feature")["delta_deviance"],
+                np.exp(base_eta(model, frame)),
+            )
+    # sd moves by at most the rms of the per-row rounding, 2 max(delta)
+    sd_before, sd_after = reports["before"][0], reports["after"][0]
+    assert np.all(np.abs(sd_after - sd_before) <= 2.0 * float(np.max(delta)))
+    slope = 2.0 * (np.maximum(reports["before"][2], reports["after"][2]) + y)
+    # the sz term's constants sum to zero, so the trade moves the intercept by
+    # the special's mean, which dropping the sz term exposes: only x and g
+    for name in ("x", "g"):
+        moved = abs(float(reports["after"][1][name] - reports["before"][1][name]))
+        assert moved <= 4.0 * float(np.sum(slope * delta)), name
+
+
+def base_eta(model, frame):
+    """The public linear predictor before the link guard."""
+    from superglm.model import base
+
+    return base._predict_eta(
+        model,
+        frame,
+        None,
+        fast_discrete=False,
+        random_effects="conditional",
+        stabilize=False,
+        warn=False,
+    )
+
+
+def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean() -> None:
+    """A held level's group-term standard error is that of the value reported there (PR 508 round 6).
+
+    An ``OrderedCategorical(basis=Spline)`` group term is penalized, so the
+    fit leaves its coefficients a covariance.  The held g000 reports the mean
+    of the identified levels' values (all but g000 and the separated g001)
+    against the base, ``c' gamma`` with ``c`` the mean of their rows less the
+    base row, so its error is ``sqrt(c' V
+    c)``, in ``relativities(with_se=True)`` and ``term_inference()``, within
+    ``4 gamma_(2p)`` of ``|c|' |V| |c|``.  Fails on 4a2ed996, which reported
+    the error of g000's own value.
+    """
+    order = [f"g{i:03d}" for i in range(12)]
+    model, _, _ = _folded_group_term_model(OrderedCategorical(order=order, basis=Spline(n_knots=4)))
+    spec = model._specs["g"]
+    sz = model._interaction_specs["x:g:sz"]
+    identified = [level for c, level in enumerate(sz._levels) if c not in sz._left_out]
+    rows = np.asarray(spec.transform(np.asarray(order, dtype=object)), dtype=np.float64)
+    rows = rows - rows[order.index(spec._base_level)]
+    c = rows[[order.index(level) for level in identified]].mean(axis=0)
+    covariance, active = model._coef_covariance
+    group = next(ag for ag in active if ag.feature_name == "g")
+    V = np.asarray(covariance)[group.start : group.end, group.start : group.end]
+    expected = float(c @ V @ c)
+    bound = 4.0 * _gamma(2 * len(c)) * float(np.abs(c) @ np.abs(V) @ np.abs(c))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frame_se = model.relativities(with_se=True)["g"].set_index("level")["se_log_relativity"]
+        inference = model.term_inference("g")
+    inferred = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
+    for se in (frame_se["g000"], inferred["g000"]):
+        assert abs(float(se) ** 2 - expected) <= bound
+
+
+def test_factor_smooth_names_a_level_its_group_holds() -> None:
+    """``factor_smooth()`` lists the levels it reports flat at the population (PR 508 round 5, finding 26).
+
+    In the round-3 binomial case the ``x`` term holds ``t`` (every row
+    separated) and the ``z`` term keeps it, until ``share_group_levels`` holds
+    it in both.  ``z``'s report showed ``t`` flat with zero error but named it
+    in neither ``thin_levels`` nor ``separated_levels``; ``held_levels`` now
+    names every level predicted at the population.  Fails on 4a2ed996 (no
+    ``held_levels``).
+    """
+    frame, y, names = _held_by_one_term_frame("binomial")
+
+    def sz(variable):
+        return FactorSmooth(
+            variable, group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(1.0)}
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="binomial",
+            features={
+                "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "z": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+            },
+            interactions=[sz("z"), sz("x")],
+            selection_penalty=0,
+        ).fit_reml(frame, y)
+        report = model.factor_smooth("z:g:sz", grid=np.linspace(0.0, 6.0, 7))
+    diagnostics = report.diagnostics
+    assert "t" not in diagnostics["thin_levels"] and "t" not in diagnostics["separated_levels"]
+    assert {"t", "u"} <= set(diagnostics["held_levels"])
+    flat = report.curves[report.curves["level"] == "t"]
+    assert np.all(flat["effect"] == 0.0) and np.all(flat["posterior_se"] == 0.0)

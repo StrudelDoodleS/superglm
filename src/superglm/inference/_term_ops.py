@@ -148,6 +148,7 @@ def term_inference(
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
 
     from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import with_population_curve
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
@@ -261,7 +262,9 @@ def term_inference(
             # Spline mode: primary output is categorical (K levels with SEs),
             # plus a smooth_curve for plotting the fitted spline.
             inner = spec._spline
-            raw = spec.reconstruct(beta_combined)
+            raw = with_population_curve(
+                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+            )
             levels = raw["levels"]
             level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
             level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
@@ -401,7 +404,9 @@ def term_inference(
             return ti_result
         else:
             # Step mode: categorical-style output
-            raw = spec.reconstruct(beta_combined)
+            raw = with_population_curve(
+                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+            )
             levels = raw["levels"]
             log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
             rels = np.array([raw["relativities"][lv] for lv in levels])
@@ -453,8 +458,6 @@ def term_inference(
 
     # ── Spline ───────────────────────────────────────────────────
     if isinstance(spec, _SplineBase):
-        from superglm.features.factor_smooth import with_population_curve
-
         raw = spec.reconstruct(beta_combined, n_points=n_points)
         # the population curve when an sz term moves it (#432), as its errors are
         raw = with_population_curve(raw, name, interaction_specs, groups, beta)
@@ -548,7 +551,9 @@ def term_inference(
 
     # ── Categorical ──────────────────────────────────────────────
     elif isinstance(spec, Categorical):
-        raw = spec.reconstruct(beta_combined)
+        raw = with_population_curve(
+            spec.reconstruct(beta_combined), name, interaction_specs, groups, beta
+        )
         levels = raw["levels"]
         log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
         rels = np.array([raw["relativities"][lv] for lv in levels])

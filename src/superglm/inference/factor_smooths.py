@@ -550,6 +550,11 @@ def factor_smooth_result(
             diagnostics["separated_levels"] = [
                 spec._levels[code] for code in spec._separated_levels
             ]
+            # predicted at the population, with zero deviation and error: without
+            # weight, every row separated, or so in another sz term on the group
+            diagnostics["held_levels"] = [
+                spec._levels[code] for code in spec._levels_at_population()
+            ]
 
     return FactorSmoothResult(
         name=group.name,
