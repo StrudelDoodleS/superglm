@@ -106,7 +106,7 @@ def group_level_values(
     group = getattr(interaction, "group", None)
     if not getattr(interaction, "_has_population_offset", False):
         return None
-    if group not in predictor.compiled.feature_order:
+    if group not in predictor.compiled.feature_order or not interaction._folds_group_term:
         return None
     levels = np.asarray(list(interaction._levels), dtype=object)
     return np.asarray(
@@ -207,7 +207,7 @@ def _add_group_term_columns(
     group = getattr(interaction, "group", None)
     if not getattr(interaction, "_has_population_offset", False):
         return
-    if group not in predictor.compiled.feature_order:
+    if group not in predictor.compiled.feature_order or not interaction._folds_group_term:
         return
     group_indices = _term_indices(predictor.compiled.groups, group)
     zeros = np.zeros(width, dtype=np.float64)

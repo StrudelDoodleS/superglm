@@ -904,6 +904,16 @@ class FactorSmooth:
         )
 
     @property
+    def _folds_group_term(self) -> bool:
+        """Whether the rule reads a redundant group term into each level's line (``_score_identified``).
+
+        A 0.41 convention, recorded with the lowest-order projector
+        (``_free_complement``): a model saved before keeps the rule it was
+        saved with, which does not read the group term.
+        """
+        return getattr(self, "_free_complement", "orthogonal") == "lowest_order"
+
+    @property
     def _population_convention(self) -> str:
         """How the population curve is fixed (``_population_map``).
 
@@ -1165,9 +1175,12 @@ class FactorSmooth:
         and the contribution returned is that level's predicted line less
         ``a_l``, so the two terms together predict as the term would alone.
         A level the rule leaves alone is scored from its own coefficients.
-        Under ``population`` a row of a known level gives ``a_l`` back too:
+        A model saved before the convention (``_folds_group_term``) ignores
+        ``level_constants``.  Under ``population`` a row of a known level gives ``a_l`` back too:
         the population is the term's alone, as without the redundant term.
         """
+        if not self._folds_group_term:
+            level_constants = None
         if population:
             numeric, group_values = self._validated_prediction_inputs(x, group)
             codes = np.full(len(numeric), -1, dtype=np.intp)

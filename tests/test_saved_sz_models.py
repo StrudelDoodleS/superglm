@@ -174,3 +174,161 @@ def test_an_sz_model_saved_by_v0_36_0_predicts_as_saved(name) -> None:
         eta = base.predict_eta_exact(model, frame, random_effects=effects, warn=False)
         bound = 2.0 * _gamma(count) * _eta_magnitude(model, frame)
         assert np.all(np.abs(eta - saved) <= bound), (effects, float(np.max(np.abs(eta - saved))))
+
+
+def _grid_over_levels(spec):
+    """Every level of the term at 21 values of ``x``: the levels' own rows and everything between."""
+    import pandas as pd
+
+    levels = [str(level) for level in spec._levels]
+    return pd.DataFrame(
+        {
+            "x": np.tile(np.linspace(0.0, 1.0, 21), len(levels)),
+            "g": np.repeat(np.asarray(levels, dtype=object), 21),
+        }
+    )
+
+
+def _drop_the_0_41_state(spec, *, record: bool) -> None:
+    """The attributes a pickle written before 0.41 lacks; ``record`` also those before 0.36."""
+    for name in ("_separated_directions", "_free_complement"):
+        delattr(spec, name)
+    if record:
+        for name in (
+            "_unidentified_levels",
+            "_free_directions",
+            "_weightless_levels",
+            "_separated_levels",
+            "_population_null_space",
+        ):
+            delattr(spec, name)
+
+
+def test_an_sz_model_saved_before_0_41_does_not_read_its_group_term_into_the_rule() -> None:
+    """A 0.36 to 0.40 model with a group term predicts its terms as they were summed (PR 508 round 1).
+
+    0.40 accepted an ``OrderedCategorical`` on the sz group (with a warning)
+    and predicted the pair as ``a_l + b(x)' identified(raw)``: the group
+    term's value read nowhere in the sz term's rule.  The 0.41 rule folds it
+    into each level's line, a convention of the same release as the
+    lowest-order projector (``_free_complement``), and a model saved before
+    keeps the rule it was saved with: unseen levels and thin levels off
+    their own rows moved by the group term's mean otherwise.  A state without
+    ``_free_complement`` or ``_separated_directions`` (what 0.36 to 0.40 pickle)
+    moves a prediction, over every level and the x between its rows, by the
+    group term's own value alone when that term's coefficients change.
+    Mutation: the fold read whatever the state.
+    """
+    import copy
+    import dataclasses
+
+    from superglm import (
+        FactorSmooth,
+        LambdaPolicy,
+        OrderedCategorical,
+        Polynomial,
+        Spline,
+        SuperGLM,
+    )
+    from superglm._frame import as_eager_frame
+    from superglm.model import base
+
+    from .test_factor_smooth_sz_thin_and_influence import (
+        _eta_magnitude,
+        _gamma,
+        _signed_aliased_frame,
+    )
+
+    frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
+    order = sorted(set(frame["g"]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the redundant group term's warning
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+                "g": OrderedCategorical(order=order, basis=Polynomial(degree=2)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis="sz",
+                    k=6,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(0.7)},
+                )
+            ],
+            selection_penalty=0,
+        )
+        model.fit_reml(frame, y, sample_weight=weight)
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._unidentified_levels and spec._free_complement == "lowest_order"
+    # the aliased group term is solved at ~0 here; give it the common level it
+    # may take, as any solver's split of the redundant columns could
+    beta = np.array(model.result.beta)
+    ordered = next(g for g in model._groups if g.feature_name == "g")
+    beta[ordered.sl] = np.random.default_rng(7).normal(size=ordered.size)
+    model._result = dataclasses.replace(model.result, beta=beta)
+    _drop_the_0_41_state(spec, record=False)
+    loaded = pickle.loads(pickle.dumps(model))
+    grid = _grid_over_levels(loaded._interaction_specs["x:g:sz"])
+    without = copy.deepcopy(loaded)
+    unset = np.array(loaded.result.beta)
+    unset[ordered.sl] = 0.0
+    without._result = dataclasses.replace(loaded.result, beta=unset)
+    plan = base._prediction_plan(loaded)
+    term = next(term for term in plan["features"] if term["name"] == "g")
+    own = base._score_prediction_term_exact(
+        term, as_eager_frame(grid), np.asarray(loaded.result.beta)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        eta = base.predict_eta_exact(loaded, grid, warn=False)
+        eta_without = base.predict_eta_exact(without, grid, warn=False)
+    count = len(loaded.result.beta) + 30 * 6 + 4 * 6 + 2
+    bound = 2.0 * _gamma(count) * _eta_magnitude(loaded, grid)
+    assert np.all(np.abs((eta - eta_without) - own) <= bound)
+
+
+def test_an_sz_model_saved_before_0_36_is_rebuilt_with_the_orthogonal_projector() -> None:
+    """A pickle without the level record predicts, off its rows, as 0.36 to 0.40 rebuilt it (PR 508 round 1).
+
+    Those releases rebuilt the record at the first prediction and predicted a
+    thin level by the orthogonal projector (``_free_complement`` absent).  The
+    0.41 rebuild recorded the lowest-order one, which moves a thin level's
+    curve off its own rows.  The rebuilt model now predicts, on a grid over
+    every level and for the population, bit for bit what the same fit does
+    in the state those releases rebuilt.  Mutation: the rebuild's default
+    complement.
+    """
+    from superglm.model import base
+
+    from .test_factor_smooth_sz_thin_and_influence import (
+        _fit,
+        _model,
+        _signed_aliased_frame,
+    )
+
+    frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
+    model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    grid = _grid_over_levels(spec)
+    grid = grid.assign(**{name: frame[name].iloc[0] for name in frame.columns if name not in grid})
+    spec._free_complement = "orthogonal"
+    expected = {
+        effects: base.predict_eta_exact(model, grid, random_effects=effects, warn=False)
+        for effects in ("conditional", "population")
+    }
+    spec._free_complement = "lowest_order"
+    assert not np.array_equal(
+        expected["conditional"],
+        base.predict_eta_exact(model, grid, random_effects="conditional", warn=False),
+    )
+    _drop_the_0_41_state(spec, record=True)
+    loaded = pickle.loads(pickle.dumps(model))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for effects, saved in expected.items():
+            eta = base.predict_eta_exact(loaded, grid, random_effects=effects, warn=False)
+            assert np.array_equal(eta, saved), effects
+    assert loaded._interaction_specs["x:g:sz"]._free_complement == "orthogonal"

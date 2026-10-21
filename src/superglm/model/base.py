@@ -421,7 +421,7 @@ def _score_unidentified_factor_smooth(
     _, right = resolve_interaction_parent_of(spec, right_spec, X.column_array(right_name))
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     constants = None
-    if group_term is not None:
+    if group_term is not None and spec._folds_group_term:
         levels = as_eager_frame(pd.DataFrame({group_term["name"]: list(spec._levels)}))
         constants = np.asarray(
             _score_prediction_term_exact(group_term, levels, beta_all), dtype=np.float64

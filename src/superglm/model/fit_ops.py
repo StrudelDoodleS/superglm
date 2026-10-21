@@ -817,8 +817,10 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
 
     A pickle from v0.35.0 or earlier carries no record and would predict its
     thin levels at the fit's arbitrary point.  The fit's design and prior
-    weights, which such a model keeps, rebuild it at the first prediction;
-    its response is not kept, so separated lines stay in its population.
+    weights, which such a model keeps, rebuild it at the first prediction,
+    under the conventions of the release that rebuilt it (the orthogonal
+    projector, no group-term fold); its response is not kept, so separated
+    lines stay in its population.
     Without them the model cannot be repaired and says so.
     """
     import warnings
@@ -837,6 +839,10 @@ def _ensure_factor_smooth_levels_recorded(model) -> None:
         return
     if getattr(model, "_dm", None) is not None and getattr(model, "_fit_weights", None) is not None:
         _record_unidentified_factor_smooth_levels(model, model._fit_weights)
+        for spec in stale:
+            # the first prediction of 0.36 to 0.40 rebuilt this record with the
+            # orthogonal projector; the 0.41 conventions are a refit's
+            spec._free_complement = "orthogonal"
         return
     for spec in stale:
         spec._unidentified_levels = ()

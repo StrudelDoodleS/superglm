@@ -2582,14 +2582,19 @@ def test_an_sz_model_saved_before_the_record_predicts_as_refitted() -> None:
 
     frame, y, weight = _signed_aliased_frame("one_row", response="fisher")
     model = _fit(_model("gaussian", "auto", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    spec = model._interaction_specs["x:g:sz"]
+    # the rebuild keeps the orthogonal projector 0.36 to 0.40 rebuilt it with
+    # (``test_saved_sz_models``): the fit in that state is the reference
+    spec._free_complement = "orthogonal"
     expected = base.predict_eta_exact(model, frame, warn=False)
     population = base.predict_eta_exact(model, frame, random_effects="population", warn=False)
-    spec = model._interaction_specs["x:g:sz"]
     for name in (
         "_unidentified_levels",
         "_free_directions",
         "_weightless_levels",
         "_separated_levels",
+        "_separated_directions",
+        "_free_complement",
         "_population_null_space",
     ):
         delattr(spec, name)
