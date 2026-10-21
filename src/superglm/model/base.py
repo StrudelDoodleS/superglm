@@ -649,7 +649,11 @@ def _predict_eta(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
 
-    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
+    from superglm.features.factor_smooth import (
+        SZ_POPULATION_PREDICTION,
+        FactorSmooth,
+        group_term_folding_terms,
+    )
     from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
@@ -722,11 +726,17 @@ def _predict_eta(
 
         _ensure_factor_smooth_levels_recorded(model)
     unidentified: list[str] = []
+    folding = group_term_folding_terms((t["name"], t["spec"]) for t in plan["interactions"])
     for term in plan["interactions"]:
         spec = term["spec"]
         if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
             group_term = next(
-                (feature for feature in plan["features"] if feature["name"] == spec.group), None
+                (
+                    feature
+                    for feature in plan["features"]
+                    if feature["name"] == spec.group and folding[spec.group] == term["name"]
+                ),
+                None,
             )
             contribution, named = _score_unidentified_factor_smooth(
                 term,

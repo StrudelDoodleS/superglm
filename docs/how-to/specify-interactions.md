@@ -141,6 +141,11 @@ factor's main effect gives a rank-deficient model. SuperGLM rejects a
 warning that names the term to drop. A random effect for a different column is
 supported.
 
+Beside an `sz` term, the group term's per-level values for a held level (one
+with no claims, no weight, or whose line separates) are not what `predict`
+prices, though its `relativities()` and `term_inference()` still report them.
+Read held levels from `predict`, or drop the redundant term.
+
 ## Level universes are inherited, never redeclared
 
 A `Categorical`-parented interaction — `SplineCategorical`,

@@ -167,10 +167,17 @@ def check_terms_on_factor_smooth_groups(
             else ""
         )
         extra = "" if note is None else note(group, spec, smooth)
+        held = (
+            " Beside an sz term, this term's per-level values for a held (zero-claim, "
+            "weightless or separated) level are not what predict prices: read held levels "
+            "from predict, or drop the term."
+            if smooth.basis == "sz"
+            else ""
+        )
         warnings.warn(
             f"The {type(spec).__name__} term on {group!r} is redundant: FactorSmooth "
             f"{smooth.name!r} already carries each level's intercept, so the term repeats "
-            f"columns the factor smooth has. Drop {where(group, spec)}.{competing}{extra}",
+            f"columns the factor smooth has. Drop {where(group, spec)}.{competing}{held}{extra}",
             FactorSmoothGroupTermWarning,
             skip_file_prefixes=(_PACKAGE_DIRECTORY,),
         )
@@ -1295,6 +1302,26 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
         and spec.variable == name
         and spec._has_population_offset
     ]
+
+
+def group_term_folding_terms(terms: Any) -> dict[str, Any]:
+    """The one ``sz`` term per group that reads that group's redundant main term into its levels.
+
+    ``terms`` is ``(name, spec)`` pairs in interaction order.  A group's main
+    term has one set of per-level values, ``a``, and the rule
+    (``FactorSmooth._score_identified``) hands it back for the levels it
+    moves: every ``sz`` term on the group folding it would take ``a`` back once
+    per term.  One fold is enough, since a level left out of the population is
+    one-sided in every ``sz`` term on its group and each term's own rule
+    removes its own share of the walk; the first term in interaction order
+    with a population offset takes it, the rest score without.  Returns
+    ``{group: name of that term}``.
+    """
+    folding: dict[str, Any] = {}
+    for name, spec in terms:
+        if getattr(spec, "_has_population_offset", False):
+            folding.setdefault(spec.group, name)
+    return folding
 
 
 def population_curve_shift(

@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import CompiledPredictor
+from superglm.features.factor_smooth import group_term_folding_terms
 from superglm.types import GroupSlice
 
 
@@ -92,8 +93,22 @@ def warn_population_levels(named: Sequence[str]) -> None:
     warn_caller(SZ_POPULATION_PREDICTION + "; ".join(named) + ".")
 
 
+def _folds_group_term(predictor: CompiledPredictor, name: str, interaction: Any) -> bool:
+    """Whether sz term ``name`` is the one that reads its group's main term into its levels."""
+    group = getattr(interaction, "group", None)
+    if not getattr(interaction, "_has_population_offset", False):
+        return False
+    if group not in predictor.compiled.feature_order or not interaction._folds_group_term:
+        return False
+    folding = group_term_folding_terms(
+        (key, predictor.compiled.interaction_specs[key])
+        for key in predictor.compiled.interaction_order
+    )
+    return folding[group] == name
+
+
 def group_level_values(
-    predictor: CompiledPredictor, interaction: Any, coefficients: NDArray
+    predictor: CompiledPredictor, name: str, interaction: Any, coefficients: NDArray
 ) -> NDArray | None:
     """A term on an sz term's group in the same predictor: its value at each of the term's levels.
 
@@ -101,13 +116,13 @@ def group_level_values(
     leaves its per-level values unpenalized they alias the sz term's level
     constants, so the sz rule reads them as part of each level's line
     (``FactorSmooth._score_identified``).  ``coefficients`` are that term's;
-    ``None`` without such a term or a level the rule moves.
+    ``None`` without such a term or a level the rule moves, and for every sz
+    term on the group but one (``group_term_folding_terms``): the group term's
+    values are folded once.
     """
-    group = getattr(interaction, "group", None)
-    if not getattr(interaction, "_has_population_offset", False):
+    if not _folds_group_term(predictor, name, interaction):
         return None
-    if group not in predictor.compiled.feature_order or not interaction._folds_group_term:
-        return None
+    group = interaction.group
     levels = np.asarray(list(interaction._levels), dtype=object)
     return np.asarray(
         _score_feature(predictor.compiled.specs[group], levels, coefficients), dtype=np.float64
@@ -190,6 +205,7 @@ def _interaction_design(
 def _add_group_term_columns(
     matrix: NDArray[np.float64],
     predictor: CompiledPredictor,
+    name: str,
     interaction: Any,
     left: NDArray,
     right: NDArray,
@@ -204,16 +220,14 @@ def _add_group_term_columns(
     term's coefficients too: one column of it per coefficient, at zero sz
     coefficients, added onto the group term's own design.
     """
-    group = getattr(interaction, "group", None)
-    if not getattr(interaction, "_has_population_offset", False):
+    if not _folds_group_term(predictor, name, interaction):
         return
-    if group not in predictor.compiled.feature_order or not interaction._folds_group_term:
-        return
+    group = interaction.group
     group_indices = _term_indices(predictor.compiled.groups, group)
     zeros = np.zeros(width, dtype=np.float64)
     identity = np.eye(len(group_indices), dtype=np.float64)
     for column, index in enumerate(group_indices):
-        constants = group_level_values(predictor, interaction, identity[:, column])
+        constants = group_level_values(predictor, name, interaction, identity[:, column])
         matrix[:, index + intercept_width] += _score_interaction(
             interaction, left, right, zeros, level_constants=constants
         )
@@ -333,6 +347,7 @@ def build_joint_prediction_design(
             _add_group_term_columns(
                 matrix,
                 predictor,
+                name,
                 interaction,
                 frame.column_array(left_name),
                 frame.column_array(right_name),

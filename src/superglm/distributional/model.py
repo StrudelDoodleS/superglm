@@ -193,6 +193,7 @@ def _predict_one_eta(
         constants = (
             group_level_values(
                 predictor,
+                name,
                 interaction,
                 slopes[_term_indices(predictor.compiled.groups, group)],
             )
