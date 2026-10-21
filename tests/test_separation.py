@@ -572,3 +572,59 @@ def test_the_runtime_gate_reads_expected_curvature_under_observed_newton_rows():
     common = {"family": Tweedie(p=1.5), "link": LogLink(), "mu": mu, "eta": eta}
     assert _separation_weight_ratio("observed", 1e13, weights=weights, **common) == 1.0
     assert _separation_weight_ratio("fisher", 1e13, weights=weights, **common) == 1e13
+
+
+def test_a_levels_anchor_rank_is_read_from_an_economy_factorization(monkeypatch):
+    """A level with many distinct anchors allocates no square left factor (PR 508 round 4).
+
+    ``_level_recession`` took the SVD of its ``(n, k)`` anchor rows with
+    ``full_matrices=True`` and read only the rank and the right null space:
+    an ``(n, n)`` left factor, about 3.2 GB at 20,000 anchors.  The work is
+    bounded by the factors' sizes, not time.  Mutation: ``full_matrices=True``.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    sizes: list[int] = []
+    real = np.linalg.svd
+
+    def spy(a, *args, **kwargs):
+        factors = real(a, *args, **kwargs)
+        sizes.append(max(factor.size for factor in factors))
+        return factors
+
+    monkeypatch.setattr(np.linalg, "svd", spy)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    natural = np.column_stack([np.ones(n), x])
+    inside = np.ones(n, dtype=bool)
+    none = np.zeros(n, dtype=bool)
+    assert _level_recession(natural, none, none, inside, np.eye(2)) is None
+    assert sizes and max(sizes) <= n * 2
+    from superglm.diagnostics.separation import _rank_and_null_space
+
+    # fewer rows than columns still returns the whole null space
+    rank, null = _rank_and_null_space(np.array([[1.0, 0.0, 0.0, 1.0]]))
+    assert rank == 1 and null.shape == (4, 3)
+    assert np.allclose(np.array([[1.0, 0.0, 0.0, 1.0]]) @ null, 0.0)
+
+
+@pytest.mark.parametrize("origin", [0.0, 1e8])
+def test_two_positive_anchors_fix_a_lines_both_coefficients_at_any_origin(origin):
+    """Moving the covariate's origin does not make a level separate (PR 508 round 4).
+
+    Positive responses at ``x = origin`` and ``origin + 1`` fix both affine
+    coefficients of the level's line, so the zero at ``origin + 2`` cannot
+    recede.  The anchors' rank was decided on the unscaled ``[1, x]``, where at
+    ``1e8`` the second singular value falls below ``max(shape) eps`` of the
+    first: rank one, and a false direction of recession.  The columns are now
+    equilibrated.  Mutation: the columns unscaled.
+    """
+    from superglm.diagnostics.separation import _level_recession
+
+    x = origin + np.array([0.0, 1.0, 2.0])
+    natural = np.column_stack([np.ones(3), x])
+    inside = np.array([True, True, False])
+    lower = np.array([False, False, True])
+    none = np.zeros(3, dtype=bool)
+    assert _level_recession(natural, lower, none, inside, np.eye(2)) is None
+    assert _level_recession(natural, lower, none, inside, np.eye(2), span=False) is None

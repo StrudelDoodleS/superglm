@@ -475,13 +475,35 @@ def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: 
     implicit = D[np.asarray(program.x, dtype=np.float64)[q:] < 0.5]
     if not len(implicit):
         return np.eye(q)
-    _, values, right = np.linalg.svd(implicit, full_matrices=True)
-    return np.ascontiguousarray(right[_numerical_rank(values, implicit.shape) :].T)
+    return _rank_and_null_space(implicit)[1]
 
 
 def _numerical_rank(values: NDArray, shape: tuple[int, ...]) -> int:
     """Rank from singular ``values``: the rule of ``numpy.linalg.matrix_rank``, ``max(shape) eps`` of the largest."""
     return int(np.sum(values > 2.0 * max(shape) * _rounding(1) * values[0])) if len(values) else 0
+
+
+def _rank_and_null_space(rows: NDArray) -> tuple[int, NDArray]:
+    """The rank of ``rows`` and an orthonormal basis ``(width, width - rank)`` of its null space.
+
+    The columns are scaled to unit length first (equilibration: van der
+    Sluis 1969; Higham 2002, section 7.3), so the rank does not depend on a
+    column's units: a covariate at ``1e8`` beside the constant otherwise puts
+    two anchors one apart below the cut, a unit-free fact decided by the
+    scale.  A null vector of the scaled rows is mapped back by the column
+    scales and orthonormalised.  Only the right factor is read: a tall matrix
+    takes the economy factorization, since its ``M x M`` left factor is never
+    used; a wide one needs full matrices for its null directions.
+    """
+    width = rows.shape[1]
+    if rows.shape[0] == 0:
+        return 0, np.eye(width)
+    scale = np.linalg.norm(rows, axis=0)
+    scale[scale == 0.0] = 1.0
+    _, values, right = np.linalg.svd(rows / scale, full_matrices=rows.shape[0] < width)
+    rank = _numerical_rank(values, rows.shape)
+    null = right[rank:].T / scale[:, None]
+    return rank, np.ascontiguousarray(np.linalg.qr(null)[0]) if null.size else null
 
 
 def _level_recession(
@@ -519,11 +541,9 @@ def _level_recession(
     anchored = unique[anchor] @ null_space
     # the anchors' rank, not their count: a gapped ``Polynomial(powers=...)``
     # has distinct anchors that are linearly dependent in ``b(x)' N_P``
-    _, values, right = np.linalg.svd(anchored, full_matrices=True)
-    held = _numerical_rank(values, anchored.shape)
+    held, free = _rank_and_null_space(anchored)
     if held >= nullity:
         return None
-    free = right[held:].T
     side = np.where(anchor, 0.0, np.where(at_lower, -1.0, 1.0))
     edge = side != 0.0
     if not (np.any(edge) and _recedes(side[edge], unique[edge], null_space, free)):
