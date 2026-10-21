@@ -272,6 +272,10 @@ class _SCOPREMLFitContext:
     scop_run_centring: SCOPRunCentring = field(
         default_factory=SCOPRunCentring, repr=False, compare=False
     )
+    # Every coefficient fit starts cold, as a fixed-lambda fit does, so the
+    # LAML is a function of lambda alone: set once a search has been found
+    # following a worse local coefficient mode (``_better_reference_mode``).
+    cold_starts: bool = False
     _penalty_context_cache: dict[int, _SCOPPenaltyContextEntry] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -1364,6 +1368,8 @@ def _fit_scop_reml_mode(
         "final": "reml_final",
         "fixed": "reml_fixed",
     }.get(phase, f"reml_{phase}")
+    if context.cold_starts and _certification_retry == 0:
+        beta_init = intercept_init = scop_state_init = None
     working_cache: dict[str, Any] = {}
     inner_tol = (
         min(context.pirls_tol, 1.0e-10)
@@ -2182,6 +2188,21 @@ _SCOP_NEWTON_MAX_BACKTRACK_ATTEMPTS = 3
 # against the full Newton step when the guard decides between a plateau stop
 # and an EFS restart.
 _SCOP_NEWTON_PLATEAU_MAX_STEP = 0.01
+# The reference check (``_better_reference_mode``): the run of consecutive
+# accepted steps under the plateau cap after which an unfinished search
+# compares its warm-started mode with a cold fit at the same lambdas, and how
+# often a search may restart from a better reference mode (the restart fits
+# every mode cold, so it has nothing left to check). From a step under the
+# cap a Newton search on a smooth LAML meets its stop test within a few
+# steps; ten accepted small steps without it are a search whose objective is
+# not moving with lambda alone (measured: the convex fixture's search moved
+# lambda by 1e-4 a step while its LAML fell 0.007 a step for 96 steps).
+_SCOP_REFERENCE_CHECK_RUN = 10
+# The iterations a restart needs (measured: 31 on the convex fixture). With
+# less budget left the restart would publish an unconverged early cold iterate
+# in place of the tracked mode, so the search stops as it otherwise would.
+_SCOP_REFERENCE_RESTART_ITERATIONS = 31
+_SCOP_REFERENCE_RESTARTS = 1
 
 
 @dataclass(frozen=True)
@@ -2688,6 +2709,63 @@ def _uncertified_bootstrap_mode(fit: _SCOPInnerFit) -> _SCOPREMLMode:
         return _scop_mode_from_fit(fit, curvature="fisher")
 
 
+def _better_reference_mode(context: _SCOPREMLFitContext, mode: _SCOPREMLMode) -> bool:
+    """Whether a cold fit at ``mode``'s lambdas reaches a better penalized optimum.
+
+    LAML is the Laplace approximation at the maximizer of the penalized
+    likelihood (Wood, Pya and Saefken 2016, section 3.1). The SCOP latent
+    (exp) parameterization makes the penalized likelihood non-concave, so one
+    lambda can carry two certified local modes, and the outer search, which
+    warm-starts every fit from the last accepted mode, can follow the worse
+    one. The worse mode can carry a far smaller log|H|, so its LAML reads
+    lower and the line search keeps it: measured on a convex P-spline beside
+    a cr spline (Poisson), two modes certified to 1e-16 at one lambda, the
+    tracked one 3.3e-3 worse in penalized deviance with log|H| 8.0 lower, so
+    a LAML 4.0 lower that a cold fit at the published lambdas did not
+    reproduce; the search rode it for 100 iterations to an EDF of 1628 with
+    16 coefficients.
+
+    The reference is the fit every fixed-lambda SCOP fit and the bootstrap
+    make: a cold start. It is a diagnostic and its mode is never published (the
+    search restarts), so its superglm warnings are held and dropped. It counts
+    only when its penalized deviance is lower than ``mode``'s by more than the
+    line search's relative tolerance; a reference that fails to converge or
+    certify is no evidence.
+    """
+    try:
+        with held_warnings.hold():
+            # Its own centring and Gamma scale-root warm history, as the
+            # bootstrap's start had: the search's state must not see a fit it
+            # may discard.
+            gamma_scale = context.gamma_scale_data
+            reference = _fit_scop_reml_mode(
+                replace(
+                    context,
+                    scop_run_centring=SCOPRunCentring(),
+                    gamma_scale_data=(
+                        None
+                        if gamma_scale is None
+                        else replace(gamma_scale, _profile_cache={}, _warm_history=[])
+                    ),
+                ),
+                dict(mode.lambdas),
+                beta_init=None,
+                intercept_init=None,
+                scop_state_init=None,
+                phase="reference",
+                reml_iteration=0,
+                require_converged=True,
+            )
+    except (ObservedModeNotCertifiedError, ObservedModeNotConvergedError):
+        return False
+    if reference is None:
+        return False
+    tracked = float(mode.evaluation.penalized_deviance)
+    cold = float(reference.evaluation.penalized_deviance)
+    tolerance = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(tracked), 1.0)
+    return bool(np.isfinite(cold) and cold < tracked - tolerance)
+
+
 def optimize_scop_efs_reml(
     dm: DesignMatrix,
     distribution: Any,
@@ -2712,6 +2790,8 @@ def optimize_scop_efs_reml(
     warm_lambdas: Mapping[str, float] | None = None,
     _aitken: bool = True,
     _outer_step: str = "newton",
+    _reference_restarts: int = _SCOP_REFERENCE_RESTARTS,
+    _cold_starts: bool = False,
 ) -> REMLResult:
     """SCOP-aware REML optimizer for monotone splines.
 
@@ -2746,6 +2826,14 @@ def optimize_scop_efs_reml(
     (``"efs_fisher"`` in ``scop_outer_steps``), and so does an observed
     iterate where those terms cannot be formed (``"efs_uncorrected"``).
     ``_outer_step="efs"`` runs EFS throughout.
+
+    The SCOP latent parameterization can give one lambda two certified local
+    coefficient modes, and the warm-started search can follow the worse one,
+    whose small log|H| reads as a lower LAML (``_better_reference_mode``).
+    So once a search has made ``_SCOP_REFERENCE_CHECK_RUN`` accepted steps
+    in a row under the plateau cap without stopping, its mode is compared
+    with a cold fit at the same lambdas, and a better cold mode restarts the
+    search from its starting values with every coefficient fit cold (once).
 
     The bootstrap is fitted at 1e-4 for every cold component and at its warm
     value for every warm one. When that fit has no certified mode, or its
@@ -2848,6 +2936,7 @@ def optimize_scop_efs_reml(
         weight_semantics=weight_semantics,
         gamma_scale_data=gamma_scale_data,
         tweedie_scale_data=tweedie_scale_data,
+        cold_starts=_cold_starts,
     )
     # The caller's starting values, kept for a guard restart (see the docstring).
     start_lambdas = dict(lambdas)
@@ -3029,6 +3118,12 @@ def optimize_scop_efs_reml(
     newton_live = newton_fallback is None
     outer_steps: list[str] = []
     restart_with_efs = False
+    # The reference check (``_better_reference_mode``): the current run of
+    # accepted steps under the plateau cap, and whether a better reference
+    # mode sends the search back to a cold start.
+    small_step_run = 0
+    reference_checked = False
+    restart_from_reference = False
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -3477,6 +3572,26 @@ def optimize_scop_efs_reml(
             lambdas = lambdas_new
             break
 
+        # Step 8b: a search still moving in steps under the plateau cap after
+        # several accepted iterations is checked against a cold fit at its
+        # lambdas once (``_better_reference_mode``); a better reference mode
+        # means it has been following a worse local coefficient mode, and it
+        # restarts from the reference (below the loop).
+        small_step_run = small_step_run + 1 if max_change < _SCOP_NEWTON_PLATEAU_MAX_STEP else 0
+        if (
+            _reference_restarts > 0
+            and not _cold_starts
+            and retained_mode.scop_states
+            and not reference_checked
+            and small_step_run == _SCOP_REFERENCE_CHECK_RUN
+            and max_reml_iter - n_reml_iter >= _SCOP_REFERENCE_RESTART_ITERATIONS
+        ):
+            reference_checked = True
+            if _better_reference_mode(fit_context, retained_mode):
+                lambdas = lambdas_new
+                restart_from_reference = True
+                break
+
         # Step 9: Warm start for next iteration
         lambdas = lambdas_new
         warm_beta = retained_mode.result.beta.copy()
@@ -3522,6 +3637,8 @@ def optimize_scop_efs_reml(
             warm_lambdas=warm_lambdas,
             _aitken=_aitken,
             _outer_step="efs",
+            _reference_restarts=_reference_restarts,
+            _cold_starts=_cold_starts,
         )
         return replace(
             restarted,
@@ -3560,6 +3677,58 @@ def optimize_scop_efs_reml(
                 raise ObservedModeNotConvergedError(
                     "SCOP REML final fit did not converge to a coefficient mode"
                 )
+
+    if restart_from_reference:
+        # The search had followed a worse local coefficient mode. It starts
+        # again from its own starting values with every coefficient fit cold,
+        # so each LAML it compares is the one a fixed-lambda fit reports
+        # there. Restarting from the reference mode instead was measured to
+        # fall back into the worse mode within two iterations (warm trials) or
+        # to stall on the line search (cold trials) on the convex fixture,
+        # where the full cold search converges to v0.39.0's fit (objective
+        # 1753.8298, EDF 7.66) in 31 iterations.
+        logger.info(
+            "SCOP REML: a cold fit at lambdas %s reaches a better coefficient mode than "
+            "the search's warm-started one; restarting the search with cold coefficient fits",
+            {name: f"{lambdas[name]:.4g}" for name in sorted(estimated_names)},
+        )
+        restarted = optimize_scop_efs_reml(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            sample_weight,
+            offset_arr,
+            start_lambdas,
+            estimated_names,
+            weight_semantics=weight_semantics,
+            max_reml_iter=max_reml_iter - n_reml_iter,
+            reml_tol=reml_tol,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+            verbose=verbose,
+            reml_penalties=reml_penalties,
+            convergence=convergence,
+            _scop_joint=_scop_joint,
+            debug_recorder=debug_recorder,
+            warm_lambdas=warm_lambdas,
+            _aitken=_aitken,
+            _outer_step=_outer_step,
+            _reference_restarts=_reference_restarts - 1,
+            _cold_starts=True,
+        )
+        return replace(
+            restarted,
+            n_reml_iter=n_reml_iter + restarted.n_reml_iter,
+            lambda_history=lambda_history + list(restarted.lambda_history),
+            inner_iter_history=inner_iter_history + list(restarted.inner_iter_history or []),
+            objective_history=objective_history + list(restarted.objective_history or []),
+            scop_step_norms=(scop_step_norms_history + list(restarted.scop_step_norms or []))
+            or None,
+            scop_fisher_fallbacks=total_fisher_fallbacks + restarted.scop_fisher_fallbacks,
+            scop_outer_steps=outer_steps + list(restarted.scop_outer_steps or []),
+        )
 
     final_result = _finalize_scop_reml_mode(fit_context, final_mode)
     final_scop_states = final_mode.scop_states

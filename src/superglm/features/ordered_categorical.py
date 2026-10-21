@@ -460,6 +460,20 @@ class OrderedCategorical:
     # class attribute so a spec pickled before it existed reads False.
     _base_is_level: bool = False
 
+    def __setstate__(self, state: dict) -> None:
+        """Restore a pickle; a spec saved before ``specials=`` (0.19, #235) has none.
+
+        Its ``_ordered_levels`` were its smooth levels, grouped when grouped,
+        and no level was held out of the smooth: the state ``specials=None``
+        builds, which scores exactly as that release scored.
+        """
+        if "_specials" not in state:
+            state["_specials"] = []
+            state["_special_raw"] = []
+            state["_special_display"] = []
+            state["_smooth_levels"] = list(state.get("_ordered_levels", ()))
+        self.__dict__.update(state)
+
     def __init__(
         self,
         values: dict[str, float] | None = None,

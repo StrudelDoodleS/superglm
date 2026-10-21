@@ -27,6 +27,7 @@ from superglm.features._spline_config import (
     configure_knots,
     initialize_runtime_state,
 )
+from superglm.features._spline_factory import kindless_as_ps
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -588,14 +589,20 @@ def declared_spline(model, name: str) -> _SplineBase | None:
     """A copy of the spline ``name`` is declared with in ``model``, unfitted, or None.
 
     An ordered term's declared basis; a numeric term's own declaration, which
-    the model keeps unfitted in its configuration. None for a term with no
-    spline, or a model too old to keep its declarations.
+    the model keeps unfitted in its configuration, or the ``ps`` the fit built
+    in its place where a kindless spline beside a SCOP term became one. None
+    for a term with no spline, or a model too old to keep its declarations.
     """
     spec = model._specs[name]
     if isinstance(spec, OrderedCategorical):
         return pristine_basis(spec) if source_spline(spec) is not None else None
     declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ())).get(name)
-    return copy.deepcopy(declared) if isinstance(declared, _SplineBase) else None
+    if not isinstance(declared, _SplineBase):
+        return None
+    declared = copy.deepcopy(declared)
+    if type(spec) is not type(declared) and (as_ps := kindless_as_ps(declared)) is not None:
+        return as_ps  # the fit built this kindless spline as ``ps``: the editor edits that
+    return declared
 
 
 def stated_knots(spline: _SplineBase) -> Any:
@@ -640,6 +647,26 @@ def respaced_spline(
         knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
         boundary=source._explicit_boundary,
     )
+    declared = getattr(spline, "_kindless_args", None)
+    if declared is not None:
+        # A spline declared with no kind may fit as ``ps``, rebuilt from these arguments. ``k``
+        # is 6 knots as ``cr`` and 4 as ``ps``, so it stays only where no count was passed.
+        stated = spline._named_knots if spline._named_knots is not None else spline._explicit_knots
+        placed = (
+            {}
+            if knots is None and n_knots is None
+            else {"k": None, "n_knots": spline.n_knots, "knots": stated}
+        )
+        setattr(
+            spline,
+            "_kindless_args",
+            {
+                **declared,
+                **placed,
+                "knot_strategy": spline.knot_strategy,
+                "knot_alpha": spline.knot_alpha,
+            },
+        )
     return spline
 
 

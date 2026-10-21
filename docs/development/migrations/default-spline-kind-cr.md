@@ -12,7 +12,18 @@ Spline(n_knots=10)               # cubic regression spline from 0.40
 Spline(kind="ps", n_knots=10)    # the P-spline that 0.39 fitted
 ```
 
-Four changes follow from it:
+A spline with no kind that `cr` cannot take builds as `kind="ps"`, the
+P-spline that 0.39 built, with a warning. Pass `kind=` to choose the kind and
+silence it. This happens in three cases:
+
+- **A degree other than 3**, such as `Spline(degree=2)`.
+- **A penalty order above 3**, such as `Spline(m=4)` or `Spline(m=(2, 4))`.
+- **A fit-time shape constraint beside a `ps` term with one.** A `cr` spline
+  puts its constraint on the QP, a `ps` term puts its on SCOP, and one model
+  cannot use both. A `cr` or `bs` term whose kind is named still stops with
+  an error.
+
+Four changes follow from the new default:
 
 - **A model that names no kind refits as `cr`.** The curve, the smoothing
   parameter, the effective degrees of freedom and the deviance can all move.
@@ -22,11 +33,12 @@ Four changes follow from it:
   `Spline(constraint=Constraint.fit.increasing)` is now a `cr` term, which the
   QP constrains. The QP chooses the smoothing parameter without the constraint
   and then refits with it. SCOP, which a `ps` term uses, chooses it with the
-  constraint in place.
+  constraint in place. Beside a `ps` constrained term it stays a `ps` term on
+  SCOP.
 - **`cr` refuses a degree other than 3.** A cubic regression spline is always
   cubic. In 0.39, `Spline(kind="cr", degree=2)` fitted a cubic without saying
-  so. It now raises an error that names `kind="ps"` and `kind="bs"`. So does
-  `Spline(degree=2)` with no kind, because its kind is now `cr`.
+  so. It now raises an error that names `kind="ps"` and `kind="bs"`.
+  `Spline(degree=2)` with no kind builds as `ps`, with a warning.
 - **An ordered term's default basis is `cr`.** `OrderedCategorical(...)` with
   no `basis` now uses `Spline(kind="cr", n_knots=5)`. In 0.39 it used
   `Spline(kind="ps", n_knots=5)`. The knot count is still limited to the
@@ -96,8 +108,7 @@ Four changes follow from it:
 - **An ordered term with no `basis` whose levels are all grouped into one
   band**: the fit now stops with an error. A P-spline fitted it.
 - **`Spline(...)` or `s(...)` with no kind and a penalty order above 3** (`m=4`, or a
-  tuple such as `m=(2, 4)`): the call now raises an error. It says the default kind
-  takes penalty orders up to 3 and names `kind="ps"`. A P-spline fitted it.
+  tuple such as `m=(2, 4)`): it is a P-spline, as in 0.39, with a warning.
 - **An ordered term with no `basis` and one observed level in the data** (for example
   a CV fold or a per-segment fit): `fit` now raises a `ValueError` whose message reads
   `Feature '<name>': every row of this ordered term is at one level, so its natural
@@ -119,8 +130,8 @@ Four changes follow from it:
 - **To keep the 0.39 fit**: add `kind="ps"` to every `Spline(...)` and `s(...)`
   that names no kind. Add `basis=Spline(kind="ps", n_knots=5)` to every
   `OrderedCategorical` that omits `basis`.
-- **A degree other than 3**: pass `kind="ps"` or `kind="bs"` with it.
-- **A penalty order above 3**: pass `kind="ps"` with it.
+- **A warning that a spline with no kind builds as `ps`**: pass `kind="ps"` to
+  keep the fit and silence it, or `kind="bs"` for another degree.
 - **To keep a 0.39 fixed-penalty fit of an explicit `cr`, `cr_cardinal` or
   `bs` spline**, or to reuse a smoothing parameter a 0.39 `fit_reml()` reported:
   multiply it by `h**-3`, where `h` is the mean knot interval, the fitted
@@ -187,7 +198,9 @@ the 0.40 fit by 0.1 deviance.
 
 - `tests/test_spline_factory.py::TestDefaultKindIsCr` pins the default kind for
   `Spline()` and `s()`, the degree refusal and the penalty-order refusal for `cr`
-  and `cr_cardinal`.
+  and `cr_cardinal`, and the `ps` a spline with no kind builds where `cr` cannot,
+  bit for bit as `kind="ps"`. `tests/test_monotone_fit.py` pins the shape
+  constraint beside a `ps` term.
 - `tests/test_pspline_general_penalty.py` pins `select=True` and the REML rank of
   `cr` and `bs` terms on quantile knots of lognormal(0, 2) and lognormal(0, 1.5)
   data, and the error that names the knot spread on lognormal(0, 3) data.

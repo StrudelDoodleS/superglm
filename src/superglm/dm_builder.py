@@ -11,7 +11,10 @@ model.py focused on orchestration.
 
 from __future__ import annotations
 
+import copy
 import logging
+import re
+import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -993,6 +996,49 @@ class BuildResult:
     compiled: CompiledPredictorDesign
 
 
+def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order) -> None:
+    """Constrained splines with no kind beside a SCOP (``ps``) constrained term build as ``ps``.
+
+    A ``cr`` constraint goes to the QP, and one model cannot use both engines.
+    Before 0.40 such a spline was ``ps``; it is again when every QP term named no kind.
+    A wrapper such as an ordered categorical keeps its levels and takes the ``ps`` basis.
+    """
+    from superglm.features._spline_build import _uses_fit_time_scop_constraints as scop
+    from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
+    from superglm.features._spline_factory import kindless_as_ps, warn_kindless_ps
+    from superglm.features.ordered_categorical import _CLAMP_WARNING_PREFIX
+
+    inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
+    on_scop = [name for name, spec in inner.items() if scop(spec)]
+    if not on_scop:
+        return
+    shaped_qp = {name: spec for name, spec in inner.items() if shaped(spec) and not scop(spec)}
+    if not shaped_qp or any(
+        getattr(spec, "_kindless_args", None) is None for spec in shaped_qp.values()
+    ):
+        return
+    try:
+        on_qp = {name: kindless_as_ps(spec) for name, spec in shaped_qp.items()}
+    except ValueError:
+        # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands.
+        return
+    for name, replacement in on_qp.items():
+        reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
+        warn_kindless_ps(reason, f"Feature {name!r}: ")
+        if inner[name] is specs[name]:
+            specs[name] = cast(FeatureSpec, replacement)
+            continue
+        wrapper: Any = copy.deepcopy(specs[name])
+        wrapper._spline_obj = replacement
+        with warnings.catch_warnings():
+            # The wrapper's construction already warned of the clamp to its levels.
+            warnings.filterwarnings(
+                "ignore", message=re.escape(_CLAMP_WARNING_PREFIX), category=UserWarning
+            )
+            wrapper._init_spline()
+        specs[name] = wrapper
+
+
 def build_design_matrix(
     X: EagerFrame,
     y: NDArray,
@@ -1101,6 +1147,7 @@ def build_design_matrix(
     # Tweedie prior fit.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
+    resolve_kindless_shape_engines(specs, feature_order)
 
     compiled = compile_predictor_design(
         X,

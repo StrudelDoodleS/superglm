@@ -323,7 +323,8 @@ class TestDefaultKindIsCr:
 
     Every test here fails on the 0.39 factory: its default built a PSpline,
     and it accepted any ``degree`` for a cubic regression spline and ignored
-    it, so a ``degree=2`` request silently fitted a cubic.
+    it, so a ``degree=2`` request silently fitted a cubic. A spline with no
+    kind that ``cr`` cannot take builds as ``ps``, as on 0.39.
     """
 
     def test_default_is_cubic_regression_spline(self):
@@ -363,33 +364,45 @@ class TestDefaultKindIsCr:
         assert f"degree={degree} cannot apply" in message
         assert "kind='ps' or kind='bs'" in message
 
-    def test_default_kind_refuses_a_degree_rather_than_fitting_a_cubic(self):
-        """Under the new default, ``Spline(degree=2)`` (a quadratic P-spline in
-        0.39) must not silently become a cubic regression spline."""
+    @pytest.mark.parametrize(
+        ("arguments", "reason"),
+        [
+            ({"degree": 1}, "cannot take degree=1"),
+            ({"degree": 2}, "cannot take degree=2"),
+            ({"m": 4}, "cannot take m=4"),
+            ({"m": (2, 4)}, "cannot take m=4"),
+        ],
+    )
+    def test_default_kind_builds_ps_where_cr_cannot_serve(self, arguments, reason):
+        """0.39 fitted these as P-splines and 0.40.0 refused them: they build the
+        P-spline again, with a warning naming the choice. Fails on e7b0df17."""
         from superglm.terms import s
 
-        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
-            Spline(n_knots=8, degree=2)
-        with pytest.raises(ValueError, match="kind='cr'.*always cubic"):
-            s("age", n_knots=8, degree=2)
-        assert Spline(kind="ps", n_knots=8, degree=2).degree == 2
+        with pytest.warns(UserWarning, match="names no kind") as record:
+            spec = Spline(n_knots=8, **arguments)
+        assert reason in str(record[0].message) and "Pass kind=" in str(record[0].message)
+        assert isinstance(spec, PSpline)
+        assert record[0].filename == __file__  # the caller's line, not a superglm frame
+        with pytest.warns(UserWarning, match="names no kind") as record:
+            assert isinstance(s("age", n_knots=8, **arguments).spec, PSpline)
+        assert record[0].filename == __file__
 
-    @pytest.mark.parametrize("m", [4, (2, 4)], ids=["int", "tuple"])
-    def test_default_kind_refuses_a_penalty_order_above_its_maximum(self, m):
-        """``Spline(m=4)`` was a valid P-spline in 0.39. The default now names itself,
-        its maximum and the remedy, not the class the caller never wrote."""
-        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3") as excinfo:
-            Spline(m=m)
-        message = str(excinfo.value)
-        assert "so m=4 cannot apply" in message
-        assert "Pass kind='ps' for a penalty of order 4" in message
-        assert "CubicRegressionSpline" not in message
+    @pytest.mark.parametrize("method", ["fit", "fit_reml"])
+    def test_default_kind_ps_fits_bit_for_bit_as_the_explicit_ps(self, method):
+        import pandas as pd
 
-    def test_s_default_refuses_a_penalty_order_above_its_maximum(self):
-        from superglm.terms import s
+        from superglm import SuperGLM
 
-        with pytest.raises(ValueError, match="kind='cr'.*takes penalty orders up to 3"):
-            s("age", m=4)
+        rng = np.random.default_rng(20261020)
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 300)})
+        y = rng.poisson(np.exp(0.3 + np.sin(3.0 * X["x"].to_numpy()))).astype(float)
+        fits = []
+        for spec in (Spline(kind="ps", k=9, degree=2), Spline(k=9, degree=2)):
+            model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec})
+            getattr(model, method)(X, y)
+            fits.append(model)
+        np.testing.assert_array_equal(fits[0].result.beta, fits[1].result.beta)
+        np.testing.assert_array_equal(fits[0].predict(X), fits[1].predict(X))
 
     @pytest.mark.parametrize("kind, cap", [("cr", 3), ("cr_cardinal", 2)])
     def test_cubic_regression_kinds_refuse_a_penalty_order_above_their_maximum(self, kind, cap):

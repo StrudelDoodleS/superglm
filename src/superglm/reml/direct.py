@@ -10,6 +10,7 @@ References
 
 from __future__ import annotations
 
+import math
 import time as _time
 from collections.abc import Mapping
 from typing import Any
@@ -154,6 +155,54 @@ def _usable_w_correction(correction, args: tuple, kwargs: dict, distribution):
             # a PIRLS failure.
             infeasible_detail="the W(rho) correction has no usable curvature",
         ) from error
+
+
+def _slow_reversal(
+    delta: NDArray,
+    previous_delta: NDArray | None,
+    contraction: float,
+    excess_decrease: float,
+    obj_change: float,
+    obj: float,
+    tol: float,
+) -> bool:
+    """Whether this order-1 Newton step reversed a previous one at a slow, linear rate.
+
+    All of these hold: a coordinate changed sign against the previous step; the
+    gradient shrank by less than half a step, but shrank; the objective fell by
+    no more than twice what the quadratic model predicted (a larger fall is a
+    moving mode, as a separated level drifting to its bound, not curvature);
+    and the objective has settled to ``sqrt(tol)``, where a Newton step would
+    square the error.
+    """
+    return (
+        previous_delta is not None
+        and bool(np.any(delta * previous_delta < 0.0))
+        and 0.5 < contraction < 1.0
+        and excess_decrease <= 0.0
+        and obj_change <= math.sqrt(tol) * (1.0 + abs(obj))
+    )
+
+
+def _escalates_to_exact_hessian(
+    step_reversals: int,
+    slow_reversal: bool,
+    tol: float,
+    score_scale: float,
+    proj_grad_norm: float,
+    contraction: float,
+    iterations_left: int,
+) -> bool:
+    """Whether two slow reversals in a row, at a rate that cannot finish in time, switch Hessians.
+
+    Linear convergence at ``contraction`` a step reaches the score bar within
+    the iterations left in the common case, and the search then finishes as it
+    always has on the order-1 Hessian.
+    """
+    if step_reversals < 2 or not slow_reversal:
+        return False
+    steps = math.log(tol * score_scale / max(proj_grad_norm, 1e-300)) / math.log(contraction)
+    return steps > iterations_left
 
 
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
@@ -767,6 +816,30 @@ def optimize_direct_reml(
     # it flat), and counting it would spin the loop doing nothing until
     # max_reml_iter with every informative direction long determined.
     stop_criterion_frozen = None
+    # The order-1 outer Hessian leaves out the d2W terms, so its Newton steps
+    # converge only linearly where they omit real curvature (Nocedal and
+    # Wright 2006, theorem 3.6): a step that keeps reversing while the
+    # gradient shrinks by less than half a step is overshooting by a factor
+    # the model gets wrong (measured: a Poisson log lambda alternating
+    # +-0.02 with its gradient contracting 0.87 a step, 34 iterations to
+    # 1e-9 against 15 with the exact Hessian). After two such steps in a row
+    # in the endgame (the objective settled to the square root of the
+    # tolerance, where a Newton step would square the error), each decreasing
+    # the objective no more than its quadratic model predicted (a larger
+    # decrease is not curvature but a moving mode, as a separated level
+    # drifting to its bound), and when that rate would not reach the score
+    # bar in the iterations left, the search takes the exact Hessian (Wood
+    # 2011, full Newton) where the family and link supply it.
+    try:
+        exact_hessian_available = not discrete and w_correction_order == 1
+        if exact_hessian_available:
+            validate_observed_derivative_capability(distribution, link, 2)
+    except NotImplementedError:
+        exact_hessian_available = False
+    previous_delta: NDArray | None = None
+    previous_gradient_norm = np.inf
+    previous_model: tuple[NDArray, NDArray, NDArray, float] | None = None
+    step_reversals = 0
 
     if verbose:
         boot_lam_str = ", ".join(
@@ -1550,6 +1623,34 @@ def optimize_direct_reml(
         max_delta = float(np.max(np.abs(delta)))
         if max_delta > max_newton_step:
             delta *= max_newton_step / max_delta
+        if exact_hessian_available:
+            contraction = (
+                proj_grad_norm / previous_gradient_norm if previous_gradient_norm > 0.0 else np.inf
+            )
+            excess_decrease = np.inf
+            if previous_model is not None:
+                rho_before, grad_before, hess_before, obj_before = previous_model
+                taken = rho_clipped - rho_before
+                predicted = -float(grad_before @ taken + 0.5 * taken @ hess_before @ taken)
+                excess_decrease = (obj_before - obj) - 2.0 * predicted
+            previous_model = (rho_clipped.copy(), grad.copy(), hess.copy(), obj)
+            slow_reversal = _slow_reversal(
+                delta, previous_delta, contraction, excess_decrease, obj_change, obj, _tol
+            )
+            step_reversals = step_reversals + 1 if slow_reversal else 0
+            previous_delta = delta.copy()
+            previous_gradient_norm = proj_grad_norm
+            if _escalates_to_exact_hessian(
+                step_reversals,
+                slow_reversal,
+                _tol,
+                score_scale,
+                proj_grad_norm,
+                contraction,
+                max_reml_iter - n_iter,
+            ):
+                w_correction_order = 2
+                exact_hessian_available = False
         _t_hessian += _time.perf_counter() - _t0
 
         # Step-halving line search with Armijo condition

@@ -8046,3 +8046,211 @@ class TestJointSCOPNewton:
             assert np.isfinite(result.objective_after)
             assert result.objective_after <= result.objective_before + 1e-8
             assert result.dropped_cross_blocks >= 1
+
+
+def _convex_beside_cr_fixture():
+    """A convex P-spline beside a cr spline on which the warm search follows a worse mode.
+
+    The release-history corpus's synthetic book (4,000 rows, Poisson with a
+    log-exposure offset), regenerated here from its seed by its own code,
+    including ``np.vectorize`` typing a level-effect lookup by its first
+    value. At one lambda the SCOP coefficients have two certified local
+    modes 3.3e-3 apart in penalized deviance, the worse one with log|H| 8.0
+    lower; v0.40.0 followed the worse one for 100 iterations to an EDF of
+    1628 with 16 coefficients.
+    """
+    rng = np.random.default_rng(20261020)
+
+    def synth(n):
+        x1 = rng.uniform(0, 10, n)
+        x2 = rng.uniform(-2, 2, n)
+        x3 = rng.normal(0, 1, n)
+        x4 = rng.uniform(0, 1, n)
+        glev = np.array([*"abcdefg", "thin"])
+        gp = np.array([0.25, 0.2, 0.15, 0.12, 0.1, 0.09, 0.085, 0.005])
+        gp /= gp.sum()
+        g = glev[rng.choice(8, n, p=gp)]
+        o = np.array(list("ABCDE"))[rng.choice(5, n, p=[0.1, 0.3, 0.3, 0.2, 0.1])]
+        r = np.array([f"r{i:02d}" for i in range(40)])[rng.integers(0, 40, n)]
+        h = np.array(["h1", "h2", "h3", "h4"])[rng.integers(0, 4, n)]
+        expo = rng.uniform(0.2, 1.0, n)
+        geff = dict(zip(glev, [0, 0.2, -0.1, 0.3, -0.2, 0.1, 0.05, 0.4], strict=True))
+        oeff = {"A": -0.3, "B": -0.1, "C": 0, "D": 0.15, "E": 0.3}
+        reff_values = rng.normal(0, 0.25, 40)
+        reff = {f"r{i:02d}": reff_values[i] for i in range(40)}
+        heff = {"h1": 0.0, "h2": 0.15, "h3": -0.1, "h4": 0.2}
+        f = (
+            0.4 * np.sin(x1 / 1.6)
+            + 0.25 * x2**2 / 4
+            - 0.2 * x3
+            + 0.5 * x4
+            + np.vectorize(geff.get)(g)
+            + np.vectorize(oeff.get)(o)
+            + np.vectorize(reff.get)(r)
+            + np.vectorize(heff.get)(h) * x1 / 10
+            + 0.1 * np.sin(x1 / 2) * x2
+        )
+        return pd.DataFrame({"x1": x1, "x2": x2}), expo, f
+
+    frame, expo, f = synth(4000)
+    synth(2000)
+    y = rng.poisson(expo * np.exp(-1.0 + f)).astype(float)
+    return frame, y, np.log(expo)
+
+
+class TestSCOPReferenceMode:
+    def test_a_search_on_a_worse_local_mode_restarts_and_publishes_a_reproducible_fit(self):
+        """The published fit is the one a cold fit at its lambdas reproduces.
+
+        On e7b0df17 (v0.40.0's solver) this fit stops at max_reml_iter=100,
+        not converged, with an EDF of 1628 for 16 coefficients and an
+        objective 4.0 below what a fixed-lambda fit at its own lambdas gives.
+        Mutation check: ``_better_reference_mode`` returning None restores
+        exactly that.
+        """
+        from superglm import LambdaPolicy, Spline
+
+        frame, y, offset = _convex_beside_cr_fixture()
+
+        features = {
+            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex),
+            "x1": Spline(kind="cr", k=8),
+        }
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+        model.fit_reml(frame, y, offset=offset)
+        reml = model._reml_result
+        assert reml.converged
+        assert model.result.effective_df <= model.result.beta.size
+
+        fixed = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x2": Spline(
+                    kind="ps",
+                    k=10,
+                    constraint=Constraint.fit.convex,
+                    lambda_policy=LambdaPolicy.fixed(reml.lambdas["x2"]),
+                ),
+                "x1": Spline(kind="cr", k=8, lambda_policy=LambdaPolicy.fixed(reml.lambdas["x1"])),
+            },
+        )
+        fixed.fit_reml(frame, y, offset=offset)
+        # Both are certified modes at one lambda; the objective is a sum of
+        # terms of order 1e3 evaluated twice, so agreement to 1e-8 relative
+        # separates "the same mode" from the 4.0 gap of a different one.
+        assert fixed._reml_result.objective == pytest.approx(reml.objective, rel=1e-8)
+        assert fixed.result.effective_df == pytest.approx(model.result.effective_df, rel=1e-6)
+
+    @staticmethod
+    def _increasing_gaussian_fit(max_reml_iter):
+        """A five-iteration SCOP REML fit, small enough to force the reference check."""
+        rng = np.random.default_rng(3)
+        frame = pd.DataFrame({"x": rng.uniform(0, 1, 400)})
+        y = (0.2 + 1.5 * frame["x"] ** 2 + rng.normal(0, 0.3, 400)).to_numpy()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, y, max_reml_iter=max_reml_iter)
+        return model._reml_result
+
+    @pytest.fixture
+    def forced_check(self, monkeypatch):
+        """Every accepted step counts as small, so the check fires at iteration 2; it
+        answers from ``calls`` instead of from the trajectory."""
+        monkeypatch.setattr(scop_efs_module, "_SCOP_NEWTON_PLATEAU_MAX_STEP", np.inf)
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", 2)
+        calls = []
+
+        def check(answer):
+            def fake(context, mode):
+                calls.append(mode)
+                return answer
+
+            monkeypatch.setattr(scop_efs_module, "_better_reference_mode", fake)
+
+        return calls, check
+
+    def test_a_restart_sums_the_iterations_and_concatenates_the_histories(
+        self, monkeypatch, forced_check
+    ):
+        """A better reference mode at iteration 2 restarts the search cold, once, in the
+        iterations left; the published history is both searches', in order.
+        Mutation check: dropping the ``n_reml_iter +`` or a history prefix in the
+        restart's ``replace`` fails the sums below."""
+        calls, check = forced_check
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_RESTART_ITERATIONS", 1)
+        check(False)
+        plain = self._increasing_gaussian_fit(max_reml_iter=40)
+        assert len(calls) == 1  # fires once, at iteration 2, and a False answer is inert
+
+        real, nested = scop_efs_module.optimize_scop_efs_reml, []
+
+        def spy(*args, **kwargs):
+            out = real(*args, **kwargs)
+            nested.append((kwargs, out))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "optimize_scop_efs_reml", spy)
+        calls.clear()
+        check(True)
+        restarted = self._increasing_gaussian_fit(max_reml_iter=40)
+
+        assert len(calls) == 1  # the restart is cold and has no restart left to spend
+        kwargs, inner = nested[0]  # the restart returns before the search that started it
+        assert kwargs["_cold_starts"] is True and kwargs["_reference_restarts"] == 0
+        assert kwargs["max_reml_iter"] == 40 - 2
+        assert restarted.n_reml_iter == 2 + inner.n_reml_iter
+        assert len(restarted.objective_history) == 2 + len(inner.objective_history)
+        assert restarted.objective_history[:2] == plain.objective_history[:2]
+        assert restarted.objective_history[2:] == list(inner.objective_history)
+        assert len(restarted.inner_iter_history) == 2 + len(inner.inner_iter_history)
+        assert len(restarted.scop_outer_steps) == 2 + len(inner.scop_outer_steps)
+
+    def test_the_reference_check_runs_at_most_once_per_search(self, monkeypatch, forced_check):
+        """A check that answers False leaves the search as it was, and a later run of small
+        steps must not pay a second cold fit. The run counter is made to match at every
+        accepted step, as it does when large steps keep resetting it.
+        Mutation check: dropping ``not reference_checked`` from the condition calls it at
+        every iteration."""
+
+        class EveryStep:
+            def __eq__(self, run):
+                return run >= 2
+
+            __hash__ = None
+
+        calls, check = forced_check
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", EveryStep())
+        check(False)
+        result = self._increasing_gaussian_fit(max_reml_iter=40)
+        assert result.n_reml_iter > 3  # the counter matched at more than one iteration
+        assert len(calls) == 1
+
+    @pytest.mark.filterwarnings("ignore:fit_reml did not converge")
+    @pytest.mark.parametrize("max_reml_iter", [2, 20], ids=["at the cap", "within 31 of it"])
+    def test_no_reference_check_without_the_budget_for_a_restart(
+        self, monkeypatch, forced_check, max_reml_iter
+    ):
+        """At the cap a restart gets ``max_reml_iter=0`` and would publish its bootstrap
+        step in place of the search's last iterate; near it, an unconverged early cold
+        iterate. The search stops as it otherwise would, without the check: it is the
+        fit with the check unable to fire. Fails without the budget condition at the
+        check (the check is then called)."""
+        calls, check = forced_check
+        check(True)
+        capped = self._increasing_gaussian_fit(max_reml_iter=max_reml_iter)
+        assert calls == []
+        monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_CHECK_RUN", 10**6)
+        unchecked = self._increasing_gaussian_fit(max_reml_iter=max_reml_iter)
+        assert capped.n_reml_iter == unchecked.n_reml_iter
+        assert capped.lambdas == unchecked.lambdas
+        assert capped.objective_history == unchecked.objective_history
+
+    def test_the_reference_check_runs_when_the_budget_covers_a_restart(self, forced_check):
+        calls, check = forced_check
+        check(False)
+        self._increasing_gaussian_fit(max_reml_iter=40)
+        assert len(calls) == 1

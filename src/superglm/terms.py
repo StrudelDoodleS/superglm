@@ -185,7 +185,7 @@ def term(column: Hashable, spec: FeatureSpec) -> BoundTerm:
 def s(
     column: Hashable,
     *,
-    kind: Literal["cr", "ps", "bs", "ns", "cr_cardinal"] = "cr",
+    kind: Literal["cr", "ps", "bs", "ns", "cr_cardinal"] | None = None,
     k: int | None = None,
     n_knots: int | None = None,
     degree: int = 3,
@@ -213,9 +213,10 @@ def s(
     ----------
     column : hashable
         Label of the numeric input column, usually its name.
-    kind : {"cr", "ps", "bs", "ns", "cr_cardinal"}, default="cr"
-        Spline basis. Common choices are ``"cr"`` for cubic regression splines
-        and ``"ps"`` for P-splines. See ``Spline`` for the other bases.
+    kind : {"cr", "ps", "bs", "ns", "cr_cardinal"}, optional
+        Spline basis. Common choices are ``"cr"`` for cubic regression splines,
+        the default, and ``"ps"`` for P-splines. See ``Spline`` for the other
+        bases and for when a spline with no kind builds as ``"ps"``.
     k : int, optional
         Public basis size. This limits flexibility; it is not the fitted
         effective degrees of freedom. Supply either ``k`` or ``n_knots``.

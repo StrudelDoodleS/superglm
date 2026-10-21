@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from numpy.typing import ArrayLike
 
@@ -47,8 +49,32 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     return n_knots
 
 
+def kindless_as_ps(spec: Any) -> _SplineBase | None:
+    """The ``ps`` spline a spec declared with no kind would be, or None if it named one."""
+    declared = getattr(spec, "_kindless_args", None)  # absent on explicit kinds and 0.40 pickles
+    if declared is None:
+        return None
+    from superglm.features.rebuild import _carry_marks
+
+    replacement = Spline(kind="ps", **declared)
+    _carry_marks(spec, replacement)
+    return replacement
+
+
+def warn_kindless_ps(reason: str, prefix: str = "") -> None:
+    """Warn that a spline with no kind builds as ``ps``, at the caller's line outside superglm."""
+    message = (
+        f"{prefix}This spline names no kind, and the default kind='cr' {reason}. It builds as "
+        "kind='ps', the P-spline a spline with no kind was before 0.40. Pass kind= to "
+        "choose the kind and silence this warning; kind='ps' keeps this fit."
+    )
+    here = os.path.dirname(os.path.abspath(__file__))
+    package = os.path.dirname(here) + os.sep
+    warnings.warn(message, UserWarning, skip_file_prefixes=(package,))
+
+
 def Spline(
-    kind: SplineKindName = "cr",
+    kind: SplineKindName | None = None,
     *,
     k: int | None = None,
     n_knots: int | None = None,
@@ -67,7 +93,25 @@ def Spline(
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> _SplineBase:
-    """Create a spline feature spec."""
+    """Create a spline feature spec; with no ``kind``, ``cr`` unless ``cr`` cannot take it."""
+    if kind is None:
+        declared = {name: value for name, value in locals().items() if name != "kind"}
+        from superglm.features.spline import CubicRegressionSpline
+
+        cap = CubicRegressionSpline._max_penalty_order
+        order = max((m,) if isinstance(m, int) else tuple(m))
+        if degree != 3:
+            reason = f"is always cubic, so it cannot take degree={degree}"
+        elif order > cap:
+            reason = f"takes penalty orders up to {cap}, so it cannot take m={order}"
+        else:
+            reason = None
+        if reason is not None:
+            warn_kindless_ps(reason)
+        spec = Spline(kind="cr" if reason is None else "ps", **declared)
+        setattr(spec, "_kindless_args", declared)
+        return spec
+
     from superglm.features.spline import (
         BSplineSmooth,
         CardinalCRSpline,
@@ -105,7 +149,7 @@ def Spline(
 
     if kind in ("cr", "cr_cardinal") and degree != 3:
         raise ValueError(
-            f"A cubic regression spline (kind={kind!r}; 'cr' is the default) is always cubic, "
+            f"A cubic regression spline (kind={kind!r}) is always cubic, "
             f"so degree={degree} cannot apply. Pass kind='ps' or kind='bs' for a "
             f"degree-{degree} spline."
         )
@@ -117,7 +161,7 @@ def Spline(
         worst = max((order for order in orders if isinstance(order, int)), default=0)
         if worst > cap:
             raise ValueError(
-                f"A cubic regression spline (kind={kind!r}; 'cr' is the default) takes penalty "
+                f"A cubic regression spline (kind={kind!r}) takes penalty "
                 f"orders up to {cap}, so m={worst} cannot apply. Pass kind='ps' for a penalty "
                 f"of order {worst}."
             )
