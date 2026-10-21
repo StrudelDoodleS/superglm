@@ -766,9 +766,17 @@ def test_estimator_limits_reach_refits_and_post_fit_inference(monkeypatch):
 
     fitted = model()
     severity = np.where(rng.random(len(y)) < 0.6, 0.0, rng.gamma(2.0, 0.5, len(y)))
+
+    def summary_forming_its_own_gram():
+        # The summary takes the Gram the fit formed, so it runs no block task;
+        # a record read against other weights forms its own, which is the
+        # post-fit work these limits have to reach.
+        fitted.result.rank_info.take_data_gram(np.zeros(0))
+        return fitted.summary()
+
     calls = {
         "fit_reml": lambda: fitted.fit_reml(X, y, max_reml_iter=3),
-        "summary": fitted.summary,
+        "summary": summary_forming_its_own_gram,
         "metrics": lambda: fitted.metrics(X, y),
         "term_inference": lambda: fitted.term_inference("a"),
         "relativities": lambda: fitted.relativities(with_se=True),

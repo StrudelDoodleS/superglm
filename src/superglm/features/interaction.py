@@ -2304,6 +2304,12 @@ class TensorInteraction:
 
         B1 = sp.csr_matrix(m1.basis)
         B2 = sp.csr_matrix(m2.basis)
+        # The training-row bases are now B1 and B2, and the design is built from
+        # them. Scoring evaluates new rows from ``raw_basis_eval`` and
+        # ``projection``, so the spec keeps no (n, K) copy of its own: it was
+        # 280 MB of a 10-pair freMTPL2 model's pickle, retained fit state or not.
+        self._marginal1 = replace(m1, basis=np.empty((0, m1.K_eff)))
+        self._marginal2 = replace(m2, basis=np.empty((0, m2.K_eff)))
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
         return B1, B2, S1, S2
@@ -2465,7 +2471,6 @@ class TensorInteraction:
             parent_specs,
             sample_weight,
         )
-
         # Row-wise Kronecker product
         T = _row_kron(B1, B2)
 
