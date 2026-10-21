@@ -322,12 +322,17 @@ are the held-out results on the remaining policies (Poisson, claim frequency):
 
 | How the region enters | Held-out deviance | Gini |
 |---|---|---|
-| `FactorSmooth(basis="sz")`, lines unpenalized | 40,604 | 0.077 |
+| `FactorSmooth(basis="sz")`, lines unpenalized | 40,604 | 0.076 |
 | `FactorSmooth(basis="sz", select=True)` | 34,201 | 0.163 |
 | `FactorSmooth(basis="fs")` | 34,332 | 0.182 |
 | `re("Region")`, no factor smooth | 34,201 | 0.163 |
 | `cat("Region")`, no factor smooth | 79,099 | 0.075 |
 | `cat("Region")` with a vehicle-age curve by region (`SplineCategorical`) | 80,724 | 0.084 |
+
+The `select=True` and `re("Region")` rows are different models that nearly
+coincide: `select=True` shrinks each region's vehicle-age curve to about an
+intercept, which is what `re()` fits, and their deviances are 34,200.7 and
+34,200.8.
 
 - For a curve by level, pass `select=True` to an SZ term or use
   `basis="fs"`. Both penalize every level's line, so a sparse level stays
@@ -339,8 +344,9 @@ are the held-out results on the remaining policies (Poisson, claim frequency):
   The same holds for a spline-by-category interaction, whose levels take their
   constant from the categorical main effect.
 - A numeric or polynomial curve by category gives each level its own slope or
-  curve. When a level's claims cannot fix it, the fit warns, and `predict`
-  holds that level's curve flat beyond the values its rows covered.
+  curve. When a level's claims cannot fix it, the fit warns, and `predict` and
+  the reported curves hold that level's curve flat beyond the values its rows
+  covered.
 - To keep a categorical term, merge sparse levels into similar ones with
   `Categorical(grouping=...)`.
 
