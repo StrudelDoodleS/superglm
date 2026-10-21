@@ -82,6 +82,6 @@ def test_scop_fit_pickles_no_data_gram_after_its_first_inference(retain_fit_stat
     assert rank_info.data_gram is None
     size = len(pickle.dumps(model))
     p = len(rank_info.mean_x)
-    # what master pickled: the record without a Gram, which the fit never held
+    # a held Gram (as the first hand-off commit left it on SCOP fits) would add 8 p^2 bytes
     object.__setattr__(rank_info, "data_gram", np.zeros((p, p)))
     assert len(pickle.dumps(model)) >= size + 8 * p * p

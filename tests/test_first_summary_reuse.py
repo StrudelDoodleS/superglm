@@ -206,7 +206,7 @@ def test_scop_fit_releases_the_gram_at_its_first_inference(gram_builds):
     assert model._solver_result.scop_inference is not None
     assert rank_info.data_gram is not None
     fits_gram = rank_info.data_gram
-    taken = state_ops.fit_inference_info(model)
+    taken = model._fit_inference_info  # the cached record the summary's rows read
     assert gram_builds == []
     assert rank_info.data_gram is None
     formed = state_ops._rank_centered_data_gram(
@@ -216,7 +216,9 @@ def test_scop_fit_releases_the_gram_at_its_first_inference(gram_builds):
     bound = _gram_bound(model, fits_gram)
     np.testing.assert_allclose(taken["R_a"].T @ taken["R_a"], formed, rtol=0.0, atol=bound)
     reference_model, _, _ = _scop_fit()
+    builds = len(gram_builds)  # the reference Gram above is the test's own build
     rows = _wood_rows(model, frame, y)
+    assert len(gram_builds) == builds  # the rows used the fit's Gram, not a rebuilt one
     reference = _wood_rows(_without_gram(reference_model), frame, y)
     assert rows.keys() == reference.keys() and rows
     for name, values in rows.items():
