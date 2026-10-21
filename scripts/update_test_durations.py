@@ -50,13 +50,16 @@ def download(run: str, repo: str | None, into: Path) -> list[Path]:
     """The junit files of one CI run, minus the coverage-instrumented runtime of a push run."""
     scope = ["--repo", repo] if repo else []
     subprocess.run(
-        ["gh", "run", "download", run, *scope, "-p", "pytest-*", "-D", str(into / run)], check=True
+        ["gh", "run", "download", run, *scope, "-p", "pytest-*", "-D", str(into / run)],
+        check=True,
+        cwd=ROOT,
     )
     event = subprocess.run(
         ["gh", "run", "view", run, *scope, "--json", "event", "--jq", ".event"],
         check=True,
         capture_output=True,
         text=True,
+        cwd=ROOT,
     ).stdout.strip()
     files = sorted((into / run).rglob("pytest-results*.xml"))
     return [f for f in files if event != "push" or COVERAGE_RUNTIME not in str(f)]
@@ -71,7 +74,7 @@ def read_times(files: list[Path]) -> tuple[dict[str, list[float]], set[str]]:
         for case in ET.parse(file).getroot().iter("testcase"):
             nid = node_id(case.get("classname", ""), case.get("name", ""))
             if nid is None:
-                unmapped.add(f"{case.get('classname')}::{case.get('name')}")
+                unmapped.add(f"{case.get('classname', '')}::{case.get('name')}")
             else:
                 seen[nid] = seen.get(nid, 0.0) + float(case.get("time", 0))
         for nid, seconds in seen.items():
@@ -92,6 +95,12 @@ def main(argv: list[str] | None = None) -> int:
         for p in args.paths
         for f in (sorted(p.rglob("pytest-results*.xml")) if p.is_dir() else [p])
     ]
+    if any(COVERAGE_RUNTIME in str(f) for f in files):
+        print(
+            f"warning: {COVERAGE_RUNTIME} files are timed as given; if they come from a push run, "
+            "they ran under coverage and should be left out (--run drops them itself)",
+            file=sys.stderr,
+        )
     with tempfile.TemporaryDirectory() as tmp:
         for run in args.run:
             files += download(run, args.repo, Path(tmp))
@@ -104,10 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     kept = len(recorded.keys() - refreshed.keys())
     merged = {**recorded, **refreshed}
     args.output.write_text(json.dumps(merged, indent=4, sort_keys=True) + "\n", encoding="utf-8")
+    elsewhere = sorted(name for name in unmapped if not name.startswith("::"))
     print(
         f"{len(files)} junit files, {len(refreshed)} tests timed, {kept} earlier entries kept, "
-        f"{len(unmapped)} case names unmapped (module-level skips), {len(merged)} entries written"
+        f"{len(unmapped) - len(elsewhere)} module-level skips unmapped, {len(merged)} entries written"
     )
+    if elsewhere:  # a file renamed or deleted since the run, or a checkout on another commit
+        print(f"{len(elsewhere)} cases name no file in this checkout, e.g. {elsewhere[:3]}")
     return 0
 
 
