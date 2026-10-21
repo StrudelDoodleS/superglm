@@ -620,3 +620,20 @@ assert tuple(kernel.nopython_signatures) == signatures
         [sys.executable, "-c", script], check=False, capture_output=True, text=True
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_a_quotient_cell_raises_no_divide_warning_from_the_discarded_log1p():
+    """Count 1, mean 1 and size 2^-100 put log1p's argument at exactly -1.
+
+    The quotient form is the one kept there; the discarded log1p(-1) = -inf
+    must not surface as a divide-by-zero under warnings-as-errors.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with np.errstate(divide="raise"):
+            evaluated = evaluate_negative_binomial_rows(
+                np.array([1.0]), np.array([1.0]), np.array([2.0**-100]), np.ones(1), "prior"
+            )
+    assert np.all(np.isfinite(evaluated.optimizing_log_likelihood))

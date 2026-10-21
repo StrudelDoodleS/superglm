@@ -618,7 +618,11 @@ def _recurrences(
         argument = (offsets - row_mean) / total
         quotient = argument < -0.5
         if quotient.any():
-            terms = np.where(quotient, np.log((row_theta + offsets) / total), np.log1p(argument))
+            # The discarded log1p of a quotient cell may be log1p(-1) = -inf; only
+            # the quotient form is kept there, so its divide warning is expected.
+            with np.errstate(divide="ignore"):
+                discarded = np.log1p(argument)
+            terms = np.where(quotient, np.log((row_theta + offsets) / total), discarded)
         else:
             terms = np.log1p(argument)
         value[rows] += np.sum(terms, axis=1)
