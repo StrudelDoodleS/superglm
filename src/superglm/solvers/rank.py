@@ -2098,8 +2098,14 @@ def _decompose_gram(
     omit_uncertifiable: bool = False,
     psd_by_construction: bool = False,
     formation_error: NDArray | None = None,
+    spectrum: dict | None = None,
 ) -> RankDecomposition | None:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    ``spectrum``, when given, receives the equilibrated matrix's eigenpairs
+    whenever they are computed (``values``, ``vectors`` and the ``active``
+    columns), for a caller that goes on to decompose the same matrix
+    (:func:`decide_data_rank`).
 
     ``omit_uncertifiable`` is a pure optimization hint, never a semantic one:
     when it is set this may return ``None`` instead of a decomposition that
@@ -2218,6 +2224,8 @@ def _decompose_gram(
             pass
 
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
+    if spectrum is not None:
+        spectrum.update(values=eigenvalues, vectors=eigenvectors, active=active_columns)
     raw_eigenvalues = eigenvalues
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))
@@ -2515,6 +2523,7 @@ def decompose_gram_if_authoritative(
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
     psd_by_construction: bool = False,
+    spectrum: dict | None = None,
 ) -> RankDecomposition | None:
     """The Gram decomposition when it is authoritative, else ``None``.
 
@@ -2553,6 +2562,7 @@ def decompose_gram_if_authoritative(
         fallback_factor=fallback_factor,
         omit_uncertifiable=True,
         psd_by_construction=psd_by_construction,
+        spectrum=spectrum,
     )
     if decomposition is None or needs_factor_certification(decomposition, policy=policy):
         return None
@@ -2583,6 +2593,7 @@ def decompose_gram_deflated(
     rows: int,
     structural: Sequence[tuple[slice, NDArray, float]] = (),
     policy: RankPolicy = SHARED_RANK_POLICY,
+    spectrum: dict | None = None,
 ) -> tuple[RankDecomposition | None, dict[str, float]]:
     """The factor-route decision from the formed Gram plus one pass over the rows on its grey subspace.
 
@@ -2638,6 +2649,14 @@ def decompose_gram_deflated(
     sigma_i(D)`` lies in ``[sigma_min(L), sigma_max(L)]``), which the
     certificate's margin carries.
 
+    ``spectrum`` holds the equilibrated Gram's eigenpairs where
+    :func:`decompose_gram_if_authoritative` has just computed them; with no
+    structural null to deflate, the eigenproblem here is that one, so they
+    are read rather than computed again.  The two equilibrations round
+    differently (``G / (d_i d_j)`` there, ``G / d_i / d_j`` here), by a few
+    units in the last place of each entry, inside the formation bound the
+    error ``e`` below already carries.
+
     Returns ``(None, info)`` whenever the certificate fails (no split, no gap,
     a grey singular value within the shift of the cut): the caller then runs
     the full factor, so this changes cost, never a certified decision.  A
@@ -2687,6 +2706,8 @@ def decompose_gram_deflated(
         ]
         values, rotation = np.linalg.eigh(_symmetric_part(complement.T @ equilibrated @ complement))
         vectors = complement @ rotation
+    elif spectrum and np.array_equal(spectrum["active"], active):
+        values, vectors = spectrum["values"], spectrum["vectors"]
     else:
         values, vectors = np.linalg.eigh(equilibrated)
     largest = float(values[-1])
@@ -2704,47 +2725,57 @@ def decompose_gram_deflated(
     # Every direction below the floor is grey; the split is searched from the
     # first eigenvalue above it up to the ceiling (that first one at least).
     first = int(np.searchsorted(values, _GREY_FLOOR * error, side="left"))
-    if first == 0 or first >= values.size:
+    if first >= values.size:
         return None, info
-    last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
-    candidates = np.arange(first, min(last, values.size - 1) + 1)
-    # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past twice
-    # the Gram's error, so the split takes the first spacing of
-    # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
-    spacing = values[candidates] - values[candidates - 1]
-    wide = np.flatnonzero(spacing >= _GREY_GAP * error)
-    split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
+    if first == 0:
+        # Every direction off the structural nulls clears the floor, and so
+        # the cut: there is no grey subspace, and the rows are not read.
+        split = 0
+    else:
+        last = max(first, int(np.searchsorted(values, _GREY_CEILING * largest, side="right")) - 1)
+        candidates = np.arange(first, min(last, values.size - 1) + 1)
+        # The gap the certificate needs is absolute, ``w_k - w_(k-1)`` past
+        # twice the Gram's error, so the split takes the first spacing of
+        # ``_GREY_GAP`` errors, else the widest spacing under the ceiling.
+        spacing = values[candidates] - values[candidates - 1]
+        wide = np.flatnonzero(spacing >= _GREY_GAP * error)
+        split = int(candidates[wide[0]] if wide.size else candidates[int(np.argmax(spacing))])
     grey = vectors[:, :split]
-    basis = np.zeros((gram.shape[0], split))
-    basis[active] = grey / d[:, None]
-    factor, cross, roundings, magnitudes = project(basis)
-    factor = np.asarray(factor, dtype=np.float64)
-    if factor.shape[0] < split:
-        # Fewer rows than grey directions: the factor's missing rows are zero.
-        factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
-    # The cross product's rows are bounded by |A|'|B|, a column's weighted
-    # norm times ||B||: d itself where rows were centred first, the
-    # projection's (|x| + |c|) norm where they were not.
-    inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
-    singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
-    if singular.size < split:
-        singular = np.concatenate((singular, np.zeros(split - singular.size)))
-    coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
-    coupling_norm = float(
-        np.nextafter(
-            float(np.linalg.norm(coupling, 2))
-            + _gamma_up(roundings + n_active)
-            * inflation
-            * math.sqrt(n_active)
-            * float(np.linalg.norm(factor))
-            + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
-            np.inf,
+    if split:
+        basis = np.zeros((gram.shape[0], split))
+        basis[active] = grey / d[:, None]
+        factor, cross, roundings, magnitudes = project(basis)
+        factor = np.asarray(factor, dtype=np.float64)
+        if factor.shape[0] < split:
+            # Fewer rows than grey directions: the factor's missing rows are zero.
+            factor = np.vstack((factor, np.zeros((split - factor.shape[0], split))))
+        # The cross product's rows are bounded by |A|'|B|, a column's weighted
+        # norm times ||B||: d itself where rows were centred first, the
+        # projection's (|x| + |c|) norm where they were not.
+        inflation = max(1.0, float(np.max(np.asarray(magnitudes)[active] / d, initial=0.0)))
+        singular = np.linalg.svd(factor, compute_uv=False) if factor.size else np.zeros(0)
+        if singular.size < split:
+            singular = np.concatenate((singular, np.zeros(split - singular.size)))
+        coupling = vectors[:, split:].T @ (np.asarray(cross)[active] / d[:, None])
+        coupling_norm = float(
+            np.nextafter(
+                float(np.linalg.norm(coupling, 2))
+                + _gamma_up(roundings + n_active)
+                * inflation
+                * math.sqrt(n_active)
+                * float(np.linalg.norm(factor))
+                + _gamma_up(n_active) * math.sqrt(largest) * float(np.linalg.norm(factor)),
+                np.inf,
+            )
         )
-    )
-    gap = float(values[split]) - error - float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+        grey_top = float(singular[0]) ** 2 * (1.0 + _gamma_up(2 * split))
+    else:
+        factor, singular = np.zeros((0, 0)), np.zeros(0)
+        coupling, coupling_norm, inflation, grey_top = np.zeros((values.size, 0)), 0.0, 1.0, 0.0
+    gap = float(values[split]) - error - grey_top
     info.update(
         k=float(split),
-        split_low=float(values[split - 1]) / largest,
+        split_low=float(values[split - 1]) / largest if split else 0.0,
         split_high=float(values[split]) / largest,
         gap=gap / largest,
         coupling=coupling_norm / largest,
@@ -2822,14 +2853,20 @@ def decide_data_rank(
     that already holds it (an unpenalized fit, whose Hessian is this Gram)
     pays nothing for it.
     """
+    spectrum: dict = {}
     decomposition = decompose_gram_if_authoritative(
-        gram, policy=policy, psd_by_construction=psd_by_construction
+        gram, policy=policy, psd_by_construction=psd_by_construction, spectrum=spectrum
     )
     if decomposition is not None:
         return decomposition
     if not certify and project is not None:
         deflated, _ = decompose_gram_deflated(
-            gram, project, rows=rows, structural=structural() if structural else (), policy=policy
+            gram,
+            project,
+            rows=rows,
+            structural=structural() if structural else (),
+            policy=policy,
+            spectrum=spectrum,
         )
         if deflated is not None:
             return deflated

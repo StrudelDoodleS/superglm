@@ -326,6 +326,59 @@ def test_the_certificate_carries_the_structural_residual(case):
         assert info["margin"] > info["shift"]
 
 
+@pytest.mark.parametrize("bound", [0.0, 1.0])
+def test_every_uncertain_direction_structural_reads_no_row(bound):
+    """No grey direction once the structural nulls are deflated: decided with no pass over the rows.
+
+    The alias ``y`` is the only direction below the floor, and it is
+    structural; the next eigenvalue, ``1e-6``, clears the floor and the cut.
+    So rank ``n_active - s`` is certified from the Gram and the residual
+    bound, and the projection is never called (``k = 0``).  A residual bound
+    above the cut still refuses.  Mutation: on the base the empty grey
+    subspace returned ``None``, so the full factor ran.
+    """
+    A, gram, project = _coupled_gram(coupling=0.0)
+    calls = []
+
+    def counted(basis):
+        calls.append(basis.shape[1])
+        return project(basis)
+
+    structural = [(slice(4, 6), np.array([[np.sqrt(0.5)], [-np.sqrt(0.5)]]), bound)]
+    deflated, info = rank.decompose_gram_deflated(gram, counted, rows=10**6, structural=structural)
+    assert calls == []
+    assert info["k"] == 0.0 and info["structural"] == 1.0
+    if bound:
+        assert deflated is None
+        return
+    assert deflated is not None and deflated.grey_subspace["k"] == 0.0
+    _assert_same_decisions(deflated, rank.decompose_factor(A))
+    assert deflated.rank == 5
+
+
+def test_the_grams_eigenpairs_are_read_not_recomputed(monkeypatch):
+    """With no structural null, the grey check reads the eigenpairs the authority check computed.
+
+    One ``eigh`` of the equilibrated Gram serves both, and the decision is
+    the full factor's.  Mutation: the base computed it twice.
+    """
+    A, gram, project = _coupled_gram(grey_ratio=1e-12, coupling=0.0)
+    calls = []
+    eigh = np.linalg.eigh
+
+    def counted(matrix, *args, **kwargs):
+        calls.append(matrix.shape)
+        return eigh(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(rank.np.linalg, "eigh", counted)
+    decided = rank.decide_data_rank(
+        gram, lambda: pytest.fail("ran the full factor"), project=project, rows=10**6
+    )
+    assert calls == [(6, 6)]
+    assert decided.grey_subspace is not None
+    _assert_same_decisions(decided, rank.decompose_factor(A))
+
+
 @pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
