@@ -878,7 +878,7 @@ class TestMetricsCaching:
             hasattr(covariance_module, name)
             for name in ("decompose_gram", "decompose_gram_if_authoritative", "decompose_factor")
         )
-        for name in ("decompose_gram", "decompose_gram_if_authoritative"):
+        for name in ("decompose_gram", "decompose_gram_if_authoritative", "decide_data_rank"):
             monkeypatch.setattr(
                 metrics_module,
                 name,

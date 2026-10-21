@@ -499,3 +499,105 @@ def test_a_near_structural_null_stays_with_its_coupling():
     assert decided.grey_subspace is not None
     _assert_same_decisions(decided, full)
     assert decided.grey_subspace["structural"] == 0.0 and decided.grey_subspace["k"] == 2.0
+
+
+def _forced_full_factor(monkeypatch):
+    """Fail every grey-subspace certificate from here on: the full factor decides."""
+    monkeypatch.setattr(rank, "decompose_gram_deflated", lambda *args, **kwargs: (None, {}))
+
+
+@pytest.mark.parametrize("rows", ["new_rows", "new_weights"])
+def test_metrics_decides_the_data_rank_as_the_fit_does(rows, monkeypatch):
+    """``metrics()`` off the fit's geometry decides its data rank by the fit's route, no row factor.
+
+    New rows read an evaluation design (dense blocks, ``chunked_projected_factor``);
+    the fit's rows under other weights read the grouped design.  Each makes
+    no TSQR of every row, and its decisions are the full factor's.
+    Mutation: on the base both ran ``streamed_weighted_factor`` over every row.
+    """
+    import superglm.inference.metrics as metrics_module
+
+    model = _fit("thin_level_curve", full_factor=False)
+    frame, y, _, _ = _thin_level_curve()
+    weights = None
+    if rows == "new_rows":
+        frame, y = frame.iloc[::2].reset_index(drop=True), y[::2]
+    else:
+        weights = np.linspace(0.7, 1.3, len(y))
+    decided, passes = [], []
+    decide, factor = metrics_module.decide_data_rank, metrics_module.streamed_weighted_factor
+    monkeypatch.setattr(
+        metrics_module,
+        "decide_data_rank",
+        lambda *args, **kwargs: decided.append(decide(*args, **kwargs)) or decided[-1],
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "streamed_weighted_factor",
+        lambda *args, **kwargs: passes.append(1) or factor(*args, **kwargs),
+    )
+    model.metrics(frame, y, sample_weight=weights).coefficient_se
+    assert passes == [] and decided[0].grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    model.metrics(frame, y, sample_weight=weights).coefficient_se
+    assert len(passes) == 1
+    _assert_same_decisions(decided[0], decided[1])
+
+
+def test_rebuilt_inference_state_decides_the_data_rank_as_the_fit_does(monkeypatch):
+    """A fit without rank metadata (``state_ops._legacy_active_state``) takes the fit's route.
+
+    It is what a shape repair rebuilds; its data rank is the fit's, from the
+    grey subspace.  Mutation: on the base it factored every row.
+    """
+    from superglm.model import state_ops
+
+    model = _fit("thin_level_curve", full_factor=False)
+    solver = model._solver_pirls_result()
+    W = state_ops._solver_space_working_weights(model)
+    data = state_ops._legacy_active_state(model, solver, W)[-1]
+    assert data.grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    reference = state_ops._legacy_active_state(model, solver, W)[-1]
+    assert reference.grey_subspace is None and reference.method == "qr_svd"
+    _assert_same_decisions(data, reference)
+    _assert_same_decisions(data, model.result.rank_info.data)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_scop_terminal_data_rank_takes_the_fits_route(discrete, monkeypatch):
+    """SCOP REML's published data rank comes from the grey subspace, as a direct fit's does.
+
+    A monotone P-spline beside the thin level's pair: the terminal data Gram
+    cannot certify itself.  No TSQR of every row for it, and the decisions
+    are the full factor's.  Mutation: on the base ``_hydrate_scop_terminal_rank_info``
+    factored every row.
+    """
+    import superglm.reml.scop_efs as scop_efs
+    from superglm import Constraint, PSpline
+
+    frame, y, features, interactions = _thin_level_curve()
+    frame = frame.assign(x=np.random.default_rng(3).uniform(0.0, 1.0, len(y)))
+    features = {**features, "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)}
+    passes = []
+    factor = scop_efs.grouped_weighted_factor
+    monkeypatch.setattr(
+        scop_efs,
+        "grouped_weighted_factor",
+        lambda *args, **kwargs: passes.append(1) or factor(*args, **kwargs),
+    )
+
+    def fit():
+        model = SuperGLM(
+            family="poisson", features=features, interactions=interactions, discrete=discrete
+        )
+        model.fit_reml(frame, y)
+        assert getattr(model.result, "scop_inference", None) is not None
+        return model.result.rank_info.data
+
+    data = fit()
+    assert passes == [] and data.grey_subspace is not None
+    _forced_full_factor(monkeypatch)
+    reference = fit()
+    assert len(passes) == 1
+    _assert_same_decisions(data, reference)

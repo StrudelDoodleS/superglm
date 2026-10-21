@@ -58,6 +58,8 @@ from superglm.reml.scop_geometry import (
 )
 from superglm.solvers.centered_system import (
     grouped_augmented_factor,
+    grouped_projected_factor,
+    grouped_structural_nulls,
     grouped_weighted_factor,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size
@@ -66,6 +68,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
+    decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
 )
@@ -1569,13 +1572,20 @@ def _hydrate_scop_terminal_rank_info(
     if result.rank_info is not None:
         raise RuntimeError("SCOP REML candidate unexpectedly retained public rank metadata")
 
-    data_rank = _certified_terminal_rank(
+    # The fit's data-rank route (``rank.decide_data_rank``): the Gram, else
+    # its grey subspace, else the full factor; unpenalized, the full factor.
+    centre = mode.fisher_mean_x
+    data_rank = decide_data_rank(
         mode.centered_xtwx,
-        lambda: grouped_weighted_factor(
-            context.dm,
-            fisher_weights(),
-            center=mode.fisher_mean_x,
+        lambda: decompose_factor(
+            grouped_weighted_factor(context.dm, fisher_weights(), center=centre)
         ),
+        project=lambda basis: grouped_projected_factor(
+            context.dm, fisher_weights(), basis, center=centre
+        ),
+        structural=lambda: grouped_structural_nulls(context.dm, fisher_weights(), center=centre),
+        rows=context.dm.n,
+        certify=not np.any(mode.penalty),
     )
     augmented_rank = _certified_terminal_rank(
         mode.centered_xtwx + mode.penalty,

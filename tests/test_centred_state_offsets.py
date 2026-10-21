@@ -1400,9 +1400,10 @@ def test_metrics_certify_the_rank_about_the_exact_pair():
     design = np.column_stack((1e16 + z, 1e16 + z + 2.0, s))
     W = np.ones(len(z))
     _, xtw1, data_gram = weighted_moments(design, W)
-    data_rank = metrics_module._certified_data_rank(design, W, data_gram, xtw1)
+    penalty = np.diag([0.0, 0.0, 1.0])
+    data_rank = metrics_module._certified_data_rank(design, W, data_gram, xtw1, penalty)
     profile_rank = metrics_module._certified_profile_rank(
-        design, W, data_gram, xtw1, np.diag([0.0, 0.0, 1.0]), data_rank
+        design, W, data_gram, xtw1, penalty, data_rank
     )
     assert data_rank.rank == 2
     assert profile_rank.rank == 2
