@@ -12,9 +12,8 @@ would let it unroll the series loop into literal exponents.
 
 Rows are independent.  Every kernel here is serial and releases the GIL, and
 the worker pool (``superglm._parallel.pooled_row_blocks``) runs it over fixed
-blocks of ``_PARALLEL_BLOCK`` rows, each with its own scratch, exactly the
-blocks numba's ``prange`` cores ran: so every worker count gives the same
-bits, and no kernel compiles numba's parallel machinery.
+blocks of ``_PARALLEL_BLOCK`` rows, each with its own scratch: so every worker
+count gives the same bits, and no kernel compiles numba's parallel machinery.
 """
 
 from __future__ import annotations
@@ -29,7 +28,12 @@ from superglm._parallel import pooled_row_blocks
 
 _EPS = 2.220446049250313e-16
 _TINY = 5e-324
-_PARALLEL_BLOCK = 4096
+# A block of 1,024 rows is about 0.2 ms of theta-series work and a section
+# costs about 0.15 ms to wake its workers: at eight workers a call over 12,000
+# rows takes 0.7 ms in blocks of 1,024 and 1.3 ms in blocks of 4,096 (which
+# keep three workers busy), and the same at one worker.  Rows are independent,
+# so the blocks change no bit.
+_PARALLEL_BLOCK = 1024
 
 
 @njit(cache=True)
