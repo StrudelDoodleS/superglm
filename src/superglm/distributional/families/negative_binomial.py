@@ -44,6 +44,7 @@ from superglm.distributional.kernels.negative_binomial import (
     negative_binomial_certified_predictor_curvature_directional,
     negative_binomial_certified_predictor_curvature_second_directional,
     negative_binomial_expected_information,
+    poisson_limit_row_count,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -321,6 +322,23 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         return NegativeBinomialPoissonBoundaryError(
             "The negative-binomial fit could not establish a stable finite theta and is "
             "Poisson-like at the diagnostic boundary"
+        )
+
+    def limit_row_disclosure(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> str | None:
+        """Say how many rows have a size at the Poisson limit, where it is not identified."""
+        candidate = _typed_plan(plan, len(theta))
+        semantics = candidate.weights.provenance.contract.semantics
+        weights = candidate.weights.values
+        n = poisson_limit_row_count(
+            theta[:, 0], theta[:, 1], weights, semantics, candidate.exact_count
+        )
+        if n == 0:
+            return None
+        return (
+            f"SuperLSS NegativeBinomialLS fit: {n} of {len(theta)} rows have a size at the "
+            "Poisson limit (no overdispersion left there), so the size coefficients are not "
+            "identified at those rows and the fit may stop short of convergence. Fit a "
+            "constant size (family.theta() with no terms) or the Poisson family instead."
         )
 
     def expected_information_natural(

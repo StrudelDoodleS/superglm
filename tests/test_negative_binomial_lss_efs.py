@@ -464,3 +464,38 @@ def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None
     assert telemetry.fallback_count >= 1
     assert any("expected (Fisher) information" in message for message in model.result_.warnings)
     assert not any("Poisson-like" in message for message in model.result_.warnings)
+
+
+def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
+    """A fit with rows at the Poisson limit says how many, and names the remedy.
+
+    One group is Poisson, so its size runs to the limit and the size
+    coefficients are not identified there. The count is recomputed here from the
+    fitted rows with the limit's definition (max(mean, count - 1) below u-scaled
+    size); an overdispersed fit gets no such entry.
+    """
+    frame, response, log_exposure = _poisson_group_fixture()
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="cr", k=8)),
+        family.theta(s("z", kind="cr", k=5), cat("g")),
+    )
+    with pytest.warns(ConvergenceWarning, match="Poisson limit") as caught:
+        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+
+    fitted = model._require_fitted().fit_state.solver_result.theta
+    reach = np.maximum(fitted[:, 0], np.maximum(response - 1.0, 0.0))
+    expected = int(np.count_nonzero(reach < np.finfo(np.float64).eps * fitted[:, 1]))
+    assert expected > 0
+    needle = f"{expected} of {len(response)} rows have a size at the Poisson limit"
+    for messages in ([str(w.message) for w in caught], list(model.result_.warnings)):
+        (entry,) = [m for m in messages if "rows have a size at the" in m]
+        assert needle in entry
+        assert "constant size" in entry and "Poisson family" in entry
+
+    frame, response = _overdispersed_fixture()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        overdispersed = _fit_reml(_model(), frame, response)
+    assert not any("rows have a size at the" in m for m in overdispersed.result_.warnings)

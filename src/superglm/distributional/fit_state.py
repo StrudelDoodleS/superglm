@@ -476,7 +476,8 @@ def _curvature_disclosures(
     before fits stopped refusing, and still is, except for a family that
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
-    refuse and is disclosed whether or not its diagnosis fires.
+    refuse and is disclosed whether or not its diagnosis fires. A family with
+    ``limit_row_disclosure`` also reports the rows at a limit, converged or not.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -500,6 +501,10 @@ def _curvature_disclosures(
             diagnosis = None
         if isinstance(diagnosis, Exception) and str(diagnosis):
             messages.append(str(diagnosis))
+    note = getattr(family, "limit_row_disclosure", None)
+    if note is not None and solver_result.theta is not None:
+        if message := note(solver_result.theta, likelihood_plan):
+            messages.append(message)
     return tuple(messages)
 
 

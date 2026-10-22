@@ -399,6 +399,11 @@ def _resolved_negative_sum(
     return bool(math.isfinite(total) and math.isfinite(roundoff_bound) and total < -roundoff_bound)
 
 
+def poisson_limit_row_count(mean, theta, weights, semantics, counts) -> int:
+    """Rows past their Poisson limit, by the mask the likelihood kernel itself applies."""
+    return int(np.count_nonzero(_domain(mean, theta, weights, semantics, counts)[-1]))
+
+
 def has_resolved_poisson_boundary(
     response: NDArray,
     exact_count: NDArray,
