@@ -3376,7 +3376,6 @@ def test_without_a_banded_main_effect_a_combination_holds_the_limit_of_its_devia
     # The joint banding's own tolerances: columns are region B and C, fuel P,
     # then the combinations (B, P) and (C, P); no main effect among them.
     values = np.unique(age)
-    values = np.unique(age)
     # Every banding of the export (the table's, the impact bin count's) gets them.
     assert captured
     for tol in captured:
