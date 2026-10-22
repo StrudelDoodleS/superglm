@@ -319,6 +319,13 @@ smoothing iterates are then compared over the coefficients both retain, as
 Wood, Pya and Säfken (2016) drop unidentifiable coefficients, so the drop is
 not mistaken for a worse fit.
 
+When rows are at that limit and the fit's final curvature is singular in a size
+direction, the size coefficients are not identified, and the fit says so with a
+`ConvergenceWarning` kept in `result_.warnings`: it reports how many rows are at
+the limit and suggests a constant size (`family.theta()` with no terms) or the
+Poisson family. Rows at the limit alone do not trigger it: when the other rows
+identify every size coefficient the fit is silent.
+
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
 observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
 1987): the solver falls back to it when the observed curvature at the end of a

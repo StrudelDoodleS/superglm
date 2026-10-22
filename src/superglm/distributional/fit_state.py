@@ -24,6 +24,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
     FitFailureDiagnosingFamily,
+    LimitRowDisclosingFamily,
 )
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
@@ -480,7 +481,7 @@ def _size_coefficients_estimable(solver_result: DenseSolverResult, block: slice)
 
 
 def _limit_row_disclosure(
-    family: Any,
+    family: LimitRowDisclosingFamily,
     solver_result: DenseSolverResult,
     likelihood_plan: FamilyLikelihoodPlan,
     layout: StackedLayout,
@@ -490,16 +491,19 @@ def _limit_row_disclosure(
     The family counts the rows its kernel treats as at the limit, where the
     parameter has no expected information, and names the parameter. That count
     alone proves nothing: the other rows may identify every direction. The
-    fit's own terminal rank decision (``solver_result.terminal_rank``, the
-    shared rank policy on the final penalized curvature; within the retained
-    face when REML removed a random effect, see ``_size_coefficients_estimable``)
-    says which coefficients are estimable (``coefficient_estimable``), and a parameter is
-    unidentified when one of its coefficients is not: a nonsingular information
-    matrix is the condition for local identification (Rothenberg,
-    *Econometrica* 39(3), 1971). No information is evaluated here. A constant
-    parameter is still identified when the intercept column alone carries data
-    curvature, read from the fit's terminal data curvature; without an
-    intercept, when some row is off the limit.
+    fit's own terminal rank decision says which coefficients are estimable (see
+    ``_size_coefficients_estimable``: ``solver_result.terminal_rank``, the
+    shared rank policy on the final penalized curvature, or within the retained
+    face when REML removed a random effect), and a parameter is unidentified
+    when one of its coefficients is not: a nonsingular information matrix is
+    the condition for local identification (Rothenberg, *Econometrica* 39(3),
+    1971). No information is evaluated here, and a coefficient the fit's rank
+    policy treats as estimable is not disclosed, however small its
+    information. A constant parameter is offered as the remedy when the intercept
+    column alone carries data curvature, read from the fit's terminal data
+    curvature (without an intercept, when some row is off the limit), and the
+    parameter has terms to drop; one that is already constant leaves only the
+    alternative family.
     """
     theta = solver_result.theta
     index, n_limit = family.limit_row_count(theta, likelihood_plan)
@@ -515,12 +519,13 @@ def _limit_row_disclosure(
             solver_result.terminal_data_curvature[state.intercept_index, state.intercept_index]
             > 0.0
         )
+    # A parameter without terms is already constant: dropping its terms is no remedy.
     has_terms = state.coefficient_slice.stop - state.coefficient_slice.start > (
         0 if state.intercept_index is None else 1
     )
     offset_varies = bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
     return family.limit_row_disclosure(
-        n_limit, len(theta), constant_identified, has_terms, offset_varies
+        n_limit, len(theta), constant_identified and has_terms, offset_varies
     )
 
 
@@ -531,7 +536,7 @@ def _curvature_disclosures(
     likelihood_plan: FamilyLikelihoodPlan,
     layout: StackedLayout | None = None,
 ) -> tuple[str, ...]:
-    """What a fit whose final curvature fell back discloses instead of refusing.
+    """The warnings a finished fit records in ``result_.warnings`` instead of refusing.
 
     Every fallback the fit used to refuse is disclosed, with the family's own
     diagnosis of repeated curvature failure when it has one. A projected
@@ -540,11 +545,11 @@ def _curvature_disclosures(
     before fits stopped refusing, and still is, except for a family that
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
-    refuse and is disclosed whether or not its diagnosis fires. A family with
-    ``limit_row_count`` also reports its rows at a limit, converged or not, when the
-    fit's terminal rank decision leaves one of that parameter's coefficients
-    not estimable (see ``_limit_row_disclosure``); a failed disclosure never fails
-    the finished fit.
+    refuse and is disclosed whether or not its diagnosis fires. A
+    :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
+    converged or not, when the fit's terminal rank decision leaves one of that
+    parameter's coefficients not estimable (see ``_limit_row_disclosure``); a
+    failed disclosure never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -569,7 +574,7 @@ def _curvature_disclosures(
         if isinstance(diagnosis, Exception) and str(diagnosis):
             messages.append(str(diagnosis))
     if (
-        hasattr(family, "limit_row_count")
+        isinstance(family, LimitRowDisclosingFamily)
         and solver_result.theta is not None
         and layout is not None
     ):

@@ -347,15 +347,15 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         n_limit: int,
         n_rows: int,
         constant_identified: bool,
-        size_has_terms: bool = True,
-        size_offset_varies: bool = False,
+        offset_varies: bool = False,
     ) -> str:
         """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
 
         The fit's terminal rank decision has left a size coefficient not estimable.
-        If a constant size would be identified it is offered, with whatever the
-        size has beyond a constant (terms, a varying offset); otherwise only the
-        Poisson family remains.
+        ``constant_identified`` is true when a constant size is identified and the
+        size has terms to drop: it is then offered, with a varying offset dropped
+        too; otherwise (no row identifies a constant size, or the size is already
+        constant) only the Poisson family remains.
         """
         head = (
             f"SuperLSS NegativeBinomialLS fit: {n_limit} of {n_rows} rows have a size at the "
@@ -365,15 +365,11 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         )
         if not constant_identified:
             return f"{head} No row identifies even a constant size; use the Poisson family instead."
-        dropped = [
-            part
-            for part, present in (("terms", size_has_terms), ("size offset", size_offset_varies))
-            if present
-        ]
-        constant = "Fit a constant size" + (
-            f" (family.theta() with no {' and no '.join(dropped)})" if dropped else ""
+        dropped = "no terms and no size offset" if offset_varies else "no terms"
+        remedy = (
+            f"Fit a constant size (family.theta() with {dropped}) or the Poisson family instead."
         )
-        return f"{head} {constant} or the Poisson family instead."
+        return f"{head} {remedy}"
 
     def expected_information_natural(
         self,

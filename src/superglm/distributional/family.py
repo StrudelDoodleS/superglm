@@ -578,6 +578,38 @@ class FitFailureDiagnosingFamily(Protocol):
 
 
 @runtime_checkable
+class LimitRowDisclosingFamily(Protocol):
+    """Optional family disclosure of rows at a parameter's limit.
+
+    A family whose kernel treats some rows as at a parameter's limit (where the
+    parameter has no expected information) counts them, and says so when the
+    fit's own terminal rank decision then leaves one of that parameter's
+    coefficients not estimable. The text is appended to ``result_.warnings``,
+    never raised; a hook that raises is dropped.
+    """
+
+    def limit_row_count(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> tuple[int, int]:
+        """Return the parameter's index and the number of rows at its limit."""
+        ...
+
+    def limit_row_disclosure(
+        self,
+        n_limit: int,
+        n_rows: int,
+        constant_identified: bool,
+        offset_varies: bool,
+    ) -> str:
+        """Return the warning for ``n_limit`` of ``n_rows`` rows at the limit.
+
+        ``constant_identified`` is true when a constant parameter (the same
+        predictor without terms) is identified by the retained curvature, so
+        dropping the terms is a remedy; ``offset_varies`` is true when the
+        parameter's offset differs across the rows.
+        """
+        ...
+
+
+@runtime_checkable
 class ExpectedInformationFamily(Protocol):
     """Optional family capability for natural-scale Fisher information."""
 

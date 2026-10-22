@@ -305,6 +305,10 @@ def test_public_package_exports_complete_fit_and_plan_validation_protocols() -> 
     assert isinstance(built_ins[2], LikelihoodPlanValidatingFamily)
     assert not isinstance(built_ins[3], LikelihoodPlanValidatingFamily)
 
+    assert "LimitRowDisclosingFamily" in distributional.__all__
+    limit_row = [isinstance(f, distributional.LimitRowDisclosingFamily) for f in built_ins]
+    assert limit_row == [False, False, True, False]
+
 
 def test_mandatory_family_protocol_does_not_require_prediction_or_capability_bag() -> None:
     family = _FakeFamily((_parameter("location"), _parameter("scale")))

@@ -531,15 +531,13 @@ def test_forced_poisson_limit_rows_are_counted_under_prior_weights() -> None:
 def test_limit_row_message_names_the_remedy_the_size_can_take() -> None:
     """A constant size is offered only when one is identified, with what it must drop."""
     say = NegativeBinomialLS().limit_row_disclosure
-    both = say(3, 9, True, True, True)
-    terms = say(3, 9, True, True, False)
-    offset = say(3, 9, True, False, True)
-    none = say(3, 9, False, True, True)
+    both = say(3, 9, True, True)
+    terms = say(3, 9, True, False)
+    none = say(3, 9, False, True)
     assert "3 of 9 rows have a size at the Poisson limit" in both
     assert "singular in a size direction" in both and "not identified" in both
     assert "(family.theta() with no terms and no size offset) or the Poisson family" in both
     assert "(family.theta() with no terms) or the Poisson family" in terms
-    assert "(family.theta() with no size offset) or the Poisson family" in offset
     assert "Fit a constant size" not in none and "use the Poisson family instead" in none
 
 
@@ -576,14 +574,21 @@ def _forced_entries(
     *,
     null: tuple[int, ...] = (),
     intercept_curvature: float = 1.0,
+    rank=None,
+    face=None,
+    reduced=None,
 ) -> list[str]:
     """The disclosure the fit's gate makes for forced limit rows and a forced terminal rank.
 
     The mean is 1 and the count 0 everywhere, so a row is at the limit when its
     size exceeds ``2**52``. ``null`` lists the coefficient indices the forced
-    terminal curvature is singular in, and ``intercept_curvature``
-    is the size intercept's terminal data curvature; with ``null`` empty the
-    fit's own terminal rank is used.
+    terminal curvature is singular in, ``rank`` is a forced terminal rank in
+    full coordinates, and ``intercept_curvature`` is the size intercept's
+    terminal data curvature. With ``face`` and ``reduced`` the fit ends on that
+    face (a decomposition in its reduced coordinates), and its terminal rank is
+    the lifted one. A forced rank in full coordinates replaces the real fit's
+    face, which the gate would read instead of it; with nothing forced the
+    fit's own terminal rank and face are used.
     """
     from types import SimpleNamespace
 
@@ -599,12 +604,17 @@ def _forced_entries(
     data = np.eye(width)
     size = _size_state(fit_state)
     data[size.intercept_index, size.intercept_index] = intercept_curvature
+    if null:
+        rank = decompose_gram(np.diag(diagonal))
+    if face is not None:
+        rank = face.lift_rank_decomposition(reduced)
+    forced = rank is not None
     result = SimpleNamespace(
         terminal_curvature=solved.terminal_curvature,
-        coefficient_face=solved.coefficient_face,
-        terminal_reduced_rank=solved.terminal_reduced_rank,
+        coefficient_face=face if forced else solved.coefficient_face,
+        terminal_reduced_rank=reduced if forced else solved.terminal_reduced_rank,
         theta=theta,
-        terminal_rank=decompose_gram(np.diag(diagonal)) if null else solved.terminal_rank,
+        terminal_rank=rank if forced else solved.terminal_rank,
         terminal_data_curvature=data,
     )
     messages = _curvature_disclosures(
@@ -703,6 +713,24 @@ def test_every_row_at_the_limit_offers_only_the_poisson_family() -> None:
     assert "Fit a constant size" not in entry
 
 
+def test_a_size_without_terms_is_never_told_to_fit_a_constant_size() -> None:
+    """Even if its intercept has curvature, a size that is already constant has only the Poisson remedy.
+
+    The size intercept is forced not estimable while its terminal data curvature
+    is positive (it would have to be collinear with another block), and a size
+    with no terms has no terms to drop.
+    """
+    _, fit_state = _gate_fit(())
+    (entry,) = _forced_entries(
+        fit_state,
+        np.ones(240, dtype=bool),
+        null=(_size_state(fit_state).intercept_index,),
+        intercept_curvature=1.0,
+    )
+    assert "use the Poisson family instead" in entry
+    assert "Fit a constant size" not in entry
+
+
 @pytest.mark.parametrize("offset_varies", [False, True])
 def test_a_size_coefficient_the_terminal_rank_cannot_estimate_is_disclosed(
     offset_varies: bool,
@@ -732,6 +760,124 @@ def test_a_singular_direction_outside_the_size_block_is_not_disclosed() -> None:
     assert _forced_entries(fit_state, at_limit, null=(mean_coefficient,)) == []
 
 
+def test_a_size_coefficient_collinear_with_another_is_disclosed() -> None:
+    """The null-basis branch of the estimability decision, not only a zero column.
+
+    The reference level's rows carry no size curvature, so the size intercept
+    and the group indicator have equal curvature: both diagonals are positive
+    and the singular direction is intercept minus indicator. The exactly
+    singular 2x2 block has a zero eigenvalue far below the rank cutoff, so the
+    decision does not depend on the eigensolver.
+    """
+    from superglm.solvers.rank import decompose_gram
+
+    frame, fit_state = _gate_fit((cat("g"),))
+    size = _size_state(fit_state)
+    both = [size.intercept_index, size.coefficient_slice.start + 1]
+    gram = np.eye(fit_state.layout.n_coefficients)
+    gram[np.ix_(both, both)] = 1.0
+    rank = decompose_gram(gram)
+    assert np.all(rank.column_scale[both] > 0.0)
+    assert not rank.coefficient_estimable()[both].any()
+    at_limit = (frame["g"] == "a").to_numpy()
+    (entry,) = _forced_entries(fit_state, at_limit, rank=rank)
+    assert f"{int(at_limit.sum())} of 240 rows have a size at the Poisson limit" in entry
+    assert "Fit a constant size (family.theta() with no terms) or the Poisson family" in entry
+
+
+def test_tiny_nonzero_curvature_is_judged_by_the_fits_rank_decision() -> None:
+    """The gate adds no threshold: a direction the rank policy treats as estimable is not disclosed.
+
+    The group indicator's curvature is 1e-31 against 1 elsewhere. The shared
+    rank policy equilibrates each column by its own diagonal, so the fit counts
+    the direction as estimated (the same decision that sets its rank,
+    degrees of freedom and standard errors), and the disclosure follows it.
+    """
+    from superglm.solvers.rank import decompose_gram
+
+    frame, fit_state = _gate_fit((cat("g"),))
+    indicator = _size_state(fit_state).coefficient_slice.start + 1
+    gram = np.eye(fit_state.layout.n_coefficients)
+    gram[indicator, indicator] = 1e-31
+    rank = decompose_gram(gram)
+    assert rank.coefficient_estimable().all()
+    at_limit = (frame["g"] == "a").to_numpy()
+    assert _forced_entries(fit_state, at_limit, rank=rank) == []
+
+
+def _face_over_the_size_smooth():
+    """A real layout whose size smooth's wiggle is an exact face, and a size indicator."""
+    from superglm.distributional.smoothing.penalty_face import build_penalty_face
+
+    frame, fit_state = _gate_fit((s("x_theta", kind="cr", k=5), cat("g")))
+    face = build_penalty_face(fit_state.layout, ("theta:x_theta#wiggle",))
+    indicator = _size_state(fit_state).coefficient_slice.stop - 1
+    assert fit_state.layout.coefficient_names[indicator].startswith("theta:g")
+    return frame, fit_state, face, indicator
+
+
+def test_a_size_coefficient_unestimable_within_a_face_is_disclosed() -> None:
+    """On a face the gate reads the reduced decomposition, and a real null direction there counts.
+
+    The reduced coordinate carrying the group indicator is left singular, so the
+    indicator is not estimable inside the face and the size is reported. A
+    branch that raises (the hook's guard would swallow it), or that reports
+    nothing on a face, fails here.
+    """
+    from superglm.solvers.rank import decompose_gram
+
+    frame, fit_state, face, indicator = _face_over_the_size_smooth()
+    k = int(np.argmax(np.abs(face.null_basis[indicator])))
+    assert abs(face.null_basis[indicator, k]) > 0.5
+    singular = decompose_gram(np.diag((np.arange(face.reduced_width) != k).astype(float)))
+    at_limit = (frame["g"] == "a").to_numpy()
+    (entry,) = _forced_entries(fit_state, at_limit, face=face, reduced=singular)
+    assert f"{int(at_limit.sum())} of 240 rows have a size at the Poisson limit" in entry
+    assert "Fit a constant size (family.theta() with no terms) or the Poisson family" in entry
+
+
+def test_coefficients_a_face_removes_are_not_unidentified() -> None:
+    """The same face with a full-rank reduced decomposition: nothing is disclosed.
+
+    The lifted decomposition lists the coefficients the face fixes as not
+    estimable (asserted, so the lifted rank would disclose here), but they are
+    determined, and the reduced decomposition is full rank.
+    """
+    from superglm.solvers.rank import decompose_gram
+
+    frame, fit_state, face, _ = _face_over_the_size_smooth()
+    full = decompose_gram(np.eye(face.reduced_width))
+    size = _size_state(fit_state).coefficient_slice
+    assert not face.lift_rank_decomposition(full).coefficient_estimable()[size].all()
+    at_limit = (frame["g"] == "a").to_numpy()
+    assert _forced_entries(fit_state, at_limit, face=face, reduced=full) == []
+
+
+@pytest.mark.parametrize(
+    ("offset_varies", "remedy"),
+    [(False, "with no terms)"), (True, "with no terms and no size offset)")],
+)
+def test_public_fit_hands_its_layout_to_the_limit_gate(
+    monkeypatch, offset_varies: bool, remedy: str
+) -> None:
+    """The fit passes its layout to the gate, which reads the size's slice and offset from it.
+
+    The count and the estimability decision are forced, so nothing depends on
+    the solver's trajectory; only the wiring of the public fit is left. Without
+    the layout the gate is skipped and no entry is made; a layout that is
+    present but ignores the offset gives the wrong remedy.
+    """
+    import superglm.distributional.fit_state as fit_state_module
+
+    monkeypatch.setattr(negative_binomial_family, "poisson_limit_row_count", lambda *a, **k: 3)
+    monkeypatch.setattr(fit_state_module, "_size_coefficients_estimable", lambda *a: False)
+    offset = np.where(np.arange(240) < 120, 0.0, 0.5) if offset_varies else None
+    _, fit_state = _gate_fit((cat("g"),), offset)
+    (entry,) = [m for m in fit_state.result.warnings if "rows have a size at the" in m]
+    assert "3 of 240 rows have a size at the Poisson limit" in entry
+    assert remedy in entry
+
+
 def test_no_limit_rows_are_not_disclosed_whatever_the_rank() -> None:
     """The count is a precondition: a singular size block without limit rows is not this finding."""
     frame, fit_state = _gate_fit((cat("g"),))
@@ -758,12 +904,12 @@ def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
     One group is Poisson, so its size tends to the limit and the size
     coefficients are not identified there. This is integration coverage of the
     public fit: whether the solver's last iterate crosses the kernel's
-    threshold depends on its trajectory, so the entry is required to agree
-    with a recount from the fitted rows (max(mean, count - 1) below 2**-52 times
-    the size), present when the recount is positive and absent when it is not.
-    Here the entry also needs the size information to be singular, which the
-    Poisson group makes so: its rows beyond the recount sit just short of the
-    threshold with information far below the policy's rank cutoff. The event
+    threshold depends on its trajectory, and so does the fit's terminal rank
+    (the Poisson group's size indicator drops out of it at a rank cutoff another
+    BLAS build can round past). The entry is therefore required to agree with
+    what the gate implies: present exactly when a recount from the fitted rows
+    (max(mean, count - 1) below 2**-52 times the size) is positive and the
+    fit's own terminal rank leaves a size coefficient not estimable. The event
     itself is forced in the tests above.
     """
     frame, response, log_exposure = _poisson_group_fixture()
@@ -780,9 +926,14 @@ def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
     fitted = model._require_fitted().fit_state.solver_result.theta
     reach = np.maximum(fitted[:, 0], np.maximum(response - 1.0, 0.0))
     expected = int(np.count_nonzero(reach < _EPS * fitted[:, 1]))
+    from superglm.distributional.fit_state import _size_coefficients_estimable
+
+    solved = model._require_fitted().fit_state.solver_result
+    size = _size_state(model._require_fitted().fit_state).coefficient_slice
+    estimable = _size_coefficients_estimable(solved, size)
     for messages in ([str(w.message) for w in caught], list(model.result_.warnings)):
         entries = [m for m in messages if "rows have a size at the" in m]
-        if expected == 0:
+        if expected == 0 or estimable:
             assert not entries
             continue
         (entry,) = entries
