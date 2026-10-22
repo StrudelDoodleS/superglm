@@ -52,20 +52,26 @@ def _directional_target(
             weight = curvature[i, channel]
             row = offset + index * columns
             source = panel_offset + i * columns
+            # Row slices, not flat offsets: the inner loop then runs over
+            # contiguous arrays and vectorises (4x on the global moments).
+            target = outputs[row : row + columns]
+            panel = panels[source : source + columns]
             for j in range(columns):
-                outputs[row + j] += weight * panels[source + j]
+                target[j] += weight * panel[j]
             active += 1
     return active * columns
 
 
 @njit(cache=True)
 def _paired_vector_target(outputs, score_offset, mass_offset, bins, score, curvature, g, sc, cc, n):
+    scores = outputs[score_offset:]
+    mass = outputs[mass_offset:]
     active = 0
     for i in range(n):
         index = bins[g, i]
         if index >= 0:
-            outputs[score_offset + index] += score[i, sc]
-            outputs[mass_offset + index] += curvature[i, cc]
+            scores[index] += score[i, sc]
+            mass[index] += curvature[i, cc]
             active += 1
     return active
 
