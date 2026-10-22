@@ -28,7 +28,11 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import CompiledPredictor, Predictor
+from superglm.distributional.predictor import (
+    CompiledPredictor,
+    Predictor,
+    PredictorExecutionPlan,
+)
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -37,12 +41,15 @@ from superglm.distributional.result import (
     DistributionalFitResult,
 )
 from superglm.distributional.solver.chunks import ChunkSize
+from superglm.distributional.solver.derivatives import transform_natural_information
+from superglm.distributional.solver.packing import packed_pairs
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
     WeightProvenance,
 )
+from superglm.solvers.rank import decompose_gram
 
 
 def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
@@ -461,6 +468,57 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _limit_row_disclosure(
+    family: Any,
+    theta: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout,
+) -> str | None:
+    """Disclose rows at a parameter's limit when they leave its coefficients unidentified.
+
+    The family counts the rows its kernel treats as at the limit, where the
+    parameter has no expected information, and names the parameter. That count
+    alone proves nothing: the other rows may identify every direction. The
+    coefficients are locally identified exactly when their information matrix
+    is nonsingular (Rothenberg, *Econometrica* 39(3), 1971), so the test is the
+    rank of the predictor's information-weighted Gram ``X' diag(w) X``, with
+    ``w`` the family's expected information for the parameter in predictor
+    coordinates (prior weights and weight semantics included), against the rank
+    of the design's own Gram ``X' X``. Both ranks come from ``decompose_gram``
+    under the shared rank policy, so no tolerance is chosen here. A constant
+    parameter would still be identified when the intercept column alone carries
+    information, which is the remedy the message may offer.
+    """
+    index, n_limit = family.limit_row_count(theta, likelihood_plan)
+    if n_limit == 0:
+        return None
+    states = sorted(layout.predictors, key=lambda state: state.parameter_index)
+    eta = np.column_stack([state.link.link(theta[:, state.parameter_index]) for state in states])
+    information = transform_natural_information(
+        family.expected_information_natural(theta, likelihood_plan),
+        eta,
+        [state.link for state in states],
+    )
+    diagonal = {
+        left: packed_index
+        for packed_index, (left, right) in enumerate(packed_pairs(len(states)))
+        if left == right
+    }
+    weights = information[:, diagonal[index]]
+    state = states[index]
+    plan = PredictorExecutionPlan(state.design, state.intercept_index is not None)
+    if plan.data_rank(weights) >= plan.data_rank(np.ones(len(theta))):
+        return None
+    constant_identified = decompose_gram(np.array([[float(np.sum(weights))]])).rank == 1
+    has_terms = state.coefficient_slice.stop - state.coefficient_slice.start > (
+        0 if state.intercept_index is None else 1
+    )
+    offset_varies = bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
+    return family.limit_row_disclosure(
+        n_limit, len(theta), constant_identified, has_terms, offset_varies
+    )
+
+
 def _curvature_disclosures(
     family: DistributionalFamily,
     solver_result: DenseSolverResult,
@@ -505,27 +563,13 @@ def _curvature_disclosures(
             diagnosis = None
         if isinstance(diagnosis, Exception) and str(diagnosis):
             messages.append(str(diagnosis))
-    note = getattr(family, "limit_row_disclosure", None)
-    if note is not None and solver_result.theta is not None:
-        has_terms = (
-            None
-            if layout is None
-            else tuple(
-                state.coefficient_slice.stop - state.coefficient_slice.start
-                > (0 if state.intercept_index is None else 1)
-                for state in sorted(layout.predictors, key=lambda state: state.parameter_index)
-            )
-        )
-        offset_varies = (
-            None
-            if layout is None
-            else tuple(
-                bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
-                for state in sorted(layout.predictors, key=lambda state: state.parameter_index)
-            )
-        )
+    if (
+        hasattr(family, "limit_row_count")
+        and solver_result.theta is not None
+        and layout is not None
+    ):
         try:
-            message = note(solver_result.theta, likelihood_plan, has_terms, offset_varies)
+            message = _limit_row_disclosure(family, solver_result.theta, likelihood_plan, layout)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:

@@ -324,56 +324,55 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             "Poisson-like at the diagnostic boundary"
         )
 
-    def limit_row_disclosure(
-        self,
-        theta: NDArray,
-        plan: FamilyLikelihoodPlan,
-        predictor_has_terms: tuple[bool, ...] | None = None,
-        predictor_offset_varies: tuple[bool, ...] | None = None,
-    ) -> str | None:
-        """Say how many rows have a size at the Poisson limit, where it is not identified.
+    def limit_row_count(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> tuple[int, int]:
+        """The size's parameter index and how many rows the kernel treats as Poisson.
 
-        The count is of the rows the likelihood kernel itself treats as Poisson
-        (``max(mean, count - 1)`` below ``2**-52`` times the size, in effective
-        units), so it is a lower bound on the rows whose size is unidentified:
-        a size that stopped just short of the kernel's threshold is not counted.
-        ``predictor_has_terms`` says, per parameter, whether its predictor has
-        terms beyond an intercept and ``predictor_offset_varies`` whether its offset
-        differs across the rows; a size with neither is constant, and is not told
-        to become one, while an offset that varies is named as something to drop.
+        The rows are those with ``max(mean, count - 1)`` below ``2**-52`` times
+        the size, in effective units, whether the size ran off or the mean is
+        negligible; the expected information of the size is zero there. That
+        alone does not make the size unidentified (the other rows may still
+        identify it), so the count is a figure for the disclosure, not its test;
+        rows just short of the threshold are not counted.
         """
         candidate = _typed_plan(plan, len(theta))
         semantics = candidate.weights.provenance.contract.semantics
-        weights = candidate.weights.values
         n = poisson_limit_row_count(
-            theta[:, 0], theta[:, 1], weights, semantics, candidate.exact_count
+            theta[:, 0], theta[:, 1], candidate.weights.values, semantics, candidate.exact_count
         )
-        if n == 0:
-            return None
-        size_has_terms = predictor_has_terms is None or predictor_has_terms[1]
-        size_offset_varies = predictor_offset_varies is not None and predictor_offset_varies[1]
-        if size_has_terms and size_offset_varies:
-            remedy = (
-                "Fit a constant size (family.theta() with no terms and no size offset) "
-                "or the Poisson family instead."
-            )
-        elif size_has_terms:
-            remedy = (
-                "Fit a constant size (family.theta() with no terms) or the Poisson family instead."
-            )
-        elif size_offset_varies:
-            remedy = (
-                "Fit a constant size (family.theta() with no size offset) "
-                "or the Poisson family instead."
-            )
-        else:
-            remedy = "The size is already constant; use the Poisson family instead."
-        return (
-            f"SuperLSS NegativeBinomialLS fit: {n} of {len(theta)} rows have a size at the "
+        return 1, n
+
+    def limit_row_disclosure(
+        self,
+        n_limit: int,
+        n_rows: int,
+        constant_identified: bool,
+        size_has_terms: bool = True,
+        size_offset_varies: bool = False,
+    ) -> str:
+        """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
+
+        The fit has found the information about the size coefficients singular.
+        If a constant size would be identified it is offered, with whatever the
+        size has beyond a constant (terms, a varying offset); otherwise only the
+        Poisson family remains.
+        """
+        head = (
+            f"SuperLSS NegativeBinomialLS fit: {n_limit} of {n_rows} rows have a size at the "
             "Poisson limit (no overdispersion left there; rows close to it are not counted), "
-            "so the size coefficients are not identified at those rows and the fit may stop "
-            f"short of convergence. {remedy}"
+            "and the information about the size coefficients is singular, so they are not "
+            "identified and the fit may stop short of convergence."
         )
+        if not constant_identified:
+            return f"{head} No row identifies even a constant size; use the Poisson family instead."
+        dropped = [
+            part
+            for part, present in (("terms", size_has_terms), ("size offset", size_offset_varies))
+            if present
+        ]
+        constant = "Fit a constant size" + (
+            f" (family.theta() with no {' and no '.join(dropped)})" if dropped else ""
+        )
+        return f"{head} {constant} or the Poisson family instead."
 
     def expected_information_natural(
         self,
