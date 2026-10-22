@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
@@ -52,6 +53,9 @@ class EagerFrame:
     _frame: nw.DataFrame | None
     _arrays: dict[object, NDArray] = field(default_factory=dict, repr=False)
     _schema: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
+    _polars_digests: dict[tuple[object, ...], bytes] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     @property
     def _polars_frame(self) -> nw.DataFrame:
@@ -209,6 +213,32 @@ class EagerFrame:
 
         selected = self.columns if columns is None else tuple(columns)
         self.require_columns(selected)
+        # Operation-local, like ``_arrays``: a fit stores its data guard and its
+        # geometry guard from one adapter, and the second reuses the first's digest.
+        if selected not in self._polars_digests:
+            digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-pl1")
+            digest.update(repr((len(self), len(selected))).encode("utf-8"))
+            for name in selected:
+                column = cast(Any, self.native).get_column(cast(str, name))
+                dtype = self._polars_schema[cast(str, name)]
+                _update_polars_column(digest, str(name), column, dtype)
+            self._polars_digests[selected] = digest.digest()
+        return self._polars_digests[selected]
+
+    @property
+    def digest_scheme(self) -> str:
+        """Name of the scheme :meth:`digest` computes for this backend."""
+        return PANDAS_DIGEST_SCHEME if self.backend == "pandas" else POLARS_DIGEST_SCHEME
+
+    def legacy_polars_digest(self, columns: tuple[object, ...] | None = None) -> bytes:
+        """Recompute the fit-time digest that releases before the scheme tag stored.
+
+        It hashed rows with Polars' own ``hash_rows`` (four seeds), whose values
+        Polars documents as unstable across versions and whose seeds 2.0 removed.
+        Raises :class:`LegacyDigestUnavailableError` where it cannot be recomputed.
+        """
+        selected = self.columns if columns is None else tuple(columns)
+        self.require_columns(selected)
         digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
         metadata = tuple(
             (repr(name), str(self._polars_schema[cast(str, name)])) for name in selected
@@ -216,23 +246,77 @@ class EagerFrame:
         digest.update(repr(((len(self), len(selected)), metadata)).encode("utf-8"))
         if selected:
             native = cast(Any, self.native).select(list(selected))
-            row_hashes = _polars_row_hashes(native).to_numpy()
+            if "seed_1" not in inspect.signature(native.hash_rows).parameters:
+                raise LegacyDigestUnavailableError(
+                    "this Polars has no four-seed hash_rows; the earlier digest cannot be recomputed"
+                )
+            row_hashes = native.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3).to_numpy()
             digest.update(np.ascontiguousarray(row_hashes, dtype=np.uint64).data)
         return digest.digest()
 
 
-def _polars_row_hashes(native: Any) -> Any:
-    """Per-row 64-bit hashes of a Polars frame, on Polars 1.x and 2.x.
+class LegacyDigestUnavailableError(RuntimeError):
+    """The Polars row-hash digest of an earlier release cannot be recomputed here."""
 
-    Polars 1.x takes four seeds and 2.0 removed ``seed_1`` to ``seed_3`` for a
-    single ``seed`` (``TypeError`` at argument binding, before any hashing).
-    1.x keeps its four seeds so a digest stored by an earlier release still
-    verifies; 2.x hash values differ from 1.x regardless.
+
+PANDAS_DIGEST_SCHEME = "pandas-hash-v1"
+POLARS_DIGEST_SCHEME = "polars-values-v1"
+
+
+def _polars_dtype_tag(dtype: Any) -> str:
+    """Name a Narwhals dtype the same way under every Polars version."""
+    extra: tuple[Any, ...] = ()
+    if isinstance(dtype, nw.Datetime):
+        extra = (dtype.time_unit, dtype.time_zone)
+    elif isinstance(dtype, nw.Duration):
+        extra = (dtype.time_unit,)
+    elif isinstance(dtype, nw.Enum):
+        extra = tuple(dtype.categories)
+    return repr((type(dtype).__name__, *extra))
+
+
+def _update_segment(digest: Any, data: bytes | NDArray) -> None:
+    """Feed one length-prefixed byte segment, so adjacent segments cannot blur."""
+    raw = data.view(np.uint8) if isinstance(data, np.ndarray) else data
+    digest.update(len(raw).to_bytes(8, "little"))
+    digest.update(raw)
+
+
+def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> None:
+    """Feed one Polars column's values to *digest* without using Polars' hash.
+
+    Polars documents its hash values as unstable across versions, so a stored
+    digest must come from the data itself: the dtype tag, the null mask and the
+    value bytes (little-endian numbers, UTF-8 text with its lengths).
     """
-    try:
-        return native.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3)
-    except TypeError:
-        return native.hash_rows(seed=0)
+    digest.update(repr((name, _polars_dtype_tag(dtype), len(column))).encode("utf-8"))
+    nulls = column.null_count()
+    mask = column.is_null().to_numpy() if nulls else np.zeros(0, dtype=np.bool_)
+    _update_segment(digest, np.ascontiguousarray(mask, dtype=np.bool_))
+    if isinstance(dtype, nw.Date | nw.Datetime | nw.Duration | nw.Time):
+        column, dtype = column.to_physical(), None
+    if isinstance(dtype, nw.String | nw.Categorical | nw.Enum):
+        text = column.cast(get_polars().String)
+        lengths = text.str.len_bytes().fill_null(0).to_numpy()
+        _update_segment(digest, np.ascontiguousarray(lengths, dtype="<u4"))
+        _update_segment(digest, text.drop_nulls().str.join("").to_list()[0].encode("utf-8"))
+        return
+    is_bool = isinstance(dtype, nw.Boolean)
+    if (
+        dtype is None
+        or is_bool
+        or (isinstance(dtype, nw.dtypes.NumericType) and not isinstance(dtype, nw.Decimal))
+    ):
+        values = (column.fill_null(False if is_bool else 0) if nulls else column).to_numpy()
+        if values.dtype.kind in "biuf":
+            if values.dtype.kind == "f" and np.isnan(values).any():
+                values = np.where(np.isnan(values), np.nan, values)
+            _update_segment(
+                digest, np.ascontiguousarray(values, dtype=values.dtype.newbyteorder("<"))
+            )
+            return
+    # Binary, Decimal, nested and 128-bit columns: Python's repr of the values.
+    _update_segment(digest, repr(column.to_list()).encode("utf-8"))
 
 
 def as_eager_frame(value: Any) -> EagerFrame:

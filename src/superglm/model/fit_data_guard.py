@@ -3,12 +3,58 @@
 from __future__ import annotations
 
 import hashlib
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, FrameBackend, FrameLike, as_eager_frame
+from superglm._frame import (
+    EagerFrame,
+    FrameBackend,
+    FrameLike,
+    LegacyDigestUnavailableError,
+    as_eager_frame,
+)
+
+_UNVERIFIABLE_WARNED = False
+
+
+def _frame_digest_matches(
+    frame: EagerFrame,
+    columns: tuple[object, ...] | None,
+    expected: bytes,
+    scheme: str | None,
+    *,
+    include_index: bool,
+) -> bool:
+    """Compare a frame with a stored digest written under *scheme*.
+
+    ``scheme`` is None for guards written before the tag existed.  Those used
+    Polars' own row hash on Polars frames, which can be recomputed on Polars 1.x
+    and not on 2.x; a digest that cannot be recomputed is not a mismatch, so it
+    warns once and lets the retained data stand.
+    """
+    if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
+        return frame.digest(columns, include_index=include_index) == expected
+    if scheme is None:
+        try:
+            return frame.legacy_polars_digest(columns) == expected
+        except LegacyDigestUnavailableError:
+            origin = "written by Polars 1.x"
+    else:
+        origin = f"written under the digest scheme {scheme!r}"
+    global _UNVERIFIABLE_WARNED
+    if not _UNVERIFIABLE_WARNED:
+        _UNVERIFIABLE_WARNED = True
+        warnings.warn(
+            f"The retained data's fit-time digest was {origin} and cannot be checked "
+            "under this Polars, so the results assume the retained data are unchanged; "
+            "refit to restore the check.",
+            UserWarning,
+            stacklevel=4,
+        )
+    return True
 
 
 def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
@@ -39,6 +85,7 @@ class FitGeometryGuard:
     weight_digest: bytes
     offset_digest: bytes
     x_columns: tuple[object, ...] | None = None
+    x_digest_scheme: str | None = None
 
     @classmethod
     def capture(
@@ -65,6 +112,7 @@ class FitGeometryGuard:
             weight_digest=weight_digest,
             offset_digest=offset_digest,
             x_columns=x_columns,
+            x_digest_scheme=frame.digest_scheme,
         )
 
     def matches(self, X, sample_weight, offset) -> bool:
@@ -78,7 +126,13 @@ class FitGeometryGuard:
                 and n_weights == self.n_rows
                 and n_offsets == self.n_rows
                 and frame.backend == self.x_backend
-                and frame.digest(self.x_columns, include_index=False) == self.x_digest
+                and _frame_digest_matches(
+                    frame,
+                    self.x_columns,
+                    self.x_digest,
+                    self.x_digest_scheme,
+                    include_index=False,
+                )
                 and weight_digest == self.weight_digest
                 and offset_digest == self.offset_digest
             )
@@ -106,6 +160,7 @@ class FitDataGuard:
     x_digest: bytes
     y_snapshot: NDArray[np.float64]
     x_columns: tuple[object, ...] | None = None
+    x_digest_scheme: str | None = None
 
     @classmethod
     def capture(
@@ -124,12 +179,19 @@ class FitDataGuard:
             x_digest=frame.digest(x_columns),
             y_snapshot=y_snapshot,
             x_columns=x_columns,
+            x_digest_scheme=frame.digest_scheme,
         )
 
     def _matches_frame(self, X: EagerFrame | FrameLike) -> bool:
         try:
             frame = as_eager_frame(X)
-            return frame.backend == self.x_backend and frame.digest(self.x_columns) == self.x_digest
+            return frame.backend == self.x_backend and _frame_digest_matches(
+                frame,
+                self.x_columns,
+                self.x_digest,
+                self.x_digest_scheme,
+                include_index=True,
+            )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
