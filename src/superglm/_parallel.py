@@ -39,6 +39,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import threading
 import warnings
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -73,6 +74,68 @@ _override: ContextVar[_Override | None] = ContextVar("superglm_parallel_override
 _retained: ContextVar[Callable[[], int] | None] = ContextVar(
     "superglm_parallel_retained", default=None
 )
+# The worker threads a fit keeps between its pooled sections (``fit_pool``),
+# and the mark that tells a pool thread it is one.
+_fit_threads: ContextVar[_FitThreads | None] = ContextVar("superglm_fit_threads", default=None)
+_on_pool_thread = threading.local()
+
+
+def _mark_pool_thread() -> None:
+    _on_pool_thread.inside = True
+
+
+class _FitThreads:
+    """One executor, created by the fit's first pooled section and closed with the fit."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._executor = None
+        self.size = 0
+
+    def executor(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with self._lock:
+            if self._executor is None:
+                self.size = resolve_n_jobs()
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self.size,
+                    thread_name_prefix="superglm-map",
+                    initializer=_mark_pool_thread,
+                )
+            return self._executor
+
+    def close(self) -> None:
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+
+@contextmanager
+def fit_pool() -> Iterator[None]:
+    """Keep one set of worker threads for a fit whose pooled sections are many and short.
+
+    Starting and joining a pool costs about the same as a few milliseconds of
+    kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
+    binomial row kernel per iteration, a batched moment pass per chunk).
+    Inside this scope :func:`pooled_map` runs on one executor, started by its
+    first section and shut down when the scope ends, instead of starting one
+    per call.  Owner: this scope; lifetime: the fit; a section that runs on
+    one of these threads (a nested map) starts its own executor, as it always
+    has, so a nested section cannot wait on threads its caller holds.  Nothing
+    changes numerically: a section's partition never depends on the workers.
+    """
+    if _fit_threads.get() is not None:
+        yield
+        return
+    threads = _FitThreads()
+    token = _fit_threads.set(threads)
+    try:
+        yield
+    finally:
+        _fit_threads.reset(token)
+        threads.close()
 
 
 @contextmanager
@@ -338,7 +401,7 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     anyway (a built design term) adds nothing over the serial loop.
     """
     import contextvars
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     from superglm._blas_threads import pooled_blas_threads
 
@@ -348,17 +411,47 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
             for item in items:
                 yield fn(item)
             return
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-map") as pool:
-            futures = [pool.submit(contextvars.copy_context().run, fn, item) for item in items]
-            try:
-                for index, future in enumerate(futures):
-                    result = future.result()
-                    futures[index] = None  # a yielded result is the caller's to keep or drop
-                    yield result
-            finally:
-                for future in futures:
-                    if future is not None:
-                        future.cancel()
+        fit_threads = _fit_threads.get()
+        if getattr(_on_pool_thread, "inside", False):
+            fit_threads = None  # a nested section starts its own executor
+        gate = None
+        if fit_threads is None:
+            pool = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="superglm-map",
+                initializer=_mark_pool_thread,
+            )
+        else:
+            pool = fit_threads.executor()
+            workers = min(workers, fit_threads.size)
+            if workers < fit_threads.size:
+                # The shared pool is wider than this section may be: the gate
+                # keeps at most ``workers`` of its tasks running.
+                gate = threading.BoundedSemaphore(workers)
+
+        def task(item):
+            if gate is None:
+                return fn(item)
+            with gate:
+                return fn(item)
+
+        futures: list = []
+        try:
+            for item in items:
+                futures.append(pool.submit(contextvars.copy_context().run, task, item))
+            for index, future in enumerate(futures):
+                result = future.result()
+                futures[index] = None  # a yielded result is the caller's to keep or drop
+                yield result
+        finally:
+            # No task of this section outlives it: its kernels write the
+            # caller's buffers.
+            pending = [future for future in futures if future is not None]
+            for future in pending:
+                future.cancel()
+            wait(pending)
+            if fit_threads is None:
+                pool.shutdown(wait=True)
 
 
 def pooled_row_blocks(fn: Callable[[int, int], object], n_rows: int, block_rows: int) -> list:

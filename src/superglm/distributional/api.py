@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 from superglm._blas_threads import solver_blas_threads
 from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._parallel import fit_pool
 from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.distributional.binding import (
@@ -708,7 +709,7 @@ class SuperLSS:
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
         # The profile is the fit's own stretch of the recorder: a caller's
         # phases open around it stay out, and its measurements during it count once.
-        with solver_blas_threads(), recorder._fit_window() as window:
+        with solver_blas_threads(), fit_pool(), recorder._fit_window() as window:
             candidate = fit_dense_distributional(
                 X,
                 y,

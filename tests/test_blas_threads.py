@@ -651,6 +651,71 @@ def test_the_pool_releases_each_result_once_it_is_yielded():
     assert len(refs) == 6
 
 
+def test_a_fit_pool_serves_every_section_from_the_same_threads():
+    """Inside ``fit_pool`` consecutive sections run on one set of worker threads, in item order,
+    capped at the section's own workers, and the threads end with the scope; nested sections and
+    a consumer that stops early neither deadlock nor leave a task running."""
+    import threading
+    import time
+
+    from superglm._parallel import fit_pool, parallel_config, pooled_map
+
+    def on_threads(items=12):
+        seen = []
+
+        def task(item):
+            seen.append(threading.current_thread())
+            time.sleep(0.002)
+            return item
+
+        results = list(pooled_map(task, list(range(items)), 1))
+        return results, {id(thread): thread for thread in seen}
+
+    with parallel_config(n_jobs=4, max_memory=2**30):
+        _, first = on_threads()
+        _, second = on_threads()
+        assert not set(first) & set(second)  # a section per executor, as before
+        with fit_pool():
+            results_a, a = on_threads()
+            results_b, b = on_threads()
+            assert results_a == results_b == list(range(12))
+            assert len({*a, *b}) <= 4  # one executor of n_jobs threads serves both
+            assert all(name.startswith("superglm-map") for name in (t.name for t in a.values()))
+            with parallel_config(n_jobs=2):  # a narrower section keeps to its own workers
+                running, peak, lock = [0], [0], threading.Lock()
+
+                def gated(item):
+                    with lock:
+                        running[0] += 1
+                        peak[0] = max(peak[0], running[0])
+                    time.sleep(0.01)
+                    with lock:
+                        running[0] -= 1
+                    return item
+
+                assert list(pooled_map(gated, list(range(8)), 1)) == list(range(8))
+                assert peak[0] <= 2
+
+            def outer(item):  # a section started from a pool thread runs on its own executor
+                return sum(pooled_map(lambda inner: inner, list(range(3)), 1)) + item
+
+            assert list(pooled_map(outer, list(range(6)), 1)) == [3 + item for item in range(6)]
+
+            started, finished = [0], [0]
+
+            def slow(item):
+                started[0] += 1
+                time.sleep(0.05)
+                finished[0] += 1
+                return item
+
+            generator = pooled_map(slow, list(range(8)), 1)
+            next(generator)
+            generator.close()
+            assert started[0] == finished[0]  # no task of the section outlives it
+        assert not [t for t in threading.enumerate() if t.name.startswith("superglm-map")]
+
+
 def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     """A dense design keeps the cap because its row passes run on the pool; every pass that runs
     on the calling thread instead (the chunked solved-row route, the gradient-only pass and the
