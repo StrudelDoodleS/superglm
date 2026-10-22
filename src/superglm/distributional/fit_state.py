@@ -461,6 +461,24 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _size_coefficients_estimable(solver_result: DenseSolverResult, block: slice) -> bool:
+    """Whether the fit estimated every coefficient of ``block`` within the face it kept.
+
+    A fit whose REML removed a random effect through an exact coefficient face
+    holds those coefficients fixed, and the lifted terminal decomposition puts
+    the face constraints in its null space. A fixed coefficient is determined,
+    not unidentified, so on a face each coefficient is read as the functional
+    ``null_basis[j] @ z`` of the reduced coordinates ``z``, judged by the
+    reduced decomposition's own estimability decision: the fixed ones are the
+    zero functional and pass. No rank is recomputed.
+    """
+    face = solver_result.coefficient_face
+    if face is None:
+        return bool(solver_result.terminal_rank.coefficient_estimable()[block].all())
+    reduced = solver_result.terminal_reduced_rank
+    return all(reduced.is_estimable(face.null_basis[j]) for j in range(block.start, block.stop))
+
+
 def _limit_row_disclosure(
     family: Any,
     solver_result: DenseSolverResult,
@@ -473,8 +491,9 @@ def _limit_row_disclosure(
     parameter has no expected information, and names the parameter. That count
     alone proves nothing: the other rows may identify every direction. The
     fit's own terminal rank decision (``solver_result.terminal_rank``, the
-    shared rank policy on the final penalized curvature) says which
-    coefficients are estimable (``coefficient_estimable``), and a parameter is
+    shared rank policy on the final penalized curvature; within the retained
+    face when REML removed a random effect, see ``_size_coefficients_estimable``)
+    says which coefficients are estimable (``coefficient_estimable``), and a parameter is
     unidentified when one of its coefficients is not: a nonsingular information
     matrix is the condition for local identification (Rothenberg,
     *Econometrica* 39(3), 1971). No information is evaluated here. A constant
@@ -487,7 +506,7 @@ def _limit_row_disclosure(
     if n_limit == 0:
         return None
     state = next(state for state in layout.predictors if state.parameter_index == index)
-    if solver_result.terminal_rank.coefficient_estimable()[state.coefficient_slice].all():
+    if _size_coefficients_estimable(solver_result, state.coefficient_slice):
         return None
     if state.intercept_index is None:
         constant_identified = n_limit < len(theta)

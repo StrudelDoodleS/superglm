@@ -601,6 +601,8 @@ def _forced_entries(
     data[size.intercept_index, size.intercept_index] = intercept_curvature
     result = SimpleNamespace(
         terminal_curvature=solved.terminal_curvature,
+        coefficient_face=solved.coefficient_face,
+        terminal_reduced_rank=solved.terminal_reduced_rank,
         theta=theta,
         terminal_rank=decompose_gram(np.diag(diagonal)) if null else solved.terminal_rank,
         terminal_data_curvature=data,
@@ -647,6 +649,43 @@ def test_negligible_mean_rows_leave_a_real_constant_size_fit_silent() -> None:
     solved = model._require_fitted().fit_state.solver_result
     _, count = family.limit_row_count(solved.theta, _forced_plan(n))
     assert count >= 1
+    assert not any("rows have a size at the" in m for m in model.result_.warnings)
+
+
+def test_a_size_random_effect_removed_through_a_face_is_not_unidentified() -> None:
+    """Coefficients REML fixes at an exact face are determined, so limit rows disclose nothing.
+
+    Three identical overdispersed groups give a size random effect with nothing
+    to estimate; started at a very large smoothing strength REML removes it
+    through an exact coefficient face and the size is constant. Eight
+    zero-count rows per group at a negligible mean trip the kernel's mask. The
+    lifted terminal decomposition lists the fixed coefficients in its null
+    space, but the reduced decomposition the fit retained is full rank, so
+    the size is identified and the fit says nothing.
+    """
+    from superglm import re
+
+    rng = np.random.default_rng(5)
+    groups, rows = 3, 80
+    block = rng.negative_binomial(1.0, 1.0 / 3.0, rows).astype(np.float64)
+    response = np.tile(block, groups)
+    offset = np.zeros(groups * rows)
+    for k in range(groups):
+        limit = k * rows + np.arange(8)
+        response[limit], offset[limit] = 0.0, -60.0
+    frame = pd.DataFrame({"g": pd.Categorical(np.repeat(np.arange(groups).astype(str), rows))})
+    family = NegativeBinomialLS()
+    model = SuperLSS(family, family.mean(), family.theta(re("g")))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offsets={"mean": offset}, lambdas={"theta:g#wiggle": 1e10})
+    solved = model._require_fitted().fit_state.solver_result
+    # Preconditions: rows at the limit, a face, a full-rank reduced decomposition, and a
+    # lifted decomposition that lists the fixed coefficients as not estimable.
+    assert NegativeBinomialLS().limit_row_count(solved.theta, _forced_plan(len(response)))[1] > 0
+    assert solved.coefficient_face is not None
+    assert solved.terminal_reduced_rank.rank == solved.terminal_reduced_rank.width
+    assert not solved.terminal_rank.coefficient_estimable().all()
     assert not any("rows have a size at the" in m for m in model.result_.warnings)
 
 
