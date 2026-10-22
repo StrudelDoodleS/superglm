@@ -329,6 +329,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         theta: NDArray,
         plan: FamilyLikelihoodPlan,
         predictor_has_terms: tuple[bool, ...] | None = None,
+        predictor_offset_varies: tuple[bool, ...] | None = None,
     ) -> str | None:
         """Say how many rows have a size at the Poisson limit, where it is not identified.
 
@@ -337,7 +338,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         units), so it is a lower bound on the rows whose size is unidentified:
         a size that stopped just short of the kernel's threshold is not counted.
         ``predictor_has_terms`` says, per parameter, whether its predictor has
-        terms beyond an intercept; a constant size is not told to become one.
+        terms beyond an intercept and ``predictor_offset_varies`` whether its offset
+        differs across the rows; a size with neither is constant, and is not told
+        to become one, while an offset that varies is named as something to drop.
         """
         candidate = _typed_plan(plan, len(theta))
         semantics = candidate.weights.provenance.contract.semantics
@@ -348,11 +351,23 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         if n == 0:
             return None
         size_has_terms = predictor_has_terms is None or predictor_has_terms[1]
-        remedy = (
-            "Fit a constant size (family.theta() with no terms) or the Poisson family instead."
-            if size_has_terms
-            else "The size is already constant; use the Poisson family instead."
-        )
+        size_offset_varies = predictor_offset_varies is not None and predictor_offset_varies[1]
+        if size_has_terms and size_offset_varies:
+            remedy = (
+                "Fit a constant size (family.theta() with no terms and no size offset) "
+                "or the Poisson family instead."
+            )
+        elif size_has_terms:
+            remedy = (
+                "Fit a constant size (family.theta() with no terms) or the Poisson family instead."
+            )
+        elif size_offset_varies:
+            remedy = (
+                "Fit a constant size (family.theta() with no size offset) "
+                "or the Poisson family instead."
+            )
+        else:
+            remedy = "The size is already constant; use the Poisson family instead."
         return (
             f"SuperLSS NegativeBinomialLS fit: {n} of {len(theta)} rows have a size at the "
             "Poisson limit (no overdispersion left there; rows close to it are not counted), "

@@ -479,7 +479,8 @@ def _curvature_disclosures(
     information after fits stopped refusing, so every fallback of it used to
     refuse and is disclosed whether or not its diagnosis fires. A family with
     ``limit_row_disclosure`` also reports the rows at a limit, converged or not;
-    it is told which predictors have terms beyond their intercept, and a failed
+    it is told which predictors have terms beyond their intercept and which have an
+    offset that is not constant across the rows, and a failed
     count never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
@@ -515,8 +516,16 @@ def _curvature_disclosures(
                 for state in sorted(layout.predictors, key=lambda state: state.parameter_index)
             )
         )
+        offset_varies = (
+            None
+            if layout is None
+            else tuple(
+                bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
+                for state in sorted(layout.predictors, key=lambda state: state.parameter_index)
+            )
+        )
         try:
-            message = note(solver_result.theta, likelihood_plan, has_terms)
+            message = note(solver_result.theta, likelihood_plan, has_terms, offset_varies)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:

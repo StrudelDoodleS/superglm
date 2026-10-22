@@ -542,6 +542,16 @@ def test_poisson_limit_remedy_does_not_recommend_a_constant_size_to_a_constant_s
     assert "Fit a constant size" not in constant and "family.theta()" not in constant
     assert "already constant" in constant and "Poisson family" in constant
 
+    # A size that varies only through its offset is not constant either.
+    offset_only = family.limit_row_disclosure(theta, plan, (True, False), (False, True))
+    both = family.limit_row_disclosure(theta, plan, (True, True), (False, True))
+    assert offset_only is not None and both is not None
+    assert "already constant" not in offset_only
+    assert "(family.theta() with no size offset) or the Poisson family" in offset_only
+    assert "(family.theta() with no terms and no size offset) or the Poisson family" in both
+    still_constant = family.limit_row_disclosure(theta, plan, (True, False), (True, False))
+    assert still_constant is not None and "already constant" in still_constant
+
 
 @pytest.mark.parametrize("size_terms", [True, False])
 def test_fit_state_tells_the_family_whether_the_size_has_terms(size_terms: bool) -> None:
@@ -574,6 +584,46 @@ def test_fit_state_tells_the_family_whether_the_size_has_terms(size_terms: bool)
     assert f"{expected} of {len(theta)} rows" in entry
     assert ("Fit a constant size" in entry) is size_terms
     assert ("already constant" in entry) is (not size_terms)
+
+
+@pytest.mark.parametrize("size_offset", ["none", "constant", "varying"])
+def test_fit_state_reads_the_size_offset_when_telling_the_remedy(size_offset: str) -> None:
+    """A size with no terms but a non-constant offset is not already constant.
+
+    Only a size with neither terms nor a varying offset gets the "already
+    constant" advice; a constant nonzero offset is still a constant size.
+    """
+    from types import SimpleNamespace
+
+    from superglm.distributional.fit_state import _curvature_disclosures
+
+    frame, response = _overdispersed_fixture(240)
+    offsets = {
+        "none": None,
+        "constant": {"theta": np.full(len(frame), 1.5)},
+        "varying": {"theta": np.where(np.arange(len(frame)) < len(frame) // 2, 0.0, 0.5)},
+    }[size_offset]
+    model = model_from_templates(
+        family=NegativeBinomialLS(),
+        predictors=(
+            Predictor("mean", {"x_mean": Spline(kind="cr", n_knots=5)}),
+            Predictor("theta", {}),
+        ),
+    )
+    model.fit(frame, response, lambdas={"mean:x_mean#wiggle": 1.0}, offsets=offsets)
+    fit_state = model._require_fitted().fit_state
+    theta, _, plan, expected = _forced_limit_rows()
+    messages = _curvature_disclosures(
+        NegativeBinomialLS(),
+        SimpleNamespace(terminal_curvature=fit_state.solver_result.terminal_curvature, theta=theta),
+        np.zeros(len(theta)),
+        plan,
+        fit_state.layout,
+    )
+    (entry,) = [m for m in messages if "rows have a size at the" in m]
+    assert f"{expected} of {len(theta)} rows" in entry
+    assert ("already constant" in entry) is (size_offset != "varying")
+    assert ("no size offset" in entry) is (size_offset == "varying")
 
 
 def test_failed_limit_count_does_not_fail_a_finished_fit(monkeypatch) -> None:
