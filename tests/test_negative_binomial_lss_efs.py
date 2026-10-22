@@ -466,13 +466,139 @@ def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None
     assert not any("Poisson-like" in message for message in model.result_.warnings)
 
 
-def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
-    """A fit with rows at the Poisson limit says how many, and names the remedy.
+_EPS = float(np.finfo(np.float64).eps)
+# (prior weight, count, mean, size relative to the row's Poisson-limit boundary, at the limit).
+# A count-dominated row is at the limit when count - 1 < 2**-52 * w * theta, a
+# mean-dominated one when w * mean < 2**-52 * w * theta; the sizes straddle each
+# boundary so the expected count is exact by construction, and the weights are
+# not 1 so that the count, the weight semantics and the weights all matter. The
+# rows that each wrong reading moves are unequal in number, so no pair of
+# mistakes cancels in the total.
+_LIMIT_ROWS = (
+    (0.5, 500, 1.0, 1.5, True),
+    (0.5, 500, 1.0, 0.7, False),
+    (0.5, 500, 1.0, 0.6, False),
+    (2.0, 500, 1.0, 1.5, True),
+    (2.0, 500, 1.0, 0.7, False),
+    (2.0, 500, 1.0, 0.6, False),
+    (2.0, 0, 10.0, 2.0, True),
+    (2.0, 0, 10.0, 0.5, False),
+    (1.0, 0, 0.1, 1.0, False),
+)
 
-    One group is Poisson, so its size runs to the limit and the size
-    coefficients are not identified there. The count is recomputed here from the
-    fitted rows with the limit's definition (max(mean, count - 1) below u-scaled
-    size); an overdispersed fit gets no such entry.
+
+def _forced_limit_rows():
+    """Terminal parameters and a prior-weighted plan whose Poisson-limit rows are known."""
+    from superglm.distributional.family import COMPLETE_OBSERVATION
+
+    weights = np.array([row[0] for row in _LIMIT_ROWS])
+    counts = np.array([row[1] for row in _LIMIT_ROWS], dtype=np.float64)
+    mean = np.array([row[2] for row in _LIMIT_ROWS])
+    reach = np.maximum(weights * mean, np.maximum(counts - 1.0, 0.0))
+    boundary = reach / (_EPS * weights)
+    theta = np.column_stack([mean, boundary * np.array([row[3] for row in _LIMIT_ROWS])])
+    # Prior weights: the response is the weighted count divided by the weight.
+    response = counts / weights
+    resolved = resolve_likelihood_weights(
+        weights, n_observations=len(weights), contract=WeightContract(semantics="prior")
+    )
+    plan = NegativeBinomialLS().bind_likelihood(response, resolved, COMPLETE_OBSERVATION)
+    return theta, response, plan, sum(row[4] for row in _LIMIT_ROWS)
+
+
+def test_forced_poisson_limit_rows_are_counted_under_prior_weights() -> None:
+    """The count is exact for terminal parameters placed across the limit.
+
+    Nothing here depends on where a solver stops. The expected count is
+    fixed by construction, and the weights are not 1, so reading the response
+    in place of the weighted count, a different weight semantics or unit weights
+    each moves a row across its boundary.
+    """
+    theta, _, plan, expected = _forced_limit_rows()
+    assert (
+        negative_binomial_family.poisson_limit_row_count(
+            theta[:, 0], theta[:, 1], plan.weights.values, "prior", plan.exact_count
+        )
+        == expected
+    )
+    message = NegativeBinomialLS().limit_row_disclosure(theta, plan)
+    assert message is not None
+    assert f"{expected} of {len(theta)} rows have a size at the Poisson limit" in message
+
+    below = theta.copy()
+    below[:, 1] = 1.0
+    assert NegativeBinomialLS().limit_row_disclosure(below, plan) is None
+
+
+def test_poisson_limit_remedy_does_not_recommend_a_constant_size_to_a_constant_size() -> None:
+    """The constant-size remedy is named only when the size has terms to drop."""
+    theta, _, plan, _ = _forced_limit_rows()
+    family = NegativeBinomialLS()
+    with_terms = family.limit_row_disclosure(theta, plan, (True, True))
+    constant = family.limit_row_disclosure(theta, plan, (True, False))
+    assert with_terms is not None and constant is not None
+    assert "Fit a constant size (family.theta() with no terms)" in with_terms
+    assert "Poisson family" in with_terms
+    assert "Fit a constant size" not in constant and "family.theta()" not in constant
+    assert "already constant" in constant and "Poisson family" in constant
+
+
+@pytest.mark.parametrize("size_terms", [True, False])
+def test_fit_state_tells_the_family_whether_the_size_has_terms(size_terms: bool) -> None:
+    """The fit's own layout decides the remedy, with the limit rows forced."""
+    from types import SimpleNamespace
+
+    from superglm.distributional.fit_state import _curvature_disclosures
+
+    frame, response = _overdispersed_fixture(240)
+    size = {"x_theta": Spline(kind="cr", n_knots=5, knot_strategy="quantile_rows")}
+    model = model_from_templates(
+        family=NegativeBinomialLS(),
+        predictors=(
+            Predictor("mean", {"x_mean": Spline(kind="cr", n_knots=5)}),
+            Predictor("theta", size if size_terms else {}),
+        ),
+    )
+    names = ["mean:x_mean#wiggle", *(["theta:x_theta#wiggle"] if size_terms else [])]
+    model.fit(frame, response, lambdas=dict.fromkeys(names, 1.0))
+    fit_state = model._require_fitted().fit_state
+    theta, _, plan, expected = _forced_limit_rows()
+    messages = _curvature_disclosures(
+        NegativeBinomialLS(),
+        SimpleNamespace(terminal_curvature=fit_state.solver_result.terminal_curvature, theta=theta),
+        np.zeros(len(theta)),
+        plan,
+        fit_state.layout,
+    )
+    (entry,) = [m for m in messages if "rows have a size at the" in m]
+    assert f"{expected} of {len(theta)} rows" in entry
+    assert ("Fit a constant size" in entry) is size_terms
+    assert ("already constant" in entry) is (not size_terms)
+
+
+def test_failed_limit_count_does_not_fail_a_finished_fit(monkeypatch) -> None:
+    """A diagnostic count that raises leaves the finished fit and its other warnings."""
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("count unavailable")
+
+    monkeypatch.setattr(negative_binomial_family, "poisson_limit_row_count", broken)
+    frame, response = _overdispersed_fixture(240)
+    model = _fit_reml(_model(), frame, response)
+    assert model.result_ is not None
+    assert not any("rows have a size at the" in m for m in model.result_.warnings)
+
+
+def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
+    """A fit reports the rows at the Poisson limit exactly when there are any.
+
+    One group is Poisson, so its size tends to the limit and the size
+    coefficients are not identified there. This is integration coverage of the
+    public fit: whether the solver's last iterate crosses the kernel's
+    threshold depends on its trajectory, so the entry is required to agree
+    with a recount from the fitted rows (max(mean, count - 1) below 2**-52 times
+    the size), present when the recount is positive and absent when it is not.
+    The event itself is forced in the tests above.
     """
     frame, response, log_exposure = _poisson_group_fixture()
     family = NegativeBinomialLS()
@@ -481,17 +607,20 @@ def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
         family.mean(s("x", kind="cr", k=8)),
         family.theta(s("z", kind="cr", k=5), cat("g")),
     )
-    with pytest.warns(ConvergenceWarning, match="Poisson limit") as caught:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         model.fit_reml(frame, response, offsets={"mean": log_exposure})
 
     fitted = model._require_fitted().fit_state.solver_result.theta
     reach = np.maximum(fitted[:, 0], np.maximum(response - 1.0, 0.0))
-    expected = int(np.count_nonzero(reach < np.finfo(np.float64).eps * fitted[:, 1]))
-    assert expected > 0
-    needle = f"{expected} of {len(response)} rows have a size at the Poisson limit"
+    expected = int(np.count_nonzero(reach < _EPS * fitted[:, 1]))
     for messages in ([str(w.message) for w in caught], list(model.result_.warnings)):
-        (entry,) = [m for m in messages if "rows have a size at the" in m]
-        assert needle in entry
+        entries = [m for m in messages if "rows have a size at the" in m]
+        if expected == 0:
+            assert not entries
+            continue
+        (entry,) = entries
+        assert f"{expected} of {len(response)} rows have a size at the Poisson limit" in entry
         assert "constant size" in entry and "Poisson family" in entry
 
     frame, response = _overdispersed_fixture()

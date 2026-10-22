@@ -400,7 +400,13 @@ def _resolved_negative_sum(
 
 
 def poisson_limit_row_count(mean, theta, weights, semantics, counts) -> int:
-    """Rows past their Poisson limit, by the mask the likelihood kernel itself applies."""
+    """Rows past their Poisson limit, by the mask the likelihood kernel itself applies.
+
+    This is where the kernel stops evaluating the size, not where the size stops
+    being identified: a size just short of the threshold is as flat in the
+    likelihood and is not counted, so the count is a lower bound that depends on
+    where the solver stopped as well as on the data.
+    """
     return int(np.count_nonzero(_domain(mean, theta, weights, semantics, counts)[-1]))
 
 

@@ -324,8 +324,21 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             "Poisson-like at the diagnostic boundary"
         )
 
-    def limit_row_disclosure(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> str | None:
-        """Say how many rows have a size at the Poisson limit, where it is not identified."""
+    def limit_row_disclosure(
+        self,
+        theta: NDArray,
+        plan: FamilyLikelihoodPlan,
+        predictor_has_terms: tuple[bool, ...] | None = None,
+    ) -> str | None:
+        """Say how many rows have a size at the Poisson limit, where it is not identified.
+
+        The count is of the rows the likelihood kernel itself treats as Poisson
+        (``max(mean, count - 1)`` below ``2**-52`` times the size, in effective
+        units), so it is a lower bound on the rows whose size is unidentified:
+        a size that stopped just short of the kernel's threshold is not counted.
+        ``predictor_has_terms`` says, per parameter, whether its predictor has
+        terms beyond an intercept; a constant size is not told to become one.
+        """
         candidate = _typed_plan(plan, len(theta))
         semantics = candidate.weights.provenance.contract.semantics
         weights = candidate.weights.values
@@ -334,11 +347,17 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         )
         if n == 0:
             return None
+        size_has_terms = predictor_has_terms is None or predictor_has_terms[1]
+        remedy = (
+            "Fit a constant size (family.theta() with no terms) or the Poisson family instead."
+            if size_has_terms
+            else "The size is already constant; use the Poisson family instead."
+        )
         return (
             f"SuperLSS NegativeBinomialLS fit: {n} of {len(theta)} rows have a size at the "
-            "Poisson limit (no overdispersion left there), so the size coefficients are not "
-            "identified at those rows and the fit may stop short of convergence. Fit a "
-            "constant size (family.theta() with no terms) or the Poisson family instead."
+            "Poisson limit (no overdispersion left there; rows close to it are not counted), "
+            "so the size coefficients are not identified at those rows and the fit may stop "
+            f"short of convergence. {remedy}"
         )
 
     def expected_information_natural(

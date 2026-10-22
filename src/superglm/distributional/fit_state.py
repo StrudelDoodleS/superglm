@@ -466,6 +466,7 @@ def _curvature_disclosures(
     solver_result: DenseSolverResult,
     response: NDArray,
     likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout | None = None,
 ) -> tuple[str, ...]:
     """What a fit whose final curvature fell back discloses instead of refusing.
 
@@ -477,7 +478,9 @@ def _curvature_disclosures(
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
     refuse and is disclosed whether or not its diagnosis fires. A family with
-    ``limit_row_disclosure`` also reports the rows at a limit, converged or not.
+    ``limit_row_disclosure`` also reports the rows at a limit, converged or not;
+    it is told which predictors have terms beyond their intercept, and a failed
+    count never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -503,7 +506,20 @@ def _curvature_disclosures(
             messages.append(str(diagnosis))
     note = getattr(family, "limit_row_disclosure", None)
     if note is not None and solver_result.theta is not None:
-        if message := note(solver_result.theta, likelihood_plan):
+        has_terms = (
+            None
+            if layout is None
+            else tuple(
+                state.coefficient_slice.stop - state.coefficient_slice.start
+                > (0 if state.intercept_index is None else 1)
+                for state in sorted(layout.predictors, key=lambda state: state.parameter_index)
+            )
+        )
+        try:
+            message = note(solver_result.theta, likelihood_plan, has_terms)
+        except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
+            message = None
+        if message:
             messages.append(message)
     return tuple(messages)
 
@@ -597,7 +613,7 @@ def prepare_distributional_fit_state(
                 if solver_result.convergence_reason == "no_ascent_direction"
                 else ()
             ),
-            *_curvature_disclosures(family, solver_result, response, likelihood_plan),
+            *_curvature_disclosures(family, solver_result, response, likelihood_plan, layout),
             *(
                 ()
                 if compact_null.converged
