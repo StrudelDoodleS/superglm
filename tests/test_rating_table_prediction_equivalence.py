@@ -3275,8 +3275,13 @@ def test_every_spline_categorical_on_a_covariate_joins_its_bands():
             assert excess.max() <= 64 * _EPS, f"{interaction}[{level}]: past its limit"
 
 
-def _combination_se(model, x: np.ndarray, region: str, fuel: str) -> np.ndarray:
+def _combination_se(
+    model, x: np.ndarray, region: str, fuel: str, *, with_main: bool = True
+) -> np.ndarray:
     """Standard error of ``main + f_region + g_fuel`` at ``x``, from the terms' own scores.
+
+    With ``with_main=False`` the main effect's rows and coefficients are left
+    out: the standard error of ``f_region + g_fuel`` alone.
 
     The same construction as ``_level_curve_se``, with the two levels' rows
     stacked beside the main effect's: the row of a term at ``x`` is its score
@@ -3289,8 +3294,8 @@ def _combination_se(model, x: np.ndarray, region: str, fuel: str) -> np.ndarray:
             [np.arange(g.start, g.end) for g in active if g.feature_name == feature]
         )
 
-    blocks = [model._specs["age"].transform(x)]
-    chosen = [indices("age")]
+    blocks = [model._specs["age"].transform(x)] if with_main else []
+    chosen = [indices("age")] if with_main else []
     for interaction, level in (("age:region", region), ("age:fuel", fuel)):
         ispec = model._interaction_specs[interaction]
         labels = np.full(len(x), level, dtype=object)
@@ -3327,6 +3332,60 @@ def test_a_row_in_a_level_of_each_of_two_interactions_holds_its_own_limit():
     )
     for name in ("age:region", "age:fuel"):
         assert result.band_diagnostics[name]["worst_error"] >= worst * (1.0 - 1e-9)
+
+
+def test_without_a_banded_main_effect_a_combination_holds_the_limit_of_its_deviations(monkeypatch):
+    """``continuous_kind="ppform"`` exports ``age`` exactly: the combination is ``f_C + g_P`` alone.
+
+    The rows are held within ``min(band_se * SE(f + g), log 1.1)``, and the
+    banding is handed that limit: a limit from the standard error of
+    ``main + f + g`` is another number, and a tighter one is held by rows that
+    the correct limit would also have held.
+    """
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    model, X, y = _two_interaction_fit()
+    age = X["age"].to_numpy()
+    captured = []
+    real = exact_banding.exact_bands
+
+    def spy(s, w, tol, max_bands):
+        captured.append(np.array(tol))
+        return real(s, w, tol, max_bands)
+
+    monkeypatch.setattr(exact_banding, "exact_bands", spy)
+    band_se = 0.2
+    payload, widened = _exact_workbook(model, X, y, None, continuous_kind="ppform", band_se=band_se)
+    assert not widened
+    assert [b.name for b in payload.interactions] == ["age:region", "age:fuel"]
+    assert [b.kind for b in payload.main_effects].count("continuous_ppform") == 1
+
+    # The standard-error term must set a limit, or the cap alone would satisfy
+    # the comparisons below; and the two standard errors must differ.
+    binds = []
+    for region in ("B", "C"):
+        limit = _combination_se(model, age, region, "P", with_main=False)
+        assert not np.allclose(limit, _combination_se(model, age, region, "P"), rtol=1e-3)
+        binds.append(np.any(band_se * limit < _LIMIT))
+        error = _banding_error(model, payload, X, region=region, fuel="P")
+        tolerance = np.minimum(band_se * limit, _LIMIT)
+        excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+        assert excess.max() <= 64 * _EPS, f"region {region}, fuel P: {excess.max():.3g} past"
+    assert any(binds)
+
+    # The joint banding's own tolerances: columns are region B and C, fuel P,
+    # then the combinations (B, P) and (C, P); no main effect among them.
+    values = np.unique(age)
+    values = np.unique(age)
+    # Every banding of the export (the table's, the impact bin count's) gets them.
+    assert captured
+    for tol in captured:
+        assert tol.shape == (len(values), 5)
+        for column, region in ((3, "B"), (4, "C")):
+            stacked = band_se * _combination_se(model, values, region, "P", with_main=False)
+            np.testing.assert_allclose(
+                tol[:, column], np.minimum(stacked, _LIMIT), rtol=1e-6, atol=0.0
+            )
 
 
 def test_a_combinations_standard_error_is_that_of_the_stacked_rows():
