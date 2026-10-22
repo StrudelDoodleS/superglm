@@ -858,3 +858,8 @@ def test_a_directory_typed_before_the_default_arrives_is_kept(open_editor_page, 
         default[0].continue_()
         page.wait_for_function("() => window.__defaultDirectoryRead === true")
         assert directory.input_value() == str(tmp_path)
+        # An error answer is parsed through the same json() and also leaves the field
+        # alone, so the marker cannot tell it from the default.  The dialog clears its
+        # status line when it opens and writes a failure there, so an empty line says
+        # the kernel answered with the default.
+        assert page.locator("#exportStatus").text_content() == ""
