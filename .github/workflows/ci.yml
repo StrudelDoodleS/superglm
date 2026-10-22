@@ -136,6 +136,39 @@ jobs:
           TEST_RESULT: ${{ needs.test-compatibility.result }}
         run: python -c "import os, sys; sys.exit(os.environ['TEST_RESULT'] != 'success')"
 
+  polars-floor:
+    # The lock holds the newest Polars, so the matrix never runs the declared
+    # floor (`polars>=1.42.1` in pyproject.toml).  This job repeats the tests
+    # that import Polars on the floor release, which pins its own matching
+    # polars-runtime-32.  Raise the version here when the floor moves.
+    name: Polars 1.42.1 floor · Polars-touching tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      POLARS_FLOOR: "1.42.1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install the locked environment
+        run: uv sync --locked --python 3.13 --extra dev
+
+      - name: Run the Polars-touching tests on the Polars floor
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          NUMBA_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+        run: |
+          uv run --no-sync --with "polars==${POLARS_FLOOR}" python -c "import os, polars; assert polars.__version__ == os.environ['POLARS_FLOOR'], polars.__version__"
+          files=$(grep -rlE "import polars|importorskip\(.polars" tests --include='*.py' | sort)
+          uv run --no-sync --with "polars==${POLARS_FLOOR}" pytest $files -q -n logical --dist worksteal -m "not browser and not docs and not threads"
+
   coverage:
     name: Python 3.12 · combined branch coverage
     if: github.event_name == 'push'
