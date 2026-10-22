@@ -215,6 +215,7 @@ def warmup() -> None:
     from superglm.reml._compensated import _warmup_compensated
     from superglm.reml._leverage_rows import _warmup_leverage_rows
     from superglm.solvers._exact_sums import _warmup_exact_sums
+    from superglm.solvers._structured.block_leaves import _warmup_factor_smooth
     from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
     from superglm.solvers.scop_newton import _warmup_scop
 
@@ -233,6 +234,7 @@ def warmup() -> None:
     _warmup_negative_binomial()
     _warmup_scop()
     _warmup_leaf_kernels()
+    _warmup_factor_smooth()
     from superglm._numba_compile import forget_compiles
 
     forget_compiles()

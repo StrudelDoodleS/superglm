@@ -138,6 +138,7 @@ from superglm.solvers._structured.border import (
     BorderGenerators,
     factor_border,
 )
+from superglm.solvers._structured.leaf_kernels import _absolute, _add, _add_scaled, _assign
 from superglm.solvers._structured.nested import _super_root_inverse
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
@@ -316,9 +317,10 @@ def _norm(A, lo, hi, c):  # pragma: no cover - compiled
 
 
 @numba.njit(cache=True)
-def _reflect(A, row, c, columns, v, M):  # pragma: no cover - compiled
-    """Householder reflector zeroing ``A[row + 1:, c]``, applied to ``columns`` (and to ``M``
-    from both sides when ``M`` is not empty).  Returns ``tau``."""
+def _reflect(A, row, c, columns, v):  # pragma: no cover - compiled
+    """Householder reflector zeroing ``A[row + 1:, c]``, applied to ``columns``.  Returns
+    ``tau``: ``0.0`` exactly when the column is already zero (no reflection); otherwise
+    ``|beta - alpha| >= |beta| > 0``, so ``tau`` is never ``0.0``."""
     m = A.shape[0]
     alpha = A[row, c]
     xnorm = _norm(A, row + 1, m, c)
@@ -340,8 +342,20 @@ def _reflect(A, row, c, columns, v, M):  # pragma: no cover - compiled
         A[row, d] -= s
         for i in range(row + 1, m):
             A[i, d] -= s * v[i]
+    return tau
+
+
+@numba.njit(cache=True)
+def _reflect_signed(A, row, c, columns, v, M):  # pragma: no cover - compiled
+    """``_reflect``, then ``M <- H M H`` with ``H = I - tau v v'`` on rows/columns ``row..m``.
+
+    The Fisher kernels call ``_reflect`` alone, so they compile no middle-factor code.
+    """
+    tau = _reflect(A, row, c, columns, v)
+    if tau == 0.0:  # ``_reflect`` formed no reflector: ``M`` stays as it is
+        return 0.0
+    m = A.shape[0]
     if M.shape[0]:
-        # M <- H M H with H = I - tau v v' on rows/columns row..m
         n = M.shape[0]
         for j in range(n):
             s = M[row, j]
@@ -404,7 +418,6 @@ def _leaf_exports(R_acc, roots, k, w_pos, Es, Ex, Qx):  # pragma: no cover - com
     K, p = R_acc.shape[0], R_acc.shape[2]
     w = p - k
     m = 2 * k
-    empty = np.zeros((0, 0))
     v = np.zeros(m)
     for level in range(K):
         A = np.zeros((m, p))
@@ -416,7 +429,7 @@ def _leaf_exports(R_acc, roots, k, w_pos, Es, Ex, Qx):  # pragma: no cover - com
         used = np.zeros(p, np.bool_)
         for j in range(k):
             used[j] = True
-            _reflect(A, j, j, _others(p, used), v, empty)
+            _reflect(A, j, j, _others(p, used), v)
         for i in range(k):
             for j in range(k):
                 Es[level, i, j] = A[i, j] if j >= i else 0.0
@@ -450,7 +463,6 @@ def _decide(Es, child, h, k, sqrt_tau, node_scale, deferred, Es_internal):  # pr
     """
     n_int = child.shape[0]
     m = 2 * k
-    empty = np.zeros((0, 0))
     v = np.zeros(m)
     for node in range(n_int):
         root = node == n_int - 1
@@ -467,20 +479,21 @@ def _decide(Es, child, h, k, sqrt_tau, node_scale, deferred, Es_internal):  # pr
                     if not root:
                         A[base + i, k + j] = e
         used = np.zeros(width, np.bool_)
-        row = 0
+        # int64, not the literal 0, so _norm and _reflect compile once
+        row = np.int64(0)
         for j in range(k):
             remaining = _norm(A, row, m, j)
             if remaining <= sqrt_tau * node_scale[node, j]:
                 deferred[node, j] = True
                 continue
             used[j] = True
-            _reflect(A, row, j, _others(width, used), v, empty)
+            _reflect(A, row, j, _others(width, used), v)
             row += 1
         if root:
             continue
         for j in range(k):
             used[k + j] = True
-            _reflect(A, row, k + j, _others(width, used), v, empty)
+            _reflect(A, row, k + j, _others(width, used), v)
             row += 1
         rank = 0
         for j in range(k):
@@ -537,7 +550,6 @@ def _fisher_sweep(E_leaf, child, h, k, deferred, carry_pos, E_int, Rzz, Rzx, ran
     """  # pragma: no cover - compiled
     n_int = child.shape[0]
     n_ext = E_leaf.shape[2] - k
-    empty = np.zeros((0, 0))
     v = np.zeros(2 * k)
     for node in range(n_int):
         root = node == n_int - 1
@@ -547,7 +559,7 @@ def _fisher_sweep(E_leaf, child, h, k, deferred, carry_pos, E_int, Rzz, Rzx, ran
         used = np.zeros(width, np.bool_)
         for j in range(rank + s_count):
             used[j] = True
-            _reflect(A, j, j, _others(width, used), v, empty)
+            _reflect(A, j, j, _others(width, used), v)
         rank_out[node] = rank
         offset = rank + s_count
         for i in range(rank):
@@ -601,7 +613,7 @@ def _signed_leaf_exports(B, signature, roots, k, w_pos, R_out, M_out):  # pragma
         used = np.zeros(p, np.bool_)
         for j in range(p):
             used[j] = True
-            _reflect(A, j, j, _others(p, used), v, M)
+            _reflect_signed(A, j, j, _others(p, used), v, M)
         for i in range(p):
             for j in range(p):
                 if j >= i:
@@ -656,7 +668,7 @@ def _signed_sweep(
         used = np.zeros(width, np.bool_)
         for j in range(width):
             used[j] = True
-            _reflect(A, j, j, _others(width, used), v, M)
+            _reflect_signed(A, j, j, _others(width, used), v, M)
         total = 0.0
         for i in range(width):
             for j in range(width):
@@ -706,8 +718,11 @@ def _signed_sweep(
         # |dN| <= gamma_r |L^-1| |L| |N|, err = gamma_{r+1} (|M_rr| + |N|'|N|) + 2 |N|' |dN|
         gk = _UNIT * max(rank, 1) / (1.0 - _UNIT * max(rank, 1))
         gk1 = _UNIT * (rank + 1) / (1.0 - _UNIT * (rank + 1))
-        absN = np.abs(N)
-        dN = gk * _mm(np.abs(Linv), _mm(np.abs(L), absN))
+        absN = _absolute(N)
+        dN = _mm(_absolute(Linv), _mm(_absolute(L), absN))
+        for i in range(rank):
+            for c in range(rest):
+                dN[i, c] = gk * dN[i, c]
         ef = 0.0
         sf = 0.0
         for i in range(rest):
@@ -835,9 +850,10 @@ def _down_sweep(
                 for e in range(n_x):
                     S[target, i, e] = S[own, i, e] + factor * Zx[node, i, e]
                 sigma[target, i] = sigma[own, i] + factor * z0[node, i]
-            A = np.eye(k) - factor * G
+            A = _transfer(G, factor, k)
             AP = _mm(A, Psi[own].copy())
-            Psi[target] = _mm(AP, A.T.copy()) + (factor * factor) * _mm(Y, Y.T.copy())
+            _assign(Psi[target], _mm(AP, A.T.copy()))
+            _add_scaled(Psi[target], factor * factor, _mm(Y, Y.T.copy()))
 
 
 def _leaf_column_norms2(leaf) -> NDArray:
@@ -905,8 +921,8 @@ def _up_vectors(child, h, G_all, Y_all, U_leaf):  # pragma: no cover - compiled
             source = U_leaf[-c - 1] if c < 0 else pi[c]
             factor = h[node, side]
             A = _transfer(G_all[node], factor, k)
-            pi[node] += _mm(A.T.copy(), source)
-            w[node] += factor * _mm(Y_all[node].T.copy(), source)
+            _add(pi[node], _mm(A.T.copy(), source))
+            _add_scaled(w[node], factor, _mm(Y_all[node].T.copy(), source))
     return w
 
 
@@ -923,11 +939,9 @@ def _down_vectors(child, h, G_all, Y_all, w):  # pragma: no cover - compiled
             c = child[node, side]
             factor = h[node, side]
             A = _transfer(G_all[node], factor, k)
-            value = _mm(A, own) + factor * _mm(Y_all[node], w[node])
-            if c < 0:
-                t_leaf[-c - 1] = value
-            else:
-                t_node[c] = value
+            value = t_leaf[-c - 1] if c < 0 else t_node[c]
+            _assign(value, _mm(A, own))
+            _add_scaled(value, factor, _mm(Y_all[node], w[node]))
     return t_leaf, t_node
 
 
@@ -958,14 +972,14 @@ def _operator_aggregates(child, h, G_all, Y_all, D_leaf, Xi_leaf):  # pragma: no
             A = _transfer(G_all[node], factor, k)
             At = A.T.copy()
             AtO = _mm(At, om)
-            Omega[node] += _mm(AtO, A)
-            Xi[node] += _mm(At, xs)
-            Lam[node] += factor * AtO
-            theta += (factor * factor) * om
-            xi_sum += factor * xs
+            _add(Omega[node], _mm(AtO, A))
+            _add(Xi[node], _mm(At, xs))
+            _add_scaled(Lam[node], factor, AtO)
+            _add_scaled(theta, factor * factor, om)
+            _add_scaled(xi_sum, factor, xs)
         Yt = Y_all[node].T.copy()
-        Xvv[node] = _mm(Yt, _mm(theta, Y_all[node]))
-        Xvx[node] = _mm(Yt, xi_sum)
+        _assign(Xvv[node], _mm(Yt, _mm(theta, Y_all[node])))
+        _assign(Xvx[node], _mm(Yt, xi_sum))
     return Lam, Xvv, Xvx
 
 
@@ -984,9 +998,9 @@ def _descendant_sums(child, h, G_all, Y_all, Lam, w):  # pragma: no cover - comp
                 continue
             factor = h[node, side]
             A = _transfer(G_all[node], factor, k)
-            acc += _mm(A.T.copy(), mu[c])
-            out[node] += factor * _mm(Y_all[node].T.copy(), mu[c])
-        mu[node] = acc
+            _add(acc, _mm(A.T.copy(), mu[c]))
+            _add_scaled(out[node], factor, _mm(Y_all[node].T.copy(), mu[c]))
+        _assign(mu[node], acc)
     return out
 
 
@@ -1015,14 +1029,15 @@ def _path_quadratics(child, h, G_all, Y_all, Psi_node, Lam, Xvv, Xvx):  # pragma
             A = _transfer(G_all[node], factor, k)
             At = A.T.copy()
             cross = _mm(_mm(A, PLy), Yt)
-            Q = _mm(_mm(A, Q_node[node]), At) + (factor * factor) * yXy + factor * (cross + cross.T)
-            r = _mm(A, r_node[node]) + factor * yX
-            if c < 0:
-                Q_leaf[-c - 1] = Q
-                r_leaf[-c - 1] = r
-            else:
-                Q_node[c] = Q
-                r_node[c] = r
+            Q = Q_leaf[-c - 1] if c < 0 else Q_node[c]
+            r = r_leaf[-c - 1] if c < 0 else r_node[c]
+            _assign(Q, _mm(_mm(A, Q_node[node]), At))
+            square = factor * factor
+            for i in range(k):
+                for j in range(k):
+                    Q[i, j] = (Q[i, j] + square * yXy[i, j]) + factor * (cross[i, j] + cross[j, i])
+            _assign(r, _mm(A, r_node[node]))
+            _add_scaled(r, factor, yX)
     return Q_leaf, r_leaf
 
 
@@ -1070,6 +1085,35 @@ def _leaf_path_row_forms(
                 side = node_side[node]
                 node = node_parent[node]
         out[r] = total
+
+
+def _warmup_balance_tree() -> None:
+    """Compile the tree kernels an ``sz`` fit reaches, Fisher and signed rows (no rows).
+
+    The operands take the layouts the tree passes: its frozen ``child`` and
+    ``h`` arrays, everything else C-contiguous and writable.  The helpers
+    (``_reflect``, ``_stack``, ``_mm``, ...) compile with their callers.
+    ``_leaf_path_row_forms`` is left to its first use: only the hat diagonal
+    of a fit's diagnostics reads it.
+    """
+    f1, f2, f3 = np.zeros(0), np.zeros((0, 0)), np.zeros((0, 0, 0))
+    i1, i2 = np.zeros(0, dtype=np.int64), np.zeros((0, 0), dtype=np.int64)
+    deferred = np.zeros((0, 0), dtype=np.bool_)
+    child, h = np.zeros((0, 2), dtype=np.int64), np.zeros((0, 2))
+    child.setflags(write=False)
+    h.setflags(write=False)
+    _leaf_exports(f3, f3, 0, i1, f3, f3, f2)
+    _signed_leaf_exports(f3, f2, f3, 0, i1, f3, f3)
+    _node_column_norms(child, h, f2)
+    _decide(f3, child, h, 0, 0.0, f2, deferred, f3)
+    _fisher_sweep(f3, child, h, 0, deferred, i2, f3, f3, f3, i1, f2)
+    _signed_sweep(f3, f3, child, h, 0, deferred, i2, f3, f3, f3, f3, i1, f2, f1, f1, f1)
+    _down_sweep(child, h, 0, i1, f3, f3, deferred, i2, f3, f2, f3, f2, f3, f3, f3)
+    _up_vectors(child, h, f3, f3, f3)
+    _down_vectors(child, h, f3, f3, f3)
+    _operator_aggregates(child, h, f3, f3, f3, f3)
+    _descendant_sums(child, h, f3, f3, f3, f3)
+    _path_quadratics(child, h, f3, f3, f3, f3, f3, f3)
 
 
 # ----------------------------------------------------------------- system ----

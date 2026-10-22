@@ -547,6 +547,8 @@ def _distinct_level_counts(
     if dominant.is_discrete:
         bins = sorted_source[0]
         data, indices, indptr = np.zeros(len(bins)), bins, np.arange(len(bins) + 1)
+        # Read-only, as an exact term's sorted CSR arrays are: one signature serves both.
+        data.flags.writeable = indptr.flags.writeable = False
     else:
         data, indices, indptr = sorted_source
     return _distinct_level_rows(data, indices, indptr, starts, ordered_weights, cap)

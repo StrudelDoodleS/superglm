@@ -140,6 +140,10 @@ def _leaf_rows(
 ) -> None:
     """Write the dense border rows ``X_b[leaf_order[lo:hi]] - c`` into ``out`` (``layout.leaf_rows``)."""
     rows = layout.leaf_rows
+    # Read-only whatever the caller holds, so the RandomEffect and FactorSmooth
+    # leaf passes share one signature of each row kernel.
+    center = center.view()
+    center.flags.writeable = False
     _coded_rows(
         out,
         rows.codes[lo:hi],

@@ -123,65 +123,20 @@ _FIRST_USE: dict[str, str] = {
         "reached them (3 with a pure-noise smooth); 14.5 s to compile, 0.12 s from cache",
     ),
     **dict.fromkeys(
-        [
-            *(
-                _STRUCTURED + "balance_tree." + name
-                for name in (
-                    "_decide",
-                    "_descendant_sums",
-                    "_down_sweep",
-                    "_down_vectors",
-                    "_fisher_sweep",
-                    "_leaf_exports",
-                    "_leaf_path_row_forms",
-                    "_mm",
-                    "_node_column_norms",
-                    "_norm",
-                    "_operator_aggregates",
-                    "_others",
-                    "_path_quadratics",
-                    "_reflect",
-                    "_signed_leaf_exports",
-                    "_signed_sweep",
-                    "_stack",
-                    "_transfer",
-                    "_up_vectors",
-                )
-            ),
-            *(
-                _STRUCTURED + "block_leaves." + name
-                for name in (
-                    "_close_level",
-                    "_close_levels",
-                    "_exact_basis_rows",
-                    "_fisher_leaf_segments",
-                    "_fisher_trials",
-                    "_house_q",
-                    "_house_qr",
-                    "_leaf_segments",
-                    "_level_row_forms",
-                    "_merge_level",
-                    "_mm",
-                    "_moment_segments",
-                    "_raw_moment_segments",
-                    "_signed_trials",
-                    "_table_basis_rows",
-                    "_upper_of",
-                    "_upper_solve",
-                )
-            ),
-            *(
-                _STRUCTURED + "leaf_kernels." + name
-                for name in (
-                    "_distinct_level_rows",
-                    "_first_distinct_level_bins",
-                    "_first_distinct_level_rows",
-                )
-            ),
-            "superglm.solvers.mode_score._factor_smooth_level_sums",
-        ],
-        "the structured engine's FactorSmooth kernels: only a FactorSmooth fit reaches them, "
-        "and they take 7-10 s to compile for basis='fs' and 26 s for 'sz'",
+        (
+            _STRUCTURED + "balance_tree._leaf_path_row_forms",
+            _STRUCTURED + "block_leaves._level_row_forms",
+        ),
+        "a structured FactorSmooth fit's hat diagonal (Cook's distance, standardized "
+        "residuals): diagnostics, not the fit",
+    ),
+    **dict.fromkeys(
+        (
+            _STRUCTURED + "block_leaves._moment_segments",
+            _STRUCTURED + "block_leaves._close_levels",
+        ),
+        "the signed moment segments of a binned FactorSmooth term and the close of a stored "
+        "level stack: no census fit reaches them (fs or sz, Fisher or signed, exact or binned)",
     ),
     _STRUCTURED + "leaf_kernels._sparse_rows": (
         "a RandomEffect leaf pass whose border has a row its tables cannot code: none in the census"
