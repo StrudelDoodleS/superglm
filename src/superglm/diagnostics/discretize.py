@@ -78,10 +78,14 @@ class DiscretizationResult:
         its weighted mean and bands can bunch there.  A spline-by-categorical
         interaction named in ``features`` has an entry too, for its levels'
         curves on the shared bands: each level's total relativity ``main +
-        deviation`` when the main effect is binned in the same call (the
-        worst and mean taken over the levels), the level's deviation alone
-        when it is not.  The covariate's entries share one ``bands`` and one
-        ``tolerance_factor``.
+        deviation`` when the main effect is binned in the same call, the
+        level's deviation alone when it is not.  With several such
+        interactions on the covariate, the entry also covers each
+        combination of levels it takes part in that occurs among the rows of
+        positive weight, and when a level was dropped, the main effect's
+        curve, which is that level's total.  The worst and mean are taken
+        over all of those curves.  The covariate's entries share one
+        ``bands`` and one ``tolerance_factor``.
     """
 
     tables: dict[str, pd.DataFrame]
@@ -1260,7 +1264,9 @@ def discretization_impact(
         relativity (main effect plus the level's deviation, with its own
         standard error) within their limits, and the cells are the bands'
         weighted means of the deviations.  Where the main effect is not named
-        the bands hold the deviations themselves.
+        the bands hold the deviations themselves.  With several such
+        interactions on one covariate, every combination of their levels that
+        occurs among the rows of positive weight is held within its limit too.
         Geometry weight means replication mass under the frequency contract and
         unit physical-row mass for Tweedie.
     features : list[str], optional
