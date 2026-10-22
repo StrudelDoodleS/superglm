@@ -864,7 +864,9 @@ def screen_interactions(
         # frame would silently pair them with the wrong observations.  Verify
         # against the retained fit-data guard when one is available.
         guard = getattr(model, "_fit_data_guard", None)
-        if guard is not None and not guard.matches_retained_values(X, y):
+        if guard is not None and not guard.matches_retained_values(
+            X, y, own_frame=X is getattr(model, "_fit_X_ref", None)
+        ):
             raise ValueError(
                 "sample_weight/offset were inherited from the fit, but X/y do not "
                 "match the retained training data (reordered or modified rows); "

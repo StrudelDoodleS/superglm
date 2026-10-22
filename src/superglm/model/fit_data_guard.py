@@ -27,13 +27,16 @@ def _frame_digest_matches(
     scheme: str | None,
     *,
     include_index: bool,
+    own_frame: bool = False,
 ) -> bool:
     """Compare a frame with a stored digest written under *scheme*.
 
     ``scheme`` is None for guards written before the tag existed.  Those used
     Polars' own row hash on Polars frames, which can be recomputed on Polars 1.x
-    and not on 2.x; a digest that cannot be recomputed is not a mismatch, so it
-    warns once and lets the retained data stand.
+    and not on 2.x.  A digest that cannot be recomputed says nothing about the
+    frame.  For the model's own retained frame (``own_frame``) that is not a
+    mismatch, so it warns once and lets the retained data stand; any other frame
+    is refused, as the data it holds cannot be shown to be the training data.
     """
     if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
         return frame.digest(columns, include_index=include_index) == expected
@@ -44,6 +47,8 @@ def _frame_digest_matches(
             origin = "written by Polars 1.x"
     else:
         origin = f"written under the digest scheme {scheme!r}"
+    if not own_frame:
+        return False
     global _UNVERIFIABLE_WARNED
     if not _UNVERIFIABLE_WARNED:
         _UNVERIFIABLE_WARNED = True
@@ -115,8 +120,12 @@ class FitGeometryGuard:
             x_digest_scheme=frame.digest_scheme,
         )
 
-    def matches(self, X, sample_weight, offset) -> bool:
-        """Return whether evaluation rows, weights, and offset match the fit."""
+    def matches(self, X, sample_weight, offset, *, own_frame: bool = False) -> bool:
+        """Return whether evaluation rows, weights, and offset match the fit.
+
+        ``own_frame`` says ``X`` is the model's own retained frame, which a
+        digest that cannot be recomputed under this Polars may not refuse.
+        """
         try:
             frame = as_eager_frame(X)
             n_weights, weight_digest = _numeric_vector_digest(sample_weight)
@@ -132,6 +141,7 @@ class FitGeometryGuard:
                     self.x_digest,
                     self.x_digest_scheme,
                     include_index=False,
+                    own_frame=own_frame,
                 )
                 and weight_digest == self.weight_digest
                 and offset_digest == self.offset_digest
@@ -139,14 +149,14 @@ class FitGeometryGuard:
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
-    def matches_training(self, X, y, sample_weight, offset) -> bool:
+    def matches_training(self, X, y, sample_weight, offset, *, own_frame: bool = False) -> bool:
         """Return whether all supplied rows reproduce the fitted training inputs."""
         try:
             n_y, y_digest = _numeric_vector_digest(y)
             return bool(
                 n_y == self.n_rows
                 and y_digest == self.y_digest
-                and self.matches(X, sample_weight, offset)
+                and self.matches(X, sample_weight, offset, own_frame=own_frame)
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
@@ -182,7 +192,7 @@ class FitDataGuard:
             x_digest_scheme=frame.digest_scheme,
         )
 
-    def _matches_frame(self, X: EagerFrame | FrameLike) -> bool:
+    def _matches_frame(self, X: EagerFrame | FrameLike, *, own_frame: bool = False) -> bool:
         try:
             frame = as_eager_frame(X)
             return frame.backend == self.x_backend and _frame_digest_matches(
@@ -191,6 +201,7 @@ class FitDataGuard:
                 self.x_digest,
                 self.x_digest_scheme,
                 include_index=True,
+                own_frame=own_frame,
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
@@ -204,6 +215,7 @@ class FitDataGuard:
         *,
         fit_weights: NDArray | None,
         fit_offset: NDArray | None,
+        own_frame: bool = False,
     ) -> bool:
         """Return whether all identity-matched inputs retain their fit-time values."""
         if not _same_numeric_vector(y, self.y_snapshot):
@@ -216,22 +228,23 @@ class FitDataGuard:
             fit_offset is None or not _same_numeric_vector(offset, fit_offset)
         ):
             return False
-        if not self._matches_frame(X):
+        if not self._matches_frame(X, own_frame=own_frame):
             return False
         return True
 
-    def matches_retained_values(self, X, y) -> bool:
+    def matches_retained_values(self, X, y, *, own_frame: bool = False) -> bool:
         """Return whether retained feature/response values still match fit time.
 
         Unlike :meth:`matches`, this path is used before an operation consumes
         retained caller data.  It therefore accepts an equal independent frame,
         including after a model deepcopy or pickle round trip.  The content digest
         catches both pandas mutations and writable NumPy aliases into a frame's
-        backing storage.
+        backing storage.  ``own_frame`` says ``X`` is the model's own retained
+        frame (see :func:`_frame_digest_matches`).
         """
         if not _same_numeric_vector(y, self.y_snapshot):
             return False
-        if not self._matches_frame(X):
+        if not self._matches_frame(X, own_frame=own_frame):
             return False
         return True
 
@@ -239,7 +252,8 @@ class FitDataGuard:
 def require_unchanged_fit_data(model, X, y) -> None:
     """Reject use of retained caller data that changed after fitting."""
     guard = getattr(model, "_fit_data_guard", None)
-    if guard is None or not guard.matches_retained_values(X, y):
+    own_frame = X is getattr(model, "_fit_X_ref", None)
+    if guard is None or not guard.matches_retained_values(X, y, own_frame=own_frame):
         raise RuntimeError(
             "retained fit data were mutated after fitting or cannot be verified; "
             "refit before refreshing fitted state"

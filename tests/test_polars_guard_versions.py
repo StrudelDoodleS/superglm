@@ -186,7 +186,32 @@ def test_a_guard_from_a_scheme_this_release_does_not_know_is_not_a_mutation(monk
     )
 
     with pytest.warns(UserWarning, match="polars-values-v9"):
-        assert future.matches_retained_values(X, y)
+        assert future.matches_retained_values(X, y, own_frame=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert not future.matches_retained_values(X.clone(), y)
+
+
+def test_a_legacy_guard_does_not_vouch_for_a_frame_the_caller_supplies(monkeypatch) -> None:
+    """The unverifiable-digest allowance covers the model's own retained frame
+    only.  Rows the caller passes to ``random_effects`` can be anything, so where
+    the old digest cannot be recomputed they are refused as before, not read
+    with the fitted posterior errors (here 58/1/1 groups against the 20/20/20
+    that were fitted).  The retained frame still reports, with its one warning."""
+    monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
+    model = _load("legacy")["model"]
+    changed = model._fit_X_ref.with_columns(pl.Series("group", ["a"] * 58 + ["b", "c"]))
+
+    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
+        model.random_effects(
+            "group",
+            X=changed,
+            y=model._fit_y_ref,
+            sample_weight=model._fit_weights,
+            offset=model._fit_offset,
+        )
+    with pytest.warns(UserWarning, match=NOTICE) if POLARS_2 else warnings.catch_warnings():
+        model.random_effects("group")
 
 
 def test_fitting_on_a_polars_frame_writes_a_guard_that_round_trips() -> None:

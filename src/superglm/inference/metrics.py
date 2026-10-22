@@ -405,6 +405,7 @@ class ModelMetrics:
                         offset,
                         fit_weights=getattr(model, "_fit_weights", None),
                         fit_offset=getattr(model, "_fit_offset", None),
+                        own_frame=self._X is fit_X,
                     )
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
@@ -453,6 +454,7 @@ class ModelMetrics:
                 self._X,
                 self._weights,
                 self._offset,
+                own_frame=self._X is fit_X,
             )
         else:
             # Identity misses the training rows after a pickle round trip or when
@@ -474,7 +476,9 @@ class ModelMetrics:
             ) or bool(
                 keeps_fit_covariance
                 and geometry_guard is not None
-                and geometry_guard.matches_training(self._X, self._y, self._weights, self._offset)
+                and geometry_guard.matches_training(
+                    self._X, self._y, self._weights, self._offset, own_frame=self._X is fit_X
+                )
             )
         self._uses_compact_fit_inference = bool(
             (

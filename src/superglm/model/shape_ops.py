@@ -786,6 +786,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         offset,
         fit_weights=getattr(model, "_fit_weights", None),
         fit_offset=getattr(model, "_fit_offset", None),
+        own_frame=X is getattr(model, "_fit_X_ref", None),
     ):
         raise RuntimeError(
             "post-fit sample_weight and offset must match the fitted data; "
