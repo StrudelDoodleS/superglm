@@ -74,131 +74,6 @@ def _scaled_power_sums(
         errors[power] = _gamma_bound(float(4 * power + 8)) * absolute / denominator + _TINY
 
 
-@njit(cache=True)
-def _theta_series_row(
-    row: int,
-    counts: NDArray[np.int64],
-    mean: NDArray[np.float64],
-    theta: NDArray[np.float64],
-    candidate_scale: NDArray[np.float64],
-    remainder_error: NDArray[np.float64],
-    remainder_scale: NDArray[np.float64],
-    derivative_order: int,
-    series_order: int,
-    exponents: NDArray[np.float64],
-    bernoulli: NDArray[np.float64],
-    use: NDArray[np.bool_],
-    natural: NDArray[np.float64],
-    direct: NDArray[np.float64],
-    sums: NDArray[np.float64],
-    sum_errors: NDArray[np.float64],
-    coefficients: NDArray[np.float64],
-) -> None:
-    count = counts[row]
-    row_mean = mean[row]
-    row_theta = theta[row]
-    scale = candidate_scale[row]
-    x = scale / row_theta
-    polynomial = 0.0
-    absolute = 0.0
-    coefficient_error_absolute = 0.0
-    weighted = 0.0
-    transformed = 0.0
-    weighted_absolute = 0.0
-    weighted_error = 0.0
-    _scaled_power_sums(count, bernoulli, sums, sum_errors, coefficients)
-    count_scale = float(count) / scale if count > 1 else 0.0
-    for order in range(series_order, 1, -1):
-        if count > 1:
-            offset_factor = math.pow(count_scale, exponents[order])
-            offset = sums[order - 1] * offset_factor
-            offset_error = (
-                abs(offset_factor) * sum_errors[order - 1]
-                + _gamma_bound(float(order + 2)) * abs(offset)
-                + _TINY
-            )
-        else:
-            offset = 0.0
-            offset_error = 0.0
-        mean_term = math.pow(row_mean / scale, exponents[order - 1]) * (
-            ((order - 1.0) / order * row_mean - count) / scale
-        )
-        sign = -1.0 if order % 2 == 0 else 1.0
-        coefficient = sign * (offset + mean_term)
-        coefficient_abs = abs(offset) + abs(mean_term)
-        polynomial = coefficient + x * polynomial
-        absolute = coefficient_abs + x * absolute
-        coefficient_error_absolute = offset_error + x * coefficient_error_absolute
-        if derivative_order == 2:
-            weighted = order * coefficient + x * weighted
-            transformed = (1.0 - order) * coefficient + x * transformed
-            weighted_absolute = order * coefficient_abs + x * weighted_absolute
-            weighted_error = order * offset_error + x * weighted_error
-
-    natural[row, 0] = x * x * polynomial
-    direct[row, 0] = scale * x * polynomial
-    order_value = exponents[series_order]
-    next_order_value = exponents[series_order + 1]
-    mean_ratio = row_mean / row_theta
-    shifted = count - 1 if count > 1 else 0
-    offset_ratio = shifted / row_theta
-    delta = abs(row_mean - count)
-    score_tail = (
-        count / row_theta * math.pow(offset_ratio, order_value) / (1.0 - offset_ratio)
-        + math.pow(mean_ratio, next_order_value) / next_order_value
-        + delta / row_theta * math.pow(mean_ratio, order_value) / (1.0 - mean_ratio)
-    )
-    series_score_error = (
-        x
-        * x
-        * (_gamma_bound(80.0) * absolute + (1.0 + _gamma_bound(32.0)) * coefficient_error_absolute)
-        + score_tail
-        + _TINY
-    )
-    total = row_mean + row_theta
-    recurrence_score_scale = (
-        count / total * ((row_mean + shifted) / row_theta) + remainder_scale[row]
-    )
-    recurrence_score_error = (
-        _gamma_bound(float(count + 64)) * recurrence_score_scale + remainder_error[row]
-    )
-    use[row, 0] = series_score_error < recurrence_score_error
-    if derivative_order == 1:
-        return
-
-    two = exponents[2]
-    natural[row, 1] = -(x * x / row_theta) * weighted
-    direct[row, 1] = scale * x * transformed
-    hessian_tail = (
-        count
-        / math.pow(row_theta, two)
-        * math.pow(offset_ratio, order_value)
-        * (next_order_value - series_order * offset_ratio)
-        / math.pow(1.0 - offset_ratio, two)
-        + math.pow(mean_ratio, next_order_value) / row_theta / (1.0 - mean_ratio)
-        + delta
-        / math.pow(row_theta, two)
-        * math.pow(mean_ratio, order_value)
-        * (next_order_value - series_order * mean_ratio)
-        / math.pow(1.0 - mean_ratio, two)
-    )
-    series_hessian_error = (
-        x
-        * x
-        / row_theta
-        * (_gamma_bound(96.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
-        + hessian_tail
-        + _TINY
-    )
-    recurrence_hessian_scale = (
-        recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
-        + (row_mean / total) * mean_ratio / total
-    )
-    use[row, 1] = series_hessian_error < (
-        _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _TINY
-    )
-
-
 @njit(cache=True, nogil=True)
 def theta_series_serial(
     rows: NDArray[np.int64],
@@ -216,29 +91,126 @@ def theta_series_serial(
     natural: NDArray[np.float64],
     direct: NDArray[np.float64],
 ) -> None:
-    """Fill ``use``, ``natural`` and ``direct`` on the candidate ``rows``, one row at a time."""
+    """Fill ``use``, ``natural`` and ``direct`` on the candidate ``rows``, one row at a time.
+
+    One function, with the row body in the loop.  A call per row that passes
+    the fourteen arrays counts each array's reference up and down again (an
+    atomic operation on its shared meminfo, twice per array per row, about
+    120 ns a row where the whole row now takes 200); numba's parallel loops, which
+    this core replaces, hand their body raw pointers and pay none of it.  The
+    scratch is touched only for counts above one, the only counts that read it.
+    """
     sums = np.empty(series_order)
     sum_errors = np.empty(series_order)
     coefficients = np.empty(series_order)
     for index in range(rows.shape[0]):
-        _theta_series_row(
-            rows[index],
-            counts,
-            mean,
-            theta,
-            candidate_scale,
-            remainder_error,
-            remainder_scale,
-            derivative_order,
-            series_order,
-            exponents,
-            bernoulli,
-            use,
-            natural,
-            direct,
-            sums,
-            sum_errors,
-            coefficients,
+        row = rows[index]
+        count = counts[row]
+        row_mean = mean[row]
+        row_theta = theta[row]
+        scale = candidate_scale[row]
+        x = scale / row_theta
+        polynomial = 0.0
+        absolute = 0.0
+        coefficient_error_absolute = 0.0
+        weighted = 0.0
+        transformed = 0.0
+        weighted_absolute = 0.0
+        weighted_error = 0.0
+        if count > 1:  # the power sums are read only for counts above one
+            _scaled_power_sums(count, bernoulli, sums, sum_errors, coefficients)
+        count_scale = float(count) / scale if count > 1 else 0.0
+        for order in range(series_order, 1, -1):
+            if count > 1:
+                offset_factor = math.pow(count_scale, exponents[order])
+                offset = sums[order - 1] * offset_factor
+                offset_error = (
+                    abs(offset_factor) * sum_errors[order - 1]
+                    + _gamma_bound(float(order + 2)) * abs(offset)
+                    + _TINY
+                )
+            else:
+                offset = 0.0
+                offset_error = 0.0
+            mean_term = math.pow(row_mean / scale, exponents[order - 1]) * (
+                ((order - 1.0) / order * row_mean - count) / scale
+            )
+            sign = -1.0 if order % 2 == 0 else 1.0
+            coefficient = sign * (offset + mean_term)
+            coefficient_abs = abs(offset) + abs(mean_term)
+            polynomial = coefficient + x * polynomial
+            absolute = coefficient_abs + x * absolute
+            coefficient_error_absolute = offset_error + x * coefficient_error_absolute
+            if derivative_order == 2:
+                weighted = order * coefficient + x * weighted
+                transformed = (1.0 - order) * coefficient + x * transformed
+                weighted_absolute = order * coefficient_abs + x * weighted_absolute
+                weighted_error = order * offset_error + x * weighted_error
+
+        natural[row, 0] = x * x * polynomial
+        direct[row, 0] = scale * x * polynomial
+        order_value = exponents[series_order]
+        next_order_value = exponents[series_order + 1]
+        mean_ratio = row_mean / row_theta
+        shifted = count - 1 if count > 1 else 0
+        offset_ratio = shifted / row_theta
+        delta = abs(row_mean - count)
+        score_tail = (
+            count / row_theta * math.pow(offset_ratio, order_value) / (1.0 - offset_ratio)
+            + math.pow(mean_ratio, next_order_value) / next_order_value
+            + delta / row_theta * math.pow(mean_ratio, order_value) / (1.0 - mean_ratio)
+        )
+        series_score_error = (
+            x
+            * x
+            * (
+                _gamma_bound(80.0) * absolute
+                + (1.0 + _gamma_bound(32.0)) * coefficient_error_absolute
+            )
+            + score_tail
+            + _TINY
+        )
+        total = row_mean + row_theta
+        recurrence_score_scale = (
+            count / total * ((row_mean + shifted) / row_theta) + remainder_scale[row]
+        )
+        recurrence_score_error = (
+            _gamma_bound(float(count + 64)) * recurrence_score_scale + remainder_error[row]
+        )
+        use[row, 0] = series_score_error < recurrence_score_error
+        if derivative_order == 1:
+            continue
+
+        two = exponents[2]
+        natural[row, 1] = -(x * x / row_theta) * weighted
+        direct[row, 1] = scale * x * transformed
+        hessian_tail = (
+            count
+            / math.pow(row_theta, two)
+            * math.pow(offset_ratio, order_value)
+            * (next_order_value - series_order * offset_ratio)
+            / math.pow(1.0 - offset_ratio, two)
+            + math.pow(mean_ratio, next_order_value) / row_theta / (1.0 - mean_ratio)
+            + delta
+            / math.pow(row_theta, two)
+            * math.pow(mean_ratio, order_value)
+            * (next_order_value - series_order * mean_ratio)
+            / math.pow(1.0 - mean_ratio, two)
+        )
+        series_hessian_error = (
+            x
+            * x
+            / row_theta
+            * (_gamma_bound(96.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
+            + hessian_tail
+            + _TINY
+        )
+        recurrence_hessian_scale = (
+            recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
+            + (row_mean / total) * mean_ratio / total
+        )
+        use[row, 1] = series_hessian_error < (
+            _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _TINY
         )
 
 
