@@ -290,6 +290,8 @@ test("a directory typed while the default is on its way is kept", async () => {
   await opening;
 
   assert.equal(fixture.directory.value, "/data/mine");
+  // openDialog catches a failed request into the status line, the stub's assertion included.
+  assert.equal(fixture.status.textContent, "");
   binding.destroy();
 });
 

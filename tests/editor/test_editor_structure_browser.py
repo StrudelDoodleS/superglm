@@ -838,10 +838,23 @@ def test_a_directory_typed_before_the_default_arrives_is_kept(open_editor_page, 
         directory = page.locator("#exportDirectory")
         directory.fill(str(tmp_path))
 
-        with page.expect_response(_posted("/save_directory")):
-            default[0].continue_()
-        # Two frames: the page has read the answer and acted on it by then.
+        # The page reports when it has parsed the answer: a task queued then runs after
+        # the dialog's own continuation, so the field holds its final value.  Without
+        # this signal the wait would be a time budget, and the assertion being negative,
+        # running out of it would pass against the unfixed dialog.
         page.evaluate(
-            "() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))"
+            """() => {
+                const json = Response.prototype.json;
+                Response.prototype.json = async function () {
+                    const payload = await json.call(this);
+                    if (new URL(this.url).pathname.endsWith('/save_directory')) {
+                        Response.prototype.json = json;
+                        setTimeout(() => { window.__defaultDirectoryRead = true; }, 0);
+                    }
+                    return payload;
+                };
+            }"""
         )
+        default[0].continue_()
+        page.wait_for_function("() => window.__defaultDirectoryRead === true")
         assert directory.input_value() == str(tmp_path)

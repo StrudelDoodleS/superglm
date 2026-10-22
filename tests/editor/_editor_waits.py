@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import itertools
 
-_EDITOR_IDLE = "() => window.__superglmTest?.mutationStatus?.() !== 'running'"
+# Without the page's test hook (``?test=1``) this waits out its timeout instead of passing.
+_EDITOR_IDLE = (
+    "() => Boolean(window.__superglmTest) && window.__superglmTest.mutationStatus() !== 'running'"
+)
 _HOLDS = itertools.count()
 _SENTINEL = "**/__intercepting__"
 # Fire one request at the sentinel route at a time until the route has seen one.
