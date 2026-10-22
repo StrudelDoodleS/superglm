@@ -87,6 +87,9 @@ def test_compiled_bounds_keep_power_neighbors_across_binary64_exponent_range():
 
 @pytest.mark.parametrize("dtype", [np.float32, np.int16, np.int32, np.int64, np.uint64])
 def test_compiled_bounds_preserve_generic_arithmetic(dtype):
+    # Close the float64 scan first, as a fit's first scan does: a generic
+    # kernel that called it would then fail to type for this dtype.
+    kernels._scan_form(np.zeros((1, 1)))
     values = np.array([[0, 1, 2], [4, 7, 8]], dtype=dtype)
     assert kernels._operand_exponent_bounds(values) == (0, 4)
 
