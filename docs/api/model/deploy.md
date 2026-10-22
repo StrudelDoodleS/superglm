@@ -151,8 +151,13 @@ export warns, and the impact sheet's `band_*` columns and
 `discretization_impact(...).band_diagnostics` report it. The limit holds at
 the observed values the bands are placed on, for each band's factor exactly as
 it is stored. A band holding only the largest value is written as a closed
-key, `[x, x]`. A model carrying editor edits, or a term with a post-fit shape
-repair, is refused, because its standard errors are not the published curve's.
+key, `[x, x]`. A spline-by-categorical interaction on the covariate is banded
+with it, on the same bands, so that the limit holds for each level's whole
+relativity (the main effect plus that level's own curve) and the interaction's
+table and the main effect's table carry the same intervals; it adds curves that
+the bands must follow, so a model with such an interaction can need more bands.
+A model carrying editor edits, or a term with a post-fit shape repair, is
+refused, because its standard errors are not the published curve's.
 
 `export_rating_tables` writes the same payload as an Excel workbook: one sheet
 of rating tables laid out side by side for a rater to key on, one for the

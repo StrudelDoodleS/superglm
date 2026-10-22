@@ -975,27 +975,48 @@ class SplineCategorical:
             out[mask] = np.asarray(rows_basis @ beta_raw, dtype=np.float64).ravel()
         return out
 
-    def _level_raw_coefficients(self, beta: NDArray) -> Iterator[tuple[str, NDArray]]:
-        """Each non-base level with its curve's coefficients on the raw basis.
+    def _level_coefficient_maps(self) -> Iterator[tuple[str, NDArray | None, int]]:
+        """Each non-base level with its fitted width and the map to raw-basis coefficients.
 
-        The one place the stacked coefficient vector is cut into levels, so
-        scoring rows and tabulating the curves cannot read it two ways.
+        The map is ``None`` where the fitted coefficients already are the
+        raw-basis ones.  The one place the stacked coefficient vector's layout
+        is decided, so scoring rows, tabulating the curves and propagating
+        their covariance cannot read it three ways.
         """
-        beta = np.asarray(beta, dtype=np.float64).ravel()
-        offset = 0
         for level in self._non_base:
             R_inv = self._R_inv_dict.get(level)
             if R_inv is not None:
-                n_cols = R_inv.shape[1]
-                beta_raw = R_inv @ beta[offset : offset + n_cols]
+                yield level, R_inv, R_inv.shape[1]
             elif self._projection is not None:
-                n_cols = self._projection.shape[1]
-                beta_raw = self._projection @ beta[offset : offset + n_cols]
+                yield level, self._projection, self._projection.shape[1]
             else:
-                n_cols = self._n_basis
-                beta_raw = beta[offset : offset + n_cols]
+                yield level, None, self._n_basis
+
+    def _level_raw_coefficients(self, beta: NDArray) -> Iterator[tuple[str, NDArray]]:
+        """Each non-base level with its curve's coefficients on the raw basis."""
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        offset = 0
+        for level, raw_map, n_cols in self._level_coefficient_maps():
+            part = beta[offset : offset + n_cols]
             offset += n_cols
-            yield level, beta_raw
+            yield level, part if raw_map is None else raw_map @ part
+
+    def level_design_rows(self, x: NDArray) -> Iterator[tuple[str, NDArray]]:
+        """Each non-base level with the matrix taking its fitted coefficients to its curve at ``x``.
+
+        Shape ``(len(x), width)``: ``rows @ beta_level`` is that level's
+        column of :meth:`level_log_deviations`, held-range clip included, so
+        a covariance of the fitted coefficients gives the curve's variance as
+        ``rows @ cov @ rows.T``.
+        """
+        x = np.asarray(x, dtype=np.float64).ravel()
+        B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x))
+        clips = getattr(self, "_level_clip", {})
+        for level, raw_map, _ in self._level_coefficient_maps():
+            clip = clips.get(level)
+            basis = B if clip is None else self._spline_spec._raw_basis_matrix(np.clip(x, *clip))
+            rows = basis if raw_map is None else basis @ raw_map
+            yield level, np.asarray(rows.toarray() if sp.issparse(rows) else rows, dtype=np.float64)
 
     def level_log_deviations(self, x: NDArray, beta: NDArray) -> NDArray:
         """Every non-base level's log deviation from the base curve at ``x``.
@@ -1014,6 +1035,27 @@ class SplineCategorical:
             clip = clips.get(level)
             basis = B if clip is None else self._spline_spec._raw_basis_matrix(np.clip(x, *clip))
             out[:, j] = np.asarray(basis @ beta_raw, dtype=np.float64).ravel()
+        return out
+
+    def banded_deviation(self, band: NDArray, x_cat: NDArray, cells: NDArray) -> NDArray:
+        """Each row's cell: ``cells[band, j]`` for a row of non-base level ``j``, 0 for any other.
+
+        ``cells`` is ``(bands, len(non_base))`` in ``_non_base`` order and
+        ``band`` gives each row's band.  The labels are routed as ``score``
+        routes them -- grouping, unseen policy and all -- so a table of cells
+        rates a row on the level its curve would have been read for.
+        """
+        x_cat = _categorical_predict_labels(
+            x_cat,
+            grouping=self._cat_grouping,
+            universe=self._cat_levels,
+            unseen=self._cat_unseen,
+            context=self.cat_name,
+        )
+        out = np.zeros(len(band), dtype=np.float64)
+        for j, level in enumerate(self._non_base):
+            rows = x_cat == level
+            out[rows] = cells[band[rows], j]
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:

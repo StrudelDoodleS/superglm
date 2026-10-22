@@ -1646,6 +1646,7 @@ def _spline_categorical_block(
     sample_weight: NDArray | None,
     n_bins: int,
     bin_strategy: str,
+    banded: pd.DataFrame | None = None,
 ) -> InteractionTableBlock:
     """A per-level spline deviation as one relativity per row key and level.
 
@@ -1656,12 +1657,18 @@ def _spline_categorical_block(
 
     A spline parent is binned: the keys are its intervals and a cell is read at
     the bin's representative (``spline_categorical_bins``), so the block is
-    not exact between representatives, which the impact sheet measures.  An
-    ``OrderedCategorical`` parent is exported as a categorical, one row per
-    level, and its cells are the curves at the levels' scores: exact.
+    not exact between representatives, which the impact sheet measures.  Under
+    ``bin_strategy="exact"`` the intervals are the covariate's exact bands and
+    a cell is the band's weighted mean of the level's deviation, so that the
+    main effect's band factor plus the cell is the level's certified factor;
+    both come from the one banding ``discretization_impact`` solved and
+    ``banded`` is its table for this term.  An ``OrderedCategorical`` parent is
+    exported as a categorical, one row per level, and its cells are the curves
+    at the levels' scores: exact.
     """
     from superglm.diagnostics.discretize import (
         _validated_discretization_weights,
+        banded_cells,
         has_ordinal_parent,
         ordinal_parent_cells,
         spline_categorical_bins,
@@ -1671,6 +1678,10 @@ def _spline_categorical_block(
     if has_ordinal_parent(model, ispec):
         keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
         kind = "cells"
+    elif banded is not None:
+        edges, log_deviation = banded_cells(banded, len(ispec._non_base))
+        keys = _interval_keys(edges[:-1], edges[1:])
+        kind = "spline_cells"
     else:
         if frame is None:
             raise TypeError(
@@ -1707,6 +1718,7 @@ def _interaction_blocks(
     frame: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
     bin_strategy: str = "exposure_quantile",
+    banded_tables: dict[str, pd.DataFrame] | None = None,
 ) -> list[InteractionTableBlock]:
     from superglm.diagnostics.discretize import is_spline_categorical
 
@@ -1718,9 +1730,12 @@ def _interaction_blocks(
         # term to learn it is not a surface; the sweep routes it by the same
         # exact-type test.
         if is_spline_categorical(ispec):
+            # Under "exact" the cells and the intervals were banded together with
+            # the main effect, by the call that gave the main block its bands.
+            banded = banded_tables.get(name) if banded_tables is not None else None
             blocks.append(
                 _spline_categorical_block(
-                    model, name, ispec, frame, sample_weight, n_bins, bin_strategy
+                    model, name, ispec, frame, sample_weight, n_bins, bin_strategy, banded
                 )
             )
             continue
@@ -1876,15 +1891,30 @@ def _empty_impact_frame() -> pd.DataFrame:
     )
 
 
-def _warn_widened_bands(band_diagnostics: dict[str, dict[str, float]], n_bins: int) -> None:
-    """Say when ``bin_strategy="exact"`` could not hold its limit in ``n_bins`` bands."""
-    for name, diagnostics in band_diagnostics.items():
-        factor = diagnostics["tolerance_factor"]
+def _warn_widened_bands(
+    band_diagnostics: dict[str, dict[str, float]],
+    n_bins: int,
+    shared_with: dict[str, str] | None = None,
+) -> None:
+    """Say when ``bin_strategy="exact"`` could not hold its limit in ``n_bins`` bands.
+
+    A covariate's main effect and the interactions banded with it (``shared_with``
+    maps each interaction to its covariate) are one banding, widened by one factor,
+    so they are one warning naming all of them.
+    """
+    shared_with = shared_with or {}
+    groups: dict[str, list[str]] = {}
+    for name in band_diagnostics:
+        groups.setdefault(shared_with.get(name, name), []).append(name)
+    for names in groups.values():
+        factor = band_diagnostics[names[0]]["tolerance_factor"]
         if factor > 1.0:
+            worst = max(band_diagnostics[name]["worst_error"] for name in names)
+            listed = ", ".join(repr(name) for name in names)
             warnings.warn(
-                f"bin_strategy='exact' could not keep {name!r} within its limit in "
+                f"bin_strategy='exact' could not keep {listed} within its limit in "
                 f"{n_bins} bands, so the limit was widened {factor:.3g}x; the worst band "
-                f"error is {diagnostics['worst_error']:.1%}. Raise n_bins to keep the limit.",
+                f"error is {worst:.1%}. Raise n_bins to keep the limit.",
                 UserWarning,
                 stacklevel=3,
             )
@@ -1967,6 +1997,11 @@ def _impact_sweep(
                 "actual_bins": int(len(table)),
             }
             row.update(result.metrics)
+            if bin_strategy == "exact":
+                diagnostics = result.band_diagnostics.get(interaction, {})
+                row.update(
+                    {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
+                )
             rows.append(row)
     if not rows:
         return _empty_impact_frame()
@@ -2170,8 +2205,21 @@ def build_rating_table_payload(
     the interval its value falls in and the column of its level, as for a cell
     table.  It reproduces ``model.predict`` to round-off for a row AT a
     representative and is approximate between them; the sheet below measures
-    it, and ``bin_strategy="exact"``, which bands a main effect against its own
-    curve, gives it the ``"exposure_quantile"`` edges.  A level unseen in
+    it.  Under ``bin_strategy="exact"`` the intervals are not representatives
+    but the covariate's exact bands, solved ONCE for the main effect and for
+    every such interaction on it: one set of bands holds the main effect and
+    each level's total relativity -- main effect plus that level's deviation,
+    each with its own standard error -- within
+    ``min(band_se * SE, log(1 + band_max_error))`` at every observed value,
+    and a cell is the band's weighted mean of the level's deviation, so the
+    main effect's band factor times the cell is the level's certified band
+    factor.  With ``continuous_kind="ppform"`` the main effect is exact and the
+    bands hold the deviations themselves.  The bands are the fewest that hold
+    all of those curves, so each interaction on a covariate adds curves to
+    its bands and the count can rise; ``n_bins`` caps it, and a cap that is
+    too small widens every limit by one factor, warned once for the
+    covariate and reported in the sheet's ``band_*`` columns on its main
+    and interaction rows alike.  A level unseen in
     training has no column and is rated as the base level, which is the
     model's own rule under ``unseen="base"``.  As for every interaction block,
     the columns are keyed on the grouped levels of a ``grouping=`` parent.  When
@@ -2313,7 +2361,9 @@ def build_rating_table_payload(
     within ``min(band_se * SE, log(1 + band_max_error))`` of the curve (defaults
     1.0 and 0.10).  When ``n_bins`` is too few, the limit is widened by the least
     factor that fits, with a warning, and the impact sheet's ``band_*`` columns
-    record it.  See ``discretization_impact``.
+    record it.  A spline-by-categorical interaction on the covariate is banded
+    with it, on the same bands (see the interaction paragraph above).  See
+    ``discretization_impact``.
 
     ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
     instead: one row per knot interval carrying four coefficients.  A consumer
@@ -2569,6 +2619,15 @@ def build_rating_table_payload(
         for name in _continuous_features(model)
         if not (continuous_kind == "ppform" and isinstance(model._specs[name], _SplineBase))
     ]
+    # Under "exact" a spline-by-categorical interaction is banded WITH its
+    # covariate's main effect, in this one call, so that the main block and the
+    # interaction block carry the same intervals and every curve the workbook
+    # approximates holds its limit on them.  The other strategies bin the
+    # interaction on their own, from the covariate alone.
+    from superglm.diagnostics.discretize import banding_companions
+
+    exact_companions = banding_companions(model) if bin_strategy == "exact" else {}
+    companion_names = [name for names in exact_companions.values() for name in names]
     selected = (
         model.discretization_impact(
             frame,
@@ -2577,15 +2636,19 @@ def build_rating_table_payload(
             offset=export_offset,
             n_bins=n_bins,
             bin_strategy=bin_strategy,
-            features=binned_continuous,
+            features=binned_continuous + companion_names,
             band_se=band_se,
             band_max_error=band_max_error,
         )
-        if binned_continuous
+        if binned_continuous or companion_names
         else None
     )
     if selected is not None and bin_strategy == "exact":
-        _warn_widened_bands(selected.band_diagnostics, n_bins)
+        _warn_widened_bands(
+            selected.band_diagnostics,
+            n_bins,
+            {name: covariate for covariate, names in exact_companions.items() for name in names},
+        )
 
     main_effects: list[RatingTableBlock] = []
     for name in model._feature_order:
@@ -2669,7 +2732,12 @@ def build_rating_table_payload(
     # reject 0.0, reject subnormal -- used to be absent entirely (issue #289).
     # ``_interaction_blocks`` is pure, so the hoist changes nothing else.
     interactions = _interaction_blocks(
-        model, n_bins, frame=frame, sample_weight=sample_weight, bin_strategy=bin_strategy
+        model,
+        n_bins,
+        frame=frame,
+        sample_weight=sample_weight,
+        bin_strategy=bin_strategy,
+        banded_tables=selected.interaction_tables if selected is not None else None,
     )
 
     # After the blocks are built, because it is the emitted values it checks

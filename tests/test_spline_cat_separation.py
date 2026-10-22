@@ -129,6 +129,18 @@ def test_level_log_deviations_hold_a_separated_level_as_score_does():
             rtol=0,
             atol=64 * U * 16,
         )
+    # The design rows that carry the covariance to the curve hold the level the
+    # same way: row @ coefficients is the tabulated column.
+    offset = 0
+    for j, (level, rows) in enumerate(ispec.level_design_rows(x)):
+        np.testing.assert_allclose(
+            rows @ beta[offset : offset + rows.shape[1]],
+            deviations[:, j],
+            rtol=0,
+            atol=64 * U * 16,
+        )
+        offset += rows.shape[1]
+    assert offset == len(beta)
     # The held range is where a free curve would differ.
     j = ispec._non_base.index("C")
     free = ispec._spline_spec._raw_basis_matrix(x[x > 22.0])

@@ -183,6 +183,21 @@ def _recenter_term(
 # ── Feature SEs ───────────────────────────────────────────────────
 
 
+def _active_spline_columns(name: Hashable, feature_groups: list, active_subs: list) -> NDArray:
+    """Columns of a spline's basis that belong to its active subgroups.
+
+    For ``select=True``: only the columns of active subgroups enter a quadratic
+    form against the active covariance.
+    """
+    return np.concatenate(
+        [
+            np.arange(g.start, g.end) - feature_groups[0].start
+            for g in feature_groups
+            if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
+        ]
+    )
+
+
 def _spline_se(
     spline_spec,
     name: Hashable,
@@ -221,14 +236,7 @@ def _spline_se(
         x_eval if x_eval is not None else np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     )
     M = np.asarray(spline_spec.transform(x_grid), dtype=np.float64)
-    # For select=True: only use columns for active subgroups
-    active_cols = np.concatenate(
-        [
-            np.arange(g.start, g.end) - feature_groups[0].start
-            for g in feature_groups
-            if any(ag.feature_name == name and ag.name == g.name for ag in active_subs)
-        ]
-    )
+    active_cols = _active_spline_columns(name, feature_groups, active_subs)
     M = M[:, active_cols]
     if reference_x is not None:
         M_ref = np.asarray(spline_spec.transform(reference_x), dtype=np.float64)[:, active_cols]
