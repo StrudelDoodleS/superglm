@@ -3411,7 +3411,10 @@ def test_the_joint_banding_receives_each_combinations_own_tolerance(monkeypatch)
     bound = []
     for column, region in ((4, "B"), (5, "C")):
         stacked = band_se * _combination_se(model, values, region, "P")
-        np.testing.assert_allclose(tol[:, column], np.minimum(stacked, cap), rtol=1e-9, atol=0.0)
+        # The oracle sums the same quadratic form in another order, which agrees
+        # only within a relative 1e-6 on this nearly collinear unpenalised fit (as
+        # above); a standard error from one level alone is off by about 10%.
+        np.testing.assert_allclose(tol[:, column], np.minimum(stacked, cap), rtol=1e-6, atol=0.0)
         bound.append(np.any(stacked < cap))
     # The standard-error term must be what sets a tolerance, or the cap alone
     # would satisfy the comparison above.
