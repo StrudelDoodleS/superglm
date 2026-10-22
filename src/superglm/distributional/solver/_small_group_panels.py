@@ -16,7 +16,10 @@ import scipy.sparse as sp
 from numba import njit, types
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_kernels import _tensor_operand_in_reassociation_range
+from superglm._group_matrix._group_matrix_kernels import (
+    _scan_form,
+    _tensor_operand_in_reassociation_range,
+)
 from superglm._numba_compile import compile_closed
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -195,9 +198,9 @@ def _in_range(values):
     if type(values) is not np.ndarray or values.dtype != np.float64:
         return False
     if values.ndim == 1:
-        return _tensor_operand_in_reassociation_range(values[:, None])
+        return _tensor_operand_in_reassociation_range(_scan_form(values[:, None]))
     if values.ndim == 2:
-        return _tensor_operand_in_reassociation_range(values)
+        return _tensor_operand_in_reassociation_range(_scan_form(values))
     # Preserve the generic-rank predicate with bounded buffers. All current
     # panel, raw-basis, map and weight callers use the allocation-free paths.
     iterator = np.nditer(

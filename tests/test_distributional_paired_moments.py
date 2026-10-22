@@ -243,28 +243,20 @@ def _channels(layout, readonly, width):
 
 
 def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(monkeypatch):
-    assert hasattr(batch_api, "_accumulate_targets_strided"), (
-        "the batch still specializes the heavy kernel for every channel storage combination"
-    )
     batch_api._warmup_batched_moments()
-    kernels = (batch_api._accumulate_targets, batch_api._accumulate_targets_strided)
-    signatures = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-    assert tuple(map(len, signatures)) == (1, 1)
-    calls = [0, 0]
-    for index, (kernel, layout) in enumerate(zip(kernels, ("C", "A"), strict=True)):
-        for channel in kernel.nopython_signatures[0].args[5:7]:
-            assert channel.layout == layout
-            assert not channel.mutable
+    kernel = batch_api._accumulate_targets
+    signatures = tuple(kernel.nopython_signatures)
+    assert len(signatures) == 1
+    for channel in signatures[0].args[5:7]:
+        assert channel.layout == "C"
+        assert not channel.mutable
+    calls = [0]
 
-        def counted(*args, index=index, kernel=kernel):
-            calls[index] += 1
-            return kernel(*args)
+    def counted(*args):
+        calls[0] += 1
+        return kernel(*args)
 
-        monkeypatch.setattr(
-            batch_api,
-            "_accumulate_targets" if index == 0 else "_accumulate_targets_strided",
-            counted,
-        )
+    monkeypatch.setattr(batch_api, "_accumulate_targets", counted)
     fixture = _fixture(True)
     batch = _build(fixture)
     exact, reserve = batch_api._batch_workspace_bytes(1, 1, 2, vector_count=17)
@@ -304,7 +296,8 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
                         np.testing.assert_array_equal(
                             actual.view(np.uint64), oracle.view(np.uint64)
                         )
-    # One call per target per accumulation: 4 all-C layouts, 32 others.
+    # One call per target per accumulation, through the one signature, for all
+    # 36 layout and writeability combinations of the two channel matrices.
     targets = len(histograms) + len(directions) + len(vectors)
-    assert calls == [4 * targets, 32 * targets]
-    assert tuple(tuple(kernel.nopython_signatures) for kernel in kernels) == signatures
+    assert calls == [36 * targets]
+    assert tuple(kernel.nopython_signatures) == signatures

@@ -139,9 +139,9 @@ def test_constructor_refuses_a_channel_outside_the_derivative_columns():
 def test_metadata_accounting_and_warmup_cover_runtime_signatures():
     module = _module()
     module._warmup_batched_moments()
-    kernels = (module._accumulate_targets, module._accumulate_targets_strided)
+    kernels = (module._accumulate_targets,)
     compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-    assert tuple(map(len, compiled)) == (1, 1)
+    assert tuple(map(len, compiled)) == (1,)
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
     bins.fill(0)
     for panel in ordinary:

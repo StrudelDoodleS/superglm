@@ -15,7 +15,7 @@ from ._group_matrix_centered import (
     _raw_centering_admitted,
     _reads_as_float64,
 )
-from ._group_matrix_kernels import _fused_bincount_2, _ssp_gram_needs_exact
+from ._group_matrix_kernels import _fused_bincount_2, _native, _ssp_gram_needs_exact
 
 # Support rows anchored at a time: bounds the (rows, raw width) transient.
 _SUPPORT_CHUNK_BYTES = 8 << 20
@@ -189,7 +189,7 @@ def _anchor_centred_columns(
             values = values[:, local]
         else:
             transform = np.asarray(transform[:, local], dtype=np.float64)
-    mass, response = _fused_bincount_2(codes, W, weighted_z, rows)
+    mass, response = _fused_bincount_2(codes, _native(W), _native(weighted_z), rows)
     anchor = np.asarray(values[int(np.argmax(mass))], dtype=np.float64)
     step = max(1, _SUPPORT_CHUNK_BYTES // (8 * max(values.shape[1], 1)))
     shift = np.zeros(values.shape[1], dtype=np.float64)

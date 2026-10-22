@@ -20,7 +20,25 @@ from math import frexp
 from operator import add, mul
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit, types  # type: ignore[import-untyped]
+
+from superglm._numba_compile import compile_closed
+
+
+def _native(values: np.ndarray) -> np.ndarray:
+    """``values`` as the read-only C-contiguous array a kernel compiles one signature for.
+
+    A view of C-contiguous input (SuperGLM's weights, a binned SuperLSS
+    channel), a C copy of anything else (an exact SuperLSS fit's strided
+    channel column, a Fortran map).  The kernels read each value as it is, so
+    the copy gives the same bits.  Callers convert at the kernel call alone,
+    never where a BLAS product reads the operand: converting SuperLSS's
+    channels at its predictor boundary changed the last bit of two fits
+    through their dense columns' products.
+    """
+    view = np.ascontiguousarray(values).view()
+    view.flags.writeable = False
+    return view
 
 
 @njit(cache=True, nogil=True)
@@ -60,11 +78,40 @@ def _float64_operand_exponent_bounds(values):
     )
 
 
+# The range scans serve every operand form through one read-only 'A' signature:
+# closed to it (``compile_closed``), numba hands a C, Fortran or strided array
+# to it as it is, so a scan copies nothing and allocates nothing.
+_SCAN_OPERAND = types.Array(types.float64, 2, "A", readonly=True)
+_SCANS = (
+    (_tensor_operand_in_reassociation_range, (_SCAN_OPERAND,)),
+    (_float64_operand_exponent_bounds, (_SCAN_OPERAND,)),
+)
+
+
+def _scan_form(values: np.ndarray) -> np.ndarray:
+    """``values`` for a range scan: closes both scans to their one signature first.
+
+    Every call site passes its operand through here, so no call compiles a
+    signature of its own before the scans are closed.  A float64 operand is
+    returned as it is; any other real dtype is promoted to float64, which the
+    closed signature needs.  Promotion is exact for floats of at most 64 bits
+    and keeps an integer's magnitude on its side of [2**-128, 2**128], so the
+    range decision is unchanged.
+    """
+    compile_closed(*_SCANS)
+    return values if values.dtype == np.float64 else values.astype(np.float64)
+
+
 @njit(cache=True, nogil=True)
 def _operand_exponent_bounds(values):
-    """Enclose nonzero magnitudes by powers of two, without array scratch."""
-    if values.dtype == np.dtype(np.float64):
-        return _float64_operand_exponent_bounds(values)
+    """Enclose nonzero magnitudes by powers of two, without array scratch.
+
+    The generic scan, for operands that are not float64. A float64 operand
+    goes to ``_float64_operand_exponent_bounds`` at the Python boundary
+    (``_group_matrix_algebra._operand_exponent_bounds``): that scan is closed to
+    one float64 signature, so a call to it here would not type for any other
+    dtype.
+    """
     smallest, largest = np.inf, 0.0
     for row in range(values.shape[0]):
         for col in range(values.shape[1]):
@@ -92,12 +139,14 @@ def _ssp_gram_needs_exact(*operands) -> bool:
     if any(array.dtype.kind not in "bifu" or array.dtype.itemsize > 8 for array in arrays):
         return False
     for array in arrays:
-        # Numba cannot scan float16 arrays. Promotion is exact and affects
-        # only classification; the native moment path keeps its operands.
-        if array.dtype == np.float16:
+        # The scan reads float64 (its one signature). Promotion is exact for
+        # every float of at most 64 bits, and an integer or boolean keeps its
+        # side of [2**-128, 2**128]; it affects only classification, and the
+        # native moment path keeps its operands.
+        if array.dtype != np.float64:
             array = array.astype(np.float64)
         values = array if array.ndim == 2 else array.reshape(-1, 1)
-        if not _tensor_operand_in_reassociation_range(values):
+        if not _tensor_operand_in_reassociation_range(_scan_form(values)):
             return True
     return False
 
@@ -1301,15 +1350,15 @@ def _warmup_group_matrix_kernels() -> None:
     frozen_matrix.setflags(write=False)
     frozen_codes = codes.copy()
     frozen_codes.setflags(write=False)
-    # The range scans see C operands, a decomposed tensor's Fortran maps and
-    # SuperLSS's read-only channel columns, plain and strided.  Call the
-    # float64 scan as fits do: directly, never through the generic
+    # The range scans take every operand form through their one closed
+    # signature (``_scan_form``); the weight kernels below take their float
+    # operands as read-only C arrays (``_native``), whatever the caller holds:
+    # SuperGLM's weights, SuperLSS's read-only and strided channel columns.
+    # Fits call the float64 scan directly, never through the generic
     # ``_operand_exponent_bounds``, which only a non-float64 operand reaches.
-    frozen_strided = np.ones((3, 4))[:, ::2]
-    frozen_strided.setflags(write=False)
-    for operand in (matrix, frozen_matrix, np.asfortranarray(matrix), frozen_strided):
-        _tensor_operand_in_reassociation_range(operand)
-        _float64_operand_exponent_bounds(operand)
+    frozen_values = values.copy()
+    frozen_values.setflags(write=False)
+    compile_closed(*_SCANS)
     _indexed_row_dot(matrix, matrix, codes, codes)
     # A TSQR leaf writes its block whole (no response) or less its last column.
     for block in (np.empty((2, 2)), np.empty((2, 3))[:, :2]):
@@ -1344,7 +1393,7 @@ def _warmup_group_matrix_kernels() -> None:
     # channels: every group freezes its level rows (``row_idx``) when built.
     _sorted_intersection(frozen_codes, frozen_codes)
     _level_tensor_channels(frozen_codes, codes, codes, codes, values, matrix, 2, 2)
-    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, False)
+    _csr_weighted_gram(values, csr_indices, csr_indptr, frozen_values, 2, False)
     _csr_weighted_cross(
         values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, values, 2, 2
     )
@@ -1357,15 +1406,13 @@ def _warmup_group_matrix_kernels() -> None:
     _csr_weighted_bincount_channels(values, csr_indices, csr_indptr, 2, codes, matrix, 0, 2, 2)
     _weighted_hist_channels(codes, None, matrix, 0, 2, 2, 1)
     _weighted_hist_channels(codes, codes, matrix, 0, 2, 2, 2)
-    _weighted_bincount_2d(codes, values, matrix, 2)
+    _weighted_bincount_2d(codes, frozen_values, frozen_matrix, 2)
     # Support crosses pass read-only C-contiguous operands and a fresh output.
-    frozen_values = values.copy()
-    frozen_values.setflags(write=False)
     _support_weighted_bincount_2d(
         np.zeros((2, 2)), frozen_codes, frozen_values, frozen_matrix, frozen_codes, 0
     )
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
-    _disc_disc_2d_hist(codes, codes, values, 2, 2)
+    _disc_disc_2d_hist(codes, codes, frozen_values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
     cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
     _cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
@@ -1376,7 +1423,7 @@ def _warmup_group_matrix_kernels() -> None:
     _cell_hist_raw_kron(
         cell_ptr, bin1, bin2, w, starts, matrix, starts, matrix, 2, np.empty((4, 4))
     )
-    _fused_bincount_2(codes, values, values, 2)
+    _fused_bincount_2(codes, frozen_values, frozen_values, 2)
     _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)
     _factor_smooth_support_matvec(matrix, codes, codes, matrix)
     _factor_smooth_csr_rmatvec(values, csr_indices, csr_indptr, codes, values, 2, 2)
@@ -1396,26 +1443,6 @@ def _warmup_group_matrix_kernels() -> None:
         pair_offsets,
         pair_right_sizes,
     )
-    _cat_weighted_bincount(codes, codes, values, 2, 2)
-    _cat_cat_weighted_crosstab(codes, codes, values, 2, 2)
-    frozen_weights = values.copy()
-    frozen_weights.setflags(write=False)
-    for level_weights in (values, frozen_weights):
-        _level_sums(codes, level_weights, 3)
-    # SuperLSS hands over its packed curvature and score channels as they are:
-    # read-only columns (binned), read-only strided ones (exact), and writable
-    # strided score columns.  Copying them into SuperGLM's form at the predictor
-    # boundary changed the last bit of two mixed-layout SuperLSS fits (the
-    # dense columns' BLAS products read the same operand), so warmup compiles
-    # these forms instead.
-    strided_weights = np.ones(4, dtype=np.float64)[::2]
-    strided_weights.setflags(write=False)
-    _level_sums(codes, strided_weights, 3)
-    _level_sums(codes, np.ones(4, dtype=np.float64)[::2], 3)
-    for channel in (frozen_values, strided_weights):
-        _cat_weighted_bincount(codes, codes, channel, 2, 2)
-        _cat_cat_weighted_crosstab(codes, codes, channel, 2, 2)
-        _disc_disc_2d_hist(codes, codes, channel, 2, 2)
-        _fused_bincount_2(codes, channel, channel, 2)
-    _weighted_bincount_2d(codes, frozen_values, frozen_matrix, 2)
-    _csr_weighted_gram(values, csr_indices, csr_indptr, strided_weights, 2, False)
+    _cat_weighted_bincount(codes, codes, frozen_values, 2, 2)
+    _cat_cat_weighted_crosstab(codes, codes, frozen_values, 2, 2)
+    _level_sums(codes, frozen_values, 3)

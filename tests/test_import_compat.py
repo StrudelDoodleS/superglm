@@ -214,17 +214,32 @@ for diagonal, expected in (([0.0, 0.0, 0.0], 0.0), ([0.0, 2.0, 0.0], 4.0), ([0.0
     for coefficients in (np.array([1.0, 2.0, 3.0]), readonly(np.array([1.0, 2.0, 3.0]))[0]):
         assert _half_penalty_quadratic(penalty, coefficients, entries) == expected
 
-# C operands of either mutability, a decomposed tensor's Fortran maps, and
-# SuperLSS's read-only strided channel columns.
-for operand in (
+# Every layout a caller holds reaches the range scans through ``_native``, as
+# their call sites pass it: C, Fortran and strided, writable or read-only.
+for values in (
     np.ones((3, 4)),
-    *readonly(
-        np.ones((3, 4)), np.ones((6, 4))[::2, ::2], np.ones((3, 4))[::-1], np.ones(9)[::2, None]
-    ),
     np.asfortranarray(np.ones((3, 4))),
+    np.ones((6, 4))[::2, ::2],
+    np.ones((3, 4))[::-1],
+    np.ones(9)[::2, None],
 ):
-    assert group_kernels._tensor_operand_in_reassociation_range(operand)
-    assert group_algebra._operand_exponent_bounds(operand) == (0, 1)
+    for operand in (values, *readonly(values.copy() if values.flags.owndata else values.view())):
+        assert group_kernels._tensor_operand_in_reassociation_range(
+            group_kernels._scan_form(operand)
+        )
+        assert group_algebra._operand_exponent_bounds(operand) == (0, 1)
+
+# A weight kernel's call site hands it a read-only C operand (``_native``),
+# whatever the caller holds: SuperGLM's weights, SuperLSS's read-only channel
+# columns (binned) and strided ones (exact).
+from superglm._group_matrix._group_matrix_core import _bincount_levels
+from superglm.group_matrix import _disc_disc_2d_hist
+
+four = np.array([0, 1, 1, 0], dtype=np.intp)
+for weights in (np.ones(4), np.ones(8)[::2], *readonly(np.ones(4), np.ones(8)[::2])):
+    np.testing.assert_array_equal(_bincount_levels(four, weights, 2), [2.0, 2.0])
+    joint = _disc_disc_2d_hist(four, four, weights, 2, 2)
+    np.testing.assert_array_equal(joint, np.diag([2.0, 2.0]))
 
 frozen_response, frozen_mean = readonly(np.array([0.0, 1.0, 2.5]), np.ones(3))
 assert np.all(np.isfinite(superglm.tweedie_logpdf(frozen_response, frozen_mean, 1.0, 1.5)))
@@ -236,7 +251,7 @@ csr_indptr = np.array([0, 1, 2], dtype=np.int32)
 cell_ptr, cell_order = group_kernels._cell_csr(codes, codes, 2, 2)
 assert group_kernels._cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
 group_kernels._csr_weighted_gram(
-    values, csr_indices, csr_indptr, values, 2, absolute_weights=True
+    values, csr_indices, csr_indptr, group_kernels._native(values), 2, absolute_weights=True
 )
 
 row_patterns, unique_codes, offsets, pair_left, pair_right, pair_offsets, right_sizes = readonly(

@@ -18,11 +18,11 @@ cache (``numba/typed/typedlist.py`` declares them without ``cache=True``).
 from __future__ import annotations
 
 from threading import Lock
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numba import njit, types
 
+from superglm._group_matrix._group_matrix_kernels import _native
 from superglm._parallel import pool_workers, pooled_map
 
 # Bytes one target's task holds while it runs: its loop state, not its rows.
@@ -128,22 +128,19 @@ def _accumulate_targets(
     return histogram_active, directional_work, vector_active
 
 
-# Keep C addressing in the common path and one general-stride fallback. Numba's
-# mutable-to-readonly and contiguous-to-A casts reuse the array descriptor;
-# neither dispatcher copies rows or changes the caller's writeability flags.
-if TYPE_CHECKING:
-    # Numba's py_func stub models descriptor binding on this plain function.
-    _accumulate_targets_strided = _accumulate_targets
-else:
-    _accumulate_targets_strided = njit(cache=True, nogil=True)(_accumulate_targets.py_func)
-# The kernels the worker pool runs: one target each, ``nogil``, never ``prange``.
-_POOLED_TARGET_KERNELS = (_accumulate_targets, _accumulate_targets_strided)
+# The kernel the worker pool runs: one target a task, ``nogil``, never ``prange``.
+_POOLED_TARGET_KERNELS = (_accumulate_targets,)
 _batched_initialization_lock = Lock()
 _batched_initialized = False
 
 
 def _initialize_batched_moments():
-    """Compile exactly two native signatures on warmup or first admitted call."""
+    """Compile the one native signature on warmup or first admitted call.
+
+    ``accumulate`` hands the kernel read-only C-contiguous channels
+    (``_native``: a view, or a copy of a strided or Fortran chunk), so one
+    signature serves every channel layout a caller passes.
+    """
     global _batched_initialized
     if _batched_initialized:
         return
@@ -152,29 +149,27 @@ def _initialize_batched_moments():
             return
         table = types.Array(types.intp, 2, "C", readonly=True)
         buffer = types.Array(types.float64, 1, "C")
-        for kernel, layout in ((_accumulate_targets, "C"), (_accumulate_targets_strided, "A")):
-            channels = types.Array(types.float64, 2, layout, readonly=True)
-            kernel.compile(
-                (
-                    table,
-                    table,
-                    buffer,
-                    buffer,
-                    types.Array(types.intp, 2, "C"),
-                    channels,
-                    channels,
-                    types.intp,
-                    types.intp,
-                    types.intp,
-                    types.intp,
-                    types.intp,
-                )
+        channels = types.Array(types.float64, 2, "C", readonly=True)
+        _accumulate_targets.compile(
+            (
+                table,
+                table,
+                buffer,
+                buffer,
+                types.Array(types.intp, 2, "C"),
+                channels,
+                channels,
+                types.intp,
+                types.intp,
+                types.intp,
+                types.intp,
+                types.intp,
             )
+        )
         # A failed compile leaves readiness false and propagates before any
         # accumulation. Retain successful compilation for a subsequent retry;
         # dispatcher identities and Numba's own failure semantics stay intact.
         _accumulate_targets.disable_compile()
-        _accumulate_targets_strided.disable_compile()
         _batched_initialized = True
 
 
@@ -362,26 +357,23 @@ class _BatchedMomentReducers:
             self.last_vector_active_updates = 0
             return 0, 0
         _initialize_batched_moments()
-        kernel = (
-            _accumulate_targets
-            if score.flags.c_contiguous and curvature.flags.c_contiguous
-            else _accumulate_targets_strided
-        )
         operands = (
             self._metadata,
             self._panel_layout,
             self._output_buffer,
             self._panel_buffer,
             self._bins,
-            score,
-            curvature,
+            _native(score),
+            _native(curvature),
             int(n),
             self._n_histograms,
             self._n_matrices,
         )
         targets = list(range(self._metadata.shape[0]))
         counts = pooled_map(
-            lambda target: kernel(*operands, target, target + 1), targets, _TASK_BYTES
+            lambda target: _accumulate_targets(*operands, target, target + 1),
+            targets,
+            _TASK_BYTES,
         )
         histogram_active = directional_work = vector_active = 0
         for histogram, directional, vector in counts:
@@ -404,5 +396,5 @@ def _carve(buffer, shapes):
 
 
 def _warmup_batched_moments():
-    """Compile the two native signatures; nothing else compiles at a first fit."""
+    """Compile the native signature; nothing else compiles at a first fit."""
     _initialize_batched_moments()

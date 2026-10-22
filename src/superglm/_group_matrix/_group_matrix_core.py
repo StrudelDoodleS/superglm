@@ -29,6 +29,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
     _level_sums,
+    _native,
     _ssp_gram_needs_exact,
 )
 from ._row_lookup import build_row_lookup
@@ -101,7 +102,7 @@ def _bincount_levels(codes: NDArray, weights: NDArray, length: int) -> NDArray:
     codes = np.asarray(codes)
     weights = np.asarray(weights, dtype=np.float64)
     if codes.dtype == np.intp and codes.ndim == 1 and weights.ndim == 1:
-        sums, ok = _level_sums(codes, weights, int(length))
+        sums, ok = _level_sums(codes, _native(weights), int(length))
         if ok:
             return sums
     return np.bincount(codes, weights=weights, minlength=length)
@@ -1057,7 +1058,7 @@ class SplineCategoricalGroupMatrix:
             self._data,
             self._indices,
             self._indptr,
-            W_sub,
+            _native(W_sub),
             self._p_b,
             False,
         )

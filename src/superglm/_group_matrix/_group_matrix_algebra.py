@@ -28,6 +28,8 @@ from ._group_matrix_kernels import (
     _fused_2d_bincount_2,
     _gather_cell_order,
     _level_tensor_channels,
+    _native,
+    _scan_form,
     _sorted_intersection,
     _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
@@ -100,13 +102,13 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
 
 
 def _operand_exponent_bounds(values: NDArray) -> tuple[int, int]:
-    """``_group_matrix_kernels._operand_exponent_bounds``, calling the float64 scan directly.
+    """Exponent bounds of ``values``: the float64 scan, else the generic one.
 
-    The generic kernel delegates a float64 operand to the float64 scan; calling
-    that scan here spares a fit compiling the generic kernel as well.
+    The float64 scan reads the binary64 encodings and is closed to one
+    signature (``_scan_form``); any other dtype goes to the generic kernel.
     """
     if values.dtype == np.float64:
-        return _float64_operand_exponent_bounds(values)
+        return _float64_operand_exponent_bounds(_scan_form(values))
     return _generic_operand_exponent_bounds(values)
 
 
@@ -441,7 +443,7 @@ class _BlockWeightCache:
             id(W),
             lambda: (
                 W,
-                _tensor_operand_in_reassociation_range(W[:, None]),
+                _tensor_operand_in_reassociation_range(_scan_form(W[:, None])),
                 _cross_operand_bounds(W[:, None]),
             ),
         )
@@ -501,7 +503,7 @@ class _BlockWeightCache:
             ("csr_gram", id(data), id(indices), id(indptr), int(p), absolute),
             (data, indices, indptr),
             int(p) * int(p),
-            lambda: _csr_weighted_gram(data, indices, indptr, W, p, absolute_weights),
+            lambda: _csr_weighted_gram(data, indices, indptr, _native(W), p, absolute_weights),
             lambda block, start, width: _csr_weighted_gram_channels(
                 data, indices, indptr, block, start, width, p, absolute
             ),
@@ -596,7 +598,7 @@ class _BlockWeightCache:
 
         def form() -> NDArray:
             t0 = perf_counter() if self._profile is not None else 0.0
-            hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
+            hist = _disc_disc_2d_hist(idx_a, idx_b, _native(W), n_a, n_b)
             _profile_elapsed(self._profile, "block_hist2d_s", t0)
             _profile_count(self._profile, "block_hist2d_builds")
             return hist
@@ -638,7 +640,13 @@ class _BlockWeightCache:
         if transposed:
             idx_a, idx_b, n_a, n_b = idx_b, idx_a, n_b, n_a
         hist = _weighted_hist(
-            self, idx_a, idx_b, W, n_a, n_b, lambda: _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
+            self,
+            idx_a,
+            idx_b,
+            W,
+            n_a,
+            n_b,
+            lambda: _disc_disc_2d_hist(idx_a, idx_b, _native(W), n_a, n_b),
         )
         return np.ascontiguousarray(hist.T) if transposed else hist
 
@@ -806,7 +814,7 @@ def _agg_by_bin(
             W,
             n_bins,
             gm.n_levels,
-            lambda: _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels),
+            lambda: _cat_weighted_bincount(gm.codes, bin_idx, _native(W), n_bins, gm.n_levels),
         )
     if isinstance(gm, SparseGroupMatrix):
         return _csr_weighted_bincount(
@@ -868,7 +876,7 @@ def _agg_by_bin(
             weight_grid = _disc_disc_2d_hist(
                 bin_idx,
                 gm.bin_idx,
-                W,
+                _native(W),
                 n_bins,
                 gm.n_bins,
             )
@@ -880,7 +888,7 @@ def _agg_by_bin(
             weight_grid = _disc_disc_2d_hist(
                 bin_idx,
                 gm.bin_idx,
-                W,
+                _native(W),
                 n_bins,
                 gm.n_bins,
             )
@@ -889,7 +897,7 @@ def _agg_by_bin(
     if isinstance(gm, FactorSmoothGroupMatrix):
         return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
     X = gm.toarray()
-    return _weighted_bincount_2d(bin_idx, W, X, n_bins)
+    return _weighted_bincount_2d(bin_idx, _native(W), _native(X), n_bins)
 
 
 def _aggregate_group_matrix_columns(
@@ -925,7 +933,7 @@ def _cross_gram_tensor_tensor(
     the same B1_unique, B2_unique, idx1, idx2 but have different R_inv.
     """
     if cache is None:
-        w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, W, gm_i.n_bins1, gm_i.n_bins2)
+        w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, _native(W), gm_i.n_bins1, gm_i.n_bins2)
     else:
         cache.release_channel_buffers()
         w_grid = cache.tensor_w_grid(gm_i, W)
@@ -1306,10 +1314,10 @@ def _cross_gram_tensor_tensor_channels(
     margins = (grid.B1_unique_t, grid.B2_unique_t, chan.B1_unique_t, chan.B2_unique_t)
     if any(operand.dtype != np.float64 for operand in (*margins, chan.B_unique, W)):
         return None
-    if not all(_tensor_operand_in_reassociation_range(v) for v in margins):
+    if not all(_tensor_operand_in_reassociation_range(_scan_form(v)) for v in margins):
         return None
     weights_in_range = (
-        _tensor_operand_in_reassociation_range(W[:, None])
+        _tensor_operand_in_reassociation_range(_scan_form(W[:, None]))
         if cache is None
         else cache.weight_range(W)[0]
     )
@@ -1407,7 +1415,7 @@ def _cross_gram_tensor_main(
             H = _disc_disc_2d_hist(
                 gm_main.bin_idx,
                 gm_tensor.idx2,
-                w_col,
+                _native(w_col),
                 gm_main.n_bins,
                 gm_tensor.n_bins2,
             )
@@ -1421,7 +1429,7 @@ def _cross_gram_tensor_main(
         H = _disc_disc_2d_hist(
             gm_main.bin_idx,
             gm_tensor.idx1,
-            w_col,
+            _native(w_col),
             gm_main.n_bins,
             gm_tensor.n_bins1,
         )
@@ -1473,7 +1481,7 @@ def _cross_gram_tensor_own_margin(
         w_grid = _disc_disc_2d_hist(
             gm_tensor.idx1,
             gm_tensor.idx2,
-            W,
+            _native(W),
             gm_tensor.n_bins1,
             gm_tensor.n_bins2,
         )
@@ -1536,7 +1544,7 @@ def _cross_gram_tensor_spline_categorical(
             for j2 in range(K2):
                 if channels is None:
                     w_col = W_rows * B2[idx2, j2]
-                    H = _disc_disc_2d_hist(idx1, bin_cat, w_col, gm_tensor.n_bins1, n_cat)
+                    H = _disc_disc_2d_hist(idx1, bin_cat, _native(w_col), gm_tensor.n_bins1, n_cat)
                 else:
                     H = channels[j2]
                 result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
@@ -1566,7 +1574,9 @@ def _cross_gram_tensor_spline_categorical(
                 idx1_chunk = idx1[start:stop]
                 for j2 in range(K2):
                     w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
-                    agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
+                    agg[j2] += _weighted_bincount_2d(
+                        idx1_chunk, _native(w_col), _native(block), gm_tensor.n_bins1
+                    )
                 del block  # next expansion is evaluated before the rebind
             for j2 in range(K2):
                 result_raw[j2::K2, :] = B1.T @ agg[j2]
@@ -1589,7 +1599,7 @@ def _cross_gram_tensor_spline_categorical(
                     block = _expand_support_rows(columns, bin_cat[start:stop])
                     w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
                     channel += _weighted_bincount_2d(
-                        idx1[start:stop], w_col, block, gm_tensor.n_bins1
+                        idx1[start:stop], _native(w_col), _native(block), gm_tensor.n_bins1
                     )
                     del block
                 result_raw[j2::K2, first:last] = B1.T @ channel
@@ -1665,7 +1675,9 @@ def _chunked_support_bincount_2d(
     for start in range(0, n_rows, chunk):
         stop = min(start + chunk, n_rows)
         block = _expand_support_rows(B_unique, support_idx[start:stop])
-        out += _weighted_bincount_2d(bin_idx[start:stop], weights[start:stop], block, int(n_bins))
+        out += _weighted_bincount_2d(
+            bin_idx[start:stop], _native(weights[start:stop]), _native(block), int(n_bins)
+        )
         # The next expansion is evaluated before the name is rebound, so
         # without this the ceiling is 2x the budget.
         del block
@@ -1801,7 +1813,7 @@ def _support_support_raw_cross(
         n_rows == 0
         or any(value.dtype != np.float64 for value in (B_unique_i, B_unique_j, W_rows))
         or not all(
-            _tensor_operand_in_reassociation_range(value)
+            _tensor_operand_in_reassociation_range(_scan_form(value))
             for value in (B_unique_i, B_unique_j, W_rows[:, None])
         )
     ):
@@ -1967,7 +1979,7 @@ def _cross_gram_spline_categorical_spline_categorical(
                 H = _disc_disc_2d_hist(
                     gm_i.bin_idx_level,
                     gm_j.bin_idx_level,
-                    W[rows],
+                    _native(W[rows]),
                     gm_i.n_bins,
                     gm_j.n_bins,
                 )
@@ -2004,7 +2016,7 @@ def _cross_gram_spline_categorical_spline_categorical(
             H = _disc_disc_2d_hist(
                 gm_i.bin_idx_level[pos_i],
                 gm_j.bin_idx_level[pos_j],
-                W[common_rows],
+                _native(W[common_rows]),
                 gm_i.n_bins,
                 gm_j.n_bins,
             )
@@ -2054,7 +2066,7 @@ def _cross_gram_discrete_spline_categorical(
     H = _disc_disc_2d_hist(
         gm_disc.bin_idx[rows],
         gm_spline_cat.bin_idx_level,
-        W[rows],
+        _native(W[rows]),
         gm_disc.n_bins,
         gm_spline_cat.n_bins,
     )
@@ -2127,7 +2139,7 @@ def _cross_gram_factor_smooth_dense(
     # comfortably in float64's exponent range under this existing guard.
     # Recheck mutable operands each time, including the raw natural map.
     if not all(
-        _tensor_operand_in_reassociation_range(value)
+        _tensor_operand_in_reassociation_range(_scan_form(value))
         for value in (W[:, None], dense.M, basis, factor.natural_map)
     ):
         return None
@@ -2240,7 +2252,7 @@ def _cross_gram_sparse_ssp(
     # Reassociation has five factors and three reductions. This existing
     # interval keeps their products and sums in binary64's exponent range.
     if not all(
-        _tensor_operand_in_reassociation_range(value)
+        _tensor_operand_in_reassociation_range(_scan_form(value))
         for value in (W[:, None], B_i.data[:, None], B_j.data[:, None], R_i, R_j)
     ):
         return None
@@ -2589,7 +2601,8 @@ def _cross_gram(
         # its allocation fits; above the cap retain the bounded row fallback.
         if use_rows and n_joint <= _MAX_DISC_DISC_HIST_CELLS:
             use_rows = all(
-                _tensor_operand_in_reassociation_range(value) for value in (B_i, B_j, W[:, None])
+                _tensor_operand_in_reassociation_range(_scan_form(value))
+                for value in (B_i, B_j, W[:, None])
             )
         if use_rows or n_joint <= _MAX_DISC_DISC_HIST_CELLS:
             if use_rows:
@@ -2597,7 +2610,7 @@ def _cross_gram(
                 _profile_count(profile, "block_cross_disc_disc_rows_calls")
             else:
                 W_2d = (
-                    _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, n_i, n_j)
+                    _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, _native(W), n_i, n_j)
                     if cache is None
                     else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, n_i, n_j)
                 )
@@ -2679,7 +2692,7 @@ def _cross_gram(
             gm_i.n_levels,
             gm_j.n_levels,
             lambda: _cat_cat_weighted_crosstab(
-                gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels
+                gm_i.codes, gm_j.codes, _native(W), gm_i.n_levels, gm_j.n_levels
             ),
         )
         _profile_elapsed(profile, "block_cross_cat_cat_s", t0)

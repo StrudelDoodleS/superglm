@@ -11,16 +11,14 @@ def test_public_warmup_covers_global_moments_in_a_fresh_process():
 import numpy as np
 import superglm
 from superglm.distributional.solver import _global_moments as moments
-from superglm.distributional.solver._batched_moments import (
-    _accumulate_targets, _accumulate_targets_strided,
-)
+from superglm.distributional.solver._batched_moments import _accumulate_targets
 
 kernels = (moments._finite_bounded_2d, moments._copy_dense_checked, moments._pack_categorical,
-           _accumulate_targets, _accumulate_targets_strided)
+           _accumulate_targets)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-assert tuple(map(len, compiled)) == (1, 1, 1, 1, 1)
+assert tuple(map(len, compiled)) == (1, 1, 1, 1)
 from tests.test_distributional_automatic_panels import _problem
 from tests.test_distributional_global_moment_integration import _row_stream
 for companion in ('mixed', 'intercept'):
@@ -59,15 +57,15 @@ from threading import Barrier
 import numpy as np
 from superglm.distributional.solver import _batched_moments as module
 
-kernels = (module._accumulate_targets, module._accumulate_targets_strided)
+kernels = (module._accumulate_targets,)
 assert all(not kernel.nopython_signatures for kernel in kernels)
-calls = [0, 0]
+calls = [0]
 fail_first = sys.argv[1] == '1'
 originals = [kernel.compile for kernel in kernels]
 for index, kernel in enumerate(kernels):
     def compile_signature(signature, index=index):
         calls[index] += 1
-        if fail_first and index == 1 and calls[index] == 1:
+        if fail_first and calls[index] == 1:
             raise RuntimeError('injected compile failure')
         return originals[index](signature)
     kernel.compile = compile_signature
@@ -92,7 +90,7 @@ except ValueError:
     pass
 else:
     raise AssertionError('invalid channels must be refused before compilation')
-assert calls == [0, 0]
+assert calls == [0]
 assert all(not kernel.nopython_signatures for kernel in kernels)
 if fail_first:
     try:
@@ -112,9 +110,9 @@ def accumulate(bound):
 with ThreadPoolExecutor(max_workers=2) as pool:
     results = list(pool.map(accumulate, (first, second)))
 assert results == [(0, 0), (0, 0)]
-assert calls == ([2, 2] if fail_first else [1, 1])
+assert calls == ([2] if fail_first else [1])
 assert module._batched_initialized
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1, 1)
+assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1,)
 assert all(not kernel._can_compile for kernel in kernels)
 assert score.flags.writeable and curvature.flags.writeable
 for _, score_out, mass_out in (first, second):
@@ -147,8 +145,8 @@ for score_layout in ('C', 'F', 'A'):
                 assert score.tobytes() == score_bytes
                 assert curvature.tobytes() == curvature_bytes
 module._warmup_batched_moments()
-assert calls == ([2, 2] if fail_first else [1, 1])
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1, 1)
+assert calls == ([2] if fail_first else [1])
+assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1,)
 """
     completed = subprocess.run(
         [sys.executable, "-c", script, str(int(fail_first))],

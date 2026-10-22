@@ -34,7 +34,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_kernels import _fused_bincount_2
+from superglm._group_matrix._group_matrix_kernels import _fused_bincount_2, _native
 from superglm.distributions import _VARIANCE_FLOOR
 
 
@@ -100,7 +100,7 @@ def pair_cell_moments(
         if int(codes_b.min()) < 0 or int(codes_b.max()) >= n_b:
             raise ValueError("codes_b fall outside [0, n_b)")
     joint = codes_a * np.intp(n_b) + codes_b
-    w_flat, s_flat = _fused_bincount_2(joint, working_weights, score, n_cells)
+    w_flat, s_flat = _fused_bincount_2(joint, _native(working_weights), _native(score), n_cells)
     return s_flat.reshape(n_a, n_b), w_flat.reshape(n_a, n_b)
 
 
