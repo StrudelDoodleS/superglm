@@ -28,8 +28,10 @@ The pooled kernels are the data-rank factor's TSQR leaves
 (``solvers.rank``), the Gram's blocks (``_group_matrix._block_queue``), the
 lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
-(``reml.w_derivatives``) and the interaction terms' builds
-(``_predictor_compiler``); :func:`pooled_map` serves the last two.
+(``reml.w_derivatives``), the interaction terms' builds
+(``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
+negative binomial rows) and batched global moments; :func:`pooled_map` and
+:func:`pooled_row_blocks` serve the last four.
 """
 
 from __future__ import annotations
@@ -357,3 +359,19 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
                 for future in futures:
                     if future is not None:
                         future.cancel()
+
+
+def pooled_row_blocks(fn: Callable[[int, int], object], n_rows: int, block_rows: int) -> list:
+    """``[fn(start, stop), ...]`` over consecutive blocks of ``block_rows`` rows, in row order.
+
+    The blocks depend on ``n_rows`` and ``block_rows`` alone, never on the
+    worker count, so a kernel whose rows write only their own outputs gives
+    the same bits whichever worker runs a block and however many there are.
+    The kernels run on :func:`pooled_map` (they must release the GIL to run
+    side by side); a block's working set is its kernel's scratch, a few
+    hundred bytes, against outputs the caller already holds.
+    """
+    starts = list(range(0, n_rows, block_rows))
+    return list(
+        pooled_map(lambda start: fn(start, min(start + block_rows, n_rows)), starts, 1 << 12)
+    )

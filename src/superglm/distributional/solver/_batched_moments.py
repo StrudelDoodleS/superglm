@@ -1,9 +1,12 @@
 """Parallelize independent global moments without changing their row order.
 
 The plan supplies already validated bins and likelihood values in its owned
-chunk buffers. Each native worker updates whole, disjoint accumulators, so
-signed floating-point additions have exactly the serial reduction order.
-Only integer diagnostics are reduced across workers; fastmath is disabled.
+chunk buffers. Each target (a histogram, a directional moment or a paired
+score/mass vector) is one task on the worker pool (``superglm._parallel``):
+a serial kernel that releases the GIL updates the target's own accumulator,
+visiting the rows in their input order, so signed floating-point additions
+have exactly the serial reduction order at every worker count. Only integer
+diagnostics are summed across tasks; fastmath is disabled.
 
 Accumulators and ordinary panels are views of two owned flat buffers, and the
 kernel addresses each through an element offset and a row width.  A
@@ -15,20 +18,15 @@ cache (``numba/typed/typedlist.py`` declares them without ``cache=True``).
 from __future__ import annotations
 
 from threading import Lock
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import numpy as np
-from numba import get_num_threads, get_thread_id, njit, types
+from numba import njit, types
 
-if TYPE_CHECKING:
-    from builtins import range as prange
+from superglm._parallel import pool_workers, pooled_map
 
-    class _NumbaThreadConfig(Protocol):
-        NUMBA_NUM_THREADS: int
-
-    config: _NumbaThreadConfig
-else:
-    from numba import config, prange
+# Bytes one target's task holds while it runs: its loop state, not its rows.
+_TASK_BYTES = 1 << 12
 
 
 @njit(cache=True)
@@ -72,8 +70,8 @@ def _paired_vector_target(outputs, score_offset, mass_offset, bins, score, curva
     return active
 
 
-@njit(cache=True, parallel=True)
-def _accumulate_batched(
+@njit(cache=True, nogil=True)
+def _accumulate_targets(
     metadata,
     panel_layout,
     outputs,
@@ -84,58 +82,50 @@ def _accumulate_batched(
     n,
     n_histograms,
     n_matrices,
-    activity,
-    lanes,
+    first,
+    stop,
 ):
-    for worker in range(activity.size):
-        activity[worker] = 0
+    """Targets ``first..stop``, each over rows ``0..n`` in order: histogram visits,
+    directional work and paired-vector visits."""
     histogram_active = 0
     directional_work = 0
     vector_active = 0
-    for lane_index in prange(lanes):
-        activity[get_thread_id()] = 1
-        # Round-robin lanes spread both histogram and wider directional targets
-        # across the configured team. Cast prange's possibly unsigned index;
-        # each target still visits rows in their input order.
-        for target in range(np.intp(lane_index), metadata.shape[0], lanes):
-            g = metadata[target, 0]
-            other = metadata[target, 1]
-            channel = metadata[target, 2]
-            offset = metadata[target, 3]
-            if target < n_histograms:
-                histogram_active += _histogram_target(
-                    outputs, offset, metadata[target, 4], bins, curvature, g, other, channel, n
-                )
-            elif target < n_matrices:
-                directional_work += _directional_target(
-                    outputs,
-                    offset,
-                    panels,
-                    panel_layout[other, 0],
-                    panel_layout[other, 1],
-                    bins,
-                    curvature,
-                    g,
-                    channel,
-                    n,
-                )
-            else:
-                vector_active += _paired_vector_target(
-                    outputs,
-                    offset,
-                    metadata[target, 4],
-                    bins,
-                    score,
-                    curvature,
-                    g,
-                    other,
-                    channel,
-                    n,
-                )
-    workers = 0
-    for worker in range(activity.size):
-        workers += activity[worker]
-    return histogram_active, directional_work, vector_active, workers
+    for target in range(first, stop):
+        g = metadata[target, 0]
+        other = metadata[target, 1]
+        channel = metadata[target, 2]
+        offset = metadata[target, 3]
+        if target < n_histograms:
+            histogram_active += _histogram_target(
+                outputs, offset, metadata[target, 4], bins, curvature, g, other, channel, n
+            )
+        elif target < n_matrices:
+            directional_work += _directional_target(
+                outputs,
+                offset,
+                panels,
+                panel_layout[other, 0],
+                panel_layout[other, 1],
+                bins,
+                curvature,
+                g,
+                channel,
+                n,
+            )
+        else:
+            vector_active += _paired_vector_target(
+                outputs,
+                offset,
+                metadata[target, 4],
+                bins,
+                score,
+                curvature,
+                g,
+                other,
+                channel,
+                n,
+            )
+    return histogram_active, directional_work, vector_active
 
 
 # Keep C addressing in the common path and one general-stride fallback. Numba's
@@ -143,9 +133,11 @@ def _accumulate_batched(
 # neither dispatcher copies rows or changes the caller's writeability flags.
 if TYPE_CHECKING:
     # Numba's py_func stub models descriptor binding on this plain function.
-    _accumulate_batched_strided = _accumulate_batched
+    _accumulate_targets_strided = _accumulate_targets
 else:
-    _accumulate_batched_strided = njit(cache=True, parallel=True)(_accumulate_batched.py_func)
+    _accumulate_targets_strided = njit(cache=True, nogil=True)(_accumulate_targets.py_func)
+# The kernels the worker pool runs: one target each, ``nogil``, never ``prange``.
+_POOLED_TARGET_KERNELS = (_accumulate_targets, _accumulate_targets_strided)
 _batched_initialization_lock = Lock()
 _batched_initialized = False
 
@@ -160,7 +152,7 @@ def _initialize_batched_moments():
             return
         table = types.Array(types.intp, 2, "C", readonly=True)
         buffer = types.Array(types.float64, 1, "C")
-        for kernel, layout in ((_accumulate_batched, "C"), (_accumulate_batched_strided, "A")):
+        for kernel, layout in ((_accumulate_targets, "C"), (_accumulate_targets_strided, "A")):
             channels = types.Array(types.float64, 2, layout, readonly=True)
             kernel.compile(
                 (
@@ -174,32 +166,30 @@ def _initialize_batched_moments():
                     types.intp,
                     types.intp,
                     types.intp,
-                    types.Array(types.intp, 1, "C"),
+                    types.intp,
                     types.intp,
                 )
             )
         # A failed compile leaves readiness false and propagates before any
         # accumulation. Retain successful compilation for a subsequent retry;
         # dispatcher identities and Numba's own failure semantics stay intact.
-        _accumulate_batched.disable_compile()
-        _accumulate_batched_strided.disable_compile()
+        _accumulate_targets.disable_compile()
+        _accumulate_targets_strided.disable_compile()
         _batched_initialized = True
 
 
 def _batch_workspace_bytes(histogram_count, directional_count, ordinary_count, *, vector_count=0):
     """Return exact owned array bytes and a separate descriptor reserve.
 
-    The three owned arrays contain five indices per target, an offset and a
-    width per ordinary panel, and one activity flag per maximum Numba worker.
-    The accumulators and panels are borrowed views of the caller's buffers.
+    The two owned arrays contain five indices per target and an offset and a
+    width per ordinary panel. The accumulators and panels are borrowed views
+    of the caller's buffers.
     Python wrappers and tuples receive a bounded conservative reserve; global
     JIT/runtime state belongs to Numba itself. Both terms are independent of
     observation count and chunk length.
     """
     targets = histogram_count + directional_count + vector_count
-    owned = np.dtype(np.intp).itemsize * (
-        5 * targets + 2 * ordinary_count + config.NUMBA_NUM_THREADS
-    )
+    owned = np.dtype(np.intp).itemsize * (5 * targets + 2 * ordinary_count)
     descriptors = 2048 + 512 * (targets + vector_count + ordinary_count)
     return int(owned), int(descriptors)
 
@@ -319,20 +309,18 @@ class _BatchedMomentReducers:
             )
         metadata.flags.writeable = False
         panel_layout.flags.writeable = False
-        activity = np.empty(config.NUMBA_NUM_THREADS, dtype=np.intp)
         self._output_buffer = output_buffer
         self._panel_buffer = panel_buffer
         self._panel_layout = panel_layout
         self._bins = bins
         self._metadata = metadata
-        self._activity = activity
         self._capacity = capacity
         self._n_channels = int(n_channels)
         self._n_score_channels = n_score_channels
         self._n_histograms = n_histograms
         self._n_matrices = len(specs)
         self._n_vectors = len(vector_specs)
-        self.owned_arrays = (metadata, panel_layout, activity)
+        self.owned_arrays = (metadata, panel_layout)
         _, self.metadata_reserve_bytes = _batch_workspace_bytes(
             n_histograms, len(directions), len(panels), vector_count=len(vector_specs)
         )
@@ -375,11 +363,11 @@ class _BatchedMomentReducers:
             return 0, 0
         _initialize_batched_moments()
         kernel = (
-            _accumulate_batched
+            _accumulate_targets
             if score.flags.c_contiguous and curvature.flags.c_contiguous
-            else _accumulate_batched_strided
+            else _accumulate_targets_strided
         )
-        histogram_active, directional_work, vector_active, workers = kernel(
+        operands = (
             self._metadata,
             self._panel_layout,
             self._output_buffer,
@@ -390,10 +378,17 @@ class _BatchedMomentReducers:
             int(n),
             self._n_histograms,
             self._n_matrices,
-            self._activity,
-            min(get_num_threads(), self._metadata.shape[0]),
         )
-        self.last_worker_count = int(workers)
+        targets = list(range(self._metadata.shape[0]))
+        counts = pooled_map(
+            lambda target: kernel(*operands, target, target + 1), targets, _TASK_BYTES
+        )
+        histogram_active = directional_work = vector_active = 0
+        for histogram, directional, vector in counts:
+            histogram_active += histogram
+            directional_work += directional
+            vector_active += vector
+        self.last_worker_count = pool_workers(len(targets), _TASK_BYTES)
         self.last_vector_active_updates = int(vector_active)
         return int(histogram_active), int(directional_work)
 

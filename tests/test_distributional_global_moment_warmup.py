@@ -1,6 +1,5 @@
 """Public warmup covers global reducers before the first geometry attempt."""
 
-import os
 import subprocess
 import sys
 
@@ -13,11 +12,11 @@ import numpy as np
 import superglm
 from superglm.distributional.solver import _global_moments as moments
 from superglm.distributional.solver._batched_moments import (
-    _accumulate_batched, _accumulate_batched_strided,
+    _accumulate_targets, _accumulate_targets_strided,
 )
 
 kernels = (moments._finite_bounded_2d, moments._copy_dense_checked, moments._pack_categorical,
-           _accumulate_batched, _accumulate_batched_strided)
+           _accumulate_targets, _accumulate_targets_strided)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
@@ -55,12 +54,12 @@ def test_direct_first_use_initializes_once_and_retries_failed_compilation(fail_f
     script = r"""
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Lock
+from threading import Barrier
 
 import numpy as np
 from superglm.distributional.solver import _batched_moments as module
 
-kernels = (module._accumulate_batched, module._accumulate_batched_strided)
+kernels = (module._accumulate_targets, module._accumulate_targets_strided)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 calls = [0, 0]
 fail_first = sys.argv[1] == '1'
@@ -72,23 +71,6 @@ for index, kernel in enumerate(kernels):
             raise RuntimeError('injected compile failure')
         return originals[index](signature)
     kernel.compile = compile_signature
-
-# Race real first-use compilation, not parallel-kernel execution: Numba's
-# workqueue backend does not support concurrent launches from Python threads.
-# These wrappers leave compile/disable_compile untouched and serialize only
-# the real native calls after the production initializer has returned.
-execution_lock = Lock()
-def serialize_execution(kernel):
-    def run(*args):
-        with execution_lock:
-            return kernel(*args)
-    run.compile = kernel.compile
-    run.disable_compile = kernel.disable_compile
-    return run
-
-module._accumulate_batched, module._accumulate_batched_strided = (
-    serialize_execution(kernel) for kernel in kernels
-)
 
 def build():
     outputs = np.zeros(6)
@@ -172,8 +154,6 @@ assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1, 1)
         [sys.executable, "-c", script, str(int(fail_first))],
         capture_output=True,
         text=True,
-        # Exercise the portable backend even where OpenMP/TBB is available.
-        env={**os.environ, "NUMBA_THREADING_LAYER": "workqueue", "NUMBA_NUM_THREADS": "2"},
         timeout=120,
     )
     assert completed.returncode == 0, completed.stderr

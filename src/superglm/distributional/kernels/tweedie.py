@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._tweedie_numba as _compiled
+from superglm._parallel import pooled_row_blocks
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,
@@ -29,19 +30,13 @@ _MIN_POWER = 1.05
 _MAX_POWER = 1.95
 _DEFAULT_MAX_TERMS = 100_000
 _DEFAULT_LOG_CUTOFF = 37.0
+# Below this many rows a batch runs as one serial block; above it, blocks of
+# _PARALLEL_BLOCK rows run on the worker pool.
 _PARALLEL_MIN_ROWS = 5_000
+_PARALLEL_BLOCK = 4096
 
-_BatchResult = tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.int64],
-    NDArray[np.bool_],
-    int,
-    int,
-]
-_BatchCore = Callable[..., _BatchResult]
-_DirectionCore = Callable[..., tuple[NDArray[np.float64], int, int]]
+_RowsKernel = Callable[..., tuple[int, int]]
+_FillKernel = Callable[..., None]
 
 
 class TweedieNumericalRefusal(RuntimeError):  # noqa: N818 - binding contract name
@@ -261,8 +256,7 @@ _COMPILED_ROW_REFUSALS = {
     _compiled.KERNEL_REQUIRED_WORK: "required float64 work is not representable",
 }
 
-_evaluate_tweedie_batch_core = _compiled._evaluate_tweedie_batch_core
-_evaluate_tweedie_batch_parallel_core = _compiled._evaluate_tweedie_batch_parallel_core
+_evaluate_tweedie_batch_rows = cast(_RowsKernel, _compiled._evaluate_tweedie_batch_rows)
 
 
 def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) -> None:
@@ -283,29 +277,67 @@ def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) ->
 
 
 # The LAML endgame's third- and fourth-derivative kernels
-# (``_tweedie_hessian_direction_core``, ``_tweedie_fourth_core`` and the helpers
-# they call) compile, or load from numba's cache, on a Tweedie fit's first
-# endgame call, not in ``superglm.warmup()``: they cost 9 s to compile and
-# only a fit whose smoothing parameter reaches its endpoint calls them (the
-# first-use list in tests/test_import_compat.py records the measurements).
+# (``_tweedie_hessian_direction_rows``, ``_tweedie_fourth_rows`` and the
+# helpers they call) compile, or load from numba's cache, on a Tweedie fit's
+# first endgame call, not in ``superglm.warmup()``: only a fit whose
+# smoothing parameter reaches its endpoint calls them (the first-use list in
+# tests/test_import_compat.py records the measurements).
+
+
+def _pooled_rows(kernel: Callable[[int, int], tuple[int, int]], n_rows: int) -> tuple[int, int]:
+    """Run ``kernel(start, stop)`` over the rows: one block below ``_PARALLEL_MIN_ROWS``,
+    else blocks of ``_PARALLEL_BLOCK`` on the worker pool.  The first failure in
+    row order, ``(status, row)``, or ``(KERNEL_OK, -1)``."""
+    if n_rows < _PARALLEL_MIN_ROWS:
+        return kernel(0, n_rows) if n_rows else (int(_compiled.KERNEL_OK), -1)
+    for status, row in pooled_row_blocks(kernel, n_rows, _PARALLEL_BLOCK):
+        if status != _compiled.KERNEL_OK:
+            return status, row
+    return int(_compiled.KERNEL_OK), -1
+
+
+def _first_failure(statuses: NDArray[np.int64]) -> tuple[int, int]:
+    """``(status, row)`` of the first row whose status is not ``KERNEL_OK``, else ``(OK, -1)``."""
+    failing = np.flatnonzero(statuses != _compiled.KERNEL_OK)
+    if failing.size:
+        return int(statuses[failing[0]]), int(failing[0])
+    return int(_compiled.KERNEL_OK), -1
+
+
+def _batch_outputs(n_rows: int, order: int) -> tuple[NDArray, ...]:
+    """``(values, scores, hessians, terms, valid)`` for ``n_rows`` rows at derivative ``order``."""
+    return (
+        np.empty(n_rows, dtype=np.float64),
+        np.empty((n_rows if order >= 1 else 0, 3), dtype=np.float64),
+        np.empty((n_rows if order == 2 else 0, 6), dtype=np.float64),
+        np.empty(n_rows, dtype=np.int64),
+        np.ones(n_rows, dtype=np.bool_),
+    )
 
 
 def _warmup_tweedie() -> None:
-    """Compile the two batch cores; every helper they call compiles with them."""
+    """Compile the batch's row kernel; every helper it calls compiles with it."""
     arrays = tuple(np.array([value], dtype=np.float64) for value in (1.0, 1.2, 0.7, 1.5, 1.0))
-    for dispatcher in (
-        _evaluate_tweedie_batch_core,
-        _evaluate_tweedie_batch_parallel_core,
-    ):
-        batch_core = cast(_BatchCore, dispatcher)
-        raw = batch_core(*arrays, 0, 2, _DEFAULT_MAX_TERMS, _DEFAULT_LOG_CUTOFF)
-        status, failing_row = raw[-2:]
-        if status != _compiled.KERNEL_OK:
-            _raise_compiled_refusal(
-                status=int(status),
-                failing_row=int(failing_row),
-                max_terms=_DEFAULT_MAX_TERMS,
-            )
+    values, scores, hessians, terms, _ = _batch_outputs(1, 2)
+    status, failing_row = _evaluate_tweedie_batch_rows(
+        *arrays,
+        0,
+        2,
+        _DEFAULT_MAX_TERMS,
+        _DEFAULT_LOG_CUTOFF,
+        0,
+        1,
+        values,
+        scores,
+        hessians,
+        terms,
+    )
+    if status == _compiled.KERNEL_OK:
+        status = _compiled._complete_batch_status(values, scores, hessians, 2)
+    if status != _compiled.KERNEL_OK:
+        _raise_compiled_refusal(
+            status=int(status), failing_row=int(failing_row), max_terms=_DEFAULT_MAX_TERMS
+        )
 
 
 def evaluate_tweedie_rows(
@@ -344,22 +376,18 @@ def evaluate_tweedie_rows(
     # the public Python cap for refusal messages, but never dispatch an
     # oversized Python integer through Numba's native integer boundary.
     native_max_terms = min(row_max_terms, _MAX_SAFE_MODE + 1)
-    batch_core = cast(
-        _BatchCore,
-        (
-            _evaluate_tweedie_batch_parallel_core
-            if len(normalized[0]) >= _PARALLEL_MIN_ROWS
-            else _evaluate_tweedie_batch_core
+    n_rows = len(normalized[0])
+    values, scores, hessians, terms, valid = _batch_outputs(n_rows, order)
+    weight_mode = 0 if semantics == "prior" else 1
+    status, failing_row = _pooled_rows(
+        lambda start, stop: _evaluate_tweedie_batch_rows(
+            *normalized, weight_mode, order, native_max_terms, cutoff,
+            start, stop, values, scores, hessians, terms,
         ),
-    )
-    raw = batch_core(
-        *normalized,
-        0 if semantics == "prior" else 1,
-        order,
-        native_max_terms,
-        cutoff,
-    )
-    values, scores, hessians, terms, valid, status, failing_row = raw
+        n_rows,
+    )  # fmt: skip
+    if status == _compiled.KERNEL_OK:
+        status = _compiled._complete_batch_status(values, scores, hessians, order)
     if status != _compiled.KERNEL_OK:
         _raise_compiled_refusal(
             status=int(status),
@@ -423,14 +451,20 @@ def tweedie_hessian_direction(
     normalized = tuple(
         np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
     )
-    direction_core = cast(_DirectionCore, _compiled._tweedie_hessian_direction_core)
-    result, status, failing_row = direction_core(
-        *normalized,
-        0 if semantics == "prior" else 1,
-        natural,
-        min(row_max_terms, _MAX_SAFE_MODE + 1),
-        cutoff,
-    )
+    n_rows = len(normalized[0])
+    result = np.empty((n_rows, 6), dtype=np.float64)
+    statuses = np.empty(n_rows, dtype=np.int64)
+    weight_mode = 0 if semantics == "prior" else 1
+    native_max_terms = min(row_max_terms, _MAX_SAFE_MODE + 1)
+    pooled_row_blocks(
+        lambda start, stop: cast(_FillKernel, _compiled._tweedie_hessian_direction_rows)(
+            *normalized, weight_mode, natural, native_max_terms, cutoff,
+            start, stop, result, statuses,
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )  # fmt: skip
+    status, failing_row = _first_failure(statuses)
     if status != _compiled.KERNEL_OK:
         _raise_compiled_refusal(
             status=int(status), failing_row=int(failing_row), max_terms=row_max_terms
@@ -474,13 +508,19 @@ def tweedie_natural_fourth(
     normalized = tuple(
         np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
     )
-    fourth_core = cast(_DirectionCore, _compiled._tweedie_fourth_core)
-    result, status, failing_row = fourth_core(
-        *normalized,
-        0 if semantics == "prior" else 1,
-        min(row_max_terms, _MAX_SAFE_MODE + 1),
-        cutoff,
+    n_rows = len(normalized[0])
+    result = np.empty((n_rows, 34), dtype=np.float64)
+    statuses = np.empty(n_rows, dtype=np.int64)
+    weight_mode = 0 if semantics == "prior" else 1
+    native_max_terms = min(row_max_terms, _MAX_SAFE_MODE + 1)
+    pooled_row_blocks(
+        lambda start, stop: cast(_FillKernel, _compiled._tweedie_fourth_rows)(
+            *normalized, weight_mode, native_max_terms, cutoff, start, stop, result, statuses
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
     )
+    status, failing_row = _first_failure(statuses)
     if status != _compiled.KERNEL_OK:
         _raise_compiled_refusal(
             status=int(status), failing_row=int(failing_row), max_terms=row_max_terms

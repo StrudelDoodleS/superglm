@@ -13,6 +13,7 @@ from numba import njit  # type: ignore[import-untyped]
 from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
 from scipy.special import polygamma
 
+from superglm._parallel import parallel_config, pooled_row_blocks
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
 from tests._tweedie_lss_oracles import (
     CENTERED_RHO_MOMENT_ORACLE,
@@ -78,17 +79,46 @@ def _dispatch_inputs(rows: int) -> tuple[np.ndarray, ...]:
     )
 
 
+_rows_kernel = tweedie_kernel._compiled._evaluate_tweedie_batch_rows
+
+
+def _raw_batch(*arguments, block: int | None = None, rows_kernel=None):
+    """A batch through the row kernel: ``(values, scores, hessians, terms, valid, status, row)``.
+
+    One serial pass over every row (the batch below the pooled threshold), or,
+    with ``block``, fixed blocks of that many rows on four pool workers.  The
+    status and row are the first failure in row order, else the complete
+    outputs' status and ``-1``, as the public boundary reads them.
+    """
+    y, mean, dispersion, power, weight, mode, order, max_terms, cutoff = arguments
+    kernel = _rows_kernel if rows_kernel is None else rows_kernel
+    values, scores, hessians, terms, valid = tweedie_kernel._batch_outputs(y.size, order)
+
+    def run(start, stop):
+        return kernel(
+            y, mean, dispersion, power, weight, mode, order, max_terms, cutoff,
+            start, stop, values, scores, hessians, terms,
+        )  # fmt: skip
+
+    if block is None:
+        results = [run(0, y.size)] if y.size else []
+    else:
+        with parallel_config(n_jobs=4):
+            results = pooled_row_blocks(run, y.size, block)
+    ok = tweedie_kernel._compiled.KERNEL_OK
+    status, row = next(((s, r) for s, r in results if s != ok), (ok, -1))
+    if status == ok:
+        status = tweedie_kernel._compiled._complete_batch_status(values, scores, hessians, order)
+    return values, scores, hessians, terms, valid, int(status), int(row)
+
+
 def test_ordinary_720_row_batch_uses_serial_nopython_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def forbidden_parallel_core(*_args):
-        raise AssertionError("ordinary batch called the parallel compiled core")
+    def forbidden_pool(*_args):
+        raise AssertionError("ordinary batch ran on the worker pool")
 
-    monkeypatch.setattr(
-        tweedie_kernel,
-        "_evaluate_tweedie_batch_parallel_core",
-        forbidden_parallel_core,
-    )
+    monkeypatch.setattr(tweedie_kernel, "pooled_row_blocks", forbidden_pool)
     rows = 720
     result = evaluate_tweedie_rows(
         *_dispatch_inputs(rows),
@@ -98,56 +128,42 @@ def test_ordinary_720_row_batch_uses_serial_nopython_boundary(
 
     assert np.all(result.valid)
     assert np.all(np.isfinite(result.log_likelihood))
-    serial_core = tweedie_kernel._evaluate_tweedie_batch_core
-    assert serial_core.nopython_signatures
-    assert type(serial_core._cache).__name__ == "FunctionCache"
-    target_options = serial_core.targetoptions
+    assert _rows_kernel.nopython_signatures
+    assert type(_rows_kernel._cache).__name__ == "FunctionCache"
+    target_options = _rows_kernel.targetoptions
     assert target_options.get("fastmath", False) is False
     assert target_options.get("parallel", False) is False
+    assert target_options.get("nogil", False) is True
 
 
-@pytest.mark.parametrize(
-    ("rows", "forbidden_core"),
-    [
-        (4_999, "_evaluate_tweedie_batch_parallel_core"),
-        (5_000, "_evaluate_tweedie_batch_core"),
-    ],
-)
+@pytest.mark.parametrize("rows", [4_999, 5_000])
 def test_production_dispatch_switches_at_measured_crossover_with_exact_outputs(
     rows: int,
-    forbidden_core: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     arrays = _dispatch_inputs(rows)
-    serial = tweedie_kernel._compiled._evaluate_tweedie_batch_core(
-        *arrays,
-        0,
-        2,
-        100_000,
-        37.0,
-    )
+    serial = _raw_batch(*arrays, 0, 2, 100_000, 37.0)
     assert serial[5:] == (0, -1)
 
-    def forbidden(*_args):
-        raise AssertionError(f"{rows}-row batch selected {forbidden_core}")
+    pooled = []
 
-    monkeypatch.setattr(tweedie_kernel, forbidden_core, forbidden)
+    def recorded(kernel, n_rows, block_rows):
+        pooled.append(n_rows)
+        return pooled_row_blocks(kernel, n_rows, block_rows)
+
+    monkeypatch.setattr(tweedie_kernel, "pooled_row_blocks", recorded)
     result = evaluate_tweedie_rows(
         *arrays,
         "prior",
         derivative_order=2,
     )
 
+    assert pooled == ([] if rows < 5_000 else [rows])
     np.testing.assert_array_equal(result.log_likelihood, serial[0])
     np.testing.assert_array_equal(result.score, serial[1])
     np.testing.assert_array_equal(result.hessian_packed, serial[2])
     np.testing.assert_array_equal(result.terms, serial[3])
     np.testing.assert_array_equal(result.valid, serial[4])
-    if rows == 5_000:
-        parallel_core = tweedie_kernel._compiled._evaluate_tweedie_batch_parallel_core
-        assert parallel_core.nopython_signatures
-        assert parallel_core.targetoptions.get("parallel", False) is True
-        assert parallel_core.targetoptions.get("fastmath", False) is False
 
 
 def test_public_warmup_normalizes_a_compiled_refusal(
@@ -155,10 +171,10 @@ def test_public_warmup_normalizes_a_compiled_refusal(
 ) -> None:
     import superglm
 
-    def refusing_core(*_args):
-        return (None, None, None, None, None, tweedie_kernel._compiled.KERNEL_MODE_RATIO, 0)
+    def refusing_rows(*_args):
+        return tweedie_kernel._compiled.KERNEL_MODE_RATIO, 0
 
-    monkeypatch.setattr(tweedie_kernel, "_evaluate_tweedie_batch_core", refusing_core)
+    monkeypatch.setattr(tweedie_kernel, "_evaluate_tweedie_batch_rows", refusing_rows)
 
     with pytest.raises(
         TweedieNumericalRefusal,
@@ -470,7 +486,7 @@ def test_huge_max_terms_matches_frozen_evidence_without_new_native_signature() -
     case = FROZEN_HUGE_CAP_EVALUATION
     arrays = _frozen_evaluation_arrays(case)
     evaluate_tweedie_rows(*arrays, "prior", derivative_order=2, max_terms=100_000)
-    signatures = tuple(tweedie_kernel._evaluate_tweedie_batch_core.signatures)
+    signatures = tuple(_rows_kernel.signatures)
 
     result = evaluate_tweedie_rows(
         *arrays,
@@ -481,7 +497,7 @@ def test_huge_max_terms_matches_frozen_evidence_without_new_native_signature() -
     )
 
     _assert_evaluation_matches_frozen(result, case, derivative_order=2)
-    assert tuple(tweedie_kernel._evaluate_tweedie_batch_core.signatures) == signatures
+    assert tuple(_rows_kernel.signatures) == signatures
 
     refusal = next(case for case in FROZEN_TWEEDIE_REFUSALS if case.id.startswith("huge-cap"))
     refusing = tuple(np.array([value], dtype=np.float64) for value in refusal.row)
@@ -493,7 +509,7 @@ def test_huge_max_terms_matches_frozen_evidence_without_new_native_signature() -
             max_terms=refusal.max_terms,
         )
     assert str(caught.value) == refusal.message
-    assert tuple(tweedie_kernel._evaluate_tweedie_batch_core.signatures) == signatures
+    assert tuple(_rows_kernel.signatures) == signatures
 
 
 def _assert_identical_point_results(actual, expected) -> None:
@@ -535,27 +551,21 @@ def test_parallel_core_is_exactly_row_equivalent_under_permutations_and_partitio
     )
 
     for variant in variants:
-        serial = tweedie_kernel._evaluate_tweedie_batch_core(
+        serial = _raw_batch(
             *variant,
             weight_mode,
             derivative_order,
             100_000,
             37.0,
         )
-        parallel = tweedie_kernel._evaluate_tweedie_batch_parallel_core(
-            *variant,
-            weight_mode,
-            derivative_order,
-            100_000,
-            37.0,
-        )
+        parallel = _raw_batch(*variant, weight_mode, derivative_order, 100_000, 37.0, block=3)
         _assert_identical_raw_results(parallel, serial)
 
 
 def test_read_only_and_strided_inputs_reuse_normalized_native_signature() -> None:
     arrays = _prior_batch_inputs()
     baseline = evaluate_tweedie_rows(*arrays, "prior", derivative_order=2)
-    signatures = tuple(tweedie_kernel._evaluate_tweedie_batch_core.signatures)
+    signatures = tuple(_rows_kernel.signatures)
 
     read_only = tuple(values.copy() for values in arrays)
     for values in read_only:
@@ -579,13 +589,13 @@ def test_read_only_and_strided_inputs_reuse_normalized_native_signature() -> Non
 
     _assert_identical_point_results(read_only_result, baseline)
     _assert_identical_point_results(strided_result, baseline)
-    assert tuple(tweedie_kernel._evaluate_tweedie_batch_core.signatures) == signatures
+    assert tuple(_rows_kernel.signatures) == signatures
 
 
 def test_parallel_boundary_preserves_read_only_and_strided_inputs_exactly() -> None:
     rows = 5_000
     arrays = tuple(np.resize(values, rows) for values in _prior_batch_inputs())
-    serial = tweedie_kernel._evaluate_tweedie_batch_core(
+    serial = _raw_batch(
         *arrays,
         0,
         2,
@@ -644,21 +654,21 @@ def _assert_raw_derivative_suppression(raw, derivative_order: int) -> None:
 def test_raw_core_leaves_unrequested_derivative_channels_uncomputed() -> None:
     arrays = tuple(np.ascontiguousarray(values) for values in _prior_batch_inputs())
 
-    order_zero = tweedie_kernel._evaluate_tweedie_batch_core(
+    order_zero = _raw_batch(
         *arrays,
         0,
         0,
         100_000,
         37.0,
     )
-    order_one = tweedie_kernel._evaluate_tweedie_batch_core(
+    order_one = _raw_batch(
         *arrays,
         0,
         1,
         100_000,
         37.0,
     )
-    order_two = tweedie_kernel._evaluate_tweedie_batch_core(
+    order_two = _raw_batch(
         *arrays,
         0,
         2,
@@ -713,7 +723,7 @@ _POSITIVE_PATH = (
     "_series_summary",
     "_positive_row",
     "_evaluate_tweedie_batch_row",
-    "_evaluate_tweedie_batch_core",
+    "_evaluate_tweedie_batch_rows",
 )
 _SERIES_PATH = (
     "_log_gamma_increment",
@@ -799,7 +809,9 @@ def test_stand_ins_compile_under_their_own_names_and_leave_production_alone() ->
     with _compiled_with(path, _term_derivative_channels=forbidden_channels) as stand_in:
         arrays = _case_arrays(TWEEDIE_LSS_CASES[3])
         with pytest.raises(RuntimeError, match="order-zero special-function poison"):
-            stand_in._evaluate_tweedie_batch_core(*arrays, 0, 1, 100_000, 37.0)
+            _raw_batch(
+                *arrays, 0, 1, 100_000, 37.0, rows_kernel=stand_in._evaluate_tweedie_batch_rows
+            )
         for name in path:
             copy = getattr(stand_in, name)
             assert copy is not production[name]
@@ -967,8 +979,8 @@ def test_production_order_one_batch_skips_poisoned_trigamma(
         return 0.0, 0.0
 
     with _compiled_with(_POSITIVE_PATH, _digamma_trigamma_positive=forbidden_trigamma) as stand_in:
-        core = stand_in._evaluate_tweedie_batch_core
-        monkeypatch.setattr(tweedie_kernel, "_evaluate_tweedie_batch_core", core)
+        rows_kernel = stand_in._evaluate_tweedie_batch_rows
+        monkeypatch.setattr(tweedie_kernel, "_evaluate_tweedie_batch_rows", rows_kernel)
         arrays = _case_arrays(TWEEDIE_LSS_CASES[3])
         order_one = evaluate_tweedie_rows(*arrays, "prior", derivative_order=1)
         assert order_one.score is not None
@@ -1793,7 +1805,7 @@ def test_selected_custom_cutoff_endpoints_match_frozen_windows(case) -> None:
 @pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
 def test_endpoint_tuned_custom_cap_matches_frozen_boundary(case) -> None:
     arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
-    raw = tweedie_kernel._evaluate_tweedie_batch_core(
+    raw = _raw_batch(
         *arrays,
         0 if case.semantics == "prior" else 1,
         0,
@@ -1835,7 +1847,7 @@ def test_series_mode_above_exact_float_integer_range_refuses() -> None:
 def test_refusal_matches_frozen_raw_status_row_and_public_message(case) -> None:
     arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
     native_max_terms = min(case.max_terms, tweedie_kernel._compiled._MAX_SAFE_MODE + 1)
-    serial = tweedie_kernel._evaluate_tweedie_batch_core(
+    serial = _raw_batch(
         *arrays,
         0 if case.semantics == "prior" else 1,
         case.derivative_order,
@@ -1862,18 +1874,18 @@ def test_refusal_matches_frozen_raw_status_row_and_public_message(case) -> None:
 )
 def test_parallel_core_preserves_frozen_complete_output_statuses(case) -> None:
     arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
-    parallel = tweedie_kernel._evaluate_tweedie_batch_parallel_core(
+    parallel = _raw_batch(
         *arrays,
         0 if case.semantics == "prior" else 1,
         case.derivative_order,
         case.max_terms,
         case.log_cutoff,
+        block=3,
     )
 
     assert parallel[5:] == (case.status, case.failing_row)
 
 
-@pytest.mark.threads
 def test_parallel_core_reports_the_deterministic_earliest_of_multiple_bad_rows() -> None:
     arrays = (
         np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64),
@@ -1885,13 +1897,7 @@ def test_parallel_core_reports_the_deterministic_earliest_of_multiple_bad_rows()
     expected = (4, 1)
 
     for _ in range(8):
-        raw = tweedie_kernel._evaluate_tweedie_batch_parallel_core(
-            *arrays,
-            0,
-            2,
-            1,
-            37.0,
-        )
+        raw = _raw_batch(*arrays, 0, 2, 1, 37.0, block=3)
         assert raw[5:] == expected
 
     with pytest.raises(TweedieNumericalRefusal) as caught:
@@ -1912,7 +1918,7 @@ def test_compiled_refusal_reports_the_frozen_failing_row() -> None:
         np.array([1.49, 1.5], dtype=np.float64),
         np.ones(2, dtype=np.float64),
     )
-    raw = tweedie_kernel._evaluate_tweedie_batch_core(*arrays, 0, 2, 100_000, 37.0)
+    raw = _raw_batch(*arrays, 0, 2, 100_000, 37.0)
     assert raw[5:] == (17, 1)
 
     with pytest.raises(TweedieNumericalRefusal) as caught:

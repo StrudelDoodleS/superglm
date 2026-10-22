@@ -4,8 +4,8 @@ import inspect
 
 import numpy as np
 import pytest
-from numba import config, get_num_threads, set_num_threads
 
+from superglm._parallel import parallel_config
 from superglm.distributional.solver import _batched_moments as batch_api
 
 
@@ -90,16 +90,12 @@ def _build(fixture):
 
 @pytest.mark.parametrize("threads", [1, 2, 16])
 @pytest.mark.parametrize("mixed", [False, True])
-@pytest.mark.threads
 def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threads, mixed):
-    if threads > int(getattr(config, "NUMBA_NUM_THREADS")):
-        pytest.skip("requested workers exceed the configured Numba maximum")
     fixture = _fixture(mixed)
     rng, sizes, ordinary, bins, histograms, directions, vectors = fixture
     batch = _build(fixture)
-    previous = get_num_threads()
-    try:
-        set_num_threads(threads)
+    targets = len(histograms) + len(directions) + len(vectors)
+    with parallel_config(n_jobs=threads):
         for reset in (False, True):
             if reset:
                 for spec in histograms + directions:
@@ -155,8 +151,7 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
                     directional_work,
                 )
                 assert batch.last_vector_active_updates == vector_active
-                assert batch.last_worker_count == threads
-                assert get_num_threads() == threads
+                assert batch.last_worker_count == min(threads, targets)
                 for spec, expected_score, expected_mass in zip(
                     vectors, expected_scores, expected_masses, strict=True
                 ):
@@ -174,8 +169,6 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
                     np.testing.assert_array_equal(
                         spec[-1].view(np.uint64), expected.view(np.uint64)
                     )
-    finally:
-        set_num_threads(previous)
 
 
 @pytest.mark.parametrize("mutation", ["support", "score_channel", "curvature_channel"])
@@ -250,11 +243,11 @@ def _channels(layout, readonly, width):
 
 
 def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(monkeypatch):
-    assert hasattr(batch_api, "_accumulate_batched_strided"), (
+    assert hasattr(batch_api, "_accumulate_targets_strided"), (
         "the batch still specializes the heavy kernel for every channel storage combination"
     )
     batch_api._warmup_batched_moments()
-    kernels = (batch_api._accumulate_batched, batch_api._accumulate_batched_strided)
+    kernels = (batch_api._accumulate_targets, batch_api._accumulate_targets_strided)
     signatures = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
     assert tuple(map(len, signatures)) == (1, 1)
     calls = [0, 0]
@@ -269,14 +262,14 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
 
         monkeypatch.setattr(
             batch_api,
-            "_accumulate_batched" if index == 0 else "_accumulate_batched_strided",
+            "_accumulate_targets" if index == 0 else "_accumulate_targets_strided",
             counted,
         )
     fixture = _fixture(True)
     batch = _build(fixture)
     exact, reserve = batch_api._batch_workspace_bytes(1, 1, 2, vector_count=17)
     assert sum(array.nbytes for array in batch.owned_arrays) == exact
-    assert len(batch.owned_arrays) == 3
+    assert len(batch.owned_arrays) == 2
     assert batch.metadata_reserve_bytes == reserve
     assert not batch.owned_arrays[0].flags.writeable
     _, _, ordinary, bins, histograms, directions, vectors = fixture
@@ -311,5 +304,7 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
                         np.testing.assert_array_equal(
                             actual.view(np.uint64), oracle.view(np.uint64)
                         )
-    assert calls == [4, 32]
+    # One call per target per accumulation: 4 all-C layouts, 32 others.
+    targets = len(histograms) + len(directions) + len(vectors)
+    assert calls == [4 * targets, 32 * targets]
     assert tuple(tuple(kernel.nopython_signatures) for kernel in kernels) == signatures

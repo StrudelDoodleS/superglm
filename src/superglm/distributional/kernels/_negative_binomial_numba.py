@@ -8,25 +8,24 @@ every power the reference takes with ``**`` is a libm ``pow`` call here too.
 The exponents arrive as data (``exponents[k] == float(k)``) rather than as
 literals: LLVM rewrites ``pow(x, 2.0)`` with a literal exponent as ``x * x``,
 which need not equal libm's ``pow`` in the last bit, and a constant trip count
-would let it unroll the series loop into literal exponents. Rows are
-independent, so the parallel core gives the serial core's bits at any thread
-count.
+would let it unroll the series loop into literal exponents.
+
+Rows are independent.  Every kernel here is serial and releases the GIL, and
+the worker pool (``superglm._parallel.pooled_row_blocks``) runs it over fixed
+blocks of ``_PARALLEL_BLOCK`` rows, each with its own scratch, exactly the
+blocks numba's ``prange`` cores ran: so every worker count gives the same
+bits, and no kernel compiles numba's parallel machinery.
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-if TYPE_CHECKING:
-    # The type checker reads Numba's loop primitive as the range it compiles to.
-    from builtins import range as prange
-else:
-    from numba import prange
+from superglm._parallel import pooled_row_blocks
 
 _EPS = 2.220446049250313e-16
 _TINY = 5e-324
@@ -200,7 +199,7 @@ def _theta_series_row(
     )
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def theta_series_serial(
     rows: NDArray[np.int64],
     counts: NDArray[np.int64],
@@ -241,52 +240,6 @@ def theta_series_serial(
             sum_errors,
             coefficients,
         )
-
-
-@njit(cache=True, parallel=True)
-def theta_series_parallel(
-    rows: NDArray[np.int64],
-    counts: NDArray[np.int64],
-    mean: NDArray[np.float64],
-    theta: NDArray[np.float64],
-    candidate_scale: NDArray[np.float64],
-    remainder_error: NDArray[np.float64],
-    remainder_scale: NDArray[np.float64],
-    derivative_order: int,
-    series_order: int,
-    exponents: NDArray[np.float64],
-    bernoulli: NDArray[np.float64],
-    use: NDArray[np.bool_],
-    natural: NDArray[np.float64],
-    direct: NDArray[np.float64],
-) -> None:
-    """The serial core's rows in blocks across threads; each row's arithmetic is unchanged."""
-    n_blocks = (rows.shape[0] + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, rows.shape[0])
-        for index in range(chunk * _PARALLEL_BLOCK, stop):
-            _theta_series_row(
-                rows[index],
-                counts,
-                mean,
-                theta,
-                candidate_scale,
-                remainder_error,
-                remainder_scale,
-                derivative_order,
-                series_order,
-                exponents,
-                bernoulli,
-                use,
-                natural,
-                direct,
-                sums,
-                sum_errors,
-                coefficients,
-            )
 
 
 @njit(cache=True)
@@ -422,7 +375,50 @@ def _log_third_row(
     used_series[row] = False
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _log_third_rows(
+    counts: NDArray[np.int64],
+    mean: NDArray[np.float64],
+    theta: NDArray[np.float64],
+    remainder: NDArray[np.float64],
+    remainder_error: NDArray[np.float64],
+    remainder_scale: NDArray[np.float64],
+    series_ratio: float,
+    series_order: int,
+    exponents: NDArray[np.float64],
+    bernoulli: NDArray[np.float64],
+    start: int,
+    stop: int,
+    third: NDArray[np.float64],
+    error: NDArray[np.float64],
+    used_series: NDArray[np.bool_],
+) -> None:
+    """``log_third_derivatives`` on rows ``start..stop``, into the caller's outputs."""
+    sums = np.empty(series_order)
+    sum_errors = np.empty(series_order)
+    coefficients = np.empty(series_order)
+    for row in range(start, stop):
+        _log_third_row(
+            row,
+            counts,
+            mean,
+            theta,
+            remainder,
+            remainder_error,
+            remainder_scale,
+            series_ratio,
+            series_order,
+            exponents,
+            bernoulli,
+            third,
+            error,
+            used_series,
+            sums,
+            sum_errors,
+            coefficients,
+        )
+
+
 def log_third_derivatives(
     counts: NDArray[np.int64],
     mean: NDArray[np.float64],
@@ -439,38 +435,20 @@ def log_third_derivatives(
 
     ``l_bbb`` takes the near-Poisson series or the count recurrence, whichever
     certifies the smaller absolute error; the other three channels are closed
-    forms.  Rows are independent, so every thread count gives the same bits.
+    forms.  Rows are independent, so every worker count gives the same bits.
     """
     n_rows = counts.shape[0]
     third = np.empty((n_rows, 4))
     error = np.empty(n_rows)
     used_series = np.zeros(n_rows, dtype=np.bool_)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            _log_third_row(
-                row,
-                counts,
-                mean,
-                theta,
-                remainder,
-                remainder_error,
-                remainder_scale,
-                series_ratio,
-                series_order,
-                exponents,
-                bernoulli,
-                third,
-                error,
-                used_series,
-                sums,
-                sum_errors,
-                coefficients,
-            )
+    pooled_row_blocks(
+        lambda start, stop: _log_third_rows(
+            counts, mean, theta, remainder, remainder_error, remainder_scale, series_ratio,
+            series_order, exponents, bernoulli, start, stop, third, error, used_series,
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )  # fmt: skip
     return third, error, used_series
 
 
@@ -596,7 +574,48 @@ def _log_fourth_row(
     error[row] = (1.0 + _gamma_bound(64.0)) * recurrence_error
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _log_fourth_rows(
+    counts: NDArray[np.int64],
+    mean: NDArray[np.float64],
+    theta: NDArray[np.float64],
+    remainder: NDArray[np.float64],
+    remainder_error: NDArray[np.float64],
+    remainder_scale: NDArray[np.float64],
+    series_ratio: float,
+    series_order: int,
+    exponents: NDArray[np.float64],
+    bernoulli: NDArray[np.float64],
+    start: int,
+    stop: int,
+    fourth: NDArray[np.float64],
+    error: NDArray[np.float64],
+) -> None:
+    """``log_fourth_derivative`` on rows ``start..stop``, into the caller's outputs."""
+    sums = np.empty(series_order)
+    sum_errors = np.empty(series_order)
+    coefficients = np.empty(series_order)
+    for row in range(start, stop):
+        _log_fourth_row(
+            row,
+            counts,
+            mean,
+            theta,
+            remainder,
+            remainder_error,
+            remainder_scale,
+            series_ratio,
+            series_order,
+            exponents,
+            bernoulli,
+            fourth,
+            error,
+            sums,
+            sum_errors,
+            coefficients,
+        )
+
+
 def log_fourth_derivative(
     counts: NDArray[np.int64],
     mean: NDArray[np.float64],
@@ -614,36 +633,19 @@ def log_fourth_derivative(
     The near-Poisson series of the theta score differentiated three times more
     in ``log theta`` (coefficients ``(1 - n)^3 c_n``) or the count recurrence,
     whichever bounds the smaller error, as ``l_bbb`` chooses.  Rows are
-    independent, so every thread count gives the same bits.
+    independent, so every worker count gives the same bits.
     """
     n_rows = counts.shape[0]
     fourth = np.empty(n_rows)
     error = np.empty(n_rows)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            _log_fourth_row(
-                row,
-                counts,
-                mean,
-                theta,
-                remainder,
-                remainder_error,
-                remainder_scale,
-                series_ratio,
-                series_order,
-                exponents,
-                bernoulli,
-                fourth,
-                error,
-                sums,
-                sum_errors,
-                coefficients,
-            )
+    pooled_row_blocks(
+        lambda start, stop: _log_fourth_rows(
+            counts, mean, theta, remainder, remainder_error, remainder_scale, series_ratio,
+            series_order, exponents, bernoulli, start, stop, fourth, error,
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )  # fmt: skip
     return fourth, error
 
 
@@ -715,7 +717,21 @@ def _size_information_row(mean: float, size: float, max_terms: int) -> tuple[flo
     return 0.0, -1
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _size_information_rows(
+    mean: NDArray[np.float64],
+    size: NDArray[np.float64],
+    max_terms: int,
+    start: int,
+    stop: int,
+    information: NDArray[np.float64],
+    terms: NDArray[np.int64],
+) -> None:
+    """``expected_size_information`` on rows ``start..stop``, into the caller's outputs."""
+    for row in range(start, stop):
+        information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
+
+
 def expected_size_information(
     mean: NDArray[np.float64],
     size: NDArray[np.float64],
@@ -724,23 +740,34 @@ def expected_size_information(
     """``theta**2 I_theta_theta`` row by row, with each row's series term count.
 
     Rows are independent and each is one fixed operation sequence, so every
-    thread count gives the same bits.
+    worker count gives the same bits.
     """
     n_rows = mean.shape[0]
     information = np.empty(n_rows)
     terms = np.empty(n_rows, dtype=np.int64)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
+    pooled_row_blocks(
+        lambda start, stop: _size_information_rows(
+            mean, size, max_terms, start, stop, information, terms
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )
     return information, terms
+
+
+# The kernels the worker pool runs (``nogil``, never ``prange``), each writing
+# only its own rows' outputs.
+_POOLED_ROW_KERNELS = (
+    theta_series_serial,
+    _log_third_rows,
+    _log_fourth_rows,
+    _size_information_rows,
+)
 
 
 __all__ = [
     "expected_size_information",
     "log_fourth_derivative",
     "log_third_derivatives",
-    "theta_series_parallel",
     "theta_series_serial",
 ]

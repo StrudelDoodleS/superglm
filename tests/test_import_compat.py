@@ -92,12 +92,12 @@ _FIRST_USE: dict[str, str] = {
                     "_third_term_channels",
                     "_series_third_cumulants",
                     "_tweedie_third_row",
-                    "_tweedie_hessian_direction_core",
+                    "_tweedie_hessian_direction_rows",
                     "_polygamma_0123",
                     "_fourth_term_channels",
                     "_series_fourth_cumulants",
                     "_tweedie_fourth_row",
-                    "_tweedie_fourth_core",
+                    "_tweedie_fourth_rows",
                     "_positive_closed",
                     "_zero_closed",
                     "_zeta_derivatives",
@@ -108,8 +108,8 @@ _FIRST_USE: dict[str, str] = {
             *(
                 _NB + name
                 for name in (
-                    "log_third_derivatives",
-                    "log_fourth_derivative",
+                    "_log_third_rows",
+                    "_log_fourth_rows",
                     "_log_third_row",
                     "_log_fourth_row",
                     "_tail_moment_one",
@@ -120,7 +120,8 @@ _FIRST_USE: dict[str, str] = {
             "superglm.distributional.kernels.gamma._small_shape_jdd_series",
         ],
         "a SuperLSS endpoint step's third and fourth derivatives: none of 26 SuperLSS fits "
-        "reached them (3 with a pure-noise smooth); 14.5 s to compile, 0.12 s from cache",
+        "reached them (3 with a pure-noise smooth); 7 s to compile after warmup(), 0.06 s "
+        "from cache",
     ),
     **dict.fromkeys(
         (

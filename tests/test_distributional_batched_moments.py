@@ -4,7 +4,8 @@ from importlib import import_module
 
 import numpy as np
 import pytest
-from numba import config, get_num_threads, set_num_threads
+
+from superglm._parallel import parallel_config
 
 
 def _module():
@@ -53,10 +54,7 @@ def _fixture(kind="both"):
 
 @pytest.mark.parametrize("threads", [1, 4])
 @pytest.mark.parametrize("kind", ["both", "histograms", "directions", "empty"])
-@pytest.mark.threads
 def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind):
-    if threads > config.NUMBA_NUM_THREADS:
-        pytest.skip("the configured Numba maximum does not permit four workers")
     module = _module()
     rng, sizes, ordinary, bins, histograms, directions, buffers = _fixture(kind)
     hist_expected = [spec[-1].copy() for spec in histograms]
@@ -64,9 +62,7 @@ def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind)
     batch = module._BatchedMomentReducers(
         histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
     )
-    previous = get_num_threads()
-    try:
-        set_num_threads(threads)
+    with parallel_config(n_jobs=threads):
         for chunk_index, n in enumerate((11, 8, 11, 1)):
             for g, size in enumerate(sizes):
                 bins[g, :n] = rng.integers(-1, size, size=n)
@@ -100,10 +96,9 @@ def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind)
                 np.testing.assert_array_equal(spec[-1], expected)
             for spec, expected in zip(directions, direction_expected, strict=True):
                 np.testing.assert_array_equal(spec[-1], expected)
-            assert batch.last_worker_count == min(threads, len(histograms) + len(directions))
-            assert get_num_threads() == threads
-    finally:
-        set_num_threads(previous)
+            assert batch.last_worker_count == (
+                min(threads, len(histograms) + len(directions)) if histograms or directions else 0
+            )
 
 
 def test_row_order_fixture_detects_reassociation():
@@ -144,7 +139,7 @@ def test_constructor_refuses_a_channel_outside_the_derivative_columns():
 def test_metadata_accounting_and_warmup_cover_runtime_signatures():
     module = _module()
     module._warmup_batched_moments()
-    kernels = (module._accumulate_batched, module._accumulate_batched_strided)
+    kernels = (module._accumulate_targets, module._accumulate_targets_strided)
     compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
     assert tuple(map(len, compiled)) == (1, 1)
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
@@ -156,7 +151,7 @@ def test_metadata_accounting_and_warmup_cover_runtime_signatures():
     )
     exact, reserve = module._batch_workspace_bytes(len(histograms), len(directions), len(ordinary))
     assert sum(array.nbytes for array in batch.owned_arrays) == exact
-    assert len(batch.owned_arrays) == 3
+    assert len(batch.owned_arrays) == 2
     assert all(array.flags.owndata for array in batch.owned_arrays)
     assert not batch.owned_arrays[0].flags.writeable
     assert batch.metadata_reserve_bytes == reserve

@@ -606,7 +606,7 @@ from superglm.distributional.kernels.negative_binomial import (
     negative_binomial_expected_information,
 )
 
-kernel = compiled.expected_size_information
+kernel = compiled._size_information_rows
 assert not kernel.nopython_signatures
 superglm.warmup()
 signatures = tuple(kernel.nopython_signatures)
