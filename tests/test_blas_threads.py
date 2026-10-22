@@ -832,7 +832,7 @@ def test_a_fit_executor_holds_only_the_workers_a_section_admits():
     shared executor holds 2 threads, not ``n_jobs``; a wider section grows it to its own width, in
     item order and with the caller's ``np.errstate`` in every task, and a failure is the first in
     item order with no task left running."""
-    import time
+    import threading
 
     from superglm._parallel import fit_pool, parallel_config, pool_workers, pooled_map
 
@@ -841,9 +841,10 @@ def test_a_fit_executor_holds_only_the_workers_a_section_admits():
 
     with parallel_config(n_jobs=32, max_memory=128 << 20), fit_pool():
         assert pool_workers(12, 64 << 20) == 2
+        pair = threading.Barrier(2, timeout=20)
 
         def square(item):
-            time.sleep(0.01)  # long enough that every posted runner needs a thread of its own
+            pair.wait()  # each item runs beside another, so the section holds 2 threads at once
             return item * item
 
         assert list(pooled_map(square, list(range(12)), 64 << 20)) == [
@@ -852,10 +853,11 @@ def test_a_fit_executor_holds_only_the_workers_a_section_admits():
         assert len(executor_threads()) == 2
         with parallel_config(max_memory=2**30):
             seen = []
+            nine = threading.Barrier(9, timeout=20)
             with np.errstate(over="raise", invalid="ignore"):
 
                 def probe(item):
-                    time.sleep(0.002)
+                    nine.wait()  # all nine items run at once: the section needs 9 threads
                     seen.append((np.geterr()["over"], np.geterr()["invalid"]))
                     return item
 
@@ -863,12 +865,15 @@ def test_a_fit_executor_holds_only_the_workers_a_section_admits():
             assert set(seen) == {("raise", "ignore")} and len(seen) == 9
             assert len(executor_threads()) == 9
 
-            started, finished = [0], [0]
+            started, finished, later_failed = [], [], threading.Event()
 
             def failing(item):
-                started[0] += 1
-                time.sleep(0.05 if item == 3 else 0.001)  # item 7 fails while item 3 still runs
-                finished[0] += 1
+                started.append(item)
+                if item == 3:
+                    assert later_failed.wait(20)  # item 7 has failed while item 3 still runs
+                finished.append(item)
+                if item == 7:
+                    later_failed.set()
                 if item in (3, 7):
                     raise ValueError(item)
                 return item
@@ -876,7 +881,7 @@ def test_a_fit_executor_holds_only_the_workers_a_section_admits():
             with pytest.raises(ValueError) as caught:
                 list(pooled_map(failing, list(range(12)), 1))
             assert caught.value.args == (3,)
-            assert started[0] == finished[0]
+            assert len(started) == len(finished)
     assert not executor_threads()
 
 
@@ -889,8 +894,8 @@ def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_pos
     four workers reaches the caller without waiting for the helpers never queued, and the one posted
     helper stops claiming items once released; no crew thread outlives the scope."""
     import contextlib
+    import queue
     import threading
-    import time
 
     from superglm import _parallel
     from superglm._parallel import fit_pool, parallel_config, pooled_for
@@ -921,11 +926,20 @@ def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_pos
                 if scoped:  # the interrupted section leaves the fit's crew usable
                     assert pooled_for(lambda item: item, list(range(8)), 1) == list(range(8))
 
+    waiting = threading.Event()
+
+    class Finished(queue.SimpleQueue):
+        def get(self, *args, **kwargs):
+            if threading.current_thread() is thread:
+                waiting.set()  # the caller has recorded the interruption and waits for its helper
+            return super().get(*args, **kwargs)
+
     monkeypatch.setattr(_parallel._Crew, "post", interrupting)
+    monkeypatch.setattr(_parallel.queue, "SimpleQueue", Finished)
     thread = threading.Thread(target=lambda: _bounded_into(section, caught), daemon=True)
     thread.start()
     assert raised.wait(20)
-    time.sleep(0.3)  # the caller is now waiting for the one helper that was posted
+    assert waiting.wait(20)
     gate.set()
     thread.join(20)
     assert not thread.is_alive(), "the interrupted section did not return"
