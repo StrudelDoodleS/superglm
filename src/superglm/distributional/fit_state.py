@@ -462,16 +462,18 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
-def _size_coefficients_estimable(solver_result: DenseSolverResult, block: slice) -> bool:
+def _block_coefficients_estimable(solver_result: DenseSolverResult, block: slice) -> bool:
     """Whether the fit estimated every coefficient of ``block`` within the face it kept.
 
-    A fit whose REML removed a random effect through an exact coefficient face
-    holds those coefficients fixed, and the lifted terminal decomposition puts
-    the face constraints in its null space. A fixed coefficient is determined,
-    not unidentified, so on a face each coefficient is read as the functional
-    ``null_basis[j] @ z`` of the reduced coordinates ``z``, judged by the
-    reduced decomposition's own estimability decision: the fixed ones are the
-    zero functional and pass. No rank is recomputed.
+    A fit whose REML removed a term's penalized range (a random effect, or a
+    smooth's wiggle) through an exact coefficient face holds those directions
+    fixed, and the lifted terminal decomposition puts the face constraints in
+    its null space. A fixed direction is determined, not unidentified, so on a
+    face each coefficient is read as the functional ``null_basis[j] @ z`` of the
+    reduced coordinates ``z``, judged by the reduced decomposition's own
+    estimability decision: a coefficient the face fixes completely is the zero
+    functional and passes, and one it fixes only partly (a smooth's wiggle) is
+    judged by the part left free. No rank is recomputed.
     """
     face = solver_result.coefficient_face
     if face is None:
@@ -492,9 +494,9 @@ def _limit_row_disclosure(
     parameter has no expected information, and names the parameter. That count
     alone proves nothing: the other rows may identify every direction. The
     fit's own terminal rank decision says which coefficients are estimable (see
-    ``_size_coefficients_estimable``: ``solver_result.terminal_rank``, the
+    ``_block_coefficients_estimable``: ``solver_result.terminal_rank``, the
     shared rank policy on the final penalized curvature, or within the retained
-    face when REML removed a random effect), and a parameter is unidentified
+    face when REML removed a penalized range, such as a random effect or a smooth's wiggle), and a parameter is unidentified
     when one of its coefficients is not: a nonsingular information matrix is
     the condition for local identification (Rothenberg, *Econometrica* 39(3),
     1971). No information is evaluated here, and a coefficient the fit's rank
@@ -510,7 +512,7 @@ def _limit_row_disclosure(
     if n_limit == 0:
         return None
     state = next(state for state in layout.predictors if state.parameter_index == index)
-    if _size_coefficients_estimable(solver_result, state.coefficient_slice):
+    if _block_coefficients_estimable(solver_result, state.coefficient_slice):
         return None
     if state.intercept_index is None:
         constant_identified = n_limit < len(theta)

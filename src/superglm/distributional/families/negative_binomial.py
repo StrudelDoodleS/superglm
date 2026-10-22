@@ -333,8 +333,11 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         alone does not make the size unidentified (the other rows may still
         identify it), so the count is a figure for the disclosure, not its test
         (the fit's terminal rank decision is); rows just short of the threshold
-        are not counted.
+        are not counted. A derived family may change the likelihood, so as with
+        ``diagnose_repeated_curvature_failure`` it reports no rows.
         """
+        if type(self) is not NegativeBinomialLS:
+            return 1, 0
         candidate = _typed_plan(plan, len(theta))
         semantics = candidate.weights.provenance.contract.semantics
         n = poisson_limit_row_count(
@@ -355,8 +358,11 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         ``constant_identified`` is true when a constant size is identified and the
         size has terms to drop: it is then offered, with a varying offset dropped
         too; otherwise (no row identifies a constant size, or the size is already
-        constant) only the Poisson family remains.
+        constant) only the Poisson family remains. A derived family gets no text
+        (see ``limit_row_count``).
         """
+        if type(self) is not NegativeBinomialLS:
+            return ""
         head = (
             f"SuperLSS NegativeBinomialLS fit: {n_limit} of {n_rows} rows have a size at the "
             "Poisson limit (no overdispersion left there; rows close to it are not counted), "

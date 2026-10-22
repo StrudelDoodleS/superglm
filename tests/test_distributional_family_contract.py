@@ -306,8 +306,40 @@ def test_public_package_exports_complete_fit_and_plan_validation_protocols() -> 
     assert not isinstance(built_ins[3], LikelihoodPlanValidatingFamily)
 
     assert "LimitRowDisclosingFamily" in distributional.__all__
-    limit_row = [isinstance(f, distributional.LimitRowDisclosingFamily) for f in built_ins]
-    assert limit_row == [False, False, True, False]
+
+
+def _built_in_family_classes() -> dict[str, type]:
+    """Every family class the package exports from ``superglm.distributional.families``."""
+    import inspect
+
+    found = {}
+    for name in distributional.__all__:
+        obj = getattr(distributional, name)
+        if inspect.isclass(obj) and obj.__module__.startswith("superglm.distributional.families."):
+            found[name] = obj
+    return found
+
+
+def test_only_negative_binomial_implements_the_limit_row_protocol_among_the_built_ins() -> None:
+    """Every built-in family is checked, so a new implementer has to be a deliberate change."""
+    built_ins = _built_in_family_classes()
+    assert {
+        "GammaLS",
+        "GaussianLS",
+        "GeneralizedGammaLSS",
+        "GeneralizedParetoLSS",
+        "LogNormalLS",
+        "NegativeBinomialLS",
+        "TweedieLSS",
+        "TwoPieceLogNormalLSS",
+        "TwoPieceNormalLSS",
+    } <= set(built_ins)
+    implementers = [
+        name
+        for name, cls in built_ins.items()
+        if issubclass(cls, distributional.LimitRowDisclosingFamily)
+    ]
+    assert implementers == ["NegativeBinomialLS"]
 
 
 def test_mandatory_family_protocol_does_not_require_prediction_or_capability_bag() -> None:
