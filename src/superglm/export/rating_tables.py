@@ -72,11 +72,14 @@ class InteractionTableBlock:
     """One two-way interaction rating-table block.
 
     ``kind`` says how the block approximates: ``"cells"`` is a full
-    categorical-by-categorical cell table and is exact, ``"grid"`` is a
-    continuous surface SAMPLED at ``n_bins`` nodes per axis and is not, and
-    ``"spline_cells"`` is a spline-by-categorical deviation with one row per bin
-    of the spline covariate and one column per level of the categorical, read at
-    each bin's representative, and is not exact between them.  It is
+    categorical-by-categorical cell table and is exact (it also covers a
+    spline-by-categorical term on an ordinal parent, tabulated per level),
+    ``"grid"`` is a continuous surface SAMPLED at ``n_bins`` nodes per axis and
+    is not, and ``"spline_cells"`` is a spline-by-categorical deviation with one
+    row per bin of the spline covariate and one column per level of the
+    categorical, read at each bin's representative (under
+    ``bin_strategy="exact"``, the band's weighted mean of the level's
+    deviation), and is not exact between them.  It is
     recorded because ``_interaction_blocks`` is the one place that decides,
     and a second place deciding differently is the shape issue #287 took.
     """
@@ -2766,9 +2769,9 @@ def build_rating_table_payload(
         # Both lists, because both are approximated, and BOTH read off the
         # blocks that were built rather than re-derived from the specs -- so a
         # term the workbook carries exactly cannot be reported as approximated.
-        # The ``selected`` call above stays main-effect-only: its tables are
-        # consumed as blocks keyed by feature name, and an interaction has no
-        # such block.
+        # The ``selected`` call above names the main effects, and under
+        # ``"exact"`` the spline-by-categorical interactions banded with them,
+        # whose tables become their blocks; the grids are not in it.
         features=_binned_continuous_names(main_effects) + _gridded_interaction_names(interactions),
     )
     return RatingTablePayload(
