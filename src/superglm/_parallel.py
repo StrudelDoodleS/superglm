@@ -105,7 +105,11 @@ class _Crew:
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
-        self.grow(started)
+        try:
+            self.grow(started)
+        except BaseException:
+            self.close()  # a failed start must not strand the threads already started
+            raise
 
     def grow(self, count: int) -> None:
         """Start threads until the crew holds ``min(count, size)``."""
@@ -466,7 +470,7 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     anyway (a built design term) adds nothing over the serial loop.
     """
     import contextvars
-    from concurrent.futures import ThreadPoolExecutor, wait
+    from concurrent.futures import Future, ThreadPoolExecutor, wait
 
     from superglm._blas_threads import pooled_blas_threads
 
@@ -479,7 +483,6 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
         fit_threads = _fit_threads.get()
         if getattr(_on_pool_thread, "inside", False):
             fit_threads = None  # a nested section starts its own executor
-        gate = None
         if fit_threads is None:
             pool = ThreadPoolExecutor(
                 max_workers=workers,
@@ -489,32 +492,42 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
         else:
             pool = fit_threads.executor()
             workers = min(workers, fit_threads.size)
-            if workers < fit_threads.size:
-                # The shared pool is wider than this section may be: the gate
-                # keeps at most ``workers`` of its tasks running.
-                gate = threading.BoundedSemaphore(workers)
+        # The section posts ``workers`` runners, which claim items in order from
+        # one counter, so a shared executor starts threads only as wide as the
+        # sections it served (a task per item would start one thread per
+        # waiting task, up to ``n_jobs``).  Each item gets its own copy of the
+        # caller's context, which carries ``np.errstate``.
+        caller = contextvars.copy_context()
+        slots = [Future() for _ in items]
+        lock = threading.Lock()
+        claimed = [0]
+        stop = threading.Event()
 
-        def task(item):
-            if gate is None:
-                return fn(item)
-            with gate:
-                return fn(item)
+        def runner() -> None:
+            while not stop.is_set():
+                with lock:
+                    index = claimed[0]
+                    claimed[0] = index + 1
+                if index >= len(items):
+                    return
+                try:
+                    slots[index].set_result(caller.copy().run(fn, items[index]))
+                except BaseException as exc:  # raised to the consumer, in item order
+                    slots[index].set_exception(exc)
 
-        futures: list = []
+        runners: list = []
         try:
-            for item in items:
-                futures.append(pool.submit(contextvars.copy_context().run, task, item))
-            for index, future in enumerate(futures):
-                result = future.result()
-                futures[index] = None  # a yielded result is the caller's to keep or drop
+            for _ in range(workers):
+                runners.append(pool.submit(runner))
+            for index, slot in enumerate(slots):
+                result = slot.result()
+                slots[index] = None  # a yielded result is the caller's to keep or drop
                 yield result
         finally:
             # No task of this section outlives it: its kernels write the
             # caller's buffers.
-            pending = [future for future in futures if future is not None]
-            for future in pending:
-                future.cancel()
-            wait(pending)
+            stop.set()
+            wait(runners)
             if fit_threads is None:
                 pool.shutdown(wait=True)
 
@@ -581,12 +594,17 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
             finally:
                 finished.put(None)
 
+        posted = 0
         try:
             for _ in range(helpers):
                 crew.post(partial(contextvars.copy_context().run, helper))
+                posted += 1
             claim()
+        except BaseException as exc:  # an interruption while posting: stop the posted helpers
+            failures.setdefault(-1, exc)
+            raise
         finally:
-            for _ in range(helpers):
+            for _ in range(posted):  # only the jobs that were queued will report
                 finished.get()
             if fit_threads is None:
                 crew.close()

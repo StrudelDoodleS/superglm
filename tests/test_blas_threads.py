@@ -795,6 +795,193 @@ def test_a_fit_crew_starts_only_the_helpers_a_section_admits():
     assert not crew_threads()
 
 
+def _bounded(call, seconds=20.0):
+    """Run ``call`` on a daemon thread; return ``(outcome, exception)`` or fail if it hangs."""
+    import threading
+
+    box: list = []
+
+    def run():
+        try:
+            box.append((call(), None))
+        except BaseException as exc:
+            box.append((None, exc))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call did not return"
+    return box[0]
+
+
+def _bounded_into(call, errors):
+    try:
+        call()
+    except BaseException as exc:  # an assertion in the section reaches the test through here
+        errors.append(exc)
+
+
+def _named_threads(prefix):
+    import threading
+
+    return [t for t in threading.enumerate() if t.name.startswith(prefix)]
+
+
+def test_a_fit_executor_holds_only_the_workers_a_section_admits():
+    """A memory-limited section posts the width ``pool_workers`` admits (2 here), so the fit's
+    shared executor holds 2 threads, not ``n_jobs``; a wider section grows it to its own width, in
+    item order and with the caller's ``np.errstate`` in every task, and a failure is the first in
+    item order with no task left running."""
+    import time
+
+    from superglm._parallel import fit_pool, parallel_config, pool_workers, pooled_map
+
+    def executor_threads():
+        return _named_threads("superglm-map_")
+
+    with parallel_config(n_jobs=32, max_memory=128 << 20), fit_pool():
+        assert pool_workers(12, 64 << 20) == 2
+
+        def square(item):
+            time.sleep(0.01)  # long enough that every posted runner needs a thread of its own
+            return item * item
+
+        assert list(pooled_map(square, list(range(12)), 64 << 20)) == [
+            item * item for item in range(12)
+        ]
+        assert len(executor_threads()) == 2
+        with parallel_config(max_memory=2**30):
+            seen = []
+            with np.errstate(over="raise", invalid="ignore"):
+
+                def probe(item):
+                    time.sleep(0.002)
+                    seen.append((np.geterr()["over"], np.geterr()["invalid"]))
+                    return item
+
+                assert list(pooled_map(probe, list(range(9)), 1)) == list(range(9))
+            assert set(seen) == {("raise", "ignore")} and len(seen) == 9
+            assert len(executor_threads()) == 9
+
+            started, finished = [0], [0]
+
+            def failing(item):
+                started[0] += 1
+                time.sleep(0.05 if item == 3 else 0.001)  # item 7 fails while item 3 still runs
+                finished[0] += 1
+                if item in (3, 7):
+                    raise ValueError(item)
+                return item
+
+            with pytest.raises(ValueError) as caught:
+                list(pooled_map(failing, list(range(12)), 1))
+            assert caught.value.args == (3,)
+            assert started[0] == finished[0]
+    assert not executor_threads()
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, MemoryError])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_posted_jobs(
+    monkeypatch, interrupt, scoped
+):
+    """``KeyboardInterrupt`` or ``MemoryError`` on the second post of a section of eight items on
+    four workers reaches the caller without waiting for the helpers never queued, and the one posted
+    helper stops claiming items once released; no crew thread outlives the scope."""
+    import contextlib
+    import threading
+    import time
+
+    from superglm import _parallel
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    post = _parallel._Crew.post
+    posts, raised, gate, started, caught = [0], threading.Event(), threading.Event(), [], []
+
+    def interrupting(self, job):
+        posts[0] += 1
+        if posts[0] == 2:
+            raised.set()
+            raise interrupt
+        post(self, job)
+
+    def fn(item):
+        started.append(item)
+        if item == 0:
+            gate.wait(20)  # the posted helper holds item 0 until the test releases it
+        return item
+
+    def section():
+        with parallel_config(n_jobs=4, max_memory=2**30):
+            with fit_pool() if scoped else contextlib.nullcontext():
+                try:
+                    pooled_for(fn, list(range(8)), 1)
+                except BaseException as exc:
+                    caught.append(exc)
+                if scoped:  # the interrupted section leaves the fit's crew usable
+                    assert pooled_for(lambda item: item, list(range(8)), 1) == list(range(8))
+
+    monkeypatch.setattr(_parallel._Crew, "post", interrupting)
+    thread = threading.Thread(target=lambda: _bounded_into(section, caught), daemon=True)
+    thread.start()
+    assert raised.wait(20)
+    time.sleep(0.3)  # the caller is now waiting for the one helper that was posted
+    gate.set()
+    thread.join(20)
+    assert not thread.is_alive(), "the interrupted section did not return"
+    assert [type(exc) for exc in caught] == [interrupt]
+    assert len(started) <= 1  # the posted helper stopped at the interruption
+    assert not _named_threads("superglm-map-crew")
+
+
+def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatch):
+    """A failure to start the second helper re-raises and leaves no crew thread, whether the
+    crew is built for one section or by the fit."""
+    import threading
+
+    from superglm._parallel import _Crew, fit_pool, parallel_config, pooled_for
+
+    start = threading.Thread.start
+    starts = [0]
+
+    def failing_start(self):
+        if self.name == "superglm-map-crew":
+            starts[0] += 1
+            if starts[0] == 2:
+                raise RuntimeError("can't start new thread")
+        start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    with pytest.raises(RuntimeError, match="can't start"):
+        _Crew(4, started=4)
+    assert not _named_threads("superglm-map-crew")
+
+    def section(scoped):
+        def run():
+            with parallel_config(n_jobs=4, max_memory=2**30):
+                if not scoped:
+                    return pooled_for(lambda item: item, list(range(8)), 1)
+                with fit_pool():
+                    return pooled_for(lambda item: item, list(range(8)), 1)
+
+        return run
+
+    starts[0] = 0
+    outcome, exc = _bounded(section(False))
+    assert isinstance(exc, RuntimeError)
+    assert not _named_threads("superglm-map-crew")
+
+    starts[0] = 0
+    outcome, exc = _bounded(section(True))
+    assert isinstance(exc, RuntimeError)
+    assert not _named_threads("superglm-map-crew")  # the fit's crew ended with the fit
+
+    starts[0] = 10  # starts succeed again
+    with parallel_config(n_jobs=4, max_memory=2**30), fit_pool():
+        assert pooled_for(lambda item: item, list(range(8)), 1) == list(range(8))
+    assert not _named_threads("superglm-map-crew")
+
+
 def test_a_fit_crew_releases_a_finished_sections_buffers():
     """An idle crew worker holds no reference to its last job, whose closure holds the section's
     buffers: once the section returns they are collectable, as after a one-worker section."""
