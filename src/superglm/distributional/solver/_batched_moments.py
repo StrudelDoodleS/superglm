@@ -23,7 +23,7 @@ import numpy as np
 from numba import njit, types
 
 from superglm._group_matrix._group_matrix_kernels import _native
-from superglm._parallel import pool_workers, pooled_map
+from superglm._parallel import pool_workers, pooled_for
 
 # Bytes one target's task holds while it runs: its loop state, not its rows.
 _TASK_BYTES = 1 << 12
@@ -376,7 +376,7 @@ class _BatchedMomentReducers:
             self._n_matrices,
         )
         targets = list(range(self._metadata.shape[0]))
-        counts = pooled_map(
+        counts = pooled_for(
             lambda target: _accumulate_targets(*operands, target, target + 1),
             targets,
             _TASK_BYTES,

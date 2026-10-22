@@ -33,7 +33,7 @@ _DEFAULT_LOG_CUTOFF = 37.0
 # Below this many rows a batch runs as one serial block; above it, blocks of
 # _PARALLEL_BLOCK rows run on the worker pool.
 _PARALLEL_MIN_ROWS = 5_000
-_PARALLEL_BLOCK = 4096
+_PARALLEL_BLOCK = 1024
 
 _RowsKernel = Callable[..., tuple[int, int]]
 _FillKernel = Callable[..., None]

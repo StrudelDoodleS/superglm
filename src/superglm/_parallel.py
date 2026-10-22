@@ -30,14 +30,17 @@ lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
 (``reml.w_derivatives``), the interaction terms' builds
 (``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
-negative binomial rows) and batched global moments; :func:`pooled_map` and
-:func:`pooled_row_blocks` serve the last four.
+negative binomial rows) and batched global moments; the SuperLSS
+kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
+rows), whose tasks are too short for an executor's dispatch, and the others on
+:func:`pooled_map`.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import queue
 import sys
 import threading
 import warnings
@@ -45,7 +48,7 @@ from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -84,12 +87,46 @@ def _mark_pool_thread() -> None:
     _on_pool_thread.inside = True
 
 
+class _Crew:
+    """Worker threads that run posted jobs, started together and ended with :meth:`close`.
+
+    A job is posted with one queue put and costs a worker's wake-up, about a
+    third of an executor's submit (a ``Future`` and its work item), which is
+    what a section of a few hundred microseconds per task can afford.
+    """
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._threads = [
+            threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
+            for _ in range(size)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _run(self) -> None:
+        _mark_pool_thread()
+        while (job := self._jobs.get()) is not None:
+            job()
+
+    def post(self, job: Callable[[], None]) -> None:
+        self._jobs.put(job)
+
+    def close(self) -> None:
+        for _ in self._threads:
+            self._jobs.put(None)
+        for thread in self._threads:
+            thread.join()
+
+
 class _FitThreads:
-    """One executor, created by the fit's first pooled section and closed with the fit."""
+    """The fit's worker threads, created by its first pooled section and closed with the fit."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._executor = None
+        self._crew: _Crew | None = None
         self.size = 0
 
     def executor(self):
@@ -105,11 +142,20 @@ class _FitThreads:
                 )
             return self._executor
 
+    def crew(self) -> _Crew:
+        with self._lock:
+            if self._crew is None:
+                self._crew = _Crew(resolve_n_jobs())
+            return self._crew
+
     def close(self) -> None:
         with self._lock:
             executor, self._executor = self._executor, None
+            crew, self._crew = self._crew, None
         if executor is not None:
             executor.shutdown(wait=True)
+        if crew is not None:
+            crew.close()
 
 
 @contextmanager
@@ -119,9 +165,10 @@ def fit_pool() -> Iterator[None]:
     Starting and joining a pool costs about the same as a few milliseconds of
     kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
     binomial row kernel per iteration, a batched moment pass per chunk).
-    Inside this scope :func:`pooled_map` runs on one executor, started by its
-    first section and shut down when the scope ends, instead of starting one
-    per call.  Owner: this scope; lifetime: the fit; a section that runs on
+    Inside this scope :func:`pooled_map` runs on one executor and
+    :func:`pooled_for` on one crew of threads, each started by its first
+    section and shut down when the scope ends, instead of starting one per
+    call.  Owner: this scope; lifetime: the fit; a section that runs on
     one of these threads (a nested map) starts its own executor, as it always
     has, so a nested section cannot wait on threads its caller holds.  Nothing
     changes numerically: a section's partition never depends on the workers.
@@ -454,17 +501,90 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
                 pool.shutdown(wait=True)
 
 
+def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
+    """``[fn(item), ...]`` in item order, the calling thread working beside ``pool_workers - 1`` helpers.
+
+    For sections of many short tasks, where :func:`pooled_map` spends more
+    waking its workers and collecting futures than a task runs (about a
+    millisecond of dispatch against 0.2 ms blocks).  The caller and its helpers
+    claim items in order from one counter, so no task waits for a wake-up
+    that has not happened, and only about half as many helpers as items are
+    woken, which the measured wake-up cost makes the cheapest cover of the
+    items.  Nothing here changes what ``fn`` computes: each item's result goes
+    to its own slot, so the list is the same at any worker count.  One
+    parallelism level, memory budget, per-task context and nested-section
+    rule as :func:`pooled_map`; the first failure in item order is raised once
+    every started task has ended (no task outlives the section), and items
+    after a failure are not started.  Helpers run on the fit's crew
+    (:func:`fit_pool`) or, outside a fit or in a nested section, on threads
+    started for this call.
+    """
+    import contextvars
+
+    from superglm._blas_threads import pooled_blas_threads
+
+    count = len(items)
+    workers = pool_workers(count, item_bytes)
+    with pooled_blas_threads():
+        if workers <= 1 or count <= 1:
+            return [fn(item) for item in items]
+        fit_threads = _fit_threads.get()
+        if getattr(_on_pool_thread, "inside", False):
+            fit_threads = None
+        helpers = min(workers - 1, (count + 1) // 2)
+        if fit_threads is None:
+            crew = _Crew(helpers)
+        else:
+            crew = fit_threads.crew()
+            helpers = min(helpers, crew.size)
+        results: list = [None] * count
+        failures: dict[int, BaseException] = {}
+        lock = threading.Lock()
+        claimed = [0]
+        finished: queue.SimpleQueue = queue.SimpleQueue()
+
+        def claim() -> None:
+            while not failures:
+                with lock:
+                    index = claimed[0]
+                    claimed[0] = index + 1
+                if index >= count:
+                    return
+                try:
+                    results[index] = fn(items[index])
+                except BaseException as exc:  # re-raised below, after every task has ended
+                    failures[index] = exc
+                    return
+
+        def helper() -> None:
+            try:
+                claim()
+            finally:
+                finished.put(None)
+
+        try:
+            for _ in range(helpers):
+                crew.post(partial(contextvars.copy_context().run, helper))
+            claim()
+        finally:
+            for _ in range(helpers):
+                finished.get()
+            if fit_threads is None:
+                crew.close()
+        if failures:
+            raise failures[min(failures)]
+        return results
+
+
 def pooled_row_blocks(fn: Callable[[int, int], object], n_rows: int, block_rows: int) -> list:
     """``[fn(start, stop), ...]`` over consecutive blocks of ``block_rows`` rows, in row order.
 
     The blocks depend on ``n_rows`` and ``block_rows`` alone, never on the
     worker count, so a kernel whose rows write only their own outputs gives
     the same bits whichever worker runs a block and however many there are.
-    The kernels run on :func:`pooled_map` (they must release the GIL to run
+    The kernels run on :func:`pooled_for` (they must release the GIL to run
     side by side); a block's working set is its kernel's scratch, a few
     hundred bytes, against outputs the caller already holds.
     """
     starts = list(range(0, n_rows, block_rows))
-    return list(
-        pooled_map(lambda start: fn(start, min(start + block_rows, n_rows)), starts, 1 << 12)
-    )
+    return pooled_for(lambda start: fn(start, min(start + block_rows, n_rows)), starts, 1 << 12)

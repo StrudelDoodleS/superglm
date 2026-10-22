@@ -716,6 +716,75 @@ def test_a_fit_pool_serves_every_section_from_the_same_threads():
         assert not [t for t in threading.enumerate() if t.name.startswith("superglm-map")]
 
 
+def test_pooled_for_gives_the_serial_list_on_any_crew_and_ends_its_threads():
+    """``pooled_for`` is ``[fn(item) ...]`` in item order at any worker count, inside a fit pool or
+    on threads it starts itself, with the caller's ``np.errstate`` in every task; the first failure in item order is raised after
+    every started task has ended, a nested section does not deadlock, and no crew thread outlives
+    its scope."""
+    import threading
+    import time
+
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    def named():
+        return [t for t in threading.enumerate() if t.name.startswith("superglm-map")]
+
+    items = list(range(23))
+    expected = [item * item for item in items]
+    for workers in (1, 2, 5, 16):
+        with parallel_config(n_jobs=workers, max_memory=2**30):
+            assert pooled_for(lambda item: item * item, items, 1) == expected
+            with fit_pool():
+                assert pooled_for(lambda item: item * item, items, 1) == expected
+                assert pooled_for(lambda item: item * item, items[:1], 1) == expected[:1]
+                assert pooled_for(lambda item: item, [], 1) == []
+            assert not named()
+
+    with parallel_config(n_jobs=4, max_memory=2**30), fit_pool():
+        seen: list = []
+        with np.errstate(over="raise", invalid="ignore"):
+
+            def probe(item):
+                time.sleep(0.001)
+                seen.append((np.geterr()["over"], np.geterr()["invalid"]))
+                return item
+
+            assert pooled_for(probe, items, 1) == items
+        assert len(seen) == len(items)
+        assert set(seen) == {("raise", "ignore")}
+
+        started, finished = [0], [0]
+
+        def failing(item):
+            started[0] += 1
+            time.sleep(0.05 if item == 3 else 0.001)  # item 9 fails while item 3 still runs
+            finished[0] += 1
+            if item in (3, 9):
+                raise ValueError(item)
+            return item
+
+        with pytest.raises(ValueError) as caught:
+            pooled_for(failing, items, 1)
+        assert caught.value.args == (3,)
+        assert started[0] == finished[0]  # no task of the section outlives it
+
+        def outer(item):  # a section started from a crew thread runs on threads of its own
+            return sum(pooled_for(lambda inner: inner, [1, 2, 3], 1)) + item
+
+        assert pooled_for(outer, items[:8], 1) == [6 + item for item in items[:8]]
+    assert not named()
+
+
+def test_pooled_for_runs_every_task_on_one_blas_thread():
+    from superglm._parallel import parallel_config, pooled_for
+
+    _native_blas_counts()
+    for workers in (1, 3):
+        with parallel_config(n_jobs=workers, max_memory=2**30):
+            counts = pooled_for(lambda _: _blas_thread_counts(), list(range(8)), 1)
+        assert all(all(count == 1 for count in each) for each in counts), workers
+
+
 def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     """A dense design keeps the cap because its row passes run on the pool; every pass that runs
     on the calling thread instead (the chunked solved-row route, the gradient-only pass and the
