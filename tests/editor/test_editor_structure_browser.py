@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 import pytest
+from tests.editor._editor_waits import hold_requests
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
 from superglm import read_structure
@@ -826,3 +827,39 @@ def test_new_levels_goes_into_the_structure_file_and_undo_takes_it_back(
                 "term => document.querySelector('#status')?.dataset.term === term", arg=term
             )
             assert control.is_hidden(), term
+
+
+def test_a_directory_typed_before_the_default_arrives_is_kept(open_editor_page, tmp_path):
+    """The dialog fills in the kernel's default directory only if the field is still empty."""
+    with open_editor_page() as (page, _session):
+        default = hold_requests(page, "**/save_directory")
+        page.locator("#exportAction").click()
+        default.wait()
+        directory = page.locator("#exportDirectory")
+        directory.fill(str(tmp_path))
+
+        # The page reports when it has parsed the answer: a task queued then runs after
+        # the dialog's own continuation, so the field holds its final value.  Without
+        # this signal the wait would be a time budget, and the assertion being negative,
+        # running out of it would pass against the unfixed dialog.
+        page.evaluate(
+            """() => {
+                const json = Response.prototype.json;
+                Response.prototype.json = async function () {
+                    const payload = await json.call(this);
+                    if (new URL(this.url).pathname.endsWith('/save_directory')) {
+                        Response.prototype.json = json;
+                        setTimeout(() => { window.__defaultDirectoryRead = true; }, 0);
+                    }
+                    return payload;
+                };
+            }"""
+        )
+        default[0].continue_()
+        page.wait_for_function("() => window.__defaultDirectoryRead === true")
+        assert directory.input_value() == str(tmp_path)
+        # An error answer is parsed through the same json() and also leaves the field
+        # alone, so the marker cannot tell it from the default.  The dialog clears its
+        # status line when it opens and writes a failure there, so an empty line says
+        # the kernel answered with the default.
+        assert page.locator("#exportStatus").text_content() == ""

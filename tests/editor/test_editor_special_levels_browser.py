@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.editor._editor_waits import wait_for_interception
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -139,6 +140,7 @@ def test_free_levels_is_one_button_for_the_diamonds_and_their_line_and_comes_bac
 def test_an_error_banner_does_not_hold_the_editor(open_editor_page):
     """A refused change leaves its banner, and the next action goes ahead without Dismiss."""
     with open_editor_page(selected_term="age_band") as (page, _session):
+        wait_for_interception(page)
         page.route(
             "**/stage*",
             lambda route: route.fulfill(

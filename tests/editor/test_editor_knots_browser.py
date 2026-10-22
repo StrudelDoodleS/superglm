@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import pytest
+from tests.editor._editor_waits import (
+    hold_requests,
+    wait_for_editor_idle,
+    wait_for_interception,
+)
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -23,6 +28,9 @@ def _wait_for_chip(page, text: str, *, waiting: bool) -> None:
         }""",
         arg=[_CHIP, text, waiting],
     )
+    # The chip changes when the answer is committed; the next Undo or Refit is
+    # dropped until the change has settled its paint.
+    wait_for_editor_idle(page)
 
 
 def test_one_knot_more_waits_for_refit_and_undo_takes_it_back(open_editor_page):
@@ -83,6 +91,7 @@ def test_a_dropped_knot_stays_where_it_was_dropped_while_its_change_is_staged(op
             )
             route.continue_()
 
+        wait_for_interception(page)
         page.route("**/stage*", held)
         box = handles.nth(3).bounding_box()
         y = box["y"] + box["height"] / 2
@@ -107,17 +116,9 @@ def test_arrow_keys_pressed_while_a_knot_change_is_staged_move_the_same_knot(ope
         before = [float(x) for x in handles.evaluate_all("els => els.map(e => e.dataset.knotX)")]
         box = handles.nth(3).bounding_box()
         page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        held = []
-
-        def hold(route):
-            held.append(route)
-
-        page.route("**/stage*", hold)
+        held = hold_requests(page, "**/stage*")
         page.keyboard.press("ArrowRight")
-        for _ in range(100):
-            if held:
-                break
-            page.wait_for_timeout(20)
+        held.wait()
         assert len(held) == 1
         page.keyboard.press("ArrowRight")
         page.keyboard.press("ArrowRight")
@@ -127,7 +128,8 @@ def test_arrow_keys_pressed_while_a_knot_change_is_staged_move_the_same_knot(ope
             "text => document.querySelector('#status')?.textContent.includes(text)",
             arg="Another change is still running; try again once it has finished.",
         )
-        # Unrouting sends the held request on.
+        # Sending the held request on lets the answers follow.
+        held[0].continue_()
         page.unroute("**/stage*")
         page.wait_for_function(
             "() => document.querySelector('#refitPendingAction')?.getAttribute('aria-label')"
@@ -152,6 +154,7 @@ def _wait_for_kind(page, kind: str, *, waiting: bool) -> None:
         }""",
         arg=[kind, waiting],
     )
+    wait_for_editor_idle(page)
 
 
 def test_a_kind_change_waits_for_refit_and_undo_takes_it_back(open_editor_page):

@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pytest
+from tests.editor._editor_waits import wait_for_interception
 
 from superglm.editor.payloads import session_payload, timeline_payload
 
@@ -191,6 +192,7 @@ def test_structural_refit_commits_atomically_before_held_metrics(open_editor_pag
 
         page.evaluate("window.__heldMetricRouteCount = 0")
         page.on("request", record_request)
+        wait_for_interception(page)
         page.route("**/metrics", hold_metrics)
         try:
             with page.expect_request(
@@ -276,6 +278,7 @@ def test_older_metrics_response_cannot_replace_newer_revision(open_editor_page):
                 };
             }"""
         )
+        wait_for_interception(page)
         page.route("**/metrics", hold_metrics)
         try:
             increase = page.get_by_role("button", name="Increase selection", exact=True)

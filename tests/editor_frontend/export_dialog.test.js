@@ -274,6 +274,27 @@ test("dialog open initializes the kernel directory, folder open is optional, and
   binding.destroy();
 });
 
+test("a directory typed while the default is on its way is kept", async () => {
+  const fixture = exportFixture();
+  fixture.directory.value = "";
+  const answer = deferred();
+  fixture.client.postJSON = async (path) => {
+    assert.equal(path, "/save_directory");
+    return answer.promise;
+  };
+  const binding = bindExportDialog(fixture.context);
+
+  const opening = fixture.action.emit("click");
+  fixture.directory.value = "/data/mine";
+  answer.resolve({ path: "/tmp/superglm" });
+  await opening;
+
+  assert.equal(fixture.directory.value, "/data/mine");
+  // openDialog catches a failed request into the status line, the stub's assertion included.
+  assert.equal(fixture.status.textContent, "");
+  binding.destroy();
+});
+
 test("cancelled browser save is a normal status and destroy removes every listener", async () => {
   const fixture = exportFixture();
   fixture.context.saveBlobToFile = async () => null;
