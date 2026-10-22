@@ -775,6 +775,52 @@ def test_pooled_for_gives_the_serial_list_on_any_crew_and_ends_its_threads():
     assert not named()
 
 
+def test_a_fit_crew_starts_only_the_helpers_a_section_admits():
+    """The crew grows with the widest section, not to ``n_jobs``: 4 items admit ``(4 + 1) // 2 = 2``
+    helpers, so a crew configured for 32 workers holds 2 threads, then 15 for a section of 30."""
+    import threading
+
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    def crew_threads():
+        return [t for t in threading.enumerate() if t.name == "superglm-map-crew"]
+
+    with parallel_config(n_jobs=32, max_memory=2**30), fit_pool():
+        assert pooled_for(lambda item: item, list(range(4)), 1) == list(range(4))
+        assert len(crew_threads()) == 2
+        assert pooled_for(lambda item: item, list(range(3)), 1) == list(range(3))
+        assert len(crew_threads()) == 2  # a narrower section keeps, not shrinks
+        assert pooled_for(lambda item: item, list(range(30)), 1) == list(range(30))
+        assert len(crew_threads()) == 15
+    assert not crew_threads()
+
+
+def test_a_fit_crew_releases_a_finished_sections_buffers():
+    """An idle crew worker holds no reference to its last job, whose closure holds the section's
+    buffers: once the section returns they are collectable, as after a one-worker section."""
+    import gc
+    import time
+    import weakref
+
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    for workers in (1, 4):
+        with parallel_config(n_jobs=workers, max_memory=2**30), fit_pool():
+            buffer = np.zeros(64)
+            ref = weakref.ref(buffer)
+
+            def task(item, buffer=buffer):
+                time.sleep(0.002)
+                buffer[item] = 1.0
+                return item
+
+            assert pooled_for(task, list(range(16)), 1) == list(range(16))
+            assert ref() is not None
+            del buffer, task
+            gc.collect()
+            assert ref() is None, workers
+
+
 def test_pooled_for_runs_every_task_on_one_blas_thread():
     from superglm._parallel import parallel_config, pooled_for
 

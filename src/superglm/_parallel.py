@@ -88,35 +88,53 @@ def _mark_pool_thread() -> None:
 
 
 class _Crew:
-    """Worker threads that run posted jobs, started together and ended with :meth:`close`.
+    """Worker threads that run posted jobs, started on demand and ended with :meth:`close`.
 
     A job is posted with one queue put and costs a worker's wake-up, about a
     third of an executor's submit (a ``Future`` and its work item), which is
     what a section of a few hundred microseconds per task can afford.
+    ``size`` is the most threads the crew may hold; :meth:`grow` starts them
+    as sections admit helpers, so a crew never holds more threads than the
+    widest section used.  A worker drops every reference to a finished job
+    before it blocks for the next one: the job's closure holds the section's
+    buffers, which must be released when the section returns.
     """
 
-    def __init__(self, size: int) -> None:
+    def __init__(self, size: int, started: int = 0) -> None:
         self.size = size
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
-        self._threads = [
-            threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
-            for _ in range(size)
-        ]
-        for thread in self._threads:
-            thread.start()
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self.grow(started)
+
+    def grow(self, count: int) -> None:
+        """Start threads until the crew holds ``min(count, size)``."""
+        with self._lock:
+            while len(self._threads) < min(count, self.size):
+                thread = threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
+                thread.start()
+                self._threads.append(thread)
 
     def _run(self) -> None:
         _mark_pool_thread()
-        while (job := self._jobs.get()) is not None:
-            job()
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            try:
+                job()
+            finally:
+                del job
 
     def post(self, job: Callable[[], None]) -> None:
         self._jobs.put(job)
 
     def close(self) -> None:
-        for _ in self._threads:
+        with self._lock:
+            threads, self._threads = self._threads, []
+        for _ in threads:
             self._jobs.put(None)
-        for thread in self._threads:
+        for thread in threads:
             thread.join()
 
 
@@ -145,7 +163,7 @@ class _FitThreads:
     def crew(self) -> _Crew:
         with self._lock:
             if self._crew is None:
-                self._crew = _Crew(resolve_n_jobs())
+                self._crew = _Crew(resolve_n_jobs())  # threads start as sections admit helpers
             return self._crew
 
     def close(self) -> None:
@@ -533,10 +551,11 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
             fit_threads = None
         helpers = min(workers - 1, (count + 1) // 2)
         if fit_threads is None:
-            crew = _Crew(helpers)
+            crew = _Crew(helpers, started=helpers)
         else:
             crew = fit_threads.crew()
             helpers = min(helpers, crew.size)
+            crew.grow(helpers)
         results: list = [None] * count
         failures: dict[int, BaseException] = {}
         lock = threading.Lock()
