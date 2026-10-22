@@ -394,6 +394,27 @@ def test_polars_digest_is_deterministic_and_sensitive_to_values_order_and_schema
     assert as_eager_frame(changed_schema).digest() != digest
 
 
+def test_polars_row_hashes_use_whichever_seed_signature_the_installed_polars_has() -> None:
+    """Polars 2.0 removed ``seed_1`` to ``seed_3``; 1.x keeps all four seeds."""
+    calls: list[dict[str, int]] = []
+
+    class FourSeeds:
+        def hash_rows(self, seed=0, seed_1=None, seed_2=None, seed_3=None):
+            calls.append({"seed": seed, "seed_1": seed_1, "seed_2": seed_2, "seed_3": seed_3})
+            return "four"
+
+    class OneSeed:
+        def hash_rows(self, seed=0):
+            calls.append({"seed": seed})
+            return "one"
+
+    assert frame_module._polars_row_hashes(FourSeeds()) == "four"
+    assert calls == [{"seed": 0, "seed_1": 1, "seed_2": 2, "seed_3": 3}]
+    calls.clear()
+    assert frame_module._polars_row_hashes(OneSeed()) == "one"
+    assert calls == [{"seed": 0}]
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 @pytest.mark.parametrize("include_index", [True, False])
 def test_empty_selected_digest_preserves_row_count_without_native_selection(

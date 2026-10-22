@@ -216,9 +216,23 @@ class EagerFrame:
         digest.update(repr(((len(self), len(selected)), metadata)).encode("utf-8"))
         if selected:
             native = cast(Any, self.native).select(list(selected))
-            row_hashes = native.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3).to_numpy()
+            row_hashes = _polars_row_hashes(native).to_numpy()
             digest.update(np.ascontiguousarray(row_hashes, dtype=np.uint64).data)
         return digest.digest()
+
+
+def _polars_row_hashes(native: Any) -> Any:
+    """Per-row 64-bit hashes of a Polars frame, on Polars 1.x and 2.x.
+
+    Polars 1.x takes four seeds and 2.0 removed ``seed_1`` to ``seed_3`` for a
+    single ``seed`` (``TypeError`` at argument binding, before any hashing).
+    1.x keeps its four seeds so a digest stored by an earlier release still
+    verifies; 2.x hash values differ from 1.x regardless.
+    """
+    try:
+        return native.hash_rows(seed=0, seed_1=1, seed_2=2, seed_3=3)
+    except TypeError:
+        return native.hash_rows(seed=0)
 
 
 def as_eager_frame(value: Any) -> EagerFrame:
