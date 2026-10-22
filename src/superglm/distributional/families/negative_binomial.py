@@ -355,10 +355,12 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
 
         The fit's terminal rank decision has left a size coefficient not estimable.
-        ``constant_identified`` is true when a constant size is identified and the
-        size has terms to drop: it is then offered, with a varying offset dropped
-        too; otherwise (no row identifies a constant size, or the size is already
-        constant) only the Poisson family remains. A derived family gets no text
+        ``constant_identified`` is true when a constant size is offered (see
+        ``LimitRowDisclosingFamily``; without a size intercept the offer is
+        unchecked) and the size has terms to drop: it is then offered, with a
+        varying offset dropped too; otherwise (every row at the limit, no
+        curvature on the intercept, or a size already constant) only the
+        Poisson family remains. A derived family gets no text
         (see ``limit_row_count``).
         """
         if type(self) is not NegativeBinomialLS:

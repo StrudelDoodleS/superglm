@@ -767,8 +767,9 @@ def test_without_a_size_intercept_a_row_off_the_limit_decides_the_constant_remed
 ) -> None:
     """With no size intercept there is no curvature to read, so the rows off the limit decide.
 
-    A constant size is identified by any row that carries size information:
-    offered when some row is off the limit, and not when all 240 are at it.
+    A constant size is offered, unchecked, when some row is off the limit, and
+    not when all 240 are at it. The all-at-limit state is forced: a real
+    factor-only size pins its base level at ``exp(offset)``, never at the limit.
     """
     _, fit_state = _gate_fit((cat("g"),), size_intercept=False)
     assert _size_state(fit_state).intercept_index is None
@@ -799,24 +800,31 @@ def test_a_size_without_terms_is_never_told_to_fit_a_constant_size() -> None:
     assert "Fit a constant size" not in entry
 
 
-@pytest.mark.parametrize("offset_varies", [False, True])
+@pytest.mark.parametrize(
+    ("size_offset", "dropped"),
+    [("none", "no terms"), ("constant", "no terms"), ("varying", "no terms and no size offset")],
+)
 def test_a_size_coefficient_the_terminal_rank_cannot_estimate_is_disclosed(
-    offset_varies: bool,
+    size_offset: str, dropped: str
 ) -> None:
     """A size indicator the terminal curvature is singular in is reported with its remedy.
 
     The size has a group indicator and the forced terminal rank leaves it not
     estimable, while the size intercept still has curvature: the remedy names
-    the constant size and what it drops.
+    the constant size and what it drops. A constant size offset, even a nonzero
+    one, is not named: only an offset that differs across the rows is.
     """
-    offset = np.where(np.arange(240) < 120, 0.0, 0.5) if offset_varies else None
+    offset = {
+        "none": None,
+        "constant": np.full(240, 1.5),
+        "varying": np.where(np.arange(240) < 120, 0.0, 0.5),
+    }[size_offset]
     frame, fit_state = _gate_fit((cat("g"),), offset)
     at_limit = (frame["g"] == "a").to_numpy()
     indicator = _size_state(fit_state).coefficient_slice.start + 1
     (entry,) = _forced_entries(fit_state, at_limit, null=(indicator,))
     assert f"{int(at_limit.sum())} of 240 rows have a size at the Poisson limit" in entry
     assert "singular in a size direction" in entry
-    dropped = "no terms and no size offset" if offset_varies else "no terms"
     assert f"Fit a constant size (family.theta() with {dropped}) or the Poisson family" in entry
 
 

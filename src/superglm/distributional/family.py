@@ -602,8 +602,11 @@ class LimitRowDisclosingFamily(Protocol):
         """Return the warning for ``n_limit`` of ``n_rows`` rows at the limit.
 
         ``constant_identified`` is true when a constant parameter (the same
-        predictor without terms) is identified by the retained curvature, so
-        dropping the terms is a remedy; ``offset_varies`` is true when the
+        predictor without terms) is offered as a remedy: with an intercept, when
+        the retained curvature identifies it; without one, when some row is off
+        the limit. The second is unchecked, since the fit holds no curvature for
+        a constant it never estimated, and rows the offset pins (a factor's base
+        level) are never at the limit. ``offset_varies`` is true when the
         parameter's offset differs across the rows.
         """
         ...

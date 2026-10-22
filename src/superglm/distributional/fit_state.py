@@ -496,16 +496,20 @@ def _limit_row_disclosure(
     fit's own terminal rank decision says which coefficients are estimable (see
     ``_block_coefficients_estimable``: ``solver_result.terminal_rank``, the
     shared rank policy on the final penalized curvature, or within the retained
-    face when REML removed a penalized range, such as a random effect or a smooth's wiggle), and a parameter is unidentified
-    when one of its coefficients is not: a nonsingular information matrix is
+    face when REML removed a penalized range, such as a random effect or a
+    smooth's wiggle), and a parameter is unidentified when one of its
+    coefficients is not: a nonsingular information matrix is
     the condition for local identification (Rothenberg, *Econometrica* 39(3),
     1971). No information is evaluated here, and a coefficient the fit's rank
     policy treats as estimable is not disclosed, however small its
     information. A constant parameter is offered as the remedy when the intercept
     column alone carries data curvature, read from the fit's terminal data
-    curvature (without an intercept, when some row is off the limit), and the
-    parameter has terms to drop; one that is already constant leaves only the
-    alternative family.
+    curvature, and the parameter has terms to drop; one that is already
+    constant leaves only the alternative family. Without an intercept the fit
+    holds no curvature for a constant it never estimated, so the offer is
+    unchecked: made when some row is off the limit, though rows the offset pins
+    (a factor's base level) never reach it, and withheld only when every row
+    is at the limit. The alternative family is always named.
     """
     theta = solver_result.theta
     index, n_limit = family.limit_row_count(theta, likelihood_plan)
