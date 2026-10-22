@@ -11,7 +11,7 @@ first Tweedie `fit_reml` and `summary` on 20,000 rows:
 | | Empty cache | Cache from an earlier cluster |
 |---|---|---|
 | First Tweedie fit and summary | 4.7 s | 0.8 s |
-| `superglm.warmup()` | [WARMUP_COLD: fill from the final timing] s | 0.5 s |
+| `superglm.warmup()` | 52 s | 0.6 s |
 
 A larger model compiles a few more kernels: a first fit of each family on
 20,000 rows of the freMTPL2 book with four interactions spent 5.0 to
@@ -104,8 +104,8 @@ Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so
 notebooks and jobs read the cache the script filled.
 
 `warmup()` compiles the kernels of every family and route: about
-[WARMUP_COLD: fill from the final timing] seconds on an empty cache, once per superglm version and node
-type, and about half a second against a filled cache. Numba keys its cache
+52 seconds on an empty cache, once per superglm version and node type, and
+about 0.6 seconds against a filled cache. Numba keys its cache
 to the CPU model, so a cache built on one node type compiles again on
 another; the entries for both are kept side by side. After `warmup()`, a
 first fit compiles nothing, for every family and link, `SuperGLM` and
