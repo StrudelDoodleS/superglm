@@ -52,7 +52,9 @@ class DiscretizationResult:
         ``features``, has one row per bin and non-base level: ``bin_from``,
         ``bin_to``, ``level``, ``relativity`` (the level's curve relative to the
         base level's at the bin's representative covariate) and
-        ``log_relativity``.
+        ``log_relativity``.  When the spline parent is an ordered categorical
+        the table is exact, so the rows are its levels: ``parent_level``,
+        ``level``, ``relativity`` and ``log_relativity``, and nothing moves.
     predictions : NDArray
         Predictions using discretized (binned) curves.
     original_predictions : NDArray
@@ -688,6 +690,34 @@ def spline_categorical_bins(
     )
 
 
+def has_ordinal_parent(model, ispec) -> bool:
+    """Whether a ``SplineCategorical``'s spline parent is an ``OrderedCategorical``.
+
+    Its main effect is exported as one row per level, so the interaction is
+    keyed on the same levels rather than binned on a covariate.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    return isinstance(model._specs[ispec.parent_names[0]], OrderedCategorical)
+
+
+def ordinal_parent_cells(model, ispec, beta: NDArray) -> tuple[list, NDArray]:
+    """Every level's curve at each level of an ordinal parent, exactly.
+
+    The ordinal parent's main block lists its levels, and a row is rated at its
+    level's score, so a cell is the level's curve at that score and nothing is
+    binned.  The labels come from the main effect and the scores through the
+    resolver ``predict`` uses.  ``log_deviation[i, j]`` is non-base level
+    ``ispec._non_base[j]`` at ``labels[i]``.
+    """
+    from superglm.features.ordered_categorical import resolve_interaction_parent
+
+    parent = ispec.parent_names[0]
+    labels = list(model.term_inference(parent, with_se=False).levels)
+    _, scores = resolve_interaction_parent(model._specs[parent], np.asarray(labels, dtype=object))
+    return labels, ispec.level_log_deviations(scores, beta)
+
+
 _INTERACTION_TABLE_RESERVED_COLUMNS = ("relativity", "log_relativity", "n_obs", "sample_weight")
 
 
@@ -1230,6 +1260,22 @@ def discretization_impact(
     for name in target_spline_categorical:
         term = interaction_terms[name]
         beta_term = _interaction_beta(name)
+        if has_ordinal_parent(model, term["spec"]):
+            # Tabulated per level of the ordinal parent, at its scores: the
+            # table is the term itself, so the replacement moves nothing.
+            ordinal_labels, log_deviation = ordinal_parent_cells(model, term["spec"], beta_term)
+            non_base = [str(level) for level in term["spec"]._non_base]
+            interaction_tables[name] = pd.DataFrame(
+                {
+                    "parent_level": np.repeat(
+                        np.asarray(ordinal_labels, dtype=object), len(non_base)
+                    ),
+                    "level": np.tile(non_base, len(ordinal_labels)),
+                    "relativity": np.exp(log_deviation).ravel(),
+                    "log_relativity": log_deviation.ravel(),
+                }
+            )
+            continue
         log_rel_exact = np.asarray(
             base._score_prediction_term_local_exact(term, frame, beta_term),
             dtype=np.float64,

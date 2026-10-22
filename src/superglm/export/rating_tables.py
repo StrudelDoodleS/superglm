@@ -1642,42 +1642,62 @@ def _spline_categorical_block(
     model: SuperGLM,
     name: str,
     ispec,
-    frame: EagerFrame,
+    frame: EagerFrame | None,
     sample_weight: NDArray | None,
     n_bins: int,
     bin_strategy: str,
 ) -> InteractionTableBlock:
-    """A per-level spline deviation as one relativity per bin and level.
+    """A per-level spline deviation as one relativity per row key and level.
 
-    Rows are the spline covariate's bins, keyed as the main effect's are, and
-    the columns are the categorical's levels, base first at ``1.0``: the shape
-    of a categorical-by-categorical cell table with intervals on the left.  A
-    cell is the level's curve relative to the base level's, at the bin's
-    representative (``spline_categorical_bins``), and the product with the main
-    effects is the prediction at that point.  Not exact between
-    representatives, which the impact sheet measures.
+    The keys are the first parent's, as its main block keys them, and the
+    columns are the categorical's levels in level order, with the base level's
+    all ``1.0`` wherever it falls.  A cell is the level's curve relative to the
+    base level's, so the product with the main effects is the prediction.
+
+    A spline parent is binned: the keys are its intervals and a cell is read at
+    the bin's representative (``spline_categorical_bins``), so the block is
+    not exact between representatives, which the impact sheet measures.  An
+    ``OrderedCategorical`` parent is exported as a categorical, one row per
+    level, and its cells are the curves at the levels' scores: exact.
     """
     from superglm.diagnostics.discretize import (
         _validated_discretization_weights,
+        has_ordinal_parent,
+        ordinal_parent_cells,
         spline_categorical_bins,
     )
 
     parent1, _ = ispec.parent_names
-    _, geometry_weight = _validated_discretization_weights(model, sample_weight, len(frame))
-    bins = spline_categorical_bins(
-        ispec,
-        _interaction_beta(model, name),
-        frame.column_array(parent1, dtype=np.float64),
-        geometry_weight,
-        n_bins,
-        bin_strategy,
-    )
-    factor = dict(zip(bins.levels, np.exp(bins.log_deviation).T, strict=True))
-    columns = {parent1: _interval_keys(bins.edges[:-1], bins.edges[1:])}
-    ones = np.ones(len(bins.representatives))
-    for level in ispec._cat_levels:
-        columns[str(level)] = factor.get(str(level), ones)
-    return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind="spline_cells")
+    if has_ordinal_parent(model, ispec):
+        keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
+        kind = "cells"
+    else:
+        if frame is None:
+            raise TypeError(
+                f"Interaction {name!r} bins {parent1!r} at its bin representatives, which "
+                "are read from the training frame; pass frame=."
+            )
+        _, geometry_weight = _validated_discretization_weights(model, sample_weight, len(frame))
+        bins = spline_categorical_bins(
+            ispec,
+            _interaction_beta(model, name),
+            frame.column_array(parent1, dtype=np.float64),
+            geometry_weight,
+            n_bins,
+            bin_strategy,
+        )
+        keys = _interval_keys(bins.edges[:-1], bins.edges[1:])
+        log_deviation = bins.log_deviation
+        kind = "spline_cells"
+    factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
+    ones = np.ones(len(keys))
+    levels = [str(level) for level in ispec._cat_levels]
+    # A level named like the first parent would overwrite the key column.
+    axis = f"{parent1} (axis 1)" if parent1 in levels else parent1
+    columns = {axis: keys}
+    for level in levels:
+        columns[level] = factor.get(level, ones)
+    return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind=kind)
 
 
 def _interaction_blocks(
@@ -1698,7 +1718,6 @@ def _interaction_blocks(
         # term to learn it is not a surface; the sweep routes it by the same
         # exact-type test.
         if is_spline_categorical(ispec):
-            assert frame is not None
             blocks.append(
                 _spline_categorical_block(
                     model, name, ispec, frame, sample_weight, n_bins, bin_strategy
@@ -2155,16 +2174,20 @@ def build_rating_table_payload(
     curve, gives it the ``"exposure_quantile"`` edges.  A level unseen in
     training has no column and is rated as the base level, which is the
     model's own rule under ``unseen="base"``.  As for every interaction block,
-    the columns are keyed on the grouped levels of a ``grouping=`` parent.
+    the columns are keyed on the grouped levels of a ``grouping=`` parent.  When
+    the spline parent is an ``OrderedCategorical`` its main block is a
+    categorical, so the interaction is a ``"cells"`` block with one row per
+    level of that parent, each cell the level's curve at the parent level's
+    score: exact, nothing binned, and not on the sheet.
 
     Lossy, by construction, for the approximated FITTED TERMS -- ``Spline``,
     ``Polynomial``, the continuous-by-continuous interaction grid, and the
     spline-by-categorical block.  Two
     distinct errors ride on those, and the sheet reports the first for all
-    three: the sweep is handed ``_continuous_features`` and
+    four: the sweep is handed ``_continuous_features`` and
     ``_gridded_interaction_names`` -- the second read off the interaction
     blocks that were actually built, so the sheet names every one of those
-    three and its metrics are joint over them.
+    four and its metrics are joint over them.
 
     "Fitted terms" is the scope, not "every factor the workbook carries": an
     OFFSET MULTIPLIER block requested as ``offset_kind="binned"`` is

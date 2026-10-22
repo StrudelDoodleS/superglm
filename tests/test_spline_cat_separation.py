@@ -105,6 +105,37 @@ def test_separated_tail_is_held_at_the_last_nonzero_response(discrete, n_bins):
     np.testing.assert_allclose(held, np.full_like(far, edge[0]), rtol=0, atol=64 * U * 16)
 
 
+def test_level_log_deviations_hold_a_separated_level_as_score_does():
+    """The tabulated curve of a separated level is the held one, not the free spline.
+
+    ``level_log_deviations`` feeds the rating-table export, which would
+    otherwise ship cells past x = 22 that follow the free curve while
+    ``predict`` holds it.
+    """
+    X, y, w = separated_tail_design()
+    model, _ = fit(X, y, w, discrete=True)
+    ispec = model._interaction_specs["x:f"]
+    assert "C" in ispec._level_clip
+    beta = np.concatenate(
+        [model.result.beta[g.sl] for g in model._groups if g.feature_name == "x:f"]
+    )
+
+    x = np.linspace(0.0, 50.0, 101)
+    deviations = ispec.level_log_deviations(x, beta)
+    for j, level in enumerate(ispec._non_base):
+        np.testing.assert_allclose(
+            deviations[:, j],
+            ispec.score(x, np.array([level] * len(x), dtype=object), beta),
+            rtol=0,
+            atol=64 * U * 16,
+        )
+    # The held range is where a free curve would differ.
+    j = ispec._non_base.index("C")
+    free = ispec._spline_spec._raw_basis_matrix(x[x > 22.0])
+    raw = dict(ispec._level_raw_coefficients(beta))["C"]
+    assert np.abs(deviations[x > 22.0, j] - free @ raw).max() > 1e-6
+
+
 def test_ignore_leaves_the_curve_free():
     X, y, w = separated_tail_design()
     model, curve = fit(X, y, w, discrete=True, separation="ignore")

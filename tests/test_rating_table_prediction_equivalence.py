@@ -467,8 +467,11 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     if block.kind == "spline_cells":
         # Intervals down the side, levels across the top: the consumer finds
         # the interval its numeric value falls in, then the column of its level.
+        # The covariate is named by the block, since a level named like it moves
+        # the key column's header.
         edges = _printed_edges(block)
-        row = np.clip(np.digitize(X[parent1].to_numpy(dtype=np.float64), edges), 1, len(edges) - 1)
+        covariate = X[block.name.split(":")[0]].to_numpy(dtype=np.float64)
+        row = np.clip(np.digitize(covariate, edges), 1, len(edges) - 1)
         cells = table.iloc[:, 1:]
         column = pd.Index([str(c) for c in cells.columns]).get_indexer(X[parent2].astype(str))
         assert (column >= 0).all(), "every level of the frame has a column"
@@ -2776,6 +2779,154 @@ def test_the_sweep_takes_a_spline_categorical_only_when_it_is_named():
     assert list(table["level"].unique()) == ["B", "C", "D"]
     assert len(table) == 20 * 3
     np.testing.assert_allclose(table["relativity"], np.exp(table["log_relativity"]), rtol=1e-15)
+
+
+_BAND_ORDERS = {
+    "string labels": ["18-25", "26-35", "36-45", "46-55", "56+"],
+    "integer labels": [10, 20, 30, 40, 50],
+}
+
+
+@cache
+def _ordinal_spline_categorical_fit(kind: str):
+    """A spline-mode ``OrderedCategorical`` crossed with ``region``: a curve per region over the bands."""
+    order = _BAND_ORDERS[kind]
+    rng = np.random.default_rng(20261022)
+    n = 2000
+    X = pd.DataFrame({"band": rng.choice(order, n), "region": rng.choice(_REGION_LEVELS, n)})
+    position = X["band"].map({label: i for i, label in enumerate(order)}).to_numpy(dtype=np.float64)
+    region = X["region"].to_numpy()
+    eta = (
+        -1.2
+        + 0.15 * position
+        + 0.6 * (position - 2.0) / 2.0 * (region == "B")
+        - 0.4 * (position - 2.0) ** 2 / 4.0 * (region == "C")
+    )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(order=order, basis=Spline(kind="ps", n_knots=4)),
+            "region": Categorical(base="first"),
+        },
+        interactions=[("band", "region")],
+    )
+    model.fit(X, y)
+    return model, X, y, order
+
+
+@pytest.mark.parametrize("kind", list(_BAND_ORDERS))
+def test_an_ordinal_spline_parent_is_keyed_on_its_levels_and_reproduces_predict(kind):
+    """The bands of an ordinal parent are rows, as in its main block, and each cell is exact.
+
+    A spline-mode ``OrderedCategorical`` parent crosses its inner spline on the
+    level SCORES, not on the labels: binning the raw labels crashed on
+    ``"18-25"`` and, for ``10 ... 50``, read every cell at the top score.
+    """
+    model, X, y, order = _ordinal_spline_categorical_fit(kind)
+    payload = _payload(model, X, y, None, "native")
+
+    (block,) = payload.interactions
+    main = next(b for b in payload.main_effects if b.name == "band")
+    assert block.kind == "cells"
+    assert list(block.table.columns) == ["band", *_REGION_LEVELS]
+    assert list(block.table["band"]) == list(main.table["band"])
+    assert [str(key) for key in block.table["band"]] == [str(label) for label in order]
+    assert (block.table["A"] == 1.0).all()
+
+    rows = pd.DataFrame(
+        {
+            "band": np.repeat(order, len(_REGION_LEVELS)),
+            "region": np.tile(_REGION_LEVELS, len(order)),
+        }
+    )
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows),
+        model.predict(rows),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
+    without = _predict_from_payload(payload, rows, with_interactions=False)
+    assert np.max(np.abs(without / model.predict(rows) - 1.0)) > 0.1
+    # Nothing is binned, so the sheet has no row for it.
+    assert "band:region" not in set(payload.discretization_impact["feature"])
+
+
+@pytest.mark.parametrize("kind", list(_BAND_ORDERS))
+def test_the_sheet_measures_no_binning_change_for_an_ordinal_spline_parent(kind):
+    """Named in ``features``, the term is replaced by itself: no row moves, and the cells are the block's."""
+    model, X, y, order = _ordinal_spline_categorical_fit(kind)
+    payload = _payload(model, X, y, None, "native")
+    (block,) = payload.interactions
+
+    result = model.discretization_impact(X, y, n_bins=20, features=["band:region"])
+    assert result.metrics["max_abs_prediction_change_pct"] == pytest.approx(0.0, abs=1e-9)
+    assert result.metrics["deviance_change"] == pytest.approx(0.0, abs=1e-9)
+    table = result.interaction_tables["band:region"]
+    assert len(table) == len(order) * (len(_REGION_LEVELS) - 1)
+    for level in _REGION_LEVELS[1:]:
+        np.testing.assert_array_equal(
+            table.loc[table["level"] == level, "relativity"].to_numpy(),
+            block.table[level].to_numpy(),
+        )
+
+
+@cache
+def _collision_fit():
+    """Region levels ``age``, ``B`` and ``C`` under a base that is neither first nor last."""
+    rng = np.random.default_rng(20261023)
+    n = 900
+    X = pd.DataFrame(
+        {"age": rng.uniform(18.0, 80.0, n), "region": rng.choice(["age", "B", "C"], n)}
+    )
+    age = X["age"].to_numpy()
+    region = X["region"].to_numpy()
+    eta = (
+        -1.3
+        + 0.01 * age
+        + 0.5 * np.sin(age / 9.0) * (region == "age")
+        - 0.003 * (age - 50.0) * (region == "B")
+    )
+    y = np.random.default_rng(1).poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="C")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_a_level_named_like_the_spline_parent_keeps_its_own_column():
+    """The key column and a level's column are two columns, and the base level is the all-1.0 one wherever it falls."""
+    model, X, y = _collision_fit()
+    payload = _payload(model, X, y, None, "native", continuous_kind="ppform")
+
+    (block,) = payload.interactions
+    assert list(block.table.columns) == ["age (axis 1)", "age", "B", "C"]
+    assert all(_INTERVAL.match(str(key)) for key in block.table["age (axis 1)"])
+    assert (block.table["C"] == 1.0).all()
+    assert not (block.table["age"] == 1.0).all()
+
+    rows = _representative_rows(block, X, _geometry_weight(model, np.ones(len(X))))
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows), model.predict(rows), rtol=1e-13, atol=0.0
+    )
+
+
+def test_the_bin_representatives_need_the_frame_only_for_a_spline_parent():
+    """Without a frame a spline parent is refused by name; an ordinal parent has no bins to read."""
+    from superglm.export.rating_tables import _interaction_blocks
+
+    model, *_ = _spline_categorical_fit()
+    with pytest.raises(TypeError, match=r"'age:region'.*pass frame="):
+        _interaction_blocks(model, 3)
+
+    ordinal, *_ = _ordinal_spline_categorical_fit("string labels")
+    (block,) = _interaction_blocks(ordinal, 3)
+    assert block.kind == "cells"
 
 
 def _payload_for(model, X, y, sample_weight, **kwargs):
