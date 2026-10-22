@@ -191,15 +191,15 @@ def warmup() -> None:
     compiles only the kernels it needs and saves them to Numba's cache, and
     later sessions load them from there.
 
-    It compiles the kernels of every family and route, ``RandomEffect`` terms
-    included (about 40 seconds on an empty cache, under a second against a
-    filled one). Three groups of kernels compile on the first fit that reaches
-    them instead, because few fits do and they take seconds to compile: the
+    It compiles the kernels of every family and route, ``RandomEffect`` and
+    ``FactorSmooth`` terms included (about a minute on an empty cache, under a
+    second against a filled one). Two groups of kernels compile on first use
+    instead, because few fits reach them and they take seconds to compile: the
     third and fourth derivatives a ``SuperLSS`` fit needs only when a smoothing
-    parameter reaches its endpoint, the structured engine's ``FactorSmooth``
-    kernels, and a diagnostic plot's smoother. Each then joins the cache like
-    the rest. Numba keys its cache to the CPU model, so a cache built on one
-    node type compiles again on another.
+    parameter reaches its endpoint, and a fit's diagnostics (a diagnostic
+    plot's smoother, a structured ``FactorSmooth`` fit's hat diagonal). Each
+    then joins the cache like the rest. Numba keys its cache to the CPU model,
+    so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """
     from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
