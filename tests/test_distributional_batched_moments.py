@@ -130,76 +130,15 @@ def test_row_order_fixture_detects_reassociation():
     assert histogram[0, 0] != regrouped
 
 
-@pytest.mark.parametrize(
-    "mutation", ["duplicate", "outside", "overlap", "readonly", "dtype", "channel", "shared"]
-)
-def test_constructor_refuses_unsafe_output_or_metadata_before_native_writes(mutation):
+def test_constructor_refuses_a_channel_outside_the_derivative_columns():
     module = _module()
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
-    if mutation == "duplicate":
-        histograms.append(histograms[0])
-    elif mutation == "shared":
-        buffers["panel_buffer"] = buffers["output_buffer"]
-    else:
-        g, h, channel, out = histograms[0]
-        if mutation == "outside":
-            out = out.copy()
-        elif mutation == "overlap":
-            # The second histogram's view, moved back one element into the first's.
-            *spec, second = histograms[1]
-            start = (second.ctypes.data - buffers["output_buffer"].ctypes.data) // 8 - 1
-            moved = buffers["output_buffer"][start : start + second.size].reshape(second.shape)
-            histograms[1] = (*spec, moved)
-        elif mutation == "readonly":
-            out.flags.writeable = False
-        elif mutation == "dtype":
-            out = out.astype(np.float32)
-        elif mutation == "channel":
-            channel = 3
-        histograms[0] = (g, h, channel, out)
-    before = [spec[-1].copy() for spec in histograms + directions]
-    with pytest.raises(ValueError):
+    g, h, _, out = histograms[0]
+    histograms[0] = (g, h, 3, out)
+    with pytest.raises(ValueError, match="channel index"):
         module._BatchedMomentReducers(
             histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
         )
-    for spec, expected in zip(histograms + directions, before, strict=True):
-        np.testing.assert_array_equal(spec[-1], expected)
-
-
-def test_constructor_refuses_an_output_that_is_also_an_input_panel():
-    module = _module()
-    buffer, (panel,) = _buffered([np.ones((3, 3))])
-    with pytest.raises(ValueError, match="overlap|alias|distinct|inside"):
-        module._BatchedMomentReducers(
-            [(0, 0, 0, panel)],
-            [],
-            [panel],
-            np.zeros((1, 3), dtype=np.intp),
-            support_sizes=(3,),
-            n_channels=1,
-            output_buffer=np.empty(9),
-            panel_buffer=buffer,
-        )
-
-
-def test_curvature_alias_is_refused_without_mutating_outputs():
-    module = _module()
-    output_buffer, (output,) = _buffered([np.ones((3, 3))])
-    panel_buffer, panels = _buffered([np.ones((3, 1))])
-    batch = module._BatchedMomentReducers(
-        [(0, 0, 0, output)],
-        [],
-        panels,
-        np.zeros((1, 3), dtype=np.intp),
-        support_sizes=(3,),
-        n_channels=3,
-        output_buffer=output_buffer,
-        panel_buffer=panel_buffer,
-    )
-    with pytest.raises(ValueError, match="overlap|alias"):
-        batch.accumulate(output, 3)
-    np.testing.assert_array_equal(output, np.ones((3, 3)))
-    assert batch.last_worker_count == 0
 
 
 def test_metadata_accounting_and_warmup_cover_runtime_signatures():

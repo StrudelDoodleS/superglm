@@ -217,22 +217,11 @@ def _owned_array(values, dtype, shape, label):
         raise ValueError(f"{label} must be an owned writable aligned C array of shape {shape}")
 
 
-def _view_offset(values, buffer, shape, label):
-    """Element offset of a writable C-contiguous float64 view inside an owned buffer."""
-    if (
-        type(values) is not np.ndarray
-        or values.dtype != np.dtype(np.float64)
-        or values.shape != shape
-        or not values.flags.c_contiguous
-        or not values.flags.writeable
-        or not values.flags.aligned
-    ):
-        raise ValueError(f"{label} must be a writable aligned C float64 view of shape {shape}")
+def _view_offset(values, buffer):
+    """Element offset of a C-contiguous view (``_carve``'s) inside its buffer."""
     if values.size == 0:
         return 0
     start = values.__array_interface__["data"][0] - buffer.__array_interface__["data"][0]
-    if start < 0 or start % buffer.itemsize or start + values.nbytes > buffer.nbytes:
-        raise ValueError(f"{label} must lie inside its owned buffer")
     return start // buffer.itemsize
 
 
@@ -250,10 +239,9 @@ class _BatchedMomentReducers:
     """Bind certified plan buffers once for one native call per chunk.
 
     Every accumulator is a view of ``output_buffer`` and every ordinary panel a
-    view of ``panel_buffer``: two distinct owned flat arrays, which the kernel
-    addresses by offset. Construction rejects views outside their buffer and
-    overlapping accumulators before native code can write them. Callers must
-    not resize the buffers or mutate their shape/dtype. Before every
+    view of ``panel_buffer``, two flat arrays the plan allocates (``_carve``),
+    which the kernel addresses by offset. Callers must not resize the buffers
+    or mutate their shape/dtype. Before every
     ``accumulate``, the owning plan certifies bins in ``[-1, support_size)``
     and fills/validates the active rows of the ordinary and likelihood panels.
     This private prepared-buffer contract avoids revalidating every support
@@ -299,35 +287,15 @@ class _BatchedMomentReducers:
             raise ValueError("bins must be a matrix with positive chunk capacity")
         capacity = bins.shape[1]
         _owned_array(bins, np.dtype(np.intp), (len(sizes), capacity), "bins")
-        for buffer, label in ((output_buffer, "output buffer"), (panel_buffer, "panel buffer")):
-            if type(buffer) is not np.ndarray or buffer.ndim != 1:
-                raise ValueError(f"{label} must be a vector")
-            _owned_array(buffer, np.dtype(np.float64), buffer.shape, label)
-        # Distinct owning allocations cannot overlap, so no accumulator can
-        # alias an ordinary panel or the bins.
-        if output_buffer is panel_buffer:
-            raise ValueError("accumulators and ordinary panels need distinct owned buffers")
         panels = tuple(ordinary)
         panel_layout = np.empty((len(panels), 2), dtype=np.intp)
         for index, panel in enumerate(panels):
             if type(panel) is not np.ndarray or panel.ndim != 2:
                 raise ValueError("ordinary panels must be matrices")
-            shape = (capacity, panel.shape[1])
-            panel_layout[index] = (
-                _view_offset(panel, panel_buffer, shape, "ordinary panel"),
-                panel.shape[1],
-            )
+            panel_layout[index] = (_view_offset(panel, panel_buffer), panel.shape[1])
         specs = tuple(histograms) + tuple(directions)
         n_histograms = len(histograms)
         metadata = np.empty((len(specs) + len(vector_specs), 5), dtype=np.intp)
-        intervals = []
-
-        def claim_output(out, shape):
-            offset = _view_offset(out, output_buffer, shape, "moment accumulator")
-            if out.size:
-                intervals.append((offset, offset + out.size))
-            return offset
-
         for target, (g, other, channel, out) in enumerate(specs):
             g = _index(g, len(sizes), "support index")
             channel = _index(channel, n_channels, "channel index")
@@ -337,7 +305,7 @@ class _BatchedMomentReducers:
             else:
                 other = _index(other, len(panels), "ordinary panel index")
                 shape = (sizes[g], panels[other].shape[1])
-            metadata[target] = (g, other, channel, claim_output(out, shape), shape[1])
+            metadata[target] = (g, other, channel, _view_offset(out, output_buffer), shape[1])
         for vector, (g, sc, cc, score_out, mass_out) in enumerate(vector_specs):
             g = _index(g, len(sizes), "support index")
             sc = _index(sc, n_score_channels, "score channel index")
@@ -346,17 +314,12 @@ class _BatchedMomentReducers:
                 g,
                 sc,
                 cc,
-                claim_output(score_out, (sizes[g],)),
-                claim_output(mass_out, (sizes[g],)),
+                _view_offset(score_out, output_buffer),
+                _view_offset(mass_out, output_buffer),
             )
-        intervals.sort()
-        if any(after[0] < before[1] for before, after in zip(intervals, intervals[1:])):
-            raise ValueError("moment accumulators must have distinct nonaliasing storage")
         metadata.flags.writeable = False
         panel_layout.flags.writeable = False
         activity = np.empty(config.NUMBA_NUM_THREADS, dtype=np.intp)
-        start = output_buffer.__array_interface__["data"][0]
-        self._output_interval = (start, start + output_buffer.nbytes)
         self._output_buffer = output_buffer
         self._panel_buffer = panel_buffer
         self._panel_layout = panel_layout
@@ -384,18 +347,6 @@ class _BatchedMomentReducers:
             or not values.flags.aligned
         ):
             raise ValueError(f"{label} must be an aligned float64 matrix of active rows/channels")
-        # A caller-owned derivative view must not alias a parallel output. The
-        # enclosing byte interval is conservative even for negative strides,
-        # and so is comparing it with the whole accumulator buffer.
-        lower = values.__array_interface__["data"][0]
-        upper = lower + values.itemsize
-        for length, stride in zip(values.shape, values.strides, strict=True):
-            extent = (length - 1) * stride
-            lower += min(0, extent)
-            upper += max(0, extent)
-        start, stop = self._output_interval
-        if lower < stop and start < upper:
-            raise ValueError(f"{label} must not overlap a moment accumulator")
         return values
 
     def accumulate(self, curvature, n, *, score=None):
@@ -454,8 +405,6 @@ def _carve(buffer, shapes):
         size = int(np.prod(shape, dtype=np.int64))
         views.append(buffer[offset : offset + size].reshape(shape))
         offset += size
-    if offset != buffer.size:
-        raise ValueError("the views must cover the buffer exactly")
     return views
 
 
