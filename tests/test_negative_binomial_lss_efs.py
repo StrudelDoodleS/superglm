@@ -536,7 +536,7 @@ def test_limit_row_message_names_the_remedy_the_size_can_take() -> None:
     offset = say(3, 9, True, False, True)
     none = say(3, 9, False, True, True)
     assert "3 of 9 rows have a size at the Poisson limit" in both
-    assert "is singular" in both and "not identified" in both
+    assert "singular in a size direction" in both and "not identified" in both
     assert "(family.theta() with no terms and no size offset) or the Poisson family" in both
     assert "(family.theta() with no terms) or the Poisson family" in terms
     assert "(family.theta() with no size offset) or the Poisson family" in offset
@@ -544,7 +544,7 @@ def test_limit_row_message_names_the_remedy_the_size_can_take() -> None:
 
 
 def _gate_fit(size_terms: tuple, size_offset: np.ndarray | None = None):
-    """A real 240-row fit whose layout the gate reads; the limit rows are forced on top."""
+    """A real 240-row fit whose layout and coefficient order the gate reads."""
     frame, response = _overdispersed_fixture(240)
     frame["g"] = pd.Categorical(np.where(np.arange(240) % 2 == 0, "a", "b"))
     family = NegativeBinomialLS()
@@ -566,36 +566,57 @@ def _forced_plan(n: int):
     return NegativeBinomialLS().bind_likelihood(np.zeros(n), resolved, COMPLETE_OBSERVATION)
 
 
-def _forced_entries(fit_state, at_limit: np.ndarray) -> list[str]:
-    """The disclosure the fit's own gate makes when exactly ``at_limit`` rows sit at the limit.
+def _size_state(fit_state):
+    return next(p for p in fit_state.layout.predictors if p.parameter_index == 1)
+
+
+def _forced_entries(
+    fit_state,
+    at_limit: np.ndarray,
+    *,
+    null: tuple[int, ...] = (),
+    intercept_curvature: float = 1.0,
+) -> list[str]:
+    """The disclosure the fit's gate makes for forced limit rows and a forced terminal rank.
 
     The mean is 1 and the count 0 everywhere, so a row is at the limit when its
-    size exceeds ``2**52``; the others have size 2 and carry information.
+    size exceeds ``2**52``. ``null`` lists the coefficient indices the forced
+    terminal curvature is singular in, and ``intercept_curvature``
+    is the size intercept's terminal data curvature; with ``null`` empty the
+    fit's own terminal rank is used.
     """
     from types import SimpleNamespace
 
     from superglm.distributional.fit_state import _curvature_disclosures
+    from superglm.solvers.rank import decompose_gram
 
+    solved = fit_state.solver_result
     n = len(at_limit)
     theta = np.column_stack([np.ones(n), np.where(at_limit, 1e17, 2.0)])
-    response = np.zeros(n)
-    plan = _forced_plan(n)
+    width = fit_state.layout.n_coefficients
+    diagonal = np.ones(width)
+    diagonal[list(null)] = 0.0
+    data = np.eye(width)
+    size = _size_state(fit_state)
+    data[size.intercept_index, size.intercept_index] = intercept_curvature
+    result = SimpleNamespace(
+        terminal_curvature=solved.terminal_curvature,
+        theta=theta,
+        terminal_rank=decompose_gram(np.diag(diagonal)) if null else solved.terminal_rank,
+        terminal_data_curvature=data,
+    )
     messages = _curvature_disclosures(
-        NegativeBinomialLS(),
-        SimpleNamespace(terminal_curvature=fit_state.solver_result.terminal_curvature, theta=theta),
-        response,
-        plan,
-        fit_state.layout,
+        NegativeBinomialLS(), result, np.zeros(n), _forced_plan(n), fit_state.layout
     )
     return [m for m in messages if "rows have a size at the" in m]
 
 
-def test_limit_rows_that_leave_a_constant_size_identified_are_not_disclosed() -> None:
+def test_limit_rows_with_a_nonsingular_terminal_curvature_are_not_disclosed() -> None:
     """Rows without information do not make the size unidentified while others identify it.
 
-    This is the review's case in a forced form: half the rows are at the limit
-    (their mean is negligible next to the size), the other half are
-    overdispersed, and a constant size is identified by the latter.
+    The review's case in forced form: half the rows are at the limit (their mean
+    is negligible next to the size) and the fit's own terminal curvature is
+    nonsingular, because a constant size is identified by the other rows.
     """
     _, fit_state = _gate_fit(())
     at_limit = np.arange(240) < 120
@@ -604,40 +625,79 @@ def test_limit_rows_that_leave_a_constant_size_identified_are_not_disclosed() ->
     assert _forced_entries(fit_state, at_limit) == []
 
 
+def test_negligible_mean_rows_leave_a_real_constant_size_fit_silent() -> None:
+    """A real fit: ten rows with a negligible mean trip the kernel's mask, nothing is disclosed.
+
+    The size is constant and the other rows are overdispersed, so the fit's
+    terminal curvature is nonsingular; the mask fires regardless of where the
+    solver stops, because exp(-60) is below ``2**-52`` times any size above 1e-10.
+    """
+    rng = np.random.default_rng(42)
+    n = 400
+    offset = np.zeros(n)
+    offset[:10] = -60.0
+    response = rng.negative_binomial(1.0, 1.0 / (1.0 + np.exp(offset))).astype(np.float64)
+    family = NegativeBinomialLS()
+    model = SuperLSS(family, family.mean(), family.theta())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            pd.DataFrame({"x": np.arange(n, dtype=np.float64)}), response, offsets={"mean": offset}
+        )
+    solved = model._require_fitted().fit_state.solver_result
+    _, count = family.limit_row_count(solved.theta, _forced_plan(n))
+    assert count >= 1
+    assert not any("rows have a size at the" in m for m in model.result_.warnings)
+
+
 def test_every_row_at_the_limit_offers_only_the_poisson_family() -> None:
-    """No row identifies even a constant size: the constant-size remedy would be false."""
+    """No row carries size curvature: the constant-size remedy would be false."""
     _, fit_state = _gate_fit(())
-    (entry,) = _forced_entries(fit_state, np.ones(240, dtype=bool))
+    (entry,) = _forced_entries(
+        fit_state,
+        np.ones(240, dtype=bool),
+        null=(_size_state(fit_state).intercept_index,),
+        intercept_curvature=0.0,
+    )
     assert "240 of 240 rows have a size at the Poisson limit" in entry
     assert "use the Poisson family instead" in entry
     assert "Fit a constant size" not in entry
 
 
 @pytest.mark.parametrize("offset_varies", [False, True])
-def test_a_size_direction_supported_only_by_limit_rows_is_disclosed(offset_varies: bool) -> None:
-    """A level whose rows all sit at the limit is not identified; a constant size would be.
+def test_a_size_coefficient_the_terminal_rank_cannot_estimate_is_disclosed(
+    offset_varies: bool,
+) -> None:
+    """A size indicator the terminal curvature is singular in is reported with its remedy.
 
-    The size has a group indicator. Group "a" is entirely at the limit, so the
-    information about its coefficient is zero while group "b" still identifies a
-    constant size: the remedy names the constant size and what it drops.
+    The size has a group indicator and the forced terminal rank leaves it not
+    estimable, while the size intercept still has curvature: the remedy names
+    the constant size and what it drops.
     """
     offset = np.where(np.arange(240) < 120, 0.0, 0.5) if offset_varies else None
     frame, fit_state = _gate_fit((cat("g"),), offset)
     at_limit = (frame["g"] == "a").to_numpy()
-    (entry,) = _forced_entries(fit_state, at_limit)
+    indicator = _size_state(fit_state).coefficient_slice.start + 1
+    (entry,) = _forced_entries(fit_state, at_limit, null=(indicator,))
     assert f"{int(at_limit.sum())} of 240 rows have a size at the Poisson limit" in entry
-    assert "is singular" in entry
+    assert "singular in a size direction" in entry
     dropped = "no terms and no size offset" if offset_varies else "no terms"
     assert f"Fit a constant size (family.theta() with {dropped}) or the Poisson family" in entry
 
 
-def test_one_informative_row_in_a_level_keeps_the_size_identified() -> None:
-    """The gate reads information, not membership: one row off the limit identifies the level."""
+def test_a_singular_direction_outside_the_size_block_is_not_disclosed() -> None:
+    """The gate attributes the null direction: one in the mean block says nothing about the size."""
     frame, fit_state = _gate_fit((cat("g"),))
-    at_limit = (frame["g"] == "a").to_numpy().copy()
-    assert _forced_entries(fit_state, at_limit) != []
-    at_limit[np.flatnonzero(at_limit)[0]] = False
-    assert _forced_entries(fit_state, at_limit) == []
+    at_limit = (frame["g"] == "a").to_numpy()
+    mean_coefficient = fit_state.layout.predictors[0].coefficient_slice.start + 1
+    assert _forced_entries(fit_state, at_limit, null=(mean_coefficient,)) == []
+
+
+def test_no_limit_rows_are_not_disclosed_whatever_the_rank() -> None:
+    """The count is a precondition: a singular size block without limit rows is not this finding."""
+    frame, fit_state = _gate_fit((cat("g"),))
+    indicator = _size_state(fit_state).coefficient_slice.start + 1
+    assert _forced_entries(fit_state, np.zeros(240, dtype=bool), null=(indicator,)) == []
 
 
 def test_failed_limit_count_does_not_fail_a_finished_fit(monkeypatch) -> None:

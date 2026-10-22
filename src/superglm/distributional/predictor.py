@@ -219,56 +219,6 @@ class PredictorExecutionPlan:
         upper = np.triu(result)
         return upper + np.triu(result, k=1).T
 
-    def data_rank(self, weights: NDArray) -> int:
-        """Rank of the weighted design (weights nonnegative), the intercept included.
-
-        The fit's own route for a data rank (``rank.decide_data_rank``, as in
-        ``state_ops``): the Gram when it certifies itself, else the weighted
-        row factor, so no tolerance is chosen here. With an intercept the
-        design is centred about the weighted mean and the intercept adds one.
-        """
-        from superglm.solvers.centered_system import (
-            build_centered_system,
-            grouped_weighted_factor,
-        )
-        from superglm.solvers.rank import decide_data_rank, decompose_factor
-
-        weight_values = self._validated_vector(weights, label="rank weights")
-        if not np.any(weight_values > 0.0):
-            return 0
-        design = self.design
-        if design.p == 0:
-            return int(self.intercept)
-        if not self.intercept:
-            return decide_data_rank(
-                self.diagonal_moment(weight_values),
-                lambda: decompose_factor(grouped_weighted_factor(design, weight_values)),
-                rows=design.n,
-                certify=True,
-                psd_by_construction=True,
-            ).rank
-        centered = build_centered_system(
-            dm=design,
-            W=weight_values,
-            z_off=np.zeros(design.n),
-            penalty=np.zeros((design.p, design.p)),
-        )
-        centre, centre_lo = centered.centre_pair()
-        return (
-            1
-            + decide_data_rank(
-                centered.data_gram,
-                lambda: decompose_factor(
-                    grouped_weighted_factor(
-                        design, weight_values, center=centre, center_lo=centre_lo
-                    )
-                ),
-                rows=design.n,
-                certify=True,
-                psd_by_construction=True,
-            ).rank
-        )
-
     def cross_moment(
         self,
         right: PredictorExecutionPlan,

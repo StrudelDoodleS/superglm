@@ -331,8 +331,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         the size, in effective units, whether the size ran off or the mean is
         negligible; the expected information of the size is zero there. That
         alone does not make the size unidentified (the other rows may still
-        identify it), so the count is a figure for the disclosure, not its test;
-        rows just short of the threshold are not counted.
+        identify it), so the count is a figure for the disclosure, not its test
+        (the fit's terminal rank decision is); rows just short of the threshold
+        are not counted.
         """
         candidate = _typed_plan(plan, len(theta))
         semantics = candidate.weights.provenance.contract.semantics
@@ -351,7 +352,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     ) -> str:
         """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
 
-        The fit has found the information about the size coefficients singular.
+        The fit's terminal rank decision has left a size coefficient not estimable.
         If a constant size would be identified it is offered, with whatever the
         size has beyond a constant (terms, a varying offset); otherwise only the
         Poisson family remains.
@@ -359,8 +360,8 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         head = (
             f"SuperLSS NegativeBinomialLS fit: {n_limit} of {n_rows} rows have a size at the "
             "Poisson limit (no overdispersion left there; rows close to it are not counted), "
-            "and the information about the size coefficients is singular, so they are not "
-            "identified and the fit may stop short of convergence."
+            "and the fit's final curvature is singular in a size direction, so the size "
+            "coefficients are not identified and the fit may stop short of convergence."
         )
         if not constant_identified:
             return f"{head} No row identifies even a constant size; use the Poisson family instead."

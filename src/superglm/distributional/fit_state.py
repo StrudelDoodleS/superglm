@@ -28,11 +28,7 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import (
-    CompiledPredictor,
-    Predictor,
-    PredictorExecutionPlan,
-)
+from superglm.distributional.predictor import CompiledPredictor, Predictor
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -41,15 +37,12 @@ from superglm.distributional.result import (
     DistributionalFitResult,
 )
 from superglm.distributional.solver.chunks import ChunkSize
-from superglm.distributional.solver.derivatives import transform_natural_information
-from superglm.distributional.solver.packing import packed_pairs
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
     WeightProvenance,
 )
-from superglm.solvers.rank import decompose_gram
 
 
 def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
@@ -470,7 +463,7 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
 
 def _limit_row_disclosure(
     family: Any,
-    theta: NDArray,
+    solver_result: DenseSolverResult,
     likelihood_plan: FamilyLikelihoodPlan,
     layout: StackedLayout,
 ) -> str | None:
@@ -479,37 +472,30 @@ def _limit_row_disclosure(
     The family counts the rows its kernel treats as at the limit, where the
     parameter has no expected information, and names the parameter. That count
     alone proves nothing: the other rows may identify every direction. The
-    coefficients are locally identified exactly when their information matrix
-    is nonsingular (Rothenberg, *Econometrica* 39(3), 1971), so the test is the
-    rank of the predictor's information-weighted Gram ``X' diag(w) X``, with
-    ``w`` the family's expected information for the parameter in predictor
-    coordinates (prior weights and weight semantics included), against the rank
-    of the design's own Gram ``X' X``. Both ranks come from ``decompose_gram``
-    under the shared rank policy, so no tolerance is chosen here. A constant
-    parameter would still be identified when the intercept column alone carries
-    information, which is the remedy the message may offer.
+    fit's own terminal rank decision (``solver_result.terminal_rank``, the
+    shared rank policy on the final penalized curvature) says which
+    coefficients are estimable (``coefficient_estimable``), and a parameter is
+    unidentified when one of its coefficients is not: a nonsingular information
+    matrix is the condition for local identification (Rothenberg,
+    *Econometrica* 39(3), 1971). No information is evaluated here. A constant
+    parameter is still identified when the intercept column alone carries data
+    curvature, read from the fit's terminal data curvature; without an
+    intercept, when some row is off the limit.
     """
+    theta = solver_result.theta
     index, n_limit = family.limit_row_count(theta, likelihood_plan)
     if n_limit == 0:
         return None
-    states = sorted(layout.predictors, key=lambda state: state.parameter_index)
-    eta = np.column_stack([state.link.link(theta[:, state.parameter_index]) for state in states])
-    information = transform_natural_information(
-        family.expected_information_natural(theta, likelihood_plan),
-        eta,
-        [state.link for state in states],
-    )
-    diagonal = {
-        left: packed_index
-        for packed_index, (left, right) in enumerate(packed_pairs(len(states)))
-        if left == right
-    }
-    weights = information[:, diagonal[index]]
-    state = states[index]
-    plan = PredictorExecutionPlan(state.design, state.intercept_index is not None)
-    if plan.data_rank(weights) >= plan.data_rank(np.ones(len(theta))):
+    state = next(state for state in layout.predictors if state.parameter_index == index)
+    if solver_result.terminal_rank.coefficient_estimable()[state.coefficient_slice].all():
         return None
-    constant_identified = decompose_gram(np.array([[float(np.sum(weights))]])).rank == 1
+    if state.intercept_index is None:
+        constant_identified = n_limit < len(theta)
+    else:
+        constant_identified = bool(
+            solver_result.terminal_data_curvature[state.intercept_index, state.intercept_index]
+            > 0.0
+        )
     has_terms = state.coefficient_slice.stop - state.coefficient_slice.start > (
         0 if state.intercept_index is None else 1
     )
@@ -536,10 +522,10 @@ def _curvature_disclosures(
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
     refuse and is disclosed whether or not its diagnosis fires. A family with
-    ``limit_row_disclosure`` also reports the rows at a limit, converged or not;
-    it is told which predictors have terms beyond their intercept and which have an
-    offset that is not constant across the rows, and a failed
-    count never fails the finished fit.
+    ``limit_row_count`` also reports its rows at a limit, converged or not, when the
+    fit's terminal rank decision leaves one of that parameter's coefficients
+    not estimable (see ``_limit_row_disclosure``); a failed disclosure never fails
+    the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -569,7 +555,7 @@ def _curvature_disclosures(
         and layout is not None
     ):
         try:
-            message = _limit_row_disclosure(family, solver_result.theta, likelihood_plan, layout)
+            message = _limit_row_disclosure(family, solver_result, likelihood_plan, layout)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:
