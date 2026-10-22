@@ -11,6 +11,7 @@ rating-table block is sampled on — and reports the impact.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import signature
 from typing import TYPE_CHECKING, Any
@@ -303,6 +304,82 @@ class _ExactBands:
     diagnostics: dict[str, dict[str, float]]
 
 
+class _TotalCurveSE:
+    """Standard errors of curves built from a covariate's main effect and its levels' deviations.
+
+    A curve is the main effect's log relativity (with ``with_main``) plus the
+    deviation of one level of each of several spline-by-categorical terms on
+    the covariate, and its variance is that of the stacked row
+    ``[a(x), b_1(x), ...]`` against the covariance of the main effect's and
+    those levels' coefficients together,
+    ``Var main + 2 Cov(main, f) + Var f + ...``; without the main effect the
+    curve is the deviations alone.  The rows are the ones the main effect's
+    own standard error (``_term_se_at``) and the terms' scores use, and the
+    covariance is the model's, so a curve's error is the error of the number
+    the workbook approximates.  Native centering, as ``_term_se_at`` has it.
+
+    ``terms`` are the interactions as ``(name, spec)``.  The covariance block
+    over the main effect and every level the fit kept is taken once, and
+    :meth:`se` reads any selection of ``(name, level)`` pairs from it.  A
+    level the fit dropped has no group in the covariance: its deviation is
+    exactly zero, so it is not ``live`` and a curve that selects it is the
+    selection without it.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        covariate: str,
+        terms: list[tuple[str, Any]],
+        x: NDArray,
+        *,
+        with_main: bool,
+    ) -> None:
+        from superglm.inference._term_helpers import _active_spline_columns
+        from superglm.inference.covariance import covariance_selected_block
+
+        covariance, active_groups = model._coef_covariance
+        self.n = len(x)
+        self.live: dict[tuple[str, str], bool] = {}
+        level_indices: dict[tuple[str, str], NDArray] = {}
+        self._rows: dict[tuple[str, str], NDArray] = {}
+        for interaction, ispec in terms:
+            by_name = {g.name: g for g in active_groups if g.feature_name == interaction}
+            for level, level_rows in ispec.level_design_rows(x):
+                group = by_name.get(f"{interaction}[{level}]")
+                self.live[(interaction, level)] = group is not None
+                if group is not None:
+                    level_indices[(interaction, level)] = np.arange(group.start, group.end)
+                    self._rows[(interaction, level)] = level_rows
+        main_indices = np.empty(0, dtype=np.intp)
+        self._main_rows = np.zeros((self.n, 0), dtype=np.float64)
+        if with_main:
+            main_groups = [ag for ag in active_groups if ag.feature_name == covariate]
+            if main_groups:
+                main_indices = np.concatenate([np.arange(ag.start, ag.end) for ag in main_groups])
+                feature_groups = [g for g in model._groups if g.feature_name == covariate]
+                columns = _active_spline_columns(covariate, feature_groups, main_groups)
+                self._main_rows = np.asarray(
+                    model._specs[covariate].transform(x), dtype=np.float64
+                )[:, columns]
+        selected = np.unique(np.concatenate([main_indices, *level_indices.values()]))
+        self._block = covariance_selected_block(covariance, selected) if selected.size else None
+        self._main_position = np.searchsorted(selected, main_indices)
+        self._position = {
+            key: np.searchsorted(selected, indices) for key, indices in level_indices.items()
+        }
+
+    def se(self, selection: list[tuple[str, str]]) -> NDArray:
+        """Standard error at ``x`` of the curve for the ``(name, level)`` pairs in ``selection``."""
+        keys = [key for key in selection if self.live[key]]
+        if self._block is None:
+            return np.zeros(self.n, dtype=np.float64)
+        position = np.concatenate([self._main_position, *(self._position[k] for k in keys)])
+        rows = np.hstack([self._main_rows, *(self._rows[k] for k in keys)])
+        q = rows @ self._block[np.ix_(position, position)]
+        return np.sqrt(np.maximum(np.sum(q * rows, axis=1), 0.0))
+
+
 def _spline_categorical_se(
     model: Any,
     covariate: str,
@@ -315,63 +392,21 @@ def _spline_categorical_se(
     """Standard error, at ``x``, of each level's curve of a spline-by-categorical term.
 
     With ``with_main`` the curve is the level's total log relativity
-    ``main(x) + f_L(x)``, whose variance is that of the stacked row
-    ``[a(x), b_L(x)]`` against the covariance of the main effect's and the
-    level's coefficients together, ``Var main + 2 Cov(main, f_L) + Var f_L``;
-    without it the curve is the deviation ``f_L(x)`` alone.  The rows are the
-    ones the main effect's own standard error (``_term_se_at``) and the
-    term's scores use, and the covariance is the model's, so a level's error is
-    the error of the number the workbook approximates.  Native centering, as
-    ``_term_se_at`` has it.
+    ``main(x) + f_L(x)`` (:class:`_TotalCurveSE`), without it the deviation
+    ``f_L(x)`` alone.
 
     Returns ``(se, live)``, ``se`` being ``(len(x), levels)`` and ``live`` the
     levels that carry a group in the covariance.  A level the fit dropped has
     the base curve: its deviation is exactly zero, so its error is the main
     effect's (zero without the main effect).
     """
-    from superglm.inference._term_helpers import _active_spline_columns
-    from superglm.inference.covariance import covariance_selected_block
-
-    covariance, active_groups = model._coef_covariance
-    levels = list(ispec._non_base)
-    se = np.zeros((len(x), len(levels)), dtype=np.float64)
-    live = np.zeros(len(levels), dtype=bool)
-
-    by_name = {g.name: g for g in active_groups if g.feature_name == interaction}
-    level_indices = {
-        level: np.arange(
-            by_name[f"{interaction}[{level}]"].start, by_name[f"{interaction}[{level}]"].end
-        )
-        for level in levels
-        if f"{interaction}[{level}]" in by_name
-    }
-    main_indices = np.empty(0, dtype=np.intp)
-    main_rows = np.zeros((len(x), 0), dtype=np.float64)
-    if with_main:
-        main_groups = [ag for ag in active_groups if ag.feature_name == covariate]
-        if main_groups:
-            main_indices = np.concatenate([np.arange(ag.start, ag.end) for ag in main_groups])
-            feature_groups = [g for g in model._groups if g.feature_name == covariate]
-            columns = _active_spline_columns(covariate, feature_groups, main_groups)
-            main_rows = np.asarray(model._specs[covariate].transform(x), dtype=np.float64)[
-                :, columns
-            ]
-    selected = np.unique(np.concatenate([main_indices, *level_indices.values()]))
-    if selected.size == 0:
-        return se, live
-    block = covariance_selected_block(covariance, selected)
-    main_position = np.searchsorted(selected, main_indices)
-    if main_indices.size:
-        q = main_rows @ block[np.ix_(main_position, main_position)]
-        se[:] = np.sqrt(np.maximum(np.sum(q * main_rows, axis=1), 0.0))[:, None]
-    for j, (level, level_rows) in enumerate(ispec.level_design_rows(x)):
-        if level not in level_indices:
-            continue
-        position = np.concatenate([main_position, np.searchsorted(selected, level_indices[level])])
-        rows = np.hstack([main_rows, level_rows])
-        q = rows @ block[np.ix_(position, position)]
-        se[:, j] = np.sqrt(np.maximum(np.sum(q * rows, axis=1), 0.0))
-        live[j] = True
+    x = np.asarray(x, dtype=np.float64)
+    curves = _TotalCurveSE(model, covariate, [(interaction, ispec)], x, with_main=with_main)
+    se = np.zeros((len(x), len(ispec._non_base)), dtype=np.float64)
+    live = np.zeros(len(ispec._non_base), dtype=bool)
+    for j, level in enumerate(ispec._non_base):
+        se[:, j] = curves.se([(interaction, level)])
+        live[j] = curves.live[(interaction, level)]
     return se, live
 
 
@@ -381,7 +416,7 @@ def _joint_exact_bands(
     x_raw: NDArray,
     main_rows: NDArray | None,
     geometry_weight: NDArray,
-    companions: list[tuple[str, Any, NDArray]],
+    companions: list[tuple[str, Any, NDArray, Callable[[], NDArray]]],
     *,
     max_bands: int,
     band_se: float,
@@ -397,20 +432,30 @@ def _joint_exact_bands(
     ``main_rows`` is the main effect's log relativity at each row, or ``None``
     when the main effect is not binned (an exact piecewise form exports it),
     and ``companions`` are the spline-by-categorical interactions on the
-    covariate, as ``(name, spec, coefficients)``.  The curves banded together
-    are those a consumer of the table reads through its bands: a binned main
-    effect and, for each level of each companion, the level's total log
-    relativity ``main + deviation``, whose band factor is the weighted mean
-    with the main effect's own weights, so the main effect's factor plus the
-    level's cell, the mean of its deviation, is that factor and the published
-    product stays exact in the factors.  Without a binned main effect the
-    curves are the deviations.  Each curve keeps the limit
+    covariate, as ``(name, spec, coefficients, labels)``, ``labels()`` giving the
+    categorical's value at each row (read only to find which level combinations
+    occur, which takes two companions).  The curves banded together are those a
+    consumer of the table reads through its bands: a binned main effect and,
+    for each level of each companion, the level's total log relativity
+    ``main + deviation``, whose band factor is the weighted mean with the
+    main effect's own weights, so the main effect's factor plus the level's
+    cell, the mean of its deviation, is that factor and the published product
+    stays exact in the factors.  Without a binned main effect the curves are
+    the deviations.  A row in a non-base level of two companions at once is
+    priced at ``main + f + g``, which the single-level curves do not bound
+    (their limits add), so each combination of levels that occurs among the
+    rows of positive weight is banded too, as the sum of the main effect and
+    its levels' deviations; the combination's factor, a weighted mean, is the
+    sum of the factors already published (means are linear), so these curves
+    only constrain the bands and carry no cell.  Each curve keeps the limit
     ``min(band_se * SE, log(1 + band_max_error))`` with its own standard error
-    (``_spline_categorical_se``), the fewest bands that hold all of them are
-    chosen, then the least weighted squared error summed over the curves
+    (``_TotalCurveSE``), the fewest bands that hold all of them are chosen,
+    then the least weighted squared error summed over the curves
     (``exact_bands``), and a cap on ``max_bands`` widens every limit by one
     common factor.  A level the fit dropped has the main effect's curve
-    already, or a zero deviation, and adds no curve.
+    already, or a zero deviation, and adds no curve of its own: the main
+    effect's error is reported on its companion's row, being that level's
+    error.
 
     A term carrying a post-fit shape repair, or a model carrying editor
     edits, is refused: its standard errors would not be the published
@@ -459,17 +504,55 @@ def _joint_exact_bands(
         errors.append(_term_se_at(model, name, values)[:, None])
         columns[name] = np.array([0])
     width = len(curves)
-    for companion, ispec, beta in companions:
-        deviation = ispec.level_log_deviations(values, beta)
-        se, live = _spline_categorical_se(
-            model, name, companion, ispec, values, with_main=main_curve is not None
-        )
-        live_levels[companion] = np.flatnonzero(live)
+    standard_errors = _TotalCurveSE(
+        model,
+        name,
+        [(companion, ispec) for companion, ispec, _, _ in companions],
+        values,
+        with_main=main_curve is not None,
+    )
+    deviations: dict[str, NDArray] = {}
+    for companion, ispec, beta, _ in companions:
+        deviation = deviations[companion] = ispec.level_log_deviations(values, beta)
+        kept = [
+            j for j, level in enumerate(ispec._non_base) if standard_errors.live[(companion, level)]
+        ]
+        live_levels[companion] = np.array(kept, dtype=np.intp)
         total = deviation if main_curve is None else main_curve[:, None] + deviation
         curves.append(total[:, live_levels[companion]])
-        errors.append(se[:, live_levels[companion]])
-        columns[companion] = width + np.arange(len(live_levels[companion]))
-        width += len(live_levels[companion])
+        errors.append(
+            np.column_stack([standard_errors.se([(companion, ispec._non_base[j])]) for j in kept])
+            if kept
+            else np.zeros((len(values), 0))
+        )
+        columns[companion] = width + np.arange(len(kept))
+        width += len(kept)
+    # The level combinations present among the positive-weight rows, over the
+    # levels the fit kept (a dropped level is the base: no deviation).
+    combinations = np.empty((0, len(companions)), dtype=np.intp)
+    if len(companions) > 1:
+        codes = np.column_stack(
+            [
+                np.where(np.isin(index, live_levels[companion]), index, -1)
+                for companion, index in (
+                    (companion, ispec.level_index(labels()))
+                    for companion, ispec, _, labels in companions
+                )
+            ]
+        )[positive]
+        combinations = np.unique(codes[(codes >= 0).sum(axis=1) > 1], axis=0)
+    combination_columns: dict[str, list[int]] = {companion: [] for companion, *_ in companions}
+    for combination in combinations:
+        total = np.zeros(len(values)) if main_curve is None else main_curve.copy()
+        picked: list[tuple[str, str]] = []
+        for (companion, ispec, _, _), code in zip(companions, combination, strict=True):
+            if code >= 0:
+                total += deviations[companion][:, code]
+                picked.append((companion, ispec._non_base[code]))
+                combination_columns[companion].append(width)
+        curves.append(total[:, None])
+        errors.append(standard_errors.se(picked)[:, None])
+        width += 1
     if width == 0:
         # Every level of every companion was dropped: nothing to certify, one band.
         curves.append(np.zeros((len(values), 1)))
@@ -521,8 +604,23 @@ def _joint_exact_bands(
             "mean_error": float(np.mean(mean)),
         }
 
+    # What each term's row reports: its own curves; for an interaction, also the
+    # main effect's curve when the fit dropped a level (that level's total
+    # relativity is the main curve, banded in the main effect's own column) and
+    # every combination of levels it takes part in.
+    reported = dict(columns)
+    for companion, ispec, _, _ in companions:
+        dropped = main_curve is not None and len(live_levels[companion]) < len(ispec._non_base)
+        reported[companion] = np.concatenate(
+            [
+                columns[companion],
+                np.array([0] if dropped else [], dtype=np.intp),
+                np.array(combination_columns[companion], dtype=np.intp),
+            ]
+        ).astype(np.intp)
+
     cells: dict[str, NDArray] = {}
-    for companion, ispec, _ in companions:
+    for companion, ispec, _, _ in companions:
         # The level's factor less the main effect's, so that the main factor plus
         # the cell is the level's certified factor; the deviation's own factor
         # when the main effect is exact.
@@ -536,7 +634,7 @@ def _joint_exact_bands(
         edges=edges,
         main_factors=banding.factors[:, 0] if main_curve is not None else None,
         cells=cells,
-        diagnostics={term: report(columns[term]) for term in banded_terms},
+        diagnostics={term: report(reported[term]) for term in banded_terms},
     )
 
 
@@ -1313,9 +1411,22 @@ def discretization_impact(
     )
     joint_bands: dict[str, _ExactBands] = {}
 
-    def _companion_terms(covariate: str) -> list[tuple[str, Any, NDArray]]:
+    def _companion_terms(covariate: str) -> list[tuple[str, Any, NDArray, Callable[[], NDArray]]]:
+        from superglm.features.ordered_categorical import resolve_interaction_parent_of
+
+        def labels_of(term: str) -> Callable[[], NDArray]:
+            # The categorical's value at each row, resolved as the term's scores are.
+            def labels() -> NDArray:
+                spec = interaction_terms[term]["spec"]
+                _, right_spec = interaction_terms[term].get("parent_specs", (None, None))
+                return resolve_interaction_parent_of(
+                    spec, right_spec, frame.column_array(spec.parent_names[1])
+                )[1]
+
+            return labels
+
         return [
-            (term, interaction_terms[term]["spec"], _interaction_beta(term))
+            (term, interaction_terms[term]["spec"], _interaction_beta(term), labels_of(term))
             for term in companions.get(covariate, [])
         ]
 

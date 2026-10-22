@@ -1037,13 +1037,11 @@ class SplineCategorical:
             out[:, j] = np.asarray(basis @ beta_raw, dtype=np.float64).ravel()
         return out
 
-    def banded_deviation(self, band: NDArray, x_cat: NDArray, cells: NDArray) -> NDArray:
-        """Each row's cell: ``cells[band, j]`` for a row of non-base level ``j``, 0 for any other.
+    def level_index(self, x_cat: NDArray) -> NDArray:
+        """Each row's position ``j`` in ``_non_base``, or -1 for a row of the base level.
 
-        ``cells`` is ``(bands, len(non_base))`` in ``_non_base`` order and
-        ``band`` gives each row's band.  The labels are routed as ``score``
-        routes them -- grouping, unseen policy and all -- so a table of cells
-        rates a row on the level its curve would have been read for.
+        The labels are routed as ``score`` routes them -- grouping, unseen
+        policy and all -- so this is the level a row's curve is read for.
         """
         x_cat = _categorical_predict_labels(
             x_cat,
@@ -1052,10 +1050,23 @@ class SplineCategorical:
             unseen=self._cat_unseen,
             context=self.cat_name,
         )
-        out = np.zeros(len(band), dtype=np.float64)
+        index = np.full(len(x_cat), -1, dtype=np.intp)
         for j, level in enumerate(self._non_base):
-            rows = x_cat == level
-            out[rows] = cells[band[rows], j]
+            index[x_cat == level] = j
+        return index
+
+    def banded_deviation(self, band: NDArray, x_cat: NDArray, cells: NDArray) -> NDArray:
+        """Each row's cell: ``cells[band, j]`` for a row of non-base level ``j``, 0 for any other.
+
+        ``cells`` is ``(bands, len(non_base))`` in ``_non_base`` order and
+        ``band`` gives each row's band; the row's level is :meth:`level_index`,
+        so a table of cells rates a row on the level its curve would have been
+        read for.
+        """
+        index = self.level_index(x_cat)
+        out = np.zeros(len(band), dtype=np.float64)
+        rows = index >= 0
+        out[rows] = cells[band[rows], index[rows]]
         return out
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:

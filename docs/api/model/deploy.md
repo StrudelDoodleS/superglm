@@ -156,6 +156,11 @@ with it, on the same bands, so that the limit holds for each level's whole
 relativity (the main effect plus that level's own curve) and the interaction's
 table and the main effect's table carry the same intervals; it adds curves that
 the bands must follow, so a model with such an interaction can need more bands.
+With several such interactions on one covariate, a policy in a non-base level
+of two of them is priced at the main effect plus both levels' curves, and that
+sum is held to its own limit (from the standard error of the sum) for every
+combination of levels that occurs in the training data; a combination that
+does not occur there is not certified.
 A model carrying editor edits, or a term with a post-fit shape repair, is
 refused, because its standard errors are not the published curve's.
 

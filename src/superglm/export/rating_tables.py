@@ -1703,8 +1703,11 @@ def _spline_categorical_block(
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
     levels = [str(level) for level in ispec._cat_levels]
-    # A level named like the first parent would overwrite the key column.
-    axis = f"{parent1} (axis 1)" if parent1 in levels else parent1
+    # A level named like the key column would overwrite it: the header is the
+    # parent's name, suffixed until no level carries it.
+    axis = parent1
+    while axis in levels:
+        axis = f"{axis} (axis 1)"
     columns = {axis: keys}
     for level in levels:
         columns[level] = factor.get(level, ones)
@@ -2213,15 +2216,20 @@ def build_rating_table_payload(
     ``min(band_se * SE, log(1 + band_max_error))`` at every observed value,
     and a cell is the band's weighted mean of the level's deviation, so the
     main effect's band factor times the cell is the level's certified band
-    factor.  With ``continuous_kind="ppform"`` the main effect is exact and the
-    bands hold the deviations themselves.  The bands are the fewest that hold
-    all of those curves, so each interaction on a covariate adds curves to
-    its bands and the count can rise; ``n_bins`` caps it, and a cap that is
-    too small widens every limit by one factor, warned once for the
-    covariate and reported in the sheet's ``band_*`` columns on its main
-    and interaction rows alike.  A level unseen in
-    training has no column and is rated as the base level, which is the
-    model's own rule under ``unseen="base"``.  As for every interaction block,
+    factor.  With several such interactions on one covariate a policy can sit
+    in a non-base level of more than one, and its price is the main effect
+    times each level's cell; that sum is certified too, for every combination
+    of levels that occurs among the training rows of positive weight, each
+    with the standard error of the sum (a combination no training row has is
+    not certified).  With ``continuous_kind="ppform"`` the main effect is
+    exact and the bands hold the deviations themselves.  The bands are the
+    fewest that hold all of those curves, so each interaction on a covariate
+    adds curves to its bands and the count can rise; ``n_bins`` caps it, and a
+    cap that is too small widens every limit by one factor, warned once for the
+    covariate and reported in the sheet's ``band_*`` columns on its main and
+    interaction rows alike.  A level unseen in training has no column and is
+    rated as the base level, which is the model's own rule under
+    ``unseen="base"``.  As for every interaction block,
     the columns are keyed on the grouped levels of a ``grouping=`` parent.  When
     the spline parent is an ``OrderedCategorical`` its main block is a
     categorical, so the interaction is a ``"cells"`` block with one row per
