@@ -3378,6 +3378,46 @@ def test_only_the_level_combinations_present_in_the_data_are_banded(monkeypatch)
     assert shapes == [1 + 2 + 1 + 1]
 
 
+def test_the_joint_banding_receives_each_combinations_own_tolerance(monkeypatch):
+    """A combination column's tolerance is ``min(band_se * SE(main + f + g), log(1 + max_error))``."""
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    model, X, y = _two_interaction_fit()
+    captured = []
+    real = exact_banding.exact_bands
+
+    def spy(s, w, tol, max_bands):
+        captured.append(np.array(tol))
+        return real(s, w, tol, max_bands)
+
+    monkeypatch.setattr(exact_banding, "exact_bands", spy)
+    band_se, band_max_error = 0.5, 10.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.discretization_impact(
+            X,
+            y,
+            bin_strategy="exact",
+            features=["age:region", "age:fuel", "age"],
+            band_se=band_se,
+            band_max_error=band_max_error,
+        )
+    (tol,) = captured
+    values = np.unique(X["age"].to_numpy())
+    cap = np.log1p(band_max_error)
+    # Columns: the main effect, region B and C, fuel P, then the combinations
+    # (region B, fuel P) and (region C, fuel P) in the order np.unique sorts them.
+    assert tol.shape == (len(values), 6)
+    bound = []
+    for column, region in ((4, "B"), (5, "C")):
+        stacked = band_se * _combination_se(model, values, region, "P")
+        np.testing.assert_allclose(tol[:, column], np.minimum(stacked, cap), rtol=1e-9, atol=0.0)
+        bound.append(np.any(stacked < cap))
+    # The standard-error term must be what sets a tolerance, or the cap alone
+    # would satisfy the comparison above.
+    assert any(bound)
+
+
 @cache
 def _dropped_levels_fit():
     """A strong main effect and a factor the penalty removes: every interaction level is dropped."""
