@@ -29,8 +29,8 @@ class ConvergenceWarning(UserWarning):
     is silent, as in 0.40), when its null model did not converge, when
     an inner fit stops with ``no_ascent_direction``, and when a
     ``NegativeBinomialLS`` fit has rows whose size is at the Poisson limit
-    and its final curvature is singular in a size direction (the message
-    gives the row count). The message names the
+    and its final curvature is singular in a size direction, whatever the
+    cause (the message gives the row count). The message names the
     reason and what to change. Silence it with ``warnings.filterwarnings``
     once the reason is understood.
     """
