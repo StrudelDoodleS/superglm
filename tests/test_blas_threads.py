@@ -1049,6 +1049,44 @@ def test_pooled_for_runs_every_task_on_one_blas_thread():
         assert all(all(count == 1 for count in each) for each in counts), workers
 
 
+@pytest.mark.parametrize("scoped", [False, True])
+def test_numbas_thread_count_caps_a_pooled_section(monkeypatch, scoped):
+    """``numba.set_num_threads`` caps a ``pooled_for`` section, as it (and ``NUMBA_NUM_THREADS``)
+    capped the ``prange`` loops of SuperLSS's row kernels and batched moments that these sections
+    replaced, whatever ``SUPERGLM_N_JOBS`` allows; an ``n_jobs`` the context sets is used as given."""
+    import contextlib
+
+    import numba
+
+    from superglm import _parallel
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    grown = []
+    grow = _parallel._Crew.grow
+
+    def recording(self, count):
+        grown.append(count)
+        grow(self, count)
+
+    monkeypatch.setattr(_parallel._Crew, "grow", recording)
+    monkeypatch.setenv("SUPERGLM_N_JOBS", "4")
+    previous = numba.get_num_threads()
+    caps = [1] + ([2] if numba.config.NUMBA_NUM_THREADS >= 2 else [])
+    try:
+        with fit_pool() if scoped else contextlib.nullcontext():
+            for cap in caps:
+                numba.set_num_threads(cap)
+                grown.clear()
+                assert pooled_for(lambda item: item, list(range(8)), 1) == list(range(8))
+                assert max(grown, default=0) == cap - 1, cap  # helpers beside the caller
+            grown.clear()
+            with parallel_config(n_jobs=4):
+                assert pooled_for(lambda item: item, list(range(8)), 1) == list(range(8))
+            assert max(grown) == 3
+    finally:
+        numba.set_num_threads(previous)
+
+
 def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     """A dense design keeps the cap because its row passes run on the pool; every pass that runs
     on the calling thread instead (the chunked solved-row route, the gradient-only pass and the

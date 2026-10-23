@@ -33,7 +33,9 @@ lookup tables' sweeps, block products and leverages
 negative binomial rows) and batched global moments; the SuperLSS
 kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
 rows), whose tasks are too short for an executor's dispatch, and the others on
-:func:`pooled_map`.
+:func:`pooled_map`.  Those SuperLSS kernels were numba ``prange`` loops, so
+numba's thread count (``NUMBA_NUM_THREADS``, ``numba.set_num_threads``) caps
+them too (:func:`section_threads`).
 """
 
 from __future__ import annotations
@@ -461,6 +463,24 @@ def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))
 
 
+def section_threads() -> int:
+    """The most threads a :func:`pooled_for` section runs: ``n_jobs``, capped by numba's thread count.
+
+    The sections replaced numba ``prange`` loops, whose width ``NUMBA_NUM_THREADS``
+    and ``numba.set_num_threads`` set, so both still cap them.  numba keeps that
+    count per thread (a thread that never set it has ``NUMBA_NUM_THREADS``), and
+    this reads the calling thread's, as a ``prange`` started there would.  An
+    ``n_jobs`` the context sets explicitly (:func:`parallel_config`, an
+    estimator's ``n_jobs``) is used as given.
+    """
+    override = _override.get()
+    if override is not None and override.n_jobs is not None:
+        return override.n_jobs
+    import numba
+
+    return min(resolve_n_jobs(), numba.get_num_threads())
+
+
 def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     """``fn(item)`` for every item, yielded in item order, on ``pool_workers`` threads.
 
@@ -538,7 +558,9 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
 
 
 def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
-    """``[fn(item), ...]`` in item order, the calling thread working beside ``pool_workers - 1`` helpers.
+    """``[fn(item), ...]`` in item order, the calling thread working beside its helpers.
+
+    At most ``pool_workers`` threads, capped by :func:`section_threads`.
 
     For sections of many short tasks, where :func:`pooled_map` spends more
     waking its workers and collecting futures than a task runs (about a
@@ -560,7 +582,7 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
     from superglm._blas_threads import pooled_blas_threads
 
     count = len(items)
-    workers = pool_workers(count, item_bytes)
+    workers = min(pool_workers(count, item_bytes), section_threads())
     with pooled_blas_threads():
         if workers <= 1 or count <= 1:
             return [fn(item) for item in items]
