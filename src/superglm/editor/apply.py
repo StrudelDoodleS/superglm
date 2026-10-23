@@ -706,11 +706,15 @@ def _refresh_fit_statistics(
             if offset is None and not explicit_scoring_data
             else offset
         )
-    else:
-        # y_ref is set only together with X_ref, so a passed offset was
-        # validated above: no offset reaches here.
+    elif offset is None:
         offset_arr = None if explicit_scoring_data else getattr(model, "_fit_offset", None)
         offset_ref = None if explicit_scoring_data else getattr(model, "_fit_offset_ref", None)
+    elif retained_offset:
+        offset_arr = offset
+        offset_ref = getattr(model, "_fit_offset_ref", None)
+    else:
+        offset_arr = np.array(offset, dtype=np.float64, copy=True).ravel()
+        offset_ref = offset
     if offset_arr is not None and offset_arr.size != y_arr.size:
         raise ValueError(f"offset has length {offset_arr.size}, expected {y_arr.size}.")
 
