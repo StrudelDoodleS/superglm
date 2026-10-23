@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from numbers import Real
 from types import MappingProxyType
@@ -452,13 +454,36 @@ def _assessment_face_geometry_matches(left: PenaltyFace, right: PenaltyFace) -> 
     )
 
 
+_FIT_TIME_FACE_GEOMETRY: ContextVar[bool] = ContextVar("fit_time_face_geometry", default=False)
+
+
+@contextmanager
+def fit_time_face_geometry() -> Iterator[None]:
+    """Validate face geometry with a fit's acceptance, half the bound a load allows."""
+    token = _FIT_TIME_FACE_GEOMETRY.set(True)
+    try:
+        yield
+    finally:
+        _FIT_TIME_FACE_GEOMETRY.reset(token)
+
+
 def _face_projectors_agree(left: PenaltyFace, right: PenaltyFace) -> bool:
-    """Whether ``N N^T`` of two stored bases agree within one replay's rounding.
+    """Whether ``N N^T`` of two stored bases agree within their replays' rounding.
 
     Each computed product lies within ``gamma_r |N| |N|^T`` of the exact one
     elementwise, ``r`` the inner dimension (Higham 2002, section 3.5), on any
-    platform. Two bases whose products agreed when the fit was saved therefore
-    agree within the sum of both replays' bounds wherever they are reloaded.
+    platform. With ``M = |N_L| |N_L|^T + |N_R| |N_R|^T``, a load accepts a gap
+    up to ``2 gamma_{2r+4} M`` and a fit up to half that, so the load has
+    margin for its own replay. Replaying both products on another machine
+    moves the gap by at most ``2 gamma_r M``. The computed ``M`` lies within a
+    relative ``gamma_{r+1}`` of the exact one, and forming the bound and the
+    gap adds a relative ``9u`` at most, so a pair a fit accepts loads on every
+    machine when
+    ``2 gamma_r + gamma_{2r+4} (1 + gamma_{r+1} + 9u) <= 2 gamma_{2r+4} (1 - gamma_{r+1})``,
+    which holds for ``r <= 2**20``. Bases saved under the earlier bitwise rule
+    had equal products, a gap of at most ``2 gamma_r M`` anywhere. Half the
+    load bound exceeds ``gamma_r M``, so a fit still accepts every exact change
+    of basis.
     """
     left_basis = np.asarray(left.null_basis, dtype=np.float64)
     right_basis = np.asarray(right.null_basis, dtype=np.float64)
@@ -475,7 +500,8 @@ def _face_projectors_agree(left: PenaltyFace, right: PenaltyFace) -> bool:
     magnitude = (
         np.abs(left_basis) @ np.abs(left_basis).T + np.abs(right_basis) @ np.abs(right_basis).T
     )
-    bound = np.nextafter(2.0 * gamma * magnitude, math.inf)
+    multiplier = 1.0 if _FIT_TIME_FACE_GEOMETRY.get() else 2.0
+    bound = np.nextafter(multiplier * gamma * magnitude, math.inf)
     gap = np.abs(left.projector - right.projector)
     return bool(np.all(np.isfinite(gap)) and np.all(gap <= bound))
 

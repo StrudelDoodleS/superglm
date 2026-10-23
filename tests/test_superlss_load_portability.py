@@ -41,6 +41,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.results import solver as result_solver
+from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.serialization import (
     DistributionalSerializationError,
     serialize_distributional_model,
@@ -591,6 +592,53 @@ def test_two_bases_of_one_face_match_by_their_projectors(face_model, monkeypatch
     tilted[:, 0] += 1.0e-9 * face.constraint_basis[:, 0]
     other = types.SimpleNamespace(null_basis=tilted, projector=tilted @ tilted.T)
     assert not result_solver._face_projectors_agree(face, other)
+
+
+def test_a_fit_accepts_two_bases_of_one_face_within_half_the_load_bound(
+    face_model, monkeypatch
+) -> None:
+    """A load replays both products, so a fit leaves it that rounding as margin.
+
+    Otherwise a gap a fit accepted near the bound could exceed it after
+    another machine's replay, and the saved model would be refused there.
+    """
+    model, _, _ = face_model
+    face = model._require_fitted().result.coefficient_face
+    turned = _quarter_turned_face(face)
+    bound = _load_projector_bound(face, turned)
+    for fraction, at_fit, at_load in ((0.25, True, True), (0.75, False, True)):
+        with monkeypatch.context() as patch:
+            _forged_projectors(patch, face, turned, fraction * bound)
+            with result_solver.fit_time_face_geometry():
+                assert result_solver._face_projectors_agree(face, turned) is at_fit
+            assert result_solver._face_projectors_agree(face, turned) is at_load
+    with result_solver.fit_time_face_geometry():
+        assert result_solver._face_projectors_agree(face, turned)
+
+
+def test_a_fit_validates_its_smoothing_result_with_the_fit_acceptance(
+    face_model, monkeypatch
+) -> None:
+    """The fit builds its smoothing result under the fit's acceptance, and a load under its own."""
+    _, _, saved = face_model
+    seen: list[bool] = []
+    real = DistributionalEFSResult.__post_init__
+
+    def post_init(self) -> None:
+        seen.append(result_solver._FIT_TIME_FACE_GEOMETRY.get())
+        real(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DistributionalEFSResult, "__post_init__", post_init)
+        family = sg.GammaLS()
+        refit = sg.SuperLSS(family, family.mean(s("x", kind="cr", k=7)), family.scale())
+        frame, columns = _data()
+        refit.fit_reml(frame, columns["positive"])
+        at_fit, seen[:] = list(seen), []
+        sg.SuperLSS.from_bytes(saved)
+        at_load = list(seen)
+    assert at_fit and all(at_fit)
+    assert at_load and not any(at_load)
 
 
 FIXTURE_NAMES = sorted(path.name.removesuffix(".pkl.xz") for path in FIXTURES.glob("*.pkl.xz"))
