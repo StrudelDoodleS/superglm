@@ -9,14 +9,8 @@ from __future__ import annotations
 from superglm.reml.gradient import reml_direct_gradient as _reml_direct_gradient
 from superglm.reml.gradient import reml_direct_hessian as _reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective as _reml_laml_objective
-from superglm.reml.w_derivatives import compute_dW_deta as _compute_dW_deta
 from superglm.reml.w_derivatives import reml_w_correction as _reml_w_correction
 from superglm.solvers.dispersion import model_weight_semantics
-
-
-def compute_dW_deta(model, mu, eta, sample_weight):
-    """Derivative of IRLS weights w.r.t. the linear predictor."""
-    return _compute_dW_deta(model._link, model._distribution, mu, eta, sample_weight)
 
 
 def reml_w_correction(
