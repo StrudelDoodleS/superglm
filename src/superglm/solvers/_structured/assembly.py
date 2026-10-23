@@ -588,8 +588,8 @@ def solve_augmented_normal_equations(
     ``NestedStructuredSystem.xtwz_small_centred``), and the fs and sz leaf
     factors theirs from the right-hand side inside the leaf factorization;
     with ``centred`` the first entry is then the centred intercept ``alpha``
-    about the factor's border centre instead of the raw one.  Any other
-    factor takes its ``solve`` (``centred`` does not apply to it).  ``extra``
+    about the factor's border centre instead of the raw one.  A factor that
+    is not its system's own raises ``TypeError``.  ``extra``
     ``(p + 1,)``, zero in the intercept entry, is a further right-hand side
     (a Levenberg shift's ``E beta``, design §3.11): it is not data, so it
     takes the factor's full solve beside the data-side one, in the same
@@ -611,11 +611,9 @@ def solve_augmented_normal_equations(
         if extra is not None:
             solution = solution + factor.solve(extra, centred=centred)
         return solution
-    if extra is not None:
-        rhs = rhs + extra
-    if centred:
-        raise ValueError("Only a nested factor solves in centred coordinates.")
-    return factor.solve(rhs)
+    raise TypeError(
+        f"{type(factor).__name__} is not the factor of a {type(system).__name__} system."
+    )
 
 
 def _cached_centred_solution(system, factor, rhs: NDArray) -> tuple[NDArray, float, float, NDArray]:

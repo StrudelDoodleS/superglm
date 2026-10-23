@@ -13,7 +13,6 @@ from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _exact_ssp_moments,
     _float64_operand_exponent_bounds,
-    _fused_2d_bincount_2,
     _fused_bincount_2,
     _indexed_row_dot,
     _native,
@@ -672,15 +671,6 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         xtw = self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
         xtwz = self.R_inv.T @ (B1.T @ wz_grid @ B2).ravel()
         return gram, xtw, xtwz
-
-    def gram_rmatvec(
-        self, W: NDArray, Wz: NDArray, *, _support: NDArray | None = None
-    ) -> tuple[NDArray, NDArray, NDArray]:
-        """Factored gram + rmatvec with shared 2D bincount."""
-        w_grid, wz_grid = _fused_2d_bincount_2(
-            self.idx1, self.idx2, W, Wz, self.n_bins1, self.n_bins2
-        )
-        return self.gram_rmatvec_from_grids(w_grid, wz_grid)
 
     def matvec(self, v: NDArray) -> NDArray:
         B1, B2 = self.B1_unique_t, self.B2_unique_t

@@ -98,16 +98,6 @@ GroupMatrix = (
 # the same failure mode as a threshold frozen into a default argument.
 
 
-def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
-    """Compatibility wrapper for the private algebra helper."""
-    return _group_matrix_algebra._agg_by_bin(gm, bin_idx, W, n_bins)
-
-
-def _cross_gram_tensor_tensor(gm_i, gm_j, W: NDArray) -> NDArray:
-    """Compatibility wrapper for tensor×tensor cross-gram helper."""
-    return _group_matrix_algebra._cross_gram_tensor_tensor(gm_i, gm_j, W)
-
-
 def _disc_disc_2d_hist(
     bin_idx_i: NDArray, bin_idx_j: NDArray, W: NDArray, n_bins_i: int, n_bins_j: int
 ) -> NDArray:
@@ -118,11 +108,6 @@ def _disc_disc_2d_hist(
     )
 
 
-def _cross_gram_tensor_main(gm_tensor, gm_main, W: NDArray) -> NDArray:
-    """Compatibility wrapper for tensor×main-effect cross-gram helper."""
-    return _group_matrix_algebra._cross_gram_tensor_main(gm_tensor, gm_main, W)
-
-
 def _cross_gram(
     gm_i: GroupMatrix,
     gm_j: GroupMatrix,
@@ -131,11 +116,6 @@ def _cross_gram(
 ) -> NDArray:
     """Compatibility wrapper for the private cross-gram helper."""
     return _group_matrix_algebra._cross_gram(gm_i, gm_j, W, profile=profile)
-
-
-def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
-    """Compatibility wrapper for any-sign diagonal gram helper."""
-    return _group_matrix_algebra._gram_any_sign(gm, W)
 
 
 def _block_xtwx(

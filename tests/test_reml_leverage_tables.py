@@ -37,6 +37,15 @@ from tests.test_reml_leverage_hessian import (
 )
 
 
+def _count_roundings(plan) -> int:
+    """``K = 3p + S + 2``, the roundings along one leverage's longest chain (module docstring).
+
+    ``3p + 1`` for a table entry's bilinear form, ``S`` for the row's sum,
+    and one for a dense column's last product ``d_j (partial + d_j V_jj)``."""
+    t, n_d = len(plan.terms), int(plan.dense_columns.size)
+    return 3 * plan.p + 1 + (1 + t + plan.n_pairs + n_d * (t + n_d + 3)) + 1
+
+
 def _centre(model: SuperGLM) -> tuple[np.ndarray, np.ndarray]:
     """The exact centre pair the weight correction reads (dense columns from the summary's pair)."""
     summary = model.result.reml_geometry
@@ -96,7 +105,7 @@ def test_table_leverages_match_the_dense_design_within_their_bound(monkeypatch, 
     """``h`` from the tables against ``x_r' V x_r`` on the materialised centred rows.
 
     Bound: the table route is within ``gamma_K eta_r`` (``K =
-    TablePlan.count_roundings()``, module docstring); the dense reference
+    _count_roundings(plan)``, module docstring); the dense reference
     within ``gamma_(2p+2) eta_r``; the two routes' support rows round apart
     by ``gamma_(w+1)`` of the anchored magnitudes ``_magnitudes`` carries,
     adding ``4 gamma_w`` (covered by ``4 w + 4``).  A
@@ -119,7 +128,7 @@ def test_table_leverages_match_the_dense_design_within_their_bound(monkeypatch, 
     reference = np.einsum("ij,jk,ik->i", centred, inverse, centred)
     magnitude, _, widest = _magnitudes(model, centre_hi + centre_lo)
     eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
-    k = plan.count_roundings() + 2 * dm.p + 2 + 4 * widest + 4
+    k = _count_roundings(plan) + 2 * dm.p + 2 + 4 * widest + 4
     bound = _gamma(k) * eta
 
     assert np.all(np.abs(leverage - reference) <= bound)
@@ -133,7 +142,7 @@ def test_table_gradient_matches_the_derivative_grams_within_rounding(monkeypatch
     plan = leverage_tables.lookup_plan(model._dm)
     assert plan is not None
     gradient, _, gradient_bound, _ = _rounding_bounds(
-        model, raw_centre_copies=2, extra_roundings=plan.count_roundings()
+        model, raw_centre_copies=2, extra_roundings=_count_roundings(plan)
     )
     args, kwargs = _correction_inputs(model)
 
@@ -522,7 +531,7 @@ def test_hand_built_dense_columns_match_the_materialised_design(monkeypatch, pai
     reference = np.where(active, np.einsum("ij,jk,ik->i", centred, inverse, centred), 0.0)
     magnitude, widest = _hand_built_magnitudes(dm, centre_hi + centre_lo)
     eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
-    bound = _gamma(plan.count_roundings() + 2 * dm.p + 2 + 4 * widest + 4) * eta
+    bound = _gamma(_count_roundings(plan) + 2 * dm.p + 2 + 4 * widest + 4) * eta
     assert np.all(np.abs(leverage - reference) <= bound)
     assert np.max(bound[active] / np.abs(reference[active])) < 1e-9
 
