@@ -189,10 +189,23 @@ def test_a_plateau_merges_whatever_its_tolerances():
         (np.array([0.0, 1.0, 2.0]), np.array([1e-308, 1.0, 1e-308]), 1e308),
     ],
 )
-def test_the_widening_search_survives_factors_near_the_top_of_double(s, tol, least):
+def test_the_widening_search_survives_factors_near_the_top_of_double(monkeypatch, s, tol, least):
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    passes = []
+    counted = exact_banding._fits
+
+    def count(*args):
+        passes.append(args[3])
+        return counted(*args)
+
+    monkeypatch.setattr(exact_banding, "_fits", count)
     result = exact_bands(s, np.ones(len(s)), tol, max_bands=1)
     assert result.starts.tolist() == [0]
     assert result.tolerance_factor == pytest.approx(least, rel=2e-6)
+    # Eleven probes below the largest double and one at the bound, then the
+    # geometric bisection to 1e-6 from [1, 2**1024): ceil(log2(709.79 / 1e-6)) = 30.
+    assert len(passes) <= 12 + 30
 
 
 def test_weights_near_the_largest_double_do_not_overflow_the_mean():

@@ -441,18 +441,20 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
 
     Returns the factor and that banding (starts and factors).  Widening every tolerance only enlarges
     each feasible set (float64 rounding is monotone), so the fewest-band count
-    never rises with the factor and bisection applies.  The search starts at
-    ``2 * reach / tau``, with ``reach`` the widest curve's range plus
+    never rises with the factor and bisection applies.  The search is bounded
+    by ``2 * reach / tau``, with ``reach`` the widest curve's range plus
     :func:`_underflow_margin` and ``tau`` the least positive tolerance.  When
     that is a double, every positive-tolerance window there holds every
     possible band mean and every value of the curve, so a double as well, and
     no larger multiplier fits more: if it fails, zero tolerances are what stand
-    in the way.  When it is past the largest double, the search starts at the
-    largest double instead, and failing there means no multiplier a double can
-    hold fits.  The bisection is geometric, so a factor near 1e30 takes about
-    thirty passes.  A pass only has to say whether the fewest bands fit, which
-    the band count alone answers (:func:`_fewest_then_least` with
-    ``count_only``), and the banding is formed once, at the factor kept.
+    in the way.  When it is past the largest double, the bound is the largest
+    double instead, and failing there means no multiplier a double can hold
+    fits.  Probes from 2, doubled to 16 and squared after, bracket the factor
+    in at most a dozen passes for any double, and the geometric bisection
+    within the bracket takes at most thirty more.  A pass only has to say
+    whether the fewest bands fit, which the band count alone answers
+    (:func:`_fewest_then_least` with ``count_only``), and the banding is
+    formed once, at the factor kept.
     """
     positive = tol[tol > 0.0]
     if positive.size == 0:
@@ -478,7 +480,8 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
             fits = probe
             break
         does_not_fit = probe
-        probe *= 2.0
+        # Doubling covers the factors an export meets; squaring bounds the rest.
+        probe = probe * probe if probe >= 16.0 else 2.0 * probe
     else:
         if not _fits(s, w, tol, upper, max_bands):
             raise ValueError(
