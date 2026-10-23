@@ -1316,7 +1316,13 @@ family-dependent interpretation. Unsupported majors receive a version error
 naming both versions. MINOR and PATCH promise readability. Because the loader
 recomputes the manifest and compares it for
 equality, any change to what the manifest describes must be a MAJOR bump — so a
-manifest mismatch always means corruption or tampering, never age. The
+manifest mismatch always means corruption or tampering, never age. A model
+also loads on a machine other than the one that saved it. The manifest binds
+what the artifact stores, not tolerances the loader recomputes with its own
+BLAS. The fit's likelihood identity hashes the response and weights as stored.
+The terms the loader recomputes from them with `log`, such as `-log y`, are
+checked against the saved fit within a rounding bound, because `log` can differ
+by an ulp between CPUs and maths libraries. The
 `public_api` block carries its own `schema_version` for the SuperLSS wrapper
 metadata alone; it moves independently of the envelope's, and both are written
 into every artifact so that whichever layer refuses a stale artifact names its

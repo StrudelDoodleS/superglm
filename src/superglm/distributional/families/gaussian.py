@@ -46,6 +46,11 @@ from superglm.distributional.kernels.gaussian import (
     gaussian_predictor_fourth_derivatives,
     initialize_gaussian,
 )
+from superglm.distributional.likelihood_identity import (
+    LOG_ERROR_UNITS,
+    CarrierRounding,
+    carrier_rounding_scale,
+)
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -283,7 +288,7 @@ class GaussianLikelihoodPlan:
     def plan_identifier(self) -> str:
         payload = "\0".join(
             (
-                "GaussianLS/v1",
+                "GaussianLS/v2",
                 self.row_law,
                 self.invariant,
                 self.family_config[0],
@@ -291,10 +296,25 @@ class GaussianLikelihoodPlan:
                 self.observation.kind,
                 str(self.observation.schema_version),
                 self.weights.digest,
-                self.carrier_digest,
             )
         ).encode("utf-8")
-        return f"GaussianLS/v1:{hashlib.sha256(payload).hexdigest()}"
+        return f"GaussianLS/v2:{hashlib.sha256(payload).hexdigest()}"
+
+    def carrier_rounding(self) -> CarrierRounding:
+        """The carrier ``0.5 log w`` of prior weights varies by platform."""
+        carrier = self.parameter_independent_carrier
+        if carrier is None:
+            semantics = self.weights.provenance.contract.semantics
+            values = self.weights.values
+            carrier = np.concatenate(
+                [
+                    _carrier_block(values[start : start + _CARRIER_BLOCK_ROWS], semantics)
+                    for start in range(0, len(values), _CARRIER_BLOCK_ROWS)
+                ]
+            )
+        return CarrierRounding(
+            "GaussianLS/v1", carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS
+        )
 
     def take(self, indices: NDArray[np.integer]) -> GaussianLikelihoodPlan:
         return GaussianLikelihoodPlan(

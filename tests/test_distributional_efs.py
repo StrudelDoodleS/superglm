@@ -404,13 +404,6 @@ def _expected_gaussian_plan_identifier(
     _digest_array(root, values)
     weight_digest = root.hexdigest()
 
-    carrier = 0.5 * np.log(values) if semantics == "prior" else np.zeros(len(values))
-    carrier = np.ascontiguousarray(carrier, dtype=np.float64)
-    carrier_hash = hashlib.sha256()
-    carrier_hash.update(b"GaussianLS/carrier/v1\0")
-    carrier_hash.update(carrier.dtype.str.encode("ascii"))
-    carrier_hash.update(repr(carrier.shape).encode("ascii"))
-    carrier_hash.update(memoryview(carrier).cast("B"))
     row_law, invariant = (
         ("normal-variance-sigma2-over-w/v1", "conditional-location")
         if semantics == "prior"
@@ -418,7 +411,7 @@ def _expected_gaussian_plan_identifier(
     )
     payload = "\0".join(
         (
-            "GaussianLS/v1",
+            "GaussianLS/v2",
             row_law,
             invariant,
             "GaussianLS/v1",
@@ -426,10 +419,9 @@ def _expected_gaussian_plan_identifier(
             "complete",
             "1",
             weight_digest,
-            carrier_hash.hexdigest(),
         )
     ).encode("utf-8")
-    base = f"GaussianLS/v1:{hashlib.sha256(payload).hexdigest()}"
+    base = f"GaussianLS/v2:{hashlib.sha256(payload).hexdigest()}"
     return base if carrier_wrapper is None else f"efs-carrier:{carrier_wrapper}:{base}"
 
 

@@ -86,6 +86,7 @@ from superglm.distributional.fit_state import (
     DistributionalRowState,
 )
 from superglm.distributional.inference import JointInference
+from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.result import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
@@ -458,16 +459,29 @@ def _coefficient_face_manifest(result: DenseSolverResult) -> dict[str, Any] | No
         "constraint_matrix": _array_descriptor(face.constraint_matrix),
         "null_basis": _array_descriptor(face.null_basis),
         "constraint_basis": _array_descriptor(face.constraint_basis),
-        "rank_resolution": _finite_float(face.rank_resolution, name="face rank resolution"),
-        "null_residual_bound": _finite_float(
-            face.null_residual_bound,
-            name="face null residual bound",
-        ),
-        "orthogonality_bound": _finite_float(
-            face.orthogonality_bound,
-            name="face orthogonality bound",
-        ),
     }
+
+
+# Tolerances a penalty face derives from a LAPACK norm of its stored constraint
+# matrix. They vary by an ulp with the BLAS kernel, so a manifest does not bind
+# them; artifacts written before this rule still carry them.
+_DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
+
+
+def _without_derived_face_values(value: Any) -> Any:
+    """``value`` with every coefficient face's derived tolerances removed."""
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                {k: v for k, v in item.items() if k not in _DERIVED_FACE_KEYS}
+                if key == "coefficient_face" and isinstance(item, Mapping)
+                else _without_derived_face_values(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_without_derived_face_values(item) for item in value]
+    return value
 
 
 def _solver_manifest(result: DenseSolverResult) -> dict[str, Any]:
@@ -729,7 +743,14 @@ def _validated_likelihood_state(model: DenseDistributionalModel) -> None:
         raise DistributionalSerializationError(
             "retained-row family likelihood plan failed live response reconstruction"
         ) from exc
-    if reconstructed_plan.plan_identifier != plan_identifier:
+    if (
+        rebound_plan_mismatch(
+            reconstructed_plan,
+            plan_identifier,
+            state.solver_result.parameter_independent_carrier,
+        )
+        is not None
+    ):
         raise DistributionalSerializationError(
             "retained-row family likelihood plan does not identify the live response"
         )
@@ -1509,7 +1530,7 @@ def deserialize_distributional_model(
             capabilities["expected_information"] = False
     if not hmac.compare_digest(
         _canonical_json(restored_manifest),
-        _canonical_json(manifest),
+        _canonical_json(_without_derived_face_values(manifest)),
     ):
         raise DistributionalSerializationError("manifest does not match fitted model payload")
     # A model re-saved after loading keeps the record of the artifact it came from.

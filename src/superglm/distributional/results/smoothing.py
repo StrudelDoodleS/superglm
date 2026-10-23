@@ -689,10 +689,20 @@ class DistributionalEFSResult:
                         projected_source = endpoint_face.project(source_fit.coefficients)
                     except ValueError:
                         projected_source = None
+                    # The fit stored its own replay of this projection. Any
+                    # BLAS replay lies within the bound's rounding terms of the
+                    # exact N (N^T s), so two replays agree within twice the
+                    # bound, not bit for bit. The branch admits a replay that
+                    # stepped only under the strict rule, which refuses it: a
+                    # step that lands within the bound is still not a projection.
                     if (
-                        projected_source is None
-                        or not np.array_equal(endpoint_fit.coefficients, projected_source)
+                        endpoint_fit.iterations != 0
+                        or projected_source is None
                         or projection_bound is None
+                        or not float(
+                            np.linalg.norm(endpoint_fit.coefficients - projected_source, ord=2)
+                        )
+                        <= float(np.nextafter(2.0 * projection_bound, math.inf))
                         or not math.isfinite(movement)
                         or movement > projection_bound
                     ):

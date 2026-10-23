@@ -192,24 +192,25 @@ def test_plan_shares_the_resolved_root_and_reconstructs_its_identifier() -> None
             "prior",
             [0.0, 1.0, 4.0],
             [0.5, 2.0, 1.5],
-            "NegativeBinomialLS/v1:"
-            "428e6a7ac447988e6bde6a086a4413e9784974147ecede37c2c7bf4b1ab60460",
+            "NegativeBinomialLS/v2:"
+            "4f08308da85532988ce55d3e14fad278d853da2cbfa5af1020858aaf41d1b173",
         ),
         (
             "frequency",
             [0.0, 2.0, 5.0],
             [1.0, 3.0, 2.0],
-            "NegativeBinomialLS/v1:"
-            "4912347aefe21b494b0946d629061e2d64999388d992ce968f89d374a1f3259e",
+            "NegativeBinomialLS/v2:"
+            "2948b87c38b42509394e29ed12ba60494f958782424d680ab7a36c1c1482cb58",
         ),
     ],
 )
-def test_plan_identifier_preserves_v1_artifact_encoding(
+def test_plan_identifier_pins_its_portable_encoding(
     semantics: WeightSemantics,
     response: list[float],
     weights: list[float],
     expected_identifier: str,
 ) -> None:
+    """The identifier hashes the stored inputs only, so every platform reproduces it."""
     plan = _plan(np.array(response), np.array(weights), semantics)
 
     assert plan.plan_identifier == expected_identifier

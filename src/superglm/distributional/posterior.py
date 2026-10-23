@@ -49,6 +49,7 @@ from superglm.distributional.family import (
     PriorWeightedDistributionFunctionFamily,
     PriorWeightedExpectedShortfallFamily,
 )
+from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 
 # ``_prediction_offsets`` is the one validator of predictor-keyed offsets the
 # fit and every prediction path already share; restating its rules here is how
@@ -411,15 +412,19 @@ def _replayed_smoothing_hessian(
             weights,
             COMPLETE_OBSERVATION,
         )
-        replay_identifier = likelihood_plan.plan_identifier
+        mismatch = rebound_plan_mismatch(
+            likelihood_plan,
+            terminal.family_likelihood_plan_identifier,
+            terminal.parameter_independent_carrier,
+        )
     except _REPLAY_FAILURES as exc:
         raise RuntimeError(
             "corrected covariance could not rebind the fitted likelihood plan "
             f"({type(exc).__name__}: {exc})"
         ) from exc
     if (
-        replay_identifier != state.family_likelihood_plan_identifier
-        or replay_identifier != terminal.family_likelihood_plan_identifier
+        state.family_likelihood_plan_identifier != terminal.family_likelihood_plan_identifier
+        or mismatch is not None
     ):
         raise RuntimeError(
             "corrected covariance replay produced a different likelihood plan identifier"

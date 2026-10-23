@@ -49,6 +49,11 @@ from superglm.distributional.kernels.negative_binomial import (
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
 )
+from superglm.distributional.likelihood_identity import (
+    LGAMMA_ERROR_UNITS,
+    CarrierRounding,
+    carrier_rounding_scale,
+)
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -60,19 +65,19 @@ _MAX_EXACT_COUNT = 2**53
 _FAMILY_CONFIGURATION = ("NegativeBinomialLS/v1", "nb2-mean-theta/v1")
 
 
-def _plan_identifier(weights, response, count, carrier) -> str:
+def _plan_identifier(weights, response, count) -> str:
     law = (
         ("nb2-mean-theta-prior-scaled-count/v1", "conditional-mean")
         if weights.provenance.contract.semantics == "prior"
         else ("nb2-mean-theta-literal-replication/v1", "literal-row-replication")
     )
-    identity = ("NegativeBinomialLS/v1", *law, *_FAMILY_CONFIGURATION, "complete", "1")
+    identity = ("NegativeBinomialLS/v2", *law, *_FAMILY_CONFIGURATION, "complete", "1")
     digests = (
         array_digest(f"NegativeBinomialLS/{name}/v1\0".encode(), values)
-        for name, values in zip(("response", "count", "carrier"), (response, count, carrier))
+        for name, values in zip(("response", "count"), (response, count))
     )
     payload = "\0".join((*identity, weights.digest, *digests)).encode()
-    return f"NegativeBinomialLS/v1:{hashlib.sha256(payload).hexdigest()}"
+    return f"NegativeBinomialLS/v2:{hashlib.sha256(payload).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -88,12 +93,23 @@ class NegativeBinomialLikelihoodPlan:
     @classmethod
     def _from_prepared(cls, weights, response, count, carrier) -> NegativeBinomialLikelihoodPlan:
         exact_response, exact_count, exact_carrier = map(immutable, (response, count, carrier))
-        identifier = _plan_identifier(weights, exact_response, exact_count, exact_carrier)
+        identifier = _plan_identifier(weights, exact_response, exact_count)
         return cls(weights, exact_response, exact_count, exact_carrier, identifier)
 
     @property
     def plan_identifier(self) -> str:
         return self._plan_identifier
+
+    def carrier_rounding(self) -> CarrierRounding:
+        """The carrier ``-m log(count!)`` varies by platform."""
+        carrier = self.parameter_independent_carrier
+        multiplier = (
+            self.weights.values
+            if self.weights.provenance.contract.semantics == "frequency"
+            else 1.0
+        )
+        scale = carrier_rounding_scale(carrier, multiplier, 1.0)
+        return CarrierRounding("NegativeBinomialLS/v1", carrier, scale, LGAMMA_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> NegativeBinomialLikelihoodPlan:
         return type(self)._from_prepared(

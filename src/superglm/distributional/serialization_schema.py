@@ -8,8 +8,10 @@ holds the data that policy consults, so the reader and the writer agree on it.
 from __future__ import annotations
 
 # 11.0.0 records a fit's disclosures (``fit.warnings``) and NegativeBinomialLS's
-# expected information in the manifest. 10.0.0 permitted compact historical
-# rows and the full-history retention flag.
+# expected information in the manifest. Its manifest binds no tolerance a
+# penalty face derives from a BLAS norm, and the reader ignores those fields
+# where an older 11.0.0 writer recorded them. 10.0.0 permitted compact
+# historical rows and the full-history retention flag.
 SCHEMA_VERSION = "11.0.0"
 
 # Schema 8 remains readable: its missing scope retains the family-dependent

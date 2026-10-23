@@ -446,8 +446,38 @@ def _assessment_face_geometry_matches(left: PenaltyFace, right: PenaltyFace) -> 
         and left.coefficient_names == right.coefficient_names
         and left.constraint_rank == right.constraint_rank
         and np.array_equal(left.constraint_matrix, right.constraint_matrix)
-        and np.array_equal(left.projector, right.projector)
+        and (
+            np.array_equal(left.null_basis, right.null_basis) or _face_projectors_agree(left, right)
+        )
     )
+
+
+def _face_projectors_agree(left: PenaltyFace, right: PenaltyFace) -> bool:
+    """Whether ``N N^T`` of two stored bases agree within one replay's rounding.
+
+    Each computed product lies within ``gamma_r |N| |N|^T`` of the exact one
+    elementwise, ``r`` the inner dimension (Higham 2002, section 3.5), on any
+    platform. Two bases whose products agreed when the fit was saved therefore
+    agree within the sum of both replays' bounds wherever they are reloaded.
+    """
+    left_basis = np.asarray(left.null_basis, dtype=np.float64)
+    right_basis = np.asarray(right.null_basis, dtype=np.float64)
+    if left_basis.shape != right_basis.shape:
+        return False
+    inner = left_basis.shape[1]
+    unit_roundoff = 2.0**-53
+    # gamma_{2r + 4} covers both replays on two machines and the bound's own
+    # products and sum; nonnegative operands keep each step monotone.
+    count = 2 * inner + 4
+    if count * unit_roundoff >= 0.5:
+        return False
+    gamma = float(np.nextafter(count * unit_roundoff / (1.0 - count * unit_roundoff), math.inf))
+    magnitude = (
+        np.abs(left_basis) @ np.abs(left_basis).T + np.abs(right_basis) @ np.abs(right_basis).T
+    )
+    bound = np.nextafter(2.0 * gamma * magnitude, math.inf)
+    gap = np.abs(left.projector - right.projector)
+    return bool(np.all(np.isfinite(gap)) and np.all(gap <= bound))
 
 
 def _assessment_complete_face_penalty_matches(
