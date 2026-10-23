@@ -42,7 +42,6 @@ def snapshot_model_behavior(model, X: pd.DataFrame) -> ModelBehaviorSnapshot:
         "_fit_stats",
         "_runtime_canonical_state",
         "_prediction_plan",
-        "_fast_prediction_state",
         "_fit_mu",
         "_fit_null_mu",
         "_summary_cache",

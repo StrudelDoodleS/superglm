@@ -53,7 +53,6 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
     "_fit_stats",
     "_prediction_plan",
     "_runtime_canonical_state",
-    "_fast_prediction_state",
 )
 
 
@@ -602,7 +601,6 @@ def _adjust_intercept(model, delta: float) -> None:
 def _invalidate_model_caches(model) -> None:
     model._prediction_plan = None
     model._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
-    model._fast_prediction_state = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None

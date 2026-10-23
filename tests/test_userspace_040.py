@@ -76,6 +76,19 @@ def test_a_model_saved_by_v0_40_0_loads_predicts_and_refits(name: str) -> None:
     assert np.all(np.isfinite(np.asarray(loaded.predict(frame), dtype=np.float64)))
 
 
+def test_a_model_saved_with_fast_prediction_metadata_loads_without_it() -> None:
+    """Releases through 0.40.0 pickled the metadata of a fast discrete predictor.
+
+    The binned fixture carries it; the model loads without it and predicts as saved.
+    """
+    record = _load("glm_poisson_binned")
+    model = record["model"]
+    assert "_fast_prediction_state" not in model.__dict__
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert_predicts_as_saved(model, record["frame"], record["prediction"])
+
+
 LEGACY_RECORDS = [
     (saver, path.stem)
     for saver in ("0.17.0", "0.18.0", "0.25.0")

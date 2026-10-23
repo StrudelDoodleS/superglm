@@ -364,6 +364,9 @@ class SuperGLM:
         ``estimate_theta``.
         """
         self.__dict__.update(state)
+        # Earlier releases pickled the metadata of a fast discrete predictor
+        # that no longer exists; nothing reads it.
+        self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
             mark_retired_linear_state,
             release_retired_tweedie_state,
@@ -2007,21 +2010,6 @@ class SuperGLM:
             random_effects=random_effects,
         )
 
-    def _predict_eta_fast_discrete(
-        self,
-        X: FrameLike,
-        offset: NDArray | None = None,
-        *,
-        random_effects: str = "conditional",
-    ) -> NDArray:
-        """Private fast discrete predictor on the link scale."""
-        return base.predict_eta_fast_discrete(
-            self,
-            X,
-            offset,
-            random_effects=random_effects,
-        )
-
     def _predict_exact(
         self,
         X: FrameLike,
@@ -2031,21 +2019,6 @@ class SuperGLM:
     ) -> NDArray:
         """Private exact canonical predictor on the response scale."""
         return base.predict_exact(self, X, offset, random_effects=random_effects)
-
-    def _predict_fast_discrete(
-        self,
-        X: FrameLike,
-        offset: NDArray | None = None,
-        *,
-        random_effects: str = "conditional",
-    ) -> NDArray:
-        """Private fast discrete predictor on the response scale."""
-        return base.predict_fast_discrete(
-            self,
-            X,
-            offset,
-            random_effects=random_effects,
-        )
 
     def predict(
         self,

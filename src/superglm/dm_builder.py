@@ -175,8 +175,8 @@ def should_discretize_tensor_interaction(
         isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
     ):
         # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and the fast-discrete predict
-        # metadata reads raw columns as float64, which label data cannot be.
+        # fit-time discretization to compress, and discretizing
+        # reads raw columns as float64, which label data cannot be.
         return False
     if not isinstance(ispec, TensorInteraction):
         return False
@@ -197,8 +197,8 @@ def should_discretize_spline_categorical_interaction(
         isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
     ):
         # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and the fast-discrete predict
-        # metadata reads raw columns as float64, which label data cannot be.
+        # fit-time discretization to compress, and discretizing
+        # reads raw columns as float64, which label data cannot be.
         return False
     if not isinstance(ispec, SplineCategorical):
         return False

@@ -138,28 +138,6 @@ def test_polars_spline_fit_publishes_same_runtime_canonical_state_as_pandas() ->
     )
 
 
-def test_polars_discrete_spline_fit_freezes_fast_prediction_metadata() -> None:
-    x = np.linspace(0.0, 1.0, 160)
-    X = pl.DataFrame({"x": x})
-    y = 0.2 + np.sin(4.0 * x)
-
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        discrete=True,
-        n_bins=32,
-        features={"x": Spline(n_knots=7, penalty="ssp")},
-    ).fit(X, y)
-
-    assert model._fast_prediction_state["features"]["x"] is not None
-    np.testing.assert_allclose(
-        model._predict_fast_discrete(X),
-        model._predict_fast_discrete(pd.DataFrame({"x": x})),
-        rtol=0.0,
-        atol=0.0,
-    )
-
-
 def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:
     groups = model._feature_groups(feature_name)
     return np.concatenate([model.result.beta[g.sl] for g in groups])
@@ -329,24 +307,6 @@ class TestRuntimeCanonicalization:
             "x",
             X["x"].to_numpy(dtype=np.float64),
         )
-
-    def test_discrete_standalone_spline_fast_predict_respects_public_runtime_state(self):
-        X, y, sample_weight = _make_monotone_poisson_data(seed=0)
-        model = SuperGLM(
-            family="poisson",
-            selection_penalty=0.0,
-            discrete=True,
-            features={"x": Spline(n_knots=10, penalty="ssp")},
-        )
-        model.fit_reml(X, y, sample_weight=sample_weight, max_reml_iter=6)
-
-        eta_exact = model._predict_eta_exact(X)
-        eta_fast = model._predict_eta_fast_discrete(X)
-        mu_exact = model.predict(X)
-        mu_fast = model._predict_fast_discrete(X)
-
-        assert np.max(np.abs(eta_exact - eta_fast)) < 3e-3
-        assert np.max(np.abs(mu_exact - mu_fast)) < 3e-3
 
     @pytest.mark.parametrize("kind", ["bs", "ns", "cr"])
     def test_discrete_standalone_spline_public_term_is_zero_mean_in_live_runtime_space(

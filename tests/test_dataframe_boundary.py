@@ -299,7 +299,7 @@ def test_dataframe_boundary_predicts_mixed_terms_identically() -> None:
     np.testing.assert_allclose(polars_mu, pandas_mu, rtol=0.0, atol=0.0)
 
 
-def test_dataframe_boundary_fast_discrete_tensor_prediction_is_backend_neutral() -> None:
+def test_dataframe_boundary_discrete_tensor_prediction_is_backend_neutral() -> None:
     n_rows = 100
     phase = np.linspace(0.0, 2.0 * np.pi, n_rows)
     data = {
@@ -321,19 +321,13 @@ def test_dataframe_boundary_fast_discrete_tensor_prediction_is_backend_neutral()
         interactions=[("left", "right")],
     ).fit(pandas_X, y)
 
-    pandas_eta = model._predict_eta_fast_discrete(pandas_X)
-    polars_eta = model._predict_eta_fast_discrete(polars_X)
-    pandas_mu = model._predict_fast_discrete(pandas_X)
-    polars_mu = model._predict_fast_discrete(polars_X)
+    pandas_eta = model._predict_eta_exact(pandas_X)
+    polars_eta = model._predict_eta_exact(polars_X)
+    pandas_mu = model.predict(pandas_X)
+    polars_mu = model.predict(polars_X)
 
     np.testing.assert_allclose(polars_eta, pandas_eta, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(polars_mu, pandas_mu, rtol=0.0, atol=0.0)
-    np.testing.assert_allclose(
-        model._predict_eta_exact(polars_X),
-        model._predict_eta_exact(pandas_X),
-        rtol=0.0,
-        atol=0.0,
-    )
 
 
 def test_dataframe_boundary_prediction_extracts_shared_parents_once(monkeypatch) -> None:

@@ -709,7 +709,6 @@ def _clear_fit_inference_caches(model) -> None:
     model._linear_system_state = None
     model._reporting_support_state = None
     model._runtime_canonical_state = None
-    model._fast_prediction_state = None
     model._prediction_plan = None
     model._fit_mu = None
     model._fit_null_mu = None
