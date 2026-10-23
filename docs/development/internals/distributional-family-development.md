@@ -426,7 +426,11 @@ libraries, so it stays out of the identifier. A plan with such a carrier
 implements `carrier_rounding()`, returning a
 `superglm.distributional.likelihood_identity.CarrierRounding`, and the loader
 checks the carrier's sum against the fit's within the bound derived in that
-module.
+module. Its `legacy_identifier_tag` is `None` for a new family. A built-in
+family whose saved identifiers once hashed the carrier names their tag there,
+such as `GammaLS/v1`, so those identifiers load by tag and carrier sum. A fit
+refuses a plan whose legacy tag is the tag of its own identifiers, because
+the loader would then accept any identifier under that tag.
 
 ## Evidence checklist
 

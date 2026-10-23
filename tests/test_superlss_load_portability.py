@@ -45,6 +45,7 @@ from superglm.distributional.serialization import (
 )
 from superglm.distributional.smoothing import penalty_face as penalty_face_module
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
 from . import test_distributional_endpoint_laml as endpoint_laml_tests
 from .test_userspace_040 import _lss_eta_rounding
@@ -298,6 +299,45 @@ def test_a_legacy_identifier_is_accepted_only_for_its_own_family() -> None:
     assert rebound_plan_mismatch(plan, f"GammaLS/v2:{digest}", stored) == "identifier"
     assert rebound_plan_mismatch(plan, f"GammaLS/v1:{digest[:-1]}", stored) == "identifier"
     assert rebound_plan_mismatch(plan, f"GammaLS/v1:{digest}", stored + 1.0) == "carrier"
+
+
+def _legacy_tag(tag: str | None):
+    """``GammaLikelihoodPlan.carrier_rounding`` declaring ``tag`` as its legacy tag."""
+    real = gamma_module.GammaLikelihoodPlan.carrier_rounding
+
+    def carrier_rounding(self):
+        return real(self)._replace(legacy_identifier_tag=tag)
+
+    return carrier_rounding
+
+
+def test_a_legacy_tag_that_names_the_plans_own_identifiers_is_refused(monkeypatch) -> None:
+    """Such a tag would accept any identifier carrying it, on its tag and carrier sum alone."""
+    from superglm.distributional.likelihood_identity import rebound_plan_mismatch
+
+    model, _ = _fit("gamma_prior")
+    fitted = model._require_fitted()
+    rows = fitted.fit_state.retained_rows
+    plan = fitted.family.bind_likelihood(
+        rows.response, rows.likelihood_weights, COMPLETE_OBSERVATION
+    )
+    identifier = fitted.fit_state.family_likelihood_plan_identifier
+    stored = fitted.result.parameter_independent_carrier
+    digest = "0123456789abcdef" * 4
+    assert identifier.startswith("GammaLS/v2:") and identifier != f"GammaLS/v2:{digest}"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            gamma_module.GammaLikelihoodPlan, "carrier_rounding", _legacy_tag("GammaLS/v2")
+        )
+        assert rebound_plan_mismatch(plan, f"GammaLS/v2:{digest}", stored) == "carrier certificate"
+        with pytest.raises(UnsupportedLikelihoodContractError, match="legacy_identifier_tag"):
+            _fit("gamma_prior")
+    with monkeypatch.context() as patch:
+        # A family that never wrote legacy identifiers declares none.
+        patch.setattr(gamma_module.GammaLikelihoodPlan, "carrier_rounding", _legacy_tag(None))
+        assert rebound_plan_mismatch(plan, identifier, stored) is None
+        assert rebound_plan_mismatch(plan, f"GammaLS/v1:{digest}", stored) == "identifier"
+        assert dict(_fit("gamma_prior")[0].coef_) == dict(model.coef_)
 
 
 @pytest.fixture(scope="module")

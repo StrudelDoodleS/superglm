@@ -76,8 +76,13 @@ LGAMMA_ERROR_UNITS = 16
 class CarrierRounding(NamedTuple):
     """What a built-in plan certifies about its platform-dependent carrier."""
 
-    legacy_identifier_tag: str
-    """The ``Family/v1`` tag whose stored identifiers hashed the carrier."""
+    legacy_identifier_tag: str | None
+    """The ``Family/v1`` tag whose stored identifiers hashed the carrier.
+
+    ``None`` for a family that never wrote such identifiers. A stored
+    identifier under this tag is accepted on its tag and carrier sum alone, so
+    the tag must not be one the plan's own identifiers carry.
+    """
 
     carrier: NDArray[np.float64]
     """The live per-row carrier."""
@@ -153,10 +158,11 @@ def rebound_plan_mismatch(
         # A plan without a certified carrier identifies itself exactly.
         return None if live_identifier == stored_identifier else "identifier"
     rounding = carrier_rounding()
-    if not isinstance(rounding, CarrierRounding):
+    if _carrier_rounding_problem(rounding, live_identifier) is not None:
         return "carrier certificate"
-    if live_identifier != stored_identifier and not _is_legacy_identifier(
-        stored_identifier, rounding.legacy_identifier_tag
+    tag = rounding.legacy_identifier_tag
+    if live_identifier != stored_identifier and (
+        tag is None or not _is_legacy_identifier(stored_identifier, tag)
     ):
         return "identifier"
     if not isinstance(stored_carrier_sum, float) or not math.isfinite(stored_carrier_sum):
@@ -167,6 +173,31 @@ def rebound_plan_mismatch(
     # One step up covers the rounding of the difference itself.
     if not math.isfinite(difference) or not difference <= _up(bound):
         return "carrier"
+    return None
+
+
+def carrier_rounding_problem(plan: object) -> str | None:
+    """Why ``plan``'s ``carrier_rounding()`` cannot certify it, or ``None``.
+
+    A plan without the method certifies nothing and identifies itself exactly.
+    """
+    carrier_rounding = getattr(plan, "carrier_rounding", None)
+    if carrier_rounding is None:
+        return None
+    return _carrier_rounding_problem(carrier_rounding(), plan.plan_identifier)  # type: ignore[attr-defined]
+
+
+def _carrier_rounding_problem(rounding: object, live_identifier: str) -> str | None:
+    if not isinstance(rounding, CarrierRounding):
+        return "family likelihood plan carrier_rounding() must return a CarrierRounding"
+    tag = rounding.legacy_identifier_tag
+    if tag is None:
+        return None
+    if not isinstance(tag, str) or not tag or live_identifier.startswith(f"{tag}:"):
+        return (
+            "family likelihood plan carrier_rounding() names a legacy_identifier_tag that "
+            "its own identifiers carry; pass None for a family with no legacy identifiers"
+        )
     return None
 
 
@@ -182,6 +213,7 @@ __all__ = [
     "LGAMMA_ERROR_UNITS",
     "LOG_ERROR_UNITS",
     "CarrierRounding",
+    "carrier_rounding_problem",
     "carrier_rounding_scale",
     "carrier_sum_bound",
     "rebound_plan_mismatch",
