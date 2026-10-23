@@ -314,7 +314,8 @@ def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> No
 
     Polars documents its hash values as unstable across versions, so a stored
     digest must come from the data itself: the dtype tag, the null mask and the
-    value bytes (little-endian numbers, UTF-8 text with its lengths).
+    value bytes (little-endian numbers, UTF-8 text with its lengths, a decimal as
+    its scale and the text of its unscaled integers).
     """
     digest.update(repr((name, _polars_dtype_tag(dtype), len(column))).encode("utf-8"))
     nulls = column.null_count()
@@ -324,6 +325,11 @@ def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> No
         column, dtype = column.to_physical(), None
     if isinstance(dtype, nw.String | nw.Categorical | nw.Enum):
         _update_polars_text(digest, column)
+        return
+    if isinstance(dtype, nw.Decimal):
+        # The unscaled integers as text, after the scale they count in.
+        digest.update(repr(("scale", column.dtype.scale)).encode("utf-8"))
+        _update_polars_text(digest, column.to_physical())
         return
     is_bool = isinstance(dtype, nw.Boolean)
     if (
@@ -339,7 +345,7 @@ def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> No
                 digest, np.ascontiguousarray(values, dtype=values.dtype.newbyteorder("<"))
             )
             return
-    # Binary, Decimal, nested and 128-bit columns: Python's repr of the values.
+    # Binary, nested and 128-bit columns: Python's repr of the values.
     _update_segment(digest, repr(column.to_list()).encode("utf-8"))
 
 

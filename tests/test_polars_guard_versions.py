@@ -7,8 +7,9 @@ with an encoding of our own, which is the same under every Polars.
 
 ``fixtures/saved_polars_guard`` holds one small Gaussian random-effect model per
 fingerprint, both pickled under Polars 1.43.2 by
-``scripts/make_polars_guard_fixtures.py``: ``legacy`` by commit 931548cd (the
-fingerprint is Polars' four-seed ``hash_rows``, with no scheme tag) and
+``scripts/make_polars_guard_fixtures.py``: ``legacy`` by code from before the
+scheme tag, which fingerprints as master did before it (Polars' four-seed
+``hash_rows``, with no scheme tag), and
 ``values`` by the release that introduced the scheme tag.  Run this file under
 Polars 1.x and 2.x; each test says which it expects.
 """
@@ -73,11 +74,33 @@ def test_the_digest_of_a_frame_is_the_same_under_every_polars() -> None:
     digest comes from Polars' hash, so no Polars version can move it."""
     frame = as_eager_frame(_mixed_frame())
 
-    assert frame.digest().hex() == "b7454a2df64f6ada464dda5987a8d9c4"
+    assert frame.digest().hex() == "1d6ccbe7c5f557cdf10f78a7398506d1"
     assert frame.digest(("i", "s")).hex() == "f0b904fa66e06f99b4ebd11b4b26846b"
     assert as_eager_frame(pl.DataFrame({"u": [1, 2]})).digest(()).hex() == (
         "0e63eee0ae32ed826aa9c1498f51d1b3"
     )
+
+
+def test_a_decimal_column_is_digested_as_its_unscaled_integers(monkeypatch) -> None:
+    """Through the vectorised text path, never a per-value Python repr, and the
+    scale fed before the integers keeps 1.50 at scale 2 apart from 15.0 at scale 1."""
+    texts = []
+    digest_text = frame_module._update_polars_text
+
+    def spy(digest, column):
+        texts.append(column.dtype)
+        return digest_text(digest, column)
+
+    monkeypatch.setattr(frame_module, "_update_polars_text", spy)
+    values = pl.Series("d", ["1.50", None, "-2.25"]).cast(pl.Decimal(10, 2))
+    digest = as_eager_frame(values.to_frame()).digest()
+    assert texts == [pl.Int128]
+
+    for changed in (
+        pl.Series("d", ["1.50", None, "-2.26"]).cast(pl.Decimal(10, 2)),
+        pl.Series("d", ["15.0", None, "-22.5"]).cast(pl.Decimal(10, 1)),
+    ):
+        assert as_eager_frame(changed.to_frame()).digest() != digest
 
 
 def test_the_digest_separates_values_nulls_text_and_types() -> None:

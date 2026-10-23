@@ -4,9 +4,10 @@ A retained fit keeps a fingerprint of its Polars frame (the fit-data guard) and
 a pickled model carries it to whatever Polars loads it.  The record holds a
 small Gaussian random-effect model fitted on a Polars frame, the frame's
 ``random_effects`` table as the fitting Polars computed it, and the Polars that
-wrote it.  Run it under Polars 1.x, once with the release that wrote the
-fingerprint with Polars' own row hash (commit 931548cd, ``legacy``) and once
-with the release that hashes the values itself (``values``):
+wrote it.  Run it under Polars 1.x, once with a master commit from before the
+scheme tag, which fingerprints with Polars' own row hash (``legacy``; e.g.
+0eea457d, the base of the change that added the tag), and once with the release
+that hashes the values itself (``values``):
 
     PYTHONPATH=<old>/src uv run --with polars==1.43.2 --with polars-runtime-32==1.43.2 \
         python scripts/make_polars_guard_fixtures.py tests/fixtures/saved_polars_guard legacy
