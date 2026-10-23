@@ -230,6 +230,20 @@ def test_a_legacy_guard_does_not_vouch_for_a_frame_the_caller_supplies(monkeypat
         model.random_effects("group")
 
 
+def test_the_retained_rows_passed_explicitly_report_as_the_implicit_call_does(monkeypatch) -> None:
+    """``random_effects(X=model._fit_X_ref, ...)`` spells out the implicit call: where
+    the old digest cannot be recomputed the guard vouches for the retained frame
+    by identity, with its one warning, as it does when ``X`` is omitted."""
+    _legacy_digest_unavailable(monkeypatch)
+    record = _load("legacy")
+    model = record["model"]
+    rows = {"y": model._fit_y_ref, "sample_weight": model._fit_weights, "offset": model._fit_offset}
+
+    with pytest.warns(UserWarning, match=NOTICE):
+        table = model.random_effects("group", X=model._fit_X_ref, **rows).table
+    pd.testing.assert_frame_equal(table, record["table"], rtol=1e-10)
+
+
 def _legacy_digest_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
 
