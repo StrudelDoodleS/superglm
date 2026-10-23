@@ -17,8 +17,9 @@ reader consults:
   scope. Schema 11 added a fit's disclosures and NegativeBinomialLS's expected
   information to the manifest, so readers of schema 10 refuse its artifacts
   at their version gate instead of reporting a manifest mismatch. Schema 12
-  names likelihood plans with ``/v2`` identifiers and drops the tolerances a
-  coefficient face derives from a BLAS norm, so readers of schema 11 refuse
+  names likelihood plans with ``/v2`` identifiers and drops the three
+  tolerances a coefficient face recomputes at load (two from a LAPACK norm of
+  its constraint matrix, one from its shape), so readers of schema 11 refuse
   its artifacts the same way. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
@@ -465,9 +466,11 @@ def _coefficient_face_manifest(result: DenseSolverResult) -> dict[str, Any] | No
     }
 
 
-# Tolerances a penalty face derives from a LAPACK norm of its stored constraint
-# matrix. They vary by an ulp with the BLAS kernel, so a manifest does not bind
-# them; artifacts of schema 11 and earlier still carry them.
+# Tolerances a penalty face recomputes at load. ``rank_resolution`` and
+# ``null_residual_bound`` scale with a LAPACK norm of its stored constraint
+# matrix and vary by an ulp with the BLAS kernel; ``orthogonality_bound`` is a
+# function of its shape, which the stored arrays already bind. A manifest binds
+# none of them; artifacts of schema 11 and earlier still carry all three.
 _DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
 
 

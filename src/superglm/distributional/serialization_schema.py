@@ -13,9 +13,10 @@ from __future__ import annotations
 # its likelihood plan with a ``/v2`` identifier, which hashes only stored
 # inputs; 11.0.0 wrote ``/v1``, which also hashed the carrier, and a model
 # loaded from 11.0.0 keeps its ``/v1`` identifier when saved again. A
-# coefficient face records no tolerance derived from a BLAS norm of its
-# constraint matrix (``rank_resolution``, ``null_residual_bound``,
-# ``orthogonality_bound``); 11.0.0 recorded all three. 11.0.0 records a fit's
+# coefficient face records none of the tolerances it recomputes at load:
+# ``rank_resolution`` and ``null_residual_bound`` scale with a LAPACK norm of
+# its constraint matrix, and ``orthogonality_bound`` is a function of its
+# shape; 11.0.0 recorded all three. 11.0.0 records a fit's
 # disclosures (``fit.warnings``) and NegativeBinomialLS's expected information
 # in the manifest. 10.0.0 permitted compact historical rows and the
 # full-history retention flag.
