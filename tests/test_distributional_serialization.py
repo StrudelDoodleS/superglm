@@ -1509,7 +1509,7 @@ def test_resolution_limited_exact_face_reason_round_trips_without_certification(
     serialized = serialize_distributional_model(resolution_limited_model)
     restored = deserialize_distributional_model(serialized)
     restored_smoothing = restored.smoothing
-    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "11.0.0"
+    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "12.0.0"
     assert restored_smoothing is not None
     assert restored_smoothing.terminal_fit.convergence_reason == "resolution_limited_stationarity"
     np.testing.assert_array_equal(
@@ -2118,14 +2118,14 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
     _decomposition_models,
     _joint_exact_face_model,
 ) -> None:
-    """Pin the schema-11 manifest, including historical row retention and disclosures.
+    """Pin the schema-12 manifest, including historical row retention and disclosures.
 
     ``deserialize_distributional_model`` compares the recomputed manifest to the
     stored one for equality, so omitting a behavior-driving key leaves that state
     unauthenticated. Deliberate manifest changes must bump the major component
     and update these key sets together.
     """
-    assert SCHEMA_VERSION == "11.0.0"
+    assert SCHEMA_VERSION == "12.0.0"
 
     fixed = _fixed_model()[0]
     manifest = distributional_manifest(fixed)

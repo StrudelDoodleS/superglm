@@ -1305,9 +1305,12 @@ make hostile pickle safe.
 
 Artifacts carry two independent version numbers. The envelope's
 `schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier unless explicitly supported**. This build writes envelope `11.0.0`
-and also reads `8.0.0`, `9.0.0` and `10.0.0`, so models saved by 0.40 load.
-Schema 11 records what a fit disclosed (`result_.warnings`) and that
+barrier unless explicitly supported**. This build writes envelope `12.0.0`
+and also reads `8.0.0`, `9.0.0`, `10.0.0` and `11.0.0`, so models saved by
+0.40, and by builds that wrote schema 11, load. Schema 12 names the
+likelihood plan by the inputs the artifact stores and drops the face
+tolerances described below, so a schema-11 reader refuses it at its version
+gate. Schema 11 records what a fit disclosed (`result_.warnings`) and that
 `NegativeBinomialLS` supplies Fisher information; schema 10 permitted compact
 historical row arrays and recorded the full-history opt-in. Older readers
 refuse a newer format before loading its payload. New fits record whether curvature diagnostics assessed

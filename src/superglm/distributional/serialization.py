@@ -11,12 +11,15 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9 and
-  10 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
+* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9, 10
+  and 11 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
   retains its original telemetry encoding and family-dependent curvature
   scope. Schema 11 added a fit's disclosures and NegativeBinomialLS's expected
   information to the manifest, so readers of schema 10 refuse its artifacts
-  at their version gate instead of reporting a manifest mismatch. Known
+  at their version gate instead of reporting a manifest mismatch. Schema 12
+  names likelihood plans with ``/v2`` identifiers and drops the tolerances a
+  coefficient face derives from a BLAS norm, so readers of schema 11 refuse
+  its artifacts the same way. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
@@ -464,7 +467,7 @@ def _coefficient_face_manifest(result: DenseSolverResult) -> dict[str, Any] | No
 
 # Tolerances a penalty face derives from a LAPACK norm of its stored constraint
 # matrix. They vary by an ulp with the BLAS kernel, so a manifest does not bind
-# them; artifacts written before this rule still carry them.
+# them; artifacts of schema 11 and earlier still carry them.
 _DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
 
 
@@ -1528,9 +1531,12 @@ def deserialize_distributional_model(
         if capabilities.get("expected_information") is True:
             # Gained after the artifact was written; compare it as recorded.
             capabilities["expected_information"] = False
+    # Schema 12 manifests never record the derived face tolerances; older ones
+    # did, and their values are not compared.
+    expected_manifest = manifest if artifact_major >= 12 else _without_derived_face_values(manifest)
     if not hmac.compare_digest(
         _canonical_json(restored_manifest),
-        _canonical_json(_without_derived_face_values(manifest)),
+        _canonical_json(expected_manifest),
     ):
         raise DistributionalSerializationError("manifest does not match fitted model payload")
     # A model re-saved after loading keeps the record of the artifact it came from.

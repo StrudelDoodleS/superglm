@@ -13,6 +13,7 @@ or OpenBLAS kernel may, and run on every platform. The fixtures in
 
 from __future__ import annotations
 
+import json
 import lzma
 import math
 import pickle
@@ -28,6 +29,7 @@ import pytest
 import superglm as sg
 from superglm import s
 from superglm.diagnostics.convergence import ConvergenceWarning
+from superglm.distributional import serialization as serialization_module
 from superglm.distributional.families import gamma as gamma_module
 from superglm.distributional.families import gaussian as gaussian_module
 from superglm.distributional.families import generalized_gamma as generalized_gamma_module
@@ -38,7 +40,10 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.results import smoothing as result_smoothing
 from superglm.distributional.results import solver as result_solver
-from superglm.distributional.serialization import DistributionalSerializationError
+from superglm.distributional.serialization import (
+    DistributionalSerializationError,
+    serialize_distributional_model,
+)
 from superglm.distributional.smoothing import penalty_face as penalty_face_module
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 
@@ -467,6 +472,14 @@ def test_a_model_saved_on_another_platform_loads_and_predicts(name: str) -> None
     """Coefficients come back bit for bit, linear predictors within two evaluations' rounding."""
     with lzma.open(FIXTURES / f"{name}.pkl.xz", "rb") as handle:
         record = pickle.load(handle)
+    # Written by builds that wrote schema 11, which this build reads as a
+    # previous major; its face manifests still record the derived tolerances.
+    assert json.loads(record["serialized"])["schema_version"] == "11.0.0"
+    if name.startswith("face_"):
+        assert all(
+            set(_DERIVED_FACE_KEYS) <= set(face)
+            for face in _coefficient_faces(json.loads(record["serialized"])["manifest"])
+        )
     model = sg.SuperLSS.from_bytes(record["serialized"])
     frame = record["frame"]
     restored = dict(model.coef_)
@@ -478,3 +491,79 @@ def test_a_model_saved_on_another_platform_loads_and_predicts(name: str) -> None
     eta = model.predict_link(frame).to_numpy(dtype=np.float64)
     excess = np.abs(eta - record["eta"]) / _lss_eta_rounding(model, frame)
     assert np.all(excess <= 1.0), float(np.max(excess))
+
+
+_DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
+
+
+def _coefficient_faces(value) -> list[dict]:
+    """Every ``coefficient_face`` mapping in a manifest."""
+    if isinstance(value, dict):
+        found = (
+            [value["coefficient_face"]] if isinstance(value.get("coefficient_face"), dict) else []
+        )
+        return found + [face for item in value.values() for face in _coefficient_faces(item)]
+    if isinstance(value, list):
+        return [face for item in value for face in _coefficient_faces(item)]
+    return []
+
+
+def _schema_eleven_reader(patch: pytest.MonkeyPatch) -> None:
+    """The reader of a build that wrote schema 11, which also read 8, 9 and 10."""
+    patch.setattr(serialization_module, "SCHEMA_VERSION", "11.0.0")
+    patch.setattr(serialization_module, "READABLE_PREVIOUS_MAJORS", frozenset({8, 9, 10}))
+
+    def unexpected_unpickle(*args, **kwargs):
+        raise AssertionError("the schema-11 reader must refuse before unpickling")
+
+    patch.setattr(serialization_module.pickle, "loads", unexpected_unpickle)
+
+
+def test_a_reloaded_schema_eleven_face_model_is_saved_as_schema_twelve(monkeypatch) -> None:
+    """A face model re-saved by this build is refused by a schema-11 reader at its version gate.
+
+    Schema 12 drops the derived face tolerances from the manifest. Written as
+    11.0.0, the re-saved model passed a schema-11 reader's version gate and
+    then failed its manifest comparison, the error reserved for tampering.
+    """
+    with lzma.open(FIXTURES / "face_native.pkl.xz", "rb") as handle:
+        record = pickle.load(handle)
+    resaved = sg.SuperLSS.from_bytes(record["serialized"]).to_bytes()
+    artifact = json.loads(resaved)
+    assert artifact["schema_version"] == "12.0.0"
+    faces = _coefficient_faces(artifact["manifest"])
+    assert faces and not any(set(_DERIVED_FACE_KEYS) & set(face) for face in faces)
+    assert dict(sg.SuperLSS.from_bytes(resaved).coef_) == record["coefficients"]
+
+    with monkeypatch.context() as patch:
+        _schema_eleven_reader(patch)
+        with pytest.raises(DistributionalSerializationError, match="major versions differ"):
+            sg.SuperLSS.from_bytes(resaved)
+
+
+def test_a_new_fit_is_saved_as_schema_twelve_with_v2_identifiers(stationary_gamma) -> None:
+    artifact = json.loads(serialize_distributional_model(stationary_gamma))
+    assert artifact["schema_version"] == "12.0.0"
+    identifiers = set(_manifest_values(artifact["manifest"], "family_likelihood_plan_identifier"))
+    assert identifiers and all(item.startswith("GammaLS/v2:") for item in identifiers)
+
+
+def test_a_schema_twelve_manifest_that_records_a_derived_face_value_is_refused(
+    face_model,
+) -> None:
+    """Schema 12 never records the derived face tolerances, so one there is not ignored."""
+    _, _, saved = face_model
+    artifact = json.loads(saved)
+    assert artifact["schema_version"] == "12.0.0"
+    _coefficient_faces(artifact["manifest"])[0]["rank_resolution"] = 1.0e-12
+    with pytest.raises(DistributionalSerializationError, match="manifest does not match"):
+        sg.SuperLSS.from_bytes(json.dumps(artifact).encode())
+
+
+def _manifest_values(value, key: str) -> list:
+    if isinstance(value, dict):
+        own = [value[key]] if key in value else []
+        return own + [found for item in value.values() for found in _manifest_values(item, key)]
+    if isinstance(value, list):
+        return [found for item in value for found in _manifest_values(item, key)]
+    return []
