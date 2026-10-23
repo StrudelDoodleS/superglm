@@ -29,6 +29,7 @@ import pytest
 import superglm as sg
 from superglm import s
 from superglm.diagnostics.convergence import ConvergenceWarning
+from superglm.distributional import posterior as posterior_module
 from superglm.distributional import serialization as serialization_module
 from superglm.distributional.families import gamma as gamma_module
 from superglm.distributional.families import gaussian as gaussian_module
@@ -37,6 +38,7 @@ from superglm.distributional.families import log_normal as log_normal_module
 from superglm.distributional.families import negative_binomial as negative_binomial_module
 from superglm.distributional.families import two_piece as two_piece_module
 from superglm.distributional.family import COMPLETE_OBSERVATION
+from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.results import solver as result_solver
 from superglm.distributional.serialization import (
@@ -193,7 +195,10 @@ def saved_case(request):
 
 
 def _live_carrier(model: sg.SuperLSS) -> np.ndarray:
-    fitted = model._require_fitted()
+    return _rebound_carrier(model._require_fitted())
+
+
+def _rebound_carrier(fitted) -> np.ndarray:
     rows = fitted.fit_state.retained_rows
     plan = fitted.family.bind_likelihood(
         rows.response, rows.likelihood_weights, COMPLETE_OBSERVATION
@@ -341,7 +346,7 @@ def test_a_legacy_tag_that_names_the_plans_own_identifiers_is_refused(monkeypatc
 
 
 @pytest.fixture(scope="module")
-def stationary_gamma():
+def gamma_reml():
     rng = np.random.default_rng(7351)
     x = rng.uniform(-1.0, 1.0, 320)
     frame = pd.DataFrame({"x": x})
@@ -354,17 +359,49 @@ def stationary_gamma():
     return model._require_fitted()
 
 
+@pytest.fixture(scope="module")
+def replayed_gamma(gamma_reml):
+    """``gamma_reml`` with no published smoothing Hessian, so the correction replays the plan.
+
+    Whether an endgame publishes its Hessian depends on the path the outer
+    loop takes. Without one, every stop replays: a stationary stop against its
+    terminal gradient, any other at its own terminal point.
+    """
+    smoothing = replace(
+        gamma_reml.smoothing, smoothing_hessian=None, smoothing_hessian_certificate=None
+    )
+    return DenseDistributionalModel(
+        gamma_reml.family, replace(gamma_reml.fit_state, smoothing=smoothing)
+    )
+
+
+def _counted_replays(patch: pytest.MonkeyPatch) -> list:
+    """Record each corrected-covariance replay of the likelihood plan."""
+    calls = []
+    real = posterior_module._replayed_smoothing_hessian
+
+    def replay(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    patch.setattr(posterior_module, "_replayed_smoothing_hessian", replay)
+    return calls
+
+
 def test_corrected_covariance_replays_where_log_rounds_differently(
-    stationary_gamma, monkeypatch
+    replayed_gamma, monkeypatch
 ) -> None:
-    fitted = stationary_gamma
-    assert fitted.smoothing.convergence_reason == "stationary"
-    assert fitted.smoothing.smoothing_hessian is None  # the correction replays the plan
+    fitted = replayed_gamma
+    expected = _rebound_carrier(fitted)
     with monkeypatch.context() as patch:
+        replays = _counted_replays(patch)
         _another_platform(patch, "gamma_prior")
+        # The perturbation reaches the carrier the replay rebinds.
+        assert np.any(_rebound_carrier(fitted) != expected)
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
             corrected = posterior_covariance(fitted, kind="corrected")
+    assert len(replays) == 1
     unavailable = [
         str(item.message)
         for item in record
@@ -374,35 +411,32 @@ def test_corrected_covariance_replays_where_log_rounds_differently(
     assert not np.array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
 
 
-def test_corrected_covariance_refuses_a_changed_carrier(stationary_gamma, monkeypatch) -> None:
+def test_corrected_covariance_refuses_a_changed_carrier(replayed_gamma, monkeypatch) -> None:
     """The replay checks the carrier as the load does: a formula change is not rounding."""
     with monkeypatch.context() as patch:
+        replays = _counted_replays(patch)
         _another_platform(patch, "gamma_prior", factor=1.0 + 1.0e-6)
         with pytest.warns(
             ConvergenceWarning, match="corrected covariance is unavailable"
         ) as record:
-            posterior_covariance(stationary_gamma, kind="corrected")
+            posterior_covariance(replayed_gamma, kind="corrected")
+    assert len(replays) == 1
     assert any("likelihood plan" in str(item.message) for item in record)
 
 
 @pytest.fixture(scope="module")
 def face_model():
-    """A ``fit_reml`` that revalidates an exact face whose endpoint moves by roundoff."""
-    n = 2000
-    rng = np.random.default_rng(4)
-    frame = pd.DataFrame(
-        {"x": rng.uniform(0, 10, n), "z": rng.uniform(-2, 2, n), "w": rng.uniform(0, 5, n)}
-    )
-    y = 1.0 + 0.3 * frame["x"].to_numpy() + 0.2 * frame["z"].to_numpy() + rng.normal(0, 0.5, n)
-    family = sg.GaussianLS()
-    model = sg.SuperLSS(
-        family,
-        family.location(s("x", kind="cr", k=14), s("z", kind="cr", k=8), s("w", kind="cr", k=7)),
-        family.scale(s("x", kind="cr", k=6)),
-    )
-    model.fit_reml(frame, y)
+    """A model on an exact penalty face, saved again by this build.
+
+    It is the committed ``face_native`` artifact rather than a live fit, so the
+    face is there on every platform; whether ``fit_reml`` reaches one depends
+    on the path it takes.
+    """
+    with lzma.open(FIXTURES / "face_native.pkl.xz", "rb") as handle:
+        record = pickle.load(handle)
+    model = sg.SuperLSS.from_bytes(record["serialized"])
     assert model.exact_face_components_
-    return model, frame, model.to_bytes()
+    return model, record["frame"], model.to_bytes()
 
 
 def test_a_face_model_loads_where_the_spectral_norm_rounds_differently(
@@ -505,22 +539,54 @@ def test_a_revalidated_endpoint_must_still_be_the_projection(
             replace(smoothing, coefficient_fits=fits)
 
 
-def _rotated_face(face: PenaltyFace, angle: float) -> PenaltyFace:
+def _quarter_turned_face(face: PenaltyFace) -> PenaltyFace:
+    """``face`` with its first two basis columns turned a quarter: an exact change of basis."""
     basis = np.array(face.null_basis, copy=True)
-    c, s_ = math.cos(angle), math.sin(angle)
-    first, second = basis[:, 0].copy(), basis[:, 1].copy()
-    basis[:, 0] = c * first - s_ * second
-    basis[:, 1] = s_ * first + c * second
+    basis[:, [0, 1]] = basis[:, [1, 0]]
+    basis[:, 0] = -basis[:, 0]
     return replace(face, null_basis=basis)
 
 
-def test_two_bases_of_one_face_match_by_their_projectors(face_model) -> None:
-    """Rotated bases give the same projector up to rounding, which no BLAS fixes bit for bit."""
+def _load_projector_bound(left: PenaltyFace, right: PenaltyFace) -> np.ndarray:
+    """``2 gamma_{2r+4} (|N_L||N_L|^T + |N_R||N_R|^T)``, the gap a load accepts."""
+    count = 2 * left.null_basis.shape[1] + 4
+    u = 2.0**-53
+    magnitude = np.abs(left.null_basis) @ np.abs(left.null_basis).T + (
+        np.abs(right.null_basis) @ np.abs(right.null_basis).T
+    )
+    return 2.0 * (count * u / (1.0 - count * u)) * magnitude
+
+
+def _forged_projectors(
+    patch: pytest.MonkeyPatch, left: PenaltyFace, right: PenaltyFace, gap: np.ndarray
+) -> None:
+    """Replay ``left``'s product as zero and ``right``'s as ``gap``, so the gap is exact."""
+    real = PenaltyFace.projector
+    forged = {id(left): np.zeros_like(gap), id(right): gap}
+    patch.setattr(
+        PenaltyFace, "projector", property(lambda face: forged.get(id(face), real.fget(face)))
+    )
+
+
+def test_two_bases_of_one_face_match_by_their_projectors(face_model, monkeypatch) -> None:
+    """Two bases of one face match when their products agree within the load's bound.
+
+    Each machine rounds the two products differently, so they never agree bit
+    for bit. The replays are forged at fixed fractions of the bound, which
+    decides the same way on every BLAS.
+    """
     model, _, _ = face_model
     face = model._require_fitted().result.coefficient_face
-    rotated = _rotated_face(face, 0.3)
-    assert not np.array_equal(rotated.projector, face.projector)
-    assert result_solver._assessment_face_geometry_matches(face, rotated)
+    assert face is not None and face.null_basis.shape[1] >= 2
+    turned = _quarter_turned_face(face)
+    assert not np.array_equal(turned.null_basis, face.null_basis)
+    bound = _load_projector_bound(face, turned)
+    for fraction, matches in ((0.5, True), (2.0, False)):
+        with monkeypatch.context() as patch:
+            _forged_projectors(patch, face, turned, fraction * bound)
+            assert result_solver._assessment_face_geometry_matches(face, turned) is matches
+    # An exact change of basis matches as the products round.
+    assert result_solver._assessment_face_geometry_matches(face, turned)
     tilted = np.array(face.null_basis, copy=True)
     tilted[:, 0] += 1.0e-9 * face.constraint_basis[:, 0]
     other = types.SimpleNamespace(null_basis=tilted, projector=tilted @ tilted.T)
@@ -608,8 +674,8 @@ def test_a_reloaded_schema_eleven_face_model_is_saved_as_schema_twelve(monkeypat
             sg.SuperLSS.from_bytes(resaved)
 
 
-def test_a_new_fit_is_saved_as_schema_twelve_with_v2_identifiers(stationary_gamma) -> None:
-    artifact = json.loads(serialize_distributional_model(stationary_gamma))
+def test_a_new_fit_is_saved_as_schema_twelve_with_v2_identifiers(gamma_reml) -> None:
+    artifact = json.loads(serialize_distributional_model(gamma_reml))
     assert artifact["schema_version"] == "12.0.0"
     identifiers = set(_manifest_values(artifact["manifest"], "family_likelihood_plan_identifier"))
     assert identifiers and all(item.startswith("GammaLS/v2:") for item in identifiers)
