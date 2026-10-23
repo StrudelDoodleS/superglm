@@ -25,9 +25,11 @@ from superglm.distributional.result import (
     DenseSolverResult,
     DistributionalEFSConfig,
     JointEndpointDirectionEvidence,
+    _assessment_is_numerically_stationary,
 )
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
 from tests.bound_predictor_fixtures import model_from_templates
+from tests.test_distributional_endpoint_laml import _forge_nonstationary_scalar_caps
 
 _FACE_COMPONENTS = ("mean:x#wiggle", "mean:z#wiggle")
 _FINITE_COMPONENT = "mean:w#wiggle"
@@ -368,6 +370,7 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
 
     monkeypatch.setattr(smoothing_loop, "_try_joint_exact_face", disable_joint_activation)
     monkeypatch.setattr(efs_module, "_try_joint_exact_face", disable_joint_activation)
+    _forge_nonstationary_scalar_caps(monkeypatch)
     case = gamma_joint_face_case
     scalar_first = _fit_public_gamma_joint_face(case.frame, case.response, case.weights)
     fitted = scalar_first._require_fitted()
@@ -386,8 +389,8 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
     cap_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
     assert cap_fit.coefficient_face is None
     cap_kkt = _retained_kkt_relative(cap_fit)
-    # A roundoff upper bound is not a lower bound on the residual a solve must leave.
     assert cap_kkt > cap_fit.config.tolerance
+    assert not _assessment_is_numerically_stationary(cap_fit, cap_fit.config.tolerance)
 
     components = {component.name: component for component in fitted.layout.penalties}
     companion = components[companion_name]

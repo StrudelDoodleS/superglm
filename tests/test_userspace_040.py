@@ -41,6 +41,10 @@ from benchmarks import release_differential
 
 from superglm import SuperLSS
 from superglm._group_matrix import _group_matrix_centered
+from superglm.distributional.results.solver import (
+    _assessment_is_numerically_stationary,
+    _assessment_is_strictly_stationary,
+)
 
 from .test_saved_fs_models import _gamma, assert_predicts_as_saved
 
@@ -56,7 +60,14 @@ def _load(name: str) -> dict:
 
 def test_the_fixture_set_covers_every_saved_route() -> None:
     assert len(GLM_RECORDS) == 11
-    assert LSS_RECORDS == ["lss_gamma", "lss_gaussian", "lss_nb", "lss_tweedie", "lss_two_piece"]
+    assert LSS_RECORDS == [
+        "lss_gamma",
+        "lss_gamma_cap_refusal",
+        "lss_gaussian",
+        "lss_nb",
+        "lss_tweedie",
+        "lss_two_piece",
+    ]
 
 
 @pytest.mark.parametrize("name", GLM_RECORDS)
@@ -189,6 +200,28 @@ def test_a_superlss_model_saved_by_v0_40_0_loads_and_predicts(name: str) -> None
     excess = np.abs(eta - record["eta"]) / _lss_eta_rounding(model, frame)
     assert np.all(excess <= 1.0), float(np.max(excess))
     assert np.all(np.isfinite(np.asarray(model.predict(frame), dtype=np.float64)))
+
+
+def test_a_v0_40_0_refusal_of_a_cap_inside_its_rounding_floor_loads() -> None:
+    """A saved fit's endpoint receipts are validated under the rule that made them.
+
+    v0.40.0 refused this cap as ``cap_not_stationary``: its retained score is
+    above the tolerance. Under the rounding-floor rule the same cap fit is
+    stationary, so validating the old refusal under the new rule refused the
+    whole artifact on load.
+    """
+    model = SuperLSS.from_bytes(_load("lss_gamma_cap_refusal")["serialized"])
+    smoothing = model._model.fit_state.smoothing
+    assert smoothing.rounding_floor_stationarity is False
+    refusal = next(
+        item
+        for item in smoothing.history
+        if item.endpoint_assessment_failure_reason == "cap_not_stationary"
+    )
+    cap_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
+    tolerance = refusal.coefficient_tolerances[0]
+    assert not _assessment_is_strictly_stationary(cap_fit, tolerance)
+    assert _assessment_is_numerically_stationary(cap_fit, tolerance)
 
 
 RELEASE_OUTCOMES = release_differential.load(FIXTURES.parent / "release_differential_v0_40_0.jsonl")

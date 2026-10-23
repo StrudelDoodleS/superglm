@@ -510,15 +510,124 @@ def _assessment_unchanged_failed_cap(
     )
 
 
-def _assessment_is_numerically_stationary(
-    result: DenseSolverResult,
+def _score_within_rounding_floor(
+    *,
+    config: DenseSolverConfig,
+    penalty: NDArray,
+    coefficients: NDArray,
+    score: NDArray,
+    penalized_curvature: NDArray,
+    face: PenaltyFace | None,
+    objective: float,
     tolerance: float,
 ) -> bool:
-    """Interpret strict score or validated resolution at an exact-face seam."""
+    """Return whether the retained score is within its rounding floor and moves nothing.
+
+    The solver forms ``g = s - P b`` in float64. Row ``i`` of ``P b`` errs by at
+    most ``gamma_{k_i} (|P| |b|)_i``, ``k_i`` the nonzeros in that row, and the
+    subtraction by ``u |g_i| / (1 - u)`` (Higham 2002, eqs. 3.5 and 3.12);
+    reducing to a face adds ``gamma_w |Z|' |g|`` and carries the row bound
+    through ``|Z|'``. At a large smoothing parameter this floor exceeds any
+    fixed relative tolerance. The data score's own summation error is left
+    out, so the floor understates the score's rounding.
+
+    The floor bounds the rounding error; it is not evidence that the score is
+    rounding. Along a direction the penalty does not act on, a representable
+    move changes the likelihood and leaves ``P b`` unchanged, so a genuine
+    score there can sit inside a floor taken from penalized rows. A score
+    within its floor is therefore stationary only when the Newton correction
+    it would drive is certified not to change the objective by more than
+    ``tolerance (1 + |f|)``. That is the objective condition of Gill, Murray
+    and Wright's termination test (1981, sec. 8.2.3), which must hold beside
+    the gradient condition's escape ``||g|| < eps_A`` that the floor states.
+    ``penalized_curvature`` is the observed penalized curvature at ``b``.
+
+    The certificate holds for every score within the floor of the computed
+    one, not only for the computed score: rounding of ``P b`` can cancel a
+    genuine score along a direction the curvature barely resists, where the
+    Newton correction is largest. Newton's method in floating point is
+    accurate only to the residual's evaluation error times ``||H^-1||``
+    (Tisseur 2001, Cor. 2.3), so the decrement certified is the computed
+    score's plus that error's, ``(sqrt(r' H^-1 r) + sqrt(||H^-1||) ||floor||)^2``
+    in the equilibrated coordinates the certificate works in.
+    """
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+    penalty = np.asarray(penalty, dtype=np.float64)
+    absolute_score = np.abs(np.asarray(score, dtype=np.float64))
+    nonzeros = np.count_nonzero(penalty, axis=1)
+    width = absolute_score.size
+    retained_score = absolute_score if face is None else np.abs(face.reduce_vector(score))
+    with np.errstate(over="ignore", invalid="ignore"):
+        row_gamma = nonzeros * unit_roundoff / (1.0 - nonzeros * unit_roundoff)
+        floor = row_gamma * (np.abs(penalty) @ np.abs(np.asarray(coefficients, dtype=np.float64)))
+        floor += unit_roundoff / (1.0 - unit_roundoff) * absolute_score
+        roundings = int(np.max(nonzeros, initial=0)) + 4
+        if face is not None:
+            reduction = width * unit_roundoff / (1.0 - width * unit_roundoff)
+            floor = np.abs(face.null_basis).T @ (floor + reduction * absolute_score)
+            roundings += width + 2
+        # Every term is nonnegative, so the computed floor is at most gamma_m
+        # low for the m roundings that formed it; restore it outward, then
+        # add the relative tolerance outward too.
+        restore = 2 * roundings * unit_roundoff / (1.0 - 2 * roundings * unit_roundoff)
+        floor = np.nextafter(floor * (1.0 + restore), np.inf)
+        scale = np.nextafter(1.0 + abs(float(objective)), np.inf)
+        limit = np.nextafter(tolerance * scale, np.inf)
+        allowed = np.nextafter(limit + floor, np.inf)
+    if not (np.all(np.isfinite(allowed)) and np.all(retained_score <= allowed)):
+        return False
+    return _newton_decrement_is_certified(
+        config=config,
+        score=score,
+        penalized_curvature=penalized_curvature,
+        penalized_objective=objective,
+        face=face,
+        tolerance=tolerance,
+        score_error=floor,
+    )
+
+
+def _is_unfallbacked_observed(telemetry: CurvatureTelemetry) -> bool:
+    return bool(
+        isinstance(telemetry, CurvatureTelemetry)
+        and telemetry.requested_source == "observed"
+        and telemetry.actual_source == "observed"
+        and telemetry.fallback_count == 0
+    )
+
+
+def _assessment_is_strictly_stationary(result: DenseSolverResult, tolerance: float) -> bool:
+    """The stationarity rule before the rounding floor: retained score or validated resolution."""
 
     return bool(
         _assessment_retained_kkt_ratio(result) <= tolerance
         or result.convergence_reason == "resolution_limited_stationarity"
+    )
+
+
+def _assessment_is_numerically_stationary(
+    result: DenseSolverResult,
+    tolerance: float,
+) -> bool:
+    """Interpret retained score, its rounding floor or validated resolution at an exact-face seam."""
+
+    optimizing = result.penalized_optimizing_log_likelihood
+    assert optimizing is not None
+    return bool(
+        _assessment_is_strictly_stationary(result, tolerance)
+        or (
+            _is_unfallbacked_observed(result.terminal_curvature)
+            and _score_within_rounding_floor(
+                config=result.config,
+                penalty=result.penalty,
+                coefficients=result.coefficients,
+                score=result.terminal_score,
+                penalized_curvature=result.terminal_penalized_curvature,
+                face=result.coefficient_face,
+                objective=optimizing,
+                tolerance=tolerance,
+            )
+        )
     )
 
 
@@ -809,8 +918,13 @@ def _newton_decrement_is_certified(
     penalized_objective: float,
     face: PenaltyFace | None,
     tolerance: float,
+    score_error: NDArray[np.float64] | None = None,
 ) -> bool:
-    """Return whether retained observed curvature certifies a scaled decrement."""
+    """Return whether retained observed curvature certifies a scaled decrement.
+
+    ``score_error`` bounds, componentwise, the error of the retained score.
+    When it is given, the decrement is certified for every score within it.
+    """
     if not math.isfinite(tolerance) or tolerance <= 0.0 or not math.isfinite(penalized_objective):
         return False
     if face is None:
@@ -951,12 +1065,29 @@ def _newton_decrement_is_certified(
         return False
     rounding = dot_gamma * max(product_sum, abs(decrement), limit, np.finfo(np.float64).tiny)
     rounding = float(np.nextafter(16.0 * (rounding + solve_error), math.inf))
-    return bool(
-        math.isfinite(decrement)
-        and math.isfinite(limit)
-        and decrement >= -rounding
-        and decrement + rounding <= limit
-    )
+    if not (math.isfinite(decrement) and math.isfinite(limit) and decrement >= -rounding):
+        return False
+    if score_error is None:
+        return decrement + rounding <= limit
+    error = np.asarray(score_error, dtype=np.float64)
+    if error.shape != (dimension,) or not np.all(np.isfinite(error)) or np.any(error < 0.0):
+        return False
+    # The exact decrement is ||H^-1/2 (r + e)||^2 with |e| <= error, so its root
+    # is at most the computed one plus ||H^-1||_2^(1/2) ||D^-1 error||_2. Each
+    # operation below is nondecreasing in nonnegative operands and is rounded
+    # outward once.
+    with np.errstate(over="ignore", invalid="ignore"):
+        equilibrated_error = np.nextafter(error / scales, np.inf)
+    error_norm = upper_frobenius_norm(equilibrated_error.reshape(1, -1))
+    if error_norm is None:
+        return False
+    spread = float(np.nextafter(math.sqrt(inverse_norm_bound), math.inf))
+    spread = float(np.nextafter(spread * error_norm, math.inf))
+    certified = float(np.nextafter(max(decrement + rounding, 0.0), math.inf))
+    root = float(np.nextafter(math.sqrt(certified), math.inf))
+    root = float(np.nextafter(root + spread, math.inf))
+    bound = float(np.nextafter(root * root, math.inf))
+    return bool(math.isfinite(bound) and bound <= limit)
 
 
 def _validate_objective_and_step_certificate(
@@ -1298,9 +1429,28 @@ class DenseSolverResult:
             1.0 + abs(penalized_optimizing)
         )
         if self.convergence_reason == "score" and (
-            not self.converged or retained_kkt > self.config.tolerance
+            not self.converged
+            or (
+                retained_kkt > self.config.tolerance
+                and not (
+                    _is_unfallbacked_observed(self.terminal_curvature)
+                    and _score_within_rounding_floor(
+                        config=self.config,
+                        penalty=penalty,
+                        coefficients=coefficients,
+                        score=score,
+                        penalized_curvature=penalized_curvature,
+                        face=self.coefficient_face,
+                        objective=penalized_optimizing,
+                        tolerance=self.config.tolerance,
+                    )
+                )
+            )
         ):
-            raise ValueError("score convergence requires retained KKT within tolerance")
+            raise ValueError(
+                "score convergence requires retained KKT within tolerance, or within its "
+                "rounding floor with a certified Newton decrement"
+            )
         if self.convergence_reason == "objective_and_step":
             _validate_objective_and_step_certificate(
                 config=self.config,

@@ -267,6 +267,107 @@ def main(out: str) -> None:
         }
         with open(os.path.join(out, f"{name}.pkl"), "wb") as handle:
             pickle.dump(record, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    write_cap_refusal_record(out)
+
+
+def _response_with_portable_logarithms(values: np.ndarray) -> np.ndarray:
+    from decimal import Decimal, localcontext
+
+    moved = np.array(values, dtype=np.float64)
+    with localcontext() as context:
+        context.prec = 60
+        for index, value in enumerate(moved):
+            while True:
+                exact = Decimal(float(value)).ln()
+                rounded = float(exact)
+                gap = min(
+                    rounded - np.nextafter(rounded, -np.inf),
+                    np.nextafter(rounded, np.inf) - rounded,
+                )
+                if abs(exact - Decimal(rounded)) <= Decimal(float(gap)) / 4:
+                    break
+                value = np.nextafter(value, np.inf)
+            moved[index] = value
+        exact_logs = [float(Decimal(float(value)).ln()) for value in moved]
+    if not np.array_equal(np.log(moved), exact_logs):
+        raise RuntimeError("this platform's log does not round the moved responses correctly")
+    return moved
+
+
+def write_cap_refusal_record(out: str) -> None:
+    """``lss_gamma_cap_refusal``: a fit whose history refuses a capped smoothing
+    parameter as ``cap_not_stationary``.
+
+    Two of three Gamma mean splines start at the cap. Joint activation is
+    disabled, so the scalar check of the first refuses its cap fit, whose
+    retained score is above the tolerance but inside its rounding floor; such
+    a receipt fails to load wherever its validator applies the floor.
+
+    Loading recomputes the Gamma carrier ``-log(y)`` and checks it bit for
+    bit, and implementations of ``log`` (numpy's AVX-512 loop, glibc, Apple's
+    and Microsoft's libm) can round a logarithm near a rounding boundary
+    differently. Each response is therefore moved up to the nearest double
+    whose logarithm lies within a quarter of a rounding interval of its
+    correctly rounded value, which every implementation within 0.75 ulp
+    rounds alike.
+    """
+    import superglm.distributional.efs as efs_module
+    import superglm.distributional.smoothing.loop as smoothing_loop
+    from superglm.distributional import GammaLS, Predictor
+    from superglm.distributional.binding import _bind_predictor_template
+    from superglm.distributional.result import DistributionalEFSConfig
+
+    def no_joint_face(*args, **kwargs):
+        return None, None
+
+    smoothing_loop._try_joint_exact_face = no_joint_face
+    efs_module._try_joint_exact_face = no_joint_face
+    grid = np.meshgrid(
+        np.linspace(-1.0, 1.0, 12),
+        np.linspace(-1.0, 1.0, 6),
+        np.linspace(-1.0, 1.0, 6),
+        np.array([0.62, 0.84, 1.16, 1.38]),
+        indexing="ij",
+    )
+    w, x, z, residual = (values.ravel() for values in grid)
+    frame = pd.DataFrame({"x": x, "z": z, "w": w})
+    mean = np.exp(
+        0.4 + 0.55 * np.sin(np.pi * w) + 0.15 * w + 0.03 * np.sin(np.pi * x)
+        + 0.024 * np.sin(np.pi * z)
+    )  # fmt: skip
+    family = GammaLS()
+    splines = {name: sg.Spline(kind="cr", n_knots=5) for name in ("x", "z", "w")}
+    model = sg.SuperLSS(
+        family,
+        *(
+            _bind_predictor_template(family, template)
+            for template in (Predictor("mean", splines), Predictor("scale", {}))
+        ),
+        coefficient_curvature="fisher",
+    )
+    cap = DistributionalEFSConfig().maximum_lambda
+    response = _response_with_portable_logarithms(0.5 * mean * residual)
+    model.fit_reml(
+        frame,
+        response,
+        sample_weight=0.65 + 0.7 * (w + 1.0) / 2.0,
+        lambdas={"mean:x#wiggle": cap, "mean:z#wiggle": cap, "mean:w#wiggle": 2.0},
+        max_reml_iter=120,
+        reml_tol=1.0e-3,
+        max_inner_iter=150,
+        inner_tol=1.0e-9,
+        outer="efs",
+    )
+    record = {
+        "version": sg.__version__,
+        "serialized": model.to_bytes(),
+        "frame": frame,
+        "coefficients": dict(model.coef_),
+        "eta": model.predict_link(frame).to_numpy(dtype=np.float64),
+        "prediction": np.asarray(model.predict(frame), dtype=np.float64),
+    }
+    with open(os.path.join(out, "lss_gamma_cap_refusal.pkl"), "wb") as handle:
+        pickle.dump(record, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":

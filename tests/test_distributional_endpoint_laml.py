@@ -1958,8 +1958,35 @@ def test_unchanged_failed_cap_is_not_endpoint_authority(
         )
 
 
-def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face() -> None:
+def _score_above_rounding_floor(fit: DenseSolverResult) -> DenseSolverResult:
+    """``fit`` stopped on its certified Newton decrement, one unpenalized score above its floor."""
+    unpenalized = np.flatnonzero(~np.any(fit.penalty, axis=1))
+    assert unpenalized.size > 0
+    score = np.array(fit.terminal_score, copy=True)
+    objective = fit.penalized_optimizing_log_likelihood
+    assert objective is not None
+    score[unpenalized[0]] = 100.0 * fit.config.tolerance * (1.0 + abs(objective))
+    forged = replace(fit, terminal_score=score, convergence_reason="objective_and_step")
+    assert not result_module._assessment_is_numerically_stationary(forged, fit.config.tolerance)
+    return forged
+
+
+def _forge_nonstationary_scalar_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every scalar cap fit of an exact-face check leaves a score above its rounding floor."""
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
+
+    def forged_cap(*args: object, **kwargs: object) -> DenseSolverResult:
+        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
+        return fit if kwargs["face"] is not None else _score_above_rounding_floor(fit)
+
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", forged_cap)
+
+
+def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Kills returning cap_not_stationary before assessing a sound exact face."""
+    _forge_nonstationary_scalar_caps(monkeypatch)
     (
         family,
         layout,
@@ -1977,6 +2004,9 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face() -> None:
     assert cap_fit.converged is True
     assert cap_fit.convergence_reason == "objective_and_step"
     assert cap_kkt > cap_fit.config.tolerance
+    assert not result_module._assessment_is_numerically_stationary(
+        cap_fit, cap_fit.config.tolerance
+    )
     assert lambdas[finite_name] < smoothing.config.maximum_lambda
 
     face = build_penalty_face(layout, (capped_name,))

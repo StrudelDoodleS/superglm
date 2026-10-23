@@ -240,7 +240,9 @@ def _check_face_direction(
             endpoint_movement = float(
                 np.linalg.norm(endpoint_fit.coefficients - endpoint_initial, ord=2)
             )
-        if cap_stationary:
+        # A replay that takes no step must be the projection of its start; a
+        # replay that steps stays within the refit envelope of its start.
+        if cap_stationary and endpoint_fit.iterations == 0:
             try:
                 projected_initial = endpoint_face.project(endpoint_initial)
             except ValueError:
@@ -250,15 +252,14 @@ def _check_face_direction(
                 np.asarray(endpoint_initial),
             )
             if (
-                endpoint_fit.iterations != 0
-                or not np.array_equal(endpoint_fit.coefficients, projected_initial)
+                not np.array_equal(endpoint_fit.coefficients, projected_initial)
                 or projection_bound is None
                 or not math.isfinite(endpoint_movement)
                 or endpoint_movement > projection_bound
             ):
                 return refused("endpoint_state_changed", cap_fit, endpoint_fit)
         else:
-            if not allow_nonstationary_cap:
+            if not cap_stationary and not allow_nonstationary_cap:
                 return refused("endpoint_state_changed", cap_fit, endpoint_fit)
             endpoint_bound = _endpoint_candidate_refit_bound(
                 np.asarray(endpoint_initial),

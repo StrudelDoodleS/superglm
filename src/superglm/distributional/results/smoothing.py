@@ -28,6 +28,7 @@ from superglm.distributional.results.solver import (
     _assessment_face_geometry_matches,
     _assessment_finite_objective,
     _assessment_is_numerically_stationary,
+    _assessment_is_strictly_stationary,
     _assessment_objective_error_bound,
     _assessment_penalty_direction_matches,
     _assessment_retained_kkt_ratio,
@@ -182,6 +183,10 @@ class DistributionalEFSResult:
     newton_iterations: int = 0
     bfgs_fallback_iterations: int = 0
     beyond_cap_components: tuple[str, ...] = ()
+    # Endpoint receipts made under the rounding-floor stationarity rule. A
+    # result saved before that rule carries none and is validated under the
+    # strict rule its receipts were made with.
+    rounding_floor_stationarity: bool = False
     _penalty_assessment_context: _PenaltyAssessmentContext | None = field(
         default=None, repr=False, compare=False
     )
@@ -195,6 +200,11 @@ class DistributionalEFSResult:
     def __post_init__(self) -> None:
         if not isinstance(self.config, DistributionalEFSConfig):
             raise TypeError("config must be DistributionalEFSConfig")
+        numerically_stationary = (
+            _assessment_is_numerically_stationary
+            if self.rounding_floor_stationarity
+            else _assessment_is_strictly_stationary
+        )
         if self._penalty_assessment_context is not None:
             if not isinstance(self._penalty_assessment_context, _PenaltyAssessmentContext):
                 raise TypeError("penalty assessment context has an invalid type")
@@ -468,13 +478,13 @@ class DistributionalEFSResult:
                     raise ValueError("joint endpoint convergence failure disagrees with its fit")
                 return
             if reason == "joint_endpoint_not_stationary":
-                if not endpoint_fit.converged or _assessment_is_numerically_stationary(
+                if not endpoint_fit.converged or numerically_stationary(
                     endpoint_fit,
                     tolerance,
                 ):
                     raise ValueError("joint endpoint stationarity failure disagrees with its fit")
                 return
-            if not endpoint_fit.converged or not _assessment_is_numerically_stationary(
+            if not endpoint_fit.converged or not numerically_stationary(
                 endpoint_fit,
                 tolerance,
             ):
@@ -560,7 +570,7 @@ class DistributionalEFSResult:
                 or rollback_fit.config.max_iterations < 150
                 or rollback_fit.config.newton_decrement_tolerance is not None
                 or not rollback_fit.converged
-                or not _assessment_is_numerically_stationary(
+                or not numerically_stationary(
                     rollback_fit,
                     rollback_tolerance,
                 )
@@ -628,12 +638,12 @@ class DistributionalEFSResult:
             """Authenticate shared stationarity and provenance for revalidation."""
             if not cap_fit.converged and not _assessment_unchanged_failed_cap(cap_fit, source_fit):
                 raise ValueError("endpoint revalidation cap did not converge")
-            if cap_numerically_stationary and not _assessment_is_numerically_stationary(
+            if cap_numerically_stationary and not numerically_stationary(
                 cap_fit,
                 tolerance,
             ):
                 raise ValueError("endpoint revalidation cap is not numerically stationary")
-            if not endpoint_fit.converged or not _assessment_is_numerically_stationary(
+            if not endpoint_fit.converged or not numerically_stationary(
                 endpoint_fit,
                 tolerance,
             ):
@@ -664,7 +674,13 @@ class DistributionalEFSResult:
                     movement = float(
                         np.linalg.norm(endpoint_fit.coefficients - source_fit.coefficients, ord=2)
                     )
-                if cap_numerically_stationary:
+                # Beside a stationary cap a replay must be the projection of
+                # its source, reached without a step; under the rounding-floor
+                # rule a replay that steps need only stay within the refit
+                # envelope.
+                if cap_numerically_stationary and (
+                    endpoint_fit.iterations == 0 or not self.rounding_floor_stationarity
+                ):
                     projection_bound = _endpoint_revalidation_projection_bound(
                         endpoint_face,
                         source_fit.coefficients,
@@ -674,8 +690,7 @@ class DistributionalEFSResult:
                     except ValueError:
                         projected_source = None
                     if (
-                        endpoint_fit.iterations != 0
-                        or projected_source is None
+                        projected_source is None
                         or not np.array_equal(endpoint_fit.coefficients, projected_source)
                         or projection_bound is None
                         or not math.isfinite(movement)
@@ -691,7 +706,7 @@ class DistributionalEFSResult:
                         tolerance=tolerance,
                     )
                     if (
-                        not direct_nonstationary_cap
+                        not (cap_numerically_stationary or direct_nonstationary_cap)
                         or movement_bound is None
                         or not math.isfinite(movement)
                         or movement > movement_bound
@@ -746,7 +761,8 @@ class DistributionalEFSResult:
             if certified_projection_replay:
                 raise ValueError("endpoint state-change evidence is only projection roundoff")
 
-            if not cap_numerically_stationary and direct_nonstationary_cap:
+            direct_replay = not cap_numerically_stationary and direct_nonstationary_cap
+            if direct_replay:
                 endpoint_rank = endpoint_fit.terminal_reduced_rank
                 endpoint_curvature = endpoint_fit.terminal_curvature
                 if (
@@ -759,6 +775,14 @@ class DistributionalEFSResult:
                     raise ValueError(
                         "nonstationary-cap exact-face authority requires full observed rank"
                     )
+            # Under the rounding-floor rule a replay that steps is refused only
+            # beyond its refit envelope; the strict rule refused any stepped
+            # replay beside a stationary cap.
+            if direct_replay or (
+                self.rounding_floor_stationarity
+                and cap_numerically_stationary
+                and endpoint_fit.iterations > 0
+            ):
                 movement_bound = _assessment_coefficient_refit_bound(
                     source_fit.coefficients,
                     endpoint_fit.coefficients,
@@ -899,12 +923,9 @@ class DistributionalEFSResult:
                         or not _assessment_face_geometry_matches(source_geometry, endpoint_face)
                     ):
                         raise ValueError("endpoint state-change revalidation changed face geometry")
-                    cap_numerically_stationary = (
-                        cap_fit.converged
-                        and _assessment_is_numerically_stationary(
-                            cap_fit,
-                            tolerance,
-                        )
+                    cap_numerically_stationary = cap_fit.converged and numerically_stationary(
+                        cap_fit,
+                        tolerance,
                     )
                     capped_outside = tuple(
                         name
@@ -966,7 +987,7 @@ class DistributionalEFSResult:
                         raise ValueError("endpoint cap failure reason disagrees with its fit")
                     return
                 if reason == "cap_not_stationary":
-                    if not cap_fit.converged or _assessment_is_numerically_stationary(
+                    if not cap_fit.converged or numerically_stationary(
                         cap_fit,
                         item.coefficient_tolerances[0],
                     ):
@@ -983,7 +1004,7 @@ class DistributionalEFSResult:
                 ):
                     raise ValueError("endpoint assessment used the wrong exact coefficient face")
                 tolerance = item.coefficient_tolerances[0]
-                cap_stationary = cap_fit.converged and _assessment_is_numerically_stationary(
+                cap_stationary = cap_fit.converged and numerically_stationary(
                     cap_fit,
                     tolerance,
                 )
@@ -1005,7 +1026,7 @@ class DistributionalEFSResult:
                         raise ValueError(
                             "endpoint stationarity failure requires a stationary endpoint cap"
                         )
-                    if not endpoint_fit.converged or _assessment_is_numerically_stationary(
+                    if not endpoint_fit.converged or numerically_stationary(
                         endpoint_fit,
                         tolerance,
                     ):
@@ -1100,17 +1121,14 @@ class DistributionalEFSResult:
                 raise ValueError("endpoint assessment did not fit an exact coefficient face")
             tolerance = direction.coefficient_tolerance
             assert tolerance is not None
-            if not _assessment_is_numerically_stationary(endpoint_fit, tolerance):
+            if not numerically_stationary(endpoint_fit, tolerance):
                 raise ValueError("endpoint analytic evidence requires a stationary endpoint fit")
             direct_nonstationary_cap = (
                 not cap_fit.converged or _assessment_retained_kkt_ratio(cap_fit) > tolerance
             )
-            cap_numerically_stationary = (
-                cap_fit.converged
-                and _assessment_is_numerically_stationary(
-                    cap_fit,
-                    tolerance,
-                )
+            cap_numerically_stationary = cap_fit.converged and numerically_stationary(
+                cap_fit,
+                tolerance,
             )
             if (
                 item.activated_face_components
