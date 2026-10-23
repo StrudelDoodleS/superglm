@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import pickle
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.serialization import pickle_state
 from superglm.distributional.smoothing.objective import _stable_isolated_gfs_update
 from superglm.features import RandomEffect, Spline
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
@@ -515,14 +517,7 @@ def test_practical_outward_result_records_fixed_coordinate_pressure(fixed_value)
     with pytest.raises(ValueError, match="raw log steps.*all terminal lambdas"):
         replace(smoothing, terminal_raw_log_steps=pressure)
 
-    from superglm.distributional.serialization import (
-        deserialize_distributional_model,
-        serialize_distributional_model,
-    )
-
-    restored = deserialize_distributional_model(
-        serialize_distributional_model(model._require_fitted())
-    ).smoothing
+    restored = pickle.loads(pickle_state(model._require_fitted())).smoothing
     assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
 
 
@@ -560,46 +555,12 @@ def test_practical_outward_cap_stop_keeps_pressure_and_replays_finite_fit() -> N
     )
 
 
-def test_practical_outward_pressure_survives_artifact_roundtrip() -> None:
-    import json
-
-    from superglm.distributional.serialization import (
-        deserialize_distributional_model,
-        serialize_distributional_model,
-    )
-
+def test_practical_outward_pressure_survives_a_pickle_round_trip() -> None:
     model, smoothing = _outward_random_effect_fit()
-    encoded = serialize_distributional_model(model._require_fitted())
-    manifest = json.loads(encoded)["manifest"]["smoothing"]
-    assert manifest["terminal_raw_log_steps"] == dict(smoothing.terminal_raw_log_steps)
-    restored = deserialize_distributional_model(encoded).smoothing
+    restored = pickle.loads(pickle_state(model._require_fitted())).smoothing
     assert restored.convergence_reason == "practical_plateau"
     assert restored.unresolved_upper_bound == smoothing.unresolved_upper_bound
     assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
     assert not restored.matched_certified
     with pytest.raises(TypeError):
         restored.terminal_raw_log_steps["location:effect#wiggle"] = -0.1
-
-
-def test_older_artifact_without_raw_pressure_metadata_gets_optional_default() -> None:
-    import json
-
-    from superglm.distributional.serialization import (
-        deserialize_distributional_model,
-        serialize_distributional_model,
-    )
-    from tests.test_distributional_serialization import _rehash_pickled_artifact
-
-    model, smoothing = _preempt_fit(True)
-    artifact = json.loads(serialize_distributional_model(model._require_fitted()))
-    artifact["manifest"]["smoothing"].pop("terminal_raw_log_steps", None)
-
-    def omit_optional_field(restored):
-        vars(restored.smoothing).pop("terminal_raw_log_steps")
-
-    restored = deserialize_distributional_model(
-        _rehash_pickled_artifact(artifact, omit_optional_field)
-    ).smoothing
-    assert restored.terminal_raw_log_steps is None
-    assert restored.convergence_reason == smoothing.convergence_reason
-    assert restored.matched_certified == smoothing.matched_certified

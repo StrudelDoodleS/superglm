@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
+import pickle
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.distributional import Predictor
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families.two_piece import TwoPieceLogNormalLSS, TwoPieceNormalLSS
@@ -329,7 +329,7 @@ def test_artifact_round_trip_preserves_predictions_and_config(family, config):
             Predictor("skew", {}),
         ),
     ).fit(frame, y)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert np.array_equal(restored.predict(frame), model.predict(frame))
     assert np.array_equal(
         restored.predict_quantile(frame, 0.95), model.predict_quantile(frame, 0.95)

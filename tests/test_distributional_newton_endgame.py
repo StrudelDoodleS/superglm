@@ -7,6 +7,7 @@ in ``test_budget_is_no_worse_than_practical_efs``.
 from __future__ import annotations
 
 import math
+import pickle
 from dataclasses import replace
 
 import numpy as np
@@ -18,6 +19,7 @@ from superglm.distributional import NegativeBinomialLS, Predictor, TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.serialization import pickle_state
 from superglm.distributional.smoothing.newton import (
     bfgs_direction,
     bfgs_update,
@@ -553,10 +555,6 @@ def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypa
     whose result validator requires a gradient, and raises instead of returning.
     """
     from superglm.distributional import GaussianLS
-    from superglm.distributional.serialization import (
-        deserialize_distributional_model,
-        serialize_distributional_model,
-    )
     from superglm.distributional.smoothing import loop as loop_module
     from superglm.distributional.smoothing import newton as newton_module
     from superglm.distributional.smoothing.derivatives import LamlDerivativeError
@@ -619,7 +617,7 @@ def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypa
     assert result.smoothing_hessian is None
     assert result.smoothing_hessian_certificate is None
 
-    restored = deserialize_distributional_model(serialize_distributional_model(model)).smoothing
+    restored = pickle.loads(pickle_state(model)).smoothing
     assert restored.convergence_reason == "derivative_unavailable"
     assert restored.beyond_cap_components == result.beyond_cap_components
     assert restored.terminal_gradient is None and not restored.matched_certified

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import pickle
 from dataclasses import replace
 
 import numpy as np
@@ -564,7 +565,7 @@ def test_loaded_artifact_is_honest_when_machine_timing_is_unavailable(
 ) -> None:
     model, _measured = profiled_face_fit
 
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     report = restored.diagnose()
 
     assert report.profile is not None
@@ -586,7 +587,7 @@ def test_diagnose_tracks_successive_public_fits() -> None:
     assert first.fit_revision == 1
     assert second.fit_revision == 2
     assert first != second
-    assert SuperLSS.from_bytes(model.to_bytes()).diagnose().fit_revision == 2
+    assert pickle.loads(pickle.dumps(model)).diagnose().fit_revision == 2
     model._fit_revision = 999
     assert model.diagnose().fit_revision == 2
 

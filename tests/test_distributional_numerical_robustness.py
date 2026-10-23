@@ -10,6 +10,7 @@ curvature. The arithmetic bounds and refit checks here are our test policy.
 from __future__ import annotations
 
 import functools
+import pickle
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -17,7 +18,7 @@ import pandas as pd
 import pytest
 from scipy.special import digamma, polygamma
 
-from superglm import GammaLS, GaussianLS, Predictor, Spline, SuperLSS, TensorInteraction
+from superglm import GammaLS, GaussianLS, Predictor, Spline, TensorInteraction
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.smoothing.derivatives import laml_derivatives
 from superglm.distributional.smoothing.objective import joint_laplace_objective
@@ -303,7 +304,7 @@ def test_public_varying_scale_fit_and_replay(kind, smoothing, discrete):
     assert fit.execution_backend_identifier == (
         "distributional-chunked-v1" if discrete else "distributional-dense-v1"
     )
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     replay = restored._require_fitted().fit_state.solver_result
     np.testing.assert_array_equal(
         restored.predict_parameters(frame), model.predict_parameters(frame)

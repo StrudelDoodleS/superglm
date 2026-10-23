@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.distributional.families import gaussian
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -389,7 +388,7 @@ def test_public_derived_fit_matches_eager_binding_and_serialization(
             np.testing.assert_array_equal(left, right)
         else:
             assert left == right
-    restored = SuperLSS.from_bytes(actual.to_bytes())
+    restored = pickle.loads(pickle.dumps(actual))
     np.testing.assert_array_equal(
         restored.predict(frame, offsets=offsets), actual.predict(frame, offsets=offsets)
     )

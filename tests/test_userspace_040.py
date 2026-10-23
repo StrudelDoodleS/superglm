@@ -29,7 +29,6 @@ state its saver scored with.
 
 from __future__ import annotations
 
-import math
 import pickle
 import sys
 import warnings
@@ -39,18 +38,12 @@ import numpy as np
 import pytest
 from benchmarks import release_differential
 
-from superglm import SuperLSS
 from superglm._group_matrix import _group_matrix_centered
-from superglm.distributional.results.solver import (
-    _assessment_is_numerically_stationary,
-    _assessment_is_strictly_stationary,
-)
 
-from .test_saved_fs_models import _gamma, assert_predicts_as_saved
+from .test_saved_fs_models import assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_40_0"
 GLM_RECORDS = sorted(path.stem for path in FIXTURES.glob("glm_*.pkl")) + ["sklearn_regressor"]
-LSS_RECORDS = sorted(path.stem for path in FIXTURES.glob("lss_*.pkl"))
 
 
 def _load(name: str) -> dict:
@@ -58,16 +51,8 @@ def _load(name: str) -> dict:
         return pickle.load(handle)
 
 
-def test_the_fixture_set_covers_every_saved_route() -> None:
+def test_the_fixture_set_covers_every_saved_glm_route() -> None:
     assert len(GLM_RECORDS) == 11
-    assert LSS_RECORDS == [
-        "lss_gamma",
-        "lss_gamma_cap_refusal",
-        "lss_gaussian",
-        "lss_nb",
-        "lss_tweedie",
-        "lss_two_piece",
-    ]
 
 
 @pytest.mark.parametrize("name", GLM_RECORDS)
@@ -144,84 +129,6 @@ def test_a_model_saved_by_an_older_release_predicts_as_it_did_then(
 
         monkeypatch.setattr(_group_matrix_centered, "_MIN_MIXED_RAW_MOMENT_CELLS", 0)
         assert str(_load_legacy(saver, name)["model"].summary())
-
-
-def _lss_eta_rounding(model: SuperLSS, frame) -> np.ndarray:
-    """Per row and parameter, the bound two float64 evaluations of the linear predictors meet.
-
-    Each predictor is ``b0 + sum_t X_t beta_t`` over its terms, a dot product
-    of at most ``p + 1`` terms, so two evaluations differ by at most
-    ``2 gamma_{p+1} (|b0| + sum_j |X_ij| |beta_j|)`` (Higham 2002, eq. 3.5),
-    the magnitude formed one basis column at a time.
-    """
-    from superglm._frame import as_eager_frame
-    from superglm.distributional.model import _score_feature, _term_indices
-
-    fitted = model._require_fitted()
-    rows = as_eager_frame(frame)
-    columns = []
-    for predictor in fitted.compiled_predictors:
-        state = fitted.layout.predictors[predictor.parameter_index]
-        local = np.asarray(fitted.result.coefficients[state.coefficient_slice], dtype=np.float64)
-        width = int(state.intercept_index is not None)
-        slopes = local[width:]
-        magnitude = np.full(len(rows), abs(float(local[0])) if width else 0.0)
-        assert not predictor.compiled.interaction_order
-        for name in predictor.compiled.feature_order:
-            indices = np.atleast_1d(
-                np.arange(len(slopes))[_term_indices(predictor.compiled.groups, name)]
-            )
-            spec, values = predictor.compiled.specs[name], rows.column_array(name)
-            for position, j in enumerate(indices):
-                unit = np.zeros(len(indices))
-                unit[position] = 1.0
-                contribution = np.asarray(_score_feature(spec, values, unit), dtype=np.float64)
-                magnitude += np.abs(contribution).reshape(-1) * abs(slopes[j])
-        columns.append(2.0 * _gamma(local.size + 1) * magnitude)
-    return np.column_stack(columns)
-
-
-@pytest.mark.parametrize("name", LSS_RECORDS)
-def test_a_superlss_model_saved_by_v0_40_0_loads_and_predicts(name: str) -> None:
-    """``from_bytes`` restores v0.40.0's coefficients bit for bit, and the linear
-    predictors are v0.40.0's within two evaluations' rounding."""
-    record = _load(name)
-    assert record["version"] == "0.40.0"
-    model = SuperLSS.from_bytes(record["serialized"])
-    frame = record["frame"]
-    restored = dict(model.coef_)
-    assert list(restored) == list(record["coefficients"])
-    assert all(
-        math.copysign(1.0, restored[key]) == math.copysign(1.0, value) and restored[key] == value
-        for key, value in record["coefficients"].items()
-    )
-    eta = model.predict_link(frame).to_numpy(dtype=np.float64)
-    assert eta.shape == record["eta"].shape
-    excess = np.abs(eta - record["eta"]) / _lss_eta_rounding(model, frame)
-    assert np.all(excess <= 1.0), float(np.max(excess))
-    assert np.all(np.isfinite(np.asarray(model.predict(frame), dtype=np.float64)))
-
-
-def test_a_v0_40_0_refusal_of_a_cap_inside_its_rounding_floor_loads() -> None:
-    """A saved fit's endpoint receipts are validated under the rule that made them.
-
-    v0.40.0 refused this cap as ``cap_not_stationary``: its retained score is
-    above the tolerance. Under the rounding-floor rule the same cap fit is
-    stationary, so validating the old refusal under the new rule refused the
-    whole artifact on load.
-    """
-    model = SuperLSS.from_bytes(_load("lss_gamma_cap_refusal")["serialized"])
-    smoothing = model._model.fit_state.smoothing
-    assert smoothing.rounding_floor_stationarity is False
-    refusal = next(
-        item
-        for item in smoothing.history
-        if item.endpoint_assessment_failure_reason == "cap_not_stationary"
-    )
-    cap_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
-    tolerance = refusal.coefficient_tolerances[0]
-    assert not _assessment_is_strictly_stationary(cap_fit, tolerance)
-    assert _assessment_is_numerically_stationary(cap_fit, tolerance)
 
 
 RELEASE_OUTCOMES = release_differential.load(FIXTURES.parent / "release_differential_v0_40_0.jsonl")

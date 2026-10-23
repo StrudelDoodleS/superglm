@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import pickle
 import re
 import warnings
 from collections.abc import Callable
@@ -32,7 +33,6 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.posterior import posterior_covariance, posterior_draws
-from superglm.distributional.serialization import distributional_manifest
 from superglm.distributional.smoothing.derivatives import (
     LamlDerivativeError,
     LamlDerivatives,
@@ -238,7 +238,6 @@ def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationa
     fit_state = fitted.fit_state
     smoothing = fitted.smoothing
     coefficients = np.array(fitted.coefficients, copy=True)
-    manifest = distributional_manifest(fitted)
 
     expected = posterior_covariance(published, kind="corrected")
     actual = posterior_covariance(fitted, kind="corrected")
@@ -248,7 +247,6 @@ def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationa
     assert fitted.fit_state is fit_state
     assert fitted.smoothing is smoothing
     assert fitted.smoothing.smoothing_hessian is None
-    assert distributional_manifest(fitted) == manifest
 
 
 def test_compact_fit_discloses_the_conditional_covariance(stationary_case) -> None:
@@ -1360,7 +1358,7 @@ def test_an_efs_fit_without_retained_rows_discloses_fixed_inference() -> None:
     fitted = model._require_fitted()
 
     _assert_conditional_disclosure(fitted, "retained training rows.*retain_rows=True")
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     _assert_conditional_disclosure(restored._require_fitted(), "retained training rows")
     with pytest.warns(ConvergenceWarning, match="unavailable"):
         draws = model.posterior_draws(16, covariance="corrected")

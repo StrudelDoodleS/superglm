@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import pickle
 from dataclasses import dataclass
 from typing import Literal
 
@@ -1382,7 +1383,7 @@ def test_public_gamma_artifact_restore_and_refit_preserve_weight_semantics(
         sample_weight=weights,
         retain_rows=False,
     )
-    restored = SuperLSS.from_bytes(fitted.to_bytes())
+    restored = pickle.loads(pickle.dumps(fitted))
 
     assert type(restored.family) is GammaLS
     assert restored.family.to_config() == {"type": "GammaLS", "parameterization": "mean_cv"}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -203,9 +204,6 @@ def test_refusal_precedes_geometry_initialization_and_evaluation():
         )
 
 
-from superglm import SuperLSS  # noqa: E402
-
-
 def test_artifact_round_trip_preserves_predictions_and_config():
     rng = np.random.default_rng(9)
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 150)})
@@ -214,7 +212,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
         family=LogNormalLS(),
         predictors=(Predictor("mean", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert np.array_equal(restored.predict(frame), model.predict(frame))
     assert np.array_equal(
         restored.predict_quantile(frame, 0.95), model.predict_quantile(frame, 0.95)

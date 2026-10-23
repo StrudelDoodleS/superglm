@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -180,7 +182,7 @@ def test_superlss_fits_a_factor_smooth_without_a_term_on_its_group():
     assert "location:x:group:fs#wiggle" in model.smoothing_parameters_
     predicted = model.predict(frame.head(5))
     assert np.all(np.isfinite(predicted))
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert np.array_equal(restored.predict(frame.head(5)), predicted)
 
 
@@ -368,7 +370,7 @@ def test_superlss_takes_integer_column_labels_end_to_end():
     assert any(name.startswith("location:1[") for name in model.coef_)
     predicted = model.predict(frame.head(5))
     assert np.all(np.isfinite(predicted))
-    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), predicted)
+    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), predicted)
     summary = model.summary()
     assert {"0", "1"} <= {str(term) for term in summary["term"]}
     by_label = model.term_inference("location", 0)
@@ -499,14 +501,14 @@ def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
         unfitted.fit_reml(frame, y),
     ):
         assert np.array_equal(restored.predict(frame), expected)
-    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame), expected)
+    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame), expected)
 
-    # As to_bytes, a pickle leaves the training frame out (its parent pickled
+    # A pickle leaves the training frame out (its parent pickled
     # every row and column of it): a restored model takes X_train=. A deep
     # copy keeps it, by reference; a shallow copy shares every member.
     restored = pickle.loads(pickle.dumps(model))
     assert restored._training_frame is None
-    with pytest.raises(RuntimeError, match="from_bytes, pickle or joblib.*X_train"):
+    with pytest.raises(RuntimeError, match="pickle or joblib.*X_train"):
         restored.summary()
     assert restored.summary(X_train=frame).equals(model.summary())
     assert copy.deepcopy(model)._training_frame is model._training_frame
@@ -537,13 +539,13 @@ def test_superlss_interactions_take_integer_column_labels():
     assert {"0:2", "0:1[a]"} <= set(model.summary()["term"])
     assert model.term_test("location", "0:2").rank > 0
     expected = model.predict(frame.head(5))
-    assert np.array_equal(SuperLSS.from_bytes(model.to_bytes()).predict(frame.head(5)), expected)
+    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
     assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
 
 
 def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loads():
     """The refusal is the declaration's; a template restored from an artifact is not re-refused."""
-    from superglm import Categorical, FactorSmooth, GaussianLS, SuperLSS
+    from superglm import Categorical, FactorSmooth, GaussianLS
     from superglm.distributional import Predictor
     from superglm.features import Spline
     from tests.bound_predictor_fixtures import model_from_templates
@@ -566,7 +568,7 @@ def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loa
     lambdas = {name: 1.0 for name in ("location:x#wiggle", "location:x:g:fs#wiggle")}
     lambdas |= {"location:x:g:fs#null_0": 1.0, "location:x:g:fs#null_1": 1.0}
     fitted = legacy.fit(frame, y, lambdas=lambdas)
-    restored = SuperLSS.from_bytes(fitted.to_bytes())
+    restored = pickle.loads(pickle.dumps(fitted))
     assert np.array_equal(restored.predict(frame), fitted.predict(frame))
 
 
@@ -606,7 +608,7 @@ def test_superlss_keeps_a_repeated_interaction_pair_with_a_warning(second):
 
 
 def test_superlss_saves_a_model_whose_labels_are_not_json_values():
-    """A date or NumPy integer label fits and survives to_bytes; the parent refused saving it."""
+    """A date or NumPy integer label fits and survives a pickle round trip; the parent refused saving it."""
     import datetime
 
     from superglm import Categorical, GaussianLS, Numeric, Spline, SuperLSS
@@ -625,7 +627,7 @@ def test_superlss_saves_a_model_whose_labels_are_not_json_values():
         family.location({day: Spline(k=6), code: Spline(k=6), "g": Categorical()}, ti(day, code)),
         family.scale({code: Numeric()}),
     ).fit_reml(frame, y)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert np.array_equal(restored.predict(frame), model.predict(frame))
     # Term payloads name the term by its text, so they stay JSON (0481c3e5 put the date in).
     import json

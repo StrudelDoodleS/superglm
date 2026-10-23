@@ -145,11 +145,8 @@ def test_optional_prediction_does_not_block_structural_fixed_fit() -> None:
         model.predict(frame)
 
 
-def test_custom_family_fit_predicts_but_public_save_refuses() -> None:
-    """A fitted extension remains usable, but is not a native persistence type."""
+def test_custom_family_fit_predicts() -> None:
+    """A fitted extension fits and predicts through the public facade."""
     model, frame, response = _fitted_four_parameter_model()
     parameters = model.predict_parameters(frame).to_numpy()
     np.testing.assert_allclose(parameters[:, 0], np.mean(response), rtol=0.0, atol=1.0e-8)
-
-    with pytest.raises(ValueError, match="built-in"):
-        model.to_bytes()

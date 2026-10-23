@@ -2,6 +2,7 @@
 
 import functools
 import math
+import pickle
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 
@@ -10,7 +11,6 @@ import pandas as pd
 import pytest
 from scipy.special import digamma, gammaln, polygamma
 
-from superglm import SuperLSS
 from superglm.distributional import GammaLS, GaussianLS, Predictor
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -506,7 +506,7 @@ def test_public_shared_penalty_replay_units_and_coordinate_permutations(kind):
             changed.gradient_error[name] + evaluation.gradient_error[name]
         )
     frame, _, _, _ = _public_data(kind)
-    replayed = SuperLSS.from_bytes(model.to_bytes())
+    replayed = pickle.loads(pickle.dumps(model))
     restored = replayed._require_fitted().fit_state
     actual = _compute_penalty_logdet_evaluation(
         dict(restored.lambdas), list(restored.layout.penalties)

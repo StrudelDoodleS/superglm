@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import pickle
 from dataclasses import replace
 
 import numpy as np
@@ -537,7 +538,7 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     # Saving keeps the rule the receipts were made under. Its face and cap fits
     # are stationary only within their rounding floors, so a load that read the
     # result as made before the floor would validate it under the strict rule.
-    loaded = SuperLSS.from_bytes(model.to_bytes())._require_fitted().smoothing
+    loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
     assert loaded is not None
     assert loaded.rounding_floor_stationarity is True
     assert replace(loaded).convergence_reason == "stationary"
