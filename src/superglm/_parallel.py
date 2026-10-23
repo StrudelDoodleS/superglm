@@ -119,8 +119,10 @@ class _Crew:
         with self._lock:
             while len(self._threads) < min(count, self.size):
                 thread = threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
-                thread.start()
+                # Recorded before it starts: a start interrupted once the thread
+                # runs must still leave it for close to end.
                 self._threads.append(thread)
+                thread.start()
 
     def _run(self) -> None:
         _mark_pool_thread()
@@ -144,9 +146,10 @@ class _Crew:
         with self._lock:
             threads, self._threads = self._threads, []
         for _ in threads:
-            self._jobs.put(None)
+            self._jobs.put(None)  # one each; a thread that never ran leaves its own unread
         for thread in threads:
-            thread.join()
+            if thread.is_alive():
+                thread.join()
 
 
 class _FitThreads:

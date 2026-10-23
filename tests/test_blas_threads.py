@@ -1014,9 +1014,12 @@ def test_an_interruption_while_waiting_for_helpers_ends_them_with_their_crew(mon
     assert not _named_threads("superglm-map-crew")
 
 
-def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatch):
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatch, when):
     """A failure to start the second helper re-raises and leaves no crew thread, whether the
-    crew is built for one section or by the fit."""
+    crew is built for one section or by the fit, and whether that helper never ran
+    ("before") or was already running when ``start`` raised, as an interruption of
+    ``start``'s wait leaves it ("after")."""
     import threading
 
     from superglm._parallel import _Crew, fit_pool, parallel_config, pooled_for
@@ -1028,6 +1031,8 @@ def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatc
         if self.name == "superglm-map-crew":
             starts[0] += 1
             if starts[0] == 2:
+                if when == "after":
+                    start(self)
                 raise RuntimeError("can't start new thread")
         start(self)
 
