@@ -1677,7 +1677,17 @@ def _spline_categorical_block(
         spline_categorical_bins,
     )
 
-    parent1, _ = ispec.parent_names
+    parent1, parent2 = ispec.parent_names
+    # A column is keyed by its level's text, so two levels with one text
+    # (1 and "1") would share a column and price one level with the other's curve.
+    levels = [str(level) for level in ispec._cat_levels]
+    shared = sorted({text for text in levels if levels.count(text) > 1})
+    if shared:
+        raise ValueError(
+            f"Interaction {name!r} cannot be exported: levels of {parent2!r} share the "
+            f"text {shared}, and a rating table keys each level by its text. Recode "
+            f"{parent2!r} so that every level's text is distinct, then refit."
+        )
     if has_ordinal_parent(model, ispec):
         keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
         kind = "cells"
@@ -1705,7 +1715,6 @@ def _spline_categorical_block(
         kind = "spline_cells"
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
-    levels = [str(level) for level in ispec._cat_levels]
     # A level named like the key column would overwrite it: the header is the
     # parent's name, suffixed until no level carries it.
     axis = parent1

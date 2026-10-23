@@ -2973,6 +2973,28 @@ def test_the_key_column_header_is_absent_from_the_complete_level_set():
     assert not (block.table["age (axis 1)"] == 1.0).all()
 
 
+def test_levels_sharing_one_text_are_refused_rather_than_merged():
+    """Base ``1`` and level ``"1"`` would share the column ``"1"``: the export refuses by name."""
+    rng = np.random.default_rng(20261023)
+    n = 600
+    region = np.tile(np.array([1, "1", "A"], dtype=object), n // 3)
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "region": region})
+    age = X["age"].to_numpy()
+    eta = -1.0 + 0.01 * age + 0.7 * np.sin(age / 9.0) * (region == "1")
+    y = np.random.default_rng(1).poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="first")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    assert list(model._specs["region"]._levels) == [1, "1", "A"]
+
+    with pytest.raises(ValueError, match=r"levels of 'region' share the text \['1'\]"):
+        _payload(model, X, y, None, "native", continuous_kind="ppform")
+
+
 def test_the_bin_representatives_need_the_frame_only_for_a_spline_parent():
     """Without a frame a spline parent is refused by name; an ordinal parent has no bins to read."""
     from superglm.export.rating_tables import _interaction_blocks
