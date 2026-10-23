@@ -318,6 +318,11 @@ model = superglm.SuperLSS(
 )
 model.fit_reml(frame, counts)
 
+# An exact ordinary spline: the sparse-SSP Gram's direct kernel call.
+superglm.SuperGLM(
+    family="poisson", discrete=False, terms=[s("x", kind="ps", k=12)]
+).fit_reml(frame.iloc[:2000], counts[:2000])
+
 # Binned factor smooths of both bases on a 50-level group: the structured
 # engine's FactorSmooth leaf pass, which warmup compiles by hand.
 from superglm import FactorSmooth
@@ -365,9 +370,10 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     then run with the layouts and flags their callers pass and must reuse
     warmup's signatures, a second warmup compiles nothing, and first fits
     (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
-    spline, a categorical and a structured RandomEffect; binned ``fs`` and
-    ``sz`` factor smooths; and an exact gamma ``fs`` fit, which takes the
-    signed rows) compile nothing outside ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
+    spline, a categorical and a structured RandomEffect; an exact ordinary
+    spline; binned ``fs`` and ``sz`` factor smooths; and an exact gamma ``fs``
+    fit, which takes the signed rows) compile nothing outside ``_FIRST_USE``.
+    ``warmup()`` stays a bare call: import compiles nothing.
     """
     assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(

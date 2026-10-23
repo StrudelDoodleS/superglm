@@ -743,7 +743,14 @@ class SparseSSPGroupMatrix:
         ``_csr_gram`` stands in for ``_csr_weighted_gram`` with its values: a
         batched assembly's shared pass over several weight vectors.
         """
-        csr_gram = _csr_weighted_gram if _csr_gram is None else _csr_gram
+        if _csr_gram is None:
+            # The kernel's one signature takes read-only C weights; a batched
+            # stand-in matches its channel by identity, so it gets ``W`` itself.
+            def csr_gram(data, indices, indptr, W, p, absolute_weights):
+                return _csr_weighted_gram(data, indices, indptr, _native(W), p, absolute_weights)
+
+        else:
+            csr_gram = _csr_gram
         if _ssp_gram_needs_exact(self._data, self.R_inv, W):
             raw_basis = sp.csr_matrix(
                 (self._data, self._indices, self._indptr),
