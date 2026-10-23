@@ -246,3 +246,23 @@ def test_a_fit_digests_each_retained_column_once_for_both_guards(monkeypatch) ->
 
     assert seen == ["group"]
     assert model._fit_data_guard.x_digest == model._fit_geometry_guard.x_digest
+
+
+def test_a_text_column_digests_the_same_in_any_chunk_size(monkeypatch) -> None:
+    """Text is fed in slices of rows so a huge column is never joined whole; the
+    byte stream, and so the digest, must not depend on the slice size."""
+    words = ["", "a", "bc", "déjà vu", "日本語", "x" * 40]
+    cycle = [words[i % len(words)] if i % 5 else None for i in range(23)]  # 23 rows, nulls
+    X = pl.DataFrame(
+        {
+            "s": pl.Series(cycle, dtype=pl.String),
+            "c": pl.Series(cycle, dtype=pl.Categorical),
+            "e": pl.Series(cycle, dtype=pl.Enum(words)),
+        }
+    )
+    whole = as_eager_frame(X).digest()
+    assert as_eager_frame(X).digest() == whole
+
+    for rows in (1, 2, 5, 7, 22, 23, 24):  # a partial last slice for all but 1, 23
+        monkeypatch.setattr(frame_module, "_TEXT_CHUNK_ROWS", rows)
+        assert as_eager_frame(X).digest() == whole, rows

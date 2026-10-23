@@ -282,6 +282,33 @@ def _update_segment(digest: Any, data: bytes | NDArray) -> None:
     digest.update(raw)
 
 
+_TEXT_CHUNK_ROWS = 1 << 16
+
+
+def _update_polars_text(digest: Any, column: Any) -> None:
+    """Feed a string, categorical or enum column as its lengths, then its UTF-8 bytes.
+
+    The byte stream is one length segment (little-endian uint32 per row, 0 for a
+    null) and one text segment (the non-null values joined, prefixed by their
+    total byte length, which is the sum of the lengths).  Both are produced in
+    slices of ``_TEXT_CHUNK_ROWS`` rows, so a slice's cast and joined copy are
+    the only text held at once; the prefix is the sum of the lengths, so the
+    stream is the one a single join would give.
+    """
+    string = get_polars().String
+    n = len(column)
+    lengths = np.empty(n, dtype="<u4")
+    for start in range(0, n, _TEXT_CHUNK_ROWS):
+        part = column.slice(start, _TEXT_CHUNK_ROWS).cast(string)
+        lengths[start : start + len(part)] = part.str.len_bytes().fill_null(0).to_numpy()
+    _update_segment(digest, lengths)
+    digest.update(int(lengths.sum(dtype=np.uint64)).to_bytes(8, "little"))
+    for start in range(0, n, _TEXT_CHUNK_ROWS):
+        part = column.slice(start, _TEXT_CHUNK_ROWS).cast(string).drop_nulls()
+        if len(part):
+            digest.update(part.str.join("").to_list()[0].encode("utf-8"))
+
+
 def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> None:
     """Feed one Polars column's values to *digest* without using Polars' hash.
 
@@ -296,10 +323,7 @@ def _update_polars_column(digest: Any, name: str, column: Any, dtype: Any) -> No
     if isinstance(dtype, nw.Date | nw.Datetime | nw.Duration | nw.Time):
         column, dtype = column.to_physical(), None
     if isinstance(dtype, nw.String | nw.Categorical | nw.Enum):
-        text = column.cast(get_polars().String)
-        lengths = text.str.len_bytes().fill_null(0).to_numpy()
-        _update_segment(digest, np.ascontiguousarray(lengths, dtype="<u4"))
-        _update_segment(digest, text.drop_nulls().str.join("").to_list()[0].encode("utf-8"))
+        _update_polars_text(digest, column)
         return
     is_bool = isinstance(dtype, nw.Boolean)
     if (
