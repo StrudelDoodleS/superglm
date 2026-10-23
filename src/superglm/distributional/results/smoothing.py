@@ -664,7 +664,9 @@ class DistributionalEFSResult:
                     movement = float(
                         np.linalg.norm(endpoint_fit.coefficients - source_fit.coefficients, ord=2)
                     )
-                if cap_numerically_stationary:
+                # A replay that takes no step must be the projection of its
+                # source; a replay that steps stays within the refit envelope.
+                if cap_numerically_stationary and endpoint_fit.iterations == 0:
                     projection_bound = _endpoint_revalidation_projection_bound(
                         endpoint_face,
                         source_fit.coefficients,
@@ -674,8 +676,7 @@ class DistributionalEFSResult:
                     except ValueError:
                         projected_source = None
                     if (
-                        endpoint_fit.iterations != 0
-                        or projected_source is None
+                        projected_source is None
                         or not np.array_equal(endpoint_fit.coefficients, projected_source)
                         or projection_bound is None
                         or not math.isfinite(movement)
@@ -691,7 +692,7 @@ class DistributionalEFSResult:
                         tolerance=tolerance,
                     )
                     if (
-                        not direct_nonstationary_cap
+                        not (cap_numerically_stationary or direct_nonstationary_cap)
                         or movement_bound is None
                         or not math.isfinite(movement)
                         or movement > movement_bound
@@ -746,7 +747,8 @@ class DistributionalEFSResult:
             if certified_projection_replay:
                 raise ValueError("endpoint state-change evidence is only projection roundoff")
 
-            if not cap_numerically_stationary and direct_nonstationary_cap:
+            direct_replay = not cap_numerically_stationary and direct_nonstationary_cap
+            if direct_replay:
                 endpoint_rank = endpoint_fit.terminal_reduced_rank
                 endpoint_curvature = endpoint_fit.terminal_curvature
                 if (
@@ -759,6 +761,8 @@ class DistributionalEFSResult:
                     raise ValueError(
                         "nonstationary-cap exact-face authority requires full observed rank"
                     )
+            # A replay that steps is refused only beyond its refit envelope.
+            if direct_replay or (cap_numerically_stationary and endpoint_fit.iterations > 0):
                 movement_bound = _assessment_coefficient_refit_bound(
                     source_fit.coefficients,
                     endpoint_fit.coefficients,

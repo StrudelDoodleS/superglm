@@ -510,15 +510,71 @@ def _assessment_unchanged_failed_cap(
     )
 
 
+def _score_within_rounding_floor(
+    *,
+    penalty: NDArray,
+    coefficients: NDArray,
+    score: NDArray,
+    face: PenaltyFace | None,
+    objective: float,
+    tolerance: float,
+) -> bool:
+    """Return whether each retained score entry is within tolerance plus its rounding.
+
+    The solver forms ``g = s - P b`` in float64. Row ``i`` of ``P b`` errs by at
+    most ``gamma_{k_i} (|P| |b|)_i``, ``k_i`` the nonzeros in that row, and the
+    subtraction by ``u |g_i| / (1 - u)`` (Higham 2002, eqs. 3.5 and 3.12);
+    reducing to a face adds ``gamma_w |Z|' |g|`` and carries the row bound
+    through ``|Z|'``. At a large smoothing parameter this floor exceeds any
+    fixed relative tolerance, and no representable ``b`` resolves the score
+    below it. The data score's own summation error is left out, so the floor
+    understates the score's rounding and never admits more than it.
+    """
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+    penalty = np.asarray(penalty, dtype=np.float64)
+    absolute_score = np.abs(np.asarray(score, dtype=np.float64))
+    nonzeros = np.count_nonzero(penalty, axis=1)
+    width = absolute_score.size
+    retained_score = absolute_score if face is None else np.abs(face.reduce_vector(score))
+    with np.errstate(over="ignore", invalid="ignore"):
+        row_gamma = nonzeros * unit_roundoff / (1.0 - nonzeros * unit_roundoff)
+        floor = row_gamma * (np.abs(penalty) @ np.abs(np.asarray(coefficients, dtype=np.float64)))
+        floor += unit_roundoff / (1.0 - unit_roundoff) * absolute_score
+        roundings = int(np.max(nonzeros, initial=0)) + 4
+        if face is not None:
+            reduction = width * unit_roundoff / (1.0 - width * unit_roundoff)
+            floor = np.abs(face.null_basis).T @ (floor + reduction * absolute_score)
+            roundings += width + 2
+        # Every term is nonnegative, so the computed floor is at most gamma_m
+        # low for the m roundings that formed it; restore it outward, then
+        # add the relative tolerance outward too.
+        restore = 2 * roundings * unit_roundoff / (1.0 - 2 * roundings * unit_roundoff)
+        floor = np.nextafter(floor * (1.0 + restore), np.inf)
+        scale = np.nextafter(1.0 + abs(float(objective)), np.inf)
+        limit = np.nextafter(tolerance * scale, np.inf)
+        allowed = np.nextafter(limit + floor, np.inf)
+    return bool(np.all(np.isfinite(allowed)) and np.all(retained_score <= allowed))
+
+
 def _assessment_is_numerically_stationary(
     result: DenseSolverResult,
     tolerance: float,
 ) -> bool:
-    """Interpret strict score or validated resolution at an exact-face seam."""
+    """Interpret retained score, its rounding floor or validated resolution at an exact-face seam."""
 
+    optimizing = result.penalized_optimizing_log_likelihood
+    assert optimizing is not None
     return bool(
         _assessment_retained_kkt_ratio(result) <= tolerance
         or result.convergence_reason == "resolution_limited_stationarity"
+        or _score_within_rounding_floor(
+            penalty=result.penalty,
+            coefficients=result.coefficients,
+            score=result.terminal_score,
+            face=result.coefficient_face,
+            objective=optimizing,
+            tolerance=tolerance,
+        )
     )
 
 
@@ -1298,9 +1354,22 @@ class DenseSolverResult:
             1.0 + abs(penalized_optimizing)
         )
         if self.convergence_reason == "score" and (
-            not self.converged or retained_kkt > self.config.tolerance
+            not self.converged
+            or (
+                retained_kkt > self.config.tolerance
+                and not _score_within_rounding_floor(
+                    penalty=penalty,
+                    coefficients=coefficients,
+                    score=score,
+                    face=self.coefficient_face,
+                    objective=penalized_optimizing,
+                    tolerance=self.config.tolerance,
+                )
+            )
         ):
-            raise ValueError("score convergence requires retained KKT within tolerance")
+            raise ValueError(
+                "score convergence requires retained KKT within tolerance and its rounding floor"
+            )
         if self.convergence_reason == "objective_and_step":
             _validate_objective_and_step_certificate(
                 config=self.config,

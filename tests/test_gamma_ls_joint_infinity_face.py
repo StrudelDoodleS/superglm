@@ -16,6 +16,7 @@ import superglm.distributional.smoothing.faces as smoothing_faces
 import superglm.distributional.smoothing.loop as smoothing_loop
 import superglm.distributional.smoothing.objective as smoothing_objective
 import superglm.distributional.smoothing.proposals as smoothing_proposals
+import superglm.distributional.solver.solver as solver_module
 from superglm import Spline, SuperLSS
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.inference import compute_joint_inference
@@ -25,6 +26,7 @@ from superglm.distributional.result import (
     DenseSolverResult,
     DistributionalEFSConfig,
     JointEndpointDirectionEvidence,
+    _assessment_is_numerically_stationary,
 )
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
 from tests.bound_predictor_fixtures import model_from_templates
@@ -368,6 +370,9 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
 
     monkeypatch.setattr(smoothing_loop, "_try_joint_exact_face", disable_joint_activation)
     monkeypatch.setattr(efs_module, "_try_joint_exact_face", disable_joint_activation)
+    # Without its rounding-floor stop the cap fit steps on round-off and stops
+    # on its Newton decrement with a retained score above its rounding floor.
+    monkeypatch.setattr(solver_module, "_score_within_rounding_floor", lambda **_: False)
     case = gamma_joint_face_case
     scalar_first = _fit_public_gamma_joint_face(case.frame, case.response, case.weights)
     fitted = scalar_first._require_fitted()
@@ -386,8 +391,8 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
     cap_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
     assert cap_fit.coefficient_face is None
     cap_kkt = _retained_kkt_relative(cap_fit)
-    # A roundoff upper bound is not a lower bound on the residual a solve must leave.
     assert cap_kkt > cap_fit.config.tolerance
+    assert not _assessment_is_numerically_stationary(cap_fit, cap_fit.config.tolerance)
 
     components = {component.name: component for component in fitted.layout.penalties}
     companion = components[companion_name]

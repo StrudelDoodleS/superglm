@@ -1958,8 +1958,13 @@ def test_unchanged_failed_cap_is_not_endpoint_authority(
         )
 
 
-def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face() -> None:
+def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Kills returning cap_not_stationary before assessing a sound exact face."""
+    # Without its rounding-floor stop the cap fit steps on round-off and stops
+    # on its Newton decrement with a retained score above its rounding floor.
+    monkeypatch.setattr(solver_module, "_score_within_rounding_floor", lambda **_: False)
     (
         family,
         layout,
@@ -1977,6 +1982,9 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face() -> None:
     assert cap_fit.converged is True
     assert cap_fit.convergence_reason == "objective_and_step"
     assert cap_kkt > cap_fit.config.tolerance
+    assert not result_module._assessment_is_numerically_stationary(
+        cap_fit, cap_fit.config.tolerance
+    )
     assert lambdas[finite_name] < smoothing.config.maximum_lambda
 
     face = build_penalty_face(layout, (capped_name,))

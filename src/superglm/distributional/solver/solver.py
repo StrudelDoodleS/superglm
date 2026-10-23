@@ -34,7 +34,10 @@ from superglm.distributional.result import (
     _resolution_limited_decrement_is_within_objective_ulp,
     _validate_resolution_limited_stationarity,
 )
-from superglm.distributional.results.solver import _newton_decrement_is_certified
+from superglm.distributional.results.solver import (
+    _newton_decrement_is_certified,
+    _score_within_rounding_floor,
+)
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver._likelihood_cache import (
     _is_builtin_gaussian_gamma,
@@ -1019,7 +1022,8 @@ def _half_penalty_quadratic(
     ``2u (|P| |b|)_i`` that one unit in the last place of each coefficient makes
     to ``(P b)_i``. So at a cap the score of a representable ``b`` cannot in
     general be resolved below that level, and stationarity there is certified
-    through the Newton decrement, not the score.
+    by the score within that floor (``_score_within_rounding_floor``) or
+    through the Newton decrement.
     """
     values = _native_operand(coefficients)
     matrix = np.asarray(penalty, dtype=np.float64)
@@ -1273,7 +1277,16 @@ def _run_iterations(
             geometry.score_penalized,
             state.penalized_optimizing_log_likelihood,
         )
-        if score_relative <= config.tolerance:
+        # A score within its own rounding floor cannot be resolved further:
+        # another step only follows round-off.
+        if score_relative <= config.tolerance or _score_within_rounding_floor(
+            penalty=context.penalty,
+            coefficients=state.coefficients,
+            score=geometry.score_penalized,
+            face=context.coefficient_face,
+            objective=state.penalized_optimizing_log_likelihood,
+            tolerance=config.tolerance,
+        ):
             return _OptimizationRun(
                 state=state,
                 geometry=geometry,

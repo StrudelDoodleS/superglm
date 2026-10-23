@@ -331,7 +331,11 @@ def _fit_endpoint_authority_stationary(
         or (fit.converged and fit.convergence_reason == "objective_and_step")
     )
     polishable_source = fit.converged or score_only_refit
-    if not polishable_source or source_kkt <= config.tolerance:
+    if (
+        not polishable_source
+        or source_kkt <= config.tolerance
+        or (fit.converged and _assessment_is_numerically_stationary(fit, config.tolerance))
+    ):
         return fit
 
     retained_rank = _endpoint_retained_rank(fit)
