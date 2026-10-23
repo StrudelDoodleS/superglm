@@ -10,7 +10,7 @@ import warnings
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -333,32 +333,22 @@ def _json_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-_REMOVED_METHODS = {
-    "to_bytes": (
-        "SuperLSS.to_bytes() was removed. Save a fitted model with "
-        "joblib.dump(model, path) and load it with joblib.load(path)."
-    ),
-    "from_bytes": (
-        "SuperLSS.from_bytes() was removed. To convert a file that to_bytes() wrote, "
-        "load it with superglm 0.41 and save it again with joblib.dump(model, path); "
-        "load it afterwards with joblib.load(path)."
-    ),
-}
+class _RemovedMethod:
+    """A removed method: reading it, from the class or an instance, raises with what to use instead."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, instance: object, owner: type | None = None) -> Any:
+        raise AttributeError(
+            self.message, name=self.name, obj=owner if instance is None else instance
+        )
 
 
-class _SuperLSSMeta(type):
-    if not TYPE_CHECKING:
-
-        def __getattr__(cls, name: str) -> Any:
-            """Make ``SuperLSS.from_bytes`` name its replacement; refuse any other missing name."""
-            if name in _REMOVED_METHODS:
-                raise AttributeError(_REMOVED_METHODS[name], name=name, obj=cls)
-            raise AttributeError(
-                f"type object {cls.__name__!r} has no attribute {name!r}", name=name, obj=cls
-            )
-
-
-class SuperLSS(metaclass=_SuperLSSMeta):
+class SuperLSS:
     """Fit several parameters of a response distribution jointly.
 
     Create a family, then pass it followed by one declaration for each of its
@@ -463,11 +453,21 @@ class SuperLSS(metaclass=_SuperLSSMeta):
         # carry it: a restored model is given one through ``X_train=``.
         self._training_frame: FrameLike | EagerFrame | None = None
 
+    to_bytes = _RemovedMethod(
+        "SuperLSS.to_bytes() was removed. Save a fitted model with "
+        "joblib.dump(model, path) and load it with joblib.load(path)."
+    )
+    from_bytes = _RemovedMethod(
+        "SuperLSS.from_bytes() was removed. To convert a file that to_bytes() wrote, "
+        "load it with superglm 0.41 and save it again with joblib.dump(model, path); "
+        "load it afterwards with joblib.load(path)."
+    )
+
     def __reduce__(self) -> tuple[Any, tuple[type[SuperLSS], bytes]]:
-        """Pickle (and so joblib) through the artifact pickler.
+        """Pickle (and so joblib) through the distributional pickler.
 
         The model keeps its configuration in read-only mappings, which the
-        standard pickler refuses; the artifact pickler carries them. The
+        standard pickler refuses; ``pickle_state`` carries them. The
         training frame stays out: it is the caller's data, every column and
         row of it, and a restored model takes ``X_train=``.
         """
@@ -475,16 +475,6 @@ class SuperLSS(metaclass=_SuperLSSMeta):
 
         state = {**self.__dict__, "_training_frame": None}
         return _restore_superlss, (type(self), pickle_state(state))
-
-    if not TYPE_CHECKING:
-
-        def __getattr__(self, name: str) -> Any:
-            """Make a removed method name its replacement; refuse any other missing name."""
-            if name in _REMOVED_METHODS:
-                raise AttributeError(_REMOVED_METHODS[name], name=name, obj=self)
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}", name=name, obj=self
-            )
 
     def __deepcopy__(self, memo: dict[int, Any]) -> SuperLSS:
         """A deep copy that keeps the training frame, by reference as the model does."""
