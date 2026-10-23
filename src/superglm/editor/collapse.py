@@ -607,13 +607,6 @@ def _is_identity_grouping(grouping: LevelGrouping) -> bool:
     )
 
 
-def _require_contiguous(indices: np.ndarray, term_name: str) -> None:
-    if indices.size and np.any(np.diff(np.sort(indices)) != 1):
-        raise EditorValueError(
-            f"Ordered categorical collapse for {term_name!r} must be contiguous."
-        )
-
-
 def _members_are_contiguous(members: list[str], order: list[str]) -> bool:
     if len(members) < 2:
         return True
