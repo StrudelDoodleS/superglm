@@ -549,3 +549,22 @@ def test_a_fit_accepts_two_bases_of_one_face_within_half_the_replay_bound(
             assert result_solver._face_projectors_agree(face, turned) is at_replay
     with result_solver.fit_time_face_geometry():
         assert result_solver._face_projectors_agree(face, turned)
+
+
+def test_a_fit_validates_its_smoothing_result_with_the_fit_acceptance(monkeypatch) -> None:
+    """Every smoothing result a fit builds is validated under the fit's face acceptance."""
+    from superglm.distributional.results.smoothing import DistributionalEFSResult
+
+    seen: list[bool] = []
+    real = DistributionalEFSResult.__post_init__
+
+    def post_init(self) -> None:
+        seen.append(result_solver._FIT_TIME_FACE_GEOMETRY.get())
+        real(self)
+
+    monkeypatch.setattr(DistributionalEFSResult, "__post_init__", post_init)
+    family = sg.GammaLS()
+    model = sg.SuperLSS(family, family.mean(s("x", kind="cr", k=7)), family.scale())
+    frame, columns = _data()
+    model.fit_reml(frame, columns["positive"])
+    assert seen and all(seen)
