@@ -199,7 +199,7 @@ def apply_edits_to_model_copy_with_data(
     edited_terms = [term.name for term in changed_terms]
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
-        _invalidate_model_caches(edited_model, keep_inference=True)
+        _invalidate_model_caches(edited_model)
     if edited_terms or has_scoring_data:
         _refresh_fit_statistics(
             edited_model,
@@ -599,18 +599,7 @@ def _adjust_intercept(model, delta: float) -> None:
     move_public_intercept(model, delta)
 
 
-def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
-    if not keep_inference:
-        for attr in (
-            "_coef_covariance",
-            "_fit_active_info",
-            "_fit_inference_info",
-            "_group_edf",
-        ):
-            try:
-                delattr(model, attr)
-            except AttributeError:
-                pass
+def _invalidate_model_caches(model) -> None:
     model._prediction_plan = None
     model._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
     model._fast_prediction_state = None
@@ -719,15 +708,11 @@ def _refresh_fit_statistics(
             if offset is None and not explicit_scoring_data
             else offset
         )
-    elif offset is None:
+    else:
+        # y_ref is set only together with X_ref, so a passed offset was
+        # validated above: no offset reaches here.
         offset_arr = None if explicit_scoring_data else getattr(model, "_fit_offset", None)
         offset_ref = None if explicit_scoring_data else getattr(model, "_fit_offset_ref", None)
-    elif retained_offset:
-        offset_arr = offset
-        offset_ref = getattr(model, "_fit_offset_ref", None)
-    else:
-        offset_arr = np.array(offset, dtype=np.float64, copy=True).ravel()
-        offset_ref = offset
     if offset_arr is not None and offset_arr.size != y_arr.size:
         raise ValueError(f"offset has length {offset_arr.size}, expected {y_arr.size}.")
 
