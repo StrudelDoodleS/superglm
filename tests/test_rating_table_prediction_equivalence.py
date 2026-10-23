@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import warnings
 from functools import cache
 
 import numpy as np
@@ -52,7 +53,12 @@ from superglm import (
     SuperGLM,
     families,
 )
-from superglm.diagnostics.discretize import _validated_discretization_weights
+from superglm.diagnostics.discretize import (
+    _spline_categorical_se,
+    _term_se_at,
+    _validated_discretization_weights,
+    banding_companions,
+)
 from superglm.export import rating_tables
 from superglm.export.rating_tables import (
     RatingTableBaseNotRepresentableError,
@@ -463,6 +469,19 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     parent2 = block.name.split(":")[1]
     assert parent2 in X.columns, f"{block.name!r} names a column the frame does not have"
 
+    if block.kind == "spline_cells":
+        # Intervals down the side, levels across the top: the consumer finds
+        # the interval its numeric value falls in, then the column of its level.
+        # The covariate is named by the block, since a level named like it moves
+        # the key column's header.
+        edges = _printed_edges(block)
+        covariate = X[block.name.split(":")[0]].to_numpy(dtype=np.float64)
+        row = np.clip(np.digitize(covariate, edges), 1, len(edges) - 1)
+        cells = table.iloc[:, 1:]
+        column = pd.Index([str(c) for c in cells.columns]).get_indexer(X[parent2].astype(str))
+        assert (column >= 0).all(), "every level of the frame has a column"
+        return cells.to_numpy(dtype=np.float64)[row - 1, column]
+
     gridded = all(pd.api.types.is_numeric_dtype(X[parent]) for parent in (parent1, parent2))
     if gridded:
         axis1 = table[parent1].to_numpy(dtype=np.float64)
@@ -473,11 +492,14 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
             _nearest(axis2, X[parent2].to_numpy(dtype=np.float64)),
         ]
 
-    levels2 = [str(column) for column in table.columns[1:]]
+    # Down the key column and across each cell column, as the main block's lookup
+    # reads its columns, and not row by row: a row of a frame whose key column is
+    # integers and whose cells are floats is upcast to floats, which turns the key
+    # 10 into 10.0 and finds nothing under the consumer's own str(10).
     cells_by_pair = {
-        (str(row[parent1]), level2): float(row[level2])
-        for _, row in table.iterrows()
-        for level2 in levels2
+        (str(key), str(level2)): float(cell)
+        for level2 in table.columns[1:]
+        for key, cell in zip(table[parent1], table[level2], strict=True)
     }
     return np.array(
         [cells_by_pair[(str(a), str(b))] for a, b in zip(X[parent1], X[parent2])],
@@ -2534,3 +2556,1006 @@ def test_error_mode_ppform_scores_the_boundary_through_the_consumer():
     assert np.allclose(scored, expected, rtol=1e-12), (
         f"the boundary scores {scored[0]!r} against predict's {expected[0]!r}"
     )
+
+
+# ── A spline-by-categorical interaction ───────────────────────────────────────
+
+_REGION_LEVELS = ["A", "B", "C", "D"]
+
+
+@cache
+def _spline_categorical_fit(unseen: str = "error"):
+    """``age`` spline crossed with a four-level ``region``, two levels with their own curve."""
+    rng = np.random.default_rng(20261021)
+    n = 1500
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18.0, 80.0, n),
+            "region": rng.choice(_REGION_LEVELS, n),
+        }
+    )
+    age = X["age"].to_numpy()
+    region = X["region"].to_numpy()
+    eta = (
+        -1.4
+        + 0.012 * age
+        + 0.3 * (region == "B")
+        + 0.5 * np.sin(age / 9.0) * (region == "C")
+        - 0.4 * (age - 50.0) / 30.0 * (region == "D")
+    )
+    sample_weight = rng.uniform(0.5, 2.0, n)
+    y = rng.poisson(np.exp(eta) * sample_weight).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6), "region": Categorical(base="first", unseen=unseen)},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    return model, X, y, sample_weight
+
+
+def _representative_rows(block, X: pd.DataFrame, geometry_weight: np.ndarray) -> pd.DataFrame:
+    """One row per (bin, level) at the bin's weighted-mean ``age``, from public inputs alone.
+
+    The representative is recomputed here from the frame and the printed edges
+    instead of being read back from the exporter, so the table is compared with
+    the model at a point the test chose for itself.  The mean is in the
+    binning's own measure (``_geometry_weight``), which for these weights is
+    one unit per physical row.
+    """
+    edges = _printed_edges(block)
+    n_bins = len(edges) - 1
+    age = X["age"].to_numpy(dtype=np.float64)
+    index = np.clip(np.digitize(age, edges), 1, n_bins) - 1
+    mass = np.bincount(index, weights=geometry_weight, minlength=n_bins)
+    moment = np.bincount(index, weights=geometry_weight * age, minlength=n_bins)
+    midpoint = 0.5 * (edges[:-1] + edges[1:])
+    representative = np.where(mass > 0.0, moment / np.where(mass > 0.0, mass, 1.0), midpoint)
+    levels = [str(column) for column in block.table.columns[1:]]
+    return pd.DataFrame(
+        {
+            "age": np.repeat(representative, len(levels)),
+            "region": np.tile(levels, n_bins),
+        }
+    )
+
+
+def test_the_spline_categorical_table_reproduces_predict_at_the_bin_representatives():
+    """Every level's cell is the model at the bin's representative, product and all.
+
+    ``continuous_kind="ppform"`` makes the ``age`` main effect exact, so the
+    product is the prediction wherever the interaction is, and the only
+    approximation left in the workbook is the interaction's binning.  A row AT
+    a representative is where that binning is not an approximation.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native", continuous_kind="ppform")
+
+    (block,) = payload.interactions
+    assert block.name == "age:region"
+    assert block.kind == "spline_cells"
+    assert list(block.table.columns) == ["age", *_REGION_LEVELS]
+
+    rows = _representative_rows(block, X, _geometry_weight(model, sample_weight))
+    assert len(rows) == len(block.table) * len(_REGION_LEVELS)
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows), model.predict(rows), rtol=1e-13, atol=0.0
+    )
+    # Not decorative: without the interaction the same rows are far off, on the
+    # two levels that carry a curve of their own.
+    without = _predict_from_payload(payload, rows, with_interactions=False)
+    assert np.max(np.abs(without / model.predict(rows) - 1.0)) > 0.1
+
+
+def test_the_spline_categorical_ratio_to_the_base_level_is_exact_under_binned_mains():
+    """With a binned ``age`` the product is approximate, but a level-to-base ratio is not.
+
+    The binned main effect cancels in ``predict(level) / predict(base)`` at one
+    ``age``, leaving the categorical main effect and the interaction cell.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    (block,) = payload.interactions
+    rows = _representative_rows(block, X, _geometry_weight(model, sample_weight))
+    base_rows = rows.assign(region="A")
+    categorical = next(b for b in payload.main_effects if b.name == "region")
+    main = dict(zip(categorical.table["region"], categorical.table["Relativity"]))
+    expected = rows["region"].map(main).to_numpy(dtype=np.float64) / main["A"]
+    cells = _interaction_multiplier(block, rows) / _interaction_multiplier(block, base_rows)
+    np.testing.assert_allclose(
+        model.predict(rows) / model.predict(base_rows), expected * cells, rtol=1e-13, atol=0.0
+    )
+
+
+def test_the_spline_categorical_block_is_keyed_on_the_main_effects_bins():
+    """One covariate, one set of intervals: the main block and the interaction agree."""
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    main = next(b for b in payload.main_effects if b.name == "age")
+    (block,) = payload.interactions
+    assert list(block.table["age"]) == list(main.table["age"])
+    assert (block.table["A"] == 1.0).all()
+
+
+@pytest.mark.parametrize("continuous_kind", ["binned", "ppform"])
+@pytest.mark.parametrize("bin_strategy", ["exposure_quantile", "uniform", "exact"])
+def test_the_sheet_measures_the_spline_categorical_workbook(bin_strategy, continuous_kind):
+    """The impact sheet's maximum is how far the workbook the reader holds is off.
+
+    A row of the sheet for ``age:region``, and the joint maximum on it equal to
+    the reconstruction's own, under every banding strategy -- ``"exact"``
+    bands the interaction's levels with the main effect.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        payload = build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            n_bins=20,
+            impact_bins=(10,),
+            bin_strategy=bin_strategy,
+            continuous_kind=continuous_kind,
+        )
+    sheet = payload.discretization_impact
+    assert "age:region" in set(sheet["feature"])
+    exported = sheet[sheet["exported"] & (sheet["feature"] == "age:region")]
+    assert len(exported) == 1
+    # Cells, as a grid's rows are: every bin of every non-base level.
+    block = payload.interactions[0]
+    assert int(exported["actual_bins"].iloc[0]) == len(block.table) * (len(_REGION_LEVELS) - 1)
+
+    predicted = model.predict(X)
+    moved_pct = np.abs(_predict_from_payload(payload, X) / predicted - 1.0) * 100.0
+    assert float(exported["max_abs_prediction_change_pct"].iloc[0]) == pytest.approx(
+        float(moved_pct.max()), rel=1e-9
+    )
+    assert float(exported["mean_abs_prediction_change_pct"].iloc[0]) == pytest.approx(
+        float(moved_pct.mean()), rel=1e-9
+    )
+
+
+def test_a_level_unseen_in_training_is_rated_on_the_base_column():
+    """``unseen="base"`` routes a new level to the base curve; the table has no column for it.
+
+    The model rates the unseen level exactly as the base level, and the base
+    column of the table is ``1.0`` throughout, so a consumer who routes an
+    unlisted level to the base reproduces ``predict``.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit("base")
+    payload = _payload(model, X, y, sample_weight, "native", continuous_kind="ppform")
+    (block,) = payload.interactions
+    assert "Z" not in block.table.columns
+
+    new = pd.DataFrame({"age": [22.0, 41.5, 67.0], "region": ["Z", "Z", "Z"]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        predicted = model.predict(new)
+    routed = new.assign(region="A")
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, routed), predicted, rtol=1e-13, atol=0.0
+    )
+
+
+def test_the_spline_categorical_block_survives_the_workbook(tmp_path):
+    """Intervals and cells read back from the file are the payload's, and nothing moved."""
+    from openpyxl import load_workbook
+
+    model, X, y, sample_weight = _spline_categorical_fit()
+    path = model.export_rating_tables(
+        tmp_path / "tables.xlsx", X, y, sample_weight=sample_weight, n_bins=20
+    )
+    payload = _payload_for(model, X, y, sample_weight, n_bins=20)
+    (block,) = payload.interactions
+
+    ws = load_workbook(path, data_only=True)["Rating Tables"]
+    title_row = next(
+        row for row in range(1, ws.max_row + 1) if ws.cell(row=row, column=1).value == "age:region"
+    )
+    header = [ws.cell(row=title_row + 2, column=c).value for c in range(1, 2 + len(_REGION_LEVELS))]
+    assert header == ["age", *_REGION_LEVELS]
+    for i in range(len(block.table)):
+        row = [
+            ws.cell(row=title_row + 3 + i, column=c).value
+            for c in range(1, 2 + len(_REGION_LEVELS))
+        ]
+        assert row[0] == block.table["age"].iloc[i]
+        # The file keeps 16 significant digits where a binary64 can need 17.
+        np.testing.assert_allclose(
+            row[1:], block.table.iloc[i, 1:].to_numpy(dtype=np.float64), rtol=1e-15, atol=0.0
+        )
+    assert ws.cell(row=title_row + 3 + len(block.table), column=1).value is None
+
+
+def test_the_sweep_takes_a_spline_categorical_only_when_it_is_named():
+    """``features=None`` keeps reporting main effects and grids; the export names the term."""
+    model, X, y, sample_weight = _spline_categorical_fit()
+
+    default = model.discretization_impact(X, y, sample_weight=sample_weight, n_bins=20)
+    assert set(default.tables) == {"age"}
+    assert default.interaction_tables == {}
+
+    named = model.discretization_impact(
+        X, y, sample_weight=sample_weight, n_bins=20, features=["age:region"]
+    )
+    table = named.interaction_tables["age:region"]
+    assert list(table["level"].unique()) == ["B", "C", "D"]
+    assert len(table) == 20 * 3
+    np.testing.assert_allclose(table["relativity"], np.exp(table["log_relativity"]), rtol=1e-15)
+
+
+_BAND_ORDERS = {
+    "string labels": ["18-25", "26-35", "36-45", "46-55", "56+"],
+    "integer labels": [10, 20, 30, 40, 50],
+}
+
+
+@cache
+def _ordinal_spline_categorical_fit(kind: str):
+    """A spline-mode ``OrderedCategorical`` crossed with ``region``: a curve per region over the bands."""
+    order = _BAND_ORDERS[kind]
+    rng = np.random.default_rng(20261022)
+    n = 2000
+    X = pd.DataFrame({"band": rng.choice(order, n), "region": rng.choice(_REGION_LEVELS, n)})
+    position = X["band"].map({label: i for i, label in enumerate(order)}).to_numpy(dtype=np.float64)
+    region = X["region"].to_numpy()
+    eta = (
+        -1.2
+        + 0.15 * position
+        + 0.6 * (position - 2.0) / 2.0 * (region == "B")
+        - 0.4 * (position - 2.0) ** 2 / 4.0 * (region == "C")
+    )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(order=order, basis=Spline(kind="ps", n_knots=4)),
+            "region": Categorical(base="first"),
+        },
+        interactions=[("band", "region")],
+    )
+    model.fit(X, y)
+    return model, X, y, order
+
+
+@pytest.mark.parametrize("kind", list(_BAND_ORDERS))
+def test_an_ordinal_spline_parent_is_keyed_on_its_levels_and_reproduces_predict(kind):
+    """The bands of an ordinal parent are rows, as in its main block, and each cell is exact.
+
+    A spline-mode ``OrderedCategorical`` parent crosses its inner spline on the
+    level SCORES, not on the labels: binning the raw labels crashed on
+    ``"18-25"`` and, for ``10 ... 50``, read every cell at the top score.
+    """
+    model, X, y, order = _ordinal_spline_categorical_fit(kind)
+    payload = _payload(model, X, y, None, "native")
+
+    (block,) = payload.interactions
+    main = next(b for b in payload.main_effects if b.name == "band")
+    assert block.kind == "cells"
+    assert list(block.table.columns) == ["band", *_REGION_LEVELS]
+    assert list(block.table["band"]) == list(main.table["band"])
+    assert [str(key) for key in block.table["band"]] == [str(label) for label in order]
+    assert (block.table["A"] == 1.0).all()
+
+    rows = pd.DataFrame(
+        {
+            "band": np.repeat(order, len(_REGION_LEVELS)),
+            "region": np.tile(_REGION_LEVELS, len(order)),
+        }
+    )
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows),
+        model.predict(rows),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
+    without = _predict_from_payload(payload, rows, with_interactions=False)
+    assert np.max(np.abs(without / model.predict(rows) - 1.0)) > 0.1
+    # Nothing is binned, so the sheet has no row for it.
+    assert "band:region" not in set(payload.discretization_impact["feature"])
+
+
+@pytest.mark.parametrize("kind", list(_BAND_ORDERS))
+def test_the_sheet_measures_no_binning_change_for_an_ordinal_spline_parent(kind):
+    """Named in ``features``, the term is replaced by itself: no row moves, and the cells are the block's."""
+    model, X, y, order = _ordinal_spline_categorical_fit(kind)
+    payload = _payload(model, X, y, None, "native")
+    (block,) = payload.interactions
+
+    result = model.discretization_impact(X, y, n_bins=20, features=["band:region"])
+    assert result.metrics["max_abs_prediction_change_pct"] == pytest.approx(0.0, abs=1e-9)
+    assert result.metrics["deviance_change"] == pytest.approx(0.0, abs=1e-9)
+    table = result.interaction_tables["band:region"]
+    assert len(table) == len(order) * (len(_REGION_LEVELS) - 1)
+    for level in _REGION_LEVELS[1:]:
+        np.testing.assert_array_equal(
+            table.loc[table["level"] == level, "relativity"].to_numpy(),
+            block.table[level].to_numpy(),
+        )
+
+
+@cache
+def _collision_fit():
+    """Region levels ``age``, ``B`` and ``C`` under a base that is neither first nor last."""
+    rng = np.random.default_rng(20261023)
+    n = 900
+    X = pd.DataFrame(
+        {"age": rng.uniform(18.0, 80.0, n), "region": rng.choice(["age", "B", "C"], n)}
+    )
+    age = X["age"].to_numpy()
+    region = X["region"].to_numpy()
+    eta = (
+        -1.3
+        + 0.01 * age
+        + 0.5 * np.sin(age / 9.0) * (region == "age")
+        - 0.003 * (age - 50.0) * (region == "B")
+    )
+    y = np.random.default_rng(1).poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="C")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_a_level_named_like_the_spline_parent_keeps_its_own_column():
+    """The key column and a level's column are two columns, and the base level is the all-1.0 one wherever it falls."""
+    model, X, y = _collision_fit()
+    payload = _payload(model, X, y, None, "native", continuous_kind="ppform")
+
+    (block,) = payload.interactions
+    # The key column, then the levels in the model's own order (capitals sort
+    # before lowercase, so the level named like the parent comes last).
+    levels = [str(level) for level in model._specs["region"]._levels]
+    assert list(block.table.columns) == ["age (axis 1)", *levels]
+    assert all(_INTERVAL.match(str(key)) for key in block.table["age (axis 1)"])
+    assert (block.table["C"] == 1.0).all()
+    assert not (block.table["age"] == 1.0).all()
+
+    rows = _representative_rows(block, X, _geometry_weight(model, np.ones(len(X))))
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, rows), model.predict(rows), rtol=1e-13, atol=0.0
+    )
+
+
+@cache
+def _header_collision_fit():
+    """Levels ``A``, ``age`` and ``age (axis 1)``: the first fallback header is a level too."""
+    rng = np.random.default_rng(20261024)
+    n = 900
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18.0, 80.0, n),
+            "region": rng.choice(["A", "age", "age (axis 1)"], n),
+        }
+    )
+    age = X["age"].to_numpy()
+    region = X["region"].to_numpy()
+    eta = (
+        -1.3
+        + 0.01 * age
+        + 0.5 * np.sin(age / 9.0) * (region == "age")
+        - 0.003 * (age - 50.0) * (region == "age (axis 1)")
+    )
+    y = np.random.default_rng(1).poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="A")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_the_key_column_header_is_absent_from_the_complete_level_set():
+    """One rule: the parent's name, suffixed until no level carries it."""
+    model, X, y = _header_collision_fit()
+    payload = _payload(model, X, y, None, "native", continuous_kind="ppform")
+
+    (block,) = payload.interactions
+    levels = [str(level) for level in model._specs["region"]._levels]
+    assert levels == ["A", "age", "age (axis 1)"]
+    assert list(block.table.columns) == ["age (axis 1) (axis 1)", *levels]
+    assert all(_INTERVAL.match(str(key)) for key in block.table["age (axis 1) (axis 1)"])
+    # Every level kept its own column: the base all 1.0, the others curves.
+    assert (block.table["A"] == 1.0).all()
+    assert not (block.table["age"] == 1.0).all()
+    assert not (block.table["age (axis 1)"] == 1.0).all()
+
+
+@pytest.mark.parametrize("bin_strategy", ["exposure_quantile", "exact"])
+def test_levels_sharing_one_text_are_refused_rather_than_merged(monkeypatch, bin_strategy):
+    """Base ``1`` and level ``"1"`` would share the column ``"1"``: the export refuses
+    by name, on every route and before any banding pass."""
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    rng = np.random.default_rng(20261023)
+    n = 600
+    region = np.tile(np.array([1, "1", "A"], dtype=object), n // 3)
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "region": region})
+    age = X["age"].to_numpy()
+    eta = -1.0 + 0.01 * age + 0.7 * np.sin(age / 9.0) * (region == "1")
+    y = np.random.default_rng(1).poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="first")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    assert list(model._specs["region"]._levels) == [1, "1", "A"]
+
+    def banded(*args):
+        raise AssertionError("a band pass ran before the refusal")
+
+    monkeypatch.setattr(exact_banding, "exact_bands", banded)
+    with pytest.raises(ValueError, match=r"levels of 'region' share the text \['1'\]"):
+        build_rating_table_payload(
+            model, X, y, n_bins=150, continuous_kind="ppform", bin_strategy=bin_strategy
+        )
+
+
+def test_the_bin_representatives_need_the_frame_only_for_a_spline_parent():
+    """Without a frame a spline parent is refused by name; an ordinal parent has no bins to read."""
+    from superglm.export.rating_tables import _interaction_blocks
+
+    model, *_ = _spline_categorical_fit()
+    with pytest.raises(TypeError, match=r"'age:region'.*pass frame="):
+        _interaction_blocks(model, 3)
+
+    ordinal, *_ = _ordinal_spline_categorical_fit("string labels")
+    (block,) = _interaction_blocks(ordinal, 3)
+    assert block.kind == "cells"
+
+
+def _payload_for(model, X, y, sample_weight, **kwargs):
+    return build_rating_table_payload(model, X, y, sample_weight=sample_weight, **kwargs)
+
+
+# ── Exact bands for a spline-by-categorical interaction ──────────────────────
+
+_LIMIT = float(np.log1p(0.10))
+
+
+def _level_curve_se(model, x: np.ndarray, interaction: str, *, with_main: bool) -> dict:
+    """Standard error of each non-base level's curve at ``x``, from the term's own scores.
+
+    Independent of the library's design rows: the term is linear in its fitted
+    coefficients, so its row for a level at ``x`` is its score at each unit
+    coefficient vector, and the covariance is the model's.  ``with_main`` adds
+    the covariate's main-effect row and the covariance between the two terms,
+    which is the error of the level's TOTAL log relativity.
+    """
+    covariance, active = model._coef_covariance
+    ispec = model._interaction_specs[interaction]
+    covariate = ispec.parent_names[0]
+    own = np.concatenate(
+        [np.arange(g.start, g.end) for g in active if g.feature_name == interaction]
+    )
+    main = np.concatenate(
+        [np.arange(g.start, g.end) for g in active if g.feature_name == covariate]
+    )
+    unit = np.eye(len(own))
+    errors = {}
+    for level in ispec._non_base:
+        labels = np.full(len(x), level, dtype=object)
+        rows = np.column_stack([ispec.score(x, labels, e) for e in unit])
+        indices = own
+        if with_main:
+            rows = np.hstack([model._specs[covariate].transform(x), rows])
+            indices = np.concatenate([main, own])
+        block = covariance[np.ix_(indices, indices)]
+        errors[level] = np.sqrt(np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0))
+    return errors
+
+
+def _banding_error(model, payload, X: pd.DataFrame, **fixed) -> np.ndarray:
+    """``log(workbook / predict)`` per row of ``X``: how far the bands put the level's curve.
+
+    Every factor but the banded ones is exact, so this is the band factors'
+    error at the row, summed over the main effect and the interaction.
+    """
+    rows = X.assign(**fixed)
+    return np.log(_predict_from_payload(payload, rows)) - np.log(model.predict(rows))
+
+
+def _exact_workbook(model, X, y, sample_weight, **kwargs):
+    """The payload under ``bin_strategy="exact"`` and the warnings it raised."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        payload = build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            n_bins=kwargs.pop("n_bins", 150),
+            impact_bins=kwargs.pop("impact_bins", (20,)),
+            bin_strategy="exact",
+            **kwargs,
+        )
+    return payload, [w for w in caught if "could not keep" in str(w.message)]
+
+
+def test_under_exact_the_main_block_and_the_interaction_carry_the_same_intervals():
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, widened = _exact_workbook(model, X, y, sample_weight)
+    assert not widened
+
+    main = next(b for b in payload.main_effects if b.name == "age")
+    (block,) = payload.interactions
+    assert block.kind == "spline_cells"
+    assert list(block.table["age"]) == list(main.table["age"])
+    assert (block.table["A"] == 1.0).all()
+
+
+def test_exact_bands_hold_every_levels_total_relativity_within_its_limit():
+    """Each level's workbook relativity is within ``min(SE, log 1.1)`` of the model's, everywhere.
+
+    The error of a level's row is the band factors' error on its TOTAL curve,
+    main effect plus deviation, since every other factor is exact; the limit is
+    that curve's own standard error, computed here from the term's scores and
+    the model's covariance and not from the library's rows.  The base level's
+    curve is the main effect.
+    """
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, widened = _exact_workbook(model, X, y, sample_weight)
+    assert not widened
+
+    age = X["age"].to_numpy()
+    limit = _level_curve_se(model, age, "age:region", with_main=True)
+    limit["A"] = _term_se_at(model, "age", age)
+    for level in _REGION_LEVELS:
+        error = _banding_error(model, payload, X, region=level)
+        tolerance = np.minimum(limit[level], _LIMIT)
+        # The oracle's standard error is the same quadratic form summed in another
+        # order, within a relative 1e-6 (the stacked rows are nearly collinear on
+        # this unpenalised fit); the rest is the exp and log of the comparison.
+        excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+        assert excess.max() <= 64 * _EPS, f"level {level}: {excess.max():.3g} past its limit"
+
+
+def test_a_cell_is_the_bands_weighted_mean_of_the_levels_deviation():
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, _ = _exact_workbook(model, X, y, sample_weight)
+    (block,) = payload.interactions
+
+    ispec = model._interaction_specs["age:region"]
+    beta = np.concatenate(
+        [model.result.beta[g.sl] for g in model._groups if g.feature_name == "age:region"]
+    )
+    age = X["age"].to_numpy()
+    edges = _printed_edges(block)
+    band = np.clip(np.digitize(age, edges), 1, len(edges) - 1) - 1
+    mass = np.bincount(band, weights=_geometry_weight(model, sample_weight))
+    for level in ispec._non_base:
+        deviation = ispec.score(age, np.full(len(age), level, dtype=object), beta)
+        mean = np.bincount(band, weights=_geometry_weight(model, sample_weight) * deviation) / mass
+        np.testing.assert_allclose(np.log(block.table[level].to_numpy()), mean, rtol=0, atol=1e-12)
+
+
+def test_with_an_exact_main_effect_the_bands_hold_the_deviations_within_their_limit():
+    """``continuous_kind="ppform"`` leaves nothing for the main effect to carry: the cells are the curves."""
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, widened = _exact_workbook(model, X, y, sample_weight, continuous_kind="ppform")
+    assert not widened
+
+    (block,) = payload.interactions
+    assert block.kind == "spline_cells"
+    age = X["age"].to_numpy()
+    limit = _level_curve_se(model, age, "age:region", with_main=False)
+    for level in _REGION_LEVELS:
+        error = _banding_error(model, payload, X, region=level)
+        if level == "A":
+            assert np.abs(error).max() <= 1e-12
+            continue
+        tolerance = np.minimum(limit[level], _LIMIT)
+        excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+        assert excess.max() <= 1e-12, f"level {level}: {excess.max():.3g} past its limit"
+
+
+def test_a_cap_too_small_for_the_shared_bands_widens_them_once():
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, widened = _exact_workbook(model, X, y, sample_weight, n_bins=6, impact_bins=())
+    assert len(widened) == 1
+    message = str(widened[0].message)
+    assert "'age'" in message and "'age:region'" in message
+    main = next(b for b in payload.main_effects if b.name == "age")
+    assert len(main.table) <= 6
+
+    result = model.discretization_impact(
+        X,
+        y,
+        sample_weight=sample_weight,
+        n_bins=6,
+        bin_strategy="exact",
+        features=["age:region", "age"],
+    )
+    factors = {result.band_diagnostics[name]["tolerance_factor"] for name in ("age", "age:region")}
+    assert len(factors) == 1
+    (factor,) = factors
+    assert factor > 1.0
+    assert f"{factor:.3g}x" in message
+    assert result.band_diagnostics["age"]["bands"] == result.band_diagnostics["age:region"]["bands"]
+
+    # Without a binned main effect the interaction is warned about alone.
+    _, widened = _exact_workbook(
+        model, X, y, sample_weight, n_bins=6, impact_bins=(), continuous_kind="ppform"
+    )
+    assert len(widened) == 1
+    assert "'age:region'" in str(widened[0].message)
+    assert "'age'" not in str(widened[0].message)
+
+
+def test_the_sheet_reports_the_shared_limit_on_the_interaction_row():
+    model, X, y, sample_weight = _spline_categorical_fit()
+    payload, _ = _exact_workbook(model, X, y, sample_weight, n_bins=12, impact_bins=(8,))
+    sheet = payload.discretization_impact
+    for n_bins, rows in sheet.groupby("n_bins"):
+        rows = rows.set_index("feature")
+        for column in ("band_tolerance_factor",):
+            assert rows.loc["age:region", column] == rows.loc["age", column]
+        assert rows.loc["age:region", "band_worst_error"] >= 0.0
+        assert rows.loc["age:region", "band_worst_error_se"] >= 0.0
+        assert set(rows.index) == {"age", "age:region"}
+
+
+def test_the_levels_standard_errors_are_those_of_the_stacked_rows():
+    model, *_ = _spline_categorical_fit()
+    ispec = model._interaction_specs["age:region"]
+    x = np.linspace(20.0, 78.0, 41)
+    for with_main in (True, False):
+        se, live = _spline_categorical_se(model, "age", "age:region", ispec, x, with_main=with_main)
+        assert live.all()
+        expected = _level_curve_se(model, x, "age:region", with_main=with_main)
+        for j, level in enumerate(ispec._non_base):
+            np.testing.assert_allclose(se[:, j], expected[level], rtol=1e-6, atol=1e-9)
+
+
+def test_a_level_the_fit_dropped_has_the_base_curve(monkeypatch):
+    """Its deviation is zero, so it adds no curve: the main effect's error, or none without one."""
+    model, *_ = _spline_categorical_fit()
+    ispec = model._interaction_specs["age:region"]
+    covariance, active = model._coef_covariance
+    gone = next(g for g in active if g.name == "age:region[B]")
+    keep = np.setdiff1d(np.arange(covariance.shape[0]), np.arange(gone.start, gone.end))
+    shifted = [
+        dataclasses.replace(g, start=g.start - gone.size, end=g.end - gone.size)
+        if g.start >= gone.end
+        else g
+        for g in active
+        if g.name != gone.name
+    ]
+    monkeypatch.setitem(
+        model.__dict__, "_coef_covariance", (covariance[np.ix_(keep, keep)], shifted)
+    )
+
+    x = np.linspace(20.0, 78.0, 41)
+    with_main, live = _spline_categorical_se(model, "age", "age:region", ispec, x, with_main=True)
+    assert live.tolist() == [False, True, True]
+    np.testing.assert_allclose(with_main[:, 0], _term_se_at(model, "age", x), rtol=1e-9)
+    alone, _ = _spline_categorical_se(model, "age", "age:region", ispec, x, with_main=False)
+    assert (alone[:, 0] == 0.0).all()
+
+
+@cache
+def _two_interaction_fit():
+    """``age`` crossed with ``region`` and with ``fuel``: two interactions on one covariate."""
+    rng = np.random.default_rng(20261024)
+    n = 1800
+    X = pd.DataFrame(
+        {
+            "age": rng.uniform(18.0, 80.0, n),
+            "region": rng.choice(["A", "B", "C"], n),
+            "fuel": rng.choice(["D", "P"], n),
+        }
+    )
+    age = X["age"].to_numpy()
+    eta = (
+        -1.4
+        + 0.01 * age
+        + 0.4 * np.sin(age / 9.0) * (X["region"] == "C").to_numpy()
+        + 0.012 * (age - 50.0) * (X["fuel"] == "P").to_numpy()
+    )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "age": Spline(n_knots=6),
+            "region": Categorical(base="first"),
+            "fuel": Categorical(base="first"),
+        },
+        interactions=[("age", "region"), ("age", "fuel")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_every_spline_categorical_on_a_covariate_joins_its_bands():
+    model, X, y = _two_interaction_fit()
+    assert banding_companions(model) == {"age": ["age:region", "age:fuel"]}
+    payload, widened = _exact_workbook(model, X, y, None)
+    assert not widened
+
+    main = next(b for b in payload.main_effects if b.name == "age")
+    assert [b.name for b in payload.interactions] == ["age:region", "age:fuel"]
+    for block in payload.interactions:
+        assert list(block.table["age"]) == list(main.table["age"])
+
+    age = X["age"].to_numpy()
+    cases = [
+        ("age:region", "region", {"fuel": "D"}, ["A", "B", "C"]),
+        ("age:fuel", "fuel", {"region": "A"}, ["D", "P"]),
+    ]
+    for interaction, column, fixed, levels in cases:
+        limit = _level_curve_se(model, age, interaction, with_main=True)
+        limit[levels[0]] = _term_se_at(model, "age", age)
+        for level in levels:
+            error = _banding_error(model, payload, X, **{column: level}, **fixed)
+            tolerance = np.minimum(limit[level], _LIMIT)
+            excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+            assert excess.max() <= 64 * _EPS, f"{interaction}[{level}]: past its limit"
+
+
+def _combination_se(
+    model, x: np.ndarray, region: str, fuel: str, *, with_main: bool = True
+) -> np.ndarray:
+    """Standard error of ``main + f_region + g_fuel`` at ``x``, from the terms' own scores.
+
+    With ``with_main=False`` the main effect's rows and coefficients are left
+    out: the standard error of ``f_region + g_fuel`` alone.
+
+    The same construction as ``_level_curve_se``, with the two levels' rows
+    stacked beside the main effect's: the row of a term at ``x`` is its score
+    at each unit coefficient vector, and the covariance is the model's.
+    """
+    covariance, active = model._coef_covariance
+
+    def indices(feature: str) -> np.ndarray:
+        return np.concatenate(
+            [np.arange(g.start, g.end) for g in active if g.feature_name == feature]
+        )
+
+    blocks = [model._specs["age"].transform(x)] if with_main else []
+    chosen = [indices("age")] if with_main else []
+    for interaction, level in (("age:region", region), ("age:fuel", fuel)):
+        ispec = model._interaction_specs[interaction]
+        labels = np.full(len(x), level, dtype=object)
+        own = indices(interaction)
+        blocks.append(np.column_stack([ispec.score(x, labels, e) for e in np.eye(len(own))]))
+        chosen.append(own)
+    rows = np.hstack(blocks)
+    selected = np.concatenate(chosen)
+    block = covariance[np.ix_(selected, selected)]
+    return np.sqrt(np.maximum(np.sum((rows @ block) * rows, axis=1), 0.0))
+
+
+def test_a_row_in_a_level_of_each_of_two_interactions_holds_its_own_limit():
+    """``main + f_C + g_P`` is bounded by ``min(SE of that sum, log 1.1)``, not by the limits' sum."""
+    model, X, y = _two_interaction_fit()
+    payload, widened = _exact_workbook(model, X, y, None)
+    assert not widened
+
+    age = X["age"].to_numpy()
+    for region in ("B", "C"):
+        error = _banding_error(model, payload, X, region=region, fuel="P")
+        tolerance = np.minimum(_combination_se(model, age, region, "P"), _LIMIT)
+        excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+        assert excess.max() <= 64 * _EPS, f"region {region}, fuel P: {excess.max():.3g} past"
+
+    # The sheet's interaction rows report the combination too: the worst relative
+    # error they state is at least the one this combination's rows show.
+    result = model.discretization_impact(
+        X, y, bin_strategy="exact", features=["age:region", "age:fuel", "age"]
+    )
+    worst = max(
+        np.abs(np.expm1(_banding_error(model, payload, X, region=r, fuel="P"))).max()
+        for r in ("B", "C")
+    )
+    for name in ("age:region", "age:fuel"):
+        assert result.band_diagnostics[name]["worst_error"] >= worst * (1.0 - 1e-9)
+
+
+def test_without_a_banded_main_effect_a_combination_holds_the_limit_of_its_deviations(monkeypatch):
+    """``continuous_kind="ppform"`` exports ``age`` exactly: the combination is ``f_C + g_P`` alone.
+
+    The rows are held within ``min(band_se * SE(f + g), log 1.1)``, and the
+    banding is handed that limit: a limit from the standard error of
+    ``main + f + g`` is another number, and a tighter one is held by rows that
+    the correct limit would also have held.
+    """
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    model, X, y = _two_interaction_fit()
+    age = X["age"].to_numpy()
+    captured = []
+    real = exact_banding.exact_bands
+
+    def spy(s, w, tol, max_bands):
+        captured.append(np.array(tol))
+        return real(s, w, tol, max_bands)
+
+    monkeypatch.setattr(exact_banding, "exact_bands", spy)
+    band_se = 0.2
+    payload, widened = _exact_workbook(model, X, y, None, continuous_kind="ppform", band_se=band_se)
+    assert not widened
+    assert [b.name for b in payload.interactions] == ["age:region", "age:fuel"]
+    assert [b.kind for b in payload.main_effects].count("continuous_ppform") == 1
+
+    # The standard-error term must set a limit, or the cap alone would satisfy
+    # the comparisons below; and the two standard errors must differ.
+    binds = []
+    for region in ("B", "C"):
+        limit = _combination_se(model, age, region, "P", with_main=False)
+        assert not np.allclose(limit, _combination_se(model, age, region, "P"), rtol=1e-3)
+        binds.append(np.any(band_se * limit < _LIMIT))
+        error = _banding_error(model, payload, X, region=region, fuel="P")
+        tolerance = np.minimum(band_se * limit, _LIMIT)
+        excess = np.abs(error) - tolerance * (1.0 + 1e-6)
+        assert excess.max() <= 64 * _EPS, f"region {region}, fuel P: {excess.max():.3g} past"
+    assert any(binds)
+
+    # The joint banding's own tolerances: columns are region B and C, fuel P,
+    # then the combinations (B, P) and (C, P); no main effect among them.
+    values = np.unique(age)
+    # Every banding of the export (the table's, the impact bin count's) gets them.
+    assert captured
+    for tol in captured:
+        assert tol.shape == (len(values), 5)
+        for column, region in ((3, "B"), (4, "C")):
+            stacked = band_se * _combination_se(model, values, region, "P", with_main=False)
+            np.testing.assert_allclose(
+                tol[:, column], np.minimum(stacked, _LIMIT), rtol=1e-6, atol=0.0
+            )
+
+
+def test_a_combinations_standard_error_is_that_of_the_stacked_rows():
+    """``Var(main + f_C + g_P)`` from the covariance of all three coefficient blocks together."""
+    from superglm.diagnostics.discretize import _TotalCurveSE
+
+    model, *_ = _two_interaction_fit()
+    x = np.linspace(20.0, 78.0, 41)
+    terms = [(name, model._interaction_specs[name]) for name in ("age:region", "age:fuel")]
+    curves = _TotalCurveSE(model, "age", terms, x, with_main=True)
+    assert all(curves.live.values())
+    for region in ("B", "C"):
+        se = curves.se([("age:region", region), ("age:fuel", "P")])
+        np.testing.assert_allclose(se, _combination_se(model, x, region, "P"), rtol=1e-6, atol=1e-9)
+
+
+def test_only_the_level_combinations_present_in_the_data_are_banded(monkeypatch):
+    """A combination no training row has is not a curve: its rows are not priced."""
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    model, X, y = _two_interaction_fit()
+    shapes = []
+    real = exact_banding.exact_bands
+
+    def spy(s, w, tol, max_bands):
+        shapes.append(np.shape(s)[1])
+        return real(s, w, tol, max_bands)
+
+    monkeypatch.setattr(exact_banding, "exact_bands", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.discretization_impact(
+            X, y, bin_strategy="exact", features=["age:region", "age:fuel", "age"]
+        )
+    # The main effect, region B and C, fuel P, and the two combinations of a
+    # region level with fuel P.
+    assert shapes == [1 + 2 + 1 + 2]
+
+    present = ~((X["region"] == "C") & (X["fuel"] == "P")).to_numpy()
+    shapes.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.discretization_impact(
+            X[present].reset_index(drop=True),
+            y[present],
+            bin_strategy="exact",
+            features=["age:region", "age:fuel", "age"],
+        )
+    assert shapes == [1 + 2 + 1 + 1]
+
+
+def test_the_joint_banding_receives_each_combinations_own_tolerance(monkeypatch):
+    """A combination column's tolerance is ``min(band_se * SE(main + f + g), log(1 + max_error))``."""
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    model, X, y = _two_interaction_fit()
+    captured = []
+    real = exact_banding.exact_bands
+
+    def spy(s, w, tol, max_bands):
+        captured.append(np.array(tol))
+        return real(s, w, tol, max_bands)
+
+    monkeypatch.setattr(exact_banding, "exact_bands", spy)
+    band_se, band_max_error = 0.5, 10.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.discretization_impact(
+            X,
+            y,
+            bin_strategy="exact",
+            features=["age:region", "age:fuel", "age"],
+            band_se=band_se,
+            band_max_error=band_max_error,
+        )
+    (tol,) = captured
+    values = np.unique(X["age"].to_numpy())
+    cap = np.log1p(band_max_error)
+    # Columns: the main effect, region B and C, fuel P, then the combinations
+    # (region B, fuel P) and (region C, fuel P) in the order np.unique sorts them.
+    assert tol.shape == (len(values), 6)
+    bound = []
+    for column, region in ((4, "B"), (5, "C")):
+        stacked = band_se * _combination_se(model, values, region, "P")
+        # The oracle sums the same quadratic form in another order, which agrees
+        # only within a relative 1e-6 on this nearly collinear unpenalised fit (as
+        # above); a standard error from one level alone is off by about 10%.
+        np.testing.assert_allclose(tol[:, column], np.minimum(stacked, cap), rtol=1e-6, atol=0.0)
+        bound.append(np.any(stacked < cap))
+    # The standard-error term must be what sets a tolerance, or the cap alone
+    # would satisfy the comparison above.
+    assert any(bound)
+
+
+@cache
+def _dropped_levels_fit():
+    """A strong main effect and a factor the penalty removes: every interaction level is dropped."""
+    rng = np.random.default_rng(7)
+    n = 1200
+    x = rng.uniform(0.0, 1.0, n)
+    X = pd.DataFrame({"x": x, "g": rng.choice(["a", "b", "c"], n)})
+    y = np.round(np.exp(0.4 + 2.0 * x**2)).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=10.0,
+        features={"x": Spline(n_knots=6), "g": Categorical(base="first")},
+        interactions=[("x", "g")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_dropped_levels_report_the_band_error_of_their_total_relativity():
+    """A dropped level's total is the main curve, so the interaction row reports its error."""
+    model, X, y = _dropped_levels_fit()
+    _, active = model._coef_covariance
+    assert not any(g.feature_name == "x:g" for g in active)
+    assert any(g.feature_name == "x" for g in active)
+
+    result = model.discretization_impact(X, y, bin_strategy="exact", features=["x:g", "x"])
+    main = result.band_diagnostics["x"]
+    row = result.band_diagnostics["x:g"]
+    assert main["worst_error"] > 0.0
+    # Every level's total relativity IS the main curve, banded on the main
+    # effect's own factors: the same error, the same standard-error multiple.
+    assert row["worst_error"] == main["worst_error"]
+    assert row["worst_error_se"] == main["worst_error_se"]
+
+    payload, _ = _exact_workbook(model, X, y, None)
+    error = _banding_error(model, payload, X, g="c")
+    assert row["worst_error"] == pytest.approx(np.abs(np.expm1(error)).max(), rel=1e-6)
+
+
+def test_an_ordinal_parent_has_no_bands_to_share():
+    model, X, y, order = _ordinal_spline_categorical_fit("string labels")
+    assert banding_companions(model) == {}
+    exact, widened = _exact_workbook(model, X, y, None)
+    assert not widened
+    (block,) = exact.interactions
+    (default,) = _payload(model, X, y, None, "native").interactions
+    assert block.kind == "cells"
+    pd.testing.assert_frame_equal(block.table, default.table)

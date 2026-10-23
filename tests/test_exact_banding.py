@@ -155,6 +155,24 @@ def test_zero_tolerances_that_cannot_merge_are_refused():
         exact_bands(np.arange(6.0), np.ones(6), np.zeros(6), max_bands=3)
 
 
+def test_zero_tolerances_that_block_every_factor_are_refused(monkeypatch):
+    # Values 0 and 2 have zero tolerance, so no factor merges them, while the
+    # positive tolerance between them sends the search to its bound, 2 * 2 / 1.
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    passes = []
+    counted = exact_banding._fits
+
+    def count(*args):
+        passes.append(args[3])
+        return counted(*args)
+
+    monkeypatch.setattr(exact_banding, "_fits", count)
+    with pytest.raises(ValueError, match="a double can hold"):
+        exact_bands(np.array([0.0, 1.0, 2.0]), np.ones(3), np.array([0.0, 1.0, 0.0]), max_bands=1)
+    assert passes == [2.0, 4.0]  # the one probe below the bound, then the bound
+
+
 def test_rounding_slack_cannot_admit_a_band_that_breaks_a_tolerance():
     # Two values 7 ulps apart near 100, tolerances of 4.2 ulps, the weight on the
     # upper one: their mean lands 7 ulps from the lower value, past its 4.2. A
@@ -189,10 +207,23 @@ def test_a_plateau_merges_whatever_its_tolerances():
         (np.array([0.0, 1.0, 2.0]), np.array([1e-308, 1.0, 1e-308]), 1e308),
     ],
 )
-def test_the_widening_search_survives_factors_near_the_top_of_double(s, tol, least):
+def test_the_widening_search_survives_factors_near_the_top_of_double(monkeypatch, s, tol, least):
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    passes = []
+    counted = exact_banding._fits
+
+    def count(*args):
+        passes.append(args[3])
+        return counted(*args)
+
+    monkeypatch.setattr(exact_banding, "_fits", count)
     result = exact_bands(s, np.ones(len(s)), tol, max_bands=1)
     assert result.starts.tolist() == [0]
     assert result.tolerance_factor == pytest.approx(least, rel=2e-6)
+    # Eleven probes below the largest double and one at the bound, then the
+    # geometric bisection to 1e-6 from [1, 2**1024): ceil(log2(709.79 / 1e-6)) = 30.
+    assert len(passes) <= 12 + 30
 
 
 def test_weights_near_the_largest_double_do_not_overflow_the_mean():
@@ -1167,7 +1198,7 @@ def test_exact_tables_export_the_certified_factors(banded_model, monkeypatch):
         df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
     )
     np.testing.assert_array_equal(
-        result.tables["age"]["log_relativity"].to_numpy(), certified[0].factors
+        result.tables["age"]["log_relativity"].to_numpy(), certified[0].factors[:, 0]
     )
 
 
@@ -1188,3 +1219,116 @@ def test_a_band_se_near_the_largest_double_leaves_the_relative_cap_binding(
         return result.tables["age"]
 
     pd.testing.assert_frame_equal(table(np.finfo(np.float64).max), table(1e300))
+
+
+# ── Several curves on one set of bands ───────────────────────────────────────
+
+
+def _brute_force_joint(s, w, tol):
+    """(band count, error summed over curves) least over every banding, and its starts."""
+    n = len(s)
+    best = None
+    for r in range(n):
+        for cuts in itertools.combinations(range(1, n), r):
+            starts = (0, *cuts)
+            ends = (*cuts, n)
+            total = 0.0
+            feasible = True
+            for a, b in zip(starts, ends, strict=True):
+                for c in range(s.shape[1]):
+                    mean = np.average(s[a:b, c], weights=w[a:b])
+                    if b - a > 1 and np.any(np.abs(s[a:b, c] - mean) > tol[a:b, c]):
+                        feasible = False
+                    total += float(np.sum(w[a:b] * (s[a:b, c] - mean) ** 2))
+            if feasible and (best is None or (len(starts), total) < best[:2]):
+                best = (len(starts), total, list(starts))
+    return best
+
+
+def test_several_curves_match_exhaustive_search_on_random_curves():
+    rng = np.random.default_rng(2)
+    for _ in range(150):
+        n = int(rng.integers(1, 10))
+        m = int(rng.integers(1, 4))
+        s = np.cumsum(rng.normal(0.0, 0.3, (n, m)), axis=0)
+        w = rng.uniform(0.1, 3.0, n)
+        tol = rng.uniform(0.0, 0.4, (n, m))
+        tol[rng.random((n, m)) < 0.15] = 0.0
+        result = exact_bands(s, w, tol, max_bands=n)
+        count, sse, starts = _brute_force_joint(s, w, tol)
+        assert result.starts.tolist() == starts
+        assert result.factors.shape == (count, m)
+        # The single-curve argument (see the test above) over n m terms: the
+        # exhaustive total has at most gamma_(n m + 3) <= gamma_30 relative error
+        # (four roundings a term, then n m - 1 additions) and the banding's, a sum
+        # per curve and one fsum, gamma_(n + 4) <= gamma_13, so they differ by under
+        # 43 u to first order times the larger total, which sum(w s^2) bounds.  64 u
+        # covers that and the second-order terms.  Nothing here nears underflow.
+        assert abs(result.sse - sse) <= 64 * _UNIT_ROUNDOFF * float(np.sum(w[:, None] * s * s))
+
+
+def test_one_curve_gives_the_same_bands_flat_or_as_a_column():
+    rng = np.random.default_rng(3)
+    s = np.cumsum(rng.normal(0.0, 0.05, 40))
+    w = rng.uniform(0.1, 3.0, 40)
+    tol = rng.uniform(0.01, 0.1, 40)
+    flat = exact_bands(s, w, tol, max_bands=40)
+    column = exact_bands(s[:, None], w, tol[:, None], max_bands=40)
+    assert flat.factors.shape == (len(flat.starts),)
+    assert column.factors.shape == (len(flat.starts), 1)
+    assert column.starts.tolist() == flat.starts.tolist()
+    np.testing.assert_array_equal(column.factors[:, 0], flat.factors)
+    assert column.sse == flat.sse
+    # The same curve twice is one curve's bands twice over, and twice its error.
+    twice = exact_bands(np.column_stack([s, s]), w, np.column_stack([tol, tol]), max_bands=40)
+    assert twice.starts.tolist() == flat.starts.tolist()
+    np.testing.assert_array_equal(twice.factors, np.column_stack([flat.factors, flat.factors]))
+    assert twice.sse == pytest.approx(2.0 * flat.sse, rel=1e-12)
+
+
+def test_every_curve_is_within_its_tolerance_of_its_band_factor():
+    rng = np.random.default_rng(4)
+    n, m = 80, 4
+    s = np.cumsum(rng.normal(0.0, 0.05, (n, m)), axis=0)
+    w = rng.uniform(0.1, 3.0, n)
+    tol = rng.uniform(0.01, 0.1, (n, m))
+    result = exact_bands(s, w, tol, max_bands=n)
+    for c in range(m):
+        assert _meets_exactly(s[:, c], result.starts, result.factors[:, c], tol[:, c])
+        # A banding that serves every curve serves each one, so no curve alone
+        # needs more bands than the curves do together.
+        alone = exact_bands(s[:, c], w, tol[:, c], max_bands=n)
+        assert len(alone.starts) <= len(result.starts)
+
+
+def test_a_cut_one_curve_needs_is_made_for_all():
+    s = np.array([[0.0, 0.0], [0.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+    tol = np.full((4, 2), 0.1)
+    assert exact_bands(s, np.ones(4), tol, max_bands=4).starts.tolist() == [0, 2]
+    assert exact_bands(s[:, :1], np.ones(4), tol[:, :1], max_bands=4).starts.tolist() == [0]
+
+
+def test_a_band_can_be_feasible_while_a_part_of_it_is_not():
+    # The mean is 1 over all three values, inside [0.8, 1.2]; over the first two it
+    # is 2/3, outside the same window.  The mean test is not hereditary, so a start
+    # is not dropped because a shorter band from it failed.
+    s = np.array([0.0, 2.0, 2.0])
+    w = np.array([2.0, 1.0, 1.0])
+    tol = np.full(3, 1.2)
+    assert exact_bands(s, w, tol, max_bands=3).starts.tolist() == [0]
+    assert exact_bands(s[:2], w[:2], tol[:2], max_bands=2).starts.tolist() == [0, 1]
+
+
+def test_several_curves_widen_by_one_common_factor():
+    x = np.linspace(0.0, 1.0, 60)
+    s = np.column_stack([x**2, np.sin(3.0 * x)])
+    w = np.ones(60)
+    tol = np.full((60, 2), 0.01)
+    result = exact_bands(s, w, tol, max_bands=5)
+    assert len(result.starts) <= 5
+    assert result.tolerance_factor > 1.0
+    tighter = result.tolerance_factor / (1.0 + 2e-6)
+    assert len(_fewest_then_least(s, w, tighter * tol)[0]) > 5
+    for c in range(2):
+        widened = result.tolerance_factor * tol[:, c]
+        assert _meets_exactly(s[:, c], result.starts, result.factors[:, c], widened)

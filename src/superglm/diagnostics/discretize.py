@@ -11,9 +11,10 @@ rating-table block is sampled on — and reports the impact.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import signature
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -48,7 +49,16 @@ class DiscretizationResult:
         interchangeable: a main effect is binned into intervals and a
         continuous-by-continuous interaction is SAMPLED at grid nodes, so it
         has axis values where a bin has a half-open interval, and one row per
-        cell rather than per bin.
+        cell rather than per bin.  A spline-by-categorical interaction, named in
+        ``features``, has one row per bin and non-base level: ``bin_from``,
+        ``bin_to``, ``level``, ``relativity`` (the level's curve relative to the
+        base level's at the bin's representative covariate) and
+        ``log_relativity``.  Under ``bin_strategy="exact"`` the bins are the
+        main effect's exact bands and a cell is the band's weighted mean of the
+        level's deviation, not a point value (see ``band_diagnostics``).  When
+        the spline parent is an ordered categorical
+        the table is exact, so the rows are its levels: ``parent_level``,
+        ``level``, ``relativity`` and ``log_relativity``, and nothing moves.
     predictions : NDArray
         Predictions using discretized (binned) curves.
     original_predictions : NDArray
@@ -65,7 +75,17 @@ class DiscretizationResult:
         geometry mass) and ``worst_error_se`` (the largest gap in standard
         errors).  Empty for the other strategies.  The standard errors are the
         term's own under its centring, so they narrow where the curve crosses
-        its weighted mean and bands can bunch there.
+        its weighted mean and bands can bunch there.  A spline-by-categorical
+        interaction named in ``features`` has an entry too, for its levels'
+        curves on the shared bands: each level's total relativity ``main +
+        deviation`` when the main effect is binned in the same call, the
+        level's deviation alone when it is not.  With several such
+        interactions on the covariate, the entry also covers each
+        combination of levels it takes part in that occurs among the rows of
+        positive weight, and when a level was dropped, the main effect's
+        curve, which is that level's total.  The worst and mean are taken
+        over all of those curves.  The covariate's entries share one
+        ``bands`` and one ``tolerance_factor``.
     """
 
     tables: dict[str, pd.DataFrame]
@@ -271,23 +291,175 @@ def _term_se_at(model: SuperGLM, name: str, x: NDArray) -> NDArray:
     return np.sqrt(np.maximum(np.sum(q * basis, axis=1), 0.0))
 
 
-def _exact_edges(
+@dataclass(frozen=True)
+class _ExactBands:
+    """One exact banding of a covariate, shared by everything that is read on its bands.
+
+    ``edges`` are the bands' edges, ``main_factors`` the main effect's band
+    factors in log (``None`` when the main effect is not banded in this call),
+    ``cells[name]`` an interaction's log cell for each band and non-base level
+    (``bands x levels``), and ``diagnostics`` the report of the main effect
+    and of each interaction, keyed by their names.
+    """
+
+    edges: NDArray
+    main_factors: NDArray | None
+    cells: dict[str, NDArray]
+    diagnostics: dict[str, dict[str, float]]
+
+
+class _TotalCurveSE:
+    """Standard errors of curves built from a covariate's main effect and its levels' deviations.
+
+    A curve is the main effect's log relativity (with ``with_main``) plus the
+    deviation of one level of each of several spline-by-categorical terms on
+    the covariate, and its variance is that of the stacked row
+    ``[a(x), b_1(x), ...]`` against the covariance of the main effect's and
+    those levels' coefficients together,
+    ``Var main + 2 Cov(main, f) + Var f + ...``; without the main effect the
+    curve is the deviations alone.  The rows are the ones the main effect's
+    own standard error (``_term_se_at``) and the terms' scores use, and the
+    covariance is the model's, so a curve's error is the error of the number
+    the workbook approximates.  Native centering, as ``_term_se_at`` has it.
+
+    ``terms`` are the interactions as ``(name, spec)``.  The covariance block
+    over the main effect and every level the fit kept is taken once, and
+    :meth:`se` reads any selection of ``(name, level)`` pairs from it.  A
+    level the fit dropped has no group in the covariance: its deviation is
+    exactly zero, so it is not ``live`` and a curve that selects it is the
+    selection without it.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        covariate: str,
+        terms: list[tuple[str, Any]],
+        x: NDArray,
+        *,
+        with_main: bool,
+    ) -> None:
+        from superglm.inference._term_helpers import _active_spline_columns
+        from superglm.inference.covariance import covariance_selected_block
+
+        covariance, active_groups = model._coef_covariance
+        self.n = len(x)
+        self.live: dict[tuple[str, str], bool] = {}
+        level_indices: dict[tuple[str, str], NDArray] = {}
+        self._rows: dict[tuple[str, str], NDArray] = {}
+        for interaction, ispec in terms:
+            by_name = {g.name: g for g in active_groups if g.feature_name == interaction}
+            for level, level_rows in ispec.level_design_rows(x):
+                group = by_name.get(f"{interaction}[{level}]")
+                self.live[(interaction, level)] = group is not None
+                if group is not None:
+                    level_indices[(interaction, level)] = np.arange(group.start, group.end)
+                    self._rows[(interaction, level)] = level_rows
+        main_indices = np.empty(0, dtype=np.intp)
+        self._main_rows = np.zeros((self.n, 0), dtype=np.float64)
+        if with_main:
+            main_groups = [ag for ag in active_groups if ag.feature_name == covariate]
+            if main_groups:
+                main_indices = np.concatenate([np.arange(ag.start, ag.end) for ag in main_groups])
+                feature_groups = [g for g in model._groups if g.feature_name == covariate]
+                columns = _active_spline_columns(covariate, feature_groups, main_groups)
+                self._main_rows = np.asarray(
+                    model._specs[covariate].transform(x), dtype=np.float64
+                )[:, columns]
+        selected = np.unique(np.concatenate([main_indices, *level_indices.values()]))
+        self._block = covariance_selected_block(covariance, selected) if selected.size else None
+        self._main_position = np.searchsorted(selected, main_indices)
+        self._position = {
+            key: np.searchsorted(selected, indices) for key, indices in level_indices.items()
+        }
+
+    def se(self, selection: list[tuple[str, str]]) -> NDArray:
+        """Standard error at ``x`` of the curve for the ``(name, level)`` pairs in ``selection``."""
+        keys = [key for key in selection if self.live[key]]
+        if self._block is None:
+            return np.zeros(self.n, dtype=np.float64)
+        position = np.concatenate([self._main_position, *(self._position[k] for k in keys)])
+        rows = np.hstack([self._main_rows, *(self._rows[k] for k in keys)])
+        q = rows @ self._block[np.ix_(position, position)]
+        return np.sqrt(np.maximum(np.sum(q * rows, axis=1), 0.0))
+
+
+def _spline_categorical_se(
+    model: Any,
+    covariate: str,
+    interaction: str,
+    ispec,
+    x: NDArray,
+    *,
+    with_main: bool,
+) -> tuple[NDArray, NDArray]:
+    """Standard error, at ``x``, of each level's curve of a spline-by-categorical term.
+
+    With ``with_main`` the curve is the level's total log relativity
+    ``main(x) + f_L(x)`` (:class:`_TotalCurveSE`), without it the deviation
+    ``f_L(x)`` alone.
+
+    Returns ``(se, live)``, ``se`` being ``(len(x), levels)`` and ``live`` the
+    levels that carry a group in the covariance.  A level the fit dropped has
+    the base curve: its deviation is exactly zero, so its error is the main
+    effect's (zero without the main effect).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    curves = _TotalCurveSE(model, covariate, [(interaction, ispec)], x, with_main=with_main)
+    se = np.zeros((len(x), len(ispec._non_base)), dtype=np.float64)
+    live = np.zeros(len(ispec._non_base), dtype=bool)
+    for j, level in enumerate(ispec._non_base):
+        se[:, j] = curves.se([(interaction, level)])
+        live[j] = curves.live[(interaction, level)]
+    return se, live
+
+
+def _joint_exact_bands(
     model: SuperGLM,
     name: str,
     x_raw: NDArray,
-    log_rel_smooth: NDArray,
+    main_rows: NDArray | None,
     geometry_weight: NDArray,
+    companions: list[tuple[str, Any, NDArray, Callable[[], NDArray]]],
     *,
     max_bands: int,
     band_se: float,
     band_max_error: float,
-) -> tuple[NDArray, dict[str, float], NDArray]:
-    """Edges, diagnostics and certified factors of the term's distinct weighted values.
+) -> _ExactBands:
+    """Bands of the covariate ``name`` that hold every curve read on them within its limit.
 
     Each band starts at its smallest value and the last edge is the largest
     value, the convention the other strategies use, so ``np.digitize`` with the
     final clip assigns every row.  A single-value last band therefore has equal
     ``bin_from`` and ``bin_to``.
+
+    ``main_rows`` is the main effect's log relativity at each row, or ``None``
+    when the main effect is not binned (an exact piecewise form exports it),
+    and ``companions`` are the spline-by-categorical interactions on the
+    covariate, as ``(name, spec, coefficients, labels)``, ``labels()`` giving the
+    categorical's value at each row (read only to find which level combinations
+    occur, which takes two companions).  The curves banded together are those a
+    consumer of the table reads through its bands: a binned main effect and,
+    for each level of each companion, the level's total log relativity
+    ``main + deviation``, whose band factor is the weighted mean with the
+    main effect's own weights, so the main effect's factor plus the level's
+    cell, the mean of its deviation, is that factor and the published product
+    stays exact in the factors.  Without a binned main effect the curves are
+    the deviations.  A row in a non-base level of two companions at once is
+    priced at ``main + f + g``, which the single-level curves do not bound
+    (their limits add), so each combination of levels that occurs among the
+    rows of positive weight is banded too, as the sum of the main effect and
+    its levels' deviations; the combination's factor, a weighted mean, is the
+    sum of the factors already published (means are linear), so these curves
+    only constrain the bands and carry no cell.  Each curve keeps the limit
+    ``min(band_se * SE, log(1 + band_max_error))`` with its own standard error
+    (``_TotalCurveSE``), the fewest bands that hold all of them are chosen,
+    then the least weighted squared error summed over the curves
+    (``exact_bands``), and a cap on ``max_bands`` widens every limit by one
+    common factor.  A level the fit dropped has the main effect's curve
+    already, or a zero deviation, and adds no curve of its own: the main
+    effect's error is reported on its companion's row, being that level's
+    error.
 
     A term carrying a post-fit shape repair, or a model carrying editor
     edits, is refused: its standard errors would not be the published
@@ -304,13 +476,15 @@ def _exact_edges(
             "before them, which bin_strategy='exact' would band on. Refit the model, or "
             "use another bin_strategy."
         )
-    if _shape_repaired(model, name):
-        raise ValueError(
-            f"Feature {name!r} carries a post-fit shape repair, so its standard errors "
-            "would come from the unconstrained fit's covariance around constrained "
-            "coefficients, which bin_strategy='exact' would band on. Fit the constraint "
-            "(Constraint.fit.*) or use another bin_strategy."
-        )
+    banded_terms = ([name] if main_rows is not None else []) + [c[0] for c in companions]
+    for term in banded_terms:
+        if _shape_repaired(model, term):
+            raise ValueError(
+                f"Feature {term!r} carries a post-fit shape repair, so its standard errors "
+                "would come from the unconstrained fit's covariance around constrained "
+                "coefficients, which bin_strategy='exact' would band on. Fit the constraint "
+                "(Constraint.fit.*) or use another bin_strategy."
+            )
     positive = geometry_weight > 0.0
     values, inverse = np.unique(x_raw[positive], return_inverse=True)
     if len(values) > MAX_EXACT_VALUES:
@@ -319,13 +493,80 @@ def _exact_edges(
             f"supports at most {MAX_EXACT_VALUES}. Round the feature or use another bin_strategy."
         )
     weight = np.bincount(inverse, weights=geometry_weight[positive], minlength=len(values))
-    curve = np.empty(len(values), dtype=np.float64)
-    curve[inverse] = log_rel_smooth[positive]
-    se = _term_se_at(model, name, values)
+
+    curves: list[NDArray] = []
+    errors: list[NDArray] = []
+    # Where each banded term's curves sit among the columns, and for a companion
+    # which of its levels they are.
+    columns: dict[str, NDArray] = {}
+    live_levels: dict[str, NDArray] = {}
+    main_curve: NDArray | None = None
+    if main_rows is not None:
+        main_curve = np.empty(len(values), dtype=np.float64)
+        main_curve[inverse] = main_rows[positive]
+        curves.append(main_curve[:, None])
+        errors.append(_term_se_at(model, name, values)[:, None])
+        columns[name] = np.array([0])
+    width = len(curves)
+    standard_errors = _TotalCurveSE(
+        model,
+        name,
+        [(companion, ispec) for companion, ispec, _, _ in companions],
+        values,
+        with_main=main_curve is not None,
+    )
+    deviations: dict[str, NDArray] = {}
+    for companion, ispec, beta, _ in companions:
+        deviation = deviations[companion] = ispec.level_log_deviations(values, beta)
+        kept = [
+            j for j, level in enumerate(ispec._non_base) if standard_errors.live[(companion, level)]
+        ]
+        live_levels[companion] = np.array(kept, dtype=np.intp)
+        total = deviation if main_curve is None else main_curve[:, None] + deviation
+        curves.append(total[:, live_levels[companion]])
+        errors.append(
+            np.column_stack([standard_errors.se([(companion, ispec._non_base[j])]) for j in kept])
+            if kept
+            else np.zeros((len(values), 0))
+        )
+        columns[companion] = width + np.arange(len(kept))
+        width += len(kept)
+    # The level combinations present among the positive-weight rows, over the
+    # levels the fit kept (a dropped level is the base: no deviation).
+    combinations = np.empty((0, len(companions)), dtype=np.intp)
+    if len(companions) > 1:
+        codes = np.column_stack(
+            [
+                np.where(np.isin(index, live_levels[companion]), index, -1)
+                for companion, index in (
+                    (companion, ispec.level_index(labels()))
+                    for companion, ispec, _, labels in companions
+                )
+            ]
+        )[positive]
+        combinations = np.unique(codes[(codes >= 0).sum(axis=1) > 1], axis=0)
+    combination_columns: dict[str, list[int]] = {companion: [] for companion, *_ in companions}
+    for combination in combinations:
+        total = np.zeros(len(values)) if main_curve is None else main_curve.copy()
+        picked: list[tuple[str, str]] = []
+        for (companion, ispec, _, _), code in zip(companions, combination, strict=True):
+            if code >= 0:
+                total += deviations[companion][:, code]
+                picked.append((companion, ispec._non_base[code]))
+                combination_columns[companion].append(width)
+        curves.append(total[:, None])
+        errors.append(standard_errors.se(picked)[:, None])
+        width += 1
+    if width == 0:
+        # Every level of every companion was dropped: nothing to certify, one band.
+        curves.append(np.zeros((len(values), 1)))
+        errors.append(np.zeros((len(values), 1)))
+    all_curves = np.hstack(curves)
+    all_errors = np.hstack(errors)
     # A band_se near the largest double overflows once SE passes 1; that inf is
     # above the finite relative cap, so the minimum is the cap either way.
     with np.errstate(over="ignore"):
-        tol = np.minimum(band_se * se, np.log1p(band_max_error))
+        tol = np.minimum(band_se * all_errors, np.log1p(band_max_error))
     # Only the weights' ratios set the bands, and exact_bands divides by the
     # largest itself, so this changes no band; it keeps the banding's squared
     # error, which no export reads, from refusing weights near the largest double.
@@ -335,21 +576,70 @@ def _exact_edges(
     # the span rather than a zero weight.
     with np.errstate(under="ignore"):
         normalised = weight / weight.max()
-    banding = exact_bands(curve, normalised if normalised.min() > 0.0 else weight, tol, max_bands)
+    banding = exact_bands(
+        all_curves, normalised if normalised.min() > 0.0 else weight, tol, max_bands
+    )
     edges = np.append(values[banding.starts], values[-1])
     ends = np.append(banding.starts[1:], len(values))
     # Band minus curve, so the relative error is the band factor's against the curve's.
-    gap = np.repeat(banding.factors, ends - banding.starts) - curve
-    relative = np.abs(np.expm1(gap))
-    in_se = np.divide(np.abs(gap), se, out=np.zeros_like(gap), where=se > 0.0)
-    diagnostics: dict[str, float] = {
-        "bands": len(banding.starts),
-        "tolerance_factor": banding.tolerance_factor,
-        "worst_error": float(relative.max()),
-        "worst_error_se": float(in_se.max()),
-        "mean_error": float(np.average(relative, weights=normalised)),
-    }
-    return edges, diagnostics, banding.factors
+    gap = np.repeat(banding.factors, ends - banding.starts, axis=0) - all_curves
+
+    def report(term_columns: NDArray) -> dict[str, float]:
+        if term_columns.size == 0:
+            return {
+                "bands": len(banding.starts),
+                "tolerance_factor": banding.tolerance_factor,
+                "worst_error": 0.0,
+                "worst_error_se": 0.0,
+                "mean_error": 0.0,
+            }
+        term_gap = gap[:, term_columns]
+        term_se = all_errors[:, term_columns]
+        relative = np.abs(np.expm1(term_gap))
+        in_se = np.divide(
+            np.abs(term_gap), term_se, out=np.zeros_like(term_gap), where=term_se > 0.0
+        )
+        mean = [np.average(relative[:, c], weights=normalised) for c in range(relative.shape[1])]
+        return {
+            "bands": len(banding.starts),
+            "tolerance_factor": banding.tolerance_factor,
+            "worst_error": float(relative.max()),
+            "worst_error_se": float(in_se.max()),
+            "mean_error": float(np.mean(mean)),
+        }
+
+    # What each term's row reports: its own curves; for an interaction, also the
+    # main effect's curve when the fit dropped a level (that level's total
+    # relativity is the main curve, banded in the main effect's own column) and
+    # every combination of levels it takes part in.
+    reported = dict(columns)
+    for companion, ispec, _, _ in companions:
+        dropped = main_curve is not None and len(live_levels[companion]) < len(ispec._non_base)
+        reported[companion] = np.concatenate(
+            [
+                columns[companion],
+                np.array([0] if dropped else [], dtype=np.intp),
+                np.array(combination_columns[companion], dtype=np.intp),
+            ]
+        ).astype(np.intp)
+
+    cells: dict[str, NDArray] = {}
+    for companion, ispec, _, _ in companions:
+        # The level's factor less the main effect's, so that the main factor plus
+        # the cell is the level's certified factor; the deviation's own factor
+        # when the main effect is exact.
+        factors = banding.factors[:, columns[companion]]
+        if main_curve is not None:
+            factors = factors - banding.factors[:, [0]]
+        cell = np.zeros((len(banding.starts), len(ispec._non_base)))
+        cell[:, live_levels[companion]] = factors
+        cells[companion] = cell
+    return _ExactBands(
+        edges=edges,
+        main_factors=banding.factors[:, 0] if main_curve is not None else None,
+        cells=cells,
+        diagnostics={term: report(reported[term]) for term in banded_terms},
+    )
 
 
 def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
@@ -599,6 +889,150 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     return raw
 
 
+def is_spline_categorical(ispec) -> bool:
+    """Whether ``ispec`` is a ``SplineCategorical``, by EXACT type.
+
+    Exact for the reason ``_grid_reconstruction`` matches exact types: a
+    subclass can override ``reconstruct`` to return a surface, and the exporter
+    then ships it as a grid on the contract.  Both the exporter and the sweep
+    ask this, so the two cannot route one term differently.
+    """
+    from superglm.features.interaction import SplineCategorical
+
+    return type(ispec) is SplineCategorical
+
+
+@dataclass(frozen=True)
+class SplineCategoricalBins:
+    """A per-level spline deviation tabulated on one set of bins.
+
+    ``log_deviation[b, j]`` is non-base level ``levels[j]``'s curve, relative
+    to the base level's, at ``representatives[b]``, the point a consumer's row
+    in bin ``b`` is rated at.
+    """
+
+    edges: NDArray
+    representatives: NDArray
+    levels: list[str]
+    log_deviation: NDArray
+
+    def row_representatives(self, x: NDArray) -> NDArray:
+        """The representative of the bin each ``x`` falls in, as the export's lookup finds it."""
+        n_bins = len(self.representatives)
+        index = np.clip(np.digitize(x, self.edges, right=False), 1, n_bins) - 1
+        return self.representatives[index]
+
+
+def spline_categorical_bins(
+    ispec,
+    beta: NDArray,
+    x: NDArray,
+    geometry_weight: NDArray,
+    n_bins: int,
+    bin_strategy: str,
+) -> SplineCategoricalBins:
+    """Bin a ``SplineCategorical``'s covariate and tabulate every level's curve.
+
+    Shared by the rating-table export and the impact sweep, so the table a
+    workbook ships and the table the sheet measures are one computation.
+
+    The bins are the main effect's: the same covariate, geometry weights,
+    ``n_bins`` and strategy through the same ``_compute_edges``, so a binned
+    main effect on this covariate and this block carry identical intervals.
+    ``bin_strategy="exact"`` has no edges to compute from the covariate alone:
+    it bands curves against their standard errors, jointly with the main
+    effect, which ``discretization_impact`` does (``_joint_exact_bands``) and
+    ``banded_cells`` reads back.
+
+    A bin is evaluated at its geometry-weighted mean covariate (its midpoint
+    when it holds no mass), which is a POINT, not an average of the curve over
+    the bin: the table is then the model itself at the representative, for
+    every level, whether or not the level has rows in that bin.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    edges = _compute_edges(x, geometry_weight, n_bins, bin_strategy)
+    n_edge_bins = len(edges) - 1
+    index = np.clip(np.digitize(x, edges, right=False), 1, n_edge_bins) - 1
+
+    # Scaled by the largest weight, which only ratios see, as the main effect's
+    # bin average is: a weight near the largest double would overflow w * x.
+    peak = float(np.max(geometry_weight))
+    scaled = geometry_weight / peak if peak > 0.0 else geometry_weight
+    mass = np.bincount(index, weights=scaled, minlength=n_edge_bins)
+    moment = np.bincount(index, weights=scaled * x, minlength=n_edge_bins)
+    midpoint = 0.5 * (edges[:-1] + edges[1:])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(mass > 0.0, moment / mass, midpoint)
+    representatives = np.clip(mean, edges[:-1], edges[1:])
+
+    return SplineCategoricalBins(
+        edges=edges,
+        representatives=representatives,
+        levels=[str(level) for level in ispec._non_base],
+        log_deviation=ispec.level_log_deviations(representatives, beta),
+    )
+
+
+def has_ordinal_parent(model, ispec) -> bool:
+    """Whether a ``SplineCategorical``'s spline parent is an ``OrderedCategorical``.
+
+    Its main effect is exported as one row per level, so the interaction is
+    keyed on the same levels rather than binned on a covariate.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    return isinstance(model._specs[ispec.parent_names[0]], OrderedCategorical)
+
+
+def banding_companions(model, names=None) -> dict[str, list[str]]:
+    """The spline-by-categorical interactions banded with each spline covariate under ``"exact"``.
+
+    Keyed by the covariate, in interaction order, and limited to ``names``
+    when given.  A term with an ordinal parent is tabulated per level and has
+    no bands to share.  The impact sweep and the rating-table export both ask
+    this, so they cannot band one covariate against different sets of curves.
+    """
+    companions: dict[str, list[str]] = {}
+    for name in model._interaction_order:
+        ispec = model._interaction_specs[name]
+        if names is not None and name not in names:
+            continue
+        if is_spline_categorical(ispec) and not has_ordinal_parent(model, ispec):
+            companions.setdefault(ispec.parent_names[0], []).append(name)
+    return companions
+
+
+def banded_cells(table: pd.DataFrame, n_levels: int) -> tuple[NDArray, NDArray]:
+    """Edges and log cells, one row per band and column per level, of a banded interaction table.
+
+    Reads back what ``discretization_impact`` returned in ``interaction_tables``
+    for a spline-by-categorical term (rows are bin-major, ``n_levels`` to a
+    bin), so the workbook ships the cells the sheet measured.
+    """
+    edges = np.append(
+        table["bin_from"].to_numpy(dtype=np.float64)[::n_levels],
+        table["bin_to"].to_numpy(dtype=np.float64)[-1],
+    )
+    return edges, table["log_relativity"].to_numpy(dtype=np.float64).reshape(-1, n_levels)
+
+
+def ordinal_parent_cells(model, ispec, beta: NDArray) -> tuple[list, NDArray]:
+    """Every level's curve at each level of an ordinal parent, exactly.
+
+    The ordinal parent's main block lists its levels, and a row is rated at its
+    level's score, so a cell is the level's curve at that score and nothing is
+    binned.  The labels come from the main effect and the scores through the
+    resolver ``predict`` uses.  ``log_deviation[i, j]`` is non-base level
+    ``ispec._non_base[j]`` at ``labels[i]``.
+    """
+    from superglm.features.ordered_categorical import resolve_interaction_parent
+
+    parent = ispec.parent_names[0]
+    labels = list(model.term_inference(parent, with_se=False).levels)
+    _, scores = resolve_interaction_parent(model._specs[parent], np.asarray(labels, dtype=object))
+    return labels, ispec.level_log_deviations(scores, beta)
+
+
 _INTERACTION_TABLE_RESERVED_COLUMNS = ("relativity", "log_relativity", "n_obs", "sample_weight")
 
 
@@ -824,13 +1258,24 @@ def discretization_impact(
         ``min(band_se * SE, log(1 + band_max_error))`` of the curve, then the
         least weighted squared error, with ``n_bins`` as the maximum band count.
         When that is too few, every tolerance is widened by the least factor
-        that fits and ``band_diagnostics`` reports it.
+        that fits and ``band_diagnostics`` reports it.  A spline-by-categorical
+        interaction named in ``features`` is banded WITH its covariate's main
+        effect: one set of bands holds the main effect and each level's total
+        relativity (main effect plus the level's deviation, with its own
+        standard error) within their limits, and the cells are the bands'
+        weighted means of the deviations.  Where the main effect is not named
+        the bands hold the deviations themselves.  With several such
+        interactions on one covariate, every combination of their levels that
+        occurs among the rows of positive weight is held within its limit too.
         Geometry weight means replication mass under the frequency contract and
         unit physical-row mass for Tweedie.
     features : list[str], optional
         Subset of names to discretize: spline/polynomial features, and
         continuous-by-continuous interaction names as they appear in
-        ``model._interaction_order``. None means every one of both.
+        ``model._interaction_order``. None means every one of both. A
+        spline-by-categorical interaction is discretized only when named: its
+        rating-table block bins the spline covariate, and the sweep measures
+        that table.
     band_se : float
         Under ``"exact"``: the tolerance in pointwise standard errors of the
         term's log relativity (native centering). Default 1.0.
@@ -901,6 +1346,10 @@ def discretization_impact(
     # and by the same ``n_bins``, and leaving it out understates the answer.
     target_features: list[str] = []
     target_interactions: list[str] = []
+    # Named explicitly only: ``features=None`` keeps meaning the main effects and
+    # the sampled grids, so a model carrying one of these reports what it did
+    # before.  The rating-table export names the ones it ships.
+    target_spline_categorical: list[str] = []
     if features is not None:
         # De-duplicated, order preserved. A repeated name used to add its
         # replacement delta once per occurrence while writing one table, so
@@ -916,12 +1365,17 @@ def discretization_impact(
                     )
                 target_features.append(name)
             elif name in model._interaction_specs:
-                if _grid_for(name) is None:
+                if _grid_for(name) is not None:
+                    target_interactions.append(name)
+                elif is_spline_categorical(model._interaction_specs[name]):
+                    target_spline_categorical.append(name)
+                else:
                     raise ValueError(
                         f"Interaction '{name}' is not continuous-by-continuous — "
-                        "only interactions exported as a sampled grid can be discretized."
+                        "only interactions exported as a sampled grid, or a "
+                        "spline-by-categorical one exported as a binned table, can be "
+                        "discretized."
                     )
-                target_interactions.append(name)
             else:
                 raise ValueError(f"Unknown feature: {name}")
     else:
@@ -939,7 +1393,7 @@ def discretization_impact(
             target_features
             + [
                 parent
-                for name in target_interactions
+                for name in (*target_interactions, *target_spline_categorical)
                 for parent in model._interaction_specs[name].parent_names
             ]
         )
@@ -955,6 +1409,32 @@ def discretization_impact(
     tables: dict[str, pd.DataFrame] = {}
     band_diagnostics: dict[str, dict[str, float]] = {}
     total_delta = np.zeros(n)
+    # Under "exact" a covariate's main effect and the spline-by-categorical
+    # interactions on it are read on ONE set of bands, so the table keys them
+    # alike and every curve it approximates keeps its limit (_joint_exact_bands).
+    companions = (
+        banding_companions(model, target_spline_categorical) if bin_strategy == "exact" else {}
+    )
+    joint_bands: dict[str, _ExactBands] = {}
+
+    def _companion_terms(covariate: str) -> list[tuple[str, Any, NDArray, Callable[[], NDArray]]]:
+        from superglm.features.ordered_categorical import resolve_interaction_parent_of
+
+        def labels_of(term: str) -> Callable[[], NDArray]:
+            # The categorical's value at each row, resolved as the term's scores are.
+            def labels() -> NDArray:
+                spec = interaction_terms[term]["spec"]
+                _, right_spec = interaction_terms[term].get("parent_specs", (None, None))
+                return resolve_interaction_parent_of(
+                    spec, right_spec, frame.column_array(spec.parent_names[1])
+                )[1]
+
+            return labels
+
+        return [
+            (term, interaction_terms[term]["spec"], _interaction_beta(term), labels_of(term))
+            for term in companions.get(covariate, [])
+        ]
 
     for name in target_features:
         x_raw = frame.column_array(name, dtype=np.float64)
@@ -971,16 +1451,19 @@ def discretization_impact(
 
         # Compute bin edges using the selected strategy
         if bin_strategy == "exact":
-            edges, band_diagnostics[name], exact_factors = _exact_edges(
+            banded = joint_bands[name] = _joint_exact_bands(
                 model,
                 name,
                 x_raw,
                 log_rel_smooth,
                 geometry_weight,
+                _companion_terms(name),
                 max_bands=n_bins,
                 band_se=band_se,
                 band_max_error=band_max_error,
             )
+            edges, exact_factors = banded.edges, banded.main_factors
+            band_diagnostics.update(banded.diagnostics)
         else:
             edges = _compute_edges(x_raw, geometry_weight, n_bins, bin_strategy)
             exact_factors = None
@@ -1118,6 +1601,86 @@ def discretization_impact(
                 "log_relativity": surface.ravel(),
                 "n_obs": np.bincount(cell, minlength=n_cells),
                 "sample_weight": np.bincount(cell, weights=evaluation_weight, minlength=n_cells),
+            }
+        )
+
+    # A spline-by-categorical interaction is BINNED on its spline covariate, one
+    # factor per bin and level.  Under the other strategies a row is rated at its
+    # bin's representative on its own level's curve: scoring the term at that
+    # representative is the replacement -- the same arithmetic ``predict`` runs,
+    # at the point the exported table is tabulated at.
+    for name in target_spline_categorical:
+        term = interaction_terms[name]
+        beta_term = _interaction_beta(name)
+        if has_ordinal_parent(model, term["spec"]):
+            # Tabulated per level of the ordinal parent, at its scores: the
+            # table is the term itself, so the replacement moves nothing.
+            ordinal_labels, log_deviation = ordinal_parent_cells(model, term["spec"], beta_term)
+            non_base = [str(level) for level in term["spec"]._non_base]
+            interaction_tables[name] = pd.DataFrame(
+                {
+                    "parent_level": np.repeat(
+                        np.asarray(ordinal_labels, dtype=object), len(non_base)
+                    ),
+                    "level": np.tile(non_base, len(ordinal_labels)),
+                    "relativity": np.exp(log_deviation).ravel(),
+                    "log_relativity": log_deviation.ravel(),
+                }
+            )
+            continue
+        log_rel_exact = np.asarray(
+            base._score_prediction_term_local_exact(term, frame, beta_term),
+            dtype=np.float64,
+        ).ravel()
+        ispec = term["spec"]
+        parent1, parent2 = term["parent_names"]
+        left_spec, right_spec = term.get("parent_specs", (None, None))
+        _, values1 = resolve_interaction_parent_of(ispec, left_spec, frame.column_array(parent1))
+        _, labels = resolve_interaction_parent_of(ispec, right_spec, frame.column_array(parent2))
+        x_values = np.asarray(values1, dtype=np.float64)
+        if bin_strategy == "exact":
+            # A band carries the weighted mean of the level's deviation, the
+            # cell that keeps main + cell the level's certified band factor,
+            # not the curve at a point.  The bands are the main effect's: they
+            # were solved with it above, or here when the main effect is not
+            # binned in this call and the deviations are banded alone.
+            if parent1 not in joint_bands:
+                banded = joint_bands[parent1] = _joint_exact_bands(
+                    model,
+                    parent1,
+                    x_values,
+                    None,
+                    geometry_weight,
+                    _companion_terms(parent1),
+                    max_bands=n_bins,
+                    band_se=band_se,
+                    band_max_error=band_max_error,
+                )
+                band_diagnostics.update(banded.diagnostics)
+            edges = joint_bands[parent1].edges
+            log_deviation = joint_bands[parent1].cells[name]
+            band = np.clip(np.digitize(x_values, edges, right=False), 1, len(edges) - 1) - 1
+            total_delta += ispec.banded_deviation(band, labels, log_deviation) - log_rel_exact
+            levels = [str(level) for level in ispec._non_base]
+        else:
+            bins = spline_categorical_bins(
+                ispec, beta_term, x_values, geometry_weight, n_bins, bin_strategy
+            )
+            total_delta += (
+                base._score_interaction(
+                    ispec, bins.row_representatives(x_values), labels, beta_term
+                )
+                - log_rel_exact
+            )
+            edges, log_deviation, levels = bins.edges, bins.log_deviation, bins.levels
+        n_levels = len(levels)
+        interaction_tables[name] = pd.DataFrame(
+            {
+                "bin_from": np.repeat(edges[:-1], n_levels),
+                "bin_to": np.repeat(edges[1:], n_levels),
+                "level": np.tile(levels, len(edges) - 1),
+                "relativity": np.exp(log_deviation).ravel(),
+                "log_relativity": log_deviation.ravel(),
             }
         )
 

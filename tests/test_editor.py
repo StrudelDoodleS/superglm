@@ -5965,6 +5965,47 @@ def test_widget_http_download_export_excel_without_training_data_is_400():
     assert "retained fit data" in payload["error"]
 
 
+def test_excel_export_carries_a_spline_categorical_interaction_block():
+    """The export dialog reaches the same builder, which now tabulates this term."""
+    import io
+
+    from openpyxl import load_workbook
+
+    rng = np.random.default_rng(31)
+    n = 400
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "region": rng.choice(["A", "B", "C"], n)})
+    eta = (
+        -1.0
+        + 0.01 * X["age"].to_numpy()
+        + 0.4 * np.sin(X["age"].to_numpy() / 9.0) * (X["region"].to_numpy() == "B")
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=5), "region": Categorical(base="first")},
+        interactions=[("age", "region")],
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["age"], train_data=(X, y))
+    widget = session.widget()
+    try:
+        result = widget._export_bytes("xlsx")
+    finally:
+        widget.close()
+
+    ws = load_workbook(io.BytesIO(result.data), data_only=True)["Rating Tables"]
+    title_row = next(
+        r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "age:region"
+    )
+    assert [ws.cell(row=title_row + 2, column=c).value for c in range(1, 5)] == [
+        "age",
+        "A",
+        "B",
+        "C",
+    ]
+
+
 def test_widget_export_file_writes_joblib_and_excel(editor_log_link_model, tmp_path):
     import joblib
     from openpyxl import load_workbook
