@@ -6,6 +6,18 @@ import numpy as np
 import pytest
 
 from superglm.distributional.solver import _ordinary_packing as packing
+from superglm.distributional.solver._global_moments import _warmup_global_moments
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _closed_writers():
+    """Close the writers before any test calls them, as every production plan does.
+
+    An open dispatcher compiles one specialisation per operand layout it sees; a
+    worker that ran only some layouts then holds several equally good matches
+    for another, and numba refuses the call as ambiguous.
+    """
+    _warmup_global_moments()
 
 
 def _matrix(values, layout):
@@ -117,7 +129,7 @@ def test_empty_and_partial_block_shapes_keep_adjacent_scratch_untouched(width, r
 
 
 def test_warmup_covers_actual_layout_and_readonly_signatures_without_fastmath():
-    packing._warmup_ordinary_packing()
+    _warmup_global_moments()
     kernels = (packing._copy_dense_checked, packing._write_categorical_block)
     compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
     for source_layout in ("C", "F", "A"):

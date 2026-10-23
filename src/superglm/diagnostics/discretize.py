@@ -384,36 +384,6 @@ class _TotalCurveSE:
         return np.sqrt(np.maximum(np.sum(q * rows, axis=1), 0.0))
 
 
-def _spline_categorical_se(
-    model: Any,
-    covariate: str,
-    interaction: str,
-    ispec,
-    x: NDArray,
-    *,
-    with_main: bool,
-) -> tuple[NDArray, NDArray]:
-    """Standard error, at ``x``, of each level's curve of a spline-by-categorical term.
-
-    With ``with_main`` the curve is the level's total log relativity
-    ``main(x) + f_L(x)`` (:class:`_TotalCurveSE`), without it the deviation
-    ``f_L(x)`` alone.
-
-    Returns ``(se, live)``, ``se`` being ``(len(x), levels)`` and ``live`` the
-    levels that carry a group in the covariance.  A level the fit dropped has
-    the base curve: its deviation is exactly zero, so its error is the main
-    effect's (zero without the main effect).
-    """
-    x = np.asarray(x, dtype=np.float64)
-    curves = _TotalCurveSE(model, covariate, [(interaction, ispec)], x, with_main=with_main)
-    se = np.zeros((len(x), len(ispec._non_base)), dtype=np.float64)
-    live = np.zeros(len(ispec._non_base), dtype=bool)
-    for j, level in enumerate(ispec._non_base):
-        se[:, j] = curves.se([(interaction, level)])
-        live[j] = curves.live[(interaction, level)]
-    return se, live
-
-
 def _joint_exact_bands(
     model: SuperGLM,
     name: str,

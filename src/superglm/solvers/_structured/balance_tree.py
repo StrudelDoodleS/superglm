@@ -103,7 +103,7 @@ diagonal is a level-space one less its cross with the last level.
 Caches (AGENTS.md):
 
 * ``SumToZeroTreeFactor`` forms its inference state on first read: the cached
-  properties ``minimum_local_eigenvalue``, ``_Q_inverse_centred``,
+  properties ``_Q_inverse_centred``,
   ``_level_diagonal_blocks``, ``_last_level_cross``, ``_penalty_total_form``
   and ``_retained_own`` (which also sets ``_projector_parts``), and the
   attributes ``_scaled_eigenvalues_cache`` and ``_data_estimable``.  Owner the
@@ -2121,16 +2121,6 @@ class SumToZeroTreeFactor:
         return clone
 
     @cached_property
-    def minimum_local_eigenvalue(self) -> float:
-        """``min_v lambda_min`` of the balance-tree pivots ``R_zz' R_zz`` (reporting only)."""
-        values = [
-            np.linalg.eigvalsh(self._Rzz[v, :r, :r].T @ self._Rzz[v, :r, :r])[0]
-            for v, r in enumerate(self._rank_nodes)
-            if r
-        ]
-        return float(min(values)) if values else 0.0
-
-    @cached_property
     def _Q_inverse_centred(self) -> NDArray:
         """``Cov(x)``, ``x = [alpha | carried | border]``: the centred border's inverse."""
         if self._super_deferred:
@@ -2809,12 +2799,6 @@ class SumToZeroTreeFactor:
                 out[i, j] = out[j, i] = self._cross_trace(forms[i], forms[j], cache)
         return out
 
-    def derivative_cross_traces(self, directions: Sequence[DerivativeDirection]) -> NDArray:
-        """``trace(H^-1 O_i H^-1 O_j)`` for every pair, ``O = scale * Omega + dH``."""
-        return self._cross_matrix(
-            self._direction_forms(directions, lambda operator: self._operator_form(operator, True))
-        )
-
     # -- diagonals -------------------------------------------------------------------
     def _x_apply(self, aggregates, w: NDArray, wx: NDArray) -> tuple[NDArray, NDArray]:
         """``X_O`` applied to innovation weights ``w`` ``(n_int, k, m)`` and border ``wx`` ``(n_x, m)``."""
@@ -3079,10 +3063,6 @@ class ProfiledSumToZeroTreeFactor:
         )
         self.small_indices = augmented_factor.small_indices[1:] - 1
         self.structured_indices = augmented_factor.structured_indices - 1
-
-    @property
-    def minimum_local_eigenvalue(self) -> float:
-        return self.augmented_factor.minimum_local_eigenvalue
 
     def published(self, system: SumToZeroLeafSystem | None = None):
         """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""

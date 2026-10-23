@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
@@ -53,14 +53,6 @@ def build_cr_matrices(spec: Any) -> None:
 def structural_penalty(spec: Any) -> NDArray:
     """The cardinal penalty's null space without its knot-spacing spread."""
     return _spline_cardinal.structural_cr_penalty(spec._cr_knots)
-
-
-def cardinal_boundary_slopes(spec: Any) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Return basis value and slope at the boundary knots for linear extrapolation."""
-    return cast(
-        tuple[NDArray, NDArray, NDArray, NDArray],
-        _spline_cardinal.cardinal_boundary_slopes(spec._cr_knots, spec._cr_M),
-    )
 
 
 def basis_matrix(spec: Any, x: NDArray) -> sp.csr_matrix:

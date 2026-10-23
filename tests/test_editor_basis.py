@@ -20,7 +20,7 @@ from superglm import (
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
-from superglm.features._spline_penalties import build_general_difference_penalty
+from superglm.features._spline_penalties import _general_difference_penalty
 from superglm.features.ordered_categorical import _spline_kind_name
 from tests.test_editor import _post_json
 from tests.test_editor_knots import _book, _declared, _knots
@@ -264,7 +264,7 @@ def test_a_p_spline_switched_from_uneven_knots_takes_the_general_difference_pena
     spec = session.model._specs["age"]
     assert (_spline_kind_name(spec), spec._knot_strategy_actual) == ("ps", "quantile")
     np.testing.assert_array_equal(spec.fitted_base_knots, placed.metadata["positions"])
-    general = build_general_difference_penalty(spec._knots, spec.degree, 2)
+    general = _general_difference_penalty(spec._knots, spec.degree, 2)[0]
     np.testing.assert_array_equal(spec._build_penalty(), general)
 
 

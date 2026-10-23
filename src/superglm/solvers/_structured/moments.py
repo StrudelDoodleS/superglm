@@ -911,7 +911,7 @@ def build_nested_structured_system(
         structured_indices=layout.structured_indices,
     )
     # X_b'a from the pass's centred sums, X_b'a = sum a (x - c) + c sum a on the
-    # dense columns (the fs leaf system's convention, block_leaves._assemble_system);
+    # dense columns (the fs leaf system's convention, block_leaves._assemble_compact);
     # a random-effect block (c = 0) through its own transpose
     dense = ~layout.indicator_columns
     border_center = leaf_statistics.center[dense]

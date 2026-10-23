@@ -14,13 +14,14 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._row_design import PredictorMatrix, matrix_row_chunk
 from superglm.distributional.smoothing.derivatives import (
+    _ROW_CHUNK,
     LamlDerivativeError,
     _analytic_first_derivative,
     _leverage_blocks,
     _packed_weights,
     _penalty_apply,
-    _predictor_directions,
     _rank_hessian,
     _stencil,
     _validated_matrices,
@@ -46,6 +47,21 @@ class LegacyDerivatives:
     hessian_certificate: NDArray[np.float64] | None
     fs_gradient: NDArray[np.float64]
     evaluations: int
+
+
+def _predictor_directions(
+    matrices: tuple[PredictorMatrix, ...],
+    slices: tuple[slice, ...],
+    vector: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """eta direction ``X v`` as an ``(n, K)`` array."""
+    result = np.empty((matrices[0].shape[0], len(matrices)), dtype=np.float64)
+    chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    for start in range(0, len(result), chunk):
+        rows = slice(start, min(start + chunk, len(result)))
+        for q, (matrix, block) in enumerate(zip(matrices, slices, strict=True)):
+            result[rows, q] = matrix[rows] @ vector[block]
+    return result
 
 
 def _legacy_axis_derivatives(rows, eta, step, *, want_second, analytic_first):

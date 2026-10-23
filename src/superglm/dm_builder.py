@@ -175,8 +175,8 @@ def should_discretize_tensor_interaction(
         isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
     ):
         # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and the fast-discrete predict
-        # metadata reads raw columns as float64, which label data cannot be.
+        # fit-time discretization to compress, and discretizing
+        # reads raw columns as float64, which label data cannot be.
         return False
     if not isinstance(ispec, TensorInteraction):
         return False
@@ -197,8 +197,8 @@ def should_discretize_spline_categorical_interaction(
         isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
     ):
         # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and the fast-discrete predict
-        # metadata reads raw columns as float64, which label data cannot be.
+        # fit-time discretization to compress, and discretizing
+        # reads raw columns as float64, which label data cannot be.
         return False
     if not isinstance(ispec, SplineCategorical):
         return False
@@ -802,17 +802,6 @@ def _process_info(
             gm.omega = omega_full
         if info.projection is not None:
             gm.projection = info.projection
-        if info.penalty_components is not None:
-            if info.projection is not None:
-                P = info.projection
-                gm.omega_components = [
-                    (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
-                ]
-            else:
-                gm.omega_components = info.penalty_components
-            gm.component_types = info.component_types
-            if info.lambda_policies is not None:
-                gm.lambda_policies = info.lambda_policies
 
     elif info.projection is not None:
         P = info.projection

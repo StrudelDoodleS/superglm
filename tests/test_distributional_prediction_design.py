@@ -69,10 +69,7 @@ def fitted_joint_model() -> tuple[pd.DataFrame, SuperLSS]:
 def test_joint_prediction_design_matches_every_fitted_term_path(
     fitted_joint_model: tuple[pd.DataFrame, SuperLSS],
 ) -> None:
-    from superglm.distributional.prediction_design import (
-        build_joint_prediction_design,
-        link_standard_errors,
-    )
+    from superglm.distributional.prediction_design import build_joint_prediction_design
 
     frame, model = fitted_joint_model
     fitted = model._require_fitted()
@@ -94,15 +91,6 @@ def test_joint_prediction_design_matches_every_fitted_term_path(
             rtol=1.0e-12,
         )
         assert not design.local[state.name].flags.writeable
-
-    standard_errors = link_standard_errors(
-        design,
-        model.covariance_,
-        fitted.layout,
-    )
-    assert tuple(standard_errors) == ("location", "scale")
-    assert all(np.all(values >= 0.0) for values in standard_errors.values())
-    assert all(not values.flags.writeable for values in standard_errors.values())
 
 
 def test_offsets_shift_eta_without_changing_coefficient_design(
@@ -126,23 +114,3 @@ def test_offsets_shift_eta_without_changing_coefficient_design(
     np.testing.assert_allclose(shifted["scale"] - base["scale"], offsets["scale"])
     for name in before.parameter_names:
         np.testing.assert_array_equal(before.local[name], after.local[name])
-
-
-def test_materially_negative_prediction_variance_is_rejected(
-    fitted_joint_model: tuple[pd.DataFrame, SuperLSS],
-) -> None:
-    from superglm.distributional.prediction_design import (
-        build_joint_prediction_design,
-        link_standard_errors,
-    )
-
-    frame, model = fitted_joint_model
-    fitted = model._require_fitted()
-    design = build_joint_prediction_design(
-        frame.iloc[:3], fitted.compiled_predictors, fitted.layout
-    )
-    covariance = np.zeros_like(model.covariance_)
-    covariance[0, 0] = -1.0
-
-    with pytest.raises(ValueError, match="materially negative"):
-        link_standard_errors(design, covariance, fitted.layout)

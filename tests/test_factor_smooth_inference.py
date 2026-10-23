@@ -220,13 +220,7 @@ def test_factor_smooth_prediction_policies_validate_unseen_and_missing(
         model.predict(missing_x, random_effects=random_effects)
 
 
-@pytest.mark.parametrize(
-    "predictor_name",
-    ["_predict_eta_exact", "_predict_eta_fast_discrete"],
-)
-def test_factor_smooth_population_prediction_ignores_unseen_policy(
-    predictor_name: str,
-) -> None:
+def test_factor_smooth_population_prediction_ignores_unseen_policy() -> None:
     X, y = _data()
     model = _model(discrete=True, unseen="error").fit_reml(
         X,
@@ -237,7 +231,7 @@ def test_factor_smooth_population_prediction_ignores_unseen_policy(
     known = X.iloc[:4].copy()
     unseen = known.copy()
     unseen["segment"] = "never-seen"
-    predictor = getattr(model, predictor_name)
+    predictor = model._predict_eta_exact
 
     np.testing.assert_allclose(
         predictor(unseen, random_effects="population"),

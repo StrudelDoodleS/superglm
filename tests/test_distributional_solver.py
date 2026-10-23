@@ -32,6 +32,7 @@ from superglm.features import Numeric, RandomEffect
 from superglm.group_matrix import DesignMatrix
 
 from ._distributional_weights import resolved_prior
+from ._telemetry import assert_no_fallback
 
 
 def _intercept_layout(
@@ -227,7 +228,7 @@ def test_intercept_only_solver_recovers_weighted_gaussian_mle_exactly() -> None:
     assert result.score_relative <= result.config.tolerance
     assert result.terminal_curvature.requested_source == "observed"
     assert result.terminal_curvature.actual_source == "observed"
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
 
 
 def test_dense_fit_reuses_one_materialization_and_bypasses_grouped_assembly(
@@ -313,7 +314,7 @@ def test_observed_dense_solver_accepts_order_two_family_without_fisher() -> None
     assert result.converged is True
     assert result.terminal_curvature.requested_source == "observed"
     assert result.terminal_curvature.actual_source == "observed"
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
 
 
 def test_observed_only_chunked_solver_does_not_require_expected_information() -> None:
@@ -333,7 +334,7 @@ def test_observed_only_chunked_solver_does_not_require_expected_information() ->
 
     assert result.converged
     assert result.resolved_chunk_size == 2
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
     assert family.initializations > 0
     assert family.evaluations > 0
 
@@ -580,7 +581,7 @@ def test_observed_only_terminal_policy_assesses_penalized_curvature(
     assert result.terminal_curvature.actual_source == "observed"
     assert result.terminal_curvature.minimum_eigenvalue == pytest.approx(1.0)
     assert result.terminal_curvature.rank == layout.n_coefficients
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
 
 
 def test_expected_information_terminal_policy_assesses_penalized_curvature(
@@ -629,7 +630,7 @@ def test_expected_information_terminal_policy_assesses_penalized_curvature(
         result.terminal_curvature.condition_estimate
         == result.terminal_rank.pre_truncation_condition
     )
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
     assert family.expected_information_calls == 0
 
 
@@ -771,7 +772,7 @@ def test_expected_information_terminal_policy_assesses_penalized_curvature_on_fa
         result.terminal_curvature.condition_estimate
         == result.terminal_reduced_rank.pre_truncation_condition
     )
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
     assert family.expected_information_calls == 0
 
 
@@ -1505,7 +1506,7 @@ def test_fixed_lambda_reuses_each_accepted_geometry_across_iterations_and_termin
     assert result.converged is True
     assert result.iterations > 1
     assert result.terminal_curvature.actual_source == "observed"
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
     assert geometry_sources.count("fisher") == result.iterations + 1
     assert geometry_sources.count("observed") == 1
 
@@ -1656,7 +1657,7 @@ def test_iteration_exhaustion_is_published_as_not_converged() -> None:
     assert result.convergence_reason == "max_iterations"
     assert result.iterations == 1
     assert result.terminal_curvature.actual_source == "observed"
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
 
 
 @pytest.mark.parametrize("coefficient_curvature", ["fisher", "observed"])

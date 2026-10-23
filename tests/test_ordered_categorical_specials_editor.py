@@ -163,7 +163,7 @@ def test_editing_one_special_moves_only_that_special_reported_effect(select):
 
 
 def test_a_special_with_no_editable_row_is_refused(specials_model):
-    from superglm.editor.apply import apply_edits_to_model_copy
+    from superglm.editor.apply import apply_edits_to_model_copy_with_data
 
     model, _, _ = specials_model
     session = EditorSession.from_model(model, terms=["band"])
@@ -184,7 +184,7 @@ def test_a_special_with_no_editable_row_is_refused(specials_model):
     # the joint least-squares solve silently assigns it a min-norm 0.0 and wipes
     # the fitted free-level effect instead of refusing the edit.
     with pytest.raises(ValueError, match="MISSING"):
-        apply_edits_to_model_copy(model, terms)
+        apply_edits_to_model_copy_with_data(model, terms)
 
 
 @pytest.mark.parametrize("level", ["3", "MISSING", "UNKNOWN"])

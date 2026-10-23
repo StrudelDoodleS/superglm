@@ -181,22 +181,6 @@ def _small_j_residual(a: float) -> float:
     raise ValueError("small-shape trigamma series did not reach float64 accuracy")
 
 
-def _small_j_log_derivative(a: float) -> float:
-    """Evaluate a d/da[a(a trigamma(a)-1)] near the origin."""
-
-    total = -a
-    power = a * a
-    sign = 1.0
-    for n in range(0, 80):
-        total += sign * (n + 1.0) * (n + 2.0) * float(special.zeta(n + 2, 1.0)) * power
-        power *= a
-        sign = -sign
-        tail = 2.0 * (n + 2.0) * (n + 3.0) * abs(power) / (1.0 - a) ** 3
-        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
-            return total
-    raise ValueError("small-shape tetragamma combination did not reach float64 accuracy")
-
-
 def _small_log_normalizer(a: float) -> float:
     """Evaluate a log(a)-a-log Gamma(a) from the log-Gamma origin series."""
 

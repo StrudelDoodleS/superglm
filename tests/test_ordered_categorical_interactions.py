@@ -173,9 +173,8 @@ def test_discretize_gates_refuse_oc_parents_that_pass_the_spline_duck_type():
     # today `should_discretize` already refuses an OrderedCategorical because it
     # is not a `_SplineBase`, so removing the guards changes no outcome. This
     # double is the state the pin exists for. If OC ever gains the spline-spec
-    # duck type, the discrete paths must still refuse it, because
-    # `_compile_interaction_fast_discrete_metadata` reads the raw parent columns
-    # as float64 and an OC column holds labels, not numbers.
+    # duck type, the discrete paths must still refuse it, because they read the
+    # raw parent columns as float64 and an OC column holds labels, not numbers.
     oc = _SplineBackedOC(order=BANDS, basis=Spline(kind="ps", n_knots=4))
     from superglm.dm_builder import should_discretize
 

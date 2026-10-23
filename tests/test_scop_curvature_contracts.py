@@ -17,7 +17,7 @@ from superglm.features._spline_constraints import (
     build_curvature_difference_constraints,
     curvature_difference_operator,
 )
-from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
+from superglm.solvers.scop import build_scop_reparam
 from tests._exact_reference import exact_matmul
 
 DEGREE = 3
@@ -259,49 +259,3 @@ def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(pe
         assert model.result.converged
     assert r_squared > 0.99
     assert _minimum_second_difference(model.predict(grid)) >= -1e-8
-
-
-# --------------------------------------------------------------------------
-# Solver-space reparameterization input contract
-# --------------------------------------------------------------------------
-
-
-def test_solver_space_initialize_from_gamma_rejects_a_raw_space_gamma():
-    q_raw = 8
-    reparam = build_scop_solver_reparam(q_raw, direction="increasing")
-
-    assert reparam.q == q_raw - 1
-    with pytest.raises(ValueError, match="solver-space"):
-        reparam.initialize_from_gamma(np.ones(q_raw))
-
-
-@pytest.mark.parametrize("kind", ["increasing", "convex"])
-def test_solver_space_initialize_from_gamma_inverts_the_solver_forward_map(kind):
-    """Regression guard for an already-shipped fix, not for this branch's fix.
-
-    Commit 67b90f8 made ``SCOPSolverReparam.initialize_from_gamma`` the exact
-    inverse of this class's own ``forward``: identity on the ``free_dim``
-    affine coordinates, log on the positivity-mapped shape block.  Before it
-    the method delegated to ``raw_reparam.initialize_from_gamma`` and inverted
-    a different, raw-space map.  So this test cannot fail against this
-    branch's parent -- it discriminates against the pre-67b90f8 delegation and
-    against any map that logs the free coordinate, and it says nothing about
-    the length guard added here, which
-    ``test_solver_space_initialize_from_gamma_rejects_a_raw_space_gamma``
-    covers.
-    """
-    if kind == "increasing":
-        reparam = build_scop_solver_reparam(8, kind=kind)
-    else:
-        knots = np.linspace(-0.3, 1.3, 12)
-        reparam = build_scop_solver_reparam(
-            8, kind=kind, knots=knots, degree=DEGREE, domain=(0.2, 0.8)
-        )
-    # The convex map keeps one identity-mapped affine coordinate, so a
-    # negative leading entry has to survive the round trip untouched.
-    beta_eff = np.linspace(-1.2, 0.9, reparam.q)
-    assert reparam.free_dim == (0 if kind == "increasing" else 1)
-
-    recovered = reparam.initialize_from_gamma(reparam.forward(beta_eff))
-
-    np.testing.assert_allclose(recovered, beta_eff, atol=1e-12)

@@ -490,7 +490,12 @@ def test_noncanonical_log_scop_fit_installs_observed_geometry(family_name):
 
 def test_gamma_log_latent_hessian_matches_finite_difference_with_intercept():
     """Pya--Wood's chain rule and intercept Schur term hold for Gamma/log."""
-    from superglm.reml.scop_geometry import assemble_observed_scop_hessian
+    from types import SimpleNamespace
+
+    from superglm.distributions import Gamma
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import LogLink
+    from superglm.reml.scop_geometry import build_observed_scop_joint_geometry
 
     rng = np.random.default_rng(20260718)
     n = 80
@@ -521,10 +526,6 @@ def test_gamma_log_latent_hessian_matches_finite_difference_with_intercept():
     mu = np.exp(eta)
     y = mu * rng.lognormal(mean=-0.03, sigma=0.18, size=n)
     slopes = np.column_stack((ordinary, basis))
-    observed_weights = weights * y / mu
-    negative_score_eta = weights * (1.0 - y / mu)
-    raw_observed_gram = slopes.T @ (observed_weights[:, None] * slopes)
-    raw_negative_score = slopes.T @ negative_score_eta
     penalty = np.zeros((3, 3))
     penalty[latent_slice, latent_slice] = penalty_block
     states = {
@@ -535,14 +536,21 @@ def test_gamma_log_latent_hessian_matches_finite_difference_with_intercept():
         }
     }
 
-    actual, transformed_cross = assemble_observed_scop_hessian(
-        raw_observed_gram=raw_observed_gram,
-        raw_negative_score=raw_negative_score,
+    geometry = build_observed_scop_joint_geometry(
+        dm=DesignMatrix([DenseGroupMatrix(slopes)], n=n, p=3),
+        distribution=Gamma(),
+        link=LogLink(),
+        y=y,
+        sample_weight=weights,
+        offset_arr=np.zeros(n),
+        result=SimpleNamespace(
+            beta=np.concatenate(([theta[1]], np.exp(theta[2:]))),
+            intercept=theta[0],
+        ),
         penalty=penalty,
         scop_states=states,
-        XtW1=slopes.T @ observed_weights,
-        sum_W=float(np.sum(observed_weights)),
     )
+    actual, transformed_cross = geometry.centered_hessian, geometry.transformed_intercept_cross
 
     epsilon = 2.0e-5
     numerical = np.empty((theta.size, theta.size))
@@ -562,7 +570,12 @@ def test_gamma_log_latent_hessian_matches_finite_difference_with_intercept():
 
 def test_curvature_mixed_map_observed_hessian_matches_finite_difference():
     """Observed REML keeps zero map curvature on the free affine slope."""
-    from superglm.reml.scop_geometry import assemble_observed_scop_hessian
+    from types import SimpleNamespace
+
+    from superglm.distributions import Gamma
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import LogLink
+    from superglm.reml.scop_geometry import build_observed_scop_joint_geometry
 
     rng = np.random.default_rng(217)
     n = 90
@@ -592,9 +605,7 @@ def test_curvature_mixed_map_observed_hessian_matches_finite_difference():
             )
         )
 
-    observed_weights = weights * y / retained_mu
     negative_score_eta = weights * (1.0 - y / retained_mu)
-    raw_observed_gram = basis.T @ (observed_weights[:, None] * basis)
     raw_negative_score = basis.T @ negative_score_eta
     states = {
         0: {
@@ -604,14 +615,18 @@ def test_curvature_mixed_map_observed_hessian_matches_finite_difference():
             "reparam": reparam,
         }
     }
-    actual, transformed_cross = assemble_observed_scop_hessian(
-        raw_observed_gram=raw_observed_gram,
-        raw_negative_score=raw_negative_score,
+    geometry = build_observed_scop_joint_geometry(
+        dm=DesignMatrix([DenseGroupMatrix(basis)], n=n, p=reparam.q),
+        distribution=Gamma(),
+        link=LogLink(),
+        y=y,
+        sample_weight=weights,
+        offset_arr=np.zeros(n),
+        result=SimpleNamespace(beta=reparam.forward(beta_eff), intercept=intercept),
         penalty=penalty,
         scop_states=states,
-        XtW1=basis.T @ observed_weights,
-        sum_W=float(np.sum(observed_weights)),
     )
+    actual, transformed_cross = geometry.centered_hessian, geometry.transformed_intercept_cross
 
     epsilon = 2e-5
     eye = np.eye(theta.size)

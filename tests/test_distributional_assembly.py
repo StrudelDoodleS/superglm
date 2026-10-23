@@ -12,11 +12,11 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.assembly import (
     assemble_grouped_geometry,
     dense_predictor_matrices,
-    evaluate_predictors_dense,
 )
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.solver.assembly import _evaluate_predictors_from_matrices
 from superglm.features import Numeric
 
 from ._distributional_weights import resolved_prior
@@ -271,7 +271,7 @@ def test_dense_predictor_evaluation_includes_intercepts_slopes_and_offsets() -> 
     layout, frame = _layout()
     coefficients = np.array([0.2, -0.3, 0.5, -0.4, 0.8])
 
-    eta = evaluate_predictors_dense(layout, coefficients)
+    eta = _evaluate_predictors_from_matrices(layout, coefficients, dense_predictor_matrices(layout))
 
     expected_location = (
         0.2
@@ -304,7 +304,9 @@ def test_zero_width_slope_and_no_intercept_predictors_are_supported() -> None:
     )
     layout = build_stacked_layout(builds)
 
-    eta = evaluate_predictors_dense(layout, np.array([1.25]))
+    eta = _evaluate_predictors_from_matrices(
+        layout, np.array([1.25]), dense_predictor_matrices(layout)
+    )
     geometry = assemble_grouped_geometry(
         layout,
         np.column_stack((np.arange(n), -np.arange(n))),
@@ -372,7 +374,7 @@ def test_assembler_rejects_channel_coefficient_and_layout_shape_mismatches() -> 
             coefficients=np.zeros(5),
         )
     with pytest.raises(ValueError, match="coefficients.*shape"):
-        evaluate_predictors_dense(layout, np.zeros(4))
+        _evaluate_predictors_from_matrices(layout, np.zeros(4), dense_predictor_matrices(layout))
 
     broken_scale = replace(layout.predictors[1], offset=np.zeros(n - 1))
     broken_layout = object.__new__(type(layout))
@@ -382,4 +384,6 @@ def test_assembler_rejects_channel_coefficient_and_layout_shape_mismatches() -> 
     object.__setattr__(broken_layout, "term_slices", layout.term_slices)
     object.__setattr__(broken_layout, "penalties", layout.penalties)
     with pytest.raises(ValueError, match="predictor row counts"):
-        evaluate_predictors_dense(broken_layout, np.zeros(5))
+        _evaluate_predictors_from_matrices(
+            broken_layout, np.zeros(5), dense_predictor_matrices(broken_layout)
+        )

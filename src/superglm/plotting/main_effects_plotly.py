@@ -1587,15 +1587,6 @@ def _add_spline_diagnostic_traces(
         link_variants.append(_LinkVariant())
 
 
-def _supports_spline_diagnostics(model, ti: TermInference) -> bool:
-    """Whether a term can show knots/basis diagnostics."""
-    # Categoricals with spline metadata (OrderedCategorical spline mode) support knots
-    if ti.spline is not None:
-        return True
-    spec = model._specs.get(ti.name)
-    return ti.kind == "spline" and spec is not None and hasattr(spec, "_basis_matrix")
-
-
 # ── Axis / layout helpers ─────────────────────────────────────
 
 

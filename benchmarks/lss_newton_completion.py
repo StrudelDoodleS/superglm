@@ -33,10 +33,7 @@ from superglm import (
     s,
     ti,
 )
-from superglm.distributional.prediction_design import (
-    build_joint_prediction_design,
-    link_standard_errors,
-)
+from superglm.distributional.prediction_design import build_joint_prediction_design
 from superglm.distributional.smoothing import derivatives, loop, newton
 from superglm.distributional.solver import solver
 from superglm.distributional.timing import FitPhaseRecorder
@@ -68,6 +65,19 @@ CASE_OPTIONS = {
         "reml_plateau_tol": 1.0e-6,
     }
 }
+
+
+def _checked_band_variance(matrix, block):
+    """The band-variance rule of ``terms._band_variance``, with a finite check.
+
+    Refuses a non-finite variance, or one below ``-64 * eps * max(1, max|variance|)``;
+    otherwise clips roundoff-negative values to zero.
+    """
+    variance = np.einsum("ij,jk,ik->i", matrix, block, matrix, optimize=True)
+    tolerance = 64.0 * np.finfo(float).eps * max(1.0, float(np.max(np.abs(variance), initial=0.0)))
+    if not np.all(np.isfinite(variance)) or np.any(variance < -tolerance):
+        raise ValueError("a prediction variance is non-finite or materially negative")
+    return np.maximum(variance, 0.0)
 
 
 def gaussian_fixture(crossed):
@@ -273,7 +283,11 @@ def main():
             design = build_joint_prediction_design(
                 evaluation, fitted.compiled_predictors, fitted.layout
             )
-            errors = link_standard_errors(design, fitted.covariance, fitted.layout)
+            errors = {}
+            for state in fitted.layout.predictors:
+                block = fitted.covariance[state.coefficient_slice, state.coefficient_slice]
+                matrix = design.local[state.name]
+                errors[state.name] = np.sqrt(_checked_band_variance(matrix, block))
             theta = fitted.predict_parameters(evaluation, offsets=evaluation_offsets)
             payload = {
                 "theta": theta,

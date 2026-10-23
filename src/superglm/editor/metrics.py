@@ -232,10 +232,6 @@ def _compute_metrics(
     }
 
 
-def _null_deviance(model, y: np.ndarray, weights: np.ndarray, offset: np.ndarray | None) -> float:
-    return _null_deviance_and_mu(model, y, weights, offset)[0]
-
-
 def _null_deviance_and_mu(
     model,
     y: np.ndarray,

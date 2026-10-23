@@ -42,7 +42,6 @@ from superglm.distributional.solver.assembly import assemble_grouped_geometry
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
 from superglm.solvers.rank import RankDecomposition, decompose_gram
-from superglm.types import PenaltyComponent
 
 
 @dataclass(frozen=True)
@@ -244,23 +243,6 @@ def _validated_complete_lambdas(
     return resolved
 
 
-def projected_finite_penalty_logdet(
-    *,
-    layout: StackedLayout,
-    lambdas: Mapping[str, float],
-    face: PenaltyFace,
-) -> ProjectedPenaltyLogDet:
-    """Return ``log|sum(lambda_j Q.T S_j Q)|+`` off the selected face."""
-    evaluation = _projected_finite_penalty_evaluation(
-        layout=layout,
-        lambdas=lambdas,
-        face=face,
-    )
-    return ProjectedPenaltyLogDet(
-        component_names=tuple(evaluation.gradient), rank=evaluation.rank, log_pdet=evaluation.logdet
-    )
-
-
 def _projected_finite_penalty_evaluation(
     *, layout: StackedLayout, lambdas: Mapping[str, float], face: PenaltyFace
 ) -> _PenaltyLogdetEvaluation:
@@ -275,87 +257,6 @@ def _projected_finite_penalty_evaluation(
     return _finite_penalty_evaluation_from_components(
         components=layout.penalties, resolved=resolved, face=face
     )
-
-
-def _projected_finite_penalty_inputs(
-    *,
-    layout: StackedLayout,
-    lambdas: Mapping[str, float],
-    face: PenaltyFace,
-) -> tuple[tuple[PenaltyComponent, ...], list[NDArray[np.float64]], NDArray[np.float64]]:
-    """Return validated finite components, their face projections and λ values."""
-    face.validate_layout(layout)
-    resolved = _validated_complete_lambdas(layout, lambdas)
-    face_names = frozenset(face.component_names)
-    finite_components = tuple(
-        component for component in layout.penalties if component.name not in face_names
-    )
-    if face.reduced_width == 0 or not finite_components:
-        return finite_components, [], np.zeros(len(finite_components), dtype=np.float64)
-
-    projected: list[NDArray[np.float64]] = []
-    finite_lambdas: list[float] = []
-    for component in finite_components:
-        local = np.asarray(penalty_component_dense_matrix(component), dtype=np.float64)
-        try:
-            np.asarray_chkfinite(local)
-        except ValueError as exc:
-            raise EndpointLaplaceError(
-                f"retained penalty {component.name!r} contains non-finite local values"
-            ) from exc
-        full = np.zeros(
-            (layout.n_coefficients, layout.n_coefficients),
-            dtype=np.float64,
-        )
-        full[component.group_sl, component.group_sl] = local
-        with np.errstate(invalid="ignore", over="ignore"):
-            raw_projected = face.null_basis.T @ full @ face.null_basis
-        if not np.all(np.isfinite(raw_projected)):
-            evidence = FloatingPointError("retained penalty projection is non-finite")
-            raise EndpointLaplaceError(
-                f"projection of retained penalty {component.name!r} produced non-finite values"
-            ) from evidence
-        scale = _spectral_norm(raw_projected)
-        symmetry_error = _spectral_norm(raw_projected - raw_projected.T)
-        # Match the raw-component certificate used to construct PenaltyFace.
-        symmetry_bound = 32.0 * max(face.reduced_width, 1) * np.finfo(np.float64).eps * scale
-        if symmetry_error > symmetry_bound:
-            raise EndpointLaplaceError(
-                f"retained projected penalty {component.name!r} is not numerically symmetric"
-            )
-        maximum_entry = float(np.max(np.abs(raw_projected), initial=0.0))
-        if maximum_entry <= np.finfo(np.float64).max / 2.0:
-            symmetric_projected = 0.5 * (raw_projected + raw_projected.T)
-        else:
-            symmetric_projected = 0.5 * raw_projected + 0.5 * raw_projected.T
-        try:
-            decompose_gram(symmetric_projected)
-        except np.linalg.LinAlgError as exc:
-            raise EndpointLaplaceError(
-                f"retained projected penalty {component.name!r} could not be decomposed"
-            ) from exc
-        except ValueError as exc:
-            try:
-                diagnostic = decompose_gram(
-                    symmetric_projected,
-                    allow_indefinite=True,
-                )
-            except np.linalg.LinAlgError as diagnostic_error:
-                raise EndpointLaplaceError(
-                    f"retained projected penalty {component.name!r} could not be decomposed"
-                ) from diagnostic_error
-            except ValueError:
-                raise exc
-            retained_values = diagnostic.retained_values
-            if retained_values is None or not np.any(retained_values < 0.0):
-                raise
-            raise EndpointLaplaceError(
-                f"retained projected penalty {component.name!r} is not positive semidefinite"
-            ) from exc
-        projected.append(symmetric_projected)
-        finite_lambdas.append(resolved[component.name])
-
-    return finite_components, projected, np.asarray(finite_lambdas, dtype=np.float64)
 
 
 def _spectral_norm(matrix: NDArray) -> float:

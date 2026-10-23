@@ -215,49 +215,12 @@ def _predict_exact(backend: str, scale: float) -> PreparedScenario:
     return PreparedScenario(model, "predict", X, y, seed=seed)
 
 
-def _predict_fast_discrete(backend: str, scale: float) -> PreparedScenario:
-    n_train = _rows(4_000, scale, 600)
-    n_predict = _rows(60_000, scale, 1_000)
-    seed = 2106
-    rng = np.random.default_rng(seed)
-    x1 = rng.uniform(-1.0, 1.0, n_train)
-    x2 = rng.uniform(-1.0, 1.0, n_train)
-    y = np.sin(np.pi * x1) + 0.4 * x2**2 + rng.normal(scale=0.2, size=n_train)
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        features={
-            "x1": Spline(n_knots=10, penalty="ssp"),
-            "x2": Spline(n_knots=10, penalty="ssp"),
-        },
-        discrete=True,
-        n_bins=128,
-    )
-    model.fit(_frame({"x1": x1, "x2": x2}, backend), y.astype(np.float64))
-    X = _frame(
-        {
-            "x1": rng.uniform(-1.0, 1.0, n_predict),
-            "x2": rng.uniform(-1.0, 1.0, n_predict),
-        },
-        backend,
-    )
-    model._predict_fast_discrete(X)
-    return PreparedScenario(
-        model,
-        "predict_fast_discrete",
-        X,
-        y.astype(np.float64),
-        seed=seed,
-    )
-
-
 SCENARIOS: dict[str, ScenarioFactory] = {
     "ordinary_mixed_fit": _ordinary_mixed_fit,
     "ordinary_scalar_fit": _ordinary_scalar_fit,
     "discrete_four_spline_fit": _discrete_four_spline_fit,
     "spline_reml": _spline_reml,
     "predict_exact": _predict_exact,
-    "predict_fast_discrete": _predict_fast_discrete,
 }
 
 
@@ -281,8 +244,6 @@ def _run_operation(prepared: PreparedScenario):
         )
     if prepared.operation == "predict":
         return prepared.model.predict(prepared.X, offset=prepared.offset)
-    if prepared.operation == "predict_fast_discrete":
-        return prepared.model._predict_fast_discrete(prepared.X, offset=prepared.offset)
     raise ValueError(f"unknown benchmark operation: {prepared.operation}")
 
 

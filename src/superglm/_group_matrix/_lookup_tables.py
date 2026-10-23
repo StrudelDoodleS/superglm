@@ -74,8 +74,7 @@ about the rounded anchor with Bjorck's two-pass correction
   (``a_r`` the table rows read, ``d_r`` the centred dense values) every table
   entry is a bilinear form read through at most ``3p + 1`` roundings and a
   row sums ``S <= 1 + T + P + n_d (T + n_d + 3)`` terms, so ``|h_r(computed)
-  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 2``
-  (:meth:`LookupPlan.count_roundings`).
+  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 2``.
 - ``X_c' v``: compensated (Neumaier) sums per bin (Higham 2002, sec. 4.3),
   within ``2u |s| + O(n u^2) sum |terms|``, then ``gamma_(m+1)`` in
   coefficient space.
@@ -185,14 +184,6 @@ class LookupPlan:
         """Row sweeps of one table Gram: margins, pairs, term-by-dense blocks, dense pairs."""
         t, d = len(self.terms), len(self.dense)
         return t + self.n_pairs + t * d + d * (d + 1) // 2
-
-    def count_roundings(self) -> int:
-        """``K = 3p + S + 2``, the roundings along one leverage's longest chain (module docstring).
-
-        ``3p + 1`` for a table entry's bilinear form, ``S`` for the row's sum,
-        and one for a dense column's last product ``d_j (partial + d_j V_jj)``."""
-        t, n_d = len(self.terms), int(self.dense_columns.size)
-        return 3 * self.p + 1 + (1 + t + self.n_pairs + n_d * (t + n_d + 3)) + 1
 
 
 def _lookup_parts(gm):

@@ -21,13 +21,59 @@ from scipy import integrate, special, stats
 
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
-from superglm.distributional.families.tweedie import TweedieLSS, _poisson_terms
+from superglm.distributional.families.tweedie import (
+    _LOG_QUANTILE_LOWER,
+    _LOG_QUANTILE_UPPER,
+    TweedieLSS,
+    _block_distribution,
+    _compound_poisson_parameters,
+    _poisson_terms,
+    _prior_weight_vector,
+    _series_blocks,
+    _validated_probabilities,
+)
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
 from superglm.features import Spline
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
+
+_QUANTILE_BISECTIONS = 64
+
+
+def _quantile_bisection(
+    family: TweedieLSS, p: NDArray, theta: NDArray, weights: NDArray | None = None
+) -> NDArray[np.float64]:
+    """The log bisection the bracketed Householder iteration replaced.
+
+    Reference the fast quantile is measured against: it inverts the same
+    distribution function with no derivative and no starting value, and refuses
+    on the same arguments.
+    """
+    values = family._distribution_parameters(theta)
+    resolved = (
+        np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
+    )
+    probabilities = _validated_probabilities(p, len(values))
+    rate, jump_shape, jump_scale = _compound_poisson_parameters(values, resolved)
+    result = np.zeros(len(values), dtype=np.float64)
+    above = np.flatnonzero(probabilities > np.exp(-rate))
+    if above.size == 0:
+        return result
+    terms = _poisson_terms(float(np.max(rate[above])))
+    for rows, block in _series_blocks(rate, jump_shape, jump_scale, above, terms):
+        target = probabilities[rows]
+        lower = np.full(len(rows), _LOG_QUANTILE_LOWER)
+        upper = np.full(len(rows), _LOG_QUANTILE_UPPER)
+        for _ in range(_QUANTILE_BISECTIONS):
+            middle = 0.5 * (lower + upper)
+            beneath = _block_distribution(block, np.exp(middle)) < target
+            lower = np.where(beneath, middle, lower)
+            upper = np.where(beneath, upper, middle)
+        result[rows] = np.exp(0.5 * (lower + upper))
+    return result
+
 
 # mean, dispersion, power, prior weight
 _TWEEDIE_ROWS = (
@@ -395,7 +441,7 @@ def test_tweedie_quantile_matches_the_bisection_it_replaces() -> None:
     theta, weights = _wide_grid()
     for probabilities in _wide_probabilities(theta, weights):
         fast = family.quantile_prior_weighted(probabilities, theta, weights)
-        reference = family._quantile_bisection(probabilities, theta, weights)
+        reference = _quantile_bisection(family, probabilities, theta, weights)
         assert np.array_equal(fast == 0.0, reference == 0.0)
         positive = fast > 0.0
         assert positive.sum() > 40
@@ -408,7 +454,7 @@ def test_tweedie_quantile_inverts_the_atom_edge_as_the_bisection_does() -> None:
     theta, weights = _wide_grid()
     for probabilities in _atom_probabilities(theta, weights):
         fast = family.quantile_prior_weighted(probabilities, theta, weights)
-        reference = family._quantile_bisection(probabilities, theta, weights)
+        reference = _quantile_bisection(family, probabilities, theta, weights)
         assert np.array_equal(fast == 0.0, reference == 0.0)
         positive = fast > 0.0
         assert positive.sum() > 100
@@ -476,11 +522,14 @@ def test_tweedie_quantile_refuses_exactly_what_the_bisection_refuses() -> None:
         with pytest.raises(ValueError, match="strictly inside"):
             family.quantile_prior_weighted(bad, theta, weights)
         with pytest.raises(ValueError, match="strictly inside"):
-            family._quantile_bisection(bad, theta, weights)
+            _quantile_bisection(family, bad, theta, weights)
     with pytest.raises(ValueError, match="prior weights"):
-        family._quantile_bisection(probabilities, theta, np.zeros(len(theta)))
+        _quantile_bisection(family, probabilities, theta, np.zeros(len(theta)))
     refused = np.array([[1.0e6, 1.0e-3, 1.5]])
-    for call in (family.quantile_prior_weighted, family._quantile_bisection):
+    for call in (
+        family.quantile_prior_weighted,
+        lambda *args: _quantile_bisection(family, *args),
+    ):
         with pytest.raises(ValueError, match="tail mass"):
             call(np.array([0.5]), refused, np.array([1.0]))
 

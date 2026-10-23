@@ -21,6 +21,7 @@ from superglm.distributional.smoothing.objective import joint_laplace_objective
 from superglm.features import Spline
 from superglm.reml.penalty_algebra import _compute_penalty_logdet_evaluation
 from superglm.types import LambdaPolicy
+from tests._endpoint_penalty import projected_finite_penalty_logdet
 from tests._gaussian_lss_oracles import (
     GaussianCoefficientOracle,
     _gradient_roundoff,
@@ -63,9 +64,7 @@ def _shared_face_problem():
 def test_projected_shared_penalty_retains_positive_support_and_inactive_names():
     """Kills weighted rank loss after projection to a disjoint exact face."""
     layout, face, lambdas = _shared_face_problem()
-    result = endpoint_laml.projected_finite_penalty_logdet(
-        layout=layout, face=face, lambdas=lambdas
-    )
+    result = projected_finite_penalty_logdet(layout=layout, face=face, lambdas=lambdas)
     assert result.rank == 3
     evaluation = endpoint_laml._projected_finite_penalty_evaluation(
         layout=layout, face=face, lambdas=lambdas
@@ -82,19 +81,6 @@ def test_projected_shared_penalty_retains_positive_support_and_inactive_names():
     assert evaluation.gradient["location:group#zero"] == 0
 
 
-def test_projected_production_uses_source_roots_without_reforming_a_gram(monkeypatch):
-    layout, face, lambdas = _shared_face_problem()
-
-    def obsolete_projection(**_kwargs):
-        pytest.fail("finite face geometry must project component roots")
-
-    monkeypatch.setattr(endpoint_laml, "_projected_finite_penalty_inputs", obsolete_projection)
-    result = endpoint_laml.projected_finite_penalty_logdet(
-        layout=layout, face=face, lambdas=lambdas
-    )
-    assert result.rank == 3
-
-
 def test_nonzero_finite_component_cannot_be_projected_away_by_a_disjoint_face():
     layout, face, lambdas = _shared_face_problem()
     selected, left, *others = layout.penalties
@@ -107,9 +93,7 @@ def test_nonzero_finite_component_cannot_be_projected_away_by_a_disjoint_face():
     )
     invalid_layout = replace(layout, penalties=(selected, overlap, *others))
     with pytest.raises(ValueError, match="shared|overlapping|layout"):
-        endpoint_laml.projected_finite_penalty_logdet(
-            layout=invalid_layout, face=face, lambdas=lambdas
-        )
+        projected_finite_penalty_logdet(layout=invalid_layout, face=face, lambdas=lambdas)
 
 
 def _public_data(kind):

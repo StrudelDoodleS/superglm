@@ -72,12 +72,6 @@ class StructuredSlopeCovarianceAccessor:
         self.shape = factor.shape
         self.ndim = 2
 
-    def scaled(self, scale: float) -> StructuredSlopeCovarianceAccessor:
-        return StructuredSlopeCovarianceAccessor(
-            self.factor,
-            scale=self.scale * float(scale),
-        )
-
     def selected_block(self, indices: NDArray) -> NDArray:
         selected = np.asarray(indices, dtype=np.intp)
         return self.scale * self.factor.selected_inverse_block(selected)
@@ -92,12 +86,6 @@ class StructuredSlopeCovarianceAccessor:
     def trace(self) -> float:
         indices = np.arange(self.shape[0], dtype=np.intp)
         return float(np.sum(self.selected_diagonal(indices)))
-
-    def quadratic_form(self, contrast: NDArray) -> float:
-        values = np.asarray(contrast, dtype=np.float64)
-        if values.shape != (self.shape[0],):
-            raise ValueError(f"contrast must have shape ({self.shape[0]},).")
-        return float(values @ self.solve(values))
 
     def __getitem__(self, key):
         if not isinstance(key, tuple) or len(key) != 2:
@@ -250,16 +238,6 @@ class StructuredCovarianceAccessor:
         if values.shape != (self.shape[0],):
             raise ValueError(f"contrast must have shape ({self.shape[0]},).")
         return float(values @ self.solve(values))
-
-    def trace(self) -> float:
-        return float(
-            self.intercept_variance()
-            + np.sum(
-                self.slope_selected_diagonal(
-                    np.arange(self.factor.shape[0], dtype=np.intp),
-                )
-            )
-        )
 
     def __getitem__(self, key):
         if not isinstance(key, tuple) or len(key) != 2:

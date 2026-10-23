@@ -1,4 +1,4 @@
-"""Tests for _robust_solve(), _safe_decompose_H(), and QR solver path."""
+"""Tests for the equilibrated-rank solve, _safe_decompose_H(), and QR solver path."""
 
 import logging
 
@@ -13,12 +13,22 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers import irls_direct as irls_direct_module
-from superglm.solvers.irls_direct import _robust_solve, _safe_decompose_H
+from superglm.solvers.irls_direct import _safe_decompose_H
 from superglm.solvers.rank import decompose_gram
 
 
+def _robust_solve(M, rhs):
+    """Solve ``M x = rhs`` by the shared equilibrated rank policy (``decompose_gram``).
+
+    Returns ``(x, pre-truncation condition, whether a spectral fallback was used)``.
+    """
+    decomposition = decompose_gram(M)
+    used_spectral_fallback = decomposition.method not in {"cholesky", "pivoted_cholesky"}
+    return decomposition.solve(rhs), decomposition.pre_truncation_condition, used_spectral_fallback
+
+
 class TestRobustSolve:
-    """Unit tests for the Cholesky + SVD fallback linear solver."""
+    """Unit tests for the Cholesky + spectral fallback linear solve."""
 
     def test_well_conditioned_uses_cholesky(self):
         """Well-conditioned SPD system should use the fast Cholesky path."""
@@ -312,7 +322,7 @@ class TestQRSolverPath:
         # ``None`` is how the shared policy says "this Gram cannot certify its
         # own retained subspace", so refusing every one of them drives the loop
         # through factor certification on every iteration.  Faking a truncated
-        # rank would also perturb ``_robust_solve``, which is not under test.
+        # rank would also perturb the linear solve, which is not under test.
         monkeypatch.setattr(
             irls_direct_module,
             "decompose_gram_if_authoritative",

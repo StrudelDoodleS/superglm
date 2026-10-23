@@ -1162,7 +1162,6 @@ class TestEstimatePFitMode:
             captured["fit_meta"] = candidate._last_fit_meta
             captured["runtime_state"] = candidate._runtime_canonical_state
             captured["prediction_plan"] = candidate._prediction_plan
-            captured["fast_prediction_state"] = candidate._fast_prediction_state
             # Before the fix, retain=False has already released these rows.  Skip
             # cache priming so the regression fails at the production access.
             if candidate._dm is None:
@@ -1250,7 +1249,6 @@ class TestEstimatePFitMode:
         assert model._last_fit_meta is captured["fit_meta"]
         assert model._runtime_canonical_state is captured["runtime_state"]
         assert model._prediction_plan is captured["prediction_plan"]
-        assert model._fast_prediction_state is captured["fast_prediction_state"]
         if fit_mode == "reml":
             assert model._reml_result is not captured["reml_result"]
             assert model._reml_result.pirls_result is model._solver_pirls_result()

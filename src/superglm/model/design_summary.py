@@ -15,6 +15,7 @@ from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -113,6 +114,16 @@ _REPRESENTATION_BY_TYPE = MappingProxyType(
     }
 )
 
+# One class stores either geometry, so the choice is made per instance: the
+# exact matrix keeps a shared CSR basis, the discrete one a support basis.
+_FACTOR_SMOOTH_EXACT = _RepresentationMetadata("factor-smooth", False, "sparse-basis")
+_FACTOR_SMOOTH_DISCRETE = _RepresentationMetadata(
+    "discretized-factor-smooth",
+    True,
+    "unique-basis",
+    specialised_discrete_route="binned-factor-smooth",
+)
+
 _SUMMARY_COLUMNS = [
     "term",
     "feature",
@@ -129,6 +140,8 @@ _SUMMARY_COLUMNS = [
 
 
 def _representation_metadata(matrix) -> _RepresentationMetadata:
+    if isinstance(matrix, FactorSmoothGroupMatrix):
+        return _FACTOR_SMOOTH_DISCRETE if matrix.is_discrete else _FACTOR_SMOOTH_EXACT
     matrix_type = type(matrix)
     metadata = _REPRESENTATION_BY_TYPE.get(matrix_type)
     if metadata is not None:

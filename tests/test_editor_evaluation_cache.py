@@ -142,7 +142,8 @@ def test_evaluation_cache_scalarizes_values_and_returns_isolated_copies():
 
     first["deviance"] = -1.0
     assert cache.get(key) == {"deviance": 1.25, "effective_df": 3.0}
-    assert cache.persistent_values_are_scalar() is True
+    retained = (*cache._original.values(), *cache._current.values())
+    assert all(type(value) is float for payload in retained for value in payload.values())
 
 
 def test_evaluation_cache_rejects_stale_current_revision_writes():

@@ -541,21 +541,6 @@ class ModelMetrics:
                 self._weight_semantics,
             )
 
-    def _build_S_from_penalties(self, lam2) -> NDArray | None:
-        """Build full penalty matrix from model._reml_penalties if available."""
-        penalties = getattr(self._model, "_reml_penalties", None)
-        if penalties is None:
-            return None
-        from superglm.reml.penalty_algebra import build_penalty_matrix
-
-        return build_penalty_matrix(
-            self._dm.group_matrices,
-            self._groups,
-            lam2,
-            self._dm.p,
-            reml_penalties=penalties,
-        )
-
     @cached_property
     def _fit_working_weights(self) -> NDArray:
         """Working weights represented by the retained fitted-rank state."""
@@ -1077,18 +1062,6 @@ class ModelMetrics:
         )
         augmented = _public_augmented_covariance(self._model, augmented, active_groups)
         return X_a, W, inverse, augmented, active_groups
-
-    @cached_property
-    def _active_design_moments(self) -> tuple[NDArray, NDArray, NDArray]:
-        """Raw and centered moments shared by R and influence calculations."""
-        X_a, W, _, _, _ = self._active_info
-        return weighted_moments(X_a, W)
-
-    @cached_property
-    def _active_centered_data_gram(self) -> NDArray:
-        """Centered Gram retained without pinning a duplicate raw p-by-p matrix."""
-        X_a, W, _, _, _ = self._active_info
-        return weighted_moments(X_a, W)[2]
 
     @cached_property
     def _active_R_factor(self) -> NDArray:

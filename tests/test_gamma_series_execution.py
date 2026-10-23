@@ -15,6 +15,31 @@ from superglm.distributional.kernels import gamma as gamma_kernel
 
 _EPS = np.finfo(np.float64).eps
 _MIN_FLOAT = np.nextafter(0.0, 1.0)
+
+
+def _small_j_log_derivative(a: float) -> float:
+    """Scalar reference for the batched origin series of d/da[a(a trigamma(a)-1)]."""
+
+    total = -a
+    power = a * a
+    sign = 1.0
+    for n in range(0, 80):
+        total += sign * (n + 1.0) * (n + 2.0) * float(special.zeta(n + 2, 1.0)) * power
+        power *= a
+        sign = -sign
+        tail = 2.0 * (n + 2.0) * (n + 3.0) * abs(power) / (1.0 - a) ** 3
+        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
+            return total
+    raise ValueError("small-shape tetragamma combination did not reach float64 accuracy")
+
+
+_SCALAR_ORACLES = {"_small_j_log_derivative": _small_j_log_derivative}
+
+
+def _scalar_series(name: str):
+    return _SCALAR_ORACLES.get(name) or getattr(gamma_kernel, name)
+
+
 _ORIGIN_HELPERS = (
     ("_scaled_digamma_residual", "_small_a_residual"),
     ("_scaled_trigamma_residual", "_small_j_residual"),
@@ -120,7 +145,10 @@ def _coefficient_error_bound(shape: Decimal, channel: int) -> Decimal:
     return total
 
 
-@pytest.mark.parametrize(("helper_name", "scalar_name"), _ORIGIN_HELPERS)
+@pytest.mark.parametrize(
+    ("helper_name", "scalar_name"),
+    [pair for pair in _ORIGIN_HELPERS if pair[1] not in _SCALAR_ORACLES],
+)
 def test_small_shape_batches_do_not_execute_python_scalar_series(
     monkeypatch: pytest.MonkeyPatch, helper_name: str, scalar_name: str
 ) -> None:
@@ -177,7 +205,7 @@ def test_origin_series_obey_scale_aware_decimal_error_bounds(channel: int) -> No
             )
             assert abs(Decimal.from_float(float(observed)) - expected[channel]) <= bound
             if shape < 0.25:
-                scalar = getattr(gamma_kernel, _ORIGIN_HELPERS[channel][1])(float(shape))
+                scalar = _scalar_series(_ORIGIN_HELPERS[channel][1])(float(shape))
                 assert abs(Decimal.from_float(scalar) - expected[channel]) <= bound
 
 
@@ -213,7 +241,7 @@ def test_origin_tail_bound_covers_zeta_coefficients() -> None:
     # exceeds the EPS/8 budget even though the geometric stopping test passes.
     shape = (19 * _EPS / (20 * 48)) ** (1 / 3)
     actual = gamma_kernel._scaled_trigamma_log_derivative(np.array([shape]))[0]
-    scalar = gamma_kernel._small_j_log_derivative(shape)
+    scalar = _small_j_log_derivative(shape)
     old_scalar = _old_small_j_log_derivative(shape)
     with localcontext() as context:
         context.prec = 96

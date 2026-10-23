@@ -174,7 +174,6 @@ class BoundedPowerLink:
 
 _POISSON_TAIL_TOLERANCE = 1.0e-12
 _MAX_POISSON_TERMS = 20_000
-_QUANTILE_BISECTIONS = 64
 # ``exp`` of this pair spans every positive float64: below the first the
 # distribution function is its zero mass and above the last it is one, so the
 # pair brackets the quantile of any row without a search.
@@ -958,38 +957,6 @@ class TweedieLSS(TweediePredictors):
             rate, jump_shape, jump_scale, above, terms, derivatives=True
         ):
             result[rows] = _block_quantile(block, probabilities[rows])
-        return result
-
-    def _quantile_bisection(
-        self, p: NDArray, theta: NDArray, weights: NDArray | None = None
-    ) -> NDArray[np.float64]:
-        """The log bisection the bracketed Householder iteration replaced.
-
-        Kept as the reference the fast path is measured against: it inverts the
-        same distribution function with no derivative and no starting value, and
-        refuses on the same arguments.  Nothing in the engine calls it.
-        """
-        values = self._distribution_parameters(theta)
-        resolved = (
-            np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
-        )
-        probabilities = _validated_probabilities(p, len(values))
-        rate, jump_shape, jump_scale = _compound_poisson_parameters(values, resolved)
-        result = np.zeros(len(values), dtype=np.float64)
-        above = np.flatnonzero(probabilities > np.exp(-rate))
-        if above.size == 0:
-            return result
-        terms = _poisson_terms(float(np.max(rate[above])))
-        for rows, block in _series_blocks(rate, jump_shape, jump_scale, above, terms):
-            target = probabilities[rows]
-            lower = np.full(len(rows), _LOG_QUANTILE_LOWER)
-            upper = np.full(len(rows), _LOG_QUANTILE_UPPER)
-            for _ in range(_QUANTILE_BISECTIONS):
-                middle = 0.5 * (lower + upper)
-                beneath = _block_distribution(block, np.exp(middle)) < target
-                lower = np.where(beneath, middle, lower)
-                upper = np.where(beneath, upper, middle)
-            result[rows] = np.exp(0.5 * (lower + upper))
         return result
 
 

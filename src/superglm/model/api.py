@@ -364,6 +364,9 @@ class SuperGLM:
         ``estimate_theta``.
         """
         self.__dict__.update(state)
+        # Earlier releases pickled the metadata of a fast discrete predictor
+        # that no longer exists; nothing reads it.
+        self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
             mark_retired_linear_state,
             release_retired_tweedie_state,
@@ -567,19 +570,6 @@ class SuperGLM:
             raise AttributeError("theta_ is only available after fitting a negative-binomial model")
         return float(theta)
 
-    # ── Static / class helpers ────────────────────────────────────
-
-    @staticmethod
-    def _resolve_penalty(penalty, lambda1, penalty_features=None):
-        return base.resolve_penalty(penalty, lambda1, penalty_features)
-
-    def _resolve_knots(self, spline_cols):
-        return base.resolve_knots(self, spline_cols)
-
-    @staticmethod
-    def _resolve_ci(ci):
-        return plot_ops.resolve_ci(ci)
-
     # ── Core model operations ─────────────────────────────────────
 
     def _clone_without_features(self, drop, *, lambda1=..., lambda2=...):
@@ -599,12 +589,6 @@ class SuperGLM:
             sample_weight,
             offset,
         )
-
-    def _compute_lambda_max(self, y, weights):
-        return base.compute_lambda_max(self, y, weights)
-
-    def _rebuild_design_matrix_with_lambdas(self, lambdas, sample_weight):
-        return base.rebuild_dm_with_lambdas(self, lambdas, sample_weight)
 
     # ── Fit ───────────────────────────────────────────────────────
 
@@ -1440,11 +1424,6 @@ class SuperGLM:
         with self._parallel_scope():
             return TermResults(explain_ops.relativities(self, with_se, centering=centering))
 
-    def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
-        return explain_ops.model_feature_se_from_cov(
-            self, name, Cov_active, active_groups, n_points
-        )
-
     def simultaneous_bands(
         self,
         feature: Hashable,
@@ -2031,21 +2010,6 @@ class SuperGLM:
             random_effects=random_effects,
         )
 
-    def _predict_eta_fast_discrete(
-        self,
-        X: FrameLike,
-        offset: NDArray | None = None,
-        *,
-        random_effects: str = "conditional",
-    ) -> NDArray:
-        """Private fast discrete predictor on the link scale."""
-        return base.predict_eta_fast_discrete(
-            self,
-            X,
-            offset,
-            random_effects=random_effects,
-        )
-
     def _predict_exact(
         self,
         X: FrameLike,
@@ -2055,21 +2019,6 @@ class SuperGLM:
     ) -> NDArray:
         """Private exact canonical predictor on the response scale."""
         return base.predict_exact(self, X, offset, random_effects=random_effects)
-
-    def _predict_fast_discrete(
-        self,
-        X: FrameLike,
-        offset: NDArray | None = None,
-        *,
-        random_effects: str = "conditional",
-    ) -> NDArray:
-        """Private fast discrete predictor on the response scale."""
-        return base.predict_fast_discrete(
-            self,
-            X,
-            offset,
-            random_effects=random_effects,
-        )
 
     def predict(
         self,
@@ -2286,182 +2235,3 @@ class SuperGLM:
             from superglm.export.rating_tables import build_rating_table_payload
 
             return build_rating_table_payload(self, X, y, sample_weight=sample_weight, **kwargs)
-
-    # ── REML adapter methods (used by reml_optimizer) ─────────────
-
-    def _compute_dW_deta(self, mu, eta, sample_weight):
-        return fit_ops.model_compute_dW_deta(self, mu, eta, sample_weight)
-
-    def _reml_w_correction(
-        self,
-        pirls_result,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        penalty_caches,
-        sample_weight,
-        offset_arr,
-        w_correction_order=1,
-    ):
-        return fit_ops.model_reml_w_correction(
-            self,
-            pirls_result,
-            XtWX_S_inv,
-            lambdas,
-            reml_groups,
-            penalty_caches,
-            sample_weight,
-            offset_arr,
-            w_correction_order=w_correction_order,
-        )
-
-    def _reml_laml_objective(
-        self, y, result, lambdas, sample_weight, offset_arr, XtWX=None, penalty_caches=None
-    ):
-        return fit_ops.model_reml_laml_objective(
-            self, y, result, lambdas, sample_weight, offset_arr, XtWX, penalty_caches
-        )
-
-    def _reml_direct_gradient(
-        self,
-        result,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        penalty_ranks,
-        phi_hat=1.0,
-        *,
-        inverse_phi=None,
-    ):
-        return fit_ops.model_reml_direct_gradient(
-            self,
-            result,
-            XtWX_S_inv,
-            lambdas,
-            reml_groups,
-            penalty_ranks,
-            phi_hat,
-            inverse_phi=inverse_phi,
-        )
-
-    def _reml_direct_hessian(
-        self,
-        XtWX_S_inv,
-        lambdas,
-        reml_groups,
-        gradient,
-        penalty_ranks,
-        penalty_caches=None,
-        pirls_result=None,
-        n_obs=0,
-        phi_hat=1.0,
-        dH_extra=None,
-        dH2_cross=None,
-        *,
-        inverse_phi=None,
-        d_inverse_phi_d_penalized_deviance=None,
-    ):
-        return fit_ops.model_reml_direct_hessian(
-            self,
-            XtWX_S_inv,
-            lambdas,
-            reml_groups,
-            gradient,
-            penalty_ranks,
-            penalty_caches,
-            pirls_result,
-            n_obs,
-            phi_hat,
-            dH_extra,
-            dH2_cross,
-            inverse_phi=inverse_phi,
-            d_inverse_phi_d_penalized_deviance=(d_inverse_phi_d_penalized_deviance),
-        )
-
-    def _optimize_direct_reml(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-        profile=None,
-    ):
-        return fit_ops.model_optimize_direct_reml(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-            profile=profile,
-        )
-
-    def _optimize_discrete_reml_cached_w(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-        profile=None,
-    ):
-        return fit_ops.model_optimize_discrete_reml_cached_w(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-            profile=profile,
-        )
-
-    def _optimize_efs_reml(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        penalty_caches=None,
-    ):
-        return fit_ops.model_optimize_efs_reml(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-        )

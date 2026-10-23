@@ -820,32 +820,18 @@ def assemble_joint_hessian(
 
 
 def _result_intercept_moments(
-    result: Any,
     *,
     width: int,
-    fisher_mean_x: NDArray | None = None,
-    fisher_sum_w: float | None = None,
+    fisher_mean_x: NDArray,
+    fisher_sum_w: float,
 ) -> tuple[NDArray, float]:
-    """Recover intercept moments from the working cache or compatibility metadata."""
-    if (fisher_mean_x is None) != (fisher_sum_w is None):
-        raise ValueError("fisher_mean_x and fisher_sum_w must be provided together")
-    if fisher_mean_x is not None:
-        assert fisher_sum_w is not None
-        mean_x = np.asarray(fisher_mean_x, dtype=np.float64)
-        sum_w = float(fisher_sum_w)
-        if mean_x.shape != (width,):
-            raise RuntimeError("SCOP REML intercept geometry has the wrong width")
-        if not np.isfinite(sum_w) or sum_w <= 0.0:
-            raise RuntimeError("SCOP REML intercept weight sum must be positive and finite")
-        return sum_w * mean_x, sum_w
-
-    rank_info = result.rank_info
-    if rank_info is None:
-        raise RuntimeError("SCOP REML requires retained intercept geometry")
-    sum_w = float(rank_info.sum_w)
-    mean_x = np.asarray(rank_info.mean_x, dtype=np.float64)
+    """Validated intercept moments ``(X'W1, sum W)`` of the retained mode."""
+    mean_x = np.asarray(fisher_mean_x, dtype=np.float64)
+    sum_w = float(fisher_sum_w)
     if mean_x.shape != (width,):
         raise RuntimeError("SCOP REML intercept geometry has the wrong width")
+    if not np.isfinite(sum_w) or sum_w <= 0.0:
+        raise RuntimeError("SCOP REML intercept weight sum must be positive and finite")
     return sum_w * mean_x, sum_w
 
 
@@ -876,7 +862,7 @@ def _evaluate_scop_reml_mode(
     xtwx: NDArray,
     centered_xtwx: NDArray,
     fisher_mean_x: NDArray,
-    fisher_sum_w: float | None = None,
+    fisher_sum_w: float,
     scop_states: dict[int, dict],
     penalty_components: list[PenaltyComponent] | None = None,
     penalty: NDArray | None = None,
@@ -910,9 +896,8 @@ def _evaluate_scop_reml_mode(
             reml_penalties=penalty_components,
         )
     xtw1, sum_w = _result_intercept_moments(
-        result,
         width=context.dm.p,
-        fisher_mean_x=fisher_mean_x if fisher_sum_w is not None else None,
+        fisher_mean_x=fisher_mean_x,
         fisher_sum_w=fisher_sum_w,
     )
     if mode_score is None:
@@ -1858,49 +1843,6 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
     if state["group_name"] != pc.group_name or state["group_sl"] != pc.group_sl:
         return None
     return state
-
-
-def scop_efs_lambda_update(
-    pc: PenaltyComponent,
-    beta: NDArray,
-    H_joint_inv: NDArray,
-    inv_phi: float,
-    lam_old: float,
-    scop_states: dict[int, dict],
-) -> float:
-    """Fellner-Schall fixed-point update for one penalty component.
-
-    .. deprecated:: Use ``_joint_efs_lambda_step`` for the main EFS loop.
-        This function uses the old fixed-point formula and is kept only for
-        backward compatibility.
-    """
-    sl = pc.group_sl
-
-    scop_st = _is_scop_component(pc, scop_states)
-    if scop_st is not None:
-        beta_g = scop_st["beta_eff"]
-    else:
-        beta_g = beta[sl]
-
-    if np.linalg.norm(beta_g) < 1e-12:
-        return lam_old
-
-    quad = penalty_component_quadratic(pc, beta_g)
-    trace_term = penalty_component_trace(pc, H_joint_inv[sl, sl])
-
-    r_j = pc.rank
-    denom = inv_phi * quad + trace_term
-
-    if denom > 1e-12:
-        lam_raw = r_j / denom
-    else:
-        return lam_old
-
-    log_step = np.log(max(lam_raw, 1e-10)) - np.log(max(lam_old, 1e-10))
-    log_step = np.clip(log_step, -5.0, 5.0)
-    lam_new = lam_old * float(np.exp(log_step))
-
-    return lam_new
 
 
 def fit_fixed_scop_reml(

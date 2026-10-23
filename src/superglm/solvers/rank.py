@@ -850,19 +850,6 @@ def _scaled_coordinate_columns(
     return np.ldexp(mantissa, exponent - column_exponent[None, :]), column_exponent
 
 
-def _restore_coordinate_scale(
-    values: NDArray, scale: NDArray, exponent: int | NDArray = 0
-) -> NDArray:
-    """Return ``values * 2**exponent / scale`` without a reciprocal intermediate."""
-    mantissa, value_exponent = np.frexp(values)
-    scale_mantissa, scale_exponent = np.frexp(scale)
-    with np.errstate(over="ignore", invalid="ignore"):
-        result = np.ldexp(mantissa / scale_mantissa, value_exponent - scale_exponent + exponent)
-    if np.any(~np.isfinite(result)):
-        raise ValueError("requested result is not representable")
-    return result
-
-
 def _exact_array(values: NDArray) -> NDArray:
     """Represent stored floats exactly, only on the deferred tiny-factor path."""
     values = np.asarray(values)
@@ -1070,21 +1057,6 @@ class RankDecomposition:
         inverse = (self.solution_basis / self.retained_values) @ self.solution_basis.T
         return _symmetric_part(inverse)
 
-    def retained_parameter_basis(self) -> NDArray:
-        if self.equilibrated_solution_basis is not None:
-            active = self.active_columns
-            basis = np.zeros((self.width, self.rank))
-            basis[active] = _restore_coordinate_scale(
-                self.equilibrated_solution_basis[active], self.column_scale[active, None]
-            )
-            return basis
-        if self.solution_basis is not None:
-            return self.solution_basis.copy()
-        basis = np.zeros((self.width, self.rank))
-        if self.rank:
-            basis[self.active_columns, :] = np.diag(1.0 / self.column_scale[self.active_columns])
-        return basis
-
     def null_basis(self) -> NDArray:
         if self.parameter_null_basis is None:
             return np.zeros((self.width, 0))
@@ -1226,22 +1198,6 @@ class RankInfo:
     @property
     def total_edf(self) -> float:
         return self.intercept_edf + float(np.sum(self.feature_edf))
-
-    def solve(self, rhs: NDArray) -> NDArray:
-        rhs = np.asarray(rhs, dtype=float)
-        if rhs.shape != self.mean_x.shape:
-            raise ValueError("rhs width does not match fitted coefficient space")
-        result = np.zeros_like(rhs)
-        result[self.selected_columns] = self.augmented.solve(rhs[self.selected_columns])
-        return result
-
-    def pseudo_inverse(self) -> NDArray:
-        width = len(self.mean_x)
-        result = np.zeros((width, width))
-        result[np.ix_(self.selected_columns, self.selected_columns)] = (
-            self.augmented.pseudo_inverse()
-        )
-        return result
 
     def is_estimable(self, contrast: NDArray) -> bool:
         contrast = np.asarray(contrast, dtype=float)

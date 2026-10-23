@@ -52,9 +52,7 @@ class FactorSmoothLeafLayout:
     codes, so no border block is densified whole), and ``basis_table`` is a
     discrete term's support rows in the natural basis.  The border fields
     (``small_*``, ``local_groups``, ``dense_small_matrix``) are
-    ``_border_partition``'s; ``indicator_columns`` is all
-    ``False`` (no border block takes cells here) and ``sparse_indicators`` is
-    empty, the attributes the shared border-row helpers read.
+    ``_border_partition``'s.
 
     Caches (the cached properties and the lineage entries): the cached
     properties are owned by this immutable layout, which lives in its design's
@@ -110,10 +108,6 @@ class FactorSmoothLeafLayout:
     def width(self) -> int:
         return len(self.small_indices)
 
-    @property
-    def sparse_indicators(self) -> tuple:
-        return ()
-
     def thin_levels(self, prior_weights: NDArray | None) -> tuple:
         """The ``sz`` levels with fewer than ``m`` distinct weighted ``x`` values (design decision 4).
 
@@ -161,12 +155,6 @@ class FactorSmoothLeafLayout:
         slot.insert(0, (sources, np.array(weights, copy=True), value))
         del slot[2:]
         return value
-
-    @cached_property
-    def indicator_columns(self) -> NDArray:
-        mask = np.zeros(len(self.small_indices), dtype=bool)
-        mask.setflags(write=False)
-        return mask
 
     @cached_property
     def one_hot_columns(self) -> NDArray:

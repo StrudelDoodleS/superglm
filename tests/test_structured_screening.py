@@ -23,9 +23,7 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.features.spline import PSpline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
-from superglm.screening._arrow import factor_arrow
 from superglm.screening._factor_kernels import _factor_rank_floor, _rank_floor
-from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_factor import _pair_scale, _profiled_factor
 from superglm.screening._pair_moments import pair_score_curvature
 from superglm.screening._score_stat import _pair_pencil, penalized_score_statistic_ladder
@@ -35,6 +33,7 @@ from superglm.screening._structured import (
     _profile,
     spline_cat_moments,
 )
+from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
 
@@ -75,109 +74,6 @@ def _single_rung(p, budget=2.0):
     rungs = structured_ladder(p, budgets=(budget,))
     assert rungs is not None, f"structured_ladder refused the pair at budget {budget}"
     return rungs[0]
-
-
-def _dense_arrow(G, E, border):
-    """The same matrix ``factor_arrow`` takes, assembled densely."""
-    n_blocks, g, _ = G.shape
-    r = border.shape[0]
-    K = np.zeros((n_blocks * g + r, n_blocks * g + r))
-    for q in range(n_blocks):
-        s = slice(q * g, (q + 1) * g)
-        K[s, s] = G[q]
-        K[n_blocks * g :, s] = E[q]
-        K[s, n_blocks * g :] = E[q].T
-    K[n_blocks * g :, n_blocks * g :] = border
-    return K
-
-
-def _random_arrow(rng, n_blocks, g, r, rows_per_block=12):
-    """A PSD arrow matrix, built as a Gram so the structure is exact.
-
-    Each group's rows touch only that group's columns and the border, so
-    ``Z' Z`` has zeros between groups by construction rather than by
-    cancellation.
-    """
-    Z = np.zeros((n_blocks * rows_per_block, n_blocks * g + r))
-    for q in range(n_blocks):
-        rows = slice(q * rows_per_block, (q + 1) * rows_per_block)
-        Z[rows, q * g : (q + 1) * g] = rng.normal(size=(rows_per_block, g))
-        Z[rows, n_blocks * g :] = rng.normal(size=(rows_per_block, r))
-    K = Z.T @ Z
-    G = np.stack([K[q * g : (q + 1) * g, q * g : (q + 1) * g] for q in range(n_blocks)])
-    E = np.stack([K[n_blocks * g :, q * g : (q + 1) * g] for q in range(n_blocks)])
-    return G, E, K[n_blocks * g :, n_blocks * g :], K
-
-
-def test_arrow_solve_and_inverse_blocks_match_a_dense_factorization():
-    """The arrow factorization is an exact reorganization, not an approximation."""
-    rng = np.random.default_rng(0)
-    n_blocks, g, r = 9, 4, 3
-    G, E, border, K = _random_arrow(rng, n_blocks, g, r)
-
-    b_blocks = rng.normal(size=(n_blocks, g))
-    b_border = rng.normal(size=r)
-    f = factor_arrow(G, E, border)
-    x, z = f.solve(b_blocks, b_border)
-
-    want = np.linalg.solve(K, np.concatenate([b_blocks.reshape(-1), b_border]))
-    assert np.allclose(x.reshape(-1), want[: n_blocks * g], rtol=0, atol=1e-9)
-    assert np.allclose(z, want[n_blocks * g :], rtol=0, atol=1e-9)
-
-    Kinv = np.linalg.inv(K)
-    got = f.diag_blocks()
-    for q in range(n_blocks):
-        s = slice(q * g, (q + 1) * g)
-        assert np.allclose(got[q], Kinv[s, s], rtol=0, atol=1e-9)
-
-    # The OFF-diagonal blocks are ``Y_q Sinv Y_q''`` and nothing else, which is
-    # what lets the edf contract V_eff's non-block-diagonal half in O(L).
-    # Never formed by the module; asserted here against the dense inverse.
-    for q in range(n_blocks):
-        for other in range(n_blocks):
-            if q == other:
-                continue
-            block = f.Y[q] @ f.Sinv @ f.Y[other].T
-            rows, cols = slice(q * g, (q + 1) * g), slice(other * g, (other + 1) * g)
-            assert np.allclose(block, Kinv[rows, cols], rtol=0, atol=1e-9)
-
-
-def test_arrow_inverts_a_singular_system_as_a_pseudo_inverse():
-    """A degenerate level is routine at high cardinality, so the factorization
-    has to keep going rather than fail on it.
-
-    This module used to answer that with a RANK, because its one caller wrote
-    ``edf`` as ``rank(A) - lambda tr(A^-1 S)``.  It does not any more, so what
-    is pinned is the property the inverse actually has to have: ``K K^+ K = K``
-    on the delivered blocks, with the empty level's own block left at zero
-    rather than inverted.  The old assertion could hold while the inverse was
-    wrong, and did -- an inverse and a rank counted by different cuts is
-    exactly what the whole ``1 - 0`` failure was.
-    """
-    rng = np.random.default_rng(1)
-    n_blocks, g, r = 6, 4, 3
-    G, E, border, _ = _random_arrow(rng, n_blocks, g, r)
-    G[2] = 0.0  # an empty level: no rows, so no curvature and no coupling
-    E[2] = 0.0
-    K = _dense_arrow(G, E, border)
-    assert np.linalg.matrix_rank(K) == n_blocks * g + r - g, "fixture must be singular"
-
-    f = factor_arrow(G, E, border)
-    n = n_blocks * g + r
-    Kplus = np.zeros((n, n))
-    for q in range(n_blocks):
-        s = slice(q * g, (q + 1) * g)
-        for other in range(n_blocks):
-            o = slice(other * g, (other + 1) * g)
-            Kplus[s, o] = f.Y[q] @ f.Sinv @ f.Y[other].T
-        Kplus[s, s] += f.Ginv[q]
-        Kplus[s, n_blocks * g :] = -f.Y[q] @ f.Sinv
-        Kplus[n_blocks * g :, s] = Kplus[s, n_blocks * g :].T
-    Kplus[n_blocks * g :, n_blocks * g :] = f.Sinv
-
-    assert np.allclose(K @ Kplus @ K, K, rtol=0, atol=1e-9 * np.abs(K).max())
-    assert np.allclose(Kplus @ K @ Kplus, Kplus, rtol=0, atol=1e-9 * np.abs(Kplus).max())
-    assert np.array_equal(f.Ginv[2], np.zeros((g, g)))
 
 
 def _dense_ladder(factor, penalty, **kw):

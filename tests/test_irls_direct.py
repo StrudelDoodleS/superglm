@@ -111,16 +111,6 @@ def _force_unresolved_score(monkeypatch, *, resolved=False):
 
 # ── Basic solver tests ─────────────────────────────────────────
 class TestDirectSolverBasic:
-    def test_working_sums_reject_nonfinite_inputs_before_moment_assembly(self):
-        from superglm.solvers.irls_direct import _working_sums
-
-        with pytest.raises(ValueError, match="working weights"):
-            _working_sums(np.array([1.0, np.inf]), np.array([1.0, 2.0]))
-        with pytest.raises(ValueError, match="working response"):
-            _working_sums(np.array([1.0, 2.0]), np.array([1.0, np.nan]))
-
-        assert _working_sums(np.array([1.0, 2.0]), np.array([3.0, 4.0])) == (3.0, 7.0)
-
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
         from superglm.distributions import Poisson
@@ -378,9 +368,9 @@ class TestDirectSolverBasic:
 
         decomposition_calls = 0
 
-        # Both entry points count: a terminal decomposition the candidate fit
-        # skips is skipped whether or not the retained fit would have had to
-        # certify it against the observation factor.
+        # A terminal decomposition the candidate fit skips is skipped whether
+        # or not the retained fit would have had to certify it against the
+        # observation factor.
         def _counting(name):
             original = getattr(irls_direct, name)
 
@@ -392,7 +382,7 @@ class TestDirectSolverBasic:
             return counted
 
         # The data rank's entry point (``rank.decide_data_rank``) counts too.
-        for name in ("decompose_gram", "decompose_gram_if_authoritative", "decide_data_rank"):
+        for name in ("decompose_gram_if_authoritative", "decide_data_rank"):
             monkeypatch.setattr(irls_direct, name, _counting(name))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
         retained_geometry_calls = decomposition_calls
@@ -556,48 +546,8 @@ class TestDirectSolverBasic:
         assert len(recorder.rows) == 2
         assert recorder.level_reads == 1
 
-    def test_h_inverse_profiled_intercept_solve_matches_augmented_system(self):
-        from superglm.solvers.irls_direct import (
-            _robust_solve,
-            _solve_profiled_intercept_from_h_inv,
-        )
-
-        rng = np.random.default_rng(222)
-        p = 7
-        A = rng.standard_normal((p, p))
-        XtWX = A @ A.T + np.eye(p)
-        B = rng.standard_normal((p, p))
-        S = B @ B.T + 0.3 * np.eye(p)
-        H = XtWX + S
-        H_inv = np.linalg.inv(H)
-        XtWz = rng.standard_normal(p)
-        XtW1 = rng.standard_normal(p)
-        sum_W = 20.0
-        sum_Wz = -0.4
-
-        M_aug = np.empty((p + 1, p + 1))
-        M_aug[0, 0] = sum_W
-        M_aug[0, 1:] = XtW1
-        M_aug[1:, 0] = XtW1
-        M_aug[1:, 1:] = H
-        rhs = np.empty(p + 1)
-        rhs[0] = sum_Wz
-        rhs[1:] = XtWz
-
-        beta_aug, _, _ = _robust_solve(M_aug, rhs)
-        beta_h, intercept_h = _solve_profiled_intercept_from_h_inv(
-            H_inv,
-            XtWz,
-            XtW1,
-            sum_W,
-            sum_Wz,
-        )
-
-        np.testing.assert_allclose(intercept_h, beta_aug[0], rtol=1e-10, atol=1e-10)
-        np.testing.assert_allclose(beta_h, beta_aug[1:], rtol=1e-10, atol=1e-10)
-
-    def test_one_step_return_xtwx_uses_h_inverse_solve(self, monkeypatch):
-        """POI one-step calls reuse the final H inverse instead of solving M_aug separately."""
+    def test_one_step_return_xtwx_returns_h_inverse_and_gram(self):
+        """A one-step fit with ``return_xtwx`` returns the final H inverse and weighted Gram."""
         import superglm.solvers.irls_direct as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
@@ -610,11 +560,6 @@ class TestDirectSolverBasic:
         weights = np.ones(n)
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
         groups = [GroupSlice(name="x", start=0, end=2)]
-
-        def fail_robust_solve(*args, **kwargs):
-            raise AssertionError("_robust_solve should not be used on this fast path")
-
-        monkeypatch.setattr(irls_direct, "_robust_solve", fail_robust_solve)
 
         result, H_inv, XtWX = irls_direct.fit_irls_direct(
             X=dm,
@@ -651,8 +596,9 @@ class TestDirectSolverBasic:
         assert log_det == pytest.approx(np.linalg.slogdet(H)[1], abs=1e-10)
         assert cholesky_ok
 
-    def test_robust_solve_uses_unpivoted_cholesky_for_spd(self, monkeypatch):
+    def test_gram_decomposition_uses_cholesky_for_spd(self, monkeypatch):
         import superglm.solvers.irls_direct as irls_direct
+        from superglm.solvers.rank import decompose_gram
 
         rng = np.random.default_rng(13)
         A = rng.standard_normal((6, 6))
@@ -664,11 +610,13 @@ class TestDirectSolverBasic:
 
         monkeypatch.setattr(irls_direct.np.linalg, "svd", fail_svd)
 
-        x, cond_est, used_svd = irls_direct._robust_solve(M, rhs)
+        decomposition = decompose_gram(M)
 
-        np.testing.assert_allclose(x, np.linalg.solve(M, rhs), rtol=1e-10, atol=1e-10)
-        assert cond_est > 0
-        assert not used_svd
+        np.testing.assert_allclose(
+            decomposition.solve(rhs), np.linalg.solve(M, rhs), rtol=1e-10, atol=1e-10
+        )
+        assert decomposition.pre_truncation_condition > 0
+        assert decomposition.method in {"cholesky", "pivoted_cholesky"}
 
     def test_constant_weight_fit_reuses_weighted_gram(self, monkeypatch):
         """Gaussian identity fits reuse X'WX across IRLS iterations."""
@@ -2112,7 +2060,7 @@ class TestREMLDirect:
         assert "relativity" in rec
 
     def test_reml_direct_keeps_basis_fixed(self, poisson_data, monkeypatch):
-        """Direct REML should update lambda weights without rebuilding the basis."""
+        """The direct optimizer updates lambda weights without rebuilding the design matrix."""
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
@@ -2124,9 +2072,9 @@ class TestREMLDirect:
         )
 
         def fail_rebuild(*args, **kwargs):
-            raise AssertionError("Direct REML should not rebuild the design matrix")
+            raise AssertionError("The direct optimizer should not rebuild the design matrix")
 
-        monkeypatch.setattr(m, "_rebuild_design_matrix_with_lambdas", fail_rebuild)
+        monkeypatch.setattr("superglm.model.base.rebuild_dm_with_lambdas", fail_rebuild)
         m.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
 
         assert hasattr(m, "_reml_lambdas")

@@ -118,7 +118,7 @@ def _rounding_bounds(
     table route reads a raw group's row and its centre as separate terms,
     ``|a_r| + |z|`` with ``|a_r| <= |x_r| + |c_raw|``, so it passes
     ``raw_centre_copies=2``, and adds its own row-sum count
-    (``extra_roundings``, ``TablePlan.count_roundings``).
+    (``extra_roundings``, ``tests.test_reml_leverage_tables._count_roundings``).
     """
     args, kwargs = _correction_inputs(model)
     gradient, extra = w_derivatives.reml_w_correction(*args, **kwargs)

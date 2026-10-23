@@ -1476,15 +1476,6 @@ def penalty_component_trace(
     if component.penalty_kind == "repeated":
         repeat_count, block_width = _repeated_penalty_geometry(component)
         omega = _penalty_component_omega_ssp(component, group_matrix)
-        if inverse.ndim == 1:
-            if inverse.shape != (repeat_count * block_width,):
-                raise ValueError("Repeated penalty inverse diagonal has the wrong width.")
-            off_diagonal = omega - np.diag(np.diag(omega))
-            if not np.allclose(off_diagonal, 0.0, atol=1e-14):
-                raise ValueError(
-                    "A repeated non-diagonal penalty trace requires a selected inverse block."
-                )
-            return float(np.sum(inverse.reshape(repeat_count, block_width) * np.diag(omega)))
         if inverse.shape != (
             repeat_count * block_width,
             repeat_count * block_width,

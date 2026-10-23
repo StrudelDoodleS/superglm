@@ -1,8 +1,8 @@
 """The screening edf path costs O(L) in the level count, proved by counting.
 
-``superglm.screening._arrow`` claims to factor a block-arrow matrix in
-``O(L * (g^3 + g^2 r + g r^2))`` where densifying it would be
-``O((L g + r)^3)`` and would allocate ``(L g + r)^2`` doubles.  The claim is
+The structured ladder (``superglm.screening._structured``) factors a
+block-arrow system in ``O(L * (g^3 + g^2 r + g r^2))`` where densifying it
+would be ``O((L g + r)^3)`` and would allocate ``(L g + r)^2`` doubles.  The claim is
 load-bearing -- it is the whole reason the path exists, since the dense route
 is refused above about 124 levels and would need terabytes at fifty thousand
 -- and until now it was untested, because the obvious test is a benchmark and
@@ -32,7 +32,7 @@ is the only thing that varies.  A generator that grew the row count alongside
 row dimension does legitimately appear in operand shapes.
 
 What counting does *not* settle is stated here rather than left to be
-discovered.  ``_arrow``'s cost has three terms; the ``g^3`` one is the
+discovered.  The ladder's cost has three terms; the ``g^3`` one is the
 eigendecomposition and is counted, while ``g^2 r`` and ``g r^2`` live in
 einsums and matrix products, which no recorder can see.  Allocation bounds
 their space and nothing here bounds their time --
@@ -51,7 +51,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from superglm.screening._arrow import factor_arrow
 from superglm.screening._structured import spline_cat_moments, structured_ladder
 
 from ._linalg_cost import (
@@ -173,7 +172,7 @@ def test_the_edf_path_work_and_allocation_grow_linearly_in_the_level_count(
 def _record_dense_arrow(n_levels: int):
     """Factor the same arrow matrix the way the dense path would.
 
-    This is the implementation ``_arrow`` exists to replace, assembled from
+    This is the implementation the structured ladder exists to replace, assembled from
     the same blocks: one ``(L g + r)`` square eigendecomposition.
     """
     g, r = K_A, 1 + K_A
@@ -255,8 +254,8 @@ def test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter()
     bounded space therefore passes both assertions, and this test fails if
     that ever stops being true so the limits section cannot quietly rot.
 
-    It also bounds what the counting half of this file proves.  ``_arrow``
-    claims ``O(L (g^3 + g^2 r + g r^2))``.  The ``g^3`` term is the ``eigh``
+    It also bounds what the counting half of this file proves.  The
+    structured ladder claims ``O(L (g^3 + g^2 r + g r^2))``.  The ``g^3`` term is the ``eigh``
     and is counted; the other two live in einsums and matrix products and are
     not.  Allocation covers their space, nothing here covers their time.
     """
@@ -276,36 +275,3 @@ def test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter()
         [record.peak_bytes + 1 for record in records],
         label="peak allocation",
     )
-
-
-def test_one_arrow_factorization_costs_exactly_one_eigendecomposition_per_block():
-    """The kernel's own claim, at its own level: L blocks plus one border.
-
-    ``factor_arrow`` is where the linearity comes from, and here the count is
-    exact rather than bounded -- there is no search above it to vary.
-
-    Two calls, whatever ``L`` is, is the module's stated "nothing loops in
-    Python over L".  Dropping to a per-block loop would leave the elementary
-    count and the shapes untouched and only move this number, which is why it
-    is asserted separately from them.
-    """
-    g, r = 4, 3
-    for n_levels in (16, 64):
-        rng = np.random.default_rng(11)
-        blocks = rng.normal(size=(n_levels, g, g))
-        blocks = blocks @ np.swapaxes(blocks, -1, -2) + g * np.eye(g)
-        coupling = rng.normal(size=(n_levels, r, g))
-        border = np.eye(r) * (n_levels * g + r)
-
-        with record_linalg_calls() as record:
-            factor_arrow(blocks, coupling, border)
-
-        assert record.elementary_factorizations() == n_levels + 1
-        assert record.core_signature() == {
-            ("numpy.linalg.eigh", ((g, g),)),
-            ("numpy.linalg.eigh", ((r, r),)),
-        }
-        assert len(record.factorizations()) == 2, (
-            f"{n_levels} levels took {len(record.factorizations())} calls; the "
-            f"block axis is meant to be batched, not looped\n{report(record)}"
-        )

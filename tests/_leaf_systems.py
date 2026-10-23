@@ -2,7 +2,7 @@
 
 ``leaf_system_from_rows`` folds hand-made rows with the engine's own leaf kernel
 (``block_leaves._leaf_segments``) and assembles them as the design's leaf pass
-does (``block_leaves._assemble_system``), without a design matrix or layout.
+does (``block_leaves._assemble_compact``), without a design matrix or layout.
 """
 
 from __future__ import annotations
@@ -10,7 +10,13 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers._structured.block_leaves import _assemble_system, _leaf_segments
+from superglm.solvers._structured.block_leaves import (
+    _assemble_compact,
+    _close_levels,
+    _leaf_segments,
+    _LeafParts,
+    _signed_parts,
+)
 from superglm.solvers._structured.border import BorderGenerators
 
 
@@ -97,4 +103,70 @@ def leaf_system_from_rows(
         group_index=0,
         group_name=name,
         basis=basis,
+    )
+
+
+def _assemble_system(
+    R_acc: NDArray,
+    M_acc: NDArray | None,
+    E_acc: NDArray | None,
+    counts: NDArray,
+    merges: NDArray,
+    *,
+    center: NDArray,
+    generators: BorderGenerators | None,
+    signed: bool,
+    block_size: int,
+    weights: NDArray,
+    weighted_rhs: NDArray,
+    small_indices: NDArray,
+    structured_indices: NDArray,
+    group_index: int,
+    group_name: str,
+    basis: str = "fs",
+    thin_levels: tuple = (),
+    thin_counts: tuple[NDArray, NDArray] | None = None,
+):
+    """The leaf data (pseudo-rows or within Gram) and the raw moment operator by products.
+
+    The whole triangles ``R_acc`` are closed level by level into the compact
+    leaf data (``_close_levels``, the arithmetic of the compact pass) and the
+    system is assembled from it (``_assemble_compact``); signed rows read
+    their triangles and middle factors once more there, and an ``sz`` leaf
+    keeps the triangles.
+    """
+    k = block_size
+    K, p = R_acc.shape[0], R_acc.shape[2]
+    top = np.zeros((K, k, p))
+    tail_norms2 = np.zeros((K, p - k))
+    tail_gram = np.zeros((p - k, p - k))
+    _close_levels(R_acc, k, top, tail_norms2, tail_gram, not signed)
+    parts = _LeafParts(top, tail_norms2, None if signed else tail_gram, counts, merges)
+    if signed:
+        assert M_acc is not None
+        pseudo_rows, signature, level_rows, border = _signed_parts(R_acc, M_acc, k)
+        assert E_acc is not None
+        parts = parts._replace(
+            pseudo_rows=pseudo_rows,
+            signature=signature,
+            error_rows=np.ascontiguousarray(E_acc[:, :k, :]),
+            error_diagonal=np.diagonal(E_acc, axis1=1, axis2=2).copy(),
+            level_rows=level_rows,
+            border=border,
+        )
+    return _assemble_compact(
+        parts._replace(triangles=R_acc),
+        center=center,
+        generators=generators,
+        signed=signed,
+        block_size=block_size,
+        weights=weights,
+        weighted_rhs=weighted_rhs,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        group_index=group_index,
+        group_name=group_name,
+        basis=basis,
+        thin_levels=thin_levels,
+        thin_counts=thin_counts,
     )

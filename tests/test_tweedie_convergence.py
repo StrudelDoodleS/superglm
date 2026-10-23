@@ -3,7 +3,7 @@
 Tweedie p=1.5 with log link and high zero-inflation (~80%) stresses the IRLS
 solver: V(mu)=mu^1.5 creates extreme working weight ranges, and the non-canonical
 log link means the Newton step can overshoot near convergence.  These tests verify
-that the condition-aware SVD fallback in _robust_solve() prevents divergence.
+that the condition-aware SVD fallback in the solver prevents divergence.
 """
 
 import numpy as np

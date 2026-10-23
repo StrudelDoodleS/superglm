@@ -7,7 +7,7 @@ from superglm import Constraint, PSpline, SuperGLM
 from superglm.solvers.scop_exact_support import build_exact_scop_support
 
 
-def test_build_exact_scop_support_aggregates_weighted_products_exactly():
+def test_build_exact_scop_support_reproduces_row_level_products_exactly():
     B = np.array(
         [
             [1.0, 0.0, 0.0],
@@ -26,7 +26,13 @@ def test_build_exact_scop_support_aggregates_weighted_products_exactly():
     BtWB_row = B.T @ (B * W[:, None])
     BtWz_row = B.T @ (W * z)
 
-    BtWB_support, BtWz_support = support.weighted_products(W, z)
+    assert_allclose(support.B_unique[support.row_to_support], B, rtol=0.0, atol=0.0)
+
+    # Aggregate the weights over the support the way the solver does.
+    W_agg = np.bincount(support.row_to_support, weights=W, minlength=support.n_unique)
+    Wz_agg = np.bincount(support.row_to_support, weights=W * z, minlength=support.n_unique)
+    BtWB_support = support.B_unique.T @ (support.B_unique * W_agg[:, None])
+    BtWz_support = support.B_unique.T @ Wz_agg
 
     assert_allclose(BtWB_support, BtWB_row)
     assert_allclose(BtWz_support, BtWz_row)

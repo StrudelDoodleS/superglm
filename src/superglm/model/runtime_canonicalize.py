@@ -43,25 +43,8 @@ class _IdentityCoefficientMap:
         return (self.size, self.size)
 
     @property
-    def ndim(self) -> int:
-        return 2
-
-    @property
     def dtype(self) -> np.dtype[np.float64]:
         return np.dtype(np.float64)
-
-    @property
-    def T(self) -> _IdentityCoefficientMap:
-        return self
-
-    def matvec(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
-        vector = np.asarray(vector, dtype=np.float64)
-        if vector.shape != (self.size,):
-            raise ValueError(f"Expected a vector of shape ({self.size},), got {vector.shape}")
-        return vector.copy()
-
-    def rmatvec(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
-        return self.matvec(vector)
 
     def __matmul__(self, other: Any) -> NDArray[Any]:
         array = np.asarray(other)
@@ -69,15 +52,6 @@ class _IdentityCoefficientMap:
             raise ValueError(
                 f"Identity map with shape {self.shape} cannot multiply an array "
                 f"with shape {array.shape}"
-            )
-        return array.copy()
-
-    def __rmatmul__(self, other: Any) -> NDArray[Any]:
-        array = np.asarray(other)
-        if array.ndim == 0 or array.shape[-1] != self.size:
-            raise ValueError(
-                f"Array with shape {array.shape} cannot multiply identity map "
-                f"with shape {self.shape}"
             )
         return array.copy()
 

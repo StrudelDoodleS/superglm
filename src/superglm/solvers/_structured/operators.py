@@ -497,41 +497,6 @@ def _block_operator_bdlr(
     )
 
 
-def _sum_to_zero_operator_bdlr(
-    operator: SumToZeroBlockOperator,
-) -> _BlockDiagonalLowRank:
-    """Convert raw constrained blocks to public block-diagonal-plus-low-rank form.
-
-    This constructs a fresh ``BlockSymmetricOperator``, so its finiteness guard
-    can raise from here -- lazily, on a path (``_operator_bdlr`` ->
-    ``trace_inverse_operator``) that no seam covers. It is a backstop rather
-    than a live refusal: ``operator`` passed its own finiteness guard at
-    construction, ``D[:-1]`` is a slice of already-finite blocks, and
-    ``C[:-1] - C[-1:]`` is a difference of finite quantities, so reaching it
-    needs that subtraction to overflow. Written down rather than seamed,
-    because a speculative catch around the Hessian assembly would be wide
-    enough to swallow the structural refusals that path is supposed to surface.
-    """
-    base = BlockSymmetricOperator(
-        A=operator.A,
-        C=operator.C[:-1] - operator.C[-1:],
-        D=operator.D[:-1],
-        small_indices=operator.small_indices,
-        structured_indices=operator.structured_indices,
-    )
-    last_basis = np.zeros((operator.shape[0], operator.block_size))
-    for indices in operator.structured_indices:
-        last_basis[indices] = np.eye(operator.block_size)
-    last = _BlockDiagonalLowRank(
-        blocks=np.zeros_like(operator.D[:-1]),
-        structured_indices=operator.structured_indices,
-        basis=last_basis,
-        core=operator.D[-1],
-        shape=operator.shape,
-    )
-    return _merge_bdlr((_block_operator_bdlr(base), last))
-
-
 def _empty_block_part(
     shape: tuple[int, int],
     structured_indices: NDArray,
@@ -605,15 +570,11 @@ def _operator_bdlr(
             shape=operator.shape,
         )
     raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
-    if not isinstance(raw, BlockSymmetricOperator | SumToZeroBlockOperator):
+    if not isinstance(raw, BlockSymmetricOperator):
         raise TypeError("BlockSchurFactor requires block-compatible compact operators.")
     if not np.array_equal(raw.structured_indices, structured_indices):
         raise ValueError("Compact operator has a different structured block layout.")
-    base = (
-        _sum_to_zero_operator_bdlr(raw)
-        if isinstance(raw, SumToZeroBlockOperator)
-        else _block_operator_bdlr(raw, local_only=local_only)
-    )
+    base = _block_operator_bdlr(raw, local_only=local_only)
     if not isinstance(operator, CenteredBlockOperator):
         return base
     update = _empty_block_part(operator.shape, structured_indices)

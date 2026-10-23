@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
 from superglm.features import (
@@ -20,9 +19,6 @@ from superglm.features import (
     _spline_config,
     _spline_constraints,
     _spline_factory,
-    _spline_identifiability,
-    _spline_knots,
-    _spline_multi_penalty,
     _spline_penalties,
     _spline_ranges,
     _spline_runtime,
@@ -36,21 +32,6 @@ if TYPE_CHECKING:
 
     from superglm.features._spline_ranges import PolynomialRange
     from superglm.solvers.scop import SCOPSolverReparam
-
-
-def _weighted_quantile_knots(
-    x: NDArray,
-    n_knots: int,
-    alpha: float,
-    sample_weight: NDArray | None = None,
-) -> NDArray:
-    """Compatibility wrapper for the private weighted-quantile knot helper."""
-    return _spline_knots.weighted_quantile_knots(
-        x,
-        n_knots,
-        alpha,
-        sample_weight=sample_weight,
-    )
 
 
 # A natural spline (``cr``, the default, or ``ns``) has no range to place its
@@ -171,17 +152,9 @@ class _SplineBase:
 
     # ── Validation ────────────────────────────────────────────────
 
-    def _validate_m_orders(self) -> None:
-        """Phase 1: static m validation. Called from __init__."""
-        _spline_config.validate_m_orders(self)
-
     def _validate_m_orders_build(self) -> None:
         """Phase 2: dimension-dependent m validation. Called after knot placement."""
         _spline_config.validate_m_orders_build(self)
-
-    def _validate_select(self) -> None:
-        """Phase 1: static select validation. Called from __init__."""
-        _spline_config.validate_select(self)
 
     def __init__(
         self,
@@ -222,10 +195,6 @@ class _SplineBase:
             polynomial_ranges=polynomial_ranges,
         )
 
-    def _prepare_eval_points(self, x: NDArray) -> tuple[NDArray, bool]:
-        """Apply the configured extrapolation policy for basis evaluation."""
-        return _spline_runtime.prepare_eval_points(self, x)
-
     def _basis_matrix(self, x: NDArray):
         """Evaluate the raw B-spline basis under the extrapolation policy."""
         return _spline_runtime.basis_matrix(self, x)
@@ -240,14 +209,6 @@ class _SplineBase:
         their own evaluation strategy.
         """
         return _spline_runtime.raw_basis_matrix(self, x)
-
-    def _basis_value_and_slope_at(self, x0: float) -> tuple[NDArray, NDArray]:
-        """Return the raw basis row and its first derivative at ``x0``."""
-        return _spline_runtime.basis_value_and_slope_at(self, x0)
-
-    def _boundary_linear_rows(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-        """Cache basis value/slope rows for linear continuation at the boundaries."""
-        return _spline_runtime.boundary_linear_rows(self)
 
     def _linear_tail_basis_matrix(self, x: NDArray):
         """Evaluate the raw basis with explicit linear continuation outside the fit range."""
@@ -338,19 +299,6 @@ class _SplineBase:
         """
         return not self.select
 
-    def _build_multi_m_components(
-        self, x: NDArray, B: Any, final_projection: NDArray | None
-    ) -> list[tuple[str, NDArray]]:
-        """Build per-order penalty components projected through the same constraints."""
-        del B, final_projection
-        return _spline_multi_penalty.build_multi_m_components(
-            x=x,
-            m_orders=self._m_orders,
-            build_penalty_for_order=self._build_penalty_for_order,
-            apply_constraints=self._apply_constraints,
-            apply_identifiability=self._apply_identifiability,
-        )
-
     def _constraint_rows(self) -> NDArray:
         """Equality rows C with ``C @ beta = 0`` on the raw coefficients.
 
@@ -370,25 +318,6 @@ class _SplineBase:
         Z = _spline_ranges.constraint_null_space(C)
         self._Z = Z
         return B, Z.T @ omega @ Z, Z.shape[1], Z
-
-    def _identifiability_projection(
-        self,
-        x: NDArray,
-        constraint_projection: NDArray | None,
-    ) -> NDArray | None:
-        """Compute the projection that removes the intercept-confounded direction."""
-        return _spline_identifiability.build_identifiability_projection_for_spec(
-            self, x, constraint_projection
-        )
-
-    def _apply_identifiability(
-        self,
-        x: NDArray,
-        omega: NDArray,
-        projection: NDArray | None,
-    ) -> tuple[NDArray, int, NDArray | None]:
-        """Remove the intercept-confounded smooth direction."""
-        return _spline_identifiability.apply_identifiability_for_spec(self, x, omega, projection)
 
     def _natural_constraint_rows(self) -> NDArray:
         """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
@@ -422,10 +351,6 @@ class _SplineBase:
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
         return _spline_select.resolve_lambda_policies(self._lambda_policy, info)
-
-    def _build_select(self, x: NDArray, B) -> GroupInfo:
-        """Build select=True GroupInfo with null + wiggle/per-order penalty components."""
-        return _spline_select.build_select(self, x, B)
 
     def build(
         self, x: NDArray, sample_weight: NDArray | None = None
@@ -1076,18 +1001,6 @@ class CardinalCRSpline(_SplineBase):
         """
         _spline_cardinal_spec.place_knots(self, x, sample_weight)
 
-    def _build_cr_matrices(self) -> None:
-        """Build the tridiagonal system matrices for the cardinal CR spline."""
-        _spline_cardinal_spec.build_cr_matrices(self)
-
-    def _cardinal_boundary_slopes(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-        """Basis value and slope at the boundary knots for linear extrapolation.
-
-        Returns ``(basis_lo, slope_lo, basis_hi, slope_hi)`` where each is
-        a length-K vector in the raw cardinal basis.
-        """
-        return _spline_cardinal_spec.cardinal_boundary_slopes(self)
-
     def _build_penalty(self) -> NDArray:
         return self._cr_S
 
@@ -1102,23 +1015,6 @@ class CardinalCRSpline(_SplineBase):
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray:
         return _spline_cardinal_spec.raw_basis_matrix(self, x)
-
-    def _linear_tail_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
-        """Evaluate cardinal basis with natural-spline linear tails outside range."""
-        return _spline_cardinal_spec.linear_tail_cardinal_basis(self, x)
-
-    def _eval_cardinal_basis(self, x: NDArray) -> sp.csr_matrix:
-        """Vectorised cardinal cubic regression spline evaluation.
-
-        For x in [x_j, x_{j+1}] with t = (x - x_j) / h_j:
-
-            f(x) = (1-t)*delta_j + t*delta_{j+1}
-                   + h_j^2 * [((1-t)^3 - (1-t))/6 * gamma_j
-                              + (t^3 - t)/6 * gamma_{j+1}]
-
-        where gamma = M @ delta.
-        """
-        return _spline_cardinal_spec.eval_cardinal_basis(self, x)
 
     @property
     def fitted_knots(self) -> NDArray | None:

@@ -31,8 +31,8 @@ from superglm.links import (
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
+    _compute_observed_row_bundle,
     build_observed_reml_geometry,
-    compute_observed_d2W_deta2,
     compute_observed_dW_deta,
     compute_observed_information_weights,
     observed_penalized_mode_score,
@@ -252,6 +252,13 @@ def test_gamma_log_observed_rows_match_glum_and_likelihood_finite_difference() -
     np.testing.assert_allclose(observed, fd_hessian, rtol=3e-6, atol=2e-6)
 
 
+def _observed_d2W_deta2(distribution, link, y, mu, eta, sample_weight):
+    """Second ``eta`` derivative of the observed row weights, from the row bundle REML reads."""
+    return _compute_observed_row_bundle(
+        distribution, link, y, mu, eta, sample_weight, derivative_order=2
+    )[2]
+
+
 def test_observed_weight_derivatives_are_exact_for_gamma_and_poisson_log() -> None:
     link = LogLink()
     eta = np.array([-0.7, 0.1, 0.9], dtype=np.float64)
@@ -261,13 +268,13 @@ def test_observed_weight_derivatives_are_exact_for_gamma_and_poisson_log() -> No
 
     gamma_w = compute_observed_information_weights(Gamma(), link, y, mu, eta, sample_weight)
     gamma_d1 = compute_observed_dW_deta(Gamma(), link, y, mu, eta, sample_weight)
-    gamma_d2 = compute_observed_d2W_deta2(Gamma(), link, y, mu, eta, sample_weight)
+    gamma_d2 = _observed_d2W_deta2(Gamma(), link, y, mu, eta, sample_weight)
     np.testing.assert_allclose(gamma_d1, -gamma_w, rtol=2e-15, atol=0.0)
     np.testing.assert_allclose(gamma_d2, gamma_w, rtol=2e-9, atol=2e-10)
 
     poisson_w = compute_observed_information_weights(Poisson(), link, y, mu, eta, sample_weight)
     poisson_d1 = compute_observed_dW_deta(Poisson(), link, y, mu, eta, sample_weight)
-    poisson_d2 = compute_observed_d2W_deta2(Poisson(), link, y, mu, eta, sample_weight)
+    poisson_d2 = _observed_d2W_deta2(Poisson(), link, y, mu, eta, sample_weight)
     fisher = sample_weight * mu
     np.testing.assert_allclose(poisson_w, fisher, rtol=2e-15, atol=0.0)
     np.testing.assert_allclose(poisson_d1, fisher, rtol=2e-15, atol=0.0)
@@ -380,7 +387,7 @@ def test_observed_row_derivative_oracle_matches_likelihood_finite_differences(
         eta,
         sample_weight,
     )
-    actual_d2 = compute_observed_d2W_deta2(
+    actual_d2 = _observed_d2W_deta2(
         distribution,
         link,
         y,
@@ -433,7 +440,7 @@ def test_custom_second_observed_derivative_requires_exact_fourth_order_protocol(
     weights = np.ones_like(y)
 
     with pytest.raises(NotImplementedError, match="deriv4_inverse"):
-        compute_observed_d2W_deta2(CustomGaussian(), link, y, mu, eta, weights)
+        _observed_d2W_deta2(CustomGaussian(), link, y, mu, eta, weights)
 
 
 def _result(beta: np.ndarray, intercept: float, *, phi: float = 1.0) -> PIRLSResult:

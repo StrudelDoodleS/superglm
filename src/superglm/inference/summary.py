@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import textwrap
 from dataclasses import dataclass
 from html import escape as html_escape
@@ -104,11 +103,6 @@ def _compute_coef_stats(
     p = 2.0 * (1.0 - norm.cdf(abs(z)))
     q = norm.ppf(1.0 - alpha / 2.0)
     return z, p, coef - q * se, coef + q * se
-
-
-def _camel_to_spaced(name: str) -> str:
-    """Convert CamelCase to spaced: 'GroupLasso' -> 'Group Lasso'."""
-    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
 
 
 def _display_method(method: Any) -> str:

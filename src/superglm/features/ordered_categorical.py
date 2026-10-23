@@ -120,17 +120,6 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
             ambiguous.add(value)
         by_value.setdefault(value, level)
 
-    def _spellings(raw: Any) -> list[str]:
-        """The renderings a numeric value can plausibly appear under."""
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            return []
-        out = [repr(value), str(value)]
-        if value.is_integer():
-            out.append(str(int(value)))
-        return out
-
     def match(raw: Any) -> Any:
         text = str(raw)
         if text in by_text:
@@ -141,12 +130,12 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
             # code. Only the grouping path opts in, because a LevelGrouping's
             # labels are stringified DATA rather than user-authored strings.
             return raw
-        # Only a rendering of the SAME number counts. "9" and 9.0 render each
-        # other ("9" -> {"9.0", "9"}), so they match; "001" renders {"1.0", "1"},
-        # which is not "001", so a declared 1 can never claim it. That asymmetry
-        # is the whole safety property -- leading zeros are identity in a policy
-        # or vehicle code, and collapsing them would be a worse bug than the one
-        # this fixes.
+        # Only a value equal to the SAME number counts. "9" and 9.0 are both
+        # the number 9, so they match. A raw string reaches here only when the
+        # caller opted in with numeric_strings; otherwise it was returned above,
+        # so a declared 1 never claims "001". That is the whole safety property
+        # -- leading zeros are identity in a policy or vehicle code, and
+        # collapsing them would be a worse bug than the one this fixes.
         try:
             value = float(raw)
         except (TypeError, ValueError):

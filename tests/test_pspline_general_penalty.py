@@ -8,9 +8,9 @@ import pytest
 
 from superglm import Spline, SuperGLM
 from superglm.features._spline_penalties import (
+    _general_difference_penalty,
     _polynomial_coefficients,
     build_difference_penalty,
-    build_general_difference_penalty,
 )
 from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
@@ -137,7 +137,7 @@ def test_the_uniform_rule_keeps_the_standard_penalty_exactly():
 def test_on_evenly_spaced_knots_the_general_penalty_is_the_standard_one():
     knots = np.arange(-3.0, 15.0)
     for order in (1, 2, 3):
-        general = build_general_difference_penalty(knots, 3, order)
+        general = _general_difference_penalty(knots, 3, order)[0]
         standard = build_difference_penalty(len(knots) - 4, order)
         np.testing.assert_allclose(general, standard, rtol=0, atol=64 * u * np.abs(standard).max())
 

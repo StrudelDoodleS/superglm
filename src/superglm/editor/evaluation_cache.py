@@ -6,8 +6,6 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import numpy as np
-
 from superglm.editor._types import EditableTerm
 from superglm.editor.evaluation import EvaluationDataset
 
@@ -92,16 +90,6 @@ class EvaluationCache:
             target = self._original if key.role == "original" else self._current
             target[key] = payload
             return True
-
-    def persistent_values_are_scalar(self) -> bool:
-        """Report whether every retained value is a scalar float."""
-        with self._lock:
-            return all(
-                isinstance(value, float) and np.ndim(value) == 0
-                for mapping in (self._original, self._current)
-                for payload in mapping.values()
-                for value in payload.values()
-            )
 
 
 __all__ = [

@@ -14,6 +14,7 @@ from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.result import DistributionalEFSConfig
 from superglm.features import RandomEffect
+from tests._matched_certified import assert_matched_certified
 from tests.bound_predictor_fixtures import model_from_templates
 
 
@@ -164,7 +165,7 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
         RuntimeError,
         match="exact coefficient face is numerically supported but not certified",
     ):
-        fitted.smoothing.assert_matched_certified()
+        assert_matched_certified(fitted.smoothing)
     evidence = fitted.smoothing.terminal_endpoint_directions["scale:group#wiggle"]
     assert evidence.authority_identifier == "analytic-observed-curvature-direction/v1"
     assert evidence.decision == "endpoint"

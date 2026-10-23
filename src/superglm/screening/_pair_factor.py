@@ -76,11 +76,13 @@ itself.
 
 Column order out is ``[ 1 | inner menu | outer menu | tensor | yhat ]``.  The
 overlap's internal order is the FACTOR's and differs from
-:func:`superglm.screening._overlap.pair_overlap_moments`' ``[1 | A | B]``:
+the test oracle ``pair_overlap_moments`` in ``tests/_overlap_oracle.py``, whose
+order is ``[1 | A | B]``:
 the overlap is only ever consumed as a SPAN, so nothing downstream can see it,
 but a reader who slices ``overlap_width`` assuming the old layout will get the
 wrong columns.  The TENSOR order is C-order ``p * k_b + q`` -- unchanged, and
-load-bearing, because ``tensor_penalty(S_a, S_b)`` is aligned to it with no
+load-bearing, because the test oracle ``tensor_penalty(S_a, S_b)`` in
+``tests/_overlap_oracle.py`` is aligned to it with no
 permutation in between.
 """
 
@@ -181,8 +183,8 @@ def pair_design_factor(
 
     Serves ``ti``, ``spline_cat`` and ``cat_cat`` -- every kind whose margins
     both grid, and whose moments :func:`~superglm.screening._pair_moments.
-    pair_score_curvature` and :func:`~superglm.screening._overlap.
-    pair_overlap_moments` used to assemble.  ``B_a`` is ``(n_a, k_a)``, ``B_b``
+    pair_score_curvature` and the test oracle ``pair_overlap_moments`` (in
+    ``tests/_overlap_oracle.py``) used to assemble.  ``B_a`` is ``(n_a, k_a)``, ``B_b``
     is ``(n_b, k_b)``, and the cell tables are ``(n_a, n_b)``.
 
     **THE REDUCTION IS ONE ORTHOGONAL TRANSFORMATION PER OUTER SUPPORT POINT,
@@ -204,8 +206,9 @@ def pair_design_factor(
     Which margin is reduced inside is chosen by width, so the emitted blocks
     are as short as the pair allows; when that puts ``B_a`` inside, the tensor
     columns come out transposed and are permuted back before the factor is
-    returned, because :func:`~superglm.screening._overlap.tensor_penalty` is
-    aligned to ``p * k_b + q`` and nothing downstream permutes.
+    returned, because the test oracle ``tensor_penalty`` (in
+    ``tests/_overlap_oracle.py``) is aligned to ``p * k_b + q`` and nothing
+    downstream permutes.
     """
     B_a = np.asarray(B_a, dtype=np.float64)
     B_b = np.asarray(B_b, dtype=np.float64)

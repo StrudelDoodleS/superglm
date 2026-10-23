@@ -30,6 +30,7 @@ from superglm.reml.efs_update import wood_fasiolo_update
 from superglm.solvers.rank import decompose_gram
 from superglm.types import LambdaPolicy
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
+from tests._matched_certified import assert_matched_certified
 from tests.test_gamma_ls_vertical_slice import (
     _CROSS_FAMILY_OUTER_TOLERANCE,
     _assert_cross_route_fit_provenance,
@@ -1386,7 +1387,7 @@ def test_automatic_smoothing_tweedie_lss_fit(
             convergence_reason="objective_plateau",
         )
     assert smoothing.matched_certified is True
-    smoothing.assert_matched_certified()
+    assert_matched_certified(smoothing)
 
     terminal_components = efs_module._component_states(model.layout, smoothing.lambdas)
     terminal_estimated_names = efs_module._estimated_names(terminal_components)

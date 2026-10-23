@@ -199,7 +199,7 @@ def test_download_serialization_does_not_hold_widget_lock(evidence_widget, monke
 
     def request_download():
         try:
-            widget._download_model("edited.joblib")
+            widget._export_bytes("joblib", "edited.joblib")
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 

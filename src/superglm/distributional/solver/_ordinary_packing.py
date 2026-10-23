@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from numba import njit, types
 
-from superglm._numba_compile import compile_closed
-
 # Match the original global-moment operand predicate exactly. Zeros, including
 # negative zero, are permitted. Nonzero magnitudes keep the separately bounded
 # degree-three moment products within the normal exponent range.
@@ -69,8 +67,3 @@ _ORDINARY_WRITERS = (
         ),
     ),
 )
-
-
-def _warmup_ordinary_packing():
-    """Compile the two writers' signatures (``compile_closed``)."""
-    compile_closed(*_ORDINARY_WRITERS)

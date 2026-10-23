@@ -1270,7 +1270,6 @@ def test_to_model_without_edits_keeps_transient_state_private(editor_model):
         name: getattr(editor_model, name)
         for name in (
             "_runtime_canonical_state",
-            "_fast_prediction_state",
             "_prediction_plan",
             "_fit_mu",
             "_fit_null_mu",
@@ -1302,7 +1301,6 @@ def test_to_model_without_edits_keeps_transient_state_private(editor_model):
     assert not np.shares_memory(copied._fit_null_mu, editor_model._fit_null_mu)
 
     copied._runtime_canonical_state["copy_only"] = True
-    copied._fast_prediction_state["copy_only"] = True
     copied._prediction_plan["copy_only"] = []
     copied._fit_mu[0] += 1.0
     copied._fit_null_mu[0] += 1.0
@@ -1313,7 +1311,6 @@ def test_to_model_without_edits_keeps_transient_state_private(editor_model):
 
     assert all(getattr(editor_model, name) is value for name, value in source_objects.items())
     assert "copy_only" not in editor_model._runtime_canonical_state
-    assert "copy_only" not in editor_model._fast_prediction_state
     assert "copy_only" not in editor_model._prediction_plan
     assert "copy_only" not in editor_model._fit_metrics_cache.__dict__
     assert "copy_only" not in editor_model._summary_cache
@@ -1358,7 +1355,6 @@ def test_materialized_model_shares_only_row_scale_fit_inputs():
             "_fit_metrics_cache",
             "_prediction_plan",
             "_runtime_canonical_state",
-            "_fast_prediction_state",
             "_summary_cache",
         )
     }
@@ -1401,7 +1397,6 @@ def test_materialized_model_shares_only_row_scale_fit_inputs():
     )
     assert edited.penalty is not model.penalty
     assert edited._runtime_canonical_state is not model._runtime_canonical_state
-    assert edited._fast_prediction_state is not model._fast_prediction_state
 
     assert edited._fit_mu is not model._fit_mu
     assert edited._fit_null_mu is not model._fit_null_mu
@@ -1453,7 +1448,8 @@ def test_widget_evidence_and_export_reuse_materialized_model(
         metrics = widget._metrics("deviance", "in_force")
         report = widget._report("final")
         saved = widget._save_model(path=str(tmp_path / "edited-model.joblib"))
-        downloaded, filename = widget._download_model("edited-model.joblib")
+        exported = widget._export_bytes("joblib", "edited-model.joblib")
+        downloaded, filename = exported.data, exported.filename
     finally:
         widget.close()
 

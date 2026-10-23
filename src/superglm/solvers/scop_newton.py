@@ -217,32 +217,6 @@ def set_scop_prototype_config(cfg: dict[str, object]) -> None:
     configure_scop_prototype(**cfg)
 
 
-def _objective(
-    B_scop: NDArray,
-    W: NDArray,
-    z: NDArray,
-    beta_scop: NDArray,
-    reparam: SCOPSolverReparam,
-    S_scop: NDArray,
-    lambda2: float,
-    bin_idx: NDArray | None = None,
-) -> float:
-    """Penalized WLS objective for SCOP term.
-
-    When *bin_idx* is provided, *B_scop* is ``(n_bins, q_eff)`` (bin-level
-    design) while *W* and *z* are observation-level ``(n,)``.  Predictions
-    are scattered via ``eta = (B_scop @ gamma_eff)[bin_idx]``.
-    """
-    gamma_eff = reparam.forward(beta_scop)
-    eta = B_scop @ gamma_eff
-    if bin_idx is not None:
-        eta = eta[bin_idx]
-    residual = z - eta
-    data_term = 0.5 * weighted_row_sum(W, np.square, residual)
-    penalty_term = 0.5 * lambda2 * (beta_scop @ S_scop @ beta_scop)
-    return float(data_term + penalty_term)
-
-
 def _safe_trial_objective(
     B_scop: NDArray,
     W: NDArray,
@@ -1061,69 +1035,6 @@ def _solve_joint_step(
 # ---------------------------------------------------------------------------
 
 
-def _safe_joint_objective(
-    scop_items: list[tuple[int, dict]],
-    W: NDArray,
-    z_scop: NDArray,
-    beta_joint: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-) -> float:
-    """Evaluate joint SCOP objective, returning inf on any non-finite value.
-
-    Parameters
-    ----------
-    scop_items : list of (group_index, state_dict)
-    W : (n,) observation weights
-    z_scop : (n,) working response minus non-SCOP eta
-    beta_joint : concatenated beta_eff for all groups
-    slices : per-group slices into beta_joint
-    lambdas_list : per-group lambda values
-    """
-    with np.errstate(over="ignore", invalid="ignore"):
-        total_eta = np.zeros_like(z_scop)
-        penalty = 0.0
-        for (gi, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
-            beta_i = beta_joint[sl_i]
-            gamma_i = st["reparam"].forward(beta_i)
-            if not np.all(np.isfinite(gamma_i)):
-                return np.inf
-            eta_i = st["B_scop"] @ gamma_i
-            if st["bin_idx"] is not None:
-                eta_i = eta_i[st["bin_idx"]]
-            total_eta += eta_i
-            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
-        r = z_scop - total_eta
-        data_term = 0.5 * weighted_row_sum(W, np.square, r)
-        obj = data_term + penalty
-    return float(obj) if np.isfinite(obj) else np.inf
-
-
-def _joint_objective_from_eta(
-    W: NDArray,
-    z_scop: NDArray,
-    total_eta: NDArray,
-    beta_joint: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-    scop_items: list[tuple[int, dict]],
-) -> float:
-    """Evaluate the joint SCOP objective from cached total eta.
-
-    This is mathematically identical to ``_safe_joint_objective`` but reuses
-    the already assembled SCOP contribution when the caller has it.
-    """
-    with np.errstate(over="ignore", invalid="ignore"):
-        penalty = 0.0
-        for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
-            beta_i = beta_joint[sl_i]
-            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
-        residual = z_scop - total_eta
-        data_term = 0.5 * weighted_row_sum(W, np.square, residual)
-        obj = data_term + penalty
-    return float(obj) if np.isfinite(obj) else np.inf
-
-
 def _build_joint_objective_cache(
     scop_items: list[tuple[int, dict]],
     W: NDArray,
@@ -1142,35 +1053,6 @@ def _build_joint_objective_cache(
         half_zwz=0.5 * weighted_row_sum(W, np.square, z_scop),
         btwz=btwz,
     )
-
-
-def _joint_objective_from_bin_etas(
-    eta_bins: list[NDArray],
-    beta_joint: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-    scop_items: list[tuple[int, dict]],
-    cache: _JointObjectiveCache,
-) -> float:
-    """Evaluate the exact joint objective from discretized bin-level etas."""
-    with np.errstate(over="ignore", invalid="ignore"):
-        penalty = 0.0
-        data_term = cache.half_zwz
-        for idx, ((_, st), sl_i, lam_i, eta_bin_i) in enumerate(
-            zip(scop_items, slices, lambdas_list, eta_bins)
-        ):
-            beta_i = beta_joint[sl_i]
-            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
-            data_term -= float(eta_bin_i @ cache.wz_aggs[idx])
-            data_term += 0.5 * float(eta_bin_i @ (cache.w_aggs[idx] * eta_bin_i))
-
-        for a in range(len(eta_bins)):
-            eta_a = eta_bins[a]
-            for b in range(a + 1, len(eta_bins)):
-                data_term += float(eta_a @ cache.w_2ds[(a, b)] @ eta_bins[b])
-
-        obj = data_term + penalty
-    return float(obj) if np.isfinite(obj) else np.inf
 
 
 def _joint_objective_from_gammas(
@@ -1202,62 +1084,6 @@ def _joint_objective_from_gammas(
                 data_term += float(gamma_a @ cache.cross_btwb[(a, b)] @ gammas[b])
 
         obj = data_term + penalty
-    return float(obj) if np.isfinite(obj) else np.inf
-
-
-def _safe_joint_trial_objective(
-    scop_items: list[tuple[int, dict]],
-    W: NDArray,
-    z_scop: NDArray,
-    beta_trial: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-    total_eta_current: NDArray,
-    gammas_current: list[NDArray],
-    objective_cache: _JointObjectiveCache | None = None,
-) -> float:
-    """Evaluate a trial joint objective reusing the current SCOP state.
-
-    Instead of rebuilding the whole objective from scratch, this keeps the
-    current total SCOP contribution and only applies per-group trial deltas.
-    """
-    with np.errstate(over="ignore", invalid="ignore"):
-        if objective_cache is not None:
-            gammas_trial: list[NDArray] = []
-            for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
-                beta_i = beta_trial[sl_i]
-                gamma_trial = st["reparam"].forward(beta_i)
-                if not np.all(np.isfinite(gamma_trial)):
-                    return np.inf
-                gammas_trial.append(gamma_trial)
-            obj = _joint_objective_from_gammas(
-                gammas_trial,
-                beta_trial,
-                slices,
-                lambdas_list,
-                scop_items,
-                objective_cache,
-            )
-            return float(obj) if np.isfinite(obj) else np.inf
-
-        total_eta = total_eta_current.copy()
-        for (_, st), sl_i, lam_i, gamma_curr in zip(
-            scop_items, slices, lambdas_list, gammas_current
-        ):
-            beta_i = beta_trial[sl_i]
-            gamma_trial = st["reparam"].forward(beta_i)
-            if not np.all(np.isfinite(gamma_trial)):
-                return np.inf
-            gamma_delta = gamma_trial - gamma_curr
-            eta_delta = st["B_scop"] @ gamma_delta
-            if st["bin_idx"] is not None:
-                eta_delta = eta_delta[st["bin_idx"]]
-            total_eta += eta_delta
-        residual = z_scop - total_eta
-        obj = 0.5 * weighted_row_sum(W, np.square, residual)
-        for (_, st), sl_i, lam_i in zip(scop_items, slices, lambdas_list):
-            beta_i = beta_trial[sl_i]
-            obj += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
     return float(obj) if np.isfinite(obj) else np.inf
 
 
@@ -1559,27 +1385,16 @@ def scop_joint_newton_step(
             H[sl_b, sl_a] = cross.T
 
     # --- Check starting objective ---
-    if objective_cache is not None:
-        objective_cache.diag_btwb = BtWBs
-        objective_cache.cross_btwb = cross_btwb
-        obj_before = _joint_objective_from_gammas(
-            gammas,
-            beta_joint,
-            joint_slices,
-            lambdas_list,
-            scop_items,
-            objective_cache,
-        )
-    else:
-        obj_before = _joint_objective_from_eta(
-            W,
-            z_scop,
-            total_scop_eta,
-            beta_joint,
-            joint_slices,
-            lambdas_list,
-            scop_items,
-        )
+    objective_cache.diag_btwb = BtWBs
+    objective_cache.cross_btwb = cross_btwb
+    obj_before = _joint_objective_from_gammas(
+        gammas,
+        beta_joint,
+        joint_slices,
+        lambdas_list,
+        scop_items,
+        objective_cache,
+    )
 
     if not np.isfinite(obj_before):
         # Non-finite starting point: return no-op for all groups

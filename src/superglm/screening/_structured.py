@@ -21,9 +21,10 @@ is EXACTLY a block-arrow matrix once its variables are grouped by level:
 What is left coupling the levels is only the intercept and the spline main —
 a border of ``1 + k_a`` columns, independent of ``L``.  So the pair is
 ``L`` blocks of size ``k_a + 1`` around a border of size ``1 + k_a``, and
-:mod:`superglm.screening._arrow` factors that in time and memory LINEAR in
-``L``.  The dense path's ``V`` alone is 2.4 TB at fifty thousand levels; the
-same pair's blocks are 48 MB.
+the row-space factorization built by :func:`_profile` and evaluated by
+:func:`_evaluate` handles that in time and memory LINEAR in ``L``.  The dense
+path's ``V`` alone is 2.4 TB at fifty thousand levels; the same pair's blocks
+are 48 MB.
 
 The two quantities the ladder needs both read off one such factorization:
 
@@ -544,11 +545,11 @@ scores the pair at 1.0000 on every budget instead of handing it back.
 asserting at either lambda, because what is portable here is the width of the
 region and not a value at one point.
 
-**WHAT A DROPPED DIRECTION COSTS NOW.**  The pair arrow's relative cut still
+**WHAT A DROPPED DIRECTION COSTS NOW.**  The pair's relative cut still
 drops directions, and where one carries a filter factor near 1 the STATISTIC
 loses it.  ``_mixed_rank_cells`` in the suite is built to sit exactly there —
 its only ``V_eff`` direction is ``1e-16`` RELATIVE to its own level block,
-under ``_solve_floor``'s ``3 eps``.  **The edf half no longer pays that**, and
+under the relative cut.  **The edf half no longer pays that**, and
 the reason is the whole point of working on the factor: ``N_q`` is ``T_q' T_q``
 from a QR of ``[R_q ; sqrt(lambda) rootS]`` and ``R_q``'s smallest direction
 sits at ``d``, not at ``d^2``, so the cut is applied to a square root.  Against

@@ -894,10 +894,6 @@ class NestedPenalizedOperator:
         object.__setattr__(self, "shape", self.data.shape)
 
     @property
-    def tree(self) -> NestedTree:
-        return self.data.tree
-
-    @property
     def small_indices(self) -> NDArray:
         return self.data.small_indices
 

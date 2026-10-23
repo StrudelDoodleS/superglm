@@ -27,7 +27,6 @@ from superglm.reml.scop_efs import (
     assemble_joint_hessian,
     build_scop_penalty_components,
     compute_scop_aware_penalty_quad,
-    scop_efs_lambda_update,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
@@ -1432,208 +1431,12 @@ class TestSCOPPenaltyQuadCompactComponents:
 
 
 # ---------------------------------------------------------------------------
-# Part 4: Tests for scop_efs_lambda_update
+# Part 4: Tests for the joint EFS lambda step
 # ---------------------------------------------------------------------------
 
 
 class TestSCOPEFSLambdaUpdate:
-    """Tests for scop_efs_lambda_update (pure unit tests, no model fitting)."""
-
-    def test_ssp_component_uses_gamma_space(self):
-        """SSP PenaltyComponent with known beta, H_inv, omega produces finite positive lambda."""
-        rng = np.random.default_rng(42)
-        p = 5
-        beta = rng.standard_normal(p)
-        # Make a PD H_inv
-        A = rng.standard_normal((p, p))
-        H_joint_inv = np.linalg.inv(A.T @ A + np.eye(p))
-
-        pc = PenaltyComponent(
-            name="smooth",
-            group_name="smooth",
-            group_index=0,
-            group_sl=slice(0, 5),
-            omega_raw=np.eye(5) * 0.5,
-            omega_ssp=np.eye(5) * 0.5,
-            rank=4.0,
-            log_det_omega_plus=0.0,
-        )
-
-        lam_old = 1.0
-        inv_phi = 1.0
-        scop_states = {}  # no SCOP groups
-
-        lam_new = scop_efs_lambda_update(pc, beta, H_joint_inv, inv_phi, lam_old, scop_states)
-        assert np.isfinite(lam_new)
-        assert lam_new > 0
-
-    def test_scop_component_uses_beta_eff(self):
-        """SCOP component lambda uses beta_eff, NOT gamma_eff from result.beta."""
-        rng = np.random.default_rng(99)
-        q_eff = 5
-        p = 8  # total param dimension
-
-        S_scop = _first_diff_penalty(q_eff)
-
-        # Two different coefficient vectors for the SCOP group
-        beta_eff = rng.standard_normal(q_eff) * 2.0  # solver space
-        gamma_eff = rng.standard_normal(q_eff) * 0.5  # gamma space (different)
-
-        # Full beta vector with gamma_eff in the SCOP slice
-        beta_full = np.zeros(p)
-        beta_full[:3] = rng.standard_normal(3)
-        beta_full[3:8] = gamma_eff
-
-        # PD H_joint_inv
-        A = rng.standard_normal((p, p))
-        H_joint_inv = np.linalg.inv(A.T @ A + 5.0 * np.eye(p))
-
-        pc = PenaltyComponent(
-            name="age",
-            group_name="age",
-            group_index=1,
-            group_sl=slice(3, 8),
-            omega_raw=S_scop,
-            omega_ssp=S_scop,
-            rank=float(q_eff - 1),
-            log_det_omega_plus=0.0,
-        )
-        scop_states = {
-            1: {
-                "beta_eff": beta_eff,
-                "S_scop": S_scop,
-                "group_sl": slice(3, 8),
-                "group_name": "age",
-            }
-        }
-
-        lam_old = 1.0
-        inv_phi = 1.0
-
-        # Compute with SCOP state (should use beta_eff)
-        lam_scop = scop_efs_lambda_update(pc, beta_full, H_joint_inv, inv_phi, lam_old, scop_states)
-
-        # Compute without SCOP state (would use gamma_eff from beta_full)
-        lam_ssp = scop_efs_lambda_update(pc, beta_full, H_joint_inv, inv_phi, lam_old, {})
-
-        # They should differ because beta_eff != gamma_eff
-        assert lam_scop != lam_ssp, f"SCOP and SSP lambdas should differ: {lam_scop} vs {lam_ssp}"
-
-        # Verify SCOP version manually: quad should use beta_eff
-        quad_expected = float(beta_eff @ S_scop @ beta_eff)
-        trace_expected = float(np.trace(H_joint_inv[3:8, 3:8] @ S_scop))
-        denom_expected = inv_phi * quad_expected + trace_expected
-        lam_raw_expected = float(q_eff - 1) / denom_expected
-        log_step_expected = np.clip(
-            np.log(max(lam_raw_expected, 1e-10)) - np.log(max(lam_old, 1e-10)),
-            -5.0,
-            5.0,
-        )
-        lam_expected = lam_old * np.exp(log_step_expected)
-        np.testing.assert_allclose(lam_scop, lam_expected, rtol=1e-12)
-
-    def test_uphill_guard_clips_log_step(self):
-        """Extreme case: log-step must be clipped to [-5, 5]."""
-        p = 5
-        # Very small beta_eff and H_inv -> large lam_raw -> large positive log-step
-        beta_eff = np.array([1e-6, 1e-6, 1e-6, 1e-6, 1e-6])
-        S_scop = _first_diff_penalty(p)
-
-        H_joint_inv = 1e-10 * np.eye(p)
-
-        pc = PenaltyComponent(
-            name="x",
-            group_name="x",
-            group_index=0,
-            group_sl=slice(0, 5),
-            omega_raw=S_scop,
-            omega_ssp=S_scop,
-            rank=float(p - 1),
-            log_det_omega_plus=0.0,
-        )
-        scop_states = {
-            0: {
-                "beta_eff": beta_eff,
-                "S_scop": S_scop,
-                "group_sl": slice(0, 5),
-                "group_name": "x",
-            }
-        }
-
-        lam_old = 1.0
-        inv_phi = 1.0
-
-        lam_new = scop_efs_lambda_update(
-            pc, np.zeros(p), H_joint_inv, inv_phi, lam_old, scop_states
-        )
-
-        # log-step should be clipped, so lam_new = lam_old * exp(5)
-        max_ratio = np.exp(5.0)
-        min_ratio = np.exp(-5.0)
-        ratio = lam_new / lam_old
-        assert ratio <= max_ratio + 1e-10, f"Ratio {ratio} exceeds exp(5)"
-        assert ratio >= min_ratio - 1e-10, f"Ratio {ratio} below exp(-5)"
-
-    def test_near_zero_beta_returns_old_lambda(self):
-        """If beta_g norm < 1e-12, returns lam_old unchanged."""
-        p = 5
-        beta = np.zeros(p)  # all zeros
-        H_joint_inv = np.eye(p)
-
-        pc = PenaltyComponent(
-            name="smooth",
-            group_name="smooth",
-            group_index=0,
-            group_sl=slice(0, 5),
-            omega_raw=np.eye(5),
-            omega_ssp=np.eye(5),
-            rank=4.0,
-            log_det_omega_plus=0.0,
-        )
-
-        lam_old = 42.0
-        lam_new = scop_efs_lambda_update(pc, beta, H_joint_inv, 1.0, lam_old, {})
-        assert lam_new == lam_old
-
-        # Also test near-zero for SCOP
-        scop_states = {
-            0: {
-                "beta_eff": np.full(5, 1e-15),
-                "S_scop": np.eye(5),
-                "group_sl": slice(0, 5),
-                "group_name": "smooth",
-            }
-        }
-        lam_new_scop = scop_efs_lambda_update(pc, beta, H_joint_inv, 1.0, lam_old, scop_states)
-        assert lam_new_scop == lam_old
-
-    def test_returns_positive(self):
-        """Lambda is always positive for valid inputs."""
-        rng = np.random.default_rng(123)
-        p = 8
-        q = 5
-
-        for trial in range(20):
-            beta = rng.standard_normal(p)
-            A = rng.standard_normal((2 * p, p))
-            H_joint_inv = np.linalg.inv(A.T @ A + np.eye(p))
-            S = _first_diff_penalty(q)
-
-            pc = PenaltyComponent(
-                name="feat",
-                group_name="feat",
-                group_index=0,
-                group_sl=slice(0, q),
-                omega_raw=S,
-                omega_ssp=S,
-                rank=float(q - 1),
-                log_det_omega_plus=0.0,
-            )
-            lam_old = rng.uniform(0.01, 100.0)
-            inv_phi = rng.uniform(0.5, 2.0)
-
-            lam_new = scop_efs_lambda_update(pc, beta, H_joint_inv, inv_phi, lam_old, {})
-            assert lam_new > 0, f"Trial {trial}: lambda={lam_new} is not positive"
+    """Tests for the joint EFS lambda step (pure unit tests, no model fitting)."""
 
     def test_joint_update_uses_generalized_prior_trace_for_overlapping_penalties(self):
         """Wood--Fasiolo's prior trace is not component rank for shared blocks."""
@@ -6521,62 +6324,6 @@ class TestSCOPEFSRegression:
             f"Recomputed {obj_recomputed:.6f} != stored {obj_stored:.6f}"
         )
 
-    @pytest.mark.slow
-    def test_model_wrapper_objective_matches_stored(self):
-        """model._reml_laml_objective wrapper reproduces stored objective for SCOP fits."""
-        from superglm.distributions import _VARIANCE_FLOOR, clip_mu
-        from superglm.group_matrix import _block_xtwx
-        from superglm.links import stabilize_eta
-
-        rng = np.random.default_rng(42)
-        n = 300
-        x = np.sort(rng.uniform(0, 1, n))
-        y = 2 * x + rng.normal(0, 0.2, n)
-        df = pd.DataFrame({"x": x})
-
-        model = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            discrete=True,
-            features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-            },
-        )
-        model.fit_reml(df[["x"]], y)
-
-        # Reconstruct XtWX to call the wrapper
-        result = model._result
-        sw = np.ones(n)
-        offset_arr = np.zeros(n)
-        eta = model._dm.matvec(result.beta) + result.intercept + offset_arr
-        eta = stabilize_eta(eta, model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
-        V = model._distribution.variance(mu)
-        dmu = model._link.deriv_inverse(eta)
-        W = sw * dmu**2 / np.maximum(V, _VARIANCE_FLOOR)
-        XtWX = _block_xtwx(
-            model._dm.group_matrices,
-            model._groups,
-            W,
-            tabmat_split=model._dm.tabmat_split,
-        )
-
-        # Call through the model wrapper (the path that was broken)
-        obj_wrapper = model._reml_laml_objective(
-            y,
-            result,
-            model._reml_lambdas,
-            sw,
-            offset_arr,
-            XtWX=XtWX,
-        )
-
-        obj_stored = model._reml_result.objective
-        assert np.isfinite(obj_wrapper)
-        assert obj_wrapper == pytest.approx(obj_stored, rel=1e-8), (
-            f"Wrapper {obj_wrapper:.6f} != stored {obj_stored:.6f}"
-        )
-
 
 class TestSCOPNewtonLineSearchSafety:
     """Newton step-halving rejects non-finite trial states cleanly."""
@@ -7474,10 +7221,8 @@ class TestJointSCOPNewton:
     @pytest.mark.parametrize("discretized", [False, True], ids=["dense", "discrete"])
     def test_joint_curvature_mixed_map_objective_matches_brute_force(self, discretized):
         """Joint line search must use mapped coefficients, not Jacobian diagonals."""
-        from superglm.solvers.scop_newton import (
-            _safe_joint_objective,
-            scop_joint_newton_step,
-        )
+        from superglm.solvers.scop_newton import scop_joint_newton_step
+        from tests._scop_objective import safe_joint_objective
 
         rng = np.random.default_rng(216)
         n = 180
@@ -7532,7 +7277,7 @@ class TestJointSCOPNewton:
         lambdas = {"x1": 0.7, "x2": 0.3}
         lambda_list = [lambdas["x1"], lambdas["x2"]]
         beta_before = np.concatenate((beta1, beta2))
-        objective_before = _safe_joint_objective(
+        objective_before = safe_joint_objective(
             scop_items,
             weights,
             response,
@@ -7549,7 +7294,7 @@ class TestJointSCOPNewton:
             groups,
         )
         beta_after = np.concatenate((results[0].beta_new, results[1].beta_new))
-        objective_after = _safe_joint_objective(
+        objective_after = safe_joint_objective(
             scop_items,
             weights,
             response,
@@ -7688,7 +7433,7 @@ class TestJointSCOPNewton:
 
     def test_joint_gradient_finite_differences(self):
         """Joint gradient should match centered finite differences."""
-        from superglm.solvers.scop_newton import _safe_joint_objective
+        from tests._scop_objective import safe_joint_objective
 
         scop_states, W, z = self._build_two_group_inputs()
         scop_items = sorted(scop_states.items())
@@ -7747,8 +7492,8 @@ class TestJointSCOPNewton:
             bm = beta_joint.copy()
             bp[k] += eps
             bm[k] -= eps
-            fp = _safe_joint_objective(scop_items, W, z, bp, slices, lambdas_list)
-            fm = _safe_joint_objective(scop_items, W, z, bm, slices, lambdas_list)
+            fp = safe_joint_objective(scop_items, W, z, bp, slices, lambdas_list)
+            fm = safe_joint_objective(scop_items, W, z, bm, slices, lambdas_list)
             grad_fd[k] = (fp - fm) / (2 * eps)
 
         np.testing.assert_allclose(grad, grad_fd, atol=1e-4)
@@ -7785,9 +7530,9 @@ class TestJointSCOPNewton:
         from superglm.solvers.scop_newton import (
             _build_joint_objective_cache,
             _joint_objective_from_gammas,
-            _safe_joint_objective,
             _safe_joint_trial_objective_delta,
         )
+        from tests._scop_objective import safe_joint_objective
 
         scop_states, W, z = self._build_two_group_inputs(discretized=True)
         scop_items = sorted(scop_states.items())
@@ -7830,7 +7575,7 @@ class TestJointSCOPNewton:
             scop_items,
             cache,
         )
-        obj_oracle = _safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
+        obj_oracle = safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
 
         np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
 

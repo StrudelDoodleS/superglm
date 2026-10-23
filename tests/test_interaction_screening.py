@@ -884,7 +884,7 @@ def test_a_factor_cannot_be_built_from_widths_it_does_not_have():
 def test_overlap_moments_match_dense_assembly():
     """M, C, u_m from cell tables must equal the dense row-space assembly."""
     from superglm.screening import pair_cell_moments
-    from superglm.screening._overlap import pair_overlap_moments
+    from tests._overlap_oracle import pair_overlap_moments
 
     rng = np.random.default_rng(9)
     n, n_a, n_b, k_a, k_b = 3000, 15, 11, 4, 3
@@ -906,7 +906,7 @@ def test_overlap_moments_match_dense_assembly():
 
 
 def test_tensor_penalty_matches_interaction_convention():
-    from superglm.screening._overlap import tensor_penalty
+    from tests._overlap_oracle import tensor_penalty
 
     rng = np.random.default_rng(10)
     S1 = _pd_matrix(rng, 3)
@@ -923,7 +923,7 @@ def test_full_chain_zeroes_an_additive_signal():
         pair_score_curvature,
         penalized_score_statistic,
     )
-    from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+    from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
 
     rng = np.random.default_rng(11)
     n, n_a, n_b, k_a, k_b = 4000, 12, 9, 4, 3

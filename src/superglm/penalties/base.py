@@ -104,7 +104,8 @@ def penalty_can_zero_groups(penalty: object) -> bool:
 class Penalty(Protocol):
     """Protocol for penalty functions.
 
-    The solver calls prox() in the inner loop and eval() for diagnostics.
+    The solver calls prox_group() in the inner loop and eval() for the objective;
+    prox() is the same operator over every group at once.
     Penalties are passed as objects so different penalties can be swapped
     without changing the solver.
     """

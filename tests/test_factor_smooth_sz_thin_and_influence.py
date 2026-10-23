@@ -1329,7 +1329,7 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
     On pg17's make model 26 of 71 identified makes had no claim; their lines
     walked toward ``-inf`` for as long as each fit ran, so the population
     curve, the mean of the levels with them, sat at ``[-37, -9.6]`` (auto)
-    against ``[-80, 80]`` (gram).  The scan (``separated_factor_smooth_levels``)
+    against ``[-80, 80]`` (gram).  The scan (``separated_factor_smooth_spans``)
     names a zero-claim level and a one-sided one, not a level with claims
     inside its rows, in a ``SeparationWarning`` (``separation="ignore"``
     silences it and still leaves them out).  Along a separated line, ``d``
@@ -1344,7 +1344,7 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
     """
     from superglm.diagnostics.separation import (
         SeparationWarning,
-        separated_factor_smooth_levels,
+        separated_factor_smooth_spans,
     )
 
     frame, y = _separated_poisson()
@@ -1376,7 +1376,7 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
     binary = (y > 0).astype(float)
     level = np.flatnonzero(codes == 3)
     binary[level] = (frame["x"].to_numpy()[level] > 0.6).astype(float)
-    found = separated_factor_smooth_levels(
+    found = separated_factor_smooth_spans(
         dm, spec._population_null_space, None, binary, ("zero", "one")
     )
     assert 3 in found and 2 not in found
@@ -1937,7 +1937,6 @@ def _assert_trading_the_group_term_moves_nothing(model, grid, terms, d_gamma, co
                 model,
                 grid,
                 None,
-                fast_discrete=False,
                 random_effects=random_effects,
                 stabilize=False,
                 warn=False,
@@ -4467,7 +4466,6 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
             model,
             grid,
             None,
-            fast_discrete=False,
             random_effects="conditional",
             stabilize=False,
             warn=False,
@@ -4556,7 +4554,6 @@ def base_eta(model, frame):
         model,
         frame,
         None,
-        fast_discrete=False,
         random_effects="conditional",
         stabilize=False,
         warn=False,
@@ -4654,7 +4651,6 @@ def test_reports_fold_a_held_level_beside_a_declared_level_the_group_term_lacks(
             model,
             grid,
             None,
-            fast_discrete=False,
             random_effects="conditional",
             stabilize=False,
             warn=False,

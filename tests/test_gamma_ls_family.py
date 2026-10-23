@@ -53,6 +53,7 @@ from tests._gamma_lss_oracles import (
     gamma_row_reference,
     gamma_scaled_ratio_oracle,
 )
+from tests._matched_certified import assert_matched_certified
 
 _gamma_initial_target = gamma_kernel._gamma_initial_target
 _gamma_log_normalizer = gamma_kernel._gamma_log_normalizer
@@ -1815,7 +1816,7 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
         RuntimeError,
         match="exact coefficient face is numerically supported but not certified",
     ):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
     # The cap is shared: the smooth stops inside it, at 5.4 in its knot
     # intervals of 1/3 (0.2 over x).
     assert smoothing.lambdas["mean:x#wiggle"] < maximum_lambda

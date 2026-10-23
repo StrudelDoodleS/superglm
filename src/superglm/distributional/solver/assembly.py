@@ -116,18 +116,6 @@ def _validated_coefficients(
     return values
 
 
-def evaluate_predictors_dense(
-    layout: StackedLayout,
-    coefficients: NDArray,
-) -> NDArray[np.float64]:
-    """Evaluate every predictor with explicit dense intercepts and offsets."""
-    return _evaluate_predictors_from_matrices(
-        layout,
-        coefficients,
-        dense_predictor_matrices(layout),
-    )
-
-
 def _evaluate_predictors_from_matrices(
     layout: StackedLayout,
     coefficients: NDArray,

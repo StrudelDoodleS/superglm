@@ -53,7 +53,6 @@ _EDITOR_EDIT_ONLY_MEMO_STATE = (
     "_fit_stats",
     "_prediction_plan",
     "_runtime_canonical_state",
-    "_fast_prediction_state",
 )
 
 
@@ -138,11 +137,6 @@ def _share_arrays_read_only(value, memo: dict) -> None:
                     stack.append(getattr(item, name, None))
 
 
-def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
-    """Return a deep-copied model with changed editor terms applied."""
-    return apply_edits_to_model_copy_with_data(model, terms)
-
-
 def apply_edits_to_model_copy_with_data(
     model,
     terms: dict[str, EditableTerm],
@@ -204,7 +198,7 @@ def apply_edits_to_model_copy_with_data(
     edited_terms = [term.name for term in changed_terms]
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
-        _invalidate_model_caches(edited_model, keep_inference=True)
+        _invalidate_model_caches(edited_model)
     if edited_terms or has_scoring_data:
         _refresh_fit_statistics(
             edited_model,
@@ -604,21 +598,9 @@ def _adjust_intercept(model, delta: float) -> None:
     move_public_intercept(model, delta)
 
 
-def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
-    if not keep_inference:
-        for attr in (
-            "_coef_covariance",
-            "_fit_active_info",
-            "_fit_inference_info",
-            "_group_edf",
-        ):
-            try:
-                delattr(model, attr)
-            except AttributeError:
-                pass
+def _invalidate_model_caches(model) -> None:
     model._prediction_plan = None
     model._runtime_canonical_state = copy.deepcopy(model._runtime_canonical_state)
-    model._fast_prediction_state = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None

@@ -964,27 +964,6 @@ def negative_binomial_log_third_derivatives(
     return third, error
 
 
-def negative_binomial_predictor_curvature_directional(
-    counts: NDArray,
-    eta: NDArray,
-    eta_direction: NDArray,
-    weights: NDArray,
-    semantics: WeightSemantics,
-) -> NDArray[np.float64]:
-    """Directional derivative of the packed observed curvature under the two log links.
-
-    The curvature is the negated Hessian in ``(log mean, log theta)``, packed
-    ``(aa, ab, bb)``; its derivative along ``d`` is ``-sum_k l_ijk d_k``.
-    :func:`negative_binomial_certified_predictor_curvature_directional`
-    returns the same values with the certified error of the ``bb`` channel.
-    """
-
-    values, _certificate = negative_binomial_certified_predictor_curvature_directional(
-        counts, eta, eta_direction, weights, semantics
-    )
-    return values
-
-
 def negative_binomial_certified_predictor_curvature_directional(
     counts: NDArray,
     eta: NDArray,
@@ -1230,7 +1209,6 @@ __all__ = [
     "negative_binomial_expected_information",
     "negative_binomial_log_fourth_derivatives",
     "negative_binomial_log_third_derivatives",
-    "negative_binomial_predictor_curvature_directional",
     "recurrence_cells",
 ]
 

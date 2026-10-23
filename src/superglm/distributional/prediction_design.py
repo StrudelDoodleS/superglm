@@ -1,4 +1,4 @@
-"""Immutable fitted prediction designs and covariance propagation."""
+"""Immutable fitted prediction designs."""
 
 from __future__ import annotations
 
@@ -21,14 +21,6 @@ def _readonly_matrix(values: NDArray, *, name: str) -> NDArray[np.float64]:
     result = np.array(values, dtype=np.float64, copy=True)
     if result.ndim != 2 or not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must be a finite matrix")
-    result.setflags(write=False)
-    return result
-
-
-def _readonly_vector(values: NDArray) -> NDArray[np.float64]:
-    result = np.array(values, dtype=np.float64, copy=True)
-    if result.ndim != 1 or not np.all(np.isfinite(result)):
-        raise ValueError("prediction standard error must be a finite vector")
     result.setflags(write=False)
     return result
 
@@ -354,47 +346,3 @@ def build_joint_prediction_design(
         local[state.name] = matrix
 
     return JointPredictionDesign(parameter_names=layout_names, local=local)
-
-
-def link_standard_errors(
-    design: JointPredictionDesign,
-    covariance: NDArray,
-    layout: StackedLayout,
-) -> Mapping[str, NDArray[np.float64]]:
-    """Propagate fixed-smoothing coefficient covariance onto each link predictor."""
-
-    if not isinstance(design, JointPredictionDesign):
-        raise TypeError("design must be a JointPredictionDesign")
-    if not isinstance(layout, StackedLayout):
-        raise TypeError("layout must be a StackedLayout")
-    try:
-        covariance_values = np.asarray(covariance, dtype=np.float64)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("covariance must be a finite square coefficient matrix") from error
-    expected_shape = (layout.n_coefficients, layout.n_coefficients)
-    if covariance_values.shape != expected_shape or not np.all(np.isfinite(covariance_values)):
-        raise ValueError("covariance must be a finite square coefficient matrix")
-    layout_names = tuple(state.name for state in layout.predictors)
-    if design.parameter_names != layout_names:
-        raise ValueError("prediction design must follow layout parameter order")
-
-    result: dict[str, NDArray[np.float64]] = {}
-    for state in layout.predictors:
-        matrix = design.local[state.name]
-        width = state.coefficient_slice.stop - state.coefficient_slice.start
-        if matrix.shape[1] != width:
-            raise ValueError(f"prediction design width for {state.name!r} does not match layout")
-        block = covariance_values[state.coefficient_slice, state.coefficient_slice]
-        variance = np.einsum("ij,jk,ik->i", matrix, block, matrix, optimize=True)
-        tolerance = (
-            64.0
-            * np.finfo(float).eps
-            * max(
-                1.0,
-                float(np.max(np.abs(variance), initial=0.0)),
-            )
-        )
-        if np.any(variance < -tolerance):
-            raise ValueError("prediction variance is materially negative")
-        result[state.name] = _readonly_vector(np.sqrt(np.maximum(variance, 0.0)))
-    return MappingProxyType(result)

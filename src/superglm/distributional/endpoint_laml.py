@@ -33,7 +33,6 @@ from superglm.distributional.smoothing.endpoint_laml import (
     EndpointLaplaceEvaluation,
     ProjectedPenaltyLogDet,
     _predictor_direction,
-    _projected_finite_penalty_inputs,
     _projected_penalty_group_indices,
     _selected_whitened_basis,
     _spectral_norm,
@@ -41,7 +40,6 @@ from superglm.distributional.smoothing.endpoint_laml import (
     _validated_complete_lambdas,
     evaluate_endpoint_laplace,
     evaluate_endpoint_laplace_derivative,
-    projected_finite_penalty_logdet,
     resolve_endpoint_direction,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace

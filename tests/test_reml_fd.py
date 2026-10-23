@@ -13,6 +13,12 @@ from superglm.distributions import Gamma, NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
 from superglm.group_matrix import SparseSSPGroupMatrix
 from superglm.reml import compute_dW_deta
+from tests._reml_adapters import (
+    reml_direct_gradient,
+    reml_direct_hessian,
+    reml_laml_objective,
+    reml_w_correction,
+)
 
 
 class TestREMLFiniteDifference:
@@ -193,7 +199,8 @@ class TestREMLFiniteDifference:
             n,
         ) = self._setup_model(family)
 
-        grad = m._reml_direct_gradient(
+        grad = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -211,7 +218,8 @@ class TestREMLFiniteDifference:
             lam_p, lam_m = lambdas.copy(), lambdas.copy()
             lam_p[name] = np.exp(rho_base + eps)
             lam_m[name] = np.exp(rho_base - eps)
-            op = m._reml_laml_objective(
+            op = reml_laml_objective(
+                m,
                 y,
                 pirls_result,
                 lam_p,
@@ -220,7 +228,8 @@ class TestREMLFiniteDifference:
                 XtWX=XtWX,
                 penalty_caches=penalty_caches,
             )
-            om = m._reml_laml_objective(
+            om = reml_laml_objective(
+                m,
                 y,
                 pirls_result,
                 lam_m,
@@ -281,7 +290,8 @@ class TestREMLFiniteDifference:
         assert m._reml_penalties is not None
         for scale in (1.0, np.exp(1e-5), np.exp(-1e-5)):
             perturbed = {name: value * scale for name, value in lambdas.items()}
-            m._reml_laml_objective(
+            reml_laml_objective(
+                m,
                 y,
                 pirls_result,
                 perturbed,
@@ -323,7 +333,8 @@ class TestREMLFiniteDifference:
             n,
         ) = self._setup_model(family)
 
-        grad = m._reml_direct_gradient(
+        grad = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -331,7 +342,8 @@ class TestREMLFiniteDifference:
             penalty_ranks,
             phi_hat=phi_hat,
         )
-        hess = m._reml_direct_hessian(
+        hess = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -387,7 +399,8 @@ class TestREMLFiniteDifference:
                         m, y, sample_weight, result_pert, pq_pert, M_p, n
                     )
 
-                grad_pert = m._reml_direct_gradient(
+                grad_pert = reml_direct_gradient(
+                    m,
                     result_pert,
                     inv_pert,
                     lam_pert,
@@ -453,7 +466,8 @@ class TestREMLFiniteDifference:
         ) = self._setup_model(family)
 
         # Partial gradient (fixed W)
-        grad_partial = m._reml_direct_gradient(
+        grad_partial = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -463,7 +477,8 @@ class TestREMLFiniteDifference:
         )
 
         # W correction
-        w_corr = m._reml_w_correction(
+        w_corr = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -502,7 +517,8 @@ class TestREMLFiniteDifference:
                     return_xtwx=True,
                     weight_semantics="prior",
                 )
-                objs[sign] = m._reml_laml_objective(
+                objs[sign] = reml_laml_objective(
+                    m,
                     y,
                     r_pert,
                     lam_pert,
@@ -650,7 +666,8 @@ class TestREMLFiniteDifference:
             n,
         ) = self._setup_model("gamma")
 
-        result = m._reml_w_correction(
+        result = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -681,7 +698,8 @@ class TestREMLFiniteDifference:
             n,
         ) = self._setup_model(family)
 
-        result = m._reml_w_correction(
+        result = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -729,7 +747,8 @@ class TestREMLFiniteDifference:
         ) = self._setup_model(family)
 
         # Compute partial gradient + W correction at base point
-        grad_partial = m._reml_direct_gradient(
+        grad_partial = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -737,7 +756,8 @@ class TestREMLFiniteDifference:
             penalty_ranks,
             phi_hat=phi_hat,
         )
-        w_corr = m._reml_w_correction(
+        w_corr = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -749,7 +769,8 @@ class TestREMLFiniteDifference:
         dH_extra = w_corr[1] if w_corr is not None else None
 
         # Analytic Hessian WITH dH_extra
-        hess_with = m._reml_direct_hessian(
+        hess_with = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -764,7 +785,8 @@ class TestREMLFiniteDifference:
         )
 
         # Analytic Hessian WITHOUT dH_extra (for comparison)
-        hess_without = m._reml_direct_hessian(
+        hess_without = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -823,7 +845,8 @@ class TestREMLFiniteDifference:
                     )
 
                 # Total gradient = partial + W correction
-                grad_pert = m._reml_direct_gradient(
+                grad_pert = reml_direct_gradient(
+                    m,
                     result_pert,
                     inv_pert,
                     lam_pert,
@@ -831,7 +854,8 @@ class TestREMLFiniteDifference:
                     penalty_ranks,
                     phi_hat=phi_pert,
                 )
-                w_corr_pert = m._reml_w_correction(
+                w_corr_pert = reml_w_correction(
+                    m,
                     result_pert,
                     inv_pert,
                     lam_pert,
@@ -895,7 +919,8 @@ class TestREMLFiniteDifference:
         ) = self._setup_model("poisson")
 
         # Partial gradient (fixed W)
-        grad_partial = m._reml_direct_gradient(
+        grad_partial = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -905,7 +930,8 @@ class TestREMLFiniteDifference:
         )
 
         # W correction (nonzero for Poisson/log)
-        w_corr = m._reml_w_correction(
+        w_corr = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -921,7 +947,8 @@ class TestREMLFiniteDifference:
         # dH_extra already adds W_i to the inverse-product term.  Supplying
         # grad_total here would add the first derivative once more through
         # the fixed-W diagonal identity g_partial + rank/2.
-        hess_total = m._reml_direct_hessian(
+        hess_total = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -936,7 +963,8 @@ class TestREMLFiniteDifference:
         )
 
         # The production call must use this fixed-W gradient.
-        hess_partial = m._reml_direct_hessian(
+        hess_partial = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -986,7 +1014,8 @@ class TestREMLFiniteDifference:
             n,
         ) = self._setup_model("poisson")
 
-        result = m._reml_w_correction(
+        result = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1028,7 +1057,8 @@ class TestREMLFiniteDifference:
             _n,
         ) = self._setup_model("nb2")
 
-        correction = m._reml_w_correction(
+        correction = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1108,7 +1138,8 @@ class TestREMLFiniteDifference:
             _inverse_phi_derivative,
             _n,
         ) = self._setup_model("nb2")
-        correction = m._reml_w_correction(
+        correction = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1199,7 +1230,8 @@ class TestREMLFiniteDifference:
         ) = self._setup_model("poisson")
         del penalty_ranks, XtWX, phi_hat, n
 
-        base = m._reml_w_correction(
+        base = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1234,7 +1266,8 @@ class TestREMLFiniteDifference:
                     return_xtwx=True,
                     weight_semantics="frequency",
                 )
-                correction = m._reml_w_correction(
+                correction = reml_w_correction(
+                    m,
                     result,
                     inverse,
                     perturbed,
@@ -1278,7 +1311,8 @@ class TestREMLFiniteDifference:
         ) = self._setup_model("poisson")
 
         # Order 1
-        w1 = m._reml_w_correction(
+        w1 = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1288,7 +1322,8 @@ class TestREMLFiniteDifference:
             offset_arr,
             w_correction_order=1,
         )
-        grad_partial = m._reml_direct_gradient(
+        grad_partial = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1297,7 +1332,8 @@ class TestREMLFiniteDifference:
             phi_hat=phi_hat,
         )
         grad1 = grad_partial + w1[0]
-        hess1 = m._reml_direct_hessian(
+        hess1 = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -1311,7 +1347,8 @@ class TestREMLFiniteDifference:
         )
 
         # Order 2
-        w2 = m._reml_w_correction(
+        w2 = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1322,7 +1359,8 @@ class TestREMLFiniteDifference:
             w_correction_order=2,
         )
         grad2 = grad_partial + w2[0]  # gradient is same for both orders
-        hess2 = m._reml_direct_hessian(
+        hess2 = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -1437,7 +1475,8 @@ class TestREMLFiniteDifference:
             _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
-        grad_partial = m._reml_direct_gradient(
+        grad_partial = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1445,7 +1484,8 @@ class TestREMLFiniteDifference:
             penalty_ranks,
             phi_hat=phi_hat,
         )
-        correction = m._reml_w_correction(
+        correction = reml_w_correction(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -1456,7 +1496,8 @@ class TestREMLFiniteDifference:
             w_correction_order=2,
         )
         assert correction is not None and correction[2] is not None
-        analytic = m._reml_direct_hessian(
+        analytic = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -1492,7 +1533,8 @@ class TestREMLFiniteDifference:
                     return_xtwx=True,
                     weight_semantics="frequency",
                 )
-                gradient = m._reml_direct_gradient(
+                gradient = reml_direct_gradient(
+                    m,
                     result,
                     inverse,
                     perturbed,
@@ -1500,7 +1542,8 @@ class TestREMLFiniteDifference:
                     penalty_ranks,
                     phi_hat=phi_hat,
                 )
-                perturbed_correction = m._reml_w_correction(
+                perturbed_correction = reml_w_correction(
+                    m,
                     result,
                     inverse,
                     perturbed,

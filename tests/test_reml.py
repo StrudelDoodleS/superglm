@@ -24,6 +24,7 @@ from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.types import GroupSlice
+from tests._reml_adapters import reml_w_correction
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -1144,8 +1145,8 @@ class TestREMLBackwardCompat:
             return_xtwx=True,
             weight_semantics="frequency",
         )
-        corr = m._reml_w_correction(
-            pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
+        corr = reml_w_correction(
+            m, pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
         )
         assert corr is not None, "Enhanced custom objects should get W correction"
 
@@ -1603,39 +1604,6 @@ class TestDiscreteCachedSolve:
         assert solve_calls > 0
         assert model._reml_profile["reml_n_linesearch_fits"] == solve_calls
         assert model._reml_profile["reml_n_linesearch_full_evals"] == solve_calls
-
-    def test_penalty_block_trace_matches_materialized_hessian_product(self):
-        from superglm.reml.gradient import _penalty_block_trace
-
-        rng = np.random.default_rng(12)
-        p = 14
-        A = rng.standard_normal((p, p))
-        H_inv = np.linalg.inv(A @ A.T + np.eye(p))
-        slices = [slice(1, 5), slice(7, 12)]
-        omegas = []
-        lambdas = [0.8, 2.3]
-        for sl in slices:
-            q = sl.stop - sl.start
-            B = rng.standard_normal((q, q))
-            omegas.append(B @ B.T)
-
-        for i, sl_i in enumerate(slices):
-            for j, sl_j in enumerate(slices):
-                F_i = np.zeros((p, p))
-                F_i[:, sl_i] = H_inv[:, sl_i] @ (lambdas[i] * omegas[i])
-                F_j = np.zeros((p, p))
-                F_j[:, sl_j] = H_inv[:, sl_j] @ (lambdas[j] * omegas[j])
-                materialized = float(np.sum(F_i * F_j.T))
-
-                compact = _penalty_block_trace(
-                    H_inv,
-                    sl_i,
-                    lambdas[i] * omegas[i],
-                    sl_j,
-                    lambdas[j] * omegas[j],
-                )
-
-                np.testing.assert_allclose(compact, materialized, rtol=1e-12, atol=1e-12)
 
     def test_profiled_cached_solve_matches_augmented_system(self):
         from superglm.reml.discrete import _solve_cached_profiled_system
