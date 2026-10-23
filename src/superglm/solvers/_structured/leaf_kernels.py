@@ -245,3 +245,62 @@ def _distinct_level_rows(data, indices, indptr, starts, weights, cap):  # pragma
                     break
         out[level] = count
     return out
+
+
+# Entry-by-entry updates of a 2-D block, for the FactorSmooth kernels
+# (``block_leaves``, ``balance_tree``).  The kernels write their matrix sums
+# through these rather than as array expressions (``X += f * Y``, ``T[v] =
+# X + Y``): numba compiles each array expression into a broadcasting loop and
+# each sliced assignment with its shape-check message, which together cost
+# seconds of a cold compile.  Each entry sees the same operations in the same
+# order as the expression did, so the results are the same to the bit.
+@njit(cache=True)
+def _assign(target, source):  # pragma: no cover - compiled
+    """``target[:] = source``."""
+    for i in range(target.shape[0]):
+        for j in range(target.shape[1]):
+            target[i, j] = source[i, j]
+
+
+@njit(cache=True)
+def _add(target, source):  # pragma: no cover - compiled
+    """``target += source``."""
+    for i in range(target.shape[0]):
+        for j in range(target.shape[1]):
+            target[i, j] += source[i, j]
+
+
+@njit(cache=True)
+def _add_scaled(target, factor, source):  # pragma: no cover - compiled
+    """``target += factor * source``."""
+    for i in range(target.shape[0]):
+        for j in range(target.shape[1]):
+            target[i, j] += factor * source[i, j]
+
+
+@njit(cache=True)
+def _absolute(A):  # pragma: no cover - compiled
+    """``np.abs(A)`` of a 2-D block, without compiling the ufunc."""
+    out = np.empty_like(A)
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            out[i, j] = abs(A[i, j])
+    return out
+
+
+def _warmup_leaf_kernels() -> None:
+    """Compile the four kernels a RandomEffect leaf pass calls (no rows).
+
+    A RandomEffect large enough for the structured engine (one with a few
+    hundred levels, nested or not) reaches these four, exact or binned; the
+    FactorSmooth kernels compile in ``block_leaves._warmup_factor_smooth``.
+    """
+    f1, i64 = np.zeros(0), np.zeros(0, dtype=np.int64)
+    f2 = np.zeros((0, 0))
+    one = np.zeros(1, dtype=np.int64)
+    center = np.zeros(0)
+    center.flags.writeable = False  # ``moments._leaf_rows`` passes it read-only
+    _coded_rows(f2, np.zeros((0, 0), dtype=np.int32), f1, i64, i64, i64, i64, i64, center)
+    _segment_means(f2, f1, one, i64, f1, f2)
+    _center_rows(f2, f2, f2, f1, f1, one, f2, f1, f2, f2)
+    _shifted_sums(f2, f1, f1, f1)

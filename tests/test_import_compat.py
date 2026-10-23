@@ -8,10 +8,15 @@ supported.
 
 import ast
 import inspect
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+import superglm
 
 # ── Old paths (must keep working after moves) ──────────────────
 
@@ -62,86 +67,132 @@ def test_toplevel_reexports():
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
 
 
-def test_public_model_kernel_warmup_is_lazy_complete_and_idempotent() -> None:
-    script = r"""
-import inspect
+# Every numba kernel in the package compiles in ``superglm.warmup()``, is
+# inlined into its callers, or is listed here: a kernel left to the first fit
+# that reaches it, with the reason.  tests/_numba_dispatchers.py finds every
+# kernel, so one added without that decision fails the test below.
+_STRUCTURED = "superglm.solvers._structured."
+_GROUP = "superglm._group_matrix._group_matrix_kernels."
+_TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
+_NB = "superglm.distributional.kernels._negative_binomial_numba."
+_FIRST_USE: dict[str, str] = {
+    # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
+    # (every family and link, SuperGLM and SuperLSS, exact and binned,
+    # RandomEffect and FactorSmooth terms) and 17 more on 2026-10-21 for the
+    # routes those missed (continuous covariates, tensors over disjoint and
+    # P-spline margins, a decomposed and a lone tensor, factor smooths on the
+    # Gram backend and beside numerics only): which fits reach each kernel,
+    # its compile time on top of warmup(), and its load from a filled cache.
+    **dict.fromkeys(
+        [
+            *(
+                _TWEEDIE + name
+                for name in (
+                    "_polygamma_012",
+                    "_third_term_channels",
+                    "_series_third_cumulants",
+                    "_tweedie_third_row",
+                    "_tweedie_hessian_direction_rows",
+                    "_polygamma_0123",
+                    "_fourth_term_channels",
+                    "_series_fourth_cumulants",
+                    "_tweedie_fourth_row",
+                    "_tweedie_fourth_rows",
+                    "_positive_closed",
+                    "_zero_closed",
+                    "_zeta_derivatives",
+                    "_term_derivatives",
+                    "_series_cumulants",
+                )
+            ),
+            *(
+                _NB + name
+                for name in (
+                    "_log_third_rows",
+                    "_log_fourth_rows",
+                    "_log_third_row",
+                    "_log_fourth_row",
+                    "_tail_moment_one",
+                    "_tail_moment_two",
+                    "_tail_moment_three",
+                )
+            ),
+            "superglm.distributional.kernels.gamma._small_shape_jdd_series",
+        ],
+        "a SuperLSS endpoint step's third and fourth derivatives: none of 26 SuperLSS fits "
+        "reached them (3 with a pure-noise smooth); 7 s to compile after warmup(), 0.06 s "
+        "from cache",
+    ),
+    **dict.fromkeys(
+        (
+            _STRUCTURED + "balance_tree._leaf_path_row_forms",
+            _STRUCTURED + "block_leaves._level_row_forms",
+        ),
+        "a structured FactorSmooth fit's hat diagonal (Cook's distance, standardized "
+        "residuals): diagnostics, not the fit",
+    ),
+    **dict.fromkeys(
+        (
+            _STRUCTURED + "block_leaves._moment_segments",
+            _STRUCTURED + "block_leaves._close_levels",
+        ),
+        "the signed moment segments of a binned FactorSmooth term and the close of a stored "
+        "level stack: no census fit reaches them (fs or sz, Fisher or signed, exact or binned)",
+    ),
+    _STRUCTURED + "leaf_kernels._sparse_rows": (
+        "a RandomEffect leaf pass whose border has a row its tables cannot code: none in the census"
+    ),
+    _GROUP + "_operand_exponent_bounds": (
+        "the non-float64 scan: fits pass float64 operands to _float64_operand_exponent_bounds"
+    ),
+    **dict.fromkeys(
+        (
+            _GROUP + "_dense_small_weighted_moments",
+            _GROUP + "_factor_smooth_support_dense_cell_aggregates",
+            _GROUP + "_factor_smooth_csr_dense_cross",
+            _GROUP + "_factor_smooth_support_dense_cross",
+        ),
+        "a FactorSmooth moment system built without its leaf layout, or crossed with a dense "
+        "term of two or more columns: no census fit reaches either (fs or sz, exact or binned, "
+        "beside numerics, splines or a polynomial)",
+    ),
+    _GROUP + "_fused_2d_bincount_2": (
+        "a discrete tensor's two weight grids on the chunked moment route, which the raw-moment "
+        "and pattern routes now serve: no census fit reaches it"
+    ),
+    "superglm.solvers._exact_sums.scaled_exact_sum": (
+        "the overflow fallback: only a sum whose products or partials leave float64's range "
+        "reaches it (0.6 s)"
+    ),
+    "superglm.distributional.solver._small_group_panels._checked_factor_scatter": (
+        "only an explicit panel budget renders a FactorSmooth group; no public fit sets one (0.4 s)"
+    ),
+    "superglm.plotting.diagnostics._lowess_core": "a diagnostic plot's smoother, not a fit (2.2 s)",
+}
+
+_WARMUP_CENSUS = r"""
+import json
 
 import numpy as np
 import superglm
-import superglm._group_matrix._group_matrix_kernels as group_kernels
-import superglm._tweedie_series as tweedie_series
-import superglm.distributional.kernels._tweedie_numba as tweedie_numba
-import superglm.reml._compensated as compensated
-from numba.core.registry import CPUDispatcher
+from superglm._group_matrix import _group_matrix_algebra as group_algebra
+from superglm._group_matrix import _group_matrix_kernels as group_kernels
+from superglm._group_matrix import _group_matrix_support as support_scans
+from superglm.features import interaction
 from superglm.reml import multi_penalty
+from tests._numba_dispatchers import is_inlined, package_dispatchers, signatures
 
-dispatchers = {}
-# The exact path's term tables, leverage rows, support scans and row
-# Kronecker builds: a large book's first fit compiled 14 of them after warmup.
-import superglm._group_matrix._group_matrix_support as support_scans
-import superglm._group_matrix._lookup_tables as lookup_tables
-import superglm.features.interaction as interaction
-import superglm.reml._leverage_rows as leverage_rows
+dispatchers, problems = package_dispatchers()
+at_import = signatures(dispatchers)
+superglm.warmup()
+warmed = signatures(dispatchers)
 
-for module in (
-    tweedie_numba, group_kernels, lookup_tables, leverage_rows, support_scans, interaction
-):
-    dispatchers.update(
-        {
-            f"{module.__name__}.{name}": value
-            for name, value in vars(module).items()
-            if isinstance(value, CPUDispatcher)
-            and value.py_func.__module__ == module.__name__
-        }
-    )
-# The series' per-term and per-row helpers are only called from compiled code,
-# so their dispatchers never gain a signature; the entry point carries them.
-dispatchers["superglm._tweedie_series._series_moments_kernel"] = (
-    tweedie_series._series_moments_kernel
-)
-for name in ("_dot2_quadratic_form", "_dot2_selected", "_dot2_value"):
-    dispatchers[f"{compensated.__name__}.{name}"] = getattr(compensated, name)
-# The SuperLSS gamma and NB2 series kernels and the exact sums, by name: their
-# modules also hold kernels that compile on first use.
-import superglm.distributional.kernels._negative_binomial_numba as nb_numba
-import superglm.distributional.kernels.gamma as gamma_kernels
-import superglm.solvers._exact_sums as exact_sums
-import superglm.solvers.scop_newton as scop_newton
-
-for module, names in (
-    (gamma_kernels, ("_small_shape_series",)),
-    (nb_numba, ("theta_series_serial", "theta_series_parallel")),
-    (exact_sums, ("unscaled_exact_sum", "scaled_exact_sum", "weighted_residual_sum")),
-    (scop_newton, ("_scop_bin_aggregates",)),
-):
-    for name in names:
-        dispatchers[f"{module.__name__}.{name}"] = getattr(module, name)
-# The LAML endgame's Tweedie third-derivative kernels compile on a Tweedie
-# fit's first use, not in every process's warmup.
-from superglm.distributional.kernels.tweedie import _FIRST_USE_DISPATCHERS
-
-first_use = {
-    name: dispatchers.pop(f"{tweedie_numba.__name__}.{name}") for name in _FIRST_USE_DISPATCHERS
-}
-assert dispatchers
-assert inspect.signature(superglm.warmup).parameters == {}
-assert all(not dispatcher.nopython_signatures for dispatcher in dispatchers.values())
-
-def signatures():
-    return {
-        name: tuple(dispatcher.nopython_signatures)
-        for name, dispatcher in dispatchers.items()
-    }
 
 def readonly(*arrays):
     for array in arrays:
         array.setflags(write=False)
     return arrays
 
-superglm.warmup()
-compiled = signatures()
-assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
-assert not any(dispatcher.nopython_signatures for dispatcher in first_use.values())
 
 # The row Kronecker build and the support scans, through their production entry
 # points: a first interaction fit must reuse the signatures warmup compiled.
@@ -152,7 +203,6 @@ interaction._row_kron(basis, basis)
 row_hashes = support_scans._row_hashes(basis, 2)
 _, first_rows, row_groups = np.unique(row_hashes, return_index=True, return_inverse=True)
 assert support_scans._verified_representatives(basis, first_rows, row_groups, 2) is not None
-assert signatures() == compiled, "an interaction build or support scan compiled after public warmup"
 
 # The SuperLSS penalty value passes one operand form, whatever its coefficients' flags.
 from superglm.distributional.solver.solver import _half_penalty_quadratic, _penalty_entries
@@ -163,8 +213,9 @@ for diagonal, expected in (([0.0, 0.0, 0.0], 0.0), ([0.0, 2.0, 0.0], 4.0), ([0.0
     entries = _penalty_entries(penalty)
     for coefficients in (np.array([1.0, 2.0, 3.0]), readonly(np.array([1.0, 2.0, 3.0]))[0]):
         assert _half_penalty_quadratic(penalty, coefficients, entries) == expected
-assert signatures() == compiled, "the penalty value compiled a new layout after public warmup"
 
+# Every layout a caller holds reaches the range scans through ``_native``, as
+# their call sites pass it: C, Fortran and strided, writable or read-only.
 for values in (
     np.ones((3, 4)),
     np.asfortranarray(np.ones((3, 4))),
@@ -172,12 +223,23 @@ for values in (
     np.ones((3, 4))[::-1],
     np.ones(9)[::2, None],
 ):
-    frozen = values.view()
-    frozen.setflags(write=False)
-    for operand in (values, frozen):
-        assert group_kernels._tensor_operand_in_reassociation_range(operand)
-        assert group_kernels._operand_exponent_bounds(operand) == (0, 1)
-assert signatures() == compiled, "range checks compiled new layouts after public warmup"
+    for operand in (values, *readonly(values.copy() if values.flags.owndata else values.view())):
+        assert group_kernels._tensor_operand_in_reassociation_range(
+            group_kernels._scan_form(operand)
+        )
+        assert group_algebra._operand_exponent_bounds(operand) == (0, 1)
+
+# A weight kernel's call site hands it a read-only C operand (``_native``),
+# whatever the caller holds: SuperGLM's weights, SuperLSS's read-only channel
+# columns (binned) and strided ones (exact).
+from superglm._group_matrix._group_matrix_core import _bincount_levels
+from superglm.group_matrix import _disc_disc_2d_hist
+
+four = np.array([0, 1, 1, 0], dtype=np.intp)
+for weights in (np.ones(4), np.ones(8)[::2], *readonly(np.ones(4), np.ones(8)[::2])):
+    np.testing.assert_array_equal(_bincount_levels(four, weights, 2), [2.0, 2.0])
+    joint = _disc_disc_2d_hist(four, four, weights, 2, 2)
+    np.testing.assert_array_equal(joint, np.diag([2.0, 2.0]))
 
 frozen_response, frozen_mean = readonly(np.array([0.0, 1.0, 2.5]), np.ones(3))
 assert np.all(np.isfinite(superglm.tweedie_logpdf(frozen_response, frozen_mean, 1.0, 1.5)))
@@ -187,23 +249,9 @@ codes = np.array([0, 1], dtype=np.intp)
 csr_indices = np.array([0, 1], dtype=np.int32)
 csr_indptr = np.array([0, 1, 2], dtype=np.int32)
 cell_ptr, cell_order = group_kernels._cell_csr(codes, codes, 2, 2)
-frozen_codes, = readonly(codes.copy())
-for first in (codes, frozen_codes):
-    for second in (codes, frozen_codes):
-        assert group_kernels._cell_csr_matches(cell_ptr, cell_order, first, second, 2, 2)
+assert group_kernels._cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
 group_kernels._csr_weighted_gram(
-    values, csr_indices, csr_indptr, values, 2, absolute_weights=True
-)
-dense_small, = readonly(np.eye(2, dtype=np.float64))
-group_kernels._dense_small_weighted_moments(dense_small, values, values)
-group_kernels._factor_smooth_csr_dense_cross(
-    values, csr_indices, csr_indptr, codes, values, dense_small, 2, 2
-)
-group_kernels._factor_smooth_support_dense_cross(
-    np.eye(2, dtype=np.float64), codes, codes, values, dense_small, 2
-)
-group_kernels._factor_smooth_support_dense_cell_aggregates(
-    codes, codes, values, dense_small, 2, 2
+    values, csr_indices, csr_indptr, group_kernels._native(values), 2, absolute_weights=True
 )
 
 row_patterns, unique_codes, offsets, pair_left, pair_right, pair_offsets, right_sizes = readonly(
@@ -226,7 +274,6 @@ group_kernels._pattern_support_summaries(
     pair_offsets,
     right_sizes,
 )
-assert signatures() == compiled
 
 # Dot2 refinement passes one operand form, whatever its callers' layouts and flags.
 rng = np.random.default_rng(0)
@@ -236,66 +283,136 @@ for first in (left, readonly(left.copy())[0], np.asfortranarray(left)):
         multi_penalty._refine_product(first, second, *multi_penalty._matmul_enclosed(first, second))
         multi_penalty._compensated_dot(first[0], second[:, 0])
         multi_penalty._compensated_dot(first[0], np.ascontiguousarray(second[:, 1]))
-assert signatures() == compiled
 
+entry_points = signatures(dispatchers)
 superglm.warmup()
-assert signatures() == compiled
-"""
+rewarmed = signatures(dispatchers)
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+# First fits: a binned SuperGLM fit and binned Tweedie and negative binomial
+# SuperLSS fits, each with a spline, a categorical and a RandomEffect of 300
+# levels (the structured engine's leaf pass).
+import warnings
 
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == ""
-    assert completed.stderr == ""
+import pandas as pd
+from superglm import cat, re, s
 
-
-def test_public_warmup_leaves_the_structured_engine_kernels_to_their_first_use() -> None:
-    """``superglm.warmup()`` costs what master's does: the structured engine's
-    kernels (leaf pass, fs block leaves, sz balance tree, mode score) compile or
-    load from numba's cache on a fit's first call, so a process pays only for
-    the kernels its model class uses.  Warming all of them added 0.26-0.39 s to
-    every process, more than a small sz fit's whole first-use cost.  Asserted on
-    compiled signatures, not time.
-    """
-    script = r"""
-import importlib
-
-import superglm
-from numba.core.registry import CPUDispatcher
-
-modules = (
-    "superglm.solvers._structured.leaf_kernels",
-    "superglm.solvers._structured.block_leaves",
-    "superglm.solvers._structured.balance_tree",
-    "superglm.solvers.mode_score",
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(7)
+n = 4000
+frame = pd.DataFrame({
+    "x": rng.uniform(0, 1, n),
+    "g": rng.choice(list("pqrs"), n),
+    "u": rng.integers(0, 300, n).astype(str),
+})
+mu = np.exp(np.sin(3 * frame.x) + rng.normal(0, 0.3, 300)[frame.u.astype(int)])
+counts = rng.poisson(mu).astype(np.float64)
+amounts = rng.gamma(1.5, mu / 1.5) * (rng.uniform(size=n) < 0.6)
+terms = (s("x", kind="cr", k=8), cat("g"), re("u"))
+superglm.SuperGLM(family="poisson", discrete=True, terms=list(terms)).fit_reml(frame, counts)
+tweedie = superglm.TweedieLSS()
+model = superglm.SuperLSS(tweedie, tweedie.mu(*terms), tweedie.phi(), tweedie.p(), discrete=True)
+model.fit_reml(frame, amounts)
+negative_binomial = superglm.NegativeBinomialLS()
+model = superglm.SuperLSS(
+    negative_binomial, negative_binomial.mean(*terms), negative_binomial.theta(), discrete=True
 )
-dispatchers = {}
-for name in modules:
-    module = importlib.import_module(name)
-    dispatchers.update(
-        {
-            f"{name}.{attribute}": value
-            for attribute, value in vars(module).items()
-            if isinstance(value, CPUDispatcher) and value.py_func.__module__ == name
-        }
-    )
-assert len(dispatchers) > 20, sorted(dispatchers)
-superglm.warmup()
-compiled = sorted(name for name, value in dispatchers.items() if value.nopython_signatures)
-assert not compiled, compiled
+model.fit_reml(frame, counts)
+
+# An exact ordinary spline: the sparse-SSP Gram's direct kernel call.
+superglm.SuperGLM(
+    family="poisson", discrete=False, terms=[s("x", kind="ps", k=12)]
+).fit_reml(frame.iloc[:2000], counts[:2000])
+
+# Binned factor smooths of both bases on a 50-level group: the structured
+# engine's FactorSmooth leaf pass, which warmup compiles by hand.
+from superglm import FactorSmooth
+from superglm import interaction as term_interaction
+
+frame["h"] = rng.integers(0, 50, n).astype(str)
+for smooths in (
+    [term_interaction(FactorSmooth("x", group="h", basis="fs", k=5))],
+    [s("x", kind="ps", k=7, m=2), term_interaction(FactorSmooth("x", group="h", basis="sz", kind="ps", k=5, m=2))],
+):
+    superglm.SuperGLM(family="poisson", discrete=True, terms=smooths).fit_reml(frame, counts)
+
+# An exact gamma (log link) fs fit: observed curvature takes the signed half of
+# the leaf pass (the signed leaf segments and trials), and an exact term its
+# sorted CSR basis rows, raw moments and compensated level sums.
+exact = frame.iloc[:2000]
+superglm.SuperGLM(
+    family="gamma", terms=[term_interaction(FactorSmooth("x", group="h", basis="fs", k=5))]
+).fit_reml(exact, rng.gamma(2.0, mu.to_numpy()[:2000] / 2.0))
+print(json.dumps({
+    "problems": problems,
+    "inlined": sorted(name for name, value in dispatchers.items() if is_inlined(value)),
+    "at_import": {name: found for name, found in at_import.items() if found},
+    "warmed": warmed,
+    "entry_points": entry_points,
+    "rewarmed": rewarmed,
+    "fitted": signatures(dispatchers),
+}))
 """
+
+
+def _changed(before: dict, after: dict) -> dict:
+    return {name: after[name] for name in after if after[name] != before.get(name)}
+
+
+@pytest.mark.slow
+def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_path) -> None:
+    """After ``superglm.warmup()`` a first fit compiles only the kernels in ``_FIRST_USE``.
+
+    On an empty numba cache a kernel compiles the kernels it calls, so after
+    warmup each of the package's dispatchers has a signature, is inlined
+    (``inline="always"``: it never compiles on its own), or is listed in
+    ``_FIRST_USE``.  A listed kernel that warmup compiles, or that no longer
+    exists, fails as well, so the list cannot rot.  The production entry points
+    then run with the layouts and flags their callers pass and must reuse
+    warmup's signatures, a second warmup compiles nothing, and first fits
+    (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
+    spline, a categorical and a structured RandomEffect; an exact ordinary
+    spline; binned ``fs`` and ``sz`` factor smooths; and an exact gamma ``fs``
+    fit, which takes the signed rows) compile nothing outside ``_FIRST_USE``.
+    ``warmup()`` stays a bare call: import compiles nothing.
+    """
+    assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", _WARMUP_CENSUS],
         check=False,
         capture_output=True,
         text=True,
+        cwd=Path(__file__).resolve().parents[1],
+        env=dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / "numba-cache")),
+        timeout=1800,  # a cold warmup takes about a minute; this bounds a hang
     )
     assert completed.returncode == 0, completed.stderr
+    census = json.loads(completed.stdout)
+    assert not census["problems"], census["problems"]
+    assert not census["at_import"], f"importing superglm compiled {sorted(census['at_import'])}"
+    warmed, inlined = census["warmed"], set(census["inlined"])
+    unclassified = sorted(
+        name
+        for name, found in warmed.items()
+        if not found and not {name} & (inlined | _FIRST_USE.keys())
+    )
+    assert not unclassified, (
+        f"warmup() compiles none of {unclassified}: warm it, or list it in _FIRST_USE with the reason"
+    )
+    stale = sorted(
+        name for name in _FIRST_USE if name not in warmed or warmed[name] or name in inlined
+    )
+    assert not stale, (
+        f"_FIRST_USE lists kernels warmup() compiles or the package no longer has: {stale}"
+    )
+    compiled_inline = sorted(name for name in inlined if warmed[name])
+    assert not compiled_inline, (
+        f"warmup() compiled the inlined {compiled_inline} on its own: numba caches no inlined "
+        "kernel, so it would compile again in every process"
+    )
+    assert not _changed(warmed, census["entry_points"]), "a first fit's operands compiled anew"
+    assert not _changed(warmed, census["rewarmed"]), "a second warmup() compiled anew"
+    first_fits = sorted(set(_changed(census["rewarmed"], census["fitted"])) - _FIRST_USE.keys())
+    assert not first_fits, f"a first fit after warmup() compiled {first_fits}"
 
 
 def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():

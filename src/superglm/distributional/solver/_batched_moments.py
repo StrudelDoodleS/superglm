@@ -1,183 +1,196 @@
 """Parallelize independent global moments without changing their row order.
 
 The plan supplies already validated bins and likelihood values in its owned
-chunk buffers. Each native worker updates whole, disjoint accumulators, so
-signed floating-point additions have exactly the serial reduction order.
-Only integer diagnostics are reduced across workers; fastmath is disabled.
+chunk buffers. Each target (a histogram, a directional moment or a paired
+score/mass vector) is one task on the worker pool (``superglm._parallel``):
+a serial kernel that releases the GIL updates the target's own accumulator,
+visiting the rows in their input order, so signed floating-point additions
+have exactly the serial reduction order at every worker count. Only integer
+diagnostics are summed across tasks; fastmath is disabled.
+
+Accumulators and ordinary panels are views of two owned flat buffers, and the
+kernel addresses each through an element offset and a row width.  A
+``numba.typed.List`` of the arrays would cost every process a compile:
+building one from Python calls numba's own list helpers, which numba does not
+cache (``numba/typed/typedlist.py`` declares them without ``cache=True``).
 """
 
 from __future__ import annotations
 
-from bisect import bisect_left
-from threading import Lock
-from typing import TYPE_CHECKING, Protocol
+from threading import Lock, get_ident
 
 import numpy as np
-from numba import get_num_threads, get_thread_id, njit, types
-from numba.typed import List
+from numba import njit, types
 
-if TYPE_CHECKING:
-    from builtins import range as prange
+from superglm._parallel import pooled_for
 
-    class _NumbaThreadConfig(Protocol):
-        NUMBA_NUM_THREADS: int
-
-    config: _NumbaThreadConfig
-else:
-    from numba import config, prange
+# Bytes one target's task holds while it runs: its loop state, not its rows.
+_TASK_BYTES = 1 << 12
 
 
 @njit(cache=True)
-def _histogram_target(out, bins, curvature, g, h, channel, n):
+def _histogram_target(outputs, offset, columns, bins, curvature, g, h, channel, n):
     active = 0
     for i in range(n):
         left = bins[g, i]
         right = bins[h, i]
         if left >= 0 and right >= 0:
-            out[left, right] += curvature[i, channel]
+            outputs[offset + left * columns + right] += curvature[i, channel]
             active += 1
     return active
 
 
 @njit(cache=True)
-def _directional_target(out, bins, panel, curvature, g, channel, n):
+def _directional_target(
+    outputs, offset, panels, panel_offset, columns, bins, curvature, g, channel, n
+):
     active = 0
     for i in range(n):
         index = bins[g, i]
         if index >= 0:
             weight = curvature[i, channel]
-            for j in range(panel.shape[1]):
-                out[index, j] += weight * panel[i, j]
+            row = offset + index * columns
+            source = panel_offset + i * columns
+            # Row slices, not flat offsets: the inner loop then runs over
+            # contiguous arrays and vectorises (4x on the global moments).
+            target = outputs[row : row + columns]
+            panel = panels[source : source + columns]
+            for j in range(columns):
+                target[j] += weight * panel[j]
             active += 1
-    return active * panel.shape[1]
+    return active * columns
 
 
 @njit(cache=True)
-def _paired_vector_target(score_out, mass_out, bins, score, curvature, g, sc, cc, n):
+def _paired_vector_target(outputs, score_offset, mass_offset, bins, score, curvature, g, sc, cc, n):
+    scores = outputs[score_offset:]
+    mass = outputs[mass_offset:]
     active = 0
     for i in range(n):
         index = bins[g, i]
         if index >= 0:
-            score_out[index] += score[i, sc]
-            mass_out[index] += curvature[i, cc]
+            scores[index] += score[i, sc]
+            mass[index] += curvature[i, cc]
             active += 1
     return active
 
 
-@njit(cache=True, parallel=True)
-def _accumulate_batched(
+@njit(cache=True, nogil=True)
+def _accumulate_targets(
     metadata,
+    panel_layout,
     outputs,
-    vector_outputs,
-    ordinary,
+    panels,
     bins,
     score,
     curvature,
     n,
     n_histograms,
     n_matrices,
-    activity,
-    lanes,
+    first,
+    stop,
 ):
-    for worker in range(activity.size):
-        activity[worker] = 0
+    """Targets ``first..stop``, each over rows ``0..n`` in order: histogram visits,
+    directional work and paired-vector visits."""
     histogram_active = 0
     directional_work = 0
     vector_active = 0
-    for lane_index in prange(lanes):
-        activity[get_thread_id()] = 1
-        # Round-robin lanes spread both histogram and wider directional targets
-        # across the configured team. Cast prange's possibly unsigned index for
-        # typed-list access; each target still visits rows in their input order.
-        for target in range(np.intp(lane_index), metadata.shape[0], lanes):
-            g = metadata[target, 0]
-            other = metadata[target, 1]
-            channel = metadata[target, 2]
-            if target < n_histograms:
-                out = outputs[target]
-                histogram_active += _histogram_target(out, bins, curvature, g, other, channel, n)
-            elif target < n_matrices:
-                out = outputs[target]
-                panel = ordinary[other]
-                directional_work += _directional_target(out, bins, panel, curvature, g, channel, n)
-            else:
-                vector = 2 * (target - n_matrices)
-                vector_active += _paired_vector_target(
-                    vector_outputs[vector],
-                    vector_outputs[vector + 1],
-                    bins,
-                    score,
-                    curvature,
-                    g,
-                    other,
-                    channel,
-                    n,
-                )
-    workers = 0
-    for worker in range(activity.size):
-        workers += activity[worker]
-    return histogram_active, directional_work, vector_active, workers
+    for target in range(first, stop):
+        g = metadata[target, 0]
+        other = metadata[target, 1]
+        channel = metadata[target, 2]
+        offset = metadata[target, 3]
+        if target < n_histograms:
+            histogram_active += _histogram_target(
+                outputs, offset, metadata[target, 4], bins, curvature, g, other, channel, n
+            )
+        elif target < n_matrices:
+            directional_work += _directional_target(
+                outputs,
+                offset,
+                panels,
+                panel_layout[other, 0],
+                panel_layout[other, 1],
+                bins,
+                curvature,
+                g,
+                channel,
+                n,
+            )
+        else:
+            vector_active += _paired_vector_target(
+                outputs,
+                offset,
+                metadata[target, 4],
+                bins,
+                score,
+                curvature,
+                g,
+                other,
+                channel,
+                n,
+            )
+    return histogram_active, directional_work, vector_active
 
 
-# Keep C addressing in the common path and one general-stride fallback. Numba's
-# mutable-to-readonly and contiguous-to-A casts reuse the array descriptor;
-# neither dispatcher copies rows or changes the caller's writeability flags.
-if TYPE_CHECKING:
-    # Numba's py_func stub models descriptor binding on this plain function.
-    _accumulate_batched_strided = _accumulate_batched
-else:
-    _accumulate_batched_strided = njit(cache=True, parallel=True)(_accumulate_batched.py_func)
+# The kernel the worker pool runs: one target a task, ``nogil``, never ``prange``.
+_POOLED_TARGET_KERNELS = (_accumulate_targets,)
 _batched_initialization_lock = Lock()
 _batched_initialized = False
 
 
 def _initialize_batched_moments():
-    """Compile exactly two native signatures on warmup or first admitted call."""
+    """Compile the one native signature on warmup or first admitted call.
+
+    The channels are typed read-only ``A``, and the closed dispatcher converts a
+    C, Fortran or strided chunk to that type without copying it, so one
+    signature serves every channel layout a caller passes and the reducer holds
+    no channel copy the workspace budget would have to count.
+    """
     global _batched_initialized
     if _batched_initialized:
         return
     with _batched_initialization_lock:
         if _batched_initialized:
             return
-        matrix = types.Array(types.float64, 2, "C")
-        vector = types.Array(types.float64, 1, "C")
-        for kernel, layout in ((_accumulate_batched, "C"), (_accumulate_batched_strided, "A")):
-            channels = types.Array(types.float64, 2, layout, readonly=True)
-            kernel.compile(
-                (
-                    types.Array(types.intp, 2, "C", readonly=True),
-                    types.ListType(matrix),
-                    types.ListType(vector),
-                    types.ListType(matrix),
-                    types.Array(types.intp, 2, "C"),
-                    channels,
-                    channels,
-                    types.intp,
-                    types.intp,
-                    types.intp,
-                    types.Array(types.intp, 1, "C"),
-                    types.intp,
-                )
+        table = types.Array(types.intp, 2, "C", readonly=True)
+        buffer = types.Array(types.float64, 1, "C")
+        channels = types.Array(types.float64, 2, "A", readonly=True)
+        _accumulate_targets.compile(
+            (
+                table,
+                table,
+                buffer,
+                buffer,
+                types.Array(types.intp, 2, "C"),
+                channels,
+                channels,
+                types.intp,
+                types.intp,
+                types.intp,
+                types.intp,
+                types.intp,
             )
+        )
         # A failed compile leaves readiness false and propagates before any
         # accumulation. Retain successful compilation for a subsequent retry;
         # dispatcher identities and Numba's own failure semantics stay intact.
-        _accumulate_batched.disable_compile()
-        _accumulate_batched_strided.disable_compile()
+        _accumulate_targets.disable_compile()
         _batched_initialized = True
 
 
 def _batch_workspace_bytes(histogram_count, directional_count, ordinary_count, *, vector_count=0):
     """Return exact owned array bytes and a separate descriptor reserve.
 
-    The two owned arrays contain three indices per target and one activity
-    flag per maximum Numba worker. Typed lists borrow existing arrays. Their
-    native descriptors, Python wrappers and address tuples receive a bounded
-    conservative reserve; global JIT/runtime state belongs to Numba itself.
-    Both terms are independent of observation count and chunk length.
+    The two owned arrays contain five indices per target and an offset and a
+    width per ordinary panel. The accumulators and panels are borrowed views
+    of the caller's buffers.
+    Python wrappers and tuples receive a bounded conservative reserve; global
+    JIT/runtime state belongs to Numba itself. Both terms are independent of
+    observation count and chunk length.
     """
     targets = histogram_count + directional_count + vector_count
-    owned = np.dtype(np.intp).itemsize * (3 * targets + config.NUMBA_NUM_THREADS)
+    owned = np.dtype(np.intp).itemsize * (5 * targets + 2 * ordinary_count)
     descriptors = 2048 + 512 * (targets + vector_count + ordinary_count)
     return int(owned), int(descriptors)
 
@@ -195,6 +208,14 @@ def _owned_array(values, dtype, shape, label):
         raise ValueError(f"{label} must be an owned writable aligned C array of shape {shape}")
 
 
+def _view_offset(values, buffer):
+    """Element offset of a C-contiguous view (``_carve``'s) inside its buffer."""
+    if values.size == 0:
+        return 0
+    start = values.__array_interface__["data"][0] - buffer.__array_interface__["data"][0]
+    return start // buffer.itemsize
+
+
 def _index(value, upper, label):
     if (
         isinstance(value, (bool, np.bool_))
@@ -208,9 +229,10 @@ def _index(value, upper, label):
 class _BatchedMomentReducers:
     """Bind certified plan buffers once for one native call per chunk.
 
-    Construction rejects shared or nonowned output storage before native code
-    can write it. Borrowed buffers retain their original native descriptors;
-    callers must not resize them or mutate their shape/dtype. Before every
+    Every accumulator is a view of ``output_buffer`` and every ordinary panel a
+    view of ``panel_buffer``, two flat arrays the plan allocates (``_carve``),
+    which the kernel addresses by offset. Callers must not resize the buffers
+    or mutate their shape/dtype. Before every
     ``accumulate``, the owning plan certifies bins in ``[-1, support_size)``
     and fills/validates the active rows of the ordinary and likelihood panels.
     This private prepared-buffer contract avoids revalidating every support
@@ -224,6 +246,8 @@ class _BatchedMomentReducers:
         ordinary,
         bins,
         *,
+        output_buffer,
+        panel_buffer,
         support_sizes,
         n_channels,
         vectors=(),
@@ -255,27 +279,14 @@ class _BatchedMomentReducers:
         capacity = bins.shape[1]
         _owned_array(bins, np.dtype(np.intp), (len(sizes), capacity), "bins")
         panels = tuple(ordinary)
-        for panel in panels:
+        panel_layout = np.empty((len(panels), 2), dtype=np.intp)
+        for index, panel in enumerate(panels):
             if type(panel) is not np.ndarray or panel.ndim != 2:
                 raise ValueError("ordinary panels must be matrices")
-            _owned_array(panel, np.dtype(np.float64), (capacity, panel.shape[1]), "ordinary panel")
+            panel_layout[index] = (_view_offset(panel, panel_buffer), panel.shape[1])
         specs = tuple(histograms) + tuple(directions)
         n_histograms = len(histograms)
-        metadata = np.empty((len(specs) + len(vector_specs), 3), dtype=np.intp)
-        # Independent owning allocations cannot overlap. Reject repeated owners
-        # explicitly, including an output that is also an input panel.
-        seen = {id(bins), *(id(panel) for panel in panels)}
-        outputs, intervals = [], []
-
-        def claim_output(out, shape):
-            _owned_array(out, np.dtype(np.float64), shape, "moment accumulator")
-            if id(out) in seen:
-                raise ValueError("moment accumulators must have distinct nonaliasing owners")
-            seen.add(id(out))
-            if out.size:
-                address = out.__array_interface__["data"][0]
-                intervals.append((address, address + out.nbytes))
-
+        metadata = np.empty((len(specs) + len(vector_specs), 5), dtype=np.intp)
         for target, (g, other, channel, out) in enumerate(specs):
             g = _index(g, len(sizes), "support index")
             channel = _index(channel, n_channels, "channel index")
@@ -285,45 +296,32 @@ class _BatchedMomentReducers:
             else:
                 other = _index(other, len(panels), "ordinary panel index")
                 shape = (sizes[g], panels[other].shape[1])
-            claim_output(out, shape)
-            metadata[target] = (g, other, channel)
-            outputs.append(out)
-        paired_outputs = []
+            metadata[target] = (g, other, channel, _view_offset(out, output_buffer), shape[1])
         for vector, (g, sc, cc, score_out, mass_out) in enumerate(vector_specs):
             g = _index(g, len(sizes), "support index")
             sc = _index(sc, n_score_channels, "score channel index")
             cc = _index(cc, n_channels, "curvature channel index")
-            claim_output(score_out, (sizes[g],))
-            claim_output(mass_out, (sizes[g],))
-            metadata[len(specs) + vector] = (g, sc, cc)
-            paired_outputs.extend((score_out, mass_out))
+            metadata[len(specs) + vector] = (
+                g,
+                sc,
+                cc,
+                _view_offset(score_out, output_buffer),
+                _view_offset(mass_out, output_buffer),
+            )
         metadata.flags.writeable = False
-        activity = np.empty(config.NUMBA_NUM_THREADS, dtype=np.intp)
-        output_list = List.empty_list(types.float64[:, ::1])
-        vector_list = List.empty_list(types.float64[::1])
-        ordinary_list = List.empty_list(types.float64[:, ::1])
-        for out in outputs:
-            output_list.append(out)
-        for panel in panels:
-            ordinary_list.append(panel)
-        for out in paired_outputs:
-            vector_list.append(out)
-        intervals.sort()
-        self._output_starts = tuple(start for start, _ in intervals)
-        self._output_stops = tuple(stop for _, stop in intervals)
-        self._outputs = output_list
-        self._vector_outputs = vector_list
-        self._ordinary = ordinary_list
+        panel_layout.flags.writeable = False
+        self._output_buffer = output_buffer
+        self._panel_buffer = panel_buffer
+        self._panel_layout = panel_layout
         self._bins = bins
         self._metadata = metadata
-        self._activity = activity
         self._capacity = capacity
         self._n_channels = int(n_channels)
         self._n_score_channels = n_score_channels
         self._n_histograms = n_histograms
         self._n_matrices = len(specs)
         self._n_vectors = len(vector_specs)
-        self.owned_arrays = (metadata, activity)
+        self.owned_arrays = (metadata, panel_layout)
         _, self.metadata_reserve_bytes = _batch_workspace_bytes(
             n_histograms, len(directions), len(panels), vector_count=len(vector_specs)
         )
@@ -338,18 +336,6 @@ class _BatchedMomentReducers:
             or not values.flags.aligned
         ):
             raise ValueError(f"{label} must be an aligned float64 matrix of active rows/channels")
-        # A caller-owned derivative view must not alias a parallel output. The
-        # enclosing byte interval is conservative even for negative strides;
-        # the disjoint sorted outputs permit a logarithmic overlap check.
-        lower = values.__array_interface__["data"][0]
-        upper = lower + values.itemsize
-        for length, stride in zip(values.shape, values.strides, strict=True):
-            extent = (length - 1) * stride
-            lower += min(0, extent)
-            upper += max(0, extent)
-        last = bisect_left(self._output_starts, upper) - 1
-        if last >= 0 and self._output_stops[last] > lower:
-            raise ValueError(f"{label} must not overlap a moment accumulator")
         return values
 
     def accumulate(self, curvature, n, *, score=None):
@@ -377,43 +363,45 @@ class _BatchedMomentReducers:
             self.last_vector_active_updates = 0
             return 0, 0
         _initialize_batched_moments()
-        kernel = (
-            _accumulate_batched
-            if score.flags.c_contiguous and curvature.flags.c_contiguous
-            else _accumulate_batched_strided
-        )
-        histogram_active, directional_work, vector_active, workers = kernel(
+        operands = (
             self._metadata,
-            self._outputs,
-            self._vector_outputs,
-            self._ordinary,
+            self._panel_layout,
+            self._output_buffer,
+            self._panel_buffer,
             self._bins,
             score,
             curvature,
             int(n),
             self._n_histograms,
             self._n_matrices,
-            self._activity,
-            min(get_num_threads(), self._metadata.shape[0]),
         )
-        self.last_worker_count = int(workers)
+        targets = list(range(self._metadata.shape[0]))
+        passes = pooled_for(
+            lambda target: (_accumulate_targets(*operands, target, target + 1), get_ident()),
+            targets,
+            _TASK_BYTES,
+        )
+        histogram_active = directional_work = vector_active = 0
+        for (histogram, directional, vector), _ in passes:
+            histogram_active += histogram
+            directional_work += directional
+            vector_active += vector
+        # The threads that ran a target, all alive until the section returns.
+        self.last_worker_count = len({thread for _, thread in passes})
         self.last_vector_active_updates = int(vector_active)
         return int(histogram_active), int(directional_work)
 
 
-def _warmup_batched_moments():
-    """Warm the two native signatures and the actual typed-list construction."""
-    _initialize_batched_moments()
-    batch = _BatchedMomentReducers(
-        [(0, 1, 0, np.zeros((2, 3)))],
-        [(0, 0, 1, np.zeros((2, 2)))],
-        [np.ones((4, 2))],
-        np.zeros((2, 4), dtype=np.intp),
-        support_sizes=(2, 3),
-        n_channels=3,
-        vectors=[(0, 0, 0, np.zeros(2), np.zeros(2))],
-        n_score_channels=2,
-    )
+def _carve(buffer, shapes):
+    """Consecutive C-contiguous views of ``buffer`` with the given shapes, in order."""
+    views, offset = [], 0
+    for shape in shapes:
+        size = int(np.prod(shape, dtype=np.int64))
+        views.append(buffer[offset : offset + size].reshape(shape))
+        offset += size
+    return views
 
-    batch.accumulate(np.ones((4, 3)), 4, score=np.ones((4, 2)))
-    batch.accumulate(np.ones((4, 6))[:, ::2], 4, score=np.ones((4, 2), order="F"))
+
+def _warmup_batched_moments():
+    """Compile the native signature; nothing else compiles at a first fit."""
+    _initialize_batched_moments()

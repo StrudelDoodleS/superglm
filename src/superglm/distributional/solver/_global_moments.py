@@ -13,19 +13,21 @@ from itertools import combinations
 from typing import cast
 
 import numpy as np
-from numba import njit
+from numba import njit, types
 
 from superglm._group_matrix._group_matrix_range import _category_rows
+from superglm._numba_compile import compile_closed
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._batched_moments import (
     _batch_workspace_bytes,
     _BatchedMomentReducers,
+    _carve,
     _warmup_batched_moments,
 )
 from superglm.distributional.solver._ordinary_packing import (
+    _ORDINARY_WRITERS,
     _copy_dense_checked,
-    _warmup_ordinary_packing,
 )
 from superglm.distributional.solver._ordinary_packing import (
     _write_categorical_block as _pack_categorical,
@@ -72,15 +74,6 @@ class GlobalMomentBuild:
 
 
 @njit(cache=True)
-def _finite_bounded_1d(values):
-    for i in range(values.shape[0]):
-        value = values[i]
-        if value != 0.0 and not _MIN_ABS <= abs(value) <= _MAX_ABS:
-            return False
-    return True
-
-
-@njit(cache=True)
 def _finite_bounded_2d(values):
     for i in range(values.shape[0]):
         for j in range(values.shape[1]):
@@ -90,69 +83,15 @@ def _finite_bounded_2d(values):
     return True
 
 
-@njit(cache=True)
-def _accumulate_vector(out, bins, weights):
-    active = 0
-    for i in range(bins.shape[0]):
-        index = bins[i]
-        if index >= 0:
-            out[index] += weights[i]
-            active += 1
-    return active
-
-
-@njit(cache=True)
-def _accumulate_histogram(out, left_bins, right_bins, weights):
-    active = 0
-    for i in range(left_bins.shape[0]):
-        left = left_bins[i]
-        right = right_bins[i]
-        if left >= 0 and right >= 0:
-            out[left, right] += weights[i]
-            active += 1
-    return active
-
-
-@njit(cache=True)
-def _accumulate_directional(out, bins, ordinary, weights):
-    active = 0
-    for i in range(bins.shape[0]):
-        index = bins[i]
-        if index >= 0:
-            weight = weights[i]
-            for j in range(ordinary.shape[1]):
-                out[index, j] += weight * ordinary[i, j]
-            active += 1
-    return active
+# One signature serves the solver-support table and every likelihood channel
+# layout a caller passes.
+_CHANNEL_CHECK = (_finite_bounded_2d, (types.Array(types.float64, 2, "A", readonly=True),))
 
 
 def _warmup_global_moments():
-    """Compile bounded writer/reducer signatures without constructing a plan."""
+    """Compile the plan's writers, channel check and batched reducers."""
     _warmup_batched_moments()
-    _warmup_ordinary_packing()
-    for layout in ("C", "F", "A"):
-        for readonly in (False, True):
-            values = (
-                np.ones((3, 4), dtype=np.float64)[:, ::2]
-                if layout == "A"
-                else np.ones((3, 2), dtype=np.float64, order=layout)
-            )
-            values.flags.writeable = not readonly
-            _finite_bounded_2d(values)
-    bins = np.array([0, -1, 1], dtype=np.intp)
-    panel = np.ones((3, 2), dtype=np.float64)
-    for strided in (False, True):
-        step = 2 if strided else 1
-        for readonly in (False, True):
-            weights = np.ones(3 * step, dtype=np.float64)[::step]
-            codes = np.zeros(3 * step, dtype=np.intp)[::step]
-            weights.flags.writeable = not readonly
-            codes.flags.writeable = not readonly
-            _finite_bounded_1d(weights)
-            _pack_categorical(panel, codes, 0, 2)
-            _accumulate_vector(np.zeros(2), bins, weights)
-            _accumulate_histogram(np.zeros((2, 2)), bins, bins, weights)
-            _accumulate_directional(np.zeros((2, 2)), bins, panel, weights)
+    compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
 
 
 @dataclass
@@ -550,6 +489,7 @@ class GlobalMomentPlan:
         ordinary_specs,
         accounting,
     ):
+        compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
         self._n, self._width, self._chunk_size = n, width, chunk_size
         self._predictors = tuple(
             _Predictor(m[0], m[1], np.array(m[2], dtype=np.intp), m[3], m[4])
@@ -579,22 +519,24 @@ class GlobalMomentPlan:
             support.solver_support.setflags(write=False)
         for predictor in self._predictors:
             predictor.ordinary_columns.setflags(write=False)
-        self._histograms = [
-            (g, h, channel, np.empty((self._supports[g].n_bins, self._supports[h].n_bins)))
-            for g, h, channel in hist_specs
-        ]
-        self._masses = [
-            (g, channel, np.empty(self._supports[g].n_bins)) for g, channel in mass_specs
-        ]
-        self._directions = [
-            (
-                g,
-                a,
-                channel,
-                np.empty((self._supports[g].n_bins, len(self._predictors[a].ordinary_columns))),
-            )
-            for g, a, channel in directional_specs
-        ]
+        # The native reducer's targets and the ordinary panels it reads are
+        # views of two owned flat buffers, which it addresses by offset.
+        n_bins = [support.n_bins for support in self._supports]
+        widths = [len(predictor.ordinary_columns) for predictor in self._predictors]
+        target_shapes = (
+            [(n_bins[g], n_bins[h]) for g, h, _ in hist_specs]
+            + [(n_bins[g],) for g, _ in mass_specs]
+            + [(n_bins[g], widths[a]) for g, a, _ in directional_specs]
+            + [(size,) for size in n_bins]
+        )
+        self._output_buffer = np.empty(sum(int(np.prod(shape)) for shape in target_shapes))
+        targets = iter(_carve(self._output_buffer, target_shapes))
+        self._histograms = [(g, h, channel, next(targets)) for g, h, channel in hist_specs]
+        self._masses = [(g, channel, next(targets)) for g, channel in mass_specs]
+        self._directions = [(g, a, channel, next(targets)) for g, a, channel in directional_specs]
+        self._support_scores = list(targets)
+        self._panel_buffer = np.empty(chunk_size * sum(widths))
+        self._ordinary = _carve(self._panel_buffer, [(chunk_size, width) for width in widths])
         self._ordinary_blocks = [
             (
                 a,
@@ -609,9 +551,7 @@ class GlobalMomentPlan:
             )
             for a, b, channel in ordinary_specs
         ]
-        self._support_scores = [np.empty(g.n_bins) for g in self._supports]
         self._ordinary_scores = [np.empty(len(p.ordinary_columns)) for p in self._predictors]
-        self._ordinary = [np.empty((chunk_size, len(p.ordinary_columns))) for p in self._predictors]
         self._weighted = np.empty(
             (chunk_size, max(len(p.ordinary_columns) for p in self._predictors))
         )
@@ -621,6 +561,8 @@ class GlobalMomentPlan:
             self._directions,
             self._ordinary,
             self._bins,
+            output_buffer=self._output_buffer,
+            panel_buffer=self._panel_buffer,
             support_sizes=tuple(support.n_bins for support in self._supports),
             n_channels=len(self._predictors) * (len(self._predictors) + 1) // 2,
             vectors=tuple(
@@ -641,8 +583,9 @@ class GlobalMomentPlan:
         )
         self._stats = dict(accounting)
         owned_arrays = (
-            self._accumulators
-            + self._ordinary
+            [x[-1] for x in self._ordinary_blocks]
+            + self._ordinary_scores
+            + [self._output_buffer, self._panel_buffer]
             + [self._weighted, self._bins, self._coefficients, self._penalty]
             + list(self._batched_moments.owned_arrays)
             + [p.ordinary_columns for p in self._predictors]
@@ -1010,6 +953,7 @@ class GlobalMomentPlan:
         self._accumulators = []
         self._histograms = self._masses = self._directions = self._ordinary_blocks = []
         self._support_scores = self._ordinary_scores = self._ordinary = []
+        self._output_buffer = self._panel_buffer = None
         self._supports = self._predictors = ()
         self._weighted = self._bins = self._coefficients = self._penalty = None
         self._state = "closed"

@@ -302,7 +302,9 @@ def test_tweedie_lss_kernels_compile_one_specialisation_each(tmp_path):
 
     Master compiled ``_row_failure`` and ``_series_failure`` once per status
     literal (16 specialisations), ``_log_adjacent_ratio`` three times and the
-    parallel core's row kernel again for prange's unsigned index.
+    parallel core's row kernel again for prange's unsigned index; the row
+    kernel now runs serially on the worker pool, one signature above and below
+    the pooled threshold.
     """
     script = """
     import json
@@ -315,8 +317,8 @@ def test_tweedie_lss_kernels_compile_one_specialisation_each(tmp_path):
     y = rng.gamma(1.5, 1.0, n) * (rng.uniform(size=n) < 0.6)
     ones = np.ones(n)
     evaluate_tweedie_rows(y, ones * 1.2, ones * 0.9, ones * 1.5, ones, "prior", derivative_order=2)
-    # Below the parallel threshold: the serial core passes the row kernel an
-    # int64 row, so an unsigned prange index would show as a second signature.
+    # Below the pooled threshold the rows run as one block: the same kernel,
+    # so a second signature would show here.
     head = slice(0, 100)
     evaluate_tweedie_rows(
         y[head], ones[head] * 1.2, ones[head] * 0.9, ones[head] * 1.5, ones[head], "prior",
@@ -329,5 +331,5 @@ def test_tweedie_lss_kernels_compile_one_specialisation_each(tmp_path):
     }))
     """
     signatures = _cold_run(script, tmp_path)
-    assert signatures["_evaluate_tweedie_batch_parallel_core"] == 1
+    assert signatures["_evaluate_tweedie_batch_rows"] == 1
     assert not {name: n for name, n in signatures.items() if n != 1}

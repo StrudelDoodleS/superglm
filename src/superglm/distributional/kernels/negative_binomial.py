@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._negative_binomial_numba as _compiled
+from superglm._parallel import pooled_row_blocks
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,
@@ -542,13 +543,7 @@ def _theta_series(
     candidates = np.flatnonzero(candidate_scale / theta <= _SERIES_RATIO).astype(np.int64)
     if not candidates.size:
         return use, natural, direct
-    core = (
-        _compiled.theta_series_parallel
-        if candidates.size >= _PARALLEL_MIN_ROWS
-        else _compiled.theta_series_serial
-    )
-    core(
-        candidates,
+    operands = (
         np.ascontiguousarray(counts, dtype=np.int64),
         np.ascontiguousarray(mean, dtype=_FLOAT),
         np.ascontiguousarray(theta, dtype=_FLOAT),
@@ -562,6 +557,16 @@ def _theta_series(
         use,
         natural,
         direct,
+    )
+    if candidates.size < _PARALLEL_MIN_ROWS:
+        _compiled.theta_series_serial(candidates, *operands)
+        return use, natural, direct
+    # Each candidate row writes only its own entries: blocks of candidates run
+    # on the worker pool and give the serial core's bits at any worker count.
+    pooled_row_blocks(
+        lambda start, stop: _compiled.theta_series_serial(candidates[start:stop], *operands),
+        candidates.size,
+        _compiled._PARALLEL_BLOCK,
     )
     return use, natural, direct
 
@@ -1233,18 +1238,18 @@ __all__ = [
 def _warmup_negative_binomial() -> None:
     """Compile the NB2 kernels a SuperLSS fit calls on its way (no rows).
 
-    The theta-series cores, serial and parallel, and the expected size
-    information, which the terminal curvature policy falls back to and
-    ``coefficient_curvature="fisher"`` steps with. The LAML endgame's third-
-    and fourth-derivative kernels compile on first use, as the Tweedie
-    family's do.
+    The theta-series core and the expected size information, which the
+    terminal curvature policy falls back to and ``coefficient_curvature=
+    "fisher"`` steps with. The LAML endgame's third- and fourth-derivative
+    kernels compile on first use, as the Tweedie family's do.
     """
     rows = np.zeros(0, dtype=np.int64)
     values = np.zeros(0, dtype=_FLOAT)
-    for core in (_compiled.theta_series_serial, _compiled.theta_series_parallel):
-        core(
-            rows, rows, values, values, values, values, values, 2, _SERIES_ORDER,
-            _SERIES_EXPONENTS, _SERIES_BERNOULLI, np.zeros((0, 2), dtype=np.bool_),
-            np.zeros((0, 2), dtype=_FLOAT), np.zeros((0, 2), dtype=_FLOAT),
-        )  # fmt: skip
-    _compiled.expected_size_information(values, values, _MAX_INFORMATION_TERMS_PER_ROW)
+    _compiled.theta_series_serial(
+        rows, rows, values, values, values, values, values, 2, _SERIES_ORDER,
+        _SERIES_EXPONENTS, _SERIES_BERNOULLI, np.zeros((0, 2), dtype=np.bool_),
+        np.zeros((0, 2), dtype=_FLOAT), np.zeros((0, 2), dtype=_FLOAT),
+    )  # fmt: skip
+    _compiled._size_information_rows(
+        values, values, _MAX_INFORMATION_TERMS_PER_ROW, 0, 0, values, rows
+    )

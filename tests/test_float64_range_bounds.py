@@ -3,27 +3,25 @@
 import numpy as np
 import pytest
 
+from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix import _group_matrix_kernels as kernels
+
+# What fits call: the float64 scan for float64 operands, the generic kernel otherwise.
+bounds = algebra._operand_exponent_bounds
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.int16, np.int64, np.uint64])
 def test_bounds_dispatch_specializes_only_native_float64(monkeypatch, dtype):
     values = np.array([[0, 1, 2], [4, 7, 8]], dtype=dtype)
     calls = []
-    implementation = getattr(
-        kernels, "_float64_operand_exponent_bounds", kernels._operand_exponent_bounds
-    )
+    implementation = algebra._float64_operand_exponent_bounds
 
     def recorded(operand):
         calls.append(operand)
         return implementation(operand)
 
-    monkeypatch.setattr(kernels, "_float64_operand_exponent_bounds", recorded, raising=False)
-    # Inspect dispatch separately from the real compiled numerical tests below.
-    dispatch = getattr(
-        kernels._operand_exponent_bounds, "py_func", kernels._operand_exponent_bounds
-    )
-    assert dispatch(values) == (0, 4)
+    monkeypatch.setattr(algebra, "_float64_operand_exponent_bounds", recorded)
+    assert bounds(values) == (0, 4)
     assert len(calls) == int(dtype == np.float64)
     if calls:
         assert calls[0] is values
@@ -49,7 +47,7 @@ def test_bounds_dispatch_specializes_only_native_float64(monkeypatch, dtype):
 )
 def test_compiled_bounds_keep_exact_boundary_decisions(values, expected):
     with np.errstate(all="raise"):
-        assert kernels._operand_exponent_bounds(np.array([values], dtype=np.float64)) == expected
+        assert bounds(np.array([values], dtype=np.float64)) == expected
 
 
 @pytest.mark.parametrize("layout", ["C", "F", "transpose", "strided", "reversed"])
@@ -69,7 +67,7 @@ def test_compiled_bounds_preserve_layout_and_readonly_inputs(layout, readonly):
     if readonly:
         values.setflags(write=False)
     before = values.copy()
-    assert kernels._operand_exponent_bounds(values) == (-2, 4)
+    assert bounds(values) == (-2, 4)
     np.testing.assert_array_equal(values, before)
 
 
@@ -84,11 +82,14 @@ def test_compiled_bounds_keep_power_neighbors_across_binary64_exponent_range():
             (below, (0, 0) if exponent == -1074 else (exponent - 1, exponent)),
             (above, (exponent, exponent + 1) if exponent != -1074 else (-1073, -1072)),
         ):
-            assert kernels._operand_exponent_bounds(np.array([[value]])) == expected
+            assert bounds(np.array([[value]])) == expected
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.int16, np.int32, np.int64, np.uint64])
 def test_compiled_bounds_preserve_generic_arithmetic(dtype):
+    # Close the float64 scan first, as a fit's first scan does: a generic
+    # kernel that called it would then fail to type for this dtype.
+    kernels._scan_form(np.zeros((1, 1)))
     values = np.array([[0, 1, 2], [4, 7, 8]], dtype=dtype)
     assert kernels._operand_exponent_bounds(values) == (0, 4)
 
@@ -175,3 +176,46 @@ def test_cached_cross_bounds_keep_combined_partial_product_refusal(weight_expone
             )
             is admitted
         )
+
+
+_ONE_SCAN_SIGNATURE = r"""
+import numpy as np
+from superglm._group_matrix import _group_matrix_kernels as kernels
+
+scans = (kernels._tensor_operand_in_reassociation_range, kernels._float64_operand_exponent_bounds)
+assert not any(scan.signatures for scan in scans)
+for values in (np.ones((3, 4)), np.asfortranarray(np.ones((3, 4))), np.ones((6, 4))[::2, ::2]):
+    frozen = values.view()
+    frozen.flags.writeable = False
+    for operand in (values, frozen):
+        assert kernels._tensor_operand_in_reassociation_range(kernels._scan_form(operand))
+        assert kernels._float64_operand_exponent_bounds(kernels._scan_form(operand)) == (0, 1)
+        assert np.shares_memory(kernels._scan_form(operand), values)
+# Any other real dtype is promoted at the boundary, so it reaches the same signature.
+for dtype in (np.float32, np.float16, np.int64, np.uint8, np.bool_):
+    operand = np.ones((3, 4), dtype=dtype)
+    assert kernels._tensor_operand_in_reassociation_range(kernels._scan_form(operand))
+    assert kernels._float64_operand_exponent_bounds(kernels._scan_form(operand)) == (0, 1)
+assert [len(scan.signatures) for scan in scans] == [1, 1], [scan.signatures for scan in scans]
+"""
+
+
+def test_range_scans_serve_every_operand_form_with_one_signature(tmp_path):
+    """C, Fortran and strided float64 operands, writable or not, reach one closed signature
+    uncopied, and other real dtypes reach it promoted.
+
+    In a fresh process, so no warmup() has closed the scans first: the call
+    sites' ``_scan_form`` closes them.  Fails when it does not (six signatures).
+    """
+    import os
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _ONE_SCAN_SIGNATURE],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path)),
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr

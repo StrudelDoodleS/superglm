@@ -13,10 +13,14 @@ from typing import cast
 
 import numpy as np
 import scipy.sparse as sp
-from numba import njit
+from numba import njit, types
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_kernels import _tensor_operand_in_reassociation_range
+from superglm._group_matrix._group_matrix_kernels import (
+    _scan_form,
+    _tensor_operand_in_reassociation_range,
+)
+from superglm._numba_compile import compile_closed
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -157,25 +161,30 @@ def _support_indices(bins, size):
     return normalized
 
 
+# One signature per writer serves every source and destination form: a
+# destination is a column span of a panel (``A``, or ``C`` for a one-row chunk)
+# and a source may be a stored design block in any layout or writeability.
+_SOURCE = types.Array(types.float64, 2, "A", readonly=True)
+_DESTINATION = types.Array(types.float64, 2, "A")
+_ROWS = types.Array(types.intp, 1, "A", readonly=True)
+_WRITERS = (
+    (_checked_copy, (_SOURCE, _DESTINATION)),
+    (_checked_gather, (_SOURCE, _ROWS, _DESTINATION)),
+    (_checked_scatter, (_SOURCE, _ROWS, _DESTINATION)),
+)
+_FACTOR_WRITER = (
+    _checked_factor_scatter,
+    (_SOURCE, _ROWS, _DESTINATION, types.intp, types.intp, types.boolean),
+)
+
+
 def _warmup_small_group_panels():
-    """Compile writer signatures without building plans or retaining panels."""
-    rows = np.array([2, 0, 1], dtype=np.intp)
-    codes = np.array([0, 1, 2], dtype=np.intp)
-    for layout in ("C", "F", "A"):
-        for readonly in (False, True):
-            if layout == "A":
-                values = np.ones((3, 4), dtype=np.float64)[:, ::2]
-            else:
-                values = np.ones((3, 2), dtype=np.float64, order=layout)
-            values.flags.writeable = not readonly
-            for strided in (False, True):
-                step = 2 if strided else 1
-                out = np.empty((3, 2 * step), dtype=np.float64)[:, ::step]
-                factors = np.empty((3, 4 * step), dtype=np.float64)[:, ::step]
-                _checked_copy(values, out)
-                _checked_gather(values, rows, out)
-                _checked_scatter(values, rows, out)
-                _checked_factor_scatter(values, codes, factors, 2, 2, True)
+    """Compile the writers an automatically admitted layout renders with.
+
+    The FactorSmooth writer compiles on first use: automatic admission never
+    renders a FactorSmooth group, so only an explicit panel budget reaches it.
+    """
+    compile_closed(*_WRITERS)
 
 
 def _in_range(values):
@@ -189,9 +198,9 @@ def _in_range(values):
     if type(values) is not np.ndarray or values.dtype != np.float64:
         return False
     if values.ndim == 1:
-        return _tensor_operand_in_reassociation_range(values[:, None])
+        return _tensor_operand_in_reassociation_range(_scan_form(values[:, None]))
     if values.ndim == 2:
-        return _tensor_operand_in_reassociation_range(values)
+        return _tensor_operand_in_reassociation_range(_scan_form(values))
     # Preserve the generic-rank predicate with bounded buffers. All current
     # panel, raw-basis, map and weight callers use the allocation-free paths.
     iterator = np.nditer(
@@ -390,6 +399,7 @@ def _render_group(group, rows, out, *, table_byte_allowance=0):
             raise _PanelRefusalError("unsupported-group")
         codes = codes.astype(np.intp, copy=False)
         _require_writer_source(natural)
+        compile_closed(_FACTOR_WRITER)
         _require_written(
             _checked_factor_scatter(
                 natural,
@@ -546,6 +556,7 @@ def build_small_group_panels(plans, rows, *, byte_budget, group_indices=None):
         if isinstance(rows, slice)
         else np.array(rows, dtype=np.intp, copy=True)
     )
+    compile_closed(*_WRITERS)
     panels, columns = [], []
     try:
         for plan, indices, selection, width in zip(

@@ -416,9 +416,11 @@ def native_operand(values) -> np.ndarray:
 
 
 def _warmup_exact_sums() -> None:
-    """Compile the kernels for the operands their callers pass."""
+    """Compile the kernels for the operands their callers pass.
+
+    ``scaled_exact_sum`` compiles on first use: only a sum whose products or
+    partials overflow float64 falls back to it.
+    """
     vector = native_operand(np.ones(2))
-    for mode in (0, 1, 2):
-        unscaled_exact_sum(vector, vector, 0.5, mode)
-        scaled_exact_sum(vector, vector, 0.5, mode)
+    unscaled_exact_sum(vector, vector, 0.5, 0)
     weighted_residual_sum(vector, vector, vector, True, 0.5, vector)

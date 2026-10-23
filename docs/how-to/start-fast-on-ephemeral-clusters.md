@@ -5,17 +5,17 @@ uses them, and Numba keeps the compiled code in an on-disk cache. On a laptop
 that compile happens once. On a cluster that starts from a clean disk every
 time, such as a Databricks job cluster, every new cluster compiles again.
 
-Measured on one machine (AMD EPYC 9645, Python 3.13, Numba 0.67), with a
+Measured on one machine (AMD EPYC 9645, Python 3.13, Numba 0.68), with a
 first Tweedie `fit_reml` and `summary` on 20,000 rows:
 
 | | Empty cache | Cache from an earlier cluster |
 |---|---|---|
-| First Tweedie fit and summary | 4.7 s | 0.6 s |
-| `superglm.warmup()` | 50 s | 1.5 s |
+| First Tweedie fit and summary | 4.7 s | 0.8 s |
+| `superglm.warmup()` | 52 s | 0.6 s |
 
-A larger model compiles a few more kernels: a first fit on the freMTPL2 book
-with four interactions spent 4.6 to 7.7 seconds compiling, depending on family
-and route.
+A larger model compiles a few more kernels: a first fit of each family on
+20,000 rows of the freMTPL2 book with four interactions spent 5.0 to
+8.2 seconds compiling, depending on family and route.
 
 ## Keep Numba's cache on persistent storage
 
@@ -40,11 +40,12 @@ cluster to the next:
 - The CPU. Entries are compiled for the machine's CPU model and features. A
   cluster on another node type compiles its own entries into the same
   directory; both sets are kept.
-- The source files. Numba 0.68 and later key the cache on each file's
-  contents, so a fresh install of the same superglm version reuses it. Numba
-  0.67 and earlier key it on each file's modification time, and `pip` stamps
-  every file with the time of the install, so each new cluster compiles again.
-  With those versions, give the installed files a fixed time after installing:
+- The source files. Numba 0.68 and later key the cache on a hash of each
+  file's contents, so a fresh install of the same superglm version at the
+  same path reuses it. Numba 0.67 and earlier key it on each file's
+  modification time, and `pip` stamps every file with the time of the
+  install, so each new cluster compiles again. With those versions, give the
+  installed files a fixed time after installing:
 
   ```bash
   SUPERGLM_DIR=$(python -c "import os, superglm; print(os.path.dirname(superglm.__file__))")
@@ -55,13 +56,18 @@ cluster to the next:
   notice when a function in one file calls a changed function in another, and
   a fixed time hides an upgrade from it.
 
-Measured with a fresh `pip install` of the same wheel into the same path,
-against a cache an earlier install wrote:
+Measured with a first Tweedie fit against a cache that an earlier install of
+the same wheel wrote, after each of these changes:
 
-| Numba | Reinstalled, as installed | Reinstalled, times fixed |
+| Between the installs | Numba 0.67 | Numba 0.68 |
 |---|---|---|
-| 0.67 | compiles again (5.2 s, 25 kernels) | loads (1.0 s) |
-| 0.68 | loads (0.8 s) | loads |
+| superglm reinstalled in place with `pip` (new file times) | compiles again (4.4 s) | loads (0.5 s) |
+| every installed file touched | compiles again (5.3 s) | loads (0.5 s) |
+| environment deleted and created again at the same path | compiles again (6.5 s) | loads (1.1 s) |
+| installed at another path | compiles again (5.8 s) | compiles again (5.4 s) |
+
+With Numba 0.67, fixing the file times as above makes a reinstall load the
+cache (1.0 s).
 
 Several workers can share one directory: Numba writes each entry to a
 temporary file and renames it into place.
@@ -97,16 +103,20 @@ find "$SUPERGLM_DIR" -name '*.py' -exec touch -d '2000-01-01 00:00:00' {} +
 Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so
 notebooks and jobs read the cache the script filled.
 
-`warmup()` compiles the kernels of every family and route: about 50
-seconds on an empty cache, once per superglm version and node type, and
-about 1.5 seconds against a filled cache. Numba keys its cache to the
-CPU model, so a cache built on one node type compiles again on another; the
-entries for both are kept side by side. After `warmup()`, a first
-fit compiled nothing on any of the freMTPL2 benchmark books (every GLM
-family, exact and binned, and the SuperLSS families). Some kernels are left
-to the first fit that uses them, by design, so a process that never fits
-those models does not pay for them. They include the higher-derivative
-kernels of a SuperLSS fit's final iterations (Tweedie, negative binomial and
-gamma), and the structured engine's kernels, which serve `RandomEffect` and
-`FactorSmooth` terms. Each compiles once on the first fit that needs it and
-then joins the persistent cache like the rest.
+`warmup()` compiles the kernels of every family and route: about
+52 seconds on an empty cache, once per superglm version and node type, and
+about 0.6 seconds against a filled cache. Numba keys its cache
+to the CPU model, so a cache built on one node type compiles again on
+another; the entries for both are kept side by side. After `warmup()`, the
+first fits we measured compiled nothing: every family and link, `SuperGLM`
+and `SuperLSS`, exact and binned, and with `RandomEffect` and `FactorSmooth`
+terms (`basis="fs"` and `"sz"`). A few fallbacks that rarely run, such as
+the sum taken when a product leaves float64's range, also compile on first
+use. Two groups of kernels are left to the first
+call that uses them, because few fits do and they take seconds to compile:
+the third and fourth derivatives a `SuperLSS` fit needs only when a
+smoothing parameter reaches its endpoint (7 seconds across the Tweedie,
+negative binomial and gamma families), and a fit's diagnostics (the
+smoother of a diagnostic plot, the hat diagonal of a `FactorSmooth` fit on
+the structured engine). Each compiles once on first use and then joins the
+persistent cache like the rest.

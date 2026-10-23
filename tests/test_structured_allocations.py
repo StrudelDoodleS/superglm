@@ -490,8 +490,7 @@ def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
 def test_the_first_build_after_warmup_does_not_collect(_wide_border_fs_fit) -> None:
     """``superglm.warmup()`` compiles outside any fit, so the next build does not collect (#432).
 
-    Warmup compiles an uncached inline helper (``_add_raw_row``) in every
-    process, which marked a compile, and a warm-cache process then paid one
+    A warmup that compiles marks a compile, and the process then paid one
     full collection on its first fit: 0.15 s on a 30,000-row ``sz`` sentinel.
     The frames warmup's compiles keep hold no fit's arrays, so it drops its
     mark (``forget_compiles``).  Fails without it: one collection.

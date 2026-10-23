@@ -8,9 +8,12 @@ every power the reference takes with ``**`` is a libm ``pow`` call here too.
 The exponents arrive as data (``exponents[k] == float(k)``) rather than as
 literals: LLVM rewrites ``pow(x, 2.0)`` with a literal exponent as ``x * x``,
 which need not equal libm's ``pow`` in the last bit, and a constant trip count
-would let it unroll the series loop into literal exponents. Rows are
-independent, so the parallel core gives the serial core's bits at any thread
-count.
+would let it unroll the series loop into literal exponents.
+
+Rows are independent.  Every kernel here is serial and releases the GIL, and
+the worker pool (``superglm._parallel.pooled_row_blocks``) runs it over fixed
+blocks of ``_PARALLEL_BLOCK`` rows, each with its own scratch: so every worker
+count gives the same bits, and no kernel compiles numba's parallel machinery.
 """
 
 from __future__ import annotations
@@ -18,12 +21,19 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from numba import njit, prange  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+
+from superglm._parallel import pooled_row_blocks
 
 _EPS = 2.220446049250313e-16
 _TINY = 5e-324
-_PARALLEL_BLOCK = 4096
+# A block of 1,024 rows is about 0.2 ms of theta-series work and a section
+# costs about 0.15 ms to wake its workers: at eight workers a call over 12,000
+# rows takes 0.7 ms in blocks of 1,024 and 1.3 ms in blocks of 4,096 (which
+# keep three workers busy), and the same at one worker.  Rows are independent,
+# so the blocks change no bit.
+_PARALLEL_BLOCK = 1024
 
 
 @njit(cache=True)
@@ -68,132 +78,7 @@ def _scaled_power_sums(
         errors[power] = _gamma_bound(float(4 * power + 8)) * absolute / denominator + _TINY
 
 
-@njit(cache=True)
-def _theta_series_row(
-    row: int,
-    counts: NDArray[np.int64],
-    mean: NDArray[np.float64],
-    theta: NDArray[np.float64],
-    candidate_scale: NDArray[np.float64],
-    remainder_error: NDArray[np.float64],
-    remainder_scale: NDArray[np.float64],
-    derivative_order: int,
-    series_order: int,
-    exponents: NDArray[np.float64],
-    bernoulli: NDArray[np.float64],
-    use: NDArray[np.bool_],
-    natural: NDArray[np.float64],
-    direct: NDArray[np.float64],
-    sums: NDArray[np.float64],
-    sum_errors: NDArray[np.float64],
-    coefficients: NDArray[np.float64],
-) -> None:
-    count = counts[row]
-    row_mean = mean[row]
-    row_theta = theta[row]
-    scale = candidate_scale[row]
-    x = scale / row_theta
-    polynomial = 0.0
-    absolute = 0.0
-    coefficient_error_absolute = 0.0
-    weighted = 0.0
-    transformed = 0.0
-    weighted_absolute = 0.0
-    weighted_error = 0.0
-    _scaled_power_sums(count, bernoulli, sums, sum_errors, coefficients)
-    count_scale = float(count) / scale if count > 1 else 0.0
-    for order in range(series_order, 1, -1):
-        if count > 1:
-            offset_factor = math.pow(count_scale, exponents[order])
-            offset = sums[order - 1] * offset_factor
-            offset_error = (
-                abs(offset_factor) * sum_errors[order - 1]
-                + _gamma_bound(float(order + 2)) * abs(offset)
-                + _TINY
-            )
-        else:
-            offset = 0.0
-            offset_error = 0.0
-        mean_term = math.pow(row_mean / scale, exponents[order - 1]) * (
-            ((order - 1.0) / order * row_mean - count) / scale
-        )
-        sign = -1.0 if order % 2 == 0 else 1.0
-        coefficient = sign * (offset + mean_term)
-        coefficient_abs = abs(offset) + abs(mean_term)
-        polynomial = coefficient + x * polynomial
-        absolute = coefficient_abs + x * absolute
-        coefficient_error_absolute = offset_error + x * coefficient_error_absolute
-        if derivative_order == 2:
-            weighted = order * coefficient + x * weighted
-            transformed = (1.0 - order) * coefficient + x * transformed
-            weighted_absolute = order * coefficient_abs + x * weighted_absolute
-            weighted_error = order * offset_error + x * weighted_error
-
-    natural[row, 0] = x * x * polynomial
-    direct[row, 0] = scale * x * polynomial
-    order_value = exponents[series_order]
-    next_order_value = exponents[series_order + 1]
-    mean_ratio = row_mean / row_theta
-    shifted = count - 1 if count > 1 else 0
-    offset_ratio = shifted / row_theta
-    delta = abs(row_mean - count)
-    score_tail = (
-        count / row_theta * math.pow(offset_ratio, order_value) / (1.0 - offset_ratio)
-        + math.pow(mean_ratio, next_order_value) / next_order_value
-        + delta / row_theta * math.pow(mean_ratio, order_value) / (1.0 - mean_ratio)
-    )
-    series_score_error = (
-        x
-        * x
-        * (_gamma_bound(80.0) * absolute + (1.0 + _gamma_bound(32.0)) * coefficient_error_absolute)
-        + score_tail
-        + _TINY
-    )
-    total = row_mean + row_theta
-    recurrence_score_scale = (
-        count / total * ((row_mean + shifted) / row_theta) + remainder_scale[row]
-    )
-    recurrence_score_error = (
-        _gamma_bound(float(count + 64)) * recurrence_score_scale + remainder_error[row]
-    )
-    use[row, 0] = series_score_error < recurrence_score_error
-    if derivative_order == 1:
-        return
-
-    two = exponents[2]
-    natural[row, 1] = -(x * x / row_theta) * weighted
-    direct[row, 1] = scale * x * transformed
-    hessian_tail = (
-        count
-        / math.pow(row_theta, two)
-        * math.pow(offset_ratio, order_value)
-        * (next_order_value - series_order * offset_ratio)
-        / math.pow(1.0 - offset_ratio, two)
-        + math.pow(mean_ratio, next_order_value) / row_theta / (1.0 - mean_ratio)
-        + delta
-        / math.pow(row_theta, two)
-        * math.pow(mean_ratio, order_value)
-        * (next_order_value - series_order * mean_ratio)
-        / math.pow(1.0 - mean_ratio, two)
-    )
-    series_hessian_error = (
-        x
-        * x
-        / row_theta
-        * (_gamma_bound(96.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
-        + hessian_tail
-        + _TINY
-    )
-    recurrence_hessian_scale = (
-        recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
-        + (row_mean / total) * mean_ratio / total
-    )
-    use[row, 1] = series_hessian_error < (
-        _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _TINY
-    )
-
-
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def theta_series_serial(
     rows: NDArray[np.int64],
     counts: NDArray[np.int64],
@@ -210,76 +95,127 @@ def theta_series_serial(
     natural: NDArray[np.float64],
     direct: NDArray[np.float64],
 ) -> None:
-    """Fill ``use``, ``natural`` and ``direct`` on the candidate ``rows``, one row at a time."""
+    """Fill ``use``, ``natural`` and ``direct`` on the candidate ``rows``, one row at a time.
+
+    One function, with the row body in the loop.  A call per row that passes
+    the fourteen arrays counts each array's reference up and down again (an
+    atomic operation on its shared meminfo, twice per array per row, about
+    120 ns a row where the whole row now takes 200); numba's parallel loops, which
+    this core replaces, hand their body raw pointers and pay none of it.  The
+    scratch is touched only for counts above one, the only counts that read it.
+    """
     sums = np.empty(series_order)
     sum_errors = np.empty(series_order)
     coefficients = np.empty(series_order)
     for index in range(rows.shape[0]):
-        _theta_series_row(
-            rows[index],
-            counts,
-            mean,
-            theta,
-            candidate_scale,
-            remainder_error,
-            remainder_scale,
-            derivative_order,
-            series_order,
-            exponents,
-            bernoulli,
-            use,
-            natural,
-            direct,
-            sums,
-            sum_errors,
-            coefficients,
-        )
-
-
-@njit(cache=True, parallel=True)
-def theta_series_parallel(
-    rows: NDArray[np.int64],
-    counts: NDArray[np.int64],
-    mean: NDArray[np.float64],
-    theta: NDArray[np.float64],
-    candidate_scale: NDArray[np.float64],
-    remainder_error: NDArray[np.float64],
-    remainder_scale: NDArray[np.float64],
-    derivative_order: int,
-    series_order: int,
-    exponents: NDArray[np.float64],
-    bernoulli: NDArray[np.float64],
-    use: NDArray[np.bool_],
-    natural: NDArray[np.float64],
-    direct: NDArray[np.float64],
-) -> None:
-    """The serial core's rows in blocks across threads; each row's arithmetic is unchanged."""
-    n_blocks = (rows.shape[0] + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, rows.shape[0])
-        for index in range(chunk * _PARALLEL_BLOCK, stop):
-            _theta_series_row(
-                rows[index],
-                counts,
-                mean,
-                theta,
-                candidate_scale,
-                remainder_error,
-                remainder_scale,
-                derivative_order,
-                series_order,
-                exponents,
-                bernoulli,
-                use,
-                natural,
-                direct,
-                sums,
-                sum_errors,
-                coefficients,
+        row = rows[index]
+        count = counts[row]
+        row_mean = mean[row]
+        row_theta = theta[row]
+        scale = candidate_scale[row]
+        x = scale / row_theta
+        polynomial = 0.0
+        absolute = 0.0
+        coefficient_error_absolute = 0.0
+        weighted = 0.0
+        transformed = 0.0
+        weighted_absolute = 0.0
+        weighted_error = 0.0
+        if count > 1:  # the power sums are read only for counts above one
+            _scaled_power_sums(count, bernoulli, sums, sum_errors, coefficients)
+        count_scale = float(count) / scale if count > 1 else 0.0
+        for order in range(series_order, 1, -1):
+            if count > 1:
+                offset_factor = math.pow(count_scale, exponents[order])
+                offset = sums[order - 1] * offset_factor
+                offset_error = (
+                    abs(offset_factor) * sum_errors[order - 1]
+                    + _gamma_bound(float(order + 2)) * abs(offset)
+                    + _TINY
+                )
+            else:
+                offset = 0.0
+                offset_error = 0.0
+            mean_term = math.pow(row_mean / scale, exponents[order - 1]) * (
+                ((order - 1.0) / order * row_mean - count) / scale
             )
+            sign = -1.0 if order % 2 == 0 else 1.0
+            coefficient = sign * (offset + mean_term)
+            coefficient_abs = abs(offset) + abs(mean_term)
+            polynomial = coefficient + x * polynomial
+            absolute = coefficient_abs + x * absolute
+            coefficient_error_absolute = offset_error + x * coefficient_error_absolute
+            if derivative_order == 2:
+                weighted = order * coefficient + x * weighted
+                transformed = (1.0 - order) * coefficient + x * transformed
+                weighted_absolute = order * coefficient_abs + x * weighted_absolute
+                weighted_error = order * offset_error + x * weighted_error
+
+        natural[row, 0] = x * x * polynomial
+        direct[row, 0] = scale * x * polynomial
+        order_value = exponents[series_order]
+        next_order_value = exponents[series_order + 1]
+        mean_ratio = row_mean / row_theta
+        shifted = count - 1 if count > 1 else 0
+        offset_ratio = shifted / row_theta
+        delta = abs(row_mean - count)
+        score_tail = (
+            count / row_theta * math.pow(offset_ratio, order_value) / (1.0 - offset_ratio)
+            + math.pow(mean_ratio, next_order_value) / next_order_value
+            + delta / row_theta * math.pow(mean_ratio, order_value) / (1.0 - mean_ratio)
+        )
+        series_score_error = (
+            x
+            * x
+            * (
+                _gamma_bound(80.0) * absolute
+                + (1.0 + _gamma_bound(32.0)) * coefficient_error_absolute
+            )
+            + score_tail
+            + _TINY
+        )
+        total = row_mean + row_theta
+        recurrence_score_scale = (
+            count / total * ((row_mean + shifted) / row_theta) + remainder_scale[row]
+        )
+        recurrence_score_error = (
+            _gamma_bound(float(count + 64)) * recurrence_score_scale + remainder_error[row]
+        )
+        use[row, 0] = series_score_error < recurrence_score_error
+        if derivative_order == 1:
+            continue
+
+        two = exponents[2]
+        natural[row, 1] = -(x * x / row_theta) * weighted
+        direct[row, 1] = scale * x * transformed
+        hessian_tail = (
+            count
+            / math.pow(row_theta, two)
+            * math.pow(offset_ratio, order_value)
+            * (next_order_value - series_order * offset_ratio)
+            / math.pow(1.0 - offset_ratio, two)
+            + math.pow(mean_ratio, next_order_value) / row_theta / (1.0 - mean_ratio)
+            + delta
+            / math.pow(row_theta, two)
+            * math.pow(mean_ratio, order_value)
+            * (next_order_value - series_order * mean_ratio)
+            / math.pow(1.0 - mean_ratio, two)
+        )
+        series_hessian_error = (
+            x
+            * x
+            / row_theta
+            * (_gamma_bound(96.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
+            + hessian_tail
+            + _TINY
+        )
+        recurrence_hessian_scale = (
+            recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
+            + (row_mean / total) * mean_ratio / total
+        )
+        use[row, 1] = series_hessian_error < (
+            _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _TINY
+        )
 
 
 @njit(cache=True)
@@ -415,7 +351,50 @@ def _log_third_row(
     used_series[row] = False
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _log_third_rows(
+    counts: NDArray[np.int64],
+    mean: NDArray[np.float64],
+    theta: NDArray[np.float64],
+    remainder: NDArray[np.float64],
+    remainder_error: NDArray[np.float64],
+    remainder_scale: NDArray[np.float64],
+    series_ratio: float,
+    series_order: int,
+    exponents: NDArray[np.float64],
+    bernoulli: NDArray[np.float64],
+    start: int,
+    stop: int,
+    third: NDArray[np.float64],
+    error: NDArray[np.float64],
+    used_series: NDArray[np.bool_],
+) -> None:
+    """``log_third_derivatives`` on rows ``start..stop``, into the caller's outputs."""
+    sums = np.empty(series_order)
+    sum_errors = np.empty(series_order)
+    coefficients = np.empty(series_order)
+    for row in range(start, stop):
+        _log_third_row(
+            row,
+            counts,
+            mean,
+            theta,
+            remainder,
+            remainder_error,
+            remainder_scale,
+            series_ratio,
+            series_order,
+            exponents,
+            bernoulli,
+            third,
+            error,
+            used_series,
+            sums,
+            sum_errors,
+            coefficients,
+        )
+
+
 def log_third_derivatives(
     counts: NDArray[np.int64],
     mean: NDArray[np.float64],
@@ -432,38 +411,20 @@ def log_third_derivatives(
 
     ``l_bbb`` takes the near-Poisson series or the count recurrence, whichever
     certifies the smaller absolute error; the other three channels are closed
-    forms.  Rows are independent, so every thread count gives the same bits.
+    forms.  Rows are independent, so every worker count gives the same bits.
     """
     n_rows = counts.shape[0]
     third = np.empty((n_rows, 4))
     error = np.empty(n_rows)
     used_series = np.zeros(n_rows, dtype=np.bool_)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            _log_third_row(
-                row,
-                counts,
-                mean,
-                theta,
-                remainder,
-                remainder_error,
-                remainder_scale,
-                series_ratio,
-                series_order,
-                exponents,
-                bernoulli,
-                third,
-                error,
-                used_series,
-                sums,
-                sum_errors,
-                coefficients,
-            )
+    pooled_row_blocks(
+        lambda start, stop: _log_third_rows(
+            counts, mean, theta, remainder, remainder_error, remainder_scale, series_ratio,
+            series_order, exponents, bernoulli, start, stop, third, error, used_series,
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )  # fmt: skip
     return third, error, used_series
 
 
@@ -589,7 +550,48 @@ def _log_fourth_row(
     error[row] = (1.0 + _gamma_bound(64.0)) * recurrence_error
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _log_fourth_rows(
+    counts: NDArray[np.int64],
+    mean: NDArray[np.float64],
+    theta: NDArray[np.float64],
+    remainder: NDArray[np.float64],
+    remainder_error: NDArray[np.float64],
+    remainder_scale: NDArray[np.float64],
+    series_ratio: float,
+    series_order: int,
+    exponents: NDArray[np.float64],
+    bernoulli: NDArray[np.float64],
+    start: int,
+    stop: int,
+    fourth: NDArray[np.float64],
+    error: NDArray[np.float64],
+) -> None:
+    """``log_fourth_derivative`` on rows ``start..stop``, into the caller's outputs."""
+    sums = np.empty(series_order)
+    sum_errors = np.empty(series_order)
+    coefficients = np.empty(series_order)
+    for row in range(start, stop):
+        _log_fourth_row(
+            row,
+            counts,
+            mean,
+            theta,
+            remainder,
+            remainder_error,
+            remainder_scale,
+            series_ratio,
+            series_order,
+            exponents,
+            bernoulli,
+            fourth,
+            error,
+            sums,
+            sum_errors,
+            coefficients,
+        )
+
+
 def log_fourth_derivative(
     counts: NDArray[np.int64],
     mean: NDArray[np.float64],
@@ -607,36 +609,19 @@ def log_fourth_derivative(
     The near-Poisson series of the theta score differentiated three times more
     in ``log theta`` (coefficients ``(1 - n)^3 c_n``) or the count recurrence,
     whichever bounds the smaller error, as ``l_bbb`` chooses.  Rows are
-    independent, so every thread count gives the same bits.
+    independent, so every worker count gives the same bits.
     """
     n_rows = counts.shape[0]
     fourth = np.empty(n_rows)
     error = np.empty(n_rows)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
-        sums = np.empty(series_order)
-        sum_errors = np.empty(series_order)
-        coefficients = np.empty(series_order)
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            _log_fourth_row(
-                row,
-                counts,
-                mean,
-                theta,
-                remainder,
-                remainder_error,
-                remainder_scale,
-                series_ratio,
-                series_order,
-                exponents,
-                bernoulli,
-                fourth,
-                error,
-                sums,
-                sum_errors,
-                coefficients,
-            )
+    pooled_row_blocks(
+        lambda start, stop: _log_fourth_rows(
+            counts, mean, theta, remainder, remainder_error, remainder_scale, series_ratio,
+            series_order, exponents, bernoulli, start, stop, fourth, error,
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )  # fmt: skip
     return fourth, error
 
 
@@ -708,7 +693,21 @@ def _size_information_row(mean: float, size: float, max_terms: int) -> tuple[flo
     return 0.0, -1
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, nogil=True)
+def _size_information_rows(
+    mean: NDArray[np.float64],
+    size: NDArray[np.float64],
+    max_terms: int,
+    start: int,
+    stop: int,
+    information: NDArray[np.float64],
+    terms: NDArray[np.int64],
+) -> None:
+    """``expected_size_information`` on rows ``start..stop``, into the caller's outputs."""
+    for row in range(start, stop):
+        information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
+
+
 def expected_size_information(
     mean: NDArray[np.float64],
     size: NDArray[np.float64],
@@ -717,23 +716,34 @@ def expected_size_information(
     """``theta**2 I_theta_theta`` row by row, with each row's series term count.
 
     Rows are independent and each is one fixed operation sequence, so every
-    thread count gives the same bits.
+    worker count gives the same bits.
     """
     n_rows = mean.shape[0]
     information = np.empty(n_rows)
     terms = np.empty(n_rows, dtype=np.int64)
-    n_blocks = (n_rows + _PARALLEL_BLOCK - 1) // _PARALLEL_BLOCK
-    for chunk in prange(n_blocks):  # ty: ignore[not-iterable] -- Numba loop primitive
-        stop = min((chunk + 1) * _PARALLEL_BLOCK, n_rows)
-        for row in range(chunk * _PARALLEL_BLOCK, stop):
-            information[row], terms[row] = _size_information_row(mean[row], size[row], max_terms)
+    pooled_row_blocks(
+        lambda start, stop: _size_information_rows(
+            mean, size, max_terms, start, stop, information, terms
+        ),
+        n_rows,
+        _PARALLEL_BLOCK,
+    )
     return information, terms
+
+
+# The kernels the worker pool runs (``nogil``, never ``prange``), each writing
+# only its own rows' outputs.
+_POOLED_ROW_KERNELS = (
+    theta_series_serial,
+    _log_third_rows,
+    _log_fourth_rows,
+    _size_information_rows,
+)
 
 
 __all__ = [
     "expected_size_information",
     "log_fourth_derivative",
     "log_third_derivatives",
-    "theta_series_parallel",
     "theta_series_serial",
 ]

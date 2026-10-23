@@ -23,12 +23,11 @@ unless the application has disabled the collector: the frames the cycles
 reach have returned by then, and the dead stacks go before the next one is
 allocated.  The event fires only on a disk-cache miss (a cached kernel loads
 without compiling), so a warm cache never collects; ``superglm.warmup``,
-which compiles outside any fit (and in every process an uncached inline
-helper), drops its own mark (``forget_compiles``).  Measured on that cold
-first fit: 1.4 s of collection and a 773 MiB peak (1.24x).  Collecting at
-every compile's end instead reached 1.20x for 3.5 s per cold fit and about
-9 s per CI worker; the owner chose the ``fs`` checkpoint (2026-10-01).  Other
-packages' kernels are left alone.
+which compiles outside any fit, drops its own mark (``forget_compiles``).
+Measured on that cold first fit: 1.4 s of collection and a 773 MiB peak
+(1.24x).  Collecting at every compile's end instead reached 1.20x for 3.5 s
+per cold fit and about 9 s per CI worker; the owner chose the ``fs``
+checkpoint (2026-10-01).  Other packages' kernels are left alone.
 """
 
 from __future__ import annotations
@@ -67,9 +66,8 @@ def forget_compiles() -> None:
     """Drop the mark of compiles that ran outside any fit (``superglm.warmup``).
 
     Their frames hold no fit's arrays, so the next ``fs`` leaf build need not
-    collect for them: without this, a warm-cache process paid one full
-    collection on its first fit for warmup's own compile of the uncached
-    ``_add_raw_row`` (0.15 s on a 30,000-row ``sz`` fit).
+    collect for them: without this, a process whose warmup compiled paid one
+    full collection on its first fit (0.15 s on a 30,000-row ``sz`` fit).
     """
     _compiled[0] = False
 
@@ -83,3 +81,30 @@ def collect_after_compile() -> None:
 
 
 numba_event.register("numba:compile", _MarkCompile())
+
+
+_close_lock = threading.Lock()
+_closed: set[int] = set()
+
+
+def compile_closed(*kernels) -> None:
+    """Compile each ``(dispatcher, signature)`` once and close the dispatcher to others.
+
+    A closed dispatcher serves a call whose operands differ from its signature
+    only in layout or writeability by converting them (a C or F array to an
+    ``A`` one, a writable array to a read-only one: numba reuses the array
+    descriptor, so nothing is copied), where an open one would compile a
+    specialisation for each operand form a caller happens to pass.  Idempotent
+    and thread-safe; numba loads the signature from its on-disk cache when it
+    is there.  A failed compile leaves the dispatcher open, so a later call
+    retries it.
+    """
+    pending = [(kernel, signature) for kernel, signature in kernels if id(kernel) not in _closed]
+    if not pending:
+        return
+    with _close_lock:
+        for kernel, signature in pending:
+            if id(kernel) not in _closed:
+                kernel.compile(signature)
+                kernel.disable_compile()
+                _closed.add(id(kernel))

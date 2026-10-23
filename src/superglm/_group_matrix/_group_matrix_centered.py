@@ -16,6 +16,7 @@ from ._group_matrix_algebra import _BlockWeightCache
 from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _fused_bincount_2,
+    _native,
     _pattern_support_summaries,
 )
 from ._group_matrix_tabmat import _tabmat_vector
@@ -818,7 +819,7 @@ def _anchor_center_support(
     projection that cancels the anchor then exposes.
     """
     values = np.asarray(values, dtype=np.float64)
-    mass, weighted_z = _fused_bincount_2(codes, W, Wz, len(values))
+    mass, weighted_z = _fused_bincount_2(codes, _native(W), _native(Wz), len(values))
     anchor = int(np.argmax(mass))
     differences = values - values[anchor]
     mean_difference = mass @ differences / sum_w
@@ -1095,7 +1096,7 @@ def _anchor_support_gram_rhs(
             joint_mass = _disc_disc_2d_hist(
                 support_i.codes,
                 support_j.codes,
-                W,
+                _native(W),
                 len(support_i.values),
                 n_j,
             )
@@ -1183,7 +1184,7 @@ def _add_family_cross(
             continue
         if index < parent:
             joint = _disc_disc_2d_hist(
-                support.codes, tensor.codes, W, len(support.values), len(tensor.values)
+                support.codes, tensor.codes, _native(W), len(support.values), len(tensor.values)
             )
             projected = support.values.T @ joint
             put(index, parent, projected @ tensor.values)
@@ -1191,7 +1192,7 @@ def _add_family_cross(
                 put(index, child, projected @ values)
         else:
             joint = _disc_disc_2d_hist(
-                tensor.codes, support.codes, W, len(tensor.values), len(support.values)
+                tensor.codes, support.codes, _native(W), len(tensor.values), len(support.values)
             )
             put(parent, index, tensor.values.T @ joint @ support.values)
             projected = joint @ support.values

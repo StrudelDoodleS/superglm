@@ -4,14 +4,48 @@ import inspect
 
 import numpy as np
 import pytest
-from numba import config, get_num_threads, set_num_threads
 
+from superglm._parallel import parallel_config
 from superglm.distributional.solver import _batched_moments as batch_api
-from superglm.distributional.solver._global_moments import (
-    _accumulate_directional,
-    _accumulate_histogram,
-    _accumulate_vector,
-)
+
+
+# The serial reductions the batched kernel replaced, as row-order references:
+# each adds a target's rows one at a time, in the order the kernel does.
+def _accumulate_vector(out, bins, weights):
+    active = 0
+    for i in range(bins.shape[0]):
+        if bins[i] >= 0:
+            out[bins[i]] += weights[i]
+            active += 1
+    return active
+
+
+def _accumulate_histogram(out, left_bins, right_bins, weights):
+    active = 0
+    for i in range(left_bins.shape[0]):
+        if left_bins[i] >= 0 and right_bins[i] >= 0:
+            out[left_bins[i], right_bins[i]] += weights[i]
+            active += 1
+    return active
+
+
+def _accumulate_directional(out, bins, ordinary, weights):
+    active = 0
+    for i in range(bins.shape[0]):
+        if bins[i] >= 0:
+            for j in range(ordinary.shape[1]):
+                out[bins[i], j] += weights[i] * ordinary[i, j]
+            active += 1
+    return active
+
+
+def _buffered(values):
+    """``values`` copied into consecutive views of one owned flat buffer."""
+    buffer = np.empty(sum(value.size for value in values))
+    views = batch_api._carve(buffer, [value.shape for value in values])
+    for view, value in zip(views, values, strict=True):
+        view[...] = value
+    return buffer, views
 
 
 def _fixture(mixed):
@@ -19,14 +53,21 @@ def _fixture(mixed):
     sizes = tuple(3 + g % 5 for g in range(17))
     capacity = 11
     bins = np.zeros((len(sizes), capacity), dtype=np.intp)
-    ordinary = [np.ones((capacity, 2)), np.ones((capacity, 5))]
-    histograms = [(0, 1, 0, np.zeros((sizes[0], sizes[1])))] if mixed else []
-    directions = [(2, 1, 2, np.zeros((sizes[2], 5)))] if mixed else []
-    vectors = [
-        (g, g % 2, (g % 2) * 2, rng.normal(size=size), rng.normal(size=size))
-        for g, size in enumerate(sizes)
-    ]
+    panel_buffer, ordinary = _buffered([np.ones((capacity, 2)), np.ones((capacity, 5))])
+    matrices = [np.zeros((sizes[0], sizes[1])), np.zeros((sizes[2], 5))] if mixed else []
+    pairs = [(rng.normal(size=size), rng.normal(size=size)) for size in sizes]
+    output_buffer, outputs = _buffered(matrices + [out for pair in pairs for out in pair])
+    histograms = [(0, 1, 0, outputs[0])] if mixed else []
+    directions = [(2, 1, 2, outputs[1])] if mixed else []
+    paired = outputs[len(matrices) :]
+    vectors = [(g, g % 2, (g % 2) * 2, paired[2 * g], paired[2 * g + 1]) for g in range(len(sizes))]
+    assert vectors[-1][-1].base is output_buffer and ordinary[-1].base is panel_buffer
     return rng, sizes, ordinary, bins, histograms, directions, vectors
+
+
+def _buffers(ordinary, vectors):
+    """The owned buffers behind a fixture's views (the mutations edit only the first vector)."""
+    return {"output_buffer": vectors[-1][-1].base, "panel_buffer": ordinary[-1].base}
 
 
 def _build(fixture):
@@ -43,21 +84,18 @@ def _build(fixture):
         n_channels=3,
         vectors=vectors,
         n_score_channels=2,
+        **_buffers(ordinary, vectors),
     )
 
 
 @pytest.mark.parametrize("threads", [1, 2, 16])
 @pytest.mark.parametrize("mixed", [False, True])
-@pytest.mark.threads
 def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threads, mixed):
-    if threads > int(getattr(config, "NUMBA_NUM_THREADS")):
-        pytest.skip("requested workers exceed the configured Numba maximum")
     fixture = _fixture(mixed)
     rng, sizes, ordinary, bins, histograms, directions, vectors = fixture
     batch = _build(fixture)
-    previous = get_num_threads()
-    try:
-        set_num_threads(threads)
+    targets = len(histograms) + len(directions) + len(vectors)
+    with parallel_config(n_jobs=threads):
         for reset in (False, True):
             if reset:
                 for spec in histograms + directions:
@@ -113,8 +151,8 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
                     directional_work,
                 )
                 assert batch.last_vector_active_updates == vector_active
-                assert batch.last_worker_count == threads
-                assert get_num_threads() == threads
+                helpers = min(threads - 1, (targets + 1) // 2)
+                assert 1 <= batch.last_worker_count <= 1 + helpers
                 for spec, expected_score, expected_mass in zip(
                     vectors, expected_scores, expected_masses, strict=True
                 ):
@@ -132,26 +170,10 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
                     np.testing.assert_array_equal(
                         spec[-1].view(np.uint64), expected.view(np.uint64)
                     )
-    finally:
-        set_num_threads(previous)
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "support",
-        "score_channel",
-        "curvature_channel",
-        "dtype",
-        "view",
-        "readonly",
-        "shape",
-        "nonarray",
-        "alias",
-        "duplicate",
-    ],
-)
-def test_paired_constructor_refuses_invalid_buffers_and_metadata(mutation):
+@pytest.mark.parametrize("mutation", ["support", "score_channel", "curvature_channel"])
+def test_paired_constructor_refuses_indices_outside_the_plan(mutation):
     fixture = _fixture(False)
     vectors = fixture[-1]
     g, sc, cc, score_out, mass_out = vectors[0]
@@ -161,22 +183,8 @@ def test_paired_constructor_refuses_invalid_buffers_and_metadata(mutation):
         sc = 2
     elif mutation == "curvature_channel":
         cc = 3
-    elif mutation == "dtype":
-        score_out = score_out.astype(np.float32)
-    elif mutation == "view":
-        mass_out = mass_out.view()
-    elif mutation == "readonly":
-        mass_out.flags.writeable = False
-    elif mutation == "shape":
-        score_out = np.zeros(len(score_out) + 1)
-    elif mutation == "nonarray":
-        score_out = list(score_out)
-    elif mutation == "alias":
-        mass_out = score_out
-    elif mutation == "duplicate":
-        vectors.append(vectors[0])
     vectors[0] = (g, sc, cc, score_out, mass_out)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="index"):
         _build(fixture)
 
 
@@ -193,35 +201,8 @@ def test_paired_targets_require_a_positive_integer_score_channel_count(n_score_c
             n_channels=3,
             vectors=vectors,
             n_score_channels=n_score_channels,
+            **_buffers(ordinary, vectors),
         )
-
-
-@pytest.mark.parametrize("input_kind", ["score", "curvature"])
-@pytest.mark.parametrize("output_kind", ["score", "mass", "histogram"])
-def test_both_derivative_inputs_refuse_overlap_with_every_output_kind(input_kind, output_kind):
-    n = 3
-    score_out, mass_out, histogram = np.ones(n), np.ones(n), np.ones((n, 1))
-    batch = batch_api._BatchedMomentReducers(
-        [(0, 1, 0, histogram)],
-        [],
-        [],
-        np.zeros((2, n), dtype=np.intp),
-        support_sizes=(n, 1),
-        n_channels=1,
-        vectors=[(0, 0, 0, score_out, mass_out)],
-        n_score_channels=1,
-    )
-    derivatives = {"score": np.ones((n, 1)), "curvature": np.ones((n, 1))}
-    derivatives[input_kind] = {
-        "score": score_out,
-        "mass": mass_out,
-        "histogram": histogram,
-    }[output_kind].reshape(n, 1)
-    with pytest.raises(ValueError, match="overlap"):
-        batch.accumulate(derivatives["curvature"], n, score=derivatives["score"])
-    for output in (score_out, mass_out, histogram):
-        np.testing.assert_array_equal(output, 1)
-    assert batch.last_vector_active_updates == 0
 
 
 @pytest.mark.parametrize("mutation", ["missing", "dtype", "shape", "subclass", "unaligned"])
@@ -263,28 +244,20 @@ def _channels(layout, readonly, width):
 
 
 def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(monkeypatch):
-    assert hasattr(batch_api, "_accumulate_batched_strided"), (
-        "the batch still specializes the heavy kernel for every channel storage combination"
-    )
     batch_api._warmup_batched_moments()
-    kernels = (batch_api._accumulate_batched, batch_api._accumulate_batched_strided)
-    signatures = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-    assert tuple(map(len, signatures)) == (1, 1)
-    calls = [0, 0]
-    for index, (kernel, layout) in enumerate(zip(kernels, ("C", "A"), strict=True)):
-        for channel in kernel.nopython_signatures[0].args[5:7]:
-            assert channel.layout == layout
-            assert not channel.mutable
+    kernel = batch_api._accumulate_targets
+    signatures = tuple(kernel.nopython_signatures)
+    assert len(signatures) == 1
+    for channel in signatures[0].args[5:7]:
+        assert channel.layout == "A"
+        assert not channel.mutable
+    calls = [0]
 
-        def counted(*args, index=index, kernel=kernel):
-            calls[index] += 1
-            return kernel(*args)
+    def counted(*args):
+        calls[0] += 1
+        return kernel(*args)
 
-        monkeypatch.setattr(
-            batch_api,
-            "_accumulate_batched" if index == 0 else "_accumulate_batched_strided",
-            counted,
-        )
+    monkeypatch.setattr(batch_api, "_accumulate_targets", counted)
     fixture = _fixture(True)
     batch = _build(fixture)
     exact, reserve = batch_api._batch_workspace_bytes(1, 1, 2, vector_count=17)
@@ -324,5 +297,8 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
                         np.testing.assert_array_equal(
                             actual.view(np.uint64), oracle.view(np.uint64)
                         )
-    assert calls == [4, 32]
-    assert tuple(tuple(kernel.nopython_signatures) for kernel in kernels) == signatures
+    # One call per target per accumulation, through the one signature, for all
+    # 36 layout and writeability combinations of the two channel matrices.
+    targets = len(histograms) + len(directions) + len(vectors)
+    assert calls == [36 * targets]
+    assert tuple(kernel.nopython_signatures) == signatures

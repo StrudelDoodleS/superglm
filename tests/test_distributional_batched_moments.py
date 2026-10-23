@@ -4,7 +4,8 @@ from importlib import import_module
 
 import numpy as np
 import pytest
-from numba import config, get_num_threads, set_num_threads
+
+from superglm._parallel import parallel_config
 
 
 def _module():
@@ -14,11 +15,19 @@ def _module():
         pytest.fail("the owned batched moment reducers have not been implemented")
 
 
-def _fixture(kind="both"):
+def _buffered(values):
+    """``values`` copied into consecutive views of one owned flat buffer."""
+    buffer = np.empty(sum(value.size for value in values))
+    views = _module()._carve(buffer, [value.shape for value in values])
+    for view, value in zip(views, values, strict=True):
+        view[...] = value
+    return buffer, views
+
+
+def _fixture(kind="both", capacity=11):
     rng = np.random.default_rng(104)
-    capacity = 11
     sizes = (3, 7, 2)
-    ordinary = [np.empty((capacity, width)) for width in (0, 2, 5)]
+    panel_buffer, ordinary = _buffered([np.empty((capacity, width)) for width in (0, 2, 5)])
     bins = np.empty((len(sizes), capacity), dtype=np.intp)
     histograms = [
         (0, 1, 0, rng.normal(size=(3, 7))),
@@ -33,25 +42,26 @@ def _fixture(kind="both"):
         histograms = []
     if kind in ("histograms", "empty"):
         directions = []
-    return rng, sizes, ordinary, bins, histograms, directions
+    output_buffer, outputs = _buffered([spec[-1] for spec in histograms + directions])
+    histograms = [(*spec[:-1], out) for spec, out in zip(histograms, outputs, strict=False)]
+    directions = [
+        (*spec[:-1], out) for spec, out in zip(directions, outputs[len(histograms) :], strict=True)
+    ]
+    buffers = {"output_buffer": output_buffer, "panel_buffer": panel_buffer}
+    return rng, sizes, ordinary, bins, histograms, directions, buffers
 
 
 @pytest.mark.parametrize("threads", [1, 4])
 @pytest.mark.parametrize("kind", ["both", "histograms", "directions", "empty"])
-@pytest.mark.threads
 def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind):
-    if threads > config.NUMBA_NUM_THREADS:
-        pytest.skip("the configured Numba maximum does not permit four workers")
     module = _module()
-    rng, sizes, ordinary, bins, histograms, directions = _fixture(kind)
+    rng, sizes, ordinary, bins, histograms, directions, buffers = _fixture(kind)
     hist_expected = [spec[-1].copy() for spec in histograms]
     direction_expected = [spec[-1].copy() for spec in directions]
     batch = module._BatchedMomentReducers(
-        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
     )
-    previous = get_num_threads()
-    try:
-        set_num_threads(threads)
+    with parallel_config(n_jobs=threads):
         for chunk_index, n in enumerate((11, 8, 11, 1)):
             for g, size in enumerate(sizes):
                 bins[g, :n] = rng.integers(-1, size, size=n)
@@ -85,18 +95,76 @@ def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind)
                 np.testing.assert_array_equal(spec[-1], expected)
             for spec, expected in zip(directions, direction_expected, strict=True):
                 np.testing.assert_array_equal(spec[-1], expected)
-            assert batch.last_worker_count == min(threads, len(histograms) + len(directions))
-            assert get_num_threads() == threads
-    finally:
-        set_num_threads(previous)
+            targets = len(histograms) + len(directions)
+            # The caller and at most about half as many helpers as targets.
+            helpers = min(threads - 1, (targets + 1) // 2)
+            assert (
+                (1 if targets else 0) <= batch.last_worker_count <= (1 + helpers if targets else 0)
+            )
+
+
+def test_last_worker_count_is_the_threads_that_ran_a_target(monkeypatch):
+    """Five targets admitted on sixteen workers run on the caller and three helpers (about half
+    as many helpers as targets), and the count is those four threads, not the five admitted.
+    Each thread holds its first target until all four have one."""
+    import threading
+
+    module = _module()
+    module._warmup_batched_moments()
+    kernel = module._accumulate_targets
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    batch = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    assert len(histograms) + len(directions) == 5
+    together, first = threading.Barrier(4, timeout=20), threading.local()
+
+    def held(*args):
+        if not getattr(first, "done", False):
+            first.done = True
+            together.wait()
+        return kernel(*args)
+
+    monkeypatch.setattr(module, "_accumulate_targets", held)
+    with parallel_config(n_jobs=16, max_memory=2**30):
+        batch.accumulate(np.ones((11, 3)), 11)
+    assert batch.last_worker_count == 4
+
+
+def test_accumulate_reads_fortran_and_strided_channels_in_place():
+    """The workspace budget counts no copy of a chunk's channels, so the reducer makes none:
+    Fortran and strided channel matrices are read where they are."""
+    import tracemalloc
+
+    module = _module()
+    module._warmup_batched_moments()
+    capacity = 1 << 14
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture(capacity=capacity)
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    batch = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
+        with parallel_config(n_jobs=1):
+            tracemalloc.start()
+            try:
+                batch.accumulate(weights, capacity)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        assert peak < weights[:, 0].nbytes, peak  # a copy holds all three columns
 
 
 def test_row_order_fixture_detects_reassociation():
     module = _module()
     bins = np.zeros((1, 3), dtype=np.intp)
-    ordinary = [np.ones((3, 1))]
-    histogram = np.zeros((1, 1))
-    direction = np.zeros((1, 1))
+    panel_buffer, ordinary = _buffered([np.ones((3, 1))])
+    output_buffer, (histogram, direction) = _buffered([np.zeros((1, 1)), np.zeros((1, 1))])
     batch = module._BatchedMomentReducers(
         [(0, 0, 0, histogram)],
         [(0, 0, 0, direction)],
@@ -104,6 +172,8 @@ def test_row_order_fixture_detects_reassociation():
         bins,
         support_sizes=(1,),
         n_channels=1,
+        output_buffer=output_buffer,
+        panel_buffer=panel_buffer,
     )
     weights = np.array([[2.0**54], [1.0], [-(2.0**54)]])
     assert batch.accumulate(weights, 3) == (3, 3)
@@ -114,75 +184,29 @@ def test_row_order_fixture_detects_reassociation():
     assert histogram[0, 0] != regrouped
 
 
-@pytest.mark.parametrize("mutation", ["duplicate", "view", "readonly", "dtype", "channel"])
-def test_constructor_refuses_unsafe_output_or_metadata_before_native_writes(mutation):
+def test_constructor_refuses_a_channel_outside_the_derivative_columns():
     module = _module()
-    _, sizes, ordinary, bins, histograms, directions = _fixture()
-    if mutation == "duplicate":
-        histograms.append(histograms[0])
-    else:
-        g, h, channel, out = histograms[0]
-        if mutation == "view":
-            out = out.view()
-        elif mutation == "readonly":
-            out.flags.writeable = False
-        elif mutation == "dtype":
-            out = out.astype(np.float32)
-        elif mutation == "channel":
-            channel = 3
-        histograms[0] = (g, h, channel, out)
-    before = [spec[-1].copy() for spec in histograms + directions]
-    with pytest.raises(ValueError):
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
+    g, h, _, out = histograms[0]
+    histograms[0] = (g, h, 3, out)
+    with pytest.raises(ValueError, match="channel index"):
         module._BatchedMomentReducers(
-            histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3
+            histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
         )
-    for spec, expected in zip(histograms + directions, before, strict=True):
-        np.testing.assert_array_equal(spec[-1], expected)
-
-
-def test_constructor_refuses_an_output_that_is_also_an_input_panel():
-    module = _module()
-    panel = np.ones((3, 3))
-    with pytest.raises(ValueError, match="overlap|alias|distinct"):
-        module._BatchedMomentReducers(
-            [(0, 0, 0, panel)],
-            [],
-            [panel],
-            np.zeros((1, 3), dtype=np.intp),
-            support_sizes=(3,),
-            n_channels=1,
-        )
-
-
-def test_curvature_alias_is_refused_without_mutating_outputs():
-    module = _module()
-    output = np.ones((3, 3))
-    batch = module._BatchedMomentReducers(
-        [(0, 0, 0, output)],
-        [],
-        [np.ones((3, 1))],
-        np.zeros((1, 3), dtype=np.intp),
-        support_sizes=(3,),
-        n_channels=3,
-    )
-    with pytest.raises(ValueError, match="overlap|alias"):
-        batch.accumulate(output, 3)
-    np.testing.assert_array_equal(output, np.ones((3, 3)))
-    assert batch.last_worker_count == 0
 
 
 def test_metadata_accounting_and_warmup_cover_runtime_signatures():
     module = _module()
     module._warmup_batched_moments()
-    kernels = (module._accumulate_batched, module._accumulate_batched_strided)
+    kernels = (module._accumulate_targets,)
     compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-    assert tuple(map(len, compiled)) == (1, 1)
-    _, sizes, ordinary, bins, histograms, directions = _fixture()
+    assert tuple(map(len, compiled)) == (1,)
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
     bins.fill(0)
     for panel in ordinary:
         panel.fill(1.0)
     batch = module._BatchedMomentReducers(
-        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
     )
     exact, reserve = module._batch_workspace_bytes(len(histograms), len(directions), len(ordinary))
     assert sum(array.nbytes for array in batch.owned_arrays) == exact

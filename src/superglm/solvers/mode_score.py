@@ -230,7 +230,9 @@ def _factor_smooth_level_sums(
     indptr``), discrete rows a support basis through ``bin_idx``.
     """
     levels, k = centre.shape
-    out = np.zeros((4, levels, k))
+    # (4, K k) from the start: reshaping a (4, K, k) result would compile
+    # numba's shape-check message, a second's worth of a cold compile.
+    out = np.zeros((4, levels * k))
     level_totals = np.zeros((4, levels))
     z = np.empty(k)
     discrete = bin_idx.size > 0
@@ -257,10 +259,11 @@ def _factor_smooth_level_sums(
             deviation = z[b] - centre[level, b]
             size = abs(deviation)
             square = deviation * deviation
-            out[0, level, b] += size * rows[0, row]
-            out[1, level, b] += size * rows[1, row]
-            out[2, level, b] += square * rows[2, row]
-            out[3, level, b] += square * rows[3, row]
+            column = level * k + b
+            out[0, column] += size * rows[0, row]
+            out[1, column] += size * rows[1, row]
+            out[2, column] += square * rows[2, row]
+            out[3, column] += square * rows[3, row]
     prefix = np.zeros((4, levels + 1))
     suffix = np.zeros((4, levels + 1))
     for q in range(4):
@@ -273,8 +276,8 @@ def _factor_smooth_level_sums(
             size = abs(centre[level, b])
             for q in range(4):
                 other = prefix[q, level] + suffix[q, level + 1]
-                out[q, level, b] += (size if q < 2 else size * size) * other
-    return out.reshape(4, levels * k)
+                out[q, level * k + b] += (size if q < 2 else size * size) * other
+    return out
 
 
 def column_sums(
@@ -309,6 +312,13 @@ def column_sums(
                 discrete = matrix.is_discrete
                 empty_int = np.zeros(0, dtype=np.intp)
                 empty = np.zeros(0)
+                # Read-only views (no copy of a contiguous block), so the Gram
+                # and structured backends share one signature.
+                natural_map = np.ascontiguousarray(matrix.natural_map).view()
+                centre = np.ascontiguousarray(
+                    mean_x[offset : offset + width].reshape(matrix.n_levels, matrix.block_size)
+                ).view()
+                natural_map.flags.writeable = centre.flags.writeable = False
                 sums = _factor_smooth_level_sums(
                     empty if discrete else matrix._data,
                     empty_int if discrete else matrix._indices,
@@ -316,10 +326,8 @@ def column_sums(
                     matrix.B_unique if discrete else np.zeros((0, 0)),
                     matrix.bin_idx if discrete else empty_int,
                     matrix.codes,
-                    np.ascontiguousarray(matrix.natural_map),
-                    np.ascontiguousarray(
-                        mean_x[offset : offset + width].reshape(matrix.n_levels, matrix.block_size)
-                    ),
+                    natural_map,
+                    centre,
                     rows,
                 )
                 result[:, inside] = sums[:, local]

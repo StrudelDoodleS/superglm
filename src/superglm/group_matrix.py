@@ -48,6 +48,7 @@ from ._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from ._group_matrix._group_matrix_kernels import (
     _disc_disc_2d_hist as _kernel_disc_disc_2d_hist,
 )
+from ._group_matrix._group_matrix_kernels import _native
 from ._group_matrix._group_matrix_tabmat import (
     RawSplineTabmatPlan,
     _build_raw_spline_tabmat_plan,
@@ -113,7 +114,7 @@ def _disc_disc_2d_hist(
     """Compatibility wrapper for the fused discretized 2D histogram kernel."""
     return cast(
         NDArray,
-        _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j),
+        _kernel_disc_disc_2d_hist(bin_idx_i, bin_idx_j, _native(W), n_bins_i, n_bins_j),
     )
 
 

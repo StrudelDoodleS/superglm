@@ -103,7 +103,7 @@ from superglm.solvers._structured.border import (
 )
 from superglm.solvers._structured.factors import _block_derivative_cross_traces
 from superglm.solvers._structured.layout import FactorSmoothLeafLayout
-from superglm.solvers._structured.leaf_kernels import _shifted_sums
+from superglm.solvers._structured.leaf_kernels import _absolute, _add, _assign, _shifted_sums
 from superglm.solvers._structured.moments import _border_generators, _leaf_rows
 from superglm.solvers._structured.nested import _super_root_inverse
 from superglm.solvers._structured.operators import (
@@ -134,6 +134,9 @@ _CHUNK = 8192
 # compiled code is fixed (so a result does not depend on a thread count), and any
 # summation order keeps the dot product's gamma_n |a|'|b| bound (Higham 2002, §3.1).
 _KERNEL_MATH = {"reassoc", "contract"}
+# A flag a kernel passes to another as a numpy boolean: a literal ``True``
+# would compile the callee once more for that value.
+_TRUE = np.bool_(True)
 
 
 def _gamma(count: float) -> float:
@@ -258,8 +261,8 @@ def _upper_of(G, R):  # pragma: no cover - compiled
 
 
 @numba.njit(cache=True)
-def _merge_level(R_acc, M_acc, R_new, M_new, signed):  # pragma: no cover - compiled
-    """TSQR merge of two pieces of one level: ``QR([R_acc; R_new])``, and ``M = Q_a'M_a Q_a + Q_b'M_b Q_b``."""
+def _stacked_qr(R_acc, R_new):  # pragma: no cover - compiled
+    """``QR([R_acc; R_new])`` in place: ``(stacked, tau, work, ints)`` as ``_house_qr`` leaves them."""
     p = R_acc.shape[0]
     # column-major work arrays: the Householder loops run down columns
     stacked = np.zeros((p, 2 * p)).T
@@ -271,18 +274,35 @@ def _merge_level(R_acc, M_acc, R_new, M_new, signed):  # pragma: no cover - comp
     work = np.empty(64 * (p + 1))
     ints = np.empty(6, np.int32)
     _house_qr(stacked, tau, work, ints)
-    if signed:
-        Q = np.zeros((p, 2 * p)).T
-        _house_q(stacked, tau, Q, work, ints)
-        merged = np.zeros((p, p))
-        for part in range(2):
-            source = M_acc if part == 0 else M_new
-            block = Q[part * p : (part + 1) * p, :]
-            middle = _mm(source, block)
-            merged += _mm(block.T, middle)
-        for i in range(p):
-            for j in range(p):
-                M_acc[i, j] = 0.5 * (merged[i, j] + merged[j, i])
+    return stacked, tau, work, ints
+
+
+# The TSQR merge of two pieces of one level, split by row kind so a Fisher
+# pass compiles no middle-factor code (``_house_q`` and its products).
+@numba.njit(cache=True)
+def _merge_level(R_acc, R_new):  # pragma: no cover - compiled
+    """Fisher rows: ``R_acc`` becomes the triangle of ``QR([R_acc; R_new])``."""
+    stacked, _, _, _ = _stacked_qr(R_acc, R_new)
+    _upper_of(stacked, R_acc)
+
+
+@numba.njit(cache=True)
+def _merge_signed_level(R_acc, M_acc, R_new, M_new):  # pragma: no cover - compiled
+    """Signed rows: ``_merge_level`` and ``M = Q_a'M_a Q_a + Q_b'M_b Q_b``."""
+    p = R_acc.shape[0]
+    stacked, tau, work, ints = _stacked_qr(R_acc, R_new)
+    Q = np.zeros((p, 2 * p)).T
+    _house_q(stacked, tau, Q, work, ints)
+    merged = np.zeros((p, p))
+    for part in range(2):
+        source = M_acc if part == 0 else M_new
+        # C copies: one signature of ``_mm`` serves every product
+        block = Q[part * p : (part + 1) * p, :].copy()
+        middle = _mm(source, block)
+        _add(merged, _mm(block.T.copy(), middle))
+    for i in range(p):
+        for j in range(p):
+            M_acc[i, j] = 0.5 * (merged[i, j] + merged[j, i])
     _upper_of(stacked, R_acc)
 
 
@@ -354,9 +374,10 @@ def _leaf_segments(
                         M_new[j, i] = value
             if started[level]:
                 # M_acc is a (1, 1, 1) placeholder for Fisher rows: never index it by level
-                _merge_level(
-                    R_acc[level], M_acc[level] if signed else M_acc[0], R_new, M_new, signed
-                )
+                if signed:
+                    _merge_signed_level(R_acc[level], M_acc[level], R_new, M_new)
+                else:
+                    _merge_level(R_acc[level], R_new)
                 merges[level] += 1
             else:
                 for i in range(p):
@@ -410,8 +431,7 @@ def _close_level(
         for i in range(w):
             for j in range(i, w):
                 trailing[i, j] = R[k + i, k + j]
-        no_middle = np.zeros((1, 1))
-        _merge_level(tail_root, no_middle, trailing, no_middle, False)
+        _merge_level(tail_root, trailing)
 
 
 @numba.njit(cache=True)
@@ -451,7 +471,6 @@ def _fisher_leaf_segments(
     m, p = rows.shape
     work = np.empty(64 * (p + 1))
     ints = np.empty(6, np.int32)
-    no_middle = np.zeros((1, 1))
     start = 0
     while start < m:
         level = levels[start]
@@ -462,7 +481,9 @@ def _fisher_leaf_segments(
             if level < open_state[0]:
                 return start
             if open_state[0] >= 0:
-                _close_level(R_open, open_state[0], k, top, tail_norms2, tail_gram, True, tail_root)
+                _close_level(
+                    R_open, open_state[0], k, top, tail_norms2, tail_gram, _TRUE, tail_root
+                )
             open_state[0] = level
             open_state[1] = 0
             for i in range(p):
@@ -488,7 +509,7 @@ def _fisher_leaf_segments(
             R_new = np.zeros((p, p))
             _upper_of(G, R_new)
             if open_state[1]:
-                _merge_level(R_open, no_middle, R_new, no_middle, False)
+                _merge_level(R_open, R_new)
                 merges[level] += 1
             else:
                 for i in range(p):
@@ -598,7 +619,7 @@ def _fisher_trials(R_acc, roots, k, Qx, U_out, F_out, Dinv_out, logdets):  # pra
         logdets[level] = total
         _upper_solve(U_out[level], V, F_out[level])
         _upper_solve(U_out[level], identity, Uinv)
-        Dinv_out[level] = _mm(Uinv, Uinv.T)
+        _assign(Dinv_out[level], _mm(Uinv, Uinv.T.copy()))
         rows = min(2 * k, p) - k
         for a in range(rows):
             for i in range(width):
@@ -696,7 +717,7 @@ def _signed_trials(
         for i in range(width):
             for j in range(i, width):
                 Rbb[i, j] = stacked[k + i, k + j]
-        piece = _mm(Rbb.T, _mm(schur, Rbb))
+        piece = _mm(Rbb.T.copy(), _mm(schur, Rbb))
         for i in range(width):
             for j in range(width):
                 Qx[i, j] += 0.5 * (piece[i, j] + piece[j, i])
@@ -706,17 +727,18 @@ def _signed_trials(
                 return level
             total += 2.0 * math.log(L[i, i]) + 2.0 * math.log(abs(Rzz[i, i]))
         logdets[level] = total
-        U = _mm(L.T, Rzz)
+        U = _mm(L.T.copy(), Rzz)
         for i in range(k):
             for j in range(k):
                 U_out[level, i, j] = U[i, j] if j >= i else 0.0
         # F = R~zz^-1 (R~zb + M~zz^-1 M~zb R~bb), M~zz^-1 M~zb = L^-T N
-        LtN = _mm(Linv.T, N)
-        right = Rzb + _mm(LtN, Rbb)
+        LtN = _mm(Linv.T.copy(), N)
+        right = Rzb.copy()
+        _add(right, _mm(LtN, Rbb))
         _upper_solve(Rzz, right, F_out[level])
         Uinv = np.empty((k, k))
         _upper_solve(U_out[level], np.eye(k), Uinv)
-        Dinv_out[level] = _mm(Uinv, Uinv.T)
+        _assign(Dinv_out[level], _mm(Uinv, Uinv.T.copy()))
         # kappa >= ||M~zz^-1||_2 = ||L^-1||_2^2 <= ||L^-1||_F^2
         kf = 0.0
         for i in range(k):
@@ -724,9 +746,18 @@ def _signed_trials(
                 kf += Linv[i, j] * Linv[i, j]
         kappa[level] = kf
         # the Schur step's own rounding (Higham Theorems 8.5 and 10.3), sandwiched
-        absN = np.abs(N)
-        dN = gk * _mm(np.abs(Linv), _mm(np.abs(L), absN))
-        err = gk1 * (np.abs(M[k:, k:]) + _mm(absN.T, absN)) + 2.0 * _mm(absN.T, dN)
+        absN = _absolute(N)
+        dN = _mm(_absolute(Linv), _mm(_absolute(L), absN))
+        for i in range(k):
+            for j in range(width):
+                dN[i, j] = gk * dN[i, j]
+        absNt = absN.T.copy()
+        cross = _mm(absNt, absN)
+        correction = _mm(absNt, dN)
+        err = np.empty((width, width))
+        for i in range(width):
+            for j in range(width):
+                err[i, j] = gk1 * (abs(M[k + i, k + j]) + cross[i, j]) + 2.0 * correction[i, j]
         ef = 0.0
         sf = 0.0
         for i in range(width):
@@ -1243,6 +1274,53 @@ def _raw_moment_segments(
                 for d in range(c + 1):
                     j = present[d]
                     A[t, i, j] += xi * border[r, j]
+
+
+def _warmup_factor_smooth() -> None:
+    """Compile the structured engine's FactorSmooth kernels for ``fs`` and ``sz`` (no rows).
+
+    Fisher and signed rows (an observed-curvature family), exact and binned,
+    with the operand layouts the leaf pass hands them; the helpers compile
+    with their callers, and the balance tree (``sz``) with
+    ``balance_tree._warmup_balance_tree``.  Left to first use: the hat
+    diagonal's per-row forms (``_level_row_forms``, a fit's diagnostics),
+    and the moment segments of a binned term's signed weight derivatives and
+    the per-level close of a stored stack (``_moment_segments``,
+    ``_close_levels``), which no census fit reached.
+    """
+    from superglm.solvers._structured.balance_tree import _warmup_balance_tree
+    from superglm.solvers._structured.leaf_kernels import (
+        _distinct_level_rows,
+        _first_distinct_level_bins,
+        _first_distinct_level_rows,
+    )
+    from superglm.solvers.mode_score import _factor_smooth_level_sums
+
+    f1, f2, f3, f4 = (np.zeros((0,) * ndim) for ndim in (1, 2, 3, 4))
+    i1, i32 = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32)
+    frozen_f1, frozen_f2, frozen_i1 = f1.copy(), f2.copy(), i1.copy()
+    starts = np.zeros(1, dtype=np.int64)
+    for array in (frozen_f1, frozen_f2, frozen_i1, starts):
+        array.setflags(write=False)
+    # The leaf pass: Fisher rows streamed level by level, signed rows stacked.
+    _fisher_leaf_segments(f2, f1, frozen_i1, f2, i1, f3, f2, f2, i1, i1, 0, f2)
+    _close_level(f2, 0, 0, f3, f2, f2, True, f2)
+    _leaf_segments(f2, f1, f1, i1, f3, f3, f3, np.zeros(0, dtype=np.bool_), i1, i1, True)
+    _fisher_trials(f3, f3, 0, f2, f3, f3, f3, f1)
+    _signed_trials(f3, f2, f3, 0, f2, f3, f3, f3, f1, f1, f1)
+    # Basis rows of an exact term (its sorted CSR arrays) and a binned one.
+    _exact_basis_rows(f2, i1, 0, 0, frozen_f1, frozen_i1, frozen_i1, f2)
+    _table_basis_rows(f2, i1, 0, 0, frozen_i1, frozen_f2)
+    _raw_moment_segments(
+        frozen_f1, frozen_i1, frozen_i1, 0, f2, f2, frozen_i1, f4, f4, f3, f3, f2, f1
+    )
+    # An sz term's distinct level rows: sorted (read-only) and as stored.
+    _distinct_level_rows(frozen_f1, frozen_i1, frozen_i1, starts, f1, 0)
+    _first_distinct_level_bins(i1, i1, f1, 0, 0)
+    _first_distinct_level_rows(f1, i32, i32, i1, f1, 0, 0)
+    # The compensated mode's per-column sums of an exact fs term.
+    _factor_smooth_level_sums(f1, i32, i32, f2, i1, i1, frozen_f2, frozen_f2, np.zeros((4, 0)))
+    _warmup_balance_tree()
 
 
 def factor_smooth_moment_operators(

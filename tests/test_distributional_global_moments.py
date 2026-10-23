@@ -297,14 +297,9 @@ def test_zero_channels_preserve_only_the_penalty(api):
     np.testing.assert_array_equal(result.data_curvature, np.zeros_like(fixture.penalty))
 
 
-def test_global_moments_reduce_support_vectors_in_the_native_batch(api, monkeypatch):
+def test_global_moments_reduce_support_vectors_in_the_native_batch(api):
     fixture = make_fixture(cancellation=True)
-
-    def separate_scan(*args, **kwargs):
-        pytest.fail("support vectors still use separate serial bin scans")
-
     with accepted_plan(api, fixture) as plan:
-        monkeypatch.setattr(api, "_accumulate_vector", separate_scan)
         result = accumulate(plan, fixture, 8)
         assert plan.stats["score_update_calls"] == 5 * plan.stats["support_count"]
         assert plan.stats["mass_update_calls"] == plan.stats["score_update_calls"]
@@ -376,8 +371,6 @@ def test_global_dispatch_does_not_materialize_or_use_grouped_moments(api, monkey
         monkeypatch.setattr(cls, "toarray", forbidden)
     monkeypatch.setattr(PredictorExecutionPlan, "diagonal_moment", forbidden)
     monkeypatch.setattr(PredictorExecutionPlan, "cross_moment", forbidden)
-    monkeypatch.setattr(api, "_accumulate_histogram", forbidden)
-    monkeypatch.setattr(api, "_accumulate_directional", forbidden)
     with accepted_plan(api, fixture) as plan:
         accumulate(plan, fixture, 8)
         assert plan.stats["chunks"] == 5
@@ -618,8 +611,6 @@ def test_live_array_subclass_refuses_before_hooks_or_native_updates(api, monkeyp
             setattr(group, field, _tripwire_array(values, calls))
         # Guard tests intentionally stop native entry, making a removed guard
         # fail safely rather than exposing the test runner to invalid indices.
-        for name in ("_accumulate_vector", "_accumulate_histogram", "_accumulate_directional"):
-            monkeypatch.setattr(api, name, forbidden)
         monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         if field == "codes":
             monkeypatch.setattr(api, "_pack_categorical", forbidden)
@@ -679,7 +670,6 @@ def test_structural_failure_takes_precedence_over_same_chunk_domain_refusal(
         else:
             supplied[0].design.group_matrices[0].M[0, 0] = 2.0**129
             supplied[1].design.group_matrices[3].bin_idx[-1] = 999
-        monkeypatch.setattr(api, "_accumulate_vector", forbidden)
         monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_chunk(supplied, score, curvature)
@@ -720,7 +710,6 @@ def test_live_activity_length_refuses_before_unbounded_comparison(api, monkeypat
         # Observe the comparison's temporary size rather than process RSS. The
         # old rows[1:] <= rows[:-1] expression exposes an oversized bool vector.
         monkeypatch.setattr(api.np, "any", bounded_any)
-        monkeypatch.setattr(api, "_accumulate_vector", forbidden)
         monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_chunk(supplied, score, curvature)

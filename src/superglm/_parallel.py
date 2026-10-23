@@ -28,21 +28,30 @@ The pooled kernels are the data-rank factor's TSQR leaves
 (``solvers.rank``), the Gram's blocks (``_group_matrix._block_queue``), the
 lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
-(``reml.w_derivatives``) and the interaction terms' builds
-(``_predictor_compiler``); :func:`pooled_map` serves the last two.
+(``reml.w_derivatives``), the interaction terms' builds
+(``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
+negative binomial rows) and batched global moments.  :func:`pooled_map`
+serves the solved-row stop passes and the interaction builds; the SuperLSS
+kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
+rows), whose tasks are too short for an executor's dispatch; the others start
+executors of their own, sized by :func:`pool_workers`.  Those SuperLSS kernels
+were numba ``prange`` loops, so numba's thread count (``NUMBA_NUM_THREADS``,
+``numba.set_num_threads``) caps them too (:func:`section_threads`).
 """
 
 from __future__ import annotations
 
 import math
 import os
+import queue
 import sys
+import threading
 import warnings
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -71,6 +80,142 @@ _override: ContextVar[_Override | None] = ContextVar("superglm_parallel_override
 _retained: ContextVar[Callable[[], int] | None] = ContextVar(
     "superglm_parallel_retained", default=None
 )
+# The worker threads a fit keeps between its pooled sections (``fit_pool``),
+# and the mark that tells a pool thread it is one.
+_fit_threads: ContextVar[_FitThreads | None] = ContextVar("superglm_fit_threads", default=None)
+_on_pool_thread = threading.local()
+
+
+def _mark_pool_thread() -> None:
+    _on_pool_thread.inside = True
+
+
+class _Crew:
+    """Worker threads that run posted jobs, started on demand and ended with :meth:`close`.
+
+    A job is posted with one queue put and costs a worker's wake-up, about a
+    third of an executor's submit (a ``Future`` and its work item), which is
+    what a section of a few hundred microseconds per task can afford.
+    ``size`` is the most threads the crew may hold; :meth:`grow` starts them
+    as sections admit helpers, so a crew never holds more threads than the
+    widest section used.  A worker drops every reference to a finished job
+    before it reports the job done on the job's own queue: the job's closure
+    holds the section's buffers, which must be released when the section
+    returns.
+    """
+
+    def __init__(self, size: int, started: int = 0) -> None:
+        self.size = size
+        self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        try:
+            self.grow(started)
+        except BaseException:
+            self.close()  # a failed start must not strand the threads already started
+            raise
+
+    def grow(self, count: int) -> None:
+        """Start threads until the crew holds ``min(count, size)``."""
+        with self._lock:
+            while len(self._threads) < min(count, self.size):
+                thread = threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
+                # Recorded before it starts: a start interrupted once the thread
+                # runs must still leave it for close to end.
+                self._threads.append(thread)
+                thread.start()
+
+    def _run(self) -> None:
+        _mark_pool_thread()
+        while True:
+            item = self._jobs.get()
+            if item is None:
+                return
+            job, done = item
+            del item
+            try:
+                job()
+            finally:
+                del job
+                done.put(None)
+
+    def post(self, job: Callable[[], None], done: queue.SimpleQueue) -> None:
+        """Run ``job`` on a worker, which puts ``None`` on ``done`` once it holds no reference to it."""
+        self._jobs.put((job, done))
+
+    def close(self) -> None:
+        with self._lock:
+            threads, self._threads = self._threads, []
+        for _ in threads:
+            self._jobs.put(None)  # one each; a thread that never ran leaves its own unread
+        for thread in threads:
+            if thread.is_alive():
+                thread.join()
+
+
+class _FitThreads:
+    """The fit's worker threads, created by its first pooled section and closed with the fit."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._executor = None
+        self._crew: _Crew | None = None
+        self.size = 0
+
+    def executor(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with self._lock:
+            if self._executor is None:
+                self.size = resolve_n_jobs()
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self.size,
+                    thread_name_prefix="superglm-map",
+                    initializer=_mark_pool_thread,
+                )
+            return self._executor
+
+    def crew(self) -> _Crew:
+        with self._lock:
+            if self._crew is None:
+                self._crew = _Crew(resolve_n_jobs())  # threads start as sections admit helpers
+            return self._crew
+
+    def close(self) -> None:
+        with self._lock:
+            executor, self._executor = self._executor, None
+            crew, self._crew = self._crew, None
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if crew is not None:
+            crew.close()
+
+
+@contextmanager
+def fit_pool() -> Iterator[None]:
+    """Keep one set of worker threads for a fit whose pooled sections are many and short.
+
+    Starting and joining a pool costs about the same as a few milliseconds of
+    kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
+    binomial row kernel per iteration, a batched moment pass per chunk).
+    Inside this scope :func:`pooled_map` runs on one executor and
+    :func:`pooled_for` on one crew of threads, each started by its first
+    section and shut down when the scope ends, instead of starting one per
+    call.  Owner: this scope; lifetime: the fit; a section that runs on
+    one of these threads (a nested map) starts its own executor, as it always
+    has, so a nested section cannot wait on threads its caller holds.  Nothing
+    changes numerically: a section's partition never depends on the workers.
+    """
+    if _fit_threads.get() is not None:
+        yield
+        return
+    threads = _FitThreads()
+    token = _fit_threads.set(threads)
+    try:
+        yield
+    finally:
+        _fit_threads.reset(token)
+        threads.close()
 
 
 @contextmanager
@@ -322,6 +467,24 @@ def pool_workers(n_tasks: int, task_bytes: int, held: int = 0) -> int:
     return max(1, min(resolve_n_jobs(), int(n_tasks), int(by_memory)))
 
 
+def section_threads() -> int:
+    """The most threads a :func:`pooled_for` section runs: ``n_jobs``, capped by numba's thread count.
+
+    The sections replaced numba ``prange`` loops, whose width ``NUMBA_NUM_THREADS``
+    and ``numba.set_num_threads`` set, so both still cap them.  numba keeps that
+    count per thread (a thread that never set it has ``NUMBA_NUM_THREADS``), and
+    this reads the calling thread's, as a ``prange`` started there would.  An
+    ``n_jobs`` the context sets explicitly (:func:`parallel_config`, an
+    estimator's ``n_jobs``) is used as given.
+    """
+    override = _override.get()
+    if override is not None and override.n_jobs is not None:
+        return override.n_jobs
+    import numba
+
+    return min(resolve_n_jobs(), numba.get_num_threads())
+
+
 def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     """``fn(item)`` for every item, yielded in item order, on ``pool_workers`` threads.
 
@@ -336,7 +499,7 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
     anyway (a built design term) adds nothing over the serial loop.
     """
     import contextvars
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor, wait
 
     from superglm._blas_threads import pooled_blas_threads
 
@@ -346,14 +509,152 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
             for item in items:
                 yield fn(item)
             return
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-map") as pool:
-            futures = [pool.submit(contextvars.copy_context().run, fn, item) for item in items]
+        fit_threads = _fit_threads.get()
+        if getattr(_on_pool_thread, "inside", False):
+            fit_threads = None  # a nested section starts its own executor
+        if fit_threads is None:
+            pool = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="superglm-map",
+                initializer=_mark_pool_thread,
+            )
+        else:
+            pool = fit_threads.executor()
+            workers = min(workers, fit_threads.size)
+        # The section posts ``workers`` runners, which claim items in order from
+        # one counter, so a shared executor starts threads only as wide as the
+        # sections it served (a task per item would start one thread per
+        # waiting task, up to ``n_jobs``).  Each item gets its own copy of the
+        # caller's context, which carries ``np.errstate``.
+        caller = contextvars.copy_context()
+        slots = [Future() for _ in items]
+        lock = threading.Lock()
+        claimed = [0]
+        stop = threading.Event()
+
+        def runner() -> None:
+            while not stop.is_set():
+                with lock:
+                    index = claimed[0]
+                    claimed[0] = index + 1
+                if index >= len(items):
+                    return
+                try:
+                    slots[index].set_result(caller.copy().run(fn, items[index]))
+                except BaseException as exc:  # raised to the consumer, in item order
+                    slots[index].set_exception(exc)
+
+        runners: list = []
+        try:
+            for _ in range(workers):
+                runners.append(pool.submit(runner))
+            for index, slot in enumerate(slots):
+                result = slot.result()
+                slots[index] = None  # a yielded result is the caller's to keep or drop
+                yield result
+        finally:
+            # No task of this section outlives it: its kernels write the
+            # caller's buffers.
+            stop.set()
+            wait(runners)
+            if fit_threads is None:
+                pool.shutdown(wait=True)
+
+
+def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
+    """``[fn(item), ...]`` in item order, the calling thread working beside its helpers.
+
+    At most ``pool_workers`` threads, capped by :func:`section_threads`.
+
+    For sections of many short tasks, where :func:`pooled_map` spends more
+    waking its workers and collecting futures than a task runs (about a
+    millisecond of dispatch against 0.2 ms blocks).  The caller and its helpers
+    claim items in order from one counter, so no task waits for a wake-up
+    that has not happened, and only about half as many helpers as items are
+    woken, which the measured wake-up cost makes the cheapest cover of the
+    items.  Nothing here changes what ``fn`` computes: each item's result goes
+    to its own slot, so the list is the same at any worker count.  One
+    parallelism level, memory budget and nested-section rule as
+    :func:`pooled_map`, but not its per-task context: each helper runs all its
+    items in one copy of the caller's context, and the caller's items run in
+    the caller's own, so ``fn`` must not set a ``ContextVar`` (no kernel
+    does).  The first failure in item order is raised once
+    every started task has ended (no task outlives the section), and items
+    after a failure are not started.  An interruption while the caller waits
+    is raised at once: no item is left to claim by then, and the helpers' last
+    tasks end before their crew closes (this call's, or the fit's as the
+    interruption leaves it).  Helpers run on the fit's crew
+    (:func:`fit_pool`) or, outside a fit or in a nested section, on threads
+    started for this call.
+    """
+    import contextvars
+
+    from superglm._blas_threads import pooled_blas_threads
+
+    count = len(items)
+    workers = min(pool_workers(count, item_bytes), section_threads())
+    with pooled_blas_threads():
+        if workers <= 1 or count <= 1:
+            return [fn(item) for item in items]
+        fit_threads = _fit_threads.get()
+        if getattr(_on_pool_thread, "inside", False):
+            fit_threads = None
+        helpers = min(workers - 1, (count + 1) // 2)
+        if fit_threads is None:
+            crew = _Crew(helpers, started=helpers)
+        else:
+            crew = fit_threads.crew()
+            helpers = min(helpers, crew.size)
+            crew.grow(helpers)
+        results: list = [None] * count
+        failures: dict[int, BaseException] = {}
+        lock = threading.Lock()
+        claimed = [0]
+        finished: queue.SimpleQueue = queue.SimpleQueue()
+
+        def claim() -> None:
+            while not failures:
+                with lock:
+                    index = claimed[0]
+                    claimed[0] = index + 1
+                if index >= count:
+                    return
+                try:
+                    results[index] = fn(items[index])
+                except BaseException as exc:  # re-raised below, after every task has ended
+                    failures[index] = exc
+                    return
+
+        posted = 0
+        try:
+            for _ in range(helpers):
+                crew.post(partial(contextvars.copy_context().run, claim), finished)
+                posted += 1
+            claim()
+        except BaseException as exc:  # an interruption while posting: stop the posted helpers
+            failures.setdefault(-1, exc)
+            raise
+        finally:
             try:
-                for index, future in enumerate(futures):
-                    result = future.result()
-                    futures[index] = None  # a yielded result is the caller's to keep or drop
-                    yield result
-            finally:
-                for future in futures:
-                    if future is not None:
-                        future.cancel()
+                for _ in range(posted):  # only the jobs that were queued will report
+                    finished.get()
+            finally:  # an interruption while waiting still ends this call's helpers
+                if fit_threads is None:
+                    crew.close()
+        if failures:
+            raise failures[min(failures)]
+        return results
+
+
+def pooled_row_blocks(fn: Callable[[int, int], object], n_rows: int, block_rows: int) -> list:
+    """``[fn(start, stop), ...]`` over consecutive blocks of ``block_rows`` rows, in row order.
+
+    The blocks depend on ``n_rows`` and ``block_rows`` alone, never on the
+    worker count, so a kernel whose rows write only their own outputs gives
+    the same bits whichever worker runs a block and however many there are.
+    The kernels run on :func:`pooled_for` (they must release the GIL to run
+    side by side); a block's working set is its kernel's scratch, a few
+    hundred bytes, against outputs the caller already holds.
+    """
+    starts = list(range(0, n_rows, block_rows))
+    return pooled_for(lambda start: fn(start, min(start + block_rows, n_rows)), starts, 1 << 12)

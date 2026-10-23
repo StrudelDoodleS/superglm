@@ -16,6 +16,8 @@ from ._group_matrix_kernels import (
     _fused_2d_bincount_2,
     _fused_bincount_2,
     _indexed_row_dot,
+    _native,
+    _scan_form,
     _ssp_gram_needs_exact,
     _tensor_operand_in_reassociation_range,
 )
@@ -39,7 +41,7 @@ def _range_shift(weights: NDArray) -> int | None:
     # with it keeps the exact route there, as on master.
     if weights.dtype.type is not np.float64 or weights.ndim != 1:
         return None
-    low, high = _float64_operand_exponent_bounds(weights.reshape(-1, 1))
+    low, high = _float64_operand_exponent_bounds(_scan_form(weights.reshape(-1, 1)))
     if high - low > 255:
         return None
     return -((low + high) // 2)
@@ -219,7 +221,7 @@ class DiscretizedSSPGroupMatrix:
             )
             return gram, cast(NDArray, xtw), cast(NDArray, xtwz)
         if _bin_sums is None:
-            W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+            W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, _native(W), _native(Wz), self.n_bins)
         else:
             W_agg = Wz_agg = _bin_sums
         if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
@@ -287,7 +289,7 @@ class DiscretizedSCOPGroupMatrix:
         return self.B_scop_unique.T @ (self.B_scop_unique * W_agg[:, None])
 
     def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
-        W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+        W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, _native(W), _native(Wz), self.n_bins)
         BtW_agg = self.B_scop_unique.T @ W_agg
         BtWz_agg = self.B_scop_unique.T @ Wz_agg
         BtWB = self.B_scop_unique.T @ (self.B_scop_unique * W_agg[:, None])
@@ -429,8 +431,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         if self.row_idx.size:
             W_agg, Wz_agg = _fused_bincount_2(
                 self.bin_idx_level,
-                W[self.row_idx],
-                Wz[self.row_idx],
+                _native(W[self.row_idx]),
+                _native(Wz[self.row_idx]),
                 self.n_bins,
             )
         else:
@@ -637,9 +639,9 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         reassociate = (
             float64_inputs
             and outer_cells + min(left_cells, right_cells) <= old_cells
-            and _tensor_operand_in_reassociation_range(B1)
-            and _tensor_operand_in_reassociation_range(B2)
-            and _tensor_operand_in_reassociation_range(w_grid)
+            and _tensor_operand_in_reassociation_range(_scan_form(B1))
+            and _tensor_operand_in_reassociation_range(_scan_form(B2))
+            and _tensor_operand_in_reassociation_range(_scan_form(w_grid))
         )
         if reassociate:
             # Marginal tables can be mutable aliases. Recompute these small
@@ -656,7 +658,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         return G_K1K1_K2K2.reshape(K1, K1, K2, K2).transpose(0, 2, 1, 3).reshape(K1 * K2, K1 * K2)
 
     def gram(self, W: NDArray, *, _support: NDArray | None = None) -> NDArray:
-        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, W, self.n_bins1, self.n_bins2)
+        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, _native(W), self.n_bins1, self.n_bins2)
         G_raw = self._factored_gram_raw(w_grid)
         return self.R_inv.T @ G_raw @ self.R_inv
 
@@ -702,15 +704,15 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         # from NumPy's pairwise sum. Preserve the old sum for extreme operands.
         if (
             B1u.dtype == B2.dtype == np.float64
-            and _tensor_operand_in_reassociation_range(B1u)
-            and _tensor_operand_in_reassociation_range(B2)
+            and _tensor_operand_in_reassociation_range(_scan_form(B1u))
+            and _tensor_operand_in_reassociation_range(_scan_form(B2))
         ):
             return _indexed_row_dot(B1u, B2, self.idx1, self.idx2)
         return np.sum(B1u[self.idx1] * B2[self.idx2], axis=1)
 
     def rmatvec(self, w: NDArray) -> NDArray:
         B1, B2 = self.B1_unique_t, self.B2_unique_t
-        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, w, self.n_bins1, self.n_bins2)
+        w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, _native(w), self.n_bins1, self.n_bins2)
         return self.R_inv.T @ (B1.T @ w_grid @ B2).ravel()
 
     def row_subset(self, idx: NDArray) -> DiscretizedTensorGroupMatrix:

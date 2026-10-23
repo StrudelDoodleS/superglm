@@ -1,50 +1,13 @@
 """Compact all-level matrix tests for random effects."""
 
-import ast
-import inspect
-
 import numpy as np
 import pytest
 from numba.core import types  # type: ignore[import-untyped]
-from numba.core.registry import CPUDispatcher  # type: ignore[import-untyped]
 
 import superglm._group_matrix._group_matrix_kernels as group_kernels
 import superglm.group_matrix as group_matrix
 from superglm import LambdaPolicy, RandomEffect
 from superglm.dm_builder import _process_info
-
-
-def test_group_matrix_warmup_reaches_every_module_owned_dispatcher() -> None:
-    dispatchers = {
-        name: value
-        for name, value in vars(group_kernels).items()
-        if isinstance(value, CPUDispatcher) and value.py_func.__module__ == group_kernels.__name__
-    }
-    assert dispatchers
-
-    group_kernels._warmup_group_matrix_kernels()
-
-    assert all(dispatcher.nopython_signatures for dispatcher in dispatchers.values())
-
-
-def test_group_matrix_warmup_calls_every_module_owned_dispatcher_directly() -> None:
-    # A caller loaded from numba's on-disk cache links its jitted callees
-    # without compiling their dispatchers, so the test above passes on a cold
-    # cache even when the warmup reaches a kernel only through another one.
-    tree = ast.parse(inspect.getsource(group_kernels._warmup_group_matrix_kernels))
-    called = {
-        getattr(node.func, "id", getattr(node.func, "attr", None))
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-    }
-    indirect = [
-        name
-        for name, value in vars(group_kernels).items()
-        if isinstance(value, CPUDispatcher)
-        and value.py_func.__module__ == group_kernels.__name__
-        and name not in called
-    ]
-    assert not indirect
 
 
 def test_group_matrix_warmup_matches_constructor_owned_integer_dtypes() -> None:

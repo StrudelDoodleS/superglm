@@ -29,6 +29,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
     _level_sums,
+    _native,
     _ssp_gram_needs_exact,
 )
 from ._row_lookup import build_row_lookup
@@ -101,7 +102,7 @@ def _bincount_levels(codes: NDArray, weights: NDArray, length: int) -> NDArray:
     codes = np.asarray(codes)
     weights = np.asarray(weights, dtype=np.float64)
     if codes.dtype == np.intp and codes.ndim == 1 and weights.ndim == 1:
-        sums, ok = _level_sums(codes, weights, int(length))
+        sums, ok = _level_sums(codes, _native(weights), int(length))
         if ok:
             return sums
     return np.bincount(codes, weights=weights, minlength=length)
@@ -742,7 +743,14 @@ class SparseSSPGroupMatrix:
         ``_csr_gram`` stands in for ``_csr_weighted_gram`` with its values: a
         batched assembly's shared pass over several weight vectors.
         """
-        csr_gram = _csr_weighted_gram if _csr_gram is None else _csr_gram
+        if _csr_gram is None:
+            # The kernel's one signature takes read-only C weights; a batched
+            # stand-in matches its channel by identity, so it gets ``W`` itself.
+            def csr_gram(data, indices, indptr, W, p, absolute_weights):
+                return _csr_weighted_gram(data, indices, indptr, _native(W), p, absolute_weights)
+
+        else:
+            csr_gram = _csr_gram
         if _ssp_gram_needs_exact(self._data, self.R_inv, W):
             raw_basis = sp.csr_matrix(
                 (self._data, self._indices, self._indptr),
@@ -1057,7 +1065,7 @@ class SplineCategoricalGroupMatrix:
             self._data,
             self._indices,
             self._indptr,
-            W_sub,
+            _native(W_sub),
             self._p_b,
             False,
         )

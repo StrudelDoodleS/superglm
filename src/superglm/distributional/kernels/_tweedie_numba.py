@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from numba import njit, prange  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._fourth_generated as _generated
@@ -882,22 +882,6 @@ def _positive_row(
 
 
 @njit(cache=True)
-def _allocate_batch_outputs(n_rows: _Int, derivative_order: _Int):
-    values = np.empty(n_rows, dtype=np.float64)
-    if derivative_order >= 1:
-        scores = np.empty((n_rows, 3), dtype=np.float64)
-    else:
-        scores = np.empty((0, 3), dtype=np.float64)
-    if derivative_order == 2:
-        hessians = np.empty((n_rows, 6), dtype=np.float64)
-    else:
-        hessians = np.empty((0, 6), dtype=np.float64)
-    terms = np.empty(n_rows, dtype=np.int64)
-    valid = np.ones(n_rows, dtype=np.bool_)
-    return values, scores, hessians, terms, valid
-
-
-@njit(cache=True)
 def _evaluate_tweedie_batch_row(
     y: NDArray[np.float64],
     mean: NDArray[np.float64],
@@ -983,10 +967,12 @@ def _complete_batch_status(
     return KERNEL_OK
 
 
-# Batch tuples append (status, failing_row): row failures carry their index,
-# while complete-output failures use -1 for Python-boundary normalization.
-@njit(cache=True)
-def _evaluate_tweedie_batch_core(
+# The row kernels below are serial and release the GIL: the Python side runs
+# them over fixed blocks of rows on the worker pool
+# (``superglm._parallel.pooled_row_blocks``).  Every row writes only its own
+# outputs, so every worker count gives the same bits.
+@njit(cache=True, nogil=True)
+def _evaluate_tweedie_batch_rows(
     y: NDArray[np.float64],
     mean: NDArray[np.float64],
     dispersion: NDArray[np.float64],
@@ -996,11 +982,19 @@ def _evaluate_tweedie_batch_core(
     derivative_order: _Int,
     max_terms: _Int,
     log_cutoff: float,
+    start: _Int,
+    stop: _Int,
+    values: NDArray[np.float64],
+    scores: NDArray[np.float64],
+    hessians: NDArray[np.float64],
+    terms: NDArray[np.int64],
 ):
-    """Evaluate one validated contiguous batch serially."""
-    outputs = _allocate_batch_outputs(y.size, derivative_order)
-    values, scores, hessians, terms, valid = outputs
-    for row in range(y.size):
+    """Rows ``start..stop`` of a validated batch into its outputs: ``(status, failing row)``.
+
+    The rows run in order and stop at the first that fails, ``(KERNEL_OK, -1)``
+    when none does.
+    """
+    for row in range(start, stop):
         status = _evaluate_tweedie_batch_row(
             y,
             mean,
@@ -1018,53 +1012,8 @@ def _evaluate_tweedie_batch_core(
             terms,
         )
         if status != KERNEL_OK:
-            return values, scores, hessians, terms, valid, status, row
-    status = _complete_batch_status(values, scores, hessians, derivative_order)
-    return values, scores, hessians, terms, valid, status, -1
-
-
-@njit(cache=True, parallel=True)
-def _evaluate_tweedie_batch_parallel_core(
-    y: NDArray[np.float64],
-    mean: NDArray[np.float64],
-    dispersion: NDArray[np.float64],
-    power: NDArray[np.float64],
-    weight: NDArray[np.float64],
-    weight_mode: _Int,
-    derivative_order: _Int,
-    max_terms: _Int,
-    log_cutoff: float,
-):
-    """Evaluate independent rows in parallel, preserving row arithmetic."""
-    outputs = _allocate_batch_outputs(y.size, derivative_order)
-    values, scores, hessians, terms, valid = outputs
-    statuses = np.empty(y.size, dtype=np.int64)
-    for index in prange(y.size):  # ty: ignore[not-iterable] -- Numba loop primitive
-        # prange's index is unsigned: passed as it is, it compiled a second
-        # specialisation of the row kernel beside the serial core's int64 one.
-        row = np.int64(index)
-        statuses[row] = _evaluate_tweedie_batch_row(
-            y,
-            mean,
-            dispersion,
-            power,
-            weight,
-            weight_mode,
-            derivative_order,
-            max_terms,
-            log_cutoff,
-            row,
-            values,
-            scores,
-            hessians,
-            terms,
-        )
-    for row in range(y.size):
-        status = statuses[row]
-        if status != KERNEL_OK:
-            return values, scores, hessians, terms, valid, status, row
-    status = _complete_batch_status(values, scores, hessians, derivative_order)
-    return values, scores, hessians, terms, valid, status, -1
+            return status, row
+    return KERNEL_OK, np.int64(-1)
 
 
 # ---------------------------------------------------------------- third derivatives
@@ -1450,8 +1399,8 @@ def _tweedie_third_row(
     return KERNEL_OK, values
 
 
-@njit(cache=True, parallel=True)
-def _tweedie_hessian_direction_core(
+@njit(cache=True, nogil=True)
+def _tweedie_hessian_direction_rows(
     y: NDArray[np.float64],
     mean: NDArray[np.float64],
     dispersion: NDArray[np.float64],
@@ -1461,12 +1410,13 @@ def _tweedie_hessian_direction_core(
     direction: NDArray[np.float64],
     max_terms: _Int,
     log_cutoff: float,
+    start: _Int,
+    stop: _Int,
+    result: NDArray[np.float64],
+    statuses: NDArray[np.int64],
 ):
-    """Packed ``dH(v)`` in ``(mu, phi, p)`` per row; status and first failing row last."""
-    n_rows = y.size
-    result = np.empty((n_rows, 6), dtype=np.float64)
-    statuses = np.empty(n_rows, dtype=np.int64)
-    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+    """Packed ``dH(v)`` in ``(mu, phi, p)`` on rows ``start..stop``, with each row's status."""
+    for row in range(start, stop):
         coefficients = np.empty(10, dtype=np.float64)
         rho = math.log(dispersion[row])
         multiplier = 1.0
@@ -1490,10 +1440,6 @@ def _tweedie_hessian_direction_core(
         result[row, 3] = multiplier * (t_mff * v_m + t_fff * v_f + t_ffp * v_p)
         result[row, 4] = multiplier * (t_mfp * v_m + t_ffp * v_f + t_fpp * v_p)
         result[row, 5] = multiplier * (t_mpp * v_m + t_fpp * v_f + t_ppp * v_p)
-    for row in range(n_rows):
-        if statuses[row] != KERNEL_OK:
-            return result, statuses[row], row
-    return result, KERNEL_OK, -1
 
 
 # ---------------------------------------------------------------- fourth order
@@ -1842,8 +1788,8 @@ def _tweedie_fourth_row(
     return KERNEL_OK
 
 
-@njit(cache=True, parallel=True)
-def _tweedie_fourth_core(
+@njit(cache=True, nogil=True)
+def _tweedie_fourth_rows(
     y: NDArray[np.float64],
     mean: NDArray[np.float64],
     dispersion: NDArray[np.float64],
@@ -1852,12 +1798,13 @@ def _tweedie_fourth_core(
     weight_mode: _Int,
     max_terms: _Int,
     log_cutoff: float,
+    start: _Int,
+    stop: _Int,
+    result: NDArray[np.float64],
+    statuses: NDArray[np.int64],
 ):
-    """``(n, 34)`` derivatives in ``(mu, rho, p)``, weighted; status and first failing row last."""
-    n_rows = y.size
-    result = np.empty((n_rows, 34), dtype=np.float64)
-    statuses = np.empty(n_rows, dtype=np.int64)
-    for row in prange(n_rows):  # ty: ignore[not-iterable] -- Numba loop primitive
+    """``(n, 34)`` derivatives in ``(mu, rho, p)``, weighted, on rows ``start..stop``."""
+    for row in range(start, stop):
         coefficients = np.empty(10, dtype=np.float64)
         rho = math.log(dispersion[row])
         multiplier = 1.0
@@ -1872,15 +1819,19 @@ def _tweedie_fourth_core(
         if status == KERNEL_OK and multiplier != 1.0:
             for index in range(34):
                 result[row, index] *= multiplier
-    for row in range(n_rows):
-        if statuses[row] != KERNEL_OK:
-            return result, statuses[row], row
-    return result, KERNEL_OK, -1
+
+
+# The kernels the worker pool runs (``nogil``, never ``prange``), each writing
+# only its own rows' outputs.
+_POOLED_ROW_KERNELS = (
+    _evaluate_tweedie_batch_rows,
+    _tweedie_hessian_direction_rows,
+    _tweedie_fourth_rows,
+)
 
 
 __all__ = [
-    "_tweedie_fourth_core",
-    "_evaluate_tweedie_batch_core",
-    "_evaluate_tweedie_batch_parallel_core",
-    "_tweedie_hessian_direction_core",
+    "_evaluate_tweedie_batch_rows",
+    "_tweedie_fourth_rows",
+    "_tweedie_hessian_direction_rows",
 ]

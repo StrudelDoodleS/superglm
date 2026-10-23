@@ -1045,7 +1045,9 @@ class TestBackendLinearAlgebraInvariants:
 
         def counting_hist(a, b, weights, n_a, n_b):
             nonlocal calls
-            if a is tensor.idx1 and b is tensor.idx2 and weights is W:
+            # The kernel receives a read-only view of W (``_native``): same memory, same shape.
+            same_weights = weights.shape == W.shape and np.shares_memory(weights, W)
+            if a is tensor.idx1 and b is tensor.idx2 and same_weights:
                 calls += 1
             return real_hist(a, b, weights, n_a, n_b)
 

@@ -1,6 +1,5 @@
 """Public warmup covers global reducers before the first geometry attempt."""
 
-import os
 import subprocess
 import sys
 
@@ -12,19 +11,14 @@ def test_public_warmup_covers_global_moments_in_a_fresh_process():
 import numpy as np
 import superglm
 from superglm.distributional.solver import _global_moments as moments
-from superglm.distributional.solver._batched_moments import (
-    _accumulate_batched, _accumulate_batched_strided,
-)
+from superglm.distributional.solver._batched_moments import _accumulate_targets
 
-kernels = (moments._finite_bounded_1d, moments._finite_bounded_2d,
-           moments._copy_dense_checked, moments._pack_categorical, moments._accumulate_vector,
-           moments._accumulate_histogram, moments._accumulate_directional,
-           _accumulate_batched, _accumulate_batched_strided)
+kernels = (moments._finite_bounded_2d, moments._copy_dense_checked, moments._pack_categorical,
+           _accumulate_targets)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
-assert all(compiled)
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels[-2:]) == (1, 1)
+assert tuple(map(len, compiled)) == (1, 1, 1, 1)
 from tests.test_distributional_automatic_panels import _problem
 from tests.test_distributional_global_moment_integration import _row_stream
 for companion in ('mixed', 'intercept'):
@@ -58,47 +52,32 @@ def test_direct_first_use_initializes_once_and_retries_failed_compilation(fail_f
     script = r"""
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Lock
+from threading import Barrier
 
 import numpy as np
 from superglm.distributional.solver import _batched_moments as module
 
-kernels = (module._accumulate_batched, module._accumulate_batched_strided)
+kernels = (module._accumulate_targets,)
 assert all(not kernel.nopython_signatures for kernel in kernels)
-calls = [0, 0]
+calls = [0]
 fail_first = sys.argv[1] == '1'
 originals = [kernel.compile for kernel in kernels]
 for index, kernel in enumerate(kernels):
     def compile_signature(signature, index=index):
         calls[index] += 1
-        if fail_first and index == 1 and calls[index] == 1:
+        if fail_first and calls[index] == 1:
             raise RuntimeError('injected compile failure')
         return originals[index](signature)
     kernel.compile = compile_signature
 
-# Race real first-use compilation, not parallel-kernel execution: Numba's
-# workqueue backend does not support concurrent launches from Python threads.
-# These wrappers leave compile/disable_compile untouched and serialize only
-# the real native calls after the production initializer has returned.
-execution_lock = Lock()
-def serialize_execution(kernel):
-    def run(*args):
-        with execution_lock:
-            return kernel(*args)
-    run.compile = kernel.compile
-    run.disable_compile = kernel.disable_compile
-    return run
-
-module._accumulate_batched, module._accumulate_batched_strided = (
-    serialize_execution(kernel) for kernel in kernels
-)
-
 def build():
-    score_out, mass_out = np.zeros(3), np.zeros(3)
+    outputs = np.zeros(6)
+    score_out, mass_out = module._carve(outputs, [(3,), (3,)])
     batch = module._BatchedMomentReducers(
         [], [], [], np.array([[0, -1, 1, 0]], dtype=np.intp),
         support_sizes=(3,), n_channels=3,
         vectors=[(0, 0, 0, score_out, mass_out)], n_score_channels=2,
+        output_buffer=outputs, panel_buffer=np.empty(0),
     )
     return batch, score_out, mass_out
 
@@ -111,7 +90,7 @@ except ValueError:
     pass
 else:
     raise AssertionError('invalid channels must be refused before compilation')
-assert calls == [0, 0]
+assert calls == [0]
 assert all(not kernel.nopython_signatures for kernel in kernels)
 if fail_first:
     try:
@@ -131,9 +110,9 @@ def accumulate(bound):
 with ThreadPoolExecutor(max_workers=2) as pool:
     results = list(pool.map(accumulate, (first, second)))
 assert results == [(0, 0), (0, 0)]
-assert calls == ([2, 2] if fail_first else [1, 1])
+assert calls == ([2] if fail_first else [1])
 assert module._batched_initialized
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1, 1)
+assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1,)
 assert all(not kernel._can_compile for kernel in kernels)
 assert score.flags.writeable and curvature.flags.writeable
 for _, score_out, mass_out in (first, second):
@@ -166,15 +145,13 @@ for score_layout in ('C', 'F', 'A'):
                 assert score.tobytes() == score_bytes
                 assert curvature.tobytes() == curvature_bytes
 module._warmup_batched_moments()
-assert calls == ([2, 2] if fail_first else [1, 1])
-assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1, 1)
+assert calls == ([2] if fail_first else [1])
+assert tuple(len(kernel.nopython_signatures) for kernel in kernels) == (1,)
 """
     completed = subprocess.run(
         [sys.executable, "-c", script, str(int(fail_first))],
         capture_output=True,
         text=True,
-        # Exercise the portable backend even where OpenMP/TBB is available.
-        env={**os.environ, "NUMBA_THREADING_LAYER": "workqueue", "NUMBA_NUM_THREADS": "2"},
         timeout=120,
     )
     assert completed.returncode == 0, completed.stderr
