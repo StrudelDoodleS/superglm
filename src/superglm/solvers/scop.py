@@ -180,13 +180,6 @@ class SCOPReparameterization:
         """Legacy alias retained for monotone call sites."""
         return self.kind
 
-    def beta_tilde(self, beta: NDArray) -> NDArray:
-        """Positivity-transformed vector in null-plus-shape coordinates."""
-        bt = np.array(beta, copy=True)
-        if self.shape_dim > 0:
-            bt[self.null_dim :] = np.exp(np.clip(bt[self.null_dim :], -500, 500))
-        return bt
-
     def forward(self, beta: NDArray) -> NDArray:
         """Forward map: beta -> gamma."""
         beta_null = beta[: self.null_dim]
@@ -309,10 +302,6 @@ class SCOPSolverReparam:
     raw_reparam: SCOPReparameterization
 
     @property
-    def null_dim(self) -> int:
-        return self.raw_reparam.null_dim
-
-    @property
     def free_dim(self) -> int:
         """Number of identity-mapped coordinates retained in solver space."""
         return self.raw_reparam.null_dim - 1
@@ -323,19 +312,9 @@ class SCOPSolverReparam:
         return self.q - self.free_dim
 
     @property
-    def kind(self) -> str:
-        return self.raw_reparam.kind
-
-    @property
     def direction(self) -> str:
         """Legacy alias retained for monotone call sites."""
         return self.raw_reparam.direction
-
-    def _embed(self, beta_eff: NDArray) -> NDArray:
-        """Embed solver-space beta_eff into raw-space beta."""
-        beta_raw = np.zeros(self.raw_reparam.q, dtype=np.float64)
-        beta_raw[1:] = beta_eff
-        return beta_raw
 
     def forward(self, beta_eff: NDArray) -> NDArray:
         """Map latent coordinates to one free block plus positive shape block."""
@@ -343,10 +322,6 @@ class SCOPSolverReparam:
         if self.shape_dim:
             mapped[self.free_dim :] = np.exp(np.clip(mapped[self.free_dim :], -500, 500))
         return mapped
-
-    def beta_tilde_eff(self, beta_eff: NDArray) -> NDArray:
-        """Effective mixed identity/positivity-transformed vector."""
-        return self.forward(beta_eff)
 
     def jacobian_diagonal(self, beta_eff: NDArray) -> NDArray:
         """Diagonal of ``d forward(beta_eff) / d beta_eff``."""
@@ -362,10 +337,6 @@ class SCOPSolverReparam:
             diagonal[self.free_dim :] = np.exp(np.clip(beta_eff[self.free_dim :], -500, 500))
         return diagonal
 
-    def jacobian(self, beta_eff: NDArray) -> NDArray:
-        """Jacobian d(forward)/d(beta_eff), shape (q_eff, q_eff)."""
-        return np.diag(self.jacobian_diagonal(beta_eff))
-
     def penalty_matrix(self) -> NDArray:
         """Penalty matrix in solver space on the shape block."""
         S = np.zeros((self.q, self.q), dtype=np.float64)
@@ -374,23 +345,6 @@ class SCOPSolverReparam:
         D = np.diff(np.eye(self.shape_dim), axis=0)
         S[self.free_dim :, self.free_dim :] = D.T @ D
         return S
-
-    def initialize_from_gamma(self, gamma: NDArray, floor: float = 1e-6) -> NDArray:
-        """Invert ``forward``: solver-space gamma_eff -> solver-space beta_eff.
-
-        ``gamma`` is the length-``q`` solver-space vector produced by
-        :meth:`forward`, not the length ``q + 1`` raw-space gamma that
-        :meth:`SCOPReparameterization.initialize_from_gamma` consumes.
-        """
-        beta = np.array(gamma, dtype=np.float64, copy=True)
-        if beta.shape != (self.q,):
-            raise ValueError(
-                f"SCOP solver-space initialize_from_gamma expects a length-{self.q} "
-                f"solver-space gamma, got shape {beta.shape}"
-            )
-        if self.shape_dim:
-            beta[self.free_dim :] = np.log(np.maximum(beta[self.free_dim :], floor))
-        return beta
 
     def qp_initialize(self, B_centered: NDArray, y: NDArray, **kwargs) -> NDArray:
         """QP initialization in solver space."""

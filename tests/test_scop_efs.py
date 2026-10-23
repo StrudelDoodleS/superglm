@@ -7474,10 +7474,8 @@ class TestJointSCOPNewton:
     @pytest.mark.parametrize("discretized", [False, True], ids=["dense", "discrete"])
     def test_joint_curvature_mixed_map_objective_matches_brute_force(self, discretized):
         """Joint line search must use mapped coefficients, not Jacobian diagonals."""
-        from superglm.solvers.scop_newton import (
-            _safe_joint_objective,
-            scop_joint_newton_step,
-        )
+        from superglm.solvers.scop_newton import scop_joint_newton_step
+        from tests._scop_objective import safe_joint_objective
 
         rng = np.random.default_rng(216)
         n = 180
@@ -7532,7 +7530,7 @@ class TestJointSCOPNewton:
         lambdas = {"x1": 0.7, "x2": 0.3}
         lambda_list = [lambdas["x1"], lambdas["x2"]]
         beta_before = np.concatenate((beta1, beta2))
-        objective_before = _safe_joint_objective(
+        objective_before = safe_joint_objective(
             scop_items,
             weights,
             response,
@@ -7549,7 +7547,7 @@ class TestJointSCOPNewton:
             groups,
         )
         beta_after = np.concatenate((results[0].beta_new, results[1].beta_new))
-        objective_after = _safe_joint_objective(
+        objective_after = safe_joint_objective(
             scop_items,
             weights,
             response,
@@ -7688,7 +7686,7 @@ class TestJointSCOPNewton:
 
     def test_joint_gradient_finite_differences(self):
         """Joint gradient should match centered finite differences."""
-        from superglm.solvers.scop_newton import _safe_joint_objective
+        from tests._scop_objective import safe_joint_objective
 
         scop_states, W, z = self._build_two_group_inputs()
         scop_items = sorted(scop_states.items())
@@ -7747,8 +7745,8 @@ class TestJointSCOPNewton:
             bm = beta_joint.copy()
             bp[k] += eps
             bm[k] -= eps
-            fp = _safe_joint_objective(scop_items, W, z, bp, slices, lambdas_list)
-            fm = _safe_joint_objective(scop_items, W, z, bm, slices, lambdas_list)
+            fp = safe_joint_objective(scop_items, W, z, bp, slices, lambdas_list)
+            fm = safe_joint_objective(scop_items, W, z, bm, slices, lambdas_list)
             grad_fd[k] = (fp - fm) / (2 * eps)
 
         np.testing.assert_allclose(grad, grad_fd, atol=1e-4)
@@ -7785,9 +7783,9 @@ class TestJointSCOPNewton:
         from superglm.solvers.scop_newton import (
             _build_joint_objective_cache,
             _joint_objective_from_gammas,
-            _safe_joint_objective,
             _safe_joint_trial_objective_delta,
         )
+        from tests._scop_objective import safe_joint_objective
 
         scop_states, W, z = self._build_two_group_inputs(discretized=True)
         scop_items = sorted(scop_states.items())
@@ -7830,7 +7828,7 @@ class TestJointSCOPNewton:
             scop_items,
             cache,
         )
-        obj_oracle = _safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
+        obj_oracle = safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
 
         np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
 

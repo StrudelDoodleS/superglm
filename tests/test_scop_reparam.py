@@ -163,16 +163,6 @@ class TestSCOPForwardMap:
         gamma = reparam.forward(np.zeros(q))
         assert gamma.shape == (q,)
 
-    def test_beta_tilde_positivity(self):
-        """beta_tilde components 2..q are always positive (exp)."""
-        rng = np.random.default_rng(42)
-        q = 8
-        beta = rng.standard_normal(q) * 5  # large values
-        reparam = build_scop_reparam(q, direction="increasing")
-        beta_tilde = reparam.beta_tilde(beta)
-        assert beta_tilde[0] == beta[0]
-        assert np.all(beta_tilde[1:] > 0)
-
 
 class TestSCOPJacobian:
     """Jacobian d(gamma)/d(beta) -- lower-triangular cumulative."""
