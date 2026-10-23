@@ -13,9 +13,15 @@ stored carrier sum within the bound below rather than hashed.
 Identifiers written before this rule (tag ``/v1``) also hashed the carrier.
 They cannot be recomputed portably, so they are never recomputed: such an
 identifier is accepted when its family tag matches the rebound plan's and the
-carrier sum passes the bound. The response and weight inputs it hashed are
-still covered exactly, by the stored weight root digest and the artifact's
-response digest.
+carrier sum passes the bound. The loader still checks the retained weights
+exactly against the stored weight root digest. The retained response is tied
+to such a fit only through the carrier sum: the artifact's response digest
+binds the stored response to the manifest, not to the fit. The sum does not
+change when response rows are reordered, does not depend on the response
+where the carrier depends only on weights or constants (``GaussianLS``'s
+``0.5 log w``, ``TwoPieceNormalLSS``'s ``-m 0.5 log(2 pi)``), and admits any
+change within the bound. Refitting records a ``/v2`` identifier, which binds
+the response exactly.
 
 Bound. Write ``u = 2**-53`` and ``gamma_k = k u / (1 - k u)`` (Higham,
 *Accuracy and Stability of Numerical Algorithms*, 2nd ed., 2002, sections 2.2

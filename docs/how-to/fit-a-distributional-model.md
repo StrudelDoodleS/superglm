@@ -1322,10 +1322,19 @@ equality, any change to what the manifest describes must be a MAJOR bump — so 
 manifest mismatch always means corruption or tampering, never age. A model
 also loads on a machine other than the one that saved it. The manifest binds
 what the artifact stores, not tolerances the loader recomputes with its own
-BLAS. The fit's likelihood identity hashes the response and weights as stored.
-The terms the loader recomputes from them with `log`, such as `-log y`, are
-checked against the saved fit within a rounding bound, because `log` can differ
-by an ulp between CPUs and maths libraries. The
+BLAS. A model fitted by this build names its likelihood by the response and
+weights as stored, and the loader checks both exactly. The terms the loader
+recomputes from them with `log`, such as `-log y`, are checked against the
+saved fit within a rounding bound, because `log` can differ by an ulp between
+CPUs and maths libraries. A model fitted by an earlier build, with a family
+whose likelihood has such terms, named its likelihood with those terms
+included, which another machine cannot reproduce; it keeps that name when
+saved again. For such a model the loader checks the weights exactly, but
+checks the response only through the sum of those terms, within the same
+bound. That sum does not change when response rows are reordered, and for
+`GaussianLS` with prior weights and for `TwoPieceNormalLSS` it does not
+involve the response at all. Fitting the model again and saving it restores
+the exact check. The
 `public_api` block carries its own `schema_version` for the SuperLSS wrapper
 metadata alone; it moves independently of the envelope's, and both are written
 into every artifact so that whichever layer refuses a stale artifact names its
