@@ -197,8 +197,9 @@ def warmup() -> None:
     instead, because few fits reach them and they take seconds to compile: the
     third and fourth derivatives a ``SuperLSS`` fit needs only when a smoothing
     parameter reaches its endpoint, and a fit's diagnostics (a diagnostic
-    plot's smoother, a structured ``FactorSmooth`` fit's hat diagonal). Each
-    then joins the cache like the rest. Numba keys its cache to the CPU model,
+    plot's smoother, a structured ``FactorSmooth`` fit's hat diagonal), and
+    so do a few fallbacks that rarely run. Each then joins the cache like the
+    rest. Numba keys its cache to the CPU model,
     so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """

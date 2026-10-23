@@ -107,10 +107,12 @@ notebooks and jobs read the cache the script filled.
 52 seconds on an empty cache, once per superglm version and node type, and
 about 0.6 seconds against a filled cache. Numba keys its cache
 to the CPU model, so a cache built on one node type compiles again on
-another; the entries for both are kept side by side. After `warmup()`, a
-first fit compiles nothing, for every family and link, `SuperGLM` and
-`SuperLSS`, exact and binned, and with `RandomEffect` and `FactorSmooth`
-terms (`basis="fs"` and `"sz"`). Two groups of kernels are left to the first
+another; the entries for both are kept side by side. After `warmup()`, the
+first fits we measured compiled nothing: every family and link, `SuperGLM`
+and `SuperLSS`, exact and binned, and with `RandomEffect` and `FactorSmooth`
+terms (`basis="fs"` and `"sz"`). A few fallbacks that rarely run, such as
+the sum taken when a product leaves float64's range, also compile on first
+use. Two groups of kernels are left to the first
 call that uses them, because few fits do and they take seconds to compile:
 the third and fourth derivatives a `SuperLSS` fit needs only when a
 smoothing parameter reaches its endpoint (7 seconds across the Tweedie,

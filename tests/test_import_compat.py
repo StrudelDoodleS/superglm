@@ -286,13 +286,45 @@ for first in (left, readonly(left.copy())[0], np.asfortranarray(left)):
 
 entry_points = signatures(dispatchers)
 superglm.warmup()
+rewarmed = signatures(dispatchers)
+
+# First fits: a binned SuperGLM fit and binned Tweedie and negative binomial
+# SuperLSS fits, each with a spline, a categorical and a RandomEffect of 300
+# levels (the structured engine's leaf pass).
+import warnings
+
+import pandas as pd
+from superglm import cat, re, s
+
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(7)
+n = 4000
+frame = pd.DataFrame({
+    "x": rng.uniform(0, 1, n),
+    "g": rng.choice(list("pqrs"), n),
+    "u": rng.integers(0, 300, n).astype(str),
+})
+mu = np.exp(np.sin(3 * frame.x) + rng.normal(0, 0.3, 300)[frame.u.astype(int)])
+counts = rng.poisson(mu).astype(np.float64)
+amounts = rng.gamma(1.5, mu / 1.5) * (rng.uniform(size=n) < 0.6)
+terms = (s("x", kind="cr", k=8), cat("g"), re("u"))
+superglm.SuperGLM(family="poisson", discrete=True, terms=list(terms)).fit_reml(frame, counts)
+tweedie = superglm.TweedieLSS()
+model = superglm.SuperLSS(tweedie, tweedie.mu(*terms), tweedie.phi(), tweedie.p(), discrete=True)
+model.fit_reml(frame, amounts)
+negative_binomial = superglm.NegativeBinomialLS()
+model = superglm.SuperLSS(
+    negative_binomial, negative_binomial.mean(*terms), negative_binomial.theta(), discrete=True
+)
+model.fit_reml(frame, counts)
 print(json.dumps({
     "problems": problems,
     "inlined": sorted(name for name, value in dispatchers.items() if is_inlined(value)),
     "at_import": {name: found for name, found in at_import.items() if found},
     "warmed": warmed,
     "entry_points": entry_points,
-    "rewarmed": signatures(dispatchers),
+    "rewarmed": rewarmed,
+    "fitted": signatures(dispatchers),
 }))
 """
 
@@ -311,8 +343,10 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     ``_FIRST_USE``.  A listed kernel that warmup compiles, or that no longer
     exists, fails as well, so the list cannot rot.  The production entry points
     then run with the layouts and flags their callers pass and must reuse
-    warmup's signatures, and a second warmup compiles nothing.  ``warmup()``
-    stays a bare call: import compiles nothing.
+    warmup's signatures, a second warmup compiles nothing, and first fits
+    (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
+    spline, a categorical and a structured RandomEffect) compile nothing outside
+    ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
     """
     assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(
@@ -322,6 +356,7 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
         text=True,
         cwd=Path(__file__).resolve().parents[1],
         env=dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / "numba-cache")),
+        timeout=1800,  # a cold warmup takes about a minute; this bounds a hang
     )
     assert completed.returncode == 0, completed.stderr
     census = json.loads(completed.stdout)
@@ -349,6 +384,8 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     )
     assert not _changed(warmed, census["entry_points"]), "a first fit's operands compiled anew"
     assert not _changed(warmed, census["rewarmed"]), "a second warmup() compiled anew"
+    first_fits = sorted(set(_changed(census["rewarmed"], census["fitted"])) - _FIRST_USE.keys())
+    assert not first_fits, f"a first fit after warmup() compiled {first_fits}"
 
 
 def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():
