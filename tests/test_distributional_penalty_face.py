@@ -22,6 +22,7 @@ from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
 
 from ._distributional_weights import resolved_prior
+from ._telemetry import assert_no_fallback
 
 
 class _ObservedOnlyGaussian:
@@ -734,7 +735,7 @@ def test_face_execution_remains_generic_for_an_observed_only_family() -> None:
 
     assert result.converged is True
     assert result.terminal_curvature.actual_source == "observed"
-    result.terminal_curvature.assert_no_fallback()
+    assert_no_fallback(result.terminal_curvature)
     np.testing.assert_allclose(
         result.coefficients[component.group_sl],
         0.0,

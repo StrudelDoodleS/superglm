@@ -13,6 +13,8 @@ from superglm.distributional.curvature import (
 )
 from superglm.distributional.telemetry import CurvatureTelemetry
 
+from ._telemetry import assert_no_fallback
+
 
 @pytest.mark.parametrize("source", ["observed", "fisher", "hybrid"])
 def test_each_curvature_request_accepts_a_valid_family_supplied_matrix(source: str) -> None:
@@ -29,7 +31,7 @@ def test_each_curvature_request_accepts_a_valid_family_supplied_matrix(source: s
     assert decision.telemetry.reason is None
     assert decision.telemetry.rank == 2
     assert decision.telemetry.fallback_count == 0
-    decision.telemetry.assert_no_fallback()
+    assert_no_fallback(decision.telemetry)
 
 
 def test_curvature_is_symmetrized_before_diagnostics_and_publication() -> None:
@@ -96,7 +98,7 @@ def test_material_observed_indefiniteness_requires_one_retry_before_fallback() -
     assert second.telemetry.fallback_count == 1
     assert second.state == CurvaturePolicyState(retry_attempted=False, fallback_count=1)
     with pytest.raises(RuntimeError, match="fallback"):
-        second.telemetry.assert_no_fallback()
+        assert_no_fallback(second.telemetry)
 
 
 def test_tighter_retry_can_accept_observed_curvature_without_fallback() -> None:
@@ -113,7 +115,7 @@ def test_tighter_retry_can_accept_observed_curvature_without_fallback() -> None:
     assert second.telemetry.actual_source == "observed"
     assert second.telemetry.reason == "accepted_after_retry"
     assert second.telemetry.fallback_count == 0
-    second.telemetry.assert_no_fallback()
+    assert_no_fallback(second.telemetry)
 
 
 @pytest.mark.parametrize("source", ["observed", "hybrid"])
@@ -267,7 +269,7 @@ def test_repeated_indefiniteness_without_fisher_accepts_the_nearest_semidefinite
     assert second.telemetry.fallback_count == 1
     assert second.telemetry.to_dict()["actual_source"] == "nearest_semidefinite"
     with pytest.raises(RuntimeError, match="fallback"):
-        second.telemetry.assert_no_fallback()
+        assert_no_fallback(second.telemetry)
 
 
 def test_semidefinite_fallback_is_not_built_when_fisher_is_usable() -> None:

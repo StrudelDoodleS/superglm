@@ -74,12 +74,3 @@ class CurvatureTelemetry:
         if self.matrix_kind is not None:
             result["matrix_kind"] = self.matrix_kind
         return result
-
-    def assert_no_fallback(self) -> None:
-        """Reject telemetry that cannot certify an algorithm-matched fixture."""
-        if self.fallback_count > 0 or self.actual_source != self.requested_source:
-            raise RuntimeError(
-                "algorithm-matched certification forbids curvature fallback "
-                f"({self.requested_source} -> {self.actual_source}, "
-                f"fallback_count={self.fallback_count})"
-            )
