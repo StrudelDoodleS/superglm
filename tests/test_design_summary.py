@@ -259,3 +259,43 @@ def test_design_summary_reports_specialised_storage_without_materializing(case, 
             "contains-compressed-group" if compressed else "specialised-group-representation"
         )
         assert row["route_reason"] == expected_reason
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_design_summary_describes_factor_smooth_terms(discrete):
+    from superglm import FactorSmooth
+    from superglm.group_matrix import FactorSmoothGroupMatrix
+
+    X, y = _design_data()
+    X = X.assign(level=np.resize(np.array(["a", "b", "c", "d"], dtype=object), len(X)))
+    model = SuperGLM(
+        family="gaussian",
+        discrete=discrete,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+        interactions=[FactorSmooth("x", group="level", basis="fs", k=5)],
+    ).fit_reml(X[["x", "level"]], y)
+
+    summary = model.design_summary()
+
+    index = next(
+        i
+        for i, group in enumerate(model._dm.group_matrices)
+        if isinstance(group, FactorSmoothGroupMatrix)
+    )
+    row = summary.iloc[index]
+    matrix = model._dm.group_matrices[index]
+    assert summary.columns.tolist() == EXPECTED_COLUMNS
+    assert row["n_columns"] == model._groups[index].size
+    assert not bool(row["ordinary_tabmat_partition"])
+    if discrete:
+        assert row["representation"] == "discretized-factor-smooth"
+        assert bool(row["compressed"])
+        assert row["storage_rows"] == matrix.B_unique.shape[0]
+        assert row["specialised_discrete_route"] == "binned-factor-smooth"
+        assert row["route_reason"] == "contains-compressed-group"
+    else:
+        assert row["representation"] == "factor-smooth"
+        assert not bool(row["compressed"])
+        assert row["storage_rows"] == matrix.B.shape[0] == len(X)
+        assert row["specialised_discrete_route"] is None
+        assert row["route_reason"] == "specialised-group-representation"
