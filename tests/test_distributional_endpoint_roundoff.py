@@ -633,8 +633,9 @@ def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
     tolerance = fit.config.tolerance
     # A score along the penalized direction, above the bare tolerance and
     # inside its floor, whose Newton correction is far below the tolerance.
-    score = np.array(fit.terminal_score, copy=True)
-    score[:2] = (1.0e-3, -1.0e-3)
+    # The fit's own scale score is not kept: a decrement stop bounds it through
+    # the curvature, not by its floor.
+    score = np.array([1.0e-3, -1.0e-3, 0.0])
     within = replace(fit, terminal_score=score, convergence_reason="score")
     assert result_module._assessment_retained_kkt_ratio(within) > tolerance
     assert result_module._assessment_is_numerically_stationary(within, tolerance)
