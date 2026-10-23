@@ -1604,39 +1604,6 @@ class TestDiscreteCachedSolve:
         assert model._reml_profile["reml_n_linesearch_fits"] == solve_calls
         assert model._reml_profile["reml_n_linesearch_full_evals"] == solve_calls
 
-    def test_penalty_block_trace_matches_materialized_hessian_product(self):
-        from superglm.reml.gradient import _penalty_block_trace
-
-        rng = np.random.default_rng(12)
-        p = 14
-        A = rng.standard_normal((p, p))
-        H_inv = np.linalg.inv(A @ A.T + np.eye(p))
-        slices = [slice(1, 5), slice(7, 12)]
-        omegas = []
-        lambdas = [0.8, 2.3]
-        for sl in slices:
-            q = sl.stop - sl.start
-            B = rng.standard_normal((q, q))
-            omegas.append(B @ B.T)
-
-        for i, sl_i in enumerate(slices):
-            for j, sl_j in enumerate(slices):
-                F_i = np.zeros((p, p))
-                F_i[:, sl_i] = H_inv[:, sl_i] @ (lambdas[i] * omegas[i])
-                F_j = np.zeros((p, p))
-                F_j[:, sl_j] = H_inv[:, sl_j] @ (lambdas[j] * omegas[j])
-                materialized = float(np.sum(F_i * F_j.T))
-
-                compact = _penalty_block_trace(
-                    H_inv,
-                    sl_i,
-                    lambdas[i] * omegas[i],
-                    sl_j,
-                    lambdas[j] * omegas[j],
-                )
-
-                np.testing.assert_allclose(compact, materialized, rtol=1e-12, atol=1e-12)
-
     def test_profiled_cached_solve_matches_augmented_system(self):
         from superglm.reml.discrete import _solve_cached_profiled_system
 

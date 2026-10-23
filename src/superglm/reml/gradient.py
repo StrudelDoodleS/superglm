@@ -32,19 +32,6 @@ from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.types import PenaltyComponent
 
 
-def _penalty_block_trace(
-    XtWX_S_inv: NDArray,
-    sl_i: slice,
-    weighted_omega_i: NDArray,
-    sl_j: slice,
-    weighted_omega_j: NDArray,
-) -> float:
-    """Return tr(H^-1 dS_i H^-1 dS_j) without materialising p x p blocks."""
-    H_ji = XtWX_S_inv[sl_j, :][:, sl_i]
-    H_ij = XtWX_S_inv[sl_i, :][:, sl_j]
-    return float(np.trace(H_ji @ weighted_omega_i @ H_ij @ weighted_omega_j))
-
-
 def _same_slice(sl_i: slice, sl_j: slice) -> bool:
     return bool(sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step)
 

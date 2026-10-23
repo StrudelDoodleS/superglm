@@ -1225,8 +1225,8 @@ class TestBackendLinearAlgebraInvariants:
 
         np.testing.assert_allclose(mapped, beta, rtol=0.0, atol=0.0)
 
-    def test_reml_hessian_uses_same_slice_penalty_trace_fast_path(self, monkeypatch):
-        """Same-slice multi-penalty Hessian traces should avoid generic block tracing."""
+    def test_reml_hessian_of_same_slice_penalties_is_symmetric(self):
+        """Two penalties on one slice give a symmetric 2 x 2 Hessian."""
         import superglm.reml.gradient as gradient
         from superglm.types import PenaltyComponent
 
@@ -1262,11 +1262,6 @@ class TestBackendLinearAlgebraInvariants:
                 eigvals_omega=np.array([]),
             ),
         ]
-
-        def fail_block_trace(*args, **kwargs):
-            raise AssertionError("same-slice penalties should use the cached fast path")
-
-        monkeypatch.setattr(gradient, "_penalty_block_trace", fail_block_trace)
 
         hess = gradient.reml_direct_hessian(
             [],
