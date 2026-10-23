@@ -329,6 +329,14 @@ for smooths in (
     [s("x", kind="ps", k=7, m=2), term_interaction(FactorSmooth("x", group="h", basis="sz", kind="ps", k=5, m=2))],
 ):
     superglm.SuperGLM(family="poisson", discrete=True, terms=smooths).fit_reml(frame, counts)
+
+# An exact gamma (log link) fs fit: observed curvature takes the signed half of
+# the leaf pass (the signed leaf segments and trials), and an exact term its
+# sorted CSR basis rows, raw moments and compensated level sums.
+exact = frame.iloc[:2000]
+superglm.SuperGLM(
+    family="gamma", terms=[term_interaction(FactorSmooth("x", group="h", basis="fs", k=5))]
+).fit_reml(exact, rng.gamma(2.0, mu.to_numpy()[:2000] / 2.0))
 print(json.dumps({
     "problems": problems,
     "inlined": sorted(name for name, value in dispatchers.items() if is_inlined(value)),
@@ -357,8 +365,9 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     then run with the layouts and flags their callers pass and must reuse
     warmup's signatures, a second warmup compiles nothing, and first fits
     (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
-    spline, a categorical and a structured RandomEffect; and binned ``fs`` and
-    ``sz`` factor smooths) compile nothing outside ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
+    spline, a categorical and a structured RandomEffect; binned ``fs`` and
+    ``sz`` factor smooths; and an exact gamma ``fs`` fit, which takes the
+    signed rows) compile nothing outside ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
     """
     assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(
