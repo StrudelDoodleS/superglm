@@ -74,14 +74,14 @@ LGAMMA_ERROR_UNITS = 16
 
 
 class CarrierRounding(NamedTuple):
-    """What a built-in plan certifies about its platform-dependent carrier."""
+    """What a built-in plan certifies about its platform-dependent carrier.
 
-    legacy_identifier_tag: str | None
-    """The ``Family/v1`` tag whose stored identifiers hashed the carrier.
-
-    ``None`` for a family that never wrote such identifiers. A stored
-    identifier under this tag is accepted on its tag and carrier sum alone, so
-    the tag must not be one the plan's own identifiers carry.
+    The plan names the ``Family/v1`` tag whose stored identifiers hashed the
+    carrier in its own ``legacy_identifier_tag`` attribute, so the tag can be
+    checked without building the carrier. A plan without the attribute, or
+    with ``None``, never wrote such identifiers. A stored identifier under
+    that tag is accepted on its tag and carrier sum alone, so the tag must not
+    be one the plan's own identifiers carry.
     """
 
     carrier: NDArray[np.float64]
@@ -158,9 +158,9 @@ def rebound_plan_mismatch(
         # A plan without a certified carrier identifies itself exactly.
         return None if live_identifier == stored_identifier else "identifier"
     rounding = carrier_rounding()
-    if _carrier_rounding_problem(rounding, live_identifier) is not None:
+    if not isinstance(rounding, CarrierRounding) or legacy_identifier_problem(plan) is not None:
         return "carrier certificate"
-    tag = rounding.legacy_identifier_tag
+    tag = getattr(plan, "legacy_identifier_tag", None)
     if live_identifier != stored_identifier and (
         tag is None or not _is_legacy_identifier(stored_identifier, tag)
     ):
@@ -176,27 +176,21 @@ def rebound_plan_mismatch(
     return None
 
 
-def carrier_rounding_problem(plan: object) -> str | None:
-    """Why ``plan``'s ``carrier_rounding()`` cannot certify it, or ``None``.
+def legacy_identifier_problem(plan: object) -> str | None:
+    """Why ``plan``'s ``legacy_identifier_tag`` cannot be trusted, or ``None``.
 
-    A plan without the method certifies nothing and identifies itself exactly.
+    It reads only the tag and the plan identifier, both strings, so a fit can
+    check it without building the carrier.
     """
-    carrier_rounding = getattr(plan, "carrier_rounding", None)
-    if carrier_rounding is None:
-        return None
-    return _carrier_rounding_problem(carrier_rounding(), plan.plan_identifier)  # type: ignore[attr-defined]
-
-
-def _carrier_rounding_problem(rounding: object, live_identifier: str) -> str | None:
-    if not isinstance(rounding, CarrierRounding):
-        return "family likelihood plan carrier_rounding() must return a CarrierRounding"
-    tag = rounding.legacy_identifier_tag
+    tag = getattr(plan, "legacy_identifier_tag", None)
     if tag is None:
         return None
+    live_identifier = plan.plan_identifier  # type: ignore[attr-defined]
     if not isinstance(tag, str) or not tag or live_identifier.startswith(f"{tag}:"):
         return (
-            "family likelihood plan carrier_rounding() names a legacy_identifier_tag that "
-            "its own identifiers carry; pass None for a family with no legacy identifiers"
+            "family likelihood plan legacy_identifier_tag must be None or a nonempty tag "
+            "that its own identifiers do not carry; use None for a family with no legacy "
+            "identifiers"
         )
     return None
 
@@ -213,8 +207,8 @@ __all__ = [
     "LGAMMA_ERROR_UNITS",
     "LOG_ERROR_UNITS",
     "CarrierRounding",
-    "carrier_rounding_problem",
     "carrier_rounding_scale",
     "carrier_sum_bound",
+    "legacy_identifier_problem",
     "rebound_plan_mismatch",
 ]

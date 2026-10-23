@@ -27,7 +27,7 @@ from superglm.distributional.fit_state import (
 )
 from superglm.distributional.inference import JointInference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
-from superglm.distributional.likelihood_identity import carrier_rounding_problem
+from superglm.distributional.likelihood_identity import legacy_identifier_problem
 from superglm.distributional.prediction_design import (
     _as_contribution,
     _score_feature,
@@ -577,7 +577,7 @@ def _fit_candidate(
         raise UnsupportedLikelihoodContractError(
             "the family likelihood changed the fitted likelihood weights"
         )
-    certificate_problem = carrier_rounding_problem(likelihood_plan)
+    certificate_problem = legacy_identifier_problem(likelihood_plan)
     if certificate_problem is not None:
         raise UnsupportedLikelihoodContractError(certificate_problem)
     with measure_phase(phase_recorder, "predictor_compilation"):

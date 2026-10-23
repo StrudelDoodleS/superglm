@@ -307,16 +307,6 @@ def test_a_legacy_identifier_is_accepted_only_for_its_own_family() -> None:
     assert rebound_plan_mismatch(plan, f"GammaLS/v1:{digest}", stored + 1.0) == "carrier"
 
 
-def _legacy_tag(tag: str | None):
-    """``GammaLikelihoodPlan.carrier_rounding`` declaring ``tag`` as its legacy tag."""
-    real = gamma_module.GammaLikelihoodPlan.carrier_rounding
-
-    def carrier_rounding(self):
-        return real(self)._replace(legacy_identifier_tag=tag)
-
-    return carrier_rounding
-
-
 def test_a_legacy_tag_that_names_the_plans_own_identifiers_is_refused(monkeypatch) -> None:
     """Such a tag would accept any identifier carrying it, on its tag and carrier sum alone."""
     from superglm.distributional.likelihood_identity import rebound_plan_mismatch
@@ -332,18 +322,80 @@ def test_a_legacy_tag_that_names_the_plans_own_identifiers_is_refused(monkeypatc
     digest = "0123456789abcdef" * 4
     assert identifier.startswith("GammaLS/v2:") and identifier != f"GammaLS/v2:{digest}"
     with monkeypatch.context() as patch:
-        patch.setattr(
-            gamma_module.GammaLikelihoodPlan, "carrier_rounding", _legacy_tag("GammaLS/v2")
-        )
+        patch.setattr(gamma_module.GammaLikelihoodPlan, "legacy_identifier_tag", "GammaLS/v2")
         assert rebound_plan_mismatch(plan, f"GammaLS/v2:{digest}", stored) == "carrier certificate"
         with pytest.raises(UnsupportedLikelihoodContractError, match="legacy_identifier_tag"):
             _fit("gamma_prior")
     with monkeypatch.context() as patch:
         # A family that never wrote legacy identifiers declares none.
-        patch.setattr(gamma_module.GammaLikelihoodPlan, "carrier_rounding", _legacy_tag(None))
+        patch.setattr(gamma_module.GammaLikelihoodPlan, "legacy_identifier_tag", None)
         assert rebound_plan_mismatch(plan, identifier, stored) is None
         assert rebound_plan_mismatch(plan, f"GammaLS/v1:{digest}", stored) == "identifier"
         assert dict(_fit("gamma_prior")[0].coef_) == dict(model.coef_)
+
+
+def test_a_chunked_fit_checks_the_legacy_tag_without_building_the_carrier(monkeypatch) -> None:
+    """A fit reads the legacy tag as a string; only save and load build the carrier.
+
+    A chunked ``GaussianLS`` plan keeps no carrier, and binding it evaluates
+    each carrier block once for the weight digest. The fit evaluates no other
+    block and never calls ``carrier_rounding()``, which concatenates all of them.
+    """
+    from superglm.distributional import model as model_module
+    from superglm.distributional.predictor import Predictor
+    from superglm.features import Numeric
+
+    from .bound_predictor_fixtures import model_from_templates
+
+    counts = {"rounding": 0, "blocks": 0, "binding blocks": 0}
+    roots = []
+    plan_class = gaussian_module.GaussianLikelihoodPlan
+    real_rounding, real_block = plan_class.carrier_rounding, gaussian_module._carrier_block
+    real_bind, real_fit = sg.GaussianLS.bind_chunked_likelihood, model_module.fit_dense_fixed_lambda
+
+    def counted_rounding(self):
+        counts["rounding"] += 1
+        return real_rounding(self)
+
+    def counted_block(*args):
+        counts["blocks"] += 1
+        return real_block(*args)
+
+    def counted_bind(self, *args, **kwargs):
+        before = counts["blocks"]
+        plan = real_bind(self, *args, **kwargs)
+        counts["binding blocks"] += counts["blocks"] - before
+        return plan
+
+    def capture(family, layout, response, plan, *args, **kwargs):
+        roots.append(plan)
+        return real_fit(family, layout, response, plan, *args, **kwargs)
+
+    monkeypatch.setattr(plan_class, "carrier_rounding", counted_rounding)
+    monkeypatch.setattr(gaussian_module, "_carrier_block", counted_block)
+    monkeypatch.setattr(sg.GaussianLS, "bind_chunked_likelihood", counted_bind)
+    monkeypatch.setattr(model_module, "fit_dense_fixed_lambda", capture)
+    n = 2 * gaussian_module._CARRIER_BLOCK_ROWS + 1
+    rng = np.random.default_rng(314)
+    x = np.linspace(-1.0, 1.0, n)
+    frame, response, weights = pd.DataFrame({"x": x}), 0.5 * x + rng.normal(size=n), x + 2.0
+
+    def fit():
+        model_from_templates(
+            family=sg.GaussianLS(),
+            predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {})),
+            discrete=True,
+        ).fit(frame, response, weights)
+
+    fit()
+    assert len(roots) == 1 and roots[0].parameter_independent_carrier is None
+    assert counts == {"rounding": 0, "blocks": 3, "binding blocks": 3}
+    # The string check still refuses a legacy tag that the live identifiers carry.
+    live_tag = roots[0].plan_identifier.split(":")[0]
+    monkeypatch.setattr(plan_class, "legacy_identifier_tag", live_tag)
+    with pytest.raises(UnsupportedLikelihoodContractError, match="legacy_identifier_tag"):
+        fit()
+    assert counts["rounding"] == 0
 
 
 @pytest.fixture(scope="module")

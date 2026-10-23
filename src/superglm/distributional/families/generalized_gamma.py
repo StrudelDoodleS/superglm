@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -114,6 +114,8 @@ def _validated_scale_floor(value: object) -> float:
 class GeneralizedGammaLikelihoodPlan:
     """One exact-response generalized gamma law and immutable carriers."""
 
+    legacy_identifier_tag: ClassVar[str] = "GeneralizedGammaLSS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: GeneralizedGammaRowLaw
     family_config: tuple[str, str, str]
@@ -171,7 +173,7 @@ class GeneralizedGammaLikelihoodPlan:
             else 1.0
         )
         scale = carrier_rounding_scale(carrier, multiplier, 2.0 * abs(_HALF_LOG_TWO_PI))
-        return CarrierRounding("GeneralizedGammaLSS/v1", carrier, scale, LOG_ERROR_UNITS)
+        return CarrierRounding(carrier, scale, LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> GeneralizedGammaLikelihoodPlan:
         return GeneralizedGammaLikelihoodPlan._from_prepared(

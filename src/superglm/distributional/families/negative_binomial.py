@@ -84,6 +84,8 @@ def _plan_identifier(weights, response, count) -> str:
 class NegativeBinomialLikelihoodPlan:
     """Prepared NB2 rows sharing one resolved likelihood-weight carrier."""
 
+    legacy_identifier_tag: ClassVar[str] = "NegativeBinomialLS/v1"
+
     weights: ResolvedLikelihoodWeights
     exact_response: NDArray[np.float64]
     exact_count: NDArray[np.float64]
@@ -109,7 +111,7 @@ class NegativeBinomialLikelihoodPlan:
             else 1.0
         )
         scale = carrier_rounding_scale(carrier, multiplier, 1.0)
-        return CarrierRounding("NegativeBinomialLS/v1", carrier, scale, LGAMMA_ERROR_UNITS)
+        return CarrierRounding(carrier, scale, LGAMMA_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> NegativeBinomialLikelihoodPlan:
         return type(self)._from_prepared(

@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -193,6 +193,8 @@ GaussianInvariant = Literal["conditional-location", "literal-row-replication"]
 class GaussianLikelihoodPlan:
     """One bound Gaussian likelihood law and its positional weight carrier."""
 
+    legacy_identifier_tag: ClassVar[str] = "GaussianLS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: GaussianRowLaw
     invariant: GaussianInvariant
@@ -312,9 +314,7 @@ class GaussianLikelihoodPlan:
                     for start in range(0, len(values), _CARRIER_BLOCK_ROWS)
                 ]
             )
-        return CarrierRounding(
-            "GaussianLS/v1", carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS
-        )
+        return CarrierRounding(carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> GaussianLikelihoodPlan:
         return GaussianLikelihoodPlan(

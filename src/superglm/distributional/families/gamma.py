@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -106,6 +106,8 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 class GammaLikelihoodPlan:
     """One exact-response Gamma likelihood law and immutable row carriers."""
 
+    legacy_identifier_tag: ClassVar[str] = "GammaLS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: GammaRowLaw
     invariant: GammaInvariant
@@ -161,9 +163,7 @@ class GammaLikelihoodPlan:
     def carrier_rounding(self) -> CarrierRounding:
         """The carrier ``-log y`` (times ``w`` for frequency weights) varies by platform."""
         carrier = self.parameter_independent_carrier
-        return CarrierRounding(
-            "GammaLS/v1", carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS
-        )
+        return CarrierRounding(carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> GammaLikelihoodPlan:
         return GammaLikelihoodPlan._from_prepared(

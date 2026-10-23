@@ -420,17 +420,20 @@ supported extension surface and `to_bytes()` refuses safely.
 A stored model must load on a machine other than the one that fitted it. The
 loader rebinds the plan from the retained response and weights and compares
 `plan_identifier` with the saved one, so the identifier hashes only inputs
-stored exactly: tags, the weight digest and the response. A carrier the plan
+stored exactly: tags, the weight digest and, where the plan keeps one, the
+response digest. A carrier the plan
 computes with `log` or `gammaln` rounds differently on other CPUs and C
 libraries, so it stays out of the identifier. A plan with such a carrier
 implements `carrier_rounding()`, returning a
 `superglm.distributional.likelihood_identity.CarrierRounding`, and the loader
 checks the carrier's sum against the fit's within the bound derived in that
-module. Its `legacy_identifier_tag` is `None` for a new family. A built-in
-family whose saved identifiers once hashed the carrier names their tag there,
-such as `GammaLS/v1`, so those identifiers load by tag and carrier sum. A fit
-refuses a plan whose legacy tag is the tag of its own identifiers, because
-the loader would then accept any identifier under that tag.
+module. A new family's plan leaves out `legacy_identifier_tag`, or sets it to
+`None`. A built-in family whose saved identifiers once hashed the carrier
+names their tag in that plan attribute, such as `GammaLS/v1`, so those
+identifiers load by tag and carrier sum. The tag is a plain attribute, not a
+`CarrierRounding` field, so a fit can check it without building the carrier:
+a fit refuses a plan whose legacy tag is the tag of its own identifiers,
+because the loader would then accept any identifier under that tag.
 
 ## Evidence checklist
 

@@ -275,6 +275,10 @@ class TwoPieceLikelihoodPlan:
         ).encode("utf-8")
         return f"{self.family_name}/v2:{hashlib.sha256(payload).hexdigest()}"
 
+    @property
+    def legacy_identifier_tag(self) -> str:
+        return f"{self.family_name}/v1"
+
     def carrier_rounding(self) -> CarrierRounding:
         """The carrier ``-m (log y + 0.5 log 2 pi)``, or ``-m 0.5 log 2 pi``, varies by platform."""
         carrier = self.parameter_independent_carrier
@@ -284,7 +288,7 @@ class TwoPieceLikelihoodPlan:
             else 1.0
         )
         scale = carrier_rounding_scale(carrier, multiplier, 2.0 * abs(_HALF_LOG_TWO_PI))
-        return CarrierRounding(f"{self.family_name}/v1", carrier, scale, LOG_ERROR_UNITS)
+        return CarrierRounding(carrier, scale, LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> TwoPieceLikelihoodPlan:
         return TwoPieceLikelihoodPlan._from_prepared(

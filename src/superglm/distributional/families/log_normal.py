@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -109,6 +109,8 @@ def _validated_scale_floor(value: object) -> float:
 class LogNormalLikelihoodPlan:
     """One exact-response log-normal law and immutable carriers."""
 
+    legacy_identifier_tag: ClassVar[str] = "LogNormalLS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: LogNormalRowLaw
     family_config: tuple[str, str, str]
@@ -166,7 +168,7 @@ class LogNormalLikelihoodPlan:
             else 1.0
         )
         scale = carrier_rounding_scale(carrier, multiplier, 2.0 * abs(_HALF_LOG_TWO_PI))
-        return CarrierRounding("LogNormalLS/v1", carrier, scale, LOG_ERROR_UNITS)
+        return CarrierRounding(carrier, scale, LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> LogNormalLikelihoodPlan:
         return LogNormalLikelihoodPlan._from_prepared(
