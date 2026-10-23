@@ -1,9 +1,12 @@
 """Check that a rebound likelihood plan is the one a saved fit recorded.
 
-A built-in plan identifier hashes the plan's inputs as stored: family and
-row-law tags, the resolved weight digest and the response digest. Those are
-exact on every platform, so a rebound plan reproduces the identifier
-bit for bit. The parameter-independent carrier (``-log y``, ``0.5 log w``,
+A built-in plan identifier hashes the plan's inputs as stored: its family
+and row-law tags, the resolved weight digest and, for every family except
+``GaussianLS``, the response digest (``NegativeBinomialLS`` also hashes the
+count digest). ``GaussianLS``'s plan stores no response, so its identifier
+binds the weights and not the response. Those inputs are exact on every
+platform, so a rebound plan reproduces the identifier bit for bit. The
+parameter-independent carrier (``-log y``, ``0.5 log w``,
 ``-log(count!)`` and similar) is a transcendental function of those inputs.
 IEEE 754 recommends but does not require a correctly rounded ``log``, and
 NumPy dispatches different SIMD loops on different CPUs, so the carrier can
@@ -21,7 +24,9 @@ change when response rows are reordered, does not depend on the response
 where the carrier depends only on weights or constants (``GaussianLS``'s
 ``0.5 log w``, ``TwoPieceNormalLSS``'s ``-m 0.5 log(2 pi)``), and admits any
 change within the bound. Refitting records a ``/v2`` identifier, which binds
-the response exactly.
+the weights exactly and, for every family except ``GaussianLS``, the response
+exactly too; a ``GaussianLS`` identifier of either version never binds the
+response.
 
 Bound. Write ``u = 2**-53`` and ``gamma_k = k u / (1 - k u)`` (Higham,
 *Accuracy and Stability of Numerical Algorithms*, 2nd ed., 2002, sections 2.2
