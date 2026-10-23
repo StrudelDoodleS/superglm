@@ -829,7 +829,7 @@ def test_a_size_coefficient_the_terminal_rank_cannot_estimate_is_disclosed(
 
 
 def test_a_singular_direction_outside_the_size_block_is_not_disclosed() -> None:
-    """The gate attributes the null direction: one in the mean block says nothing about the size."""
+    """The gate reads only the size block: a null direction in the mean block says nothing about it."""
     frame, fit_state = _gate_fit((cat("g"),))
     at_limit = (frame["g"] == "a").to_numpy()
     mean_coefficient = fit_state.layout.predictors[0].coefficient_slice.start + 1
