@@ -249,6 +249,12 @@ def test_result_rejects_a_within_bound_state_change_receipt(
     fits[endpoint_index] = replace(within_bound, iterations=within_bound.iterations + 1)
     with pytest.raises(ValueError, match="within the refit envelope"):
         replace(smoothing, coefficient_fits=tuple(fits))
+    # The strict rule a saved v0.40.0 result was made under refused any
+    # stepped replay beside a strictly stationary cap.
+    fits[cap_index] = replace(cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score))
+    with pytest.raises(ValueError, match="within the refit envelope"):
+        replace(smoothing, coefficient_fits=tuple(fits))
+    replace(smoothing, coefficient_fits=tuple(fits), rounding_floor_stationarity=False)
 
     # Beside a cap that is not stationary, direct face authority also needs
     # full observed rank.

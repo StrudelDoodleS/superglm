@@ -191,6 +191,7 @@ def _efs_result(
         newton_iterations=sum(item.stage == "newton" for item in history),
         bfgs_fallback_iterations=sum(item.step_source == "bfgs" for item in history),
         beyond_cap_components=tuple(beyond_cap_components),
+        rounding_floor_stationarity=True,
         _penalty_assessment_context=_PenaltyAssessmentContext.from_layout(
             layout,
             faces=tuple(
