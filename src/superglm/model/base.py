@@ -1678,14 +1678,3 @@ def rebuild_dm_with_lambdas(
         sample_weight,
         configured_lambda2(model),
     )
-
-
-def predict(
-    model,
-    X: FrameLike,
-    offset: NDArray | None = None,
-    *,
-    random_effects: str = "conditional",
-) -> NDArray:
-    """Predict the response mean for new data."""
-    return predict_exact(model, X, offset, random_effects=random_effects)

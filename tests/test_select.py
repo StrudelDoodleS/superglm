@@ -6,6 +6,7 @@ import pytest
 
 from superglm.features.spline import Spline
 from superglm.model import SuperGLM
+from superglm.model.base import compute_lambda_max
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_lasso import GroupLasso
 
@@ -411,7 +412,7 @@ class TestSelectLambdaMax:
             selection_penalty=1.0,  # fixed strength; lambda_max is inspected separately below
         )
         m.fit(X, y, sample_weight=sample_weight)
-        lmax = m._compute_lambda_max(y.astype(np.float64), sample_weight)
+        lmax = compute_lambda_max(m, y.astype(np.float64), sample_weight)
         # lambda_max should be finite and positive
         assert np.isfinite(lmax)
         assert lmax > 0

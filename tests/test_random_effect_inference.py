@@ -261,7 +261,7 @@ def test_structured_selected_covariance_matches_dense_augmented_inverse(monkeypa
 
     slope_indices = np.array([0, 1, 4, 8], dtype=np.intp)
     np.testing.assert_allclose(
-        compact.slope_selected_block(slope_indices),
+        compact.slopes.selected_block(slope_indices),
         dense_augmented[1:, 1:][np.ix_(slope_indices, slope_indices)],
         rtol=3e-8,
         atol=3e-9,

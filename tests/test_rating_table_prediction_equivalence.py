@@ -54,8 +54,8 @@ from superglm import (
     families,
 )
 from superglm.diagnostics.discretize import (
-    _spline_categorical_se,
     _term_se_at,
+    _TotalCurveSE,
     _validated_discretization_weights,
     banding_companions,
 )
@@ -3207,6 +3207,18 @@ def test_the_sheet_reports_the_shared_limit_on_the_interaction_row():
         assert rows.loc["age:region", "band_worst_error"] >= 0.0
         assert rows.loc["age:region", "band_worst_error_se"] >= 0.0
         assert set(rows.index) == {"age", "age:region"}
+
+
+def _spline_categorical_se(model, covariate, interaction, ispec, x, *, with_main):
+    """Standard error, at ``x``, of each level's curve, and the levels that carry a group."""
+    x = np.asarray(x, dtype=np.float64)
+    curves = _TotalCurveSE(model, covariate, [(interaction, ispec)], x, with_main=with_main)
+    se = np.zeros((len(x), len(ispec._non_base)), dtype=np.float64)
+    live = np.zeros(len(ispec._non_base), dtype=bool)
+    for j, level in enumerate(ispec._non_base):
+        se[:, j] = curves.se([(interaction, level)])
+        live[j] = curves.live[(interaction, level)]
+    return se, live
 
 
 def test_the_levels_standard_errors_are_those_of_the_stacked_rows():

@@ -623,17 +623,6 @@ def emit_level_curve_separation(terms: list) -> None:
         )
 
 
-def separated_factor_smooth_levels(
-    dominant: Any,
-    null_space: NDArray,
-    prior_weights: NDArray | None,
-    y: NDArray,
-    boundaries: tuple[str, ...],
-) -> tuple[int, ...]:
-    """The ``sz`` levels whose unpenalized line separates the response (``separated_factor_smooth_spans``)."""
-    return tuple(separated_factor_smooth_spans(dominant, null_space, prior_weights, y, boundaries))
-
-
 def separated_factor_smooth_spans(
     dominant: Any,
     null_space: NDArray,
@@ -746,7 +735,7 @@ SZ_SELECT_REMEDY = (
 
 
 def format_factor_smooth_separation(name: str, labels: list[Any], n_levels: int) -> str:
-    """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_levels``)."""
+    """The warning for ``sz`` levels whose unpenalized line separates (``separated_factor_smooth_spans``)."""
     return (
         f"FactorSmooth {name!r} (basis='sz'): {len(labels)} of {n_levels} levels have an "
         f"unpenalized line that separates the response: {_format_labels(labels)}. The "

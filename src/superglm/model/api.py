@@ -567,19 +567,6 @@ class SuperGLM:
             raise AttributeError("theta_ is only available after fitting a negative-binomial model")
         return float(theta)
 
-    # ── Static / class helpers ────────────────────────────────────
-
-    @staticmethod
-    def _resolve_penalty(penalty, lambda1, penalty_features=None):
-        return base.resolve_penalty(penalty, lambda1, penalty_features)
-
-    def _resolve_knots(self, spline_cols):
-        return base.resolve_knots(self, spline_cols)
-
-    @staticmethod
-    def _resolve_ci(ci):
-        return plot_ops.resolve_ci(ci)
-
     # ── Core model operations ─────────────────────────────────────
 
     def _clone_without_features(self, drop, *, lambda1=..., lambda2=...):
@@ -599,12 +586,6 @@ class SuperGLM:
             sample_weight,
             offset,
         )
-
-    def _compute_lambda_max(self, y, weights):
-        return base.compute_lambda_max(self, y, weights)
-
-    def _rebuild_design_matrix_with_lambdas(self, lambdas, sample_weight):
-        return base.rebuild_dm_with_lambdas(self, lambdas, sample_weight)
 
     # ── Fit ───────────────────────────────────────────────────────
 
@@ -1439,11 +1420,6 @@ class SuperGLM:
         """
         with self._parallel_scope():
             return TermResults(explain_ops.relativities(self, with_se, centering=centering))
-
-    def _feature_se_from_cov(self, name, Cov_active, active_groups, n_points=200):
-        return explain_ops.model_feature_se_from_cov(
-            self, name, Cov_active, active_groups, n_points
-        )
 
     def simultaneous_bands(
         self,

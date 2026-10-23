@@ -2060,7 +2060,7 @@ class TestREMLDirect:
         assert "relativity" in rec
 
     def test_reml_direct_keeps_basis_fixed(self, poisson_data, monkeypatch):
-        """Direct REML should update lambda weights without rebuilding the basis."""
+        """The direct optimizer updates lambda weights without rebuilding the design matrix."""
         X, y, w = poisson_data
         m = SuperGLM(
             family="poisson",
@@ -2072,9 +2072,9 @@ class TestREMLDirect:
         )
 
         def fail_rebuild(*args, **kwargs):
-            raise AssertionError("Direct REML should not rebuild the design matrix")
+            raise AssertionError("The direct optimizer should not rebuild the design matrix")
 
-        monkeypatch.setattr(m, "_rebuild_design_matrix_with_lambdas", fail_rebuild)
+        monkeypatch.setattr("superglm.model.base.rebuild_dm_with_lambdas", fail_rebuild)
         m.fit_reml(X, y, sample_weight=w, max_reml_iter=20)
 
         assert hasattr(m, "_reml_lambdas")
