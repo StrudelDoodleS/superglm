@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import SuperLSS
 from superglm.distributional import DistributionFunctionFamily, GammaLS, Predictor
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
@@ -323,7 +324,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
         family=GeneralizedParetoLSS(shape_lower=0.0, shape_upper=1.0),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert np.array_equal(restored.predict(frame), model.predict(frame))
     assert np.array_equal(
         restored.predict_quantile(frame, 0.95), model.predict_quantile(frame, 0.95)
@@ -336,12 +337,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
     }
 
 
-def test_narrow_walls_round_trip_and_a_tampered_config_is_refused():
-    from superglm.distributional.serialization import (
-        DistributionalSerializationError,
-        _validate_generalized_pareto_config,
-    )
-
+def test_narrow_walls_round_trip():
     rng = np.random.default_rng(21)
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 300)})
     y = np.expm1(-0.2 * np.log(rng.random(300))) / 0.2
@@ -349,14 +345,5 @@ def test_narrow_walls_round_trip_and_a_tampered_config_is_refused():
         family=GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.5),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert restored.family == GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.5)
-    for bad in (
-        {"type": "GeneralizedParetoLSS", "shape_lower": 0.0},
-        {"type": "GeneralizedParetoLSS", "shape_lower": 0.0, "shape_upper": 1.0, "extra": 1},
-        {"type": "GeneralizedParetoLSS", "shape_lower": -0.5, "shape_upper": 1.0},
-        {"type": "GeneralizedParetoLSS", "shape_lower": 0.5, "shape_upper": 0.5},
-        {"type": "GeneralizedParetoLSS", "shape_lower": 0.0, "shape_upper": True},
-    ):
-        with pytest.raises(DistributionalSerializationError):
-            _validate_generalized_pareto_config(bad)

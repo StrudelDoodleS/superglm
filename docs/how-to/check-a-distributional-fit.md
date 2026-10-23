@@ -278,11 +278,14 @@ the reference distribution is a chi-squared and not an F.
 :class: note
 Term grids need the frame the model was fitted on. It is kept **by
 reference** at `fit`/`fit_reml` — not copied — and it does not survive
-`to_bytes()`. A model restored with `from_bytes` must be given the frame
+pickling or joblib. A restored model must be given the frame
 explicitly, on any of the three methods:
 
 ```python
-restored = SuperLSS.from_bytes(model.to_bytes())
+import joblib
+
+joblib.dump(model, "model.joblib")
+restored = joblib.load("model.joblib")
 restored.summary(X_train=frame)
 restored.term_inference("mean", "x", X_train=frame)
 ```

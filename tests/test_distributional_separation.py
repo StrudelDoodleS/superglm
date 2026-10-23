@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import warnings
 from dataclasses import replace
 
@@ -7,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.distributional import GammaLS, GaussianLS, NegativeBinomialLS, Predictor, TweedieLSS
 from superglm.distributional.family import ResponseBoundaryFamily
@@ -96,7 +96,7 @@ def test_separated_tweedie_fit_finishes_on_the_nearest_semidefinite_curvature() 
     assert "nearest positive semidefinite" in model.result_.warnings[0]
     assert any(str(item.message) == model.result_.warnings[0] for item in caught)
     assert np.all(np.isfinite(model.covariance_))
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert restored.result_.warnings == model.result_.warnings
     assert restored.result_.curvature_telemetry == model.result_.curvature_telemetry
 

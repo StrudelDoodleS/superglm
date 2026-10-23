@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import pickle
 
 import matplotlib
 import numpy as np
@@ -505,7 +506,7 @@ def test_summary_lists_every_intercept_and_term(case):
 
 def test_a_restored_model_needs_the_training_frame(case):
     model, frame, _ = case
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     with pytest.raises(RuntimeError, match="X_train"):
         restored.summary()
     with pytest.raises(RuntimeError, match="X_train"):

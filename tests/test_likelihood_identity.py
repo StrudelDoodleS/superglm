@@ -1,26 +1,18 @@
-"""A SuperLSS model saved on one machine loads on another.
+"""The likelihood identity a fit stores and a posterior replay checks.
 
-A load hashes the inputs a model stores and compares them exactly. Values it
-recomputes with a transcendental or a BLAS kernel, such as the ``-log y``
-likelihood carrier or a penalty face's tolerances, are compared within a
-rounding bound or not rebound at all. The simulated tests replace a family
-module's ``log`` (or a face's spectral norm, or its projection) at load with
-one that rounds one row an ulp the other way, as another C library, SIMD loop
-or OpenBLAS kernel may, and run on every platform. The fixtures in
-``fixtures/saved_portable_v041`` were saved on real platforms that disagree
-(``scripts/make_portable_load_fixtures.py``).
+``rebound_plan_mismatch`` and ``carrier_sum_bound`` decide whether a likelihood
+plan rebound from a model's retained rows is the plan the fit used. A fit reads
+the legacy identifier tag, and the corrected covariance replays the plan under
+the same check. The tests simulate another machine rounding the carrier's
+transcendentals differently.
 """
 
 from __future__ import annotations
 
-import json
-import lzma
 import math
-import pickle
 import types
 import warnings
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -30,30 +22,17 @@ import superglm as sg
 from superglm import s
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import posterior as posterior_module
-from superglm.distributional import serialization as serialization_module
 from superglm.distributional.families import gamma as gamma_module
 from superglm.distributional.families import gaussian as gaussian_module
-from superglm.distributional.families import generalized_gamma as generalized_gamma_module
-from superglm.distributional.families import log_normal as log_normal_module
-from superglm.distributional.families import negative_binomial as negative_binomial_module
-from superglm.distributional.families import two_piece as two_piece_module
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.results import solver as result_solver
-from superglm.distributional.results.smoothing import DistributionalEFSResult
-from superglm.distributional.serialization import (
-    DistributionalSerializationError,
-    serialize_distributional_model,
-)
-from superglm.distributional.smoothing import penalty_face as penalty_face_module
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
 from . import test_distributional_endpoint_laml as endpoint_laml_tests
-from .test_userspace_040 import _lss_eta_rounding
 
-FIXTURES = Path(__file__).parent / "fixtures" / "saved_portable_v041"
 N_ROWS = 120
 
 
@@ -90,35 +69,9 @@ class _OtherNumpy(types.ModuleType):
         return _rounded_up(np.log(values, *args, **kwargs), factor=self._factor)
 
 
-class _OtherSpecial(types.ModuleType):
-    """``scipy.special``, except ``gammaln`` rounds every row the other way."""
-
-    def __init__(self, factor: float | None) -> None:
-        super().__init__("scipy.special")
-        self._factor = factor
-
-    def __getattr__(self, name: str):
-        return getattr(_REAL_SPECIAL, name)
-
-    def gammaln(self, values, *args, **kwargs):
-        real = _REAL_SPECIAL.gammaln(values, *args, **kwargs)
-        return _rounded_up(real, factor=self._factor)
-
-
-_REAL_SPECIAL = negative_binomial_module.special
-
-
-def _another_platform(monkeypatch: pytest.MonkeyPatch, case: str, factor: float | None = None):
-    """Patch ``case``'s carrier transcendental as another platform rounds it."""
-    module = _CASES[case]["module"]
-    if case == "nb":
-        monkeypatch.setattr(module, "special", _OtherSpecial(factor))
-    elif case == "two_piece_normal":
-        constant = module._HALF_LOG_TWO_PI
-        moved = constant * factor if factor is not None else np.nextafter(constant, np.inf)
-        monkeypatch.setattr(module, "_HALF_LOG_TWO_PI", float(moved))
-    else:
-        monkeypatch.setattr(module, "np", _OtherNumpy(factor))
+def _another_gamma_platform(monkeypatch: pytest.MonkeyPatch, factor: float | None = None) -> None:
+    """Patch the Gamma carrier's ``log`` as another platform rounds it."""
+    monkeypatch.setattr(gamma_module, "np", _OtherNumpy(factor))
 
 
 def _data(seed: int = 5):
@@ -138,38 +91,32 @@ def _data(seed: int = 5):
 
 
 _CASES = {
-    "gamma_prior": {"module": gamma_module, "family": sg.GammaLS, "response": "positive"},
+    "gamma_prior": {"family": sg.GammaLS, "response": "positive"},
     "gamma_frequency": {
-        "module": gamma_module,
         "family": sg.GammaLS,
         "response": "positive",
         "weights": "replicates",
         "semantics": "frequency",
     },
-    "log_normal": {"module": log_normal_module, "family": sg.LogNormalLS, "response": "positive"},
+    "log_normal": {"family": sg.LogNormalLS, "response": "positive"},
     "generalized_gamma": {
-        "module": generalized_gamma_module,
         "family": sg.GeneralizedGammaLSS,
         "response": "positive",
     },
     "two_piece_log_normal": {
-        "module": two_piece_module,
         "family": sg.TwoPieceLogNormalLSS,
         "response": "positive",
     },
     "two_piece_normal": {
-        "module": two_piece_module,
         "family": sg.TwoPieceNormalLSS,
         "response": "real",
     },
     "gaussian_prior_weights": {
-        "module": gaussian_module,
         "family": sg.GaussianLS,
         "response": "real",
         "weights": "weight",
     },
     "nb": {
-        "module": negative_binomial_module,
         "family": sg.NegativeBinomialLS,
         "response": "count",
     },
@@ -190,9 +137,9 @@ def _fit(case: str) -> tuple[sg.SuperLSS, pd.DataFrame]:
 
 
 @pytest.fixture(scope="module", params=sorted(_CASES))
-def saved_case(request):
-    model, frame = _fit(request.param)
-    return request.param, model, frame, model.to_bytes()
+def fitted_case(request):
+    model, _ = _fit(request.param)
+    return request.param, model
 
 
 def _live_carrier(model: sg.SuperLSS) -> np.ndarray:
@@ -207,44 +154,10 @@ def _rebound_carrier(fitted) -> np.ndarray:
     return np.asarray(plan.parameter_independent_carrier)
 
 
-def test_a_model_loads_where_log_rounds_every_row_differently(saved_case, monkeypatch) -> None:
-    case, model, frame, saved = saved_case
-    expected = _live_carrier(model)
-    with monkeypatch.context() as patch:
-        _another_platform(patch, case)
-        # The perturbation reaches the carrier the load recomputes.
-        assert np.any(_live_carrier(model) != expected)
-        loaded = sg.SuperLSS.from_bytes(saved)
-        refit = sg.SuperLSS.from_bytes(saved).fit(
-            frame, *_refit_arguments(case), lambdas=loaded.smoothing_parameters_
-        )
-    assert dict(loaded.coef_) == dict(model.coef_)
-    np.testing.assert_array_equal(
-        loaded.predict_link(frame).to_numpy(), model.predict_link(frame).to_numpy()
-    )
-    assert refit.result_.converged
-
-
-def _refit_arguments(case: str):
-    spec = _CASES[case]
-    _, columns = _data()
-    weights = columns[spec["weights"]] if "weights" in spec else None
-    return columns[spec["response"]], weights
-
-
-def test_a_carrier_formula_change_is_refused(saved_case, monkeypatch) -> None:
-    """A carrier row moved far beyond rounding is a different likelihood, not another libm."""
-    case, _, _, saved = saved_case
-    with monkeypatch.context() as patch:
-        _another_platform(patch, case, factor=1.0 + 1.0e-6)
-        with pytest.raises(DistributionalSerializationError, match="does not identify"):
-            sg.SuperLSS.from_bytes(saved)
-
-
-def test_a_saved_carrier_sum_outside_the_bound_is_refused(saved_case) -> None:
+def test_a_stored_carrier_sum_outside_the_bound_is_refused(fitted_case) -> None:
     from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 
-    case, model, _, _ = saved_case
+    _, model = fitted_case
     fitted = model._require_fitted()
     rows = fitted.fit_state.retained_rows
     plan = fitted.family.bind_likelihood(
@@ -257,14 +170,14 @@ def test_a_saved_carrier_sum_outside_the_bound_is_refused(saved_case) -> None:
     assert rebound_plan_mismatch(plan, identifier, stored + 1.0e-9 * magnitude) == "carrier"
 
 
-def test_the_carrier_sum_check_uses_the_bound_on_both_sides(saved_case) -> None:
-    """Within the bound loads, beyond it refuses, whichever side the saved sum lies."""
+def test_the_carrier_sum_check_uses_the_bound_on_both_sides(fitted_case) -> None:
+    """Within the bound matches, beyond it does not, whichever side the stored sum lies."""
     from superglm.distributional.likelihood_identity import (
         carrier_sum_bound,
         rebound_plan_mismatch,
     )
 
-    _, model, _, _ = saved_case
+    _, model = fitted_case
     fitted = model._require_fitted()
     rows = fitted.fit_state.retained_rows
     plan = fitted.family.bind_likelihood(
@@ -335,7 +248,7 @@ def test_a_legacy_tag_that_names_the_plans_own_identifiers_is_refused(monkeypatc
 
 
 def test_a_chunked_fit_checks_the_legacy_tag_without_building_the_carrier(monkeypatch) -> None:
-    """A fit reads the legacy tag as a string; only save and load build the carrier.
+    """A fit reads the legacy tag as a string; only a replay of the plan builds the carrier.
 
     A chunked ``GaussianLS`` plan keeps no carrier, and binding it evaluates
     each carrier block once for the weight digest. The fit evaluates no other
@@ -448,7 +361,7 @@ def test_corrected_covariance_replays_where_log_rounds_differently(
     expected = _rebound_carrier(fitted)
     with monkeypatch.context() as patch:
         replays = _counted_replays(patch)
-        _another_platform(patch, "gamma_prior")
+        _another_gamma_platform(patch)
         # The perturbation reaches the carrier the replay rebinds.
         assert np.any(_rebound_carrier(fitted) != expected)
         with warnings.catch_warnings(record=True) as record:
@@ -465,52 +378,16 @@ def test_corrected_covariance_replays_where_log_rounds_differently(
 
 
 def test_corrected_covariance_refuses_a_changed_carrier(replayed_gamma, monkeypatch) -> None:
-    """The replay checks the carrier as the load does: a formula change is not rounding."""
+    """The replay checks the carrier as a fit does: a formula change is not rounding."""
     with monkeypatch.context() as patch:
         replays = _counted_replays(patch)
-        _another_platform(patch, "gamma_prior", factor=1.0 + 1.0e-6)
+        _another_gamma_platform(patch, factor=1.0 + 1.0e-6)
         with pytest.warns(
             ConvergenceWarning, match="corrected covariance is unavailable"
         ) as record:
             posterior_covariance(replayed_gamma, kind="corrected")
     assert len(replays) == 1
     assert any("likelihood plan" in str(item.message) for item in record)
-
-
-@pytest.fixture(scope="module")
-def face_model():
-    """A model on an exact penalty face, saved again by this build.
-
-    It is the committed ``face_native`` artifact rather than a live fit, so the
-    face is there on every platform; whether ``fit_reml`` reaches one depends
-    on the path it takes.
-    """
-    with lzma.open(FIXTURES / "face_native.pkl.xz", "rb") as handle:
-        record = pickle.load(handle)
-    model = sg.SuperLSS.from_bytes(record["serialized"])
-    assert model.exact_face_components_
-    return model, record["frame"], model.to_bytes()
-
-
-def test_a_face_model_loads_where_the_spectral_norm_rounds_differently(
-    face_model, monkeypatch
-) -> None:
-    """Another OpenBLAS kernel moves the face's LAPACK norm by a few ulps."""
-    model, frame, saved = face_model
-    real_norm = penalty_face_module._spectral_norm
-
-    def other_kernel(values):
-        norm = real_norm(values)
-        for _ in range(4):
-            norm = np.nextafter(norm, np.inf)
-        return float(norm)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(penalty_face_module, "_spectral_norm", other_kernel)
-        loaded = sg.SuperLSS.from_bytes(saved)
-    np.testing.assert_array_equal(
-        loaded.predict_link(frame).to_numpy(), model.predict_link(frame).to_numpy()
-    )
 
 
 @pytest.fixture(scope="module")
@@ -525,6 +402,14 @@ def revalidated_face():
     return smoothing, event
 
 
+@pytest.fixture(scope="module")
+def exact_face(revalidated_face) -> PenaltyFace:
+    """The exact penalty face the revalidated endpoint sits on."""
+    smoothing, event = revalidated_face
+    endpoint_index = event.coefficient_fit_indices[1]
+    return smoothing.coefficient_fits[endpoint_index].coefficient_face
+
+
 def _forged_projection_replay(
     revalidated_face, patch: pytest.MonkeyPatch, *, replay_gap: float
 ) -> tuple[object, tuple]:
@@ -532,8 +417,8 @@ def _forged_projection_replay(
 
     The stored endpoint is the source moved by an eighth of the projection
     bound along one coordinate, reached without a step, beside a cap whose
-    score is zero, so the load authenticates it as a replay of the source's
-    face projection. The load's own replay is the stored endpoint moved by
+    score is zero, so the result authenticates it as a replay of the source's
+    face projection. The result's own replay is the stored endpoint moved by
     ``replay_gap`` times the bound along that coordinate. Every margin is a
     fixed fraction of the bound, far above one rounding of the coordinate, so
     the decision is the same on every BLAS.
@@ -569,10 +454,10 @@ def _forged_projection_replay(
 
 
 @pytest.mark.parametrize("replay_gap", [0.0, 1.5])
-def test_a_revalidated_endpoint_loads_where_the_projection_rounds_differently(
+def test_a_revalidated_endpoint_is_accepted_where_the_projection_rounds_differently(
     revalidated_face, monkeypatch, replay_gap: float
 ) -> None:
-    """A stored replay within twice the bound of the load's own replay is accepted.
+    """A stored replay within twice the bound of the result's own replay is accepted.
 
     Each replay lies within the bound of the exact projection on its own
     machine, so two machines' replays differ by up to twice the bound.
@@ -600,8 +485,8 @@ def _quarter_turned_face(face: PenaltyFace) -> PenaltyFace:
     return replace(face, null_basis=basis)
 
 
-def _load_projector_bound(left: PenaltyFace, right: PenaltyFace) -> np.ndarray:
-    """``2 gamma_{2r+4} (|N_L||N_L|^T + |N_R||N_R|^T)``, the gap a load accepts."""
+def _replay_projector_bound(left: PenaltyFace, right: PenaltyFace) -> np.ndarray:
+    """``2 gamma_{2r+4} (|N_L||N_L|^T + |N_R||N_R|^T)``, the gap a result accepts."""
     count = 2 * left.null_basis.shape[1] + 4
     u = 2.0**-53
     magnitude = np.abs(left.null_basis) @ np.abs(left.null_basis).T + (
@@ -621,19 +506,18 @@ def _forged_projectors(
     )
 
 
-def test_two_bases_of_one_face_match_by_their_projectors(face_model, monkeypatch) -> None:
-    """Two bases of one face match when their products agree within the load's bound.
+def test_two_bases_of_one_face_match_by_their_projectors(exact_face, monkeypatch) -> None:
+    """Two bases of one face match when their products agree within the result's bound.
 
     Each machine rounds the two products differently, so they never agree bit
     for bit. The replays are forged at fixed fractions of the bound, which
     decides the same way on every BLAS.
     """
-    model, _, _ = face_model
-    face = model._require_fitted().result.coefficient_face
+    face = exact_face
     assert face is not None and face.null_basis.shape[1] >= 2
     turned = _quarter_turned_face(face)
     assert not np.array_equal(turned.null_basis, face.null_basis)
-    bound = _load_projector_bound(face, turned)
+    bound = _replay_projector_bound(face, turned)
     for fraction, matches in ((0.5, True), (2.0, False)):
         with monkeypatch.context() as patch:
             _forged_projectors(patch, face, turned, fraction * bound)
@@ -646,33 +530,31 @@ def test_two_bases_of_one_face_match_by_their_projectors(face_model, monkeypatch
     assert not result_solver._face_projectors_agree(face, other)
 
 
-def test_a_fit_accepts_two_bases_of_one_face_within_half_the_load_bound(
-    face_model, monkeypatch
+def test_a_fit_accepts_two_bases_of_one_face_within_half_the_replay_bound(
+    exact_face, monkeypatch
 ) -> None:
-    """A load replays both products, so a fit leaves it that rounding as margin.
+    """A rebuilt result replays both products, so a fit leaves it that rounding as margin.
 
     Otherwise a gap a fit accepted near the bound could exceed it after
-    another machine's replay, and the saved model would be refused there.
+    another machine's replay, and the result would be refused there.
     """
-    model, _, _ = face_model
-    face = model._require_fitted().result.coefficient_face
+    face = exact_face
     turned = _quarter_turned_face(face)
-    bound = _load_projector_bound(face, turned)
-    for fraction, at_fit, at_load in ((0.25, True, True), (0.75, False, True)):
+    bound = _replay_projector_bound(face, turned)
+    for fraction, at_fit, at_replay in ((0.25, True, True), (0.75, False, True)):
         with monkeypatch.context() as patch:
             _forged_projectors(patch, face, turned, fraction * bound)
             with result_solver.fit_time_face_geometry():
                 assert result_solver._face_projectors_agree(face, turned) is at_fit
-            assert result_solver._face_projectors_agree(face, turned) is at_load
+            assert result_solver._face_projectors_agree(face, turned) is at_replay
     with result_solver.fit_time_face_geometry():
         assert result_solver._face_projectors_agree(face, turned)
 
 
-def test_a_fit_validates_its_smoothing_result_with_the_fit_acceptance(
-    face_model, monkeypatch
-) -> None:
-    """The fit builds its smoothing result under the fit's acceptance, and a load under its own."""
-    _, _, saved = face_model
+def test_a_fit_validates_its_smoothing_result_with_the_fit_acceptance(monkeypatch) -> None:
+    """Every smoothing result a fit builds is validated under the fit's face acceptance."""
+    from superglm.distributional.results.smoothing import DistributionalEFSResult
+
     seen: list[bool] = []
     real = DistributionalEFSResult.__post_init__
 
@@ -680,123 +562,9 @@ def test_a_fit_validates_its_smoothing_result_with_the_fit_acceptance(
         seen.append(result_solver._FIT_TIME_FACE_GEOMETRY.get())
         real(self)
 
-    with monkeypatch.context() as patch:
-        patch.setattr(DistributionalEFSResult, "__post_init__", post_init)
-        family = sg.GammaLS()
-        refit = sg.SuperLSS(family, family.mean(s("x", kind="cr", k=7)), family.scale())
-        frame, columns = _data()
-        refit.fit_reml(frame, columns["positive"])
-        at_fit, seen[:] = list(seen), []
-        sg.SuperLSS.from_bytes(saved)
-        at_load = list(seen)
-    assert at_fit and all(at_fit)
-    assert at_load and not any(at_load)
-
-
-FIXTURE_NAMES = sorted(path.name.removesuffix(".pkl.xz") for path in FIXTURES.glob("*.pkl.xz"))
-
-
-def test_the_fixture_set_covers_both_carriers_and_both_kernels() -> None:
-    assert FIXTURE_NAMES == ["face_haswell", "face_native", "gamma_avx512", "gamma_libm"]
-
-
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_a_model_saved_on_another_platform_loads_and_predicts(name: str) -> None:
-    """Coefficients come back bit for bit, linear predictors within two evaluations' rounding."""
-    with lzma.open(FIXTURES / f"{name}.pkl.xz", "rb") as handle:
-        record = pickle.load(handle)
-    # Written by builds that wrote schema 11, which this build reads as a
-    # previous major; its face manifests still record the derived tolerances.
-    assert json.loads(record["serialized"])["schema_version"] == "11.0.0"
-    if name.startswith("face_"):
-        assert all(
-            set(_DERIVED_FACE_KEYS) <= set(face)
-            for face in _coefficient_faces(json.loads(record["serialized"])["manifest"])
-        )
-    model = sg.SuperLSS.from_bytes(record["serialized"])
-    frame = record["frame"]
-    restored = dict(model.coef_)
-    assert list(restored) == list(record["coefficients"])
-    assert all(
-        math.copysign(1.0, restored[key]) == math.copysign(1.0, value) and restored[key] == value
-        for key, value in record["coefficients"].items()
-    )
-    eta = model.predict_link(frame).to_numpy(dtype=np.float64)
-    excess = np.abs(eta - record["eta"]) / _lss_eta_rounding(model, frame)
-    assert np.all(excess <= 1.0), float(np.max(excess))
-
-
-_DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
-
-
-def _coefficient_faces(value) -> list[dict]:
-    """Every ``coefficient_face`` mapping in a manifest."""
-    if isinstance(value, dict):
-        found = (
-            [value["coefficient_face"]] if isinstance(value.get("coefficient_face"), dict) else []
-        )
-        return found + [face for item in value.values() for face in _coefficient_faces(item)]
-    if isinstance(value, list):
-        return [face for item in value for face in _coefficient_faces(item)]
-    return []
-
-
-def _schema_eleven_reader(patch: pytest.MonkeyPatch) -> None:
-    """The reader of a build that wrote schema 11, which also read 8, 9 and 10."""
-    patch.setattr(serialization_module, "SCHEMA_VERSION", "11.0.0")
-    patch.setattr(serialization_module, "READABLE_PREVIOUS_MAJORS", frozenset({8, 9, 10}))
-
-    def unexpected_unpickle(*args, **kwargs):
-        raise AssertionError("the schema-11 reader must refuse before unpickling")
-
-    patch.setattr(serialization_module.pickle, "loads", unexpected_unpickle)
-
-
-def test_a_reloaded_schema_eleven_face_model_is_saved_as_schema_twelve(monkeypatch) -> None:
-    """A face model re-saved by this build is refused by a schema-11 reader at its version gate.
-
-    Schema 12 drops the derived face tolerances from the manifest. Written as
-    11.0.0, the re-saved model passed a schema-11 reader's version gate and
-    then failed its manifest comparison, the error reserved for tampering.
-    """
-    with lzma.open(FIXTURES / "face_native.pkl.xz", "rb") as handle:
-        record = pickle.load(handle)
-    resaved = sg.SuperLSS.from_bytes(record["serialized"]).to_bytes()
-    artifact = json.loads(resaved)
-    assert artifact["schema_version"] == "12.0.0"
-    faces = _coefficient_faces(artifact["manifest"])
-    assert faces and not any(set(_DERIVED_FACE_KEYS) & set(face) for face in faces)
-    assert dict(sg.SuperLSS.from_bytes(resaved).coef_) == record["coefficients"]
-
-    with monkeypatch.context() as patch:
-        _schema_eleven_reader(patch)
-        with pytest.raises(DistributionalSerializationError, match="major versions differ"):
-            sg.SuperLSS.from_bytes(resaved)
-
-
-def test_a_new_fit_is_saved_as_schema_twelve_with_v2_identifiers(gamma_reml) -> None:
-    artifact = json.loads(serialize_distributional_model(gamma_reml))
-    assert artifact["schema_version"] == "12.0.0"
-    identifiers = set(_manifest_values(artifact["manifest"], "family_likelihood_plan_identifier"))
-    assert identifiers and all(item.startswith("GammaLS/v2:") for item in identifiers)
-
-
-def test_a_schema_twelve_manifest_that_records_a_derived_face_value_is_refused(
-    face_model,
-) -> None:
-    """Schema 12 never records the derived face tolerances, so one there is not ignored."""
-    _, _, saved = face_model
-    artifact = json.loads(saved)
-    assert artifact["schema_version"] == "12.0.0"
-    _coefficient_faces(artifact["manifest"])[0]["rank_resolution"] = 1.0e-12
-    with pytest.raises(DistributionalSerializationError, match="manifest does not match"):
-        sg.SuperLSS.from_bytes(json.dumps(artifact).encode())
-
-
-def _manifest_values(value, key: str) -> list:
-    if isinstance(value, dict):
-        own = [value[key]] if key in value else []
-        return own + [found for item in value.values() for found in _manifest_values(item, key)]
-    if isinstance(value, list):
-        return [found for item in value for found in _manifest_values(item, key)]
-    return []
+    monkeypatch.setattr(DistributionalEFSResult, "__post_init__", post_init)
+    family = sg.GammaLS()
+    model = sg.SuperLSS(family, family.mean(s("x", kind="cr", k=7)), family.scale())
+    frame, columns = _data()
+    model.fit_reml(frame, columns["positive"])
+    assert seen and all(seen)

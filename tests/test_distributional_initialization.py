@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GaussianLS, Predictor, Spline, SuperLSS
+from superglm import GaussianLS, Predictor, Spline
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -261,7 +263,7 @@ def test_public_automatic_start_artifact_preserves_config_numeric_starts_and_pre
             Predictor("scale", {}),
         ],
     ).fit_reml(frame, y, max_reml_iter=1)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     source = model._require_fitted().smoothing
     saved = restored._require_fitted().smoothing
     assert source.config.initial_lambda is None

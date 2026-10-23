@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
+import contextlib
+import io
+import pickle
+import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -24,13 +25,8 @@ from superglm.distributional.family import DistributionalFamily, ObservationCont
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import fit_dense_distributional, refit_dense_distributional
 from superglm.distributional.result import DistributionalFitResult
-from superglm.distributional.serialization import (
-    SCHEMA_VERSION,
-    DistributionalSerializationError,
-)
 from superglm.distributional.timing import FitPhaseRecorder
 from superglm.distributional.weights import (
-    LegacyPowerWeightArtifactError,
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
     WeightContract,
@@ -220,7 +216,7 @@ def _assert_observed_coefficient_fits(model: SuperLSS) -> None:
 
 
 def _assert_public_tweedie_round_trip(model: SuperLSS, frame: pd.DataFrame) -> None:
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     source = model._require_fitted()
     target = restored._require_fitted()
 
@@ -375,22 +371,6 @@ class _UnconfiguredGammaLookalike:
 
     def evaluate_natural(self, y, theta, plan, *, derivative_order=2):
         raise AssertionError("configuration refusal must precede family evaluation")
-
-
-def _resign_public_config(artifact: dict) -> None:
-    config = artifact["public_api"]["config"]
-    canonical = json.dumps(
-        config,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    digest = hashlib.sha256()
-    digest.update(artifact["payload"]["sha256"].lower().encode("ascii"))
-    digest.update(b"\n")
-    digest.update(canonical)
-    artifact["public_api"]["sha256"] = digest.hexdigest()
 
 
 def test_public_imports_and_fixed_fit_publish_named_immutable_views() -> None:
@@ -1105,7 +1085,7 @@ def test_failed_second_fit_keeps_the_previous_complete_revision() -> None:
 def test_published_arrays_cannot_rearm_writes_and_isolate_constructor_inputs() -> None:
     frame, response, _, _ = _fixture()
     original = _linear_model().fit(frame, response)
-    for model in (original, SuperLSS.from_bytes(original.to_bytes())):
+    for model in (original, pickle.loads(pickle.dumps(original))):
         expected = model.predict(frame).copy()
         solver = model._require_fitted().result
         arrays = [model.result_.coefficients, model.covariance_, *model.coef_by_predictor_.values()]
@@ -1144,10 +1124,8 @@ def test_public_artifact_round_trip_preserves_fitted_state_and_execution_config(
         retain_rows=False,
     )
 
-    artifact = model.to_bytes()
-    restored = SuperLSS.from_bytes(artifact)
+    restored = pickle.loads(pickle.dumps(model))
 
-    assert isinstance(artifact, bytes)
     assert restored.discrete is False
     assert restored.n_bins == {"x": 128, "z": 96}
     assert restored.weight_semantics == "prior"
@@ -1167,66 +1145,6 @@ def test_public_artifact_round_trip_preserves_fitted_state_and_execution_config(
         model.predict_parameters(frame, offsets=offsets),
     )
 
-    corrupted = json.loads(artifact)
-    corrupted["public_api"]["config"]["discrete"] = True
-    with pytest.raises(DistributionalSerializationError, match="digest does not match"):
-        SuperLSS.from_bytes(json.dumps(corrupted))
-
-    with pytest.raises(RuntimeError, match="not fitted"):
-        _linear_model().to_bytes()
-
-
-def test_public_schema_version_is_independent_of_the_envelope_version() -> None:
-    """The two version numbers are separate concepts, and both must be present.
-
-    ``_PUBLIC_SCHEMA_VERSION`` versions only the ``public_api`` block; the
-    envelope beneath it carries ``serialization.SCHEMA_VERSION``.  They are
-    allowed to differ and version their own key sets.  The artifact records both
-    so whichever layer refuses a stale artifact can identify its own boundary.
-    """
-    frame, response, _, _ = _fixture()
-    model = _linear_model().fit(frame, response)
-    artifact = json.loads(model.to_bytes())
-
-    public = artifact["public_api"]
-    assert set(public) == {"artifact_type", "schema_version", "config", "sha256"}
-    assert public["schema_version"] == "2.0.0"
-    assert artifact["schema_version"] == SCHEMA_VERSION
-    assert public["schema_version"] != artifact["schema_version"]
-    assert set(public["config"]) == {
-        "discrete",
-        "n_bins",
-        "separation",
-        "weight_contract",
-    }
-    assert public["config"]["separation"] == "warn"
-    assert public["config"]["weight_contract"] == {
-        "schema_version": 1,
-        "semantics": "prior",
-    }
-
-
-def test_from_bytes_reports_a_precontract_envelope_as_typed_legacy() -> None:
-    """A pre-contract envelope under a current public block is unknowable.
-
-    The public block's digest covers the payload and config only, so an artifact
-    with an older envelope clears every public check.  The internal schema must
-    route it to the typed legacy-weight refusal before unpickling, because no
-    old compact field proves whether its weights were counts or powers.
-    """
-    frame, response, _, _ = _fixture()
-    model = _linear_model().fit(frame, response)
-    artifact = json.loads(model.to_bytes())
-
-    stale = "1.0.0"  # what every pre-penalty-geometry writer stamped
-    artifact["schema_version"] = stale
-    for component in artifact["manifest"]["penalties"]["components"]:
-        for key in ("penalty_kind", "repeat_count", "block_width"):
-            component.pop(key, None)
-
-    with pytest.raises(LegacyPowerWeightArtifactError, match="legacy|pre-contract"):
-        SuperLSS.from_bytes(json.dumps(artifact))
-
 
 def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> None:
     frame, response, _, offsets = _fixture(14)
@@ -1240,7 +1158,7 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         predictors=predictors,
         weight_semantics="frequency",
     ).fit(frame, response, sample_weight=counts, offsets=offsets, retain_rows=False)
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     state = restored._require_fitted().fit_state
 
     assert restored.weight_semantics == "frequency"
@@ -1300,99 +1218,6 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         rtol=0.0,
         atol=2e-11,
     )
-
-
-def test_public_schema_routes_legacy_future_and_current_duplicate_separately() -> None:
-    frame, response, _, _ = _fixture(12)
-    model = model_from_templates(
-        family=GaussianLS(),
-        predictors=(Predictor("location", {}), Predictor("scale", {})),
-        weight_semantics="frequency",
-    ).fit(frame, response, sample_weight=np.ones(len(frame), dtype=np.int64))
-
-    legacy = json.loads(model.to_bytes())
-    legacy["public_api"]["schema_version"] = "1.0.0"
-    legacy["public_api"]["config"].pop("weight_contract")
-    legacy["public_api"]["config"].pop("separation")
-    raw = b"validly hashed payload that must not be unpickled"
-    legacy["payload"]["data"] = base64.b64encode(raw).decode("ascii")
-    legacy["payload"]["sha256"] = hashlib.sha256(raw).hexdigest()
-    _resign_public_config(legacy)
-    with pytest.raises(LegacyPowerWeightArtifactError, match="legacy|pre-contract"):
-        SuperLSS.from_bytes(json.dumps(legacy))
-
-    future = json.loads(model.to_bytes())
-    future["public_api"]["schema_version"] = "3.0.0"
-    with pytest.raises(DistributionalSerializationError, match="unreadable by this build"):
-        SuperLSS.from_bytes(json.dumps(future))
-
-    mismatch = json.loads(model.to_bytes())
-    mismatch["public_api"]["config"]["weight_contract"] = {
-        "schema_version": 1,
-        "semantics": "prior",
-    }
-    _resign_public_config(mismatch)
-    with pytest.raises(DistributionalSerializationError, match="contract.*does not match"):
-        SuperLSS.from_bytes(json.dumps(mismatch))
-
-
-@pytest.mark.parametrize(
-    ("accepted_n_bins", "aliased_n_bins"),
-    [
-        (1, True),
-        (1, 1.0),
-        ({"x": 2, "z": 1}, {"x": 2, "z": True}),
-        ({"x": 2, "z": 1}, {"x": 2, "z": 1.0}),
-    ],
-    ids=["scalar-bool", "scalar-float", "mapping-bool", "mapping-float"],
-)
-def test_current_public_n_bins_rejects_type_aliases_after_valid_resigning(
-    accepted_n_bins: int | dict[str, int],
-    aliased_n_bins: object,
-) -> None:
-    frame, response, _, _ = _fixture(12)
-    model = model_from_templates(
-        family=GaussianLS(),
-        predictors=(Predictor("location", {}), Predictor("scale", {})),
-        n_bins=accepted_n_bins,
-    ).fit(frame, response)
-    artifact = json.loads(model.to_bytes())
-    artifact["public_api"]["config"]["n_bins"] = aliased_n_bins
-    _resign_public_config(artifact)
-
-    with pytest.raises(DistributionalSerializationError, match="n_bins.*invalid"):
-        SuperLSS.from_bytes(json.dumps(artifact))
-
-
-def test_current_public_weight_schema_rejects_float_alias_after_valid_resigning() -> None:
-    frame, response, _, _ = _fixture(12)
-    model = _linear_model().fit(frame, response)
-    artifact = json.loads(model.to_bytes())
-    artifact["public_api"]["config"]["weight_contract"]["schema_version"] = 1.0
-    _resign_public_config(artifact)
-
-    with pytest.raises(
-        DistributionalSerializationError,
-        match="contract configuration is invalid",
-    ):
-        SuperLSS.from_bytes(json.dumps(artifact))
-
-
-@pytest.mark.parametrize("invalid", ["silent", 1, True, None])
-def test_current_public_separation_policy_rejects_invalid_values_after_valid_resigning(
-    invalid: object,
-) -> None:
-    frame, response, _, _ = _fixture(12)
-    model = _linear_model().fit(frame, response)
-    artifact = json.loads(model.to_bytes())
-    artifact["public_api"]["config"]["separation"] = invalid
-    _resign_public_config(artifact)
-
-    with pytest.raises(
-        DistributionalSerializationError,
-        match="separation configuration is invalid",
-    ):
-        SuperLSS.from_bytes(json.dumps(artifact))
 
 
 def _gamma_curvature_fixture(n: int = 400) -> tuple[pd.DataFrame, np.ndarray]:
@@ -1696,7 +1521,7 @@ def test_unconverged_null_model_finishes_and_discloses(monkeypatch) -> None:
     codes = [finding.code for finding in model.diagnose().findings]
     assert "fit.null_model_not_converged" in codes
 
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     assert restored.result_.warnings == model.result_.warnings
     assert restored._require_fitted().null_model.converged is False
     assert restored._require_fitted().null_model.convergence_reason == "max_iterations"
@@ -1778,3 +1603,32 @@ def test_fit_reml_outer_defaults_to_efs_and_is_validated() -> None:
     newton = newton_model._require_fitted().smoothing
     assert newton is not None
     assert newton.config.outer == "efs+newton"
+
+
+@pytest.mark.parametrize(
+    ("name", "instruction"),
+    [
+        ("to_bytes", "joblib.dump(model, path)"),
+        ("from_bytes", "superglm 0.41"),
+    ],
+)
+def test_removed_byte_methods_say_what_to_use_instead(name: str, instruction: str) -> None:
+    model = _linear_model()
+    for owner in (SuperLSS, model):
+        assert not hasattr(owner, name)
+        with pytest.raises(AttributeError, match="was removed") as error:
+            getattr(owner, name)
+        assert "joblib" in str(error.value) and instruction in str(error.value)
+    # An uncaught `model.name` must not report a "Did you mean" suggestion of the other
+    # removed method. Python attaches the looked-up name to errors from getattr() and
+    # from a bare attribute read, so this makes the method call a user writes.
+    with pytest.raises(AttributeError) as statement:
+        exec(f"model.{name}()", {"model": model})
+    report = io.StringIO()
+    with contextlib.redirect_stderr(report):
+        sys.__excepthook__(type(statement.value), statement.value, statement.tb)
+    assert "was removed" in report.getvalue() and "Did you mean" not in report.getvalue()
+    with pytest.raises(AttributeError, match="has no attribute 'to_byte'"):
+        model.to_byte
+    with pytest.raises(AttributeError, match="has no attribute 'from_byte'"):
+        SuperLSS.from_byte

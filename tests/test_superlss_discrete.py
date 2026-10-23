@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -168,7 +170,7 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
         list(grouped.smoothing_parameters_.values()),
         rtol=np.sqrt(np.finfo(float).eps) * len(frame),
     )
-    restored = SuperLSS.from_bytes(grouped.to_bytes())
+    restored = pickle.loads(pickle.dumps(grouped))
     assert restored.discrete and restored.n_bins == 32
     assert restored.training_telemetry() == grouped.training_telemetry()
     np.testing.assert_array_equal(restored.covariance_, grouped.covariance_)
@@ -239,8 +241,8 @@ def test_public_serialization_size_ignores_primed_category_lookups(discrete) -> 
             1.0,
         ),
     )
-    model = SuperLSS.from_bytes(model.to_bytes())
-    cold_size = len(model.to_bytes())
+    model = pickle.loads(pickle.dumps(model))
+    cold_size = len(pickle.dumps(model))
     groups = [
         group
         for state in model._require_fitted().layout.predictors
@@ -254,9 +256,9 @@ def test_public_serialization_size_ignores_primed_category_lookups(discrete) -> 
         assert group._sorted_rows is None
         group.row_subset(np.arange(17))
         assert group._sorted_rows is not None
-    payload = model.to_bytes()
+    payload = pickle.dumps(model)
     assert len(payload) == cold_size
-    restored = SuperLSS.from_bytes(payload)
+    restored = pickle.loads(payload)
     np.testing.assert_array_equal(
         restored.predict_parameters(frame), model.predict_parameters(frame)
     )

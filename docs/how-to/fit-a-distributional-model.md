@@ -1273,7 +1273,7 @@ could carry them across it keep their analytic fourth derivatives,
 but report a certificate scaled by the curvature jump there, so the endgame
 trusts that Hessian no more than a differenced one.
 
-## Telemetry and serialization
+## Telemetry and saving
 
 `training_telemetry()` returns compact immutable fit metadata without requiring
 retained training rows:
@@ -1286,63 +1286,37 @@ print(telemetry.rank, telemetry.converged)
 print(telemetry.discrete, telemetry.n_bins)
 ```
 
-Serialize the complete fitted revision with the versioned public artifact:
+Save the complete fitted revision with joblib:
 
 ```python
-from pathlib import Path
+import joblib
 
-Path("severity.superlss").write_bytes(model.to_bytes())
-restored = SuperLSS.from_bytes(Path("severity.superlss").read_bytes())
+joblib.dump(model, "severity.joblib")
+restored = joblib.load("severity.joblib")
 restored_parameters = restored.predict_parameters(scoring_data)
 ```
 
-The artifact preserves family configuration, links, compiled predictor state,
+The file keeps the family configuration, links, compiled predictor state,
 penalties, coefficients, joint covariance, EDF, convergence and fallback
-telemetry, null model, and discrete configuration. Its JSON envelope and payload
-digests detect corruption. The payload contains Python pickle data for learned
-feature objects, so load artifacts only from trusted sources; a digest does not
-make hostile pickle safe.
+telemetry, null model, and discrete configuration. It also keeps row-level
+fit state, one value per training row:
 
-Artifacts carry two independent version numbers. The envelope's
-`schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier unless explicitly supported**. This build writes envelope `12.0.0`
-and also reads `8.0.0`, `9.0.0`, `10.0.0` and `11.0.0`, so models saved by
-0.40, and by builds that wrote schema 11, load. Schema 12 names the
-likelihood plan by the inputs the artifact stores and drops the face
-tolerances described below, so a schema-11 reader refuses it at its version
-gate. Schema 11 records what a fit disclosed (`result_.warnings`) and that
-`NegativeBinomialLS` supplies Fisher information; schema 10 permitted compact
-historical row arrays and recorded the full-history opt-in. Older readers
-refuse a newer format before loading its payload. New fits record whether curvature diagnostics assessed
-the data matrix or the penalized matrix; older fits keep their original
-family-dependent interpretation. Unsupported majors receive a version error
-naming both versions. MINOR and PATCH promise readability. Because the loader
-recomputes the manifest and compares it for
-equality, any change to what the manifest describes must be a MAJOR bump — so a
-manifest mismatch always means corruption or tampering, never age. A model
-also loads on a machine other than the one that saved it. The manifest binds
-what the artifact stores, not tolerances the loader recomputes with its own
-BLAS. A model fitted by this build names its likelihood by the weights as
-stored and, for every family except `GaussianLS`, by the response as stored,
-and the loader checks what the name covers exactly. The `GaussianLS`
-likelihood stores no response, so its name covers the weights only. The terms the loader
-recomputes from them with `log`, such as `-log y`, are checked against the
-saved fit within a rounding bound, because `log` can differ by an ulp between
-CPUs and maths libraries. A model fitted by an earlier build, with a family
-whose likelihood has such terms, named its likelihood with those terms
-included, which another machine cannot reproduce; it keeps that name when
-saved again. For such a model the loader checks the weights exactly, but
-checks the response only through the sum of those terms, within the same
-bound. That sum does not change when response rows are reordered, and for
-`GaussianLS` with prior weights and for `TwoPieceNormalLSS` it does not
-involve the response at all. Fitting the model again and saving it restores
-the exact check of the response for every family except `GaussianLS`, whose
-name never covered the response. The
-`public_api` block carries its own `schema_version` for the SuperLSS wrapper
-metadata alone; it moves independently of the envelope's, and both are written
-into every artifact so that whichever layer refuses a stale artifact names its
-own version. The wrapper remains at `2.0.0`. Envelope majors below 8 identify
-development-only shapes that are refused, not compatibility promises.
+- with the default `retain_rows=True`: the response, the likelihood weights,
+  the offsets, and the fitted and null linear predictors and parameters;
+- with any setting: the fitted linear predictors and parameters of the final
+  fit and of the last few fits in the smoothing history (the rows kept for
+  the plateau checks), and each predictor's offsets.
+
+It does not keep the training frame, so term-level reading methods on a
+restored model take `X_train=`. Treat the file as you treat the training
+data: the response and fitted values are in it. `retain_rows=False` drops the
+first group; no option drops the second, so a file saved without retained
+rows still holds fitted values for every training row. A joblib file is a
+pickle: load it only from sources you trust.
+
+`SuperLSS.to_bytes()` and `SuperLSS.from_bytes()` were removed. To convert a
+file that `to_bytes()` wrote, open it with superglm 0.41 and save the model
+again with `joblib.dump`.
 
 ### Diagnosing a fit
 
@@ -1376,9 +1350,8 @@ The report leads with the fit's work profile (`report.profile`):
 
 Findings follow the profile, ranked as before. Phase timings are measurements
 of this fit on this machine, not benchmark claims or per-feature attribution.
-A model restored with `from_bytes` has no machine timing: its report renders
-the same work counts and smoothing metrics, says that timing is unavailable,
-and the artifact schema is unchanged.
+A model with no recorded fit timing renders the same work counts and smoothing
+metrics and says that timing is unavailable.
 
 ## Current limits
 

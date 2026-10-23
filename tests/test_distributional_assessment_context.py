@@ -238,12 +238,12 @@ def test_scalar_receipts_authenticate_a_rejected_objective_without_re_evaluating
 
 
 def test_assessment_context_preserves_its_bindings_and_receipts_in_protocol_five_serialization():
-    from superglm.distributional.serialization import _pickle_model
+    from superglm.distributional.serialization import pickle_state
 
     layout, face, values, result = _assessment_problem()
     original, evaluation = _issue_receipt(layout, result, values)
     context = solver._PenaltyAssessmentContext.from_layout(layout, faces=(face,))
-    restored = pickle.loads(_pickle_model(context))
+    restored = pickle.loads(pickle_state(context))
     restored._validate()
     assert restored.original_error(
         result, lambdas=values, rank=evaluation.rank, objective=original

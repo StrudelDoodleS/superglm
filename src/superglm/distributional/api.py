@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import importlib
-import json
 import math
 import operator
 import pickle
@@ -27,7 +24,6 @@ from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconverge
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.distributional.binding import (
     BoundPredictor,
-    _bind_predictor_template,
     _snapshot_family,
     resolve_predictors,
 )
@@ -80,12 +76,7 @@ from superglm.distributional.result import (
     DistributionalFitResult,
     EFSConvergenceReason,
 )
-from superglm.distributional.separation import SeparationPolicy, validate_separation_policy
-from superglm.distributional.serialization import (
-    DistributionalSerializationError,
-    deserialize_distributional_model,
-    serialize_distributional_model,
-)
+from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.surfaces import (
     DensityFan,
     Portfolio,
@@ -109,8 +100,6 @@ from superglm.distributional.terms import (
 )
 from superglm.distributional.timing import FitPhaseRecorder, FitPhaseSnapshot
 from superglm.distributional.weights import (
-    LegacyPowerWeightArtifactError,
-    UnsupportedLikelihoodContractError,
     WeightContract,
     resolve_likelihood_weights,
 )
@@ -157,153 +146,6 @@ class SuperLSSTrainingTelemetry:
 @dataclass(frozen=True)
 class _LinkDefaults:
     default_link: str | Link
-
-
-_PUBLIC_ARTIFACT_TYPE = "superglm.SuperLSS"
-
-# Versions the ``public_api`` block that :meth:`SuperLSS.to_bytes` wraps around
-# the dense-model envelope -- its ``artifact_type`` / ``schema_version`` /
-# ``config`` / ``sha256`` keys, and nothing below them.  It is deliberately
-# independent of ``serialization.SCHEMA_VERSION``, which versions the envelope
-# underneath.  Version 2 is the first released wrapper schema.  Version 1 was
-# an internal pre-contract shape and is explicitly refused because it cannot
-# prove weight semantics.  Both numbers are written into every artifact, so
-# whichever layer refuses a stale artifact names its own version.
-# ``test_public_schema_version_is_independent_of_the_envelope_version`` pins the
-# relationship, including the block's key set.
-_PUBLIC_SCHEMA_VERSION = "2.0.0"
-
-
-def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise DistributionalSerializationError(
-            "SuperLSS artifact metadata must be finite JSON"
-        ) from exc
-
-
-def _public_config_digest(
-    config: Mapping[str, Any],
-    artifact: Mapping[str, Any],
-) -> str:
-    payload = artifact.get("payload")
-    fitted_digest = payload.get("sha256") if isinstance(payload, Mapping) else None
-    if not isinstance(fitted_digest, str) or len(fitted_digest) != 64:
-        raise DistributionalSerializationError("fitted-state payload digest is invalid")
-    digest = hashlib.sha256()
-    digest.update(fitted_digest.lower().encode("ascii"))
-    digest.update(b"\n")
-    digest.update(_canonical_json(config))
-    return digest.hexdigest()
-
-
-def _parse_public_artifact(
-    serialized: bytes | bytearray | memoryview | str,
-) -> tuple[
-    Mapping[str, Any],
-    WeightContract,
-    bool,
-    int | Mapping[str, int],
-    SeparationPolicy,
-]:
-    if isinstance(serialized, str):
-        text = serialized
-    elif isinstance(serialized, bytes | bytearray | memoryview):
-        try:
-            text = bytes(serialized).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise DistributionalSerializationError("SuperLSS artifact must be UTF-8 JSON") from exc
-    else:
-        raise TypeError("serialized artifact must be bytes or str")
-
-    try:
-        artifact = json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
-        raise DistributionalSerializationError("SuperLSS artifact is not valid JSON") from exc
-    if not isinstance(artifact, Mapping):
-        raise DistributionalSerializationError("SuperLSS artifact root must be an object")
-    public = artifact.get("public_api")
-    if not isinstance(public, Mapping):
-        raise DistributionalSerializationError("SuperLSS public metadata is missing")
-    if public.get("artifact_type") != _PUBLIC_ARTIFACT_TYPE:
-        raise DistributionalSerializationError("artifact type is not SuperLSS")
-    public_version = public.get("schema_version")
-    if not isinstance(public_version, str):
-        raise DistributionalSerializationError(
-            "SuperLSS metadata schema_version must be a semantic version"
-        )
-    version_parts = public_version.split(".")
-    if len(version_parts) != 3 or any(not part.isdigit() for part in version_parts):
-        raise DistributionalSerializationError(
-            "SuperLSS metadata schema_version must be a semantic version"
-        )
-
-    config = public.get("config")
-    if not isinstance(config, Mapping):
-        raise DistributionalSerializationError("SuperLSS public configuration is incomplete")
-    digest = public.get("sha256")
-    if not isinstance(digest, str) or len(digest) != 64:
-        raise DistributionalSerializationError("SuperLSS public configuration digest is invalid")
-    expected = _public_config_digest(config, artifact)
-    if not hmac.compare_digest(digest.lower(), expected):
-        raise DistributionalSerializationError(
-            "SuperLSS public configuration digest does not match"
-        )
-    public_major = int(version_parts[0])
-    current_major = int(_PUBLIC_SCHEMA_VERSION.split(".", 1)[0])
-    if public_major == 1:
-        if set(config) != {"discrete", "n_bins"}:
-            raise DistributionalSerializationError(
-                "legacy SuperLSS public configuration is corrupt"
-            )
-        raise LegacyPowerWeightArtifactError(
-            f"legacy pre-contract SuperLSS metadata version {public_version} cannot "
-            "establish likelihood-weight semantics; refit and regenerate the artifact"
-        )
-    if public_major != current_major:
-        raise DistributionalSerializationError(
-            f"artifact SuperLSS metadata version {public_version!r} is unreadable by this "
-            f"build, which reads and writes version {_PUBLIC_SCHEMA_VERSION!r}"
-        )
-    if set(config) != {"discrete", "n_bins", "separation", "weight_contract"}:
-        raise DistributionalSerializationError("SuperLSS public configuration is incomplete")
-    contract_config = config["weight_contract"]
-    if (
-        not isinstance(contract_config, Mapping)
-        or set(contract_config) != {"schema_version", "semantics"}
-        or type(contract_config["schema_version"]) is not int
-        or contract_config["schema_version"] != 1
-    ):
-        raise DistributionalSerializationError(
-            "SuperLSS likelihood-weight contract configuration is invalid"
-        )
-    try:
-        contract = WeightContract(semantics=contract_config["semantics"])
-    except (TypeError, UnsupportedLikelihoodContractError) as exc:
-        raise DistributionalSerializationError(
-            "SuperLSS likelihood-weight contract configuration is invalid"
-        ) from exc
-    discrete = config["discrete"]
-    if not isinstance(discrete, bool):
-        raise DistributionalSerializationError("SuperLSS discrete configuration must be bool")
-    try:
-        n_bins = _owned_n_bins(config["n_bins"])
-    except (TypeError, ValueError) as exc:
-        raise DistributionalSerializationError("SuperLSS n_bins configuration is invalid") from exc
-    try:
-        separation = validate_separation_policy(config["separation"])
-    except ValueError as exc:
-        raise DistributionalSerializationError(
-            "SuperLSS separation configuration is invalid"
-        ) from exc
-    return artifact, contract, discrete, n_bins, separation
 
 
 def _predictor_error(
@@ -491,6 +333,16 @@ def _json_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+class _RemovedMethod:
+    """A removed method: reading it, from the class or an instance, raises with what to use instead."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def __get__(self, instance: object, owner: type | None = None) -> Any:
+        raise AttributeError(self.message)
+
+
 class SuperLSS:
     """Fit several parameters of a response distribution jointly.
 
@@ -592,17 +444,27 @@ class SuperLSS:
         self._fit_phase_snapshot: FitPhaseSnapshot | None = None
         # The term grids sweep one covariate over its training range with the
         # others held at their training centre, so they need the frame the fit
-        # saw.  It is kept by reference, not copied, and serialization does not
+        # saw.  It is kept by reference, not copied, and pickling does not
         # carry it: a restored model is given one through ``X_train=``.
         self._training_frame: FrameLike | EagerFrame | None = None
 
+    to_bytes = _RemovedMethod(
+        "SuperLSS.to_bytes() was removed. Save a fitted model with "
+        "joblib.dump(model, path) and load it with joblib.load(path)."
+    )
+    from_bytes = _RemovedMethod(
+        "SuperLSS.from_bytes() was removed. To convert a file that to_bytes() wrote, "
+        "load it with superglm 0.41 and save it again with joblib.dump(model, path); "
+        "load it afterwards with joblib.load(path)."
+    )
+
     def __reduce__(self) -> tuple[Any, tuple[type[SuperLSS], bytes]]:
-        """Pickle (and so joblib) through the artifact pickler.
+        """Pickle (and so joblib) through the distributional pickler.
 
         The model keeps its configuration in read-only mappings, which the
-        standard pickler refuses; ``to_bytes``'s pickler carries them. As in
-        ``to_bytes``, the training frame stays out: it is the caller's data,
-        every column and row of it, and a restored model takes ``X_train=``.
+        standard pickler refuses; ``pickle_state`` carries them. The
+        training frame stays out: it is the caller's data, every column and
+        row of it, and a restored model takes ``X_train=``.
         """
         from superglm.distributional.serialization import pickle_state
 
@@ -933,8 +795,8 @@ class SuperLSS:
 
         The report leads with the work profile of the fit this object ran:
         phase timing shares, iteration and refit counts, and the terminal
-        state of every smoothing component.  A model restored from an
-        artifact carries no machine timing, and its report says so.
+        state of every smoothing component.  A model with no recorded fit
+        timing says so in its report.
         """
         return diagnose_distributional_fit(
             self._require_fitted(),
@@ -1121,99 +983,6 @@ class SuperLSS:
             resolved_chunk_size=model.result.resolved_chunk_size,
         )
 
-    def to_bytes(self) -> bytes:
-        """Serialize one fitted revision; load artifacts only from trusted sources."""
-        fitted = self._require_fitted()
-        state = fitted.fit_state
-        facade_n_bins = self._n_bins_config()
-        state_n_bins = (
-            state.requested_n_bins
-            if isinstance(state.requested_n_bins, int)
-            else dict(state.requested_n_bins)
-        )
-        expected_chunk_size = "auto" if self._discrete else None
-        if (
-            self._weight_contract != state.weight_contract
-            or self._discrete is not state.requested_discrete
-            or facade_n_bins != state_n_bins
-            or state.requested_chunk_size != expected_chunk_size
-        ):
-            raise DistributionalSerializationError(
-                "SuperLSS facade configuration does not match accepted fitted state"
-            )
-        artifact = json.loads(serialize_distributional_model(fitted))
-        config = {
-            "discrete": state.requested_discrete,
-            # JSON keys a column's bins by the label's text; from_bytes compares
-            # them so, and restores the labels from the fitted state.
-            "n_bins": (
-                state_n_bins
-                if isinstance(state_n_bins, int)
-                else {str(name): count for name, count in state_n_bins.items()}
-            ),
-            "separation": self._separation,
-            "weight_contract": {
-                "schema_version": state.weight_contract.schema_version,
-                "semantics": state.weight_contract.semantics,
-            },
-        }
-        artifact["public_api"] = {
-            "artifact_type": _PUBLIC_ARTIFACT_TYPE,
-            "schema_version": _PUBLIC_SCHEMA_VERSION,
-            "config": config,
-            "sha256": _public_config_digest(config, artifact),
-        }
-        return _canonical_json(artifact)
-
-    @classmethod
-    def from_bytes(
-        cls,
-        serialized: bytes | bytearray | memoryview | str,
-    ) -> SuperLSS:
-        """Restore a trusted fitted artifact after schema and integrity checks."""
-        artifact, public_contract, discrete, n_bins, separation = _parse_public_artifact(serialized)
-        fitted = deserialize_distributional_model(_canonical_json(artifact))
-        state = fitted.fit_state
-        state_n_bins = (
-            state.requested_n_bins
-            if isinstance(state.requested_n_bins, int)
-            else dict(state.requested_n_bins)
-        )
-        # The public JSON keys a column's bins by the label's text.
-        public_n_bins = n_bins if isinstance(n_bins, int) else dict(n_bins)
-        stated_n_bins = (
-            state_n_bins
-            if isinstance(state_n_bins, int)
-            else {str(name): count for name, count in state_n_bins.items()}
-        )
-        if public_contract != state.weight_contract:
-            raise DistributionalSerializationError(
-                "SuperLSS public weight contract does not match accepted fitted state"
-            )
-        if discrete is not state.requested_discrete or public_n_bins != stated_n_bins:
-            raise DistributionalSerializationError(
-                "SuperLSS public execution configuration does not match accepted fitted state"
-            )
-        expected_chunk_size = "auto" if state.requested_discrete else None
-        if state.requested_chunk_size != expected_chunk_size:
-            raise DistributionalSerializationError(
-                "SuperLSS fitted chunk policy is incompatible with its public configuration"
-            )
-        model = cls(
-            fitted.family,
-            *(
-                _bind_predictor_template(fitted.family, template)
-                for template in fitted.fit_state.predictor_templates
-            ),
-            weight_semantics=state.weight_contract.semantics,
-            discrete=state.requested_discrete,
-            n_bins=state_n_bins,
-            separation=separation,
-            coefficient_curvature=state.requested_solver_config.coefficient_curvature,
-        )
-        model._model = fitted
-        return model
-
     # ------------------------------------------------------------------ #
     # Inference suite
     #
@@ -1313,8 +1082,8 @@ class SuperLSS:
         if self._training_frame is None:
             raise RuntimeError(
                 "term inference sweeps a covariate over its training range, and this model "
-                "carries no training frame -- a model restored with from_bytes, pickle or "
-                "joblib never does. "
+                "carries no training frame -- a model restored by pickle or joblib "
+                "never does. "
                 "Pass X_train= the frame the model was fitted on."
             )
         return self._training_frame
@@ -1609,7 +1378,7 @@ class SuperLSS:
         Marra and Wood (2012) beside the max-deviation simultaneous band of
         Ruppert, Wand and Carroll (2003).  The sweep needs the frame the model
         was fitted on: it is kept by reference at ``fit``/``fit_reml`` but does
-        not survive serialization, so a restored model must be given
+        not survive pickling, so a restored model must be given
         ``X_train=``.
         """
         return term_effect(

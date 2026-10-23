@@ -23,8 +23,8 @@ tuple is the executable contract. The built-ins currently expose:
 | `src/superglm/distributional/weights.py` | Resolve and certify prior or frequency weights, their provenance, retained rows, and slicing identity. A family consumes `ResolvedLikelihoodWeights`; it does not reinterpret raw weights. |
 | `src/superglm/distributional/families/<name>.py` | Own the family adapter: parameter metadata, observation admission, the bound likelihood plan, initialization, `to_config()`, translation to and from a numerical kernel, and any optional structural protocols the family can support. |
 | `src/superglm/distributional/kernels/<name>.py` (optional) | Own primitive row numerics, local numerical-domain checks, a local weight-semantics type, and an immutable kernel result. It imports no distributional contract or aggregate namespace; a dedicated sibling numerical backend is the only permitted package-internal dependency. |
-| `src/superglm/distributional/serialization.py` | Own exact artifact codec registration and manifest validation only for families that explicitly promise persistence. An unregistered family is refused before pickle serialization. |
-| `tests/` | Prove the family law against independent row and derivative oracles, weight identities, initialization and refusal boundaries, packed-channel order, public fitting, optional behavior, persistence ordering when promised, and import boundaries. |
+| `src/superglm/distributional/serialization.py` | Own the pickler that lets a fitted `SuperLSS` pass through `pickle` and joblib. It registers no family: any family that pickles saves. |
+| `tests/` | Prove the family law against independent row and derivative oracles, weight identities, initialization and refusal boundaries, packed-channel order, public fitting, optional behavior, pickle round trips, and import boundaries. |
 
 ## Solver-facing adapter contract
 
@@ -118,12 +118,7 @@ The mapping should completely identify configuration that can change the
 family's fitted law. Current null fitting deep-copies and snapshots this
 mapping as read-only fit metadata, so later caller mutation cannot rewrite the
 accepted state. Consequently, `ConfigurableDistributionalFamily` metadata is
-required for a complete fit even when artifact persistence is neither needed
-nor supported.
-
-This configuration is not a serialization codec. In particular, a usable
-custom family does not become a registered artifact type merely by returning
-`{"type": "MyFamily"}`.
+required for a complete fit.
 
 ## Optional structural protocols
 
@@ -388,52 +383,28 @@ parameters = model.predict_parameters(frame)
 
 The nonempty `to_config()` metadata is load-bearing: this family needs it to
 complete null fitting. It can nevertheless complete the public fixed fit and
-call `predict_parameters()` without implementing `DefaultPredictionFamily` or
-registering a persistence codec. `model.predict(frame)` produces the
-actionable default-prediction refusal and directs callers to
-`predict_parameters()`. `model.to_bytes()` produces the actionable
-unregistered-family persistence refusal, `only built-in families can be
-serialized`. No artifact round trip belongs in this example because the
-family does not promise persistence.
+call `predict_parameters()` without implementing `DefaultPredictionFamily`. `model.predict(frame)` produces
+the actionable default-prediction refusal and directs callers to
+`predict_parameters()`.
 
-## Persistence is explicit
+## Replaying the likelihood plan
 
-Family configuration and artifact registration solve different problems.
-`to_config()` records the configuration of an accepted complete fit. An exact
-codec registration additionally pins the concrete Python class, qualified
-Python type, configuration type and schema, validation, and reconstruction
-rules needed to trust a stored model.
-
-Serialization accepts only exact registered family classes. An unregistered
-family, including a subclass of a registered built-in, is refused while the
-manifest is being selected, before family metadata is encoded and before the
-model reaches pickle serialization. Deserialization admits only an exact
-registered `(python_type, config.type)` pair and validates it before base64
-decoding or unpickling. These ordering guarantees keep corrupted or unknown
-artifacts away from executable payload handling.
-
-Complete fitting therefore does not imply a storage codec. Add an exact codec
-entry only when the family explicitly promises a compatible, validated
-artifact lifecycle; otherwise fitting and `predict_parameters()` are the
-supported extension surface and `to_bytes()` refuses safely.
-
-A stored model must load on a machine other than the one that fitted it. The
-loader rebinds the plan from the retained response and weights and compares
-`plan_identifier` with the saved one, so the identifier hashes only inputs
-stored exactly: tags, the weight digest and, where the plan keeps one, the
-response digest. A carrier the plan
-computes with `log` or `gammaln` rounds differently on other CPUs and C
-libraries, so it stays out of the identifier. A plan with such a carrier
-implements `carrier_rounding()`, returning a
-`superglm.distributional.likelihood_identity.CarrierRounding`, and the loader
+The corrected covariance rebinds the plan from the retained response and
+weights and compares `plan_identifier` with the one the fit recorded, so the
+identifier hashes only inputs stored exactly: tags, the weight digest and,
+where the plan keeps one, the response digest. A carrier the plan computes
+with `log` or `gammaln` rounds differently on other CPUs and C libraries, so
+it stays out of the identifier. A plan with such a carrier implements
+`carrier_rounding()`, returning a
+`superglm.distributional.likelihood_identity.CarrierRounding`, and the replay
 checks the carrier's sum against the fit's within the bound derived in that
 module. A new family's plan leaves out `legacy_identifier_tag`, or sets it to
-`None`. A built-in family whose saved identifiers once hashed the carrier
-names their tag in that plan attribute, such as `GammaLS/v1`, so those
-identifiers load by tag and carrier sum. The tag is a plain attribute, not a
+`None`. A built-in family whose earlier identifiers hashed the carrier names
+their tag in that plan attribute, such as `GammaLS/v1`, so those identifiers
+are matched by tag and carrier sum. The tag is a plain attribute, not a
 `CarrierRounding` field, so a fit can check it without building the carrier:
 a fit refuses a plan whose legacy tag is the tag of its own identifiers,
-because the loader would then accept any identifier under that tag.
+because the replay would then accept any identifier under that tag.
 
 ## Evidence checklist
 
@@ -464,20 +435,17 @@ Before proposing a package-provided family, record all applicable evidence:
 - [ ] Positive continuous CDF tests distinguish a finite outside-support query
   (`y ≤ 0` gives zero) from likelihood response admission, and atom families
   retain their jump at zero.
-- [ ] Serialization tamper ordering proves exact class/config-pair admission
-  and refusal before payload decoding, unpickling, or pickling as appropriate.
 - [ ] AST import checks keep public integration tests on documented namespaces
   and keep primitive kernels free of reverse distributional imports.
 - [ ] Ruff check and format checks pass for production and test code.
-- [ ] Focused family, kernel, public API, and persistence tests pass before any
+- [ ] Focused family, kernel, public API, and pickle round-trip tests pass before any
   broader suite is used as integration evidence.
 
 ## Change checklist
 
 For a normal package-provided family, production changes are limited to the
-family adapter with `to_config()`, an optional primitive kernel, its public
-export, and an exact serialization codec entry only if persistence is
-promised. External structural families need no production registration merely
+family adapter with `to_config()`, an optional primitive kernel and its public
+export. External structural families need no production registration merely
 to fit.
 
 Keep each added or materially changed function within the ordinary ≤60-line

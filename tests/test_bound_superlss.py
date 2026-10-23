@@ -1,8 +1,8 @@
 """Regression coverage for family-bound public construction."""
 
 import inspect
+import pickle
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -423,7 +423,7 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
             np.testing.assert_allclose(a.omega_ssp, b.omega_ssp, rtol=0.0, atol=tolerance * scale)
     np.testing.assert_array_equal(model.predict(frame, offsets=offsets), snapshot["prediction"])
     np.testing.assert_array_equal(model.covariance_, snapshot["covariance"])
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
     np.testing.assert_array_equal(
         restored.predict(frame, offsets=offsets), model.predict(frame, offsets=offsets)
     )
@@ -459,32 +459,8 @@ def test_feature_mapping_and_term_list_fit_bit_identically():
     assert np.array_equal(left.result_.coefficients, right.result_.coefficients)
     assert dict(left.smoothing_parameters_) == dict(right.smoothing_parameters_)
     assert left.result_.log_likelihood == right.result_.log_likelihood
-    restored = SuperLSS.from_bytes(left.to_bytes())
+    restored = pickle.loads(pickle.dumps(left))
     for model in (restored, left):
         pd.testing.assert_frame_equal(
             model.predict_parameters(frame), right.predict_parameters(frame)
         )
-
-
-def test_trusted_032_artifact_preserves_predictions_and_covariance():
-    artifact = Path(__file__).with_name("fixtures") / "superlss-v0.32.0.json"
-    restored = SuperLSS.from_bytes(artifact.read_bytes())
-    frame, response, weights, offsets = _fixture()
-    family = GaussianLS(scale_floor=0.02)
-    fresh = SuperLSS(family, family.location("x"), family.scale("z")).fit(
-        frame,
-        response,
-        sample_weight=weights,
-        offsets=offsets,
-        lambdas={},
-    )
-    # Independent fits can differ by platform-dependent numerical roundoff;
-    # exact equality remains required for the same-run round trips above.
-    for historical, current in (
-        (restored.predict(frame, offsets=offsets), fresh.predict(frame, offsets=offsets)),
-        (restored.covariance_, fresh.covariance_),
-        (np.asarray(tuple(restored.coef_.values())), np.asarray(tuple(fresh.coef_.values()))),
-    ):
-        tolerance = _roundoff_factor(historical, current)
-        scale = max(1.0, np.linalg.norm(current, ord=np.inf))
-        np.testing.assert_allclose(historical, current, rtol=tolerance, atol=tolerance * scale)

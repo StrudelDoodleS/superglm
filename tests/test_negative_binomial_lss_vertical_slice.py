@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 
@@ -85,7 +87,7 @@ def test_public_fixed_fit_predicts_and_round_trips_complete_state() -> None:
     assert model.training_telemetry().curvature_policy == "observed"
     assert model.result_.curvature_telemetry.actual_source == "observed"
 
-    restored = SuperLSS.from_bytes(model.to_bytes())
+    restored = pickle.loads(pickle.dumps(model))
 
     assert type(restored.family_) is NegativeBinomialLS
     assert restored.family_.to_config() == {

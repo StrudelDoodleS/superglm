@@ -1,9 +1,6 @@
 """Historical row retention must not change smoothing or replay authority."""
 
-import base64
 import gc
-import hashlib
-import json
 import math
 import pickle
 import weakref
@@ -14,7 +11,6 @@ import pandas as pd
 import pytest
 
 from superglm.distributional import GaussianLS, Predictor
-from superglm.distributional import serialization as serialization_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.result import (
@@ -22,11 +18,7 @@ from superglm.distributional.result import (
     DenseSolverResult,
     DistributionalEFSConfig,
 )
-from superglm.distributional.serialization import (
-    DistributionalSerializationError,
-    deserialize_distributional_model,
-    serialize_distributional_model,
-)
+from superglm.distributional.serialization import pickle_state
 from superglm.distributional.weights import WeightContract
 from superglm.features import RandomEffect, Spline
 from tests.bound_predictor_fixtures import model_from_templates
@@ -74,7 +66,7 @@ def test_public_full_history_opt_in():
 
 
 @pytest.mark.parametrize("outer", ["efs", "efs+newton"])
-def test_compact_and_full_history_preserve_fit_and_serialization(outer):
+def test_compact_and_full_history_preserve_fit_and_pickling(outer):
     compact = _fit(outer=outer, retain_history_rows=False, handoff_iterations=2)
     full = _fit(outer=outer, retain_history_rows=True, handoff_iterations=2)
     left, right = compact.smoothing, full.smoothing
@@ -92,7 +84,7 @@ def test_compact_and_full_history_preserve_fit_and_serialization(outer):
     frame, _ = _data()
     np.testing.assert_array_equal(compact.predict_parameters(frame), full.predict_parameters(frame))
     for model in (compact, full):
-        restored = deserialize_distributional_model(serialize_distributional_model(model))
+        restored = pickle.loads(pickle_state(model))
         np.testing.assert_array_equal(
             restored.predict_parameters(frame), model.predict_parameters(frame)
         )
@@ -167,57 +159,6 @@ def test_history_row_storage_is_bounded_during_optimization(monkeypatch, outer):
     assert samples[-1][0] > samples[-1][1]
     if outer == "efs+newton":
         assert smoothing.newton_iterations > 0
-
-
-def _mutated_artifact(model, mutate, *, legacy=False):
-    artifact = json.loads(serialize_distributional_model(model))
-    restored = pickle.loads(base64.b64decode(artifact["payload"]["data"]))
-    mutate(restored)
-    raw = serialization_module._pickle_model(restored)
-    artifact["payload"]["data"] = base64.b64encode(raw).decode("ascii")
-    artifact["payload"]["sha256"] = hashlib.sha256(raw).hexdigest()
-    if legacy:
-        artifact["manifest"]["smoothing"]["config"].pop("retain_history_rows")
-    return json.dumps(artifact).encode()
-
-
-def test_legacy_full_history_without_new_fields_round_trips():
-    model = _fit(retain_history_rows=True)
-
-    def old_fields(restored):
-        vars(restored.smoothing.config).pop("retain_history_rows")
-        for fit in restored.smoothing.coefficient_fits:
-            vars(fit).pop("row_shape")
-
-    restored = deserialize_distributional_model(_mutated_artifact(model, old_fields, legacy=True))
-    assert restored.smoothing.config.retain_history_rows is False
-    assert all(fit.row_shape == (96, 2) for fit in restored.smoothing.coefficient_fits)
-    assert all(fit.eta is not None for fit in restored.smoothing.coefficient_fits)
-
-
-def test_rehashed_compact_shape_tampering_is_refused():
-    model = _fit()
-
-    def wrong_shape(restored):
-        object.__setattr__(restored.smoothing.coefficient_fits[0], "row_shape", (9700, 2))
-
-    with pytest.raises(DistributionalSerializationError, match="row shape"):
-        deserialize_distributional_model(_mutated_artifact(model, wrong_shape))
-
-
-def test_legacy_migration_does_not_repair_mismatched_terminal_identity():
-    model = _fit(retain_history_rows=True)
-
-    def corrupt_legacy(restored):
-        vars(restored.smoothing.config).pop("retain_history_rows")
-        for fit in restored.smoothing.coefficient_fits:
-            vars(fit).pop("row_shape")
-        object.__setattr__(
-            restored.fit_state, "solver_result", restored.smoothing.coefficient_fits[0]
-        )
-
-    with pytest.raises(DistributionalSerializationError, match="terminal EFS fit"):
-        deserialize_distributional_model(_mutated_artifact(model, corrupt_legacy, legacy=True))
 
 
 def test_dense_reuse_keeps_live_authority_without_owning_old_fits(monkeypatch):
@@ -343,7 +284,7 @@ def test_plateau_and_exact_face_keep_replay_authority(practical):
     else:
         assert left.terminal_fit.coefficient_face is not None
     for model in models:
-        restored = deserialize_distributional_model(serialize_distributional_model(model))
+        restored = pickle.loads(pickle_state(model))
         assert restored.smoothing.history == model.smoothing.history
         assert (
             restored.smoothing.terminal_endpoint_directions
