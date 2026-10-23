@@ -3,12 +3,70 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, FrameBackend, FrameLike, as_eager_frame
+from superglm._frame import (
+    EagerFrame,
+    FrameBackend,
+    FrameLike,
+    LegacyDigestUnavailableError,
+    as_eager_frame,
+)
+
+_UNVERIFIABLE_WARNED = False
+
+
+def _frame_digest_matches(
+    frame: EagerFrame,
+    columns: tuple[object, ...] | None,
+    expected: bytes,
+    scheme: str | None,
+    *,
+    include_index: bool,
+    own_frame: bool = False,
+) -> bool | None:
+    """Compare a frame with a stored digest written under *scheme*.
+
+    ``scheme`` is None for guards written before the tag existed.  Those used
+    Polars' own row hash on Polars frames, which can be recomputed on Polars 1.x
+    and not on 2.x.  A digest that cannot be recomputed says nothing about the
+    frame.  For the model's own retained frame (``own_frame``) that is not a
+    mismatch, so it warns once and lets the retained data stand; any other frame
+    is refused with a warning that names the cause, as the data it holds cannot
+    be shown to be the training data, and the verdict is None (cannot tell)
+    rather than False (differs).
+    """
+    if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
+        return frame.digest(columns, include_index=include_index) == expected
+    if scheme is None:
+        try:
+            return frame.legacy_polars_digest(columns) == expected
+        except LegacyDigestUnavailableError:
+            cause = "was written by Polars 1.x and cannot be checked under this Polars"
+    else:
+        cause = f"was written under the digest scheme {scheme!r}, which this release cannot check"
+    if not own_frame:
+        warnings.warn(
+            f"The model's fit-time digest {cause}, so a frame other than its retained "
+            "one cannot be recognised as the training rows; refit to restore the check.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+    global _UNVERIFIABLE_WARNED
+    if not _UNVERIFIABLE_WARNED:
+        _UNVERIFIABLE_WARNED = True
+        warnings.warn(
+            f"The retained data's fit-time digest {cause}, so the results assume the "
+            "retained data are unchanged; refit to restore the check.",
+            UserWarning,
+            stacklevel=4,
+        )
+    return True
 
 
 def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
@@ -39,6 +97,7 @@ class FitGeometryGuard:
     weight_digest: bytes
     offset_digest: bytes
     x_columns: tuple[object, ...] | None = None
+    x_digest_scheme: str | None = None
 
     @classmethod
     def capture(
@@ -65,10 +124,15 @@ class FitGeometryGuard:
             weight_digest=weight_digest,
             offset_digest=offset_digest,
             x_columns=x_columns,
+            x_digest_scheme=frame.digest_scheme,
         )
 
-    def matches(self, X, sample_weight, offset) -> bool:
-        """Return whether evaluation rows, weights, and offset match the fit."""
+    def matches(self, X, sample_weight, offset, *, own_frame: bool = False) -> bool:
+        """Return whether evaluation rows, weights, and offset match the fit.
+
+        ``own_frame`` says ``X`` is the model's own retained frame, which a
+        digest that cannot be recomputed under this Polars may not refuse.
+        """
         try:
             frame = as_eager_frame(X)
             n_weights, weight_digest = _numeric_vector_digest(sample_weight)
@@ -78,21 +142,55 @@ class FitGeometryGuard:
                 and n_weights == self.n_rows
                 and n_offsets == self.n_rows
                 and frame.backend == self.x_backend
-                and frame.digest(self.x_columns, include_index=False) == self.x_digest
                 and weight_digest == self.weight_digest
                 and offset_digest == self.offset_digest
+                and _frame_digest_matches(
+                    frame,
+                    self.x_columns,
+                    self.x_digest,
+                    self.x_digest_scheme,
+                    include_index=False,
+                    own_frame=own_frame,
+                )
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
-    def matches_training(self, X, y, sample_weight, offset) -> bool:
+    def records_same_fit(
+        self, other: FitGeometryGuard, X, *, own_frame: bool = False
+    ) -> bool | None:
+        """Return whether ``other``, a guard captured from the frame ``X``, records this fit's inputs.
+
+        Guards written under one digest scheme compare by value.  Across schemes
+        (a guard saved before the tag) the response, weights and offset still
+        compare by value, and this guard's frame digest is checked against ``X``
+        as :meth:`matches` checks it; None when that digest cannot be checked
+        against ``X`` at all.
+        """
+        if self.x_digest_scheme == other.x_digest_scheme:
+            return self == other
+        if replace(self, x_digest=other.x_digest, x_digest_scheme=other.x_digest_scheme) != other:
+            return False
+        try:
+            return _frame_digest_matches(
+                as_eager_frame(X),
+                self.x_columns,
+                self.x_digest,
+                self.x_digest_scheme,
+                include_index=False,
+                own_frame=own_frame,
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    def matches_training(self, X, y, sample_weight, offset, *, own_frame: bool = False) -> bool:
         """Return whether all supplied rows reproduce the fitted training inputs."""
         try:
             n_y, y_digest = _numeric_vector_digest(y)
             return bool(
                 n_y == self.n_rows
                 and y_digest == self.y_digest
-                and self.matches(X, sample_weight, offset)
+                and self.matches(X, sample_weight, offset, own_frame=own_frame)
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
@@ -106,6 +204,7 @@ class FitDataGuard:
     x_digest: bytes
     y_snapshot: NDArray[np.float64]
     x_columns: tuple[object, ...] | None = None
+    x_digest_scheme: str | None = None
 
     @classmethod
     def capture(
@@ -124,12 +223,23 @@ class FitDataGuard:
             x_digest=frame.digest(x_columns),
             y_snapshot=y_snapshot,
             x_columns=x_columns,
+            x_digest_scheme=frame.digest_scheme,
         )
 
-    def _matches_frame(self, X: EagerFrame | FrameLike) -> bool:
+    def _matches_frame(self, X: EagerFrame | FrameLike, *, own_frame: bool = False) -> bool:
         try:
             frame = as_eager_frame(X)
-            return frame.backend == self.x_backend and frame.digest(self.x_columns) == self.x_digest
+            return bool(
+                frame.backend == self.x_backend
+                and _frame_digest_matches(
+                    frame,
+                    self.x_columns,
+                    self.x_digest,
+                    self.x_digest_scheme,
+                    include_index=True,
+                    own_frame=own_frame,
+                )
+            )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
@@ -142,6 +252,7 @@ class FitDataGuard:
         *,
         fit_weights: NDArray | None,
         fit_offset: NDArray | None,
+        own_frame: bool = False,
     ) -> bool:
         """Return whether all identity-matched inputs retain their fit-time values."""
         if not _same_numeric_vector(y, self.y_snapshot):
@@ -154,22 +265,23 @@ class FitDataGuard:
             fit_offset is None or not _same_numeric_vector(offset, fit_offset)
         ):
             return False
-        if not self._matches_frame(X):
+        if not self._matches_frame(X, own_frame=own_frame):
             return False
         return True
 
-    def matches_retained_values(self, X, y) -> bool:
+    def matches_retained_values(self, X, y, *, own_frame: bool = False) -> bool:
         """Return whether retained feature/response values still match fit time.
 
         Unlike :meth:`matches`, this path is used before an operation consumes
         retained caller data.  It therefore accepts an equal independent frame,
         including after a model deepcopy or pickle round trip.  The content digest
         catches both pandas mutations and writable NumPy aliases into a frame's
-        backing storage.
+        backing storage.  ``own_frame`` says ``X`` is the model's own retained
+        frame (see :func:`_frame_digest_matches`).
         """
         if not _same_numeric_vector(y, self.y_snapshot):
             return False
-        if not self._matches_frame(X):
+        if not self._matches_frame(X, own_frame=own_frame):
             return False
         return True
 
@@ -177,7 +289,8 @@ class FitDataGuard:
 def require_unchanged_fit_data(model, X, y) -> None:
     """Reject use of retained caller data that changed after fitting."""
     guard = getattr(model, "_fit_data_guard", None)
-    if guard is None or not guard.matches_retained_values(X, y):
+    own_frame = X is getattr(model, "_fit_X_ref", None)
+    if guard is None or not guard.matches_retained_values(X, y, own_frame=own_frame):
         raise RuntimeError(
             "retained fit data were mutated after fitting or cannot be verified; "
             "refit before refreshing fitted state"

@@ -394,6 +394,25 @@ def test_polars_digest_is_deterministic_and_sensitive_to_values_order_and_schema
     assert as_eager_frame(changed_schema).digest() != digest
 
 
+def test_legacy_polars_digest_needs_the_four_seed_hash_rows() -> None:
+    """The digest of releases before the scheme tag used Polars' four-seed
+    ``hash_rows``; Polars 2.0 removed the extra seeds, so there it is unavailable
+    (the digest of the current scheme never calls ``hash_rows``)."""
+    frame = as_eager_frame(pl.DataFrame({"x": [1, 2]}))
+
+    class OneSeed:
+        def hash_rows(self, seed=0):
+            raise AssertionError("must not hash with a different digest")
+
+    class Stub:
+        def select(self, columns):
+            return OneSeed()
+
+    frame.native = Stub()  # type: ignore[assignment]
+    with pytest.raises(frame_module.LegacyDigestUnavailableError):
+        frame.legacy_polars_digest(("x",))
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 @pytest.mark.parametrize("include_index", [True, False])
 def test_empty_selected_digest_preserves_row_count_without_native_selection(

@@ -284,6 +284,7 @@ def _reporting_rows(
             y_values,
             weights,
             offset_values,
+            own_frame=X is model._fit_X_ref,
         ):
             raise ValueError(
                 "random-effect reporting rows must reproduce fitted training rows, "

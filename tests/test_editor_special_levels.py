@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import pickle
 import urllib.error
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -994,6 +996,30 @@ def test_free_levels_on_other_rows_than_the_curve_say_so_and_bound_the_gap(
         "the curve was fitted on other rows than the comparison reads."
     )
     assert np.all(found[-1].gap_var > found[-1].free_var)
+
+
+def test_a_model_saved_before_the_digest_scheme_compares_on_its_own_rows(monkeypatch):
+    """A pandas guard saved before the scheme tag holds the same digest as one written now.
+
+    Its curve and the free refit read the same rows, so the comparison
+    measures the gap as it does for a model fitted now, without a warning.
+    """
+    found = _captured_gaps(monkeypatch)
+    X, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
+    model = SuperGLM(
+        family="gaussian",
+        features={"band": OrderedCategorical(order=TWELVE, basis=Spline(kind="ps", n_knots=6))},
+        spline_penalty=20.0,
+    ).fit(X, y)
+    fresh = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    # What a model pickled before the tag loads as: the same digest, no scheme.
+    model._fit_geometry_guard = dataclasses.replace(model._fit_geometry_guard, x_digest_scheme=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        saved = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert fresh["notice"] is None
+    assert saved["notice"] is None
+    np.testing.assert_array_equal(found[1].gap_var, found[0].gap_var)
 
 
 def test_free_levels_say_when_the_fits_cannot_be_matched_or_their_curvature_is_signed(

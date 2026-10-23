@@ -137,7 +137,7 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
     assert "if: ${{ always() }}" in floor[0]
-    assert "needs: test-compatibility" in floor[0]
+    assert "needs: [test-compatibility, polars-floor]" in floor[0]
     matrix = _jobs(workflow)["test-compatibility"]
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
         ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
@@ -147,6 +147,35 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
         "the compatibility test matrix must install the bench and plotting extras"
     )
     assert "continue-on-error: true" not in workflow
+
+
+def test_polars_floor_job_runs_the_declared_floor_with_the_matrix_extras() -> None:
+    """The floor job tests the Polars release pyproject.toml declares as the
+    floor, in the environment the matrix installs, and lists its skips."""
+    job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
+        "polars-floor"
+    ]
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [*project["dependencies"], *sum(project["optional-dependencies"].values(), [])]
+    floors = [
+        requirement.removeprefix("polars>=")
+        for requirement in requirements
+        if requirement.startswith("polars>=")
+    ]
+    assert floors == [job["env"]["POLARS_FLOOR"]], (
+        "the floor job must run the declared Polars floor"
+    )
+    assert f"Polars {floors[0]} floor" in job["name"]
+    runs = [step["run"] for step in job["steps"] if "run" in step]
+    assert any(
+        run.startswith("uv sync --locked ") and "--extra dev --extra bench --extra plotting" in run
+        for run in runs
+    ), "the Polars floor job must install the matrix's bench and plotting extras"
+    uv_runs = [line for run in runs for line in run.splitlines() if line.startswith("uv run ")]
+    assert len(uv_runs) == 2
+    assert all('--with "polars==${POLARS_FLOOR}"' in line for line in uv_runs)
+    assert "polars.__version__ == os.environ['POLARS_FLOOR']" in uv_runs[0]
+    assert " pytest " in uv_runs[1] and " -rs " in uv_runs[1]
 
 
 def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None:
@@ -199,24 +228,28 @@ def test_suite_runner_stages_report_both_failures(tmp_path: Path, stage: int) ->
     assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("floor_result", ["success", "failure", "cancelled", "skipped"])
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
-def test_python_floor_aggregate_executes_the_matrix_verdict(result: str) -> None:
+def test_python_floor_aggregate_executes_the_matrix_verdict(result: str, floor_result: str) -> None:
+    """The required context passes only when the matrix and the Polars floor both passed."""
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     aggregate = _jobs(workflow)["python-floor"]
     assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
+    assert "POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}" in aggregate
     commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
     assert len(commands) == 1
     command = shlex.split(commands[0])
     assert command[:2] == ["python", "-c"]
     completed = subprocess.run(
         [sys.executable, *command[1:]],
-        env=os.environ | {"TEST_RESULT": result},
+        env=os.environ | {"TEST_RESULT": result, "POLARS_FLOOR_RESULT": floor_result},
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
-    assert (completed.returncode == 0) == (result == "success"), completed.stderr
+    passed = result == floor_result == "success"
+    assert (completed.returncode == 0) == passed, completed.stderr
 
 
 def test_dev_ci_job_names_do_not_claim_merge_gate_membership() -> None:

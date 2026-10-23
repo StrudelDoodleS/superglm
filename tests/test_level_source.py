@@ -1,5 +1,7 @@
 """tests/test_level_source.py"""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -106,5 +108,13 @@ def test_polars_plain_categorical_uses_observed_uniques():
     pl = pytest.importorskip("polars")
     foreign = pl.Series("other", ["zzz_foreign"], dtype=pl.Categorical)
     s = pl.Series("g", ["b", "a", "b"], dtype=pl.Categorical)
-    assert "zzz_foreign" in list(foreign.dtype.categories)  # registry is shared
+    # Polars 1.42 cannot iterate `dtype.categories` and Polars 2 has no
+    # `cat.get_categories` (deprecated from 1.43), so read whichever exists.
+    if hasattr(foreign.cat, "get_categories"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            registry = foreign.cat.get_categories().to_list()
+    else:
+        registry = list(foreign.dtype.categories)
+    assert "zzz_foreign" in registry  # registry is shared
     assert resolve_level_source(s) == ["a", "b"]

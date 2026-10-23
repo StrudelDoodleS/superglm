@@ -160,6 +160,7 @@ def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
             dataset.offset,
             fit_weights=fit_weights,
             fit_offset=fit_offset,
+            own_frame=True,
         )
     )
 

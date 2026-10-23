@@ -104,6 +104,7 @@ def metrics(model, X, y, sample_weight=None, offset=None):
             offset,
             fit_weights=getattr(model, "_fit_weights", None),
             fit_offset=getattr(model, "_fit_offset", None),
+            own_frame=True,
         )
     )
     if (

@@ -1146,6 +1146,7 @@ def _prime_fit_caches(
     null_mu: NDArray | None = None,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
+    from superglm._frame import as_eager_frame
     from superglm.model.fit_data_guard import FitDataGuard, FitGeometryGuard
 
     guard_columns = list(model._feature_order)
@@ -1179,13 +1180,14 @@ def _prime_fit_caches(
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
     model._fit_offset_ref = offset_ref
+    guard_frame = as_eager_frame(X_ref)
     model._fit_data_guard = (
-        FitDataGuard.capture(X_ref, y_arr, columns=tuple(guard_columns))
+        FitDataGuard.capture(guard_frame, y_arr, columns=tuple(guard_columns))
         if getattr(model, "_retain_fit_state", True)
         else None
     )
     model._fit_geometry_guard = FitGeometryGuard.capture(
-        X_ref,
+        guard_frame,
         y_arr,
         model._fit_weights,
         (
