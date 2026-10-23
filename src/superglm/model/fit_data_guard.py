@@ -28,7 +28,7 @@ def _frame_digest_matches(
     *,
     include_index: bool,
     own_frame: bool = False,
-) -> bool:
+) -> bool | None:
     """Compare a frame with a stored digest written under *scheme*.
 
     ``scheme`` is None for guards written before the tag existed.  Those used
@@ -37,7 +37,8 @@ def _frame_digest_matches(
     frame.  For the model's own retained frame (``own_frame``) that is not a
     mismatch, so it warns once and lets the retained data stand; any other frame
     is refused with a warning that names the cause, as the data it holds cannot
-    be shown to be the training data.
+    be shown to be the training data, and the verdict is None (cannot tell)
+    rather than False (differs).
     """
     if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
         return frame.digest(columns, include_index=include_index) == expected
@@ -55,7 +56,7 @@ def _frame_digest_matches(
             UserWarning,
             stacklevel=4,
         )
-        return False
+        return None
     global _UNVERIFIABLE_WARNED
     if not _UNVERIFIABLE_WARNED:
         _UNVERIFIABLE_WARNED = True
@@ -155,13 +156,16 @@ class FitGeometryGuard:
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
-    def records_same_fit(self, other: FitGeometryGuard, X, *, own_frame: bool = False) -> bool:
+    def records_same_fit(
+        self, other: FitGeometryGuard, X, *, own_frame: bool = False
+    ) -> bool | None:
         """Return whether ``other``, a guard captured from the frame ``X``, records this fit's inputs.
 
         Guards written under one digest scheme compare by value.  Across schemes
         (a guard saved before the tag) the response, weights and offset still
         compare by value, and this guard's frame digest is checked against ``X``
-        as :meth:`matches` checks it.
+        as :meth:`matches` checks it; None when that digest cannot be checked
+        against ``X`` at all.
         """
         if self.x_digest_scheme == other.x_digest_scheme:
             return self == other
@@ -225,13 +229,16 @@ class FitDataGuard:
     def _matches_frame(self, X: EagerFrame | FrameLike, *, own_frame: bool = False) -> bool:
         try:
             frame = as_eager_frame(X)
-            return frame.backend == self.x_backend and _frame_digest_matches(
-                frame,
-                self.x_columns,
-                self.x_digest,
-                self.x_digest_scheme,
-                include_index=True,
-                own_frame=own_frame,
+            return bool(
+                frame.backend == self.x_backend
+                and _frame_digest_matches(
+                    frame,
+                    self.x_columns,
+                    self.x_digest,
+                    self.x_digest_scheme,
+                    include_index=True,
+                    own_frame=own_frame,
+                )
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False

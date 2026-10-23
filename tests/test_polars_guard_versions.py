@@ -390,10 +390,11 @@ def test_free_levels_of_a_legacy_guard_compare_on_the_rows_both_fits_read(monkey
         if not POLARS_2:
             warnings.simplefilter("error")
         copy = free_level_comparison(session, "band")
-    if POLARS_2:
+    if POLARS_2:  # the rows cannot be checked, which is not the same as differing
         assert copy["notice"].endswith(
-            "the curve was fitted on other rows than the comparison reads."
+            "cannot be checked against these rows. Refit the model to measure it."
         )
+        assert "other rows" not in copy["notice"]
     else:
         assert copy["notice"] is None
         np.testing.assert_array_equal(found[2].gap_var, found[0].gap_var)

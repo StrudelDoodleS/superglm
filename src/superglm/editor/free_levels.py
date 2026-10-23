@@ -108,6 +108,10 @@ _NO_DESIGN = _INDEPENDENT + (
     "include it."
 )
 _OTHER_ROWS = _INDEPENDENT + "the curve was fitted on other rows than the comparison reads."
+_UNCHECKED = _INDEPENDENT + (
+    "the model's saved record of its training rows was written by another release and "
+    "cannot be checked against these rows. Refit the model to measure it."
+)
 _SIGNED = (
     _INDEPENDENT
     + "under this family and link, rows far from their fitted mean leave it unmeasured."
@@ -448,8 +452,9 @@ def _gap_variances(
         # The free fit read ``X``; the curve's fingerprint, perhaps saved under
         # an earlier digest scheme, is checked against it.
         own_frame = X is getattr(model, "_fit_X_ref", None)
-        if not fingerprints[1].records_same_fit(fingerprints[0], X, own_frame=own_frame):
-            return None, _OTHER_ROWS
+        same = fingerprints[1].records_same_fit(fingerprints[0], X, own_frame=own_frame)
+        if not same:
+            return None, _UNCHECKED if same is None else _OTHER_ROWS
     free_side = _influence(free_model, name)
     if isinstance(free_side, str):
         return None, free_side
