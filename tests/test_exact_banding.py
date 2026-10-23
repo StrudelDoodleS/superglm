@@ -155,6 +155,24 @@ def test_zero_tolerances_that_cannot_merge_are_refused():
         exact_bands(np.arange(6.0), np.ones(6), np.zeros(6), max_bands=3)
 
 
+def test_zero_tolerances_that_block_every_factor_are_refused(monkeypatch):
+    # Values 0 and 2 have zero tolerance, so no factor merges them, while the
+    # positive tolerance between them sends the search to its bound, 2 * 2 / 1.
+    import superglm.diagnostics.exact_banding as exact_banding
+
+    passes = []
+    counted = exact_banding._fits
+
+    def count(*args):
+        passes.append(args[3])
+        return counted(*args)
+
+    monkeypatch.setattr(exact_banding, "_fits", count)
+    with pytest.raises(ValueError, match="a double can hold"):
+        exact_bands(np.array([0.0, 1.0, 2.0]), np.ones(3), np.array([0.0, 1.0, 0.0]), max_bands=1)
+    assert passes == [2.0, 4.0]  # the one probe below the bound, then the bound
+
+
 def test_rounding_slack_cannot_admit_a_band_that_breaks_a_tolerance():
     # Two values 7 ulps apart near 100, tolerances of 4.2 ulps, the weight on the
     # upper one: their mean lands 7 ulps from the lower value, past its 4.2. A
