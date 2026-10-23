@@ -131,8 +131,7 @@ dimension.  It holds for every input because the bound covers all of them, so
 there is no unmeasured regime waiting to break it.  :func:`_rank_floor` is of
 this kind: ``max(n, 1) * eps``, LAPACK's convention and ``matrix_rank``'s own
 tolerance, and :func:`_factor_rank_floor` is its square root, which is the same
-statement about a factor.  So is ``_solve_floor`` in
-:mod:`superglm.screening._arrow`.
+statement about a factor.
 
 *Type 2 -- "is this answer small?"*  A statement about DATA.  Not derivable;
 any constant is a claim about the datasets its author had seen, and there is
