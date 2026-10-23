@@ -339,13 +339,8 @@ class _RemovedMethod:
     def __init__(self, message: str) -> None:
         self.message = message
 
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.name = name
-
     def __get__(self, instance: object, owner: type | None = None) -> Any:
-        raise AttributeError(
-            self.message, name=self.name, obj=owner if instance is None else instance
-        )
+        raise AttributeError(self.message)
 
 
 class SuperLSS:

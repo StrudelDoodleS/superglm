@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import pickle
+import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -1616,6 +1619,15 @@ def test_removed_byte_methods_say_what_to_use_instead(name: str, instruction: st
         with pytest.raises(AttributeError, match="was removed") as error:
             getattr(owner, name)
         assert "joblib" in str(error.value) and instruction in str(error.value)
+    # An uncaught `model.name` must not report a "Did you mean" suggestion of the other
+    # removed method. Python attaches the looked-up name to errors from getattr() and
+    # from a bare attribute read, so this makes the method call a user writes.
+    with pytest.raises(AttributeError) as statement:
+        exec(f"model.{name}()", {"model": model})
+    report = io.StringIO()
+    with contextlib.redirect_stderr(report):
+        sys.__excepthook__(type(statement.value), statement.value, statement.tb)
+    assert "was removed" in report.getvalue() and "Did you mean" not in report.getvalue()
     with pytest.raises(AttributeError, match="has no attribute 'to_byte'"):
         model.to_byte
     with pytest.raises(AttributeError, match="has no attribute 'from_byte'"):

@@ -517,9 +517,11 @@ def test_superlss_pickles_deepcopies_and_dumps_with_joblib():
     assert shallow._model is model._model and shallow._training_frame is model._training_frame
 
 
-def test_superlss_interactions_take_integer_column_labels():
+def test_superlss_interactions_take_integer_column_labels(tmp_path):
     """Master refused a non-string interaction parent in a SuperLSS predictor."""
     import pickle
+
+    import joblib
 
     from superglm import GaussianLS, SuperLSS
     from superglm.features.interaction import SplineCategorical
@@ -540,11 +542,17 @@ def test_superlss_interactions_take_integer_column_labels():
     assert model.term_test("location", "0:2").rank > 0
     expected = model.predict(frame.head(5))
     assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
-    assert np.array_equal(pickle.loads(pickle.dumps(model)).predict(frame.head(5)), expected)
+    joblib.dump(model, tmp_path / "model.joblib")
+    assert np.array_equal(joblib.load(tmp_path / "model.joblib").predict(frame.head(5)), expected)
 
 
-def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loads():
-    """The refusal is the declaration's; a template restored from an artifact is not re-refused."""
+def test_a_pickled_superlss_model_with_a_term_on_its_factor_smooth_group_predicts_the_same():
+    """A model fitted with a categorical term on its factor-smooth group survives a pickle round trip.
+
+    The group-term warning belongs to the declaration helpers. A model built
+    from templates carries the term without it, and pickling restores that
+    model without running the declaration check again.
+    """
     from superglm import Categorical, FactorSmooth, GaussianLS
     from superglm.distributional import Predictor
     from superglm.features import Spline
@@ -554,7 +562,7 @@ def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loa
     n = 400
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, n), "g": rng.choice(list("abc"), n)})
     y = np.sin(2.0 * frame["x"].to_numpy()) + 0.3 * rng.standard_normal(n)
-    legacy = model_from_templates(
+    template_model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor(
@@ -567,7 +575,7 @@ def test_a_saved_superlss_model_with_a_term_on_its_factor_smooth_group_still_loa
     )
     lambdas = {name: 1.0 for name in ("location:x#wiggle", "location:x:g:fs#wiggle")}
     lambdas |= {"location:x:g:fs#null_0": 1.0, "location:x:g:fs#null_1": 1.0}
-    fitted = legacy.fit(frame, y, lambdas=lambdas)
+    fitted = template_model.fit(frame, y, lambdas=lambdas)
     restored = pickle.loads(pickle.dumps(fitted))
     assert np.array_equal(restored.predict(frame), fitted.predict(frame))
 
