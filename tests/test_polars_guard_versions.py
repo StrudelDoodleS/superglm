@@ -29,8 +29,11 @@ import pytest
 import superglm as sg
 import superglm._frame as frame_module
 from superglm._frame import POLARS_DIGEST_SCHEME, as_eager_frame
+from superglm.editor import EditorSession
+from superglm.editor.free_levels import free_level_comparison
 from superglm.model import fit_data_guard as guard_module
 from superglm.model.fit_data_guard import FitDataGuard, require_unchanged_fit_data
+from tests.test_editor_special_levels import TWELVE, _captured_gaps, _gaussian
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_polars_guard"
 POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
@@ -335,6 +338,51 @@ def test_a_legacy_guard_does_not_pair_inherited_weights_with_other_rows(monkeypa
         pytest.raises(ValueError, match="inherited from the fit"),
     ):
         model.screen_interactions(X.with_columns(pl.col("x").reverse()), y)
+
+
+def test_free_levels_of_a_legacy_guard_compare_on_the_rows_both_fits_read(monkeypatch) -> None:
+    """A model saved before the scheme tag compares its curve with the free refit
+    on the rows they both read, as the release that saved it did.  Polars 1.x
+    recomputes the old digest and recognises the retained frame and an equal
+    copy alike.  Polars 2.x cannot: the retained frame stands with the one
+    warning, and a copy is reported as other rows, with the warning that names
+    the digest as the cause."""
+    monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
+    found = _captured_gaps(monkeypatch)
+    frame, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
+    X = pl.from_pandas(frame)
+    model = sg.SuperGLM(
+        family="gaussian",
+        features={
+            "band": sg.OrderedCategorical(order=TWELVE, basis=sg.Spline(kind="ps", n_knots=6))
+        },
+        spline_penalty=20.0,
+    ).fit(X, y)
+    fresh = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    guard = model._fit_geometry_guard
+    legacy = guard.x_digest if POLARS_2 else as_eager_frame(X).legacy_polars_digest(guard.x_columns)
+    model._fit_geometry_guard = dataclasses.replace(guard, x_digest=legacy, x_digest_scheme=None)
+
+    with pytest.warns(UserWarning, match=NOTICE) if POLARS_2 else warnings.catch_warnings():
+        if not POLARS_2:
+            warnings.simplefilter("error")
+        saved = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    assert fresh["notice"] is None
+    assert saved["notice"] is None
+    np.testing.assert_array_equal(found[1].gap_var, found[0].gap_var)
+
+    session = EditorSession.from_model(model, train_data=(X.clone(), y))
+    with pytest.warns(UserWarning, match=REFUSAL) if POLARS_2 else warnings.catch_warnings():
+        if not POLARS_2:
+            warnings.simplefilter("error")
+        copy = free_level_comparison(session, "band")
+    if POLARS_2:
+        assert copy["notice"].endswith(
+            "the curve was fitted on other rows than the comparison reads."
+        )
+    else:
+        assert copy["notice"] is None
+        np.testing.assert_array_equal(found[2].gap_var, found[0].gap_var)
 
 
 def test_fitting_on_a_polars_frame_writes_a_guard_that_round_trips() -> None:

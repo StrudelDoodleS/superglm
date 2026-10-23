@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -151,6 +151,30 @@ class FitGeometryGuard:
                     include_index=False,
                     own_frame=own_frame,
                 )
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    def records_same_fit(self, other: FitGeometryGuard, X, *, own_frame: bool = False) -> bool:
+        """Return whether ``other``, a guard captured from the frame ``X``, records this fit's inputs.
+
+        Guards written under one digest scheme compare by value.  Across schemes
+        (a guard saved before the tag) the response, weights and offset still
+        compare by value, and this guard's frame digest is checked against ``X``
+        as :meth:`matches` checks it.
+        """
+        if self.x_digest_scheme == other.x_digest_scheme:
+            return self == other
+        if replace(self, x_digest=other.x_digest, x_digest_scheme=other.x_digest_scheme) != other:
+            return False
+        try:
+            return _frame_digest_matches(
+                as_eager_frame(X),
+                self.x_columns,
+                self.x_digest,
+                self.x_digest_scheme,
+                include_index=False,
+                own_frame=own_frame,
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False

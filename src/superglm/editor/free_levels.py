@@ -210,6 +210,7 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
         name,
         dict(zip(levels, exposure.tolist(), strict=True)),
         {label for labels in separated.values() for label in labels},
+        X,
     )
     # A fit that stopped before converging holds no estimates to judge by:
     # its diamonds are drawn, and no level is flagged.
@@ -263,7 +264,7 @@ class _Gaps:
     note: str | None
 
 
-def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[str]) -> _Gaps:
+def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[str], X) -> _Gaps:
     """Both fits' level values centred on one weighted mean of one set of levels, and each gap's variance.
 
     The set is the levels the free fit estimated, less those ``separated``
@@ -283,7 +284,7 @@ def _gaps(free_model, model, name: str, prior: dict[str, float], separated: set[
     free_rows = _categorical_contrasts(free_model, name, labels, share)
     curve_rows = _ordered_contrasts(model, name, [declared[x] for x in labels], share)
     free_var = _contrast_variances(free_model, name, free_rows)
-    gap_var, note = _gap_variances(free_model, free_rows, model, curve_rows, name)
+    gap_var, note = _gap_variances(free_model, free_rows, model, curve_rows, name, X)
     if gap_var is None:
         # Unmeasured, the gap's variance is bounded whatever the two fits'
         # correlation: var(b - f) <= (sd(b) + sd(f))^2. Fits on shared rows
@@ -417,7 +418,7 @@ def _contrast_variances(model, name: str, rows: np.ndarray) -> np.ndarray:
 
 
 def _gap_variances(
-    free_model, free_rows, model, curve_rows, name: str
+    free_model, free_rows, model, curve_rows, name: str, X
 ) -> tuple[np.ndarray | None, str | None]:
     """Each gap's variance from both fits linearised on the same rows, or None and why not.
 
@@ -430,7 +431,8 @@ def _gap_variances(
     fits themselves stay in. A curve taken as fixed (``curve_rows`` None), or
     one that fits exactly, contributes nothing. The sum runs row by row, so
     the two fits must have read the same rows, response, weights and offset,
-    which their fit fingerprints decide.
+    which their fit fingerprints decide, the curve's checked against ``X``,
+    the frame the free fit read.
     """
     phi = float(free_model.result.phi)
     if not phi > 0.0 or _term_covariance(free_model, name) is None:
@@ -443,7 +445,10 @@ def _gap_variances(
         fingerprints = [getattr(fit, "_fit_geometry_guard", None) for fit in (free_model, model)]
         if None in fingerprints:
             return None, _UNMEASURED
-        if fingerprints[0] != fingerprints[1]:
+        # The free fit read ``X``; the curve's fingerprint, perhaps saved under
+        # an earlier digest scheme, is checked against it.
+        own_frame = X is getattr(model, "_fit_X_ref", None)
+        if not fingerprints[1].records_same_fit(fingerprints[0], X, own_frame=own_frame):
             return None, _OTHER_ROWS
     free_side = _influence(free_model, name)
     if isinstance(free_side, str):
