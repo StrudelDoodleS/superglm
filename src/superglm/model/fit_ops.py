@@ -49,14 +49,8 @@ from superglm.model.reml_finalize import (
     finalize_reml_fit,
 )
 from superglm.model.reml_ops import (
-    model_compute_dW_deta,
     model_optimize_direct_reml,
-    model_optimize_discrete_reml_cached_w,
     model_optimize_efs_reml,
-    model_reml_direct_gradient,
-    model_reml_direct_hessian,
-    model_reml_laml_objective,
-    model_reml_w_correction,
 )
 from superglm.model.reml_setup import (
     collect_reml_groups,
@@ -91,14 +85,8 @@ __all__ = [
     "fit",
     "fit_path",
     "fit_reml",
-    "model_compute_dW_deta",
     "model_optimize_direct_reml",
-    "model_optimize_discrete_reml_cached_w",
     "model_optimize_efs_reml",
-    "model_reml_direct_gradient",
-    "model_reml_direct_hessian",
-    "model_reml_laml_objective",
-    "model_reml_w_correction",
 ]
 
 

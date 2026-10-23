@@ -30,6 +30,7 @@ from superglm.reml.scop_efs import (
 )
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
+from tests._reml_adapters import reml_laml_objective
 
 
 def _curvature_solver_reparam(q_raw: int, kind: str):
@@ -6365,7 +6366,8 @@ class TestSCOPEFSRegression:
         )
 
         # Call through the model wrapper (the path that was broken)
-        obj_wrapper = model._reml_laml_objective(
+        obj_wrapper = reml_laml_objective(
+            model,
             y,
             result,
             model._reml_lambdas,

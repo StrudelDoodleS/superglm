@@ -15,6 +15,7 @@ from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatri
 from superglm.model import SuperGLM
 from superglm.reml import build_penalty_caches
 from superglm.solvers.irls_direct import _build_penalty_matrix, fit_irls_direct
+from tests._reml_adapters import reml_direct_gradient, reml_direct_hessian
 
 
 def _setup(family, seed=42):
@@ -137,7 +138,8 @@ def _full_outer_fd_hessian(
                 S_pert = _build_penalty_matrix(m._dm.group_matrices, m._groups, lam_pert, p_dim)
                 pq_pert = float(r_pert.beta @ S_pert @ r_pert.beta)
                 phi_pert = max((r_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
-            grads[sign] = m._reml_direct_gradient(
+            grads[sign] = reml_direct_gradient(
+                m,
                 r_pert,
                 inv_pert,
                 lam_pert,
@@ -172,7 +174,8 @@ class TestIFTHessian:
             M_p,
         ) = _setup(family)
 
-        grad = m._reml_direct_gradient(
+        grad = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -180,7 +183,8 @@ class TestIFTHessian:
             penalty_ranks,
             phi_hat=phi_hat,
         )
-        hess = m._reml_direct_hessian(
+        hess = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,
@@ -229,7 +233,8 @@ class TestIFTHessian:
             M_p,
         ) = _setup(family)
 
-        grad = m._reml_direct_gradient(
+        grad = reml_direct_gradient(
+            m,
             pirls_result,
             XtWX_S_inv,
             lambdas,
@@ -237,7 +242,8 @@ class TestIFTHessian:
             penalty_ranks,
             phi_hat=phi_hat,
         )
-        hess = m._reml_direct_hessian(
+        hess = reml_direct_hessian(
+            m,
             XtWX_S_inv,
             lambdas,
             reml_groups,

@@ -289,11 +289,8 @@ def test_builtin_link_does_not_warn(poisson_setup) -> None:
 def test_compute_dW_deta_itself_is_silent(poisson_setup) -> None:
     """The warning lives in ``reml_w_correction``, never in ``compute_dW_deta``.
 
-    ``compute_dW_deta`` has a second public entry point --
-    ``model_compute_dW_deta`` (``model/reml_ops.py:13``), surfaced as
-    ``Model._compute_dW_deta`` and re-exported from ``reml/__init__.py``.  That
-    is a bare derivative query making no REML claim, so a warning about skipped
-    smoothing-parameter gradients does not belong on it.
+    ``compute_dW_deta`` is a bare derivative query making no REML claim, so a
+    warning about skipped smoothing-parameter gradients does not belong on it.
 
     Without this test the placement is unpinned: moving the ``warnings.warn``
     call from ``reml_w_correction`` into ``compute_dW_deta`` leaves every other
@@ -310,25 +307,6 @@ def test_compute_dW_deta_itself_is_silent(poisson_setup) -> None:
             assert _dW_deta(poisson_setup, **kwargs) is None
 
         assert [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)] == [], kwargs
-
-
-def test_model_compute_dW_deta_is_silent(poisson_setup, monkeypatch) -> None:
-    """The same guard through the public ``Model._compute_dW_deta`` wrapper.
-
-    This is the path the placement decision exists to protect, so assert it
-    directly rather than only on the underlying function.
-    """
-    model = poisson_setup["model"]
-    link = _LinkWithoutDeriv2(poisson_setup["link"])
-    monkeypatch.setattr(model, "_link", link)
-    eta, mu = _eta_mu(poisson_setup, link, poisson_setup["distribution"])
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        result = model._compute_dW_deta(mu, eta, poisson_setup["sample_weight"])
-
-    assert result is None, "the capability gate is what must be exercised here"
-    assert [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)] == []
 
 
 def test_gamma_log_structural_zero_does_not_warn(gamma_setup) -> None:

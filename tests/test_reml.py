@@ -24,6 +24,7 @@ from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.types import GroupSlice
+from tests._reml_adapters import reml_w_correction
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -1144,8 +1145,8 @@ class TestREMLBackwardCompat:
             return_xtwx=True,
             weight_semantics="frequency",
         )
-        corr = m._reml_w_correction(
-            pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
+        corr = reml_w_correction(
+            m, pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
         )
         assert corr is not None, "Enhanced custom objects should get W correction"
 
