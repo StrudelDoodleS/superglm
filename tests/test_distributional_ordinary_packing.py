@@ -9,6 +9,17 @@ from superglm.distributional.solver import _ordinary_packing as packing
 from superglm.distributional.solver._global_moments import _warmup_global_moments
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _closed_writers():
+    """Close the writers before any test calls them, as every production plan does.
+
+    An open dispatcher compiles one specialisation per operand layout it sees; a
+    worker that ran only some layouts then holds several equally good matches
+    for another, and numba refuses the call as ambiguous.
+    """
+    _warmup_global_moments()
+
+
 def _matrix(values, layout):
     if layout == "A":
         storage = np.empty((2 * values.shape[0], 2 * values.shape[1]))
