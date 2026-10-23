@@ -1,7 +1,10 @@
 """Raising form of the strict smoothing certification contract.
 
-``SmoothingResult.matched_certified`` states the same contract as a property;
-this helper checks it independently, one named refusal at a time.
+``SmoothingResult.matched_certified`` states the contract as a property; this
+helper checks a subset of its clauses independently, one named refusal at a
+time. It leaves out two clauses of the property: the check that
+``tuple(terminal_endpoint_directions) == face_names``, and the refusal of a
+stationary outcome with a component resting at the maximum lambda.
 """
 
 from __future__ import annotations

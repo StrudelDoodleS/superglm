@@ -1,4 +1,4 @@
-"""Immutable fitted prediction designs and covariance propagation."""
+"""Immutable fitted prediction designs."""
 
 from __future__ import annotations
 
@@ -21,14 +21,6 @@ def _readonly_matrix(values: NDArray, *, name: str) -> NDArray[np.float64]:
     result = np.array(values, dtype=np.float64, copy=True)
     if result.ndim != 2 or not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must be a finite matrix")
-    result.setflags(write=False)
-    return result
-
-
-def _readonly_vector(values: NDArray) -> NDArray[np.float64]:
-    result = np.array(values, dtype=np.float64, copy=True)
-    if result.ndim != 1 or not np.all(np.isfinite(result)):
-        raise ValueError("prediction standard error must be a finite vector")
     result.setflags(write=False)
     return result
 

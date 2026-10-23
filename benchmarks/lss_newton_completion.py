@@ -67,6 +67,19 @@ CASE_OPTIONS = {
 }
 
 
+def _checked_band_variance(matrix, block):
+    """The band-variance rule of ``terms._band_variance``, with a finite check.
+
+    Refuses a non-finite variance, or one below ``-64 * eps * max(1, max|variance|)``;
+    otherwise clips roundoff-negative values to zero.
+    """
+    variance = np.einsum("ij,jk,ik->i", matrix, block, matrix, optimize=True)
+    tolerance = 64.0 * np.finfo(float).eps * max(1.0, float(np.max(np.abs(variance), initial=0.0)))
+    if not np.all(np.isfinite(variance)) or np.any(variance < -tolerance):
+        raise ValueError("a prediction variance is non-finite or materially negative")
+    return np.maximum(variance, 0.0)
+
+
 def gaussian_fixture(crossed):
     """The original API-test fixture and its independent crossed control."""
     if crossed:
@@ -274,8 +287,7 @@ def main():
             for state in fitted.layout.predictors:
                 block = fitted.covariance[state.coefficient_slice, state.coefficient_slice]
                 matrix = design.local[state.name]
-                variance = np.einsum("ij,jk,ik->i", matrix, block, matrix, optimize=True)
-                errors[state.name] = np.sqrt(np.maximum(variance, 0.0))
+                errors[state.name] = np.sqrt(_checked_band_variance(matrix, block))
             theta = fitted.predict_parameters(evaluation, offsets=evaluation_offsets)
             payload = {
                 "theta": theta,

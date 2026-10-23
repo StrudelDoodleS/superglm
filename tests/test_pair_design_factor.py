@@ -419,7 +419,10 @@ def test_no_production_module_imports_a_retired_gram_producer():
     #322's precedent is to delete what nothing calls.  These five are kept
     instead, and the reason is that they still have real callers -- as this
     suite's arbiter, which is a use rather than dead code, and the same
-    standing ``_reference_edf`` has in the structured suite.  What must not
+    standing ``_reference_edf`` has in the structured suite.  Two of the five,
+    ``pair_overlap_moments`` and ``tensor_penalty``, now live in
+    ``tests/_overlap_oracle.py``, which this file imports; the other three live
+    in ``superglm.screening``.  What must not
     happen is one of them quietly becoming the production route again for a
     pair some future branch adds, because the moment route's accuracy ceiling
     is architectural and a new caller would inherit it without being told.
@@ -452,9 +455,12 @@ def test_no_production_module_imports_a_retired_gram_producer():
     ``superglm.screening`` misses ``from ._overlap import tensor_penalty``,
     where ``node.module`` is ``"_overlap"`` and ``node.level`` is 1 -- and a
     sibling is exactly where the re-adoption this scan was widened for would
-    appear.  ``node.level > 0`` closes it with no module test needed: these
-    five names live nowhere but ``superglm.screening``, so a relative import
-    that binds one of them resolved into that package whatever its dots say.
+    appear.  ``node.level > 0`` closes it with no module test needed: three of
+    the five names live in ``superglm.screening``, so a relative import that
+    binds one of them resolved into that package whatever its dots say.  The
+    other two live in ``tests/_overlap_oracle.py``, outside ``src``, so a
+    production import of either is wrong in any form, and the same
+    ``node.level`` check catches a relative one.
     The ``ast.Attribute`` fallback does not cover the case, because ``from X
     import name`` binds a bare ``Name``.
 
