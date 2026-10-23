@@ -535,13 +535,14 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
 
 
-def _null_direction_problem():
+def _null_direction_problem(offset: float = -2.0e8):
     """Two constant location columns tied by a penalty at the cap, offset to cancel.
 
     At ``b = (1e8, 1e8)`` the penalty term ``P b`` is exactly zero, but its
     rounding floor ``gamma_2 (|P| |b|)`` is about 440. The location score
     along ``b1 + b2``, the penalty's null direction, is a genuine likelihood
-    gain that no rounding of ``P b`` produces.
+    gain that no rounding of ``P b`` produces. With ``offset = 0`` the fit
+    starts from ``b = (0.5, 0.5)`` instead, where the floor is about 2e-6.
     """
     family = GaussianLS(scale_floor=0)
     n = 40
@@ -557,7 +558,7 @@ def _null_direction_problem():
                 Predictor("location", {"x": Numeric(), "z": Numeric()}, intercept=False),
                 Predictor("scale", {}, intercept=True),
             ),
-            offsets={"location": np.full(n, -2.0e8)},
+            offsets={"location": np.full(n, offset)},
         )
     )
     response = np.tile([0.0, 2.0], n // 2)
@@ -618,24 +619,136 @@ def test_a_score_inside_its_floor_that_a_newton_step_removes_is_not_stationary()
         replace(fit, terminal_score=score, convergence_reason="score")
 
 
-def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
-    """Kills certifying a floor stop's Newton correction on a fallback curvature."""
-    family, layout, response, plan, penalty = _null_direction_problem()
+def _cancelled_score_problem():
+    """Review round 3's counterexample, rebuilt so that every computed ``P b`` is exact.
+
+    Location columns ``(1, -1)`` with offset ``-2t`` at ``b = (t, -t)``, where
+    ``t = 2**24``, give location 0, and the penalty ``2**33 [[1, 1], [1, 1]]``
+    has ``b`` in its null space. The location score lies along that null
+    direction, ``(1, -1)``. The rounding floor ``gamma_2 (|P| |b|)`` is 64, yet
+    each product is a coefficient times a power of two and each row adds two
+    terms within a factor of two of each other, so every BLAS computes ``P b``
+    exactly at every ``b`` the fit visits. The responses alternate
+    ``delta - 1`` and ``delta + 1``, so the maximum likelihood estimates are
+    location ``delta`` and scale 1, and the start's scale is the estimate at
+    location 0.
+    """
+    family = GaussianLS(scale_floor=0)
+    n = 128
+    t = 2.0**24
+    delta = -0.25
+    weights = resolve_likelihood_weights(
+        np.ones(n), n_observations=n, contract=WeightContract(semantics="prior")
+    )
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"x": np.ones(n), "z": -np.ones(n)})),
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"x": Numeric(), "z": Numeric()}, intercept=False),
+                Predictor("scale", {}, intercept=True),
+            ),
+            offsets={"location": np.full(n, -2.0 * t)},
+        )
+    )
+    response = np.tile([delta - 1.0, delta + 1.0], n // 2)
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    penalty = np.zeros((3, 3))
+    penalty[:2, :2] = 2.0**33
+    start = np.array([t, -t, math.log(math.sqrt(1.0 + delta**2))])
+    return family, layout, response, plan, penalty, start, delta
+
+
+def test_a_floor_stop_holds_for_every_score_its_rounding_admits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills certifying a floor stop's Newton correction on the computed score alone.
+
+    In the reviewer's case a fused multiply-add BLAS kernel returned
+    ``P b = (128, -128)`` where it is exactly zero, and that rounding cancelled
+    the location score along the penalty's null direction. The rest lay along
+    the penalized direction, inside its floor and with a Newton correction far
+    below the tolerance, so the fit stopped at iteration 0 at location 0. Here
+    the start's score is forged to that outcome on every platform: rounding
+    inside the floor takes the null-direction score away and leaves 1/16 along
+    ``(1, 1)``.
+    """
+    family, layout, response, plan, penalty, start, delta = _cancelled_score_problem()
+    stiff = 0.0625
+    real_geometry = solver_module._geometry
+    implied_products = []
+
+    def cancelled_geometry(context, state, source):
+        geometry = real_geometry(context, state, source)
+        if not np.array_equal(state.coefficients, start):
+            return geometry
+        score = np.array([stiff, stiff, geometry.score_penalized[2]])
+        implied_products.append(geometry.score_data - score)
+        return replace(geometry, score_penalized=score)
+
+    monkeypatch.setattr(solver_module, "_geometry", cancelled_geometry)
     fit = fit_dense_fixed_lambda(
         family,
         layout,
         response,
         plan,
         penalty,
-        initial=np.array([1.0e8, 1.0e8, math.log(math.sqrt(2.0))]),
+        initial=start,
+        config=DenseSolverConfig(max_iterations=100, tolerance=1.0e-12),
+    )
+
+    # The forged score is one a rounding of P b = 0 within its floor returns.
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+    floor = 2.0 * unit_roundoff * (np.abs(penalty) @ np.abs(start))
+    assert implied_products
+    assert np.all(np.abs(implied_products[0]) <= floor)
+    assert fit.converged is True
+    assert fit.iterations > 0
+    objective = fit.penalized_optimizing_log_likelihood
+    assert objective is not None
+    # As in the null-direction test: the stop certifies a gap of at most
+    # tol (1 + |f|) in a quadratic model with location and log-scale
+    # curvatures n and 2n, and the location sums three terms up to 2t.
+    n = len(response)
+    gap = fit.config.tolerance * (1.0 + abs(objective))
+    location, scale = fit.theta[0]
+    assert abs(location - delta) <= math.sqrt(2.0 * gap / n) + 3.0 * unit_roundoff * 4.0 * 2.0**24
+    assert abs(math.log(scale)) <= math.sqrt(2.0 * gap / (2.0 * n)) + 4.0 * unit_roundoff
+
+    # The same score on the converged state is inside its floor with a Newton
+    # correction far below the tolerance, but a rounding inside that floor can
+    # hide a null-direction score whose correction is not.
+    tolerance = fit.config.tolerance
+    score = np.array([stiff, stiff, 0.0])
+    unconverged = replace(
+        fit, terminal_score=score, converged=False, convergence_reason="max_iterations"
+    )
+    assert result_module._assessment_retained_kkt_ratio(unconverged) > tolerance
+    assert not result_module._assessment_is_numerically_stationary(unconverged, tolerance)
+    with pytest.raises(ValueError, match="rounding floor"):
+        replace(fit, terminal_score=score, convergence_reason="score")
+
+
+def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
+    """Kills certifying a floor stop's Newton correction on a fallback curvature."""
+    family, layout, response, plan, penalty = _null_direction_problem(offset=0.0)
+    fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        penalty,
+        initial=np.array([0.5, 0.5, math.log(math.sqrt(2.0))]),
         config=DenseSolverConfig(max_iterations=100, tolerance=1.0e-12),
     )
     tolerance = fit.config.tolerance
     # A score along the penalized direction, above the bare tolerance and
-    # inside its floor, whose Newton correction is far below the tolerance.
-    # The fit's own scale score is not kept: a decrement stop bounds it through
-    # the curvature, not by its floor.
-    score = np.array([1.0e-3, -1.0e-3, 0.0])
+    # inside its floor of about 2e-6, whose Newton correction is far below the
+    # tolerance for every score within that floor. The fit's own scale score
+    # is not kept: a decrement stop bounds it through the curvature, not by
+    # its floor.
+    score = np.array([1.0e-6, -1.0e-6, 0.0])
     within = replace(fit, terminal_score=score, convergence_reason="score")
     assert result_module._assessment_retained_kkt_ratio(within) > tolerance
     assert result_module._assessment_is_numerically_stationary(within, tolerance)

@@ -541,6 +541,15 @@ def _score_within_rounding_floor(
     and Wright's termination test (1981, sec. 8.2.3), which must hold beside
     the gradient condition's escape ``||g|| < eps_A`` that the floor states.
     ``penalized_curvature`` is the observed penalized curvature at ``b``.
+
+    The certificate holds for every score within the floor of the computed
+    one, not only for the computed score: rounding of ``P b`` can cancel a
+    genuine score along a direction the curvature barely resists, where the
+    Newton correction is largest. Newton's method in floating point is
+    accurate only to the residual's evaluation error times ``||H^-1||``
+    (Tisseur 2001, Cor. 2.3), so the decrement certified is the computed
+    score's plus that error's, ``(sqrt(r' H^-1 r) + sqrt(||H^-1||) ||floor||)^2``
+    in the equilibrated coordinates the certificate works in.
     """
     unit_roundoff = 0.5 * np.finfo(np.float64).eps
     penalty = np.asarray(penalty, dtype=np.float64)
@@ -574,6 +583,7 @@ def _score_within_rounding_floor(
         penalized_objective=objective,
         face=face,
         tolerance=tolerance,
+        score_error=floor,
     )
 
 
@@ -908,8 +918,13 @@ def _newton_decrement_is_certified(
     penalized_objective: float,
     face: PenaltyFace | None,
     tolerance: float,
+    score_error: NDArray[np.float64] | None = None,
 ) -> bool:
-    """Return whether retained observed curvature certifies a scaled decrement."""
+    """Return whether retained observed curvature certifies a scaled decrement.
+
+    ``score_error`` bounds, componentwise, the error of the retained score.
+    When it is given, the decrement is certified for every score within it.
+    """
     if not math.isfinite(tolerance) or tolerance <= 0.0 or not math.isfinite(penalized_objective):
         return False
     if face is None:
@@ -1050,12 +1065,29 @@ def _newton_decrement_is_certified(
         return False
     rounding = dot_gamma * max(product_sum, abs(decrement), limit, np.finfo(np.float64).tiny)
     rounding = float(np.nextafter(16.0 * (rounding + solve_error), math.inf))
-    return bool(
-        math.isfinite(decrement)
-        and math.isfinite(limit)
-        and decrement >= -rounding
-        and decrement + rounding <= limit
-    )
+    if not (math.isfinite(decrement) and math.isfinite(limit) and decrement >= -rounding):
+        return False
+    if score_error is None:
+        return decrement + rounding <= limit
+    error = np.asarray(score_error, dtype=np.float64)
+    if error.shape != (dimension,) or not np.all(np.isfinite(error)) or np.any(error < 0.0):
+        return False
+    # The exact decrement is ||H^-1/2 (r + e)||^2 with |e| <= error, so its root
+    # is at most the computed one plus ||H^-1||_2^(1/2) ||D^-1 error||_2. Each
+    # operation below is nondecreasing in nonnegative operands and is rounded
+    # outward once.
+    with np.errstate(over="ignore", invalid="ignore"):
+        equilibrated_error = np.nextafter(error / scales, np.inf)
+    error_norm = upper_frobenius_norm(equilibrated_error.reshape(1, -1))
+    if error_norm is None:
+        return False
+    spread = float(np.nextafter(math.sqrt(inverse_norm_bound), math.inf))
+    spread = float(np.nextafter(spread * error_norm, math.inf))
+    certified = float(np.nextafter(max(decrement + rounding, 0.0), math.inf))
+    root = float(np.nextafter(math.sqrt(certified), math.inf))
+    root = float(np.nextafter(root + spread, math.inf))
+    bound = float(np.nextafter(root * root, math.inf))
+    return bool(math.isfinite(bound) and bound <= limit)
 
 
 def _validate_objective_and_step_certificate(
