@@ -30,12 +30,13 @@ lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
 (``reml.w_derivatives``), the interaction terms' builds
 (``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
-negative binomial rows) and batched global moments; the SuperLSS
+negative binomial rows) and batched global moments.  :func:`pooled_map`
+serves the solved-row stop passes and the interaction builds; the SuperLSS
 kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
-rows), whose tasks are too short for an executor's dispatch, and the others on
-:func:`pooled_map`.  Those SuperLSS kernels were numba ``prange`` loops, so
-numba's thread count (``NUMBA_NUM_THREADS``, ``numba.set_num_threads``) caps
-them too (:func:`section_threads`).
+rows), whose tasks are too short for an executor's dispatch; the others start
+executors of their own, sized by :func:`pool_workers`.  Those SuperLSS kernels
+were numba ``prange`` loops, so numba's thread count (``NUMBA_NUM_THREADS``,
+``numba.set_num_threads``) caps them too (:func:`section_threads`).
 """
 
 from __future__ import annotations
