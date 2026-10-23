@@ -28,7 +28,6 @@ from superglm.distributional.endpoint_laml import (
     ProjectedPenaltyLogDet,
     evaluate_endpoint_laplace,
     evaluate_endpoint_laplace_derivative,
-    projected_finite_penalty_logdet,
 )
 from superglm.distributional.face_efs import (
     _bounded_effective_rank,
@@ -65,6 +64,7 @@ from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
 
 from ._distributional_weights import resolved_prior
+from ._endpoint_penalty import projected_finite_penalty_logdet
 
 
 @dataclass(frozen=True)
@@ -6166,41 +6166,6 @@ def test_projected_penalty_accepts_unresolved_negative_roundoff_under_shared_pol
     assert result.log_pdet == pytest.approx(expected_log_pdet, rel=0.0, abs=tolerance)
 
 
-def test_projected_compatibility_inputs_symmetrize_large_projection_without_overflow() -> None:
-    layout, face, _lambdas, _, _ = _projected_penalty_problem()
-    face_component = next(
-        component for component in layout.penalties if component.name in face.component_names
-    )
-    retained = next(
-        component for component in layout.penalties if component.name not in face.component_names
-    )
-    large_value = 0.75 * np.finfo(np.float64).max
-    large_matrix = np.diag([large_value, 1.0, 0.0])
-    large_component = replace(
-        retained,
-        omega_raw=large_matrix,
-        omega_ssp=large_matrix,
-    )
-    large_layout = replace(layout, penalties=(face_component, large_component))
-    aligned_face, retained_reduced_indices = _axis_aligned_projected_face(
-        large_layout,
-        face,
-        large_component,
-    )
-    _components, captured, values = endpoint_laml_module._projected_finite_penalty_inputs(
-        layout=large_layout,
-        lambdas={face_component.name: 13.0, large_component.name: 0.0},
-        face=aligned_face,
-    )
-
-    np.testing.assert_array_equal(values, [0.0])
-    assert len(captured) == 1
-    assert np.all(np.isfinite(captured[0]))
-    assert large_value > np.finfo(np.float64).max / 2.0
-    first_retained = retained_reduced_indices[0]
-    assert captured[0][first_retained, first_retained] == large_value
-
-
 def test_projected_penalty_refuses_materially_asymmetric_retained_component() -> None:
     layout, face, _lambdas, _, _ = _projected_penalty_problem()
     face_component = next(
@@ -6263,64 +6228,6 @@ def test_projected_penalty_contains_nonfinite_local_retained_component(
 
     assert isinstance(error.value.__cause__, ValueError)
     assert str(error.value.__cause__) == "array must not contain infs or NaNs"
-
-
-def test_projected_compatibility_inputs_contain_finite_input_projection_overflow() -> None:
-    layout, face, _lambdas, _, _ = _projected_penalty_problem()
-    face_component = next(
-        component for component in layout.penalties if component.name in face.component_names
-    )
-    retained = next(
-        component for component in layout.penalties if component.name not in face.component_names
-    )
-    aligned_face, retained_reduced_indices = _axis_aligned_projected_face(
-        layout,
-        face,
-        retained,
-    )
-    rotated_indices = retained_reduced_indices[:2]
-    assert len(rotated_indices) == 2
-    rotation = np.eye(aligned_face.reduced_width, dtype=np.float64)
-    cosine = 1.0 / np.sqrt(2.0)
-    rotation[np.ix_(rotated_indices, rotated_indices)] = np.array(
-        [[cosine, -cosine], [cosine, cosine]],
-        dtype=np.float64,
-    )
-    rotated_face = replace(
-        aligned_face,
-        null_basis=aligned_face.null_basis @ rotation,
-    )
-    finite_matrix = np.zeros((3, 3), dtype=np.float64)
-    finite_matrix[:2, :2] = 0.75 * np.finfo(np.float64).max
-    overflowing = replace(
-        retained,
-        omega_raw=finite_matrix,
-        omega_ssp=finite_matrix,
-    )
-    overflowing_layout = replace(layout, penalties=(face_component, overflowing))
-
-    assert np.all(np.isfinite(finite_matrix))
-    full = np.zeros(
-        (layout.n_coefficients, layout.n_coefficients),
-        dtype=np.float64,
-    )
-    full[overflowing.group_sl, overflowing.group_sl] = finite_matrix
-    with np.errstate(invalid="ignore", over="ignore"):
-        direct_projection = rotated_face.null_basis.T @ full @ rotated_face.null_basis
-    assert not np.all(np.isfinite(direct_projection))
-
-    with pytest.raises(
-        endpoint_laml_module.EndpointLaplaceError,
-        match="projection of retained penalty .* produced non-finite values",
-    ) as error:
-        endpoint_laml_module._projected_finite_penalty_inputs(
-            layout=overflowing_layout,
-            lambdas={face_component.name: 13.0, overflowing.name: 1.0},
-            face=rotated_face,
-        )
-
-    assert isinstance(error.value.__cause__, FloatingPointError)
-    assert str(error.value.__cause__) == "retained penalty projection is non-finite"
 
 
 @pytest.mark.parametrize(

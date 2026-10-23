@@ -8,7 +8,6 @@ import numpy as np
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.smoothing.endpoint_laml import (
-    _projected_finite_penalty_inputs,
     _projected_penalty_group_indices,
 )
 from superglm.distributional.smoothing.face_efs import (
