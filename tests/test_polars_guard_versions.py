@@ -15,6 +15,7 @@ Polars 1.x and 2.x; each test says which it expects.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import pickle
 import warnings
@@ -212,6 +213,90 @@ def test_a_legacy_guard_does_not_vouch_for_a_frame_the_caller_supplies(monkeypat
         )
     with pytest.warns(UserWarning, match=NOTICE) if POLARS_2 else warnings.catch_warnings():
         model.random_effects("group")
+
+
+def _legacy_digest_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
+
+    def unavailable(self, columns=None):
+        raise frame_module.LegacyDigestUnavailableError("no four-seed hash_rows")
+
+    monkeypatch.setattr(frame_module.EagerFrame, "legacy_polars_digest", unavailable)
+
+
+def _as_legacy(guard):
+    return dataclasses.replace(guard, x_digest_scheme=None)
+
+
+# Each caller below passes the guard ``own_frame=X is <retained frame>``.  The
+# tests hand it an equal-length frame that is not the retained one, which an
+# unverifiable digest must not vouch for.
+
+
+def test_a_legacy_guard_refuses_a_copy_of_the_retained_frame(monkeypatch) -> None:
+    _legacy_digest_unavailable(monkeypatch)
+    model = _load("legacy")["model"]
+
+    with pytest.raises(RuntimeError, match="retained fit data were mutated"):
+        require_unchanged_fit_data(model, model._fit_X_ref.clone(), model._fit_y_ref)
+    with pytest.warns(UserWarning, match=NOTICE):
+        require_unchanged_fit_data(model, model._fit_X_ref, model._fit_y_ref)
+
+
+def test_a_legacy_geometry_guard_does_not_vouch_for_rows_of_a_released_fit(monkeypatch) -> None:
+    """With the design released, only a guard match lets ``metrics`` read the
+    fit's covariance; rows it cannot verify are refused, not scored with it."""
+    _legacy_digest_unavailable(monkeypatch)
+    rng = np.random.default_rng(518)
+    X = pl.DataFrame({"x": np.linspace(0.0, 1.0, 120)})
+    y = 1.0 + X["x"].to_numpy() + rng.normal(0.0, 0.1, 120)
+    model = sg.SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        retain_fit_state=False,
+        features={"x": sg.Spline(n_knots=6)},
+    ).fit(X, y)
+    model._fit_geometry_guard = _as_legacy(model._fit_geometry_guard)
+
+    with pytest.raises(RuntimeError, match="does not match the fit geometry"):
+        model.metrics(X.with_columns(pl.col("x").reverse()), y).leverage
+
+
+def test_a_legacy_geometry_guard_does_not_lend_the_fit_covariance_to_other_rows(
+    monkeypatch,
+) -> None:
+    """A structured fit reads its retained covariance and design for rows the
+    guard matches.  Rows it cannot verify are evaluated on their own design,
+    exactly as a guard that can be checked evaluates them."""
+    _legacy_digest_unavailable(monkeypatch)
+    rng = np.random.default_rng(518)
+    X = pl.DataFrame({"group": ["a"] * 58 + ["b"] * 31 + ["c"] * 31})
+    y = rng.normal(size=120)
+    model = sg.SuperGLM(
+        family="gaussian", direct_solve="structured", features={"group": sg.RandomEffect()}
+    ).fit_reml(X, y)
+    changed = X.with_columns(pl.col("group").reverse())
+    reference = model.metrics(changed, y).leverage
+
+    model._fit_geometry_guard = _as_legacy(model._fit_geometry_guard)
+
+    np.testing.assert_array_equal(model.metrics(changed, y).leverage, reference)
+
+
+def test_a_legacy_guard_does_not_pair_inherited_weights_with_other_rows(monkeypatch) -> None:
+    _legacy_digest_unavailable(monkeypatch)
+    rng = np.random.default_rng(518)
+    X = pl.DataFrame({"x": rng.uniform(size=200), "z": rng.uniform(size=200)})
+    y = rng.normal(size=200)
+    model = sg.SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": sg.Spline(n_knots=6), "z": sg.Spline(n_knots=6)},
+    ).fit(X, y, sample_weight=rng.uniform(0.5, 2.0, size=200))
+    model._fit_data_guard = _as_legacy(model._fit_data_guard)
+
+    with pytest.raises(ValueError, match="inherited from the fit"):
+        model.screen_interactions(X.with_columns(pl.col("x").reverse()), y)
 
 
 def test_fitting_on_a_polars_frame_writes_a_guard_that_round_trips() -> None:
