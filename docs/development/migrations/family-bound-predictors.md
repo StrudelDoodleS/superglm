@@ -105,8 +105,8 @@ prediction tables, offsets, penalty keys and saved models remain `mean`,
 `dispersion` and `power`. For example, a known addition to the mean's log
 predictor belongs under `offsets={"mean": values}`.
 
-Existing supported model artifacts still load through `SuperLSS.from_bytes`.
-The constructor migration does not change their parameter ordering or schema.
+Models saved with joblib keep loading with `joblib.load`. The constructor
+migration does not change their parameter ordering.
 
 For a complete runnable example, follow
 [Your first distributional model](../../tutorials/distributional-model.md).

@@ -1,17 +1,22 @@
 # Save and load
 
-{py:meth}`~superglm.SuperLSS.to_bytes` serialises one fitted revision and
-{py:meth}`~superglm.SuperLSS.from_bytes` restores it after schema and
-integrity checks. Load artifacts only from trusted sources. A restored model
-carries no training frame or machine timing, so the reading methods need
-`X_train=` and {py:meth}`~superglm.SuperLSS.diagnose` says the timing is
-absent.
+Save a fitted {py:class}`~superglm.SuperLSS` with joblib and load it back with
+joblib:
 
-```{eval-rst}
-.. autosummary::
-   :toctree: ../generated
-   :nosignatures:
+```python
+import joblib
 
-   ~superglm.SuperLSS.to_bytes
-   ~superglm.SuperLSS.from_bytes
+joblib.dump(model, "severity.joblib")
+restored = joblib.load("severity.joblib")
 ```
+
+A restored model predicts exactly what the saved one predicted. It carries no
+training frame or machine timing, so the reading methods need `X_train=` and
+{py:meth}`~superglm.SuperLSS.diagnose` says the timing is absent. Load files
+only from sources you trust: joblib files are pickles, and a hostile pickle
+can run code.
+
+`SuperLSS.to_bytes()` and `SuperLSS.from_bytes()` were removed; both raise an
+`AttributeError` that says so. To convert a file that `to_bytes()` wrote, open
+it with superglm 0.41 (`SuperLSS.from_bytes(...)`) and save the model again
+with `joblib.dump`.
