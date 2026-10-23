@@ -16,13 +16,12 @@ from superglm import (
 )
 from superglm.constraints import (
     MonotoneRepairResult,
-    curvature_violation,
-    monotonicity_violation,
     shape_constraint_certificate,
     shape_derivative_matrix,
 )
 from superglm.model import shape_ops
 from superglm.model.fit_state import fitted_lambda2
+from tests._shape_violation import curvature_violation, monotonicity_violation
 
 
 def _minimum_signed_derivative(spec, beta, kind: str) -> float:

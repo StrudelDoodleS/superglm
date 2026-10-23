@@ -52,7 +52,6 @@ from superglm.screening._numeric_margin import (
     numeric_numeric_moments,
     numeric_pair_moments,
 )
-from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_factor import (
     PairFactor,
     _pair_scale,
@@ -66,6 +65,7 @@ from superglm.screening._score_stat import (
     _pair_pencil,
     penalized_score_statistic_ladder,
 )
+from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
 
 
 def _gram_blocks(factor: PairFactor):
@@ -384,11 +384,12 @@ def test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair(thin):
     assert np.abs(U_cell - U_rows).max() / max(np.abs(U_rows).max(), 1e-300) < 1e-10, thin
 
 
-# The producers that assembled the dense route's Grams.  They are KEPT -- every
-# test above grades the factor against them, and
+# The producers that assembled the dense route's Grams.  Every test above grades
+# the factor against them, and
 # ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` cannot
-# make its point without them -- but they must not regain a production caller,
-# which is what this list is for.
+# make its point without them.  ``pair_overlap_moments`` and ``tensor_penalty``
+# now live in ``tests/_overlap_oracle.py``; none of the five may regain a
+# production caller, which is what this list is for.
 _RETIRED_GRAM_PRODUCERS = frozenset(
     {
         "pair_score_curvature",
@@ -400,9 +401,9 @@ _RETIRED_GRAM_PRODUCERS = frozenset(
 )
 
 # The three of them ``screening/__init__.py`` names in ``__all__``, which IS the
-# arbiter's public surface.  It is neither all five nor a pattern: ``_overlap``
-# is never imported there, so ``pair_overlap_moments`` and ``tensor_penalty``
-# are re-exported by nothing and re-exporting either would be a new decision.
+# arbiter's public surface.  It is neither all five nor a pattern:
+# ``pair_overlap_moments`` and ``tensor_penalty`` are not in ``src`` at all, so
+# re-exporting either would be a new decision.
 _RE_EXPORTED_PRODUCERS = frozenset(
     {
         "numeric_numeric_moments",

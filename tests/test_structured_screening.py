@@ -24,7 +24,6 @@ from superglm.features import Categorical, Spline
 from superglm.features.spline import PSpline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._factor_kernels import _factor_rank_floor, _rank_floor
-from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_factor import _pair_scale, _profiled_factor
 from superglm.screening._pair_moments import pair_score_curvature
 from superglm.screening._score_stat import _pair_pencil, penalized_score_statistic_ladder
@@ -34,6 +33,7 @@ from superglm.screening._structured import (
     _profile,
     spline_cat_moments,
 )
+from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
 

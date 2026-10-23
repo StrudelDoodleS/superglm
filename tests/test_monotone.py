@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 from superglm import Constraint, Spline, SuperGLM
-from superglm.constraints import MonotoneRepairer, MonotoneRepairResult, monotonicity_violation
+from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
+from tests._shape_violation import monotonicity_violation
 
 # ── Fixtures ─────────────────────────────────────────────────────
 
@@ -279,14 +280,3 @@ class TestSummaryMonotoneIntegration:
         summary = m.summary()
         text = str(summary)
         assert "mono=" not in text
-
-
-# ── Phase 6: Fit-time scaffold ──────────────────────────────────
-
-
-class TestFitTimeScaffold:
-    def test_derivative_grid_raises(self):
-        from superglm.constraints import derivative_grid_matrix
-
-        with pytest.raises(NotImplementedError, match="Fit-time monotone"):
-            derivative_grid_matrix(None)
