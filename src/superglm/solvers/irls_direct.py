@@ -141,7 +141,6 @@ from superglm.solvers.rank import (
     RankInfo,
     decide_data_rank,
     decompose_factor,
-    decompose_gram,
     decompose_gram_if_authoritative,
     decompose_symmetric,
     weights_fingerprint,
@@ -631,50 +630,6 @@ def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     )
 
 
-def _working_sums(W: NDArray, Wz: NDArray) -> tuple[float, float]:
-    """Validate the already-required intercept sums before moment kernels."""
-    with np.errstate(over="ignore", invalid="ignore"):
-        sum_w = float(np.sum(W, dtype=np.float64))
-        sum_wz = float(np.sum(Wz, dtype=np.float64))
-    if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("working weights must have a positive finite sum")
-    if not np.isfinite(sum_wz):
-        raise ValueError("weighted working response must have a finite sum")
-    return sum_w, sum_wz
-
-
-def _robust_solve(
-    M: NDArray, rhs: NDArray, residual_tol: float = 1e-6
-) -> tuple[NDArray, float, bool]:
-    """Compatibility wrapper around the shared equilibrated rank policy."""
-    decomposition = decompose_gram(M, residual_tol=residual_tol)
-    used_spectral_fallback = decomposition.method not in {
-        "cholesky",
-        "pivoted_cholesky",
-    }
-    return (
-        decomposition.solve(rhs),
-        decomposition.pre_truncation_condition,
-        used_spectral_fallback,
-    )
-
-
-def _solve_profiled_intercept_from_h_inv(
-    H_inv: NDArray,
-    XtWz: NDArray,
-    XtW1: NDArray,
-    sum_W: float,
-    sum_Wz: float,
-) -> tuple[NDArray, float]:
-    """Solve beta/intercept from H^{-1} with the intercept profiled out."""
-    h_z = H_inv @ XtWz
-    h_1 = H_inv @ XtW1
-    denom = sum_W - float(XtW1 @ h_1)
-    intercept = float((sum_Wz - XtW1 @ h_z) / denom)
-    beta = h_z - h_1 * intercept
-    return beta, intercept
-
-
 def _separation_weight_ratio(
     curvature_source: str,
     w_ratio: float,
@@ -916,34 +871,6 @@ def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
     L_aug = np.zeros((p + 1, p + 1))
     L_aug[1:, 1:] = (eigvecs * np.sqrt(eigvals)) @ eigvecs.T
     return L_aug
-
-
-def _invert_xtwx_plus_penalty(
-    XtWX: NDArray,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambda2: float | dict[str, float],
-    S_override: NDArray | None = None,
-    reml_penalties: list[PenaltyComponent] | None = None,
-) -> NDArray:
-    """Invert ``X'WX + S(lambda2)`` for a fixed weighted Gram matrix.
-
-    Parameters
-    ----------
-    S_override : (p, p) ndarray, optional
-        Pre-built penalty matrix.  When provided, skips internal
-        ``_build_penalty_matrix`` call entirely.
-    reml_penalties : list of PenaltyComponent, optional
-        Forwarded to ``_build_penalty_matrix`` for the multi-penalty path.
-    """
-    if S_override is not None:
-        S = S_override
-    else:
-        p = XtWX.shape[0]
-        S = _build_penalty_matrix(group_matrices, groups, lambda2, p, reml_penalties=reml_penalties)
-    M_beta = XtWX + S
-    H_inv, _, _ = _safe_decompose_H(M_beta)
-    return H_inv
 
 
 def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, float, bool]:

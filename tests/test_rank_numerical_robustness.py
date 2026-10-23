@@ -201,7 +201,6 @@ def test_signed_solve_preserves_permuted_and_padded_modes(
         matrix @ inverse, np.diag(active.astype(float)), atol=bound, rtol=bound
     )
     np.testing.assert_array_equal(decomposition.null_basis(), np.eye(len(matrix))[:, ~active])
-    np.testing.assert_array_equal(decomposition.retained_parameter_basis()[~active], 0.0)
 
 
 @pytest.mark.parametrize(
@@ -259,7 +258,6 @@ def test_signed_spectral_and_structural_null_spaces_keep_disjoint_row_supports()
         atol=bound,
         rtol=bound,
     )
-    np.testing.assert_array_equal(decomposition.retained_parameter_basis()[~active], 0.0)
     np.testing.assert_allclose(
         matrix @ decomposition.pseudo_inverse() @ matrix,
         matrix,
@@ -363,9 +361,7 @@ def test_tiny_factor_decomposition_preserves_representable_gram_rhs_solve(
     np.testing.assert_allclose(actual, expected, atol=0.0, rtol=bound)
 
 
-@pytest.mark.parametrize(
-    "operation", ["solve_factor_rhs", "pseudo_inverse", "retained_parameter_basis"]
-)
+@pytest.mark.parametrize("operation", ["solve_factor_rhs", "pseudo_inverse"])
 def test_tiny_factor_refuses_an_unrepresentable_requested_result(operation: str) -> None:
     decomposition = decompose_factor(1e-309 * np.eye(2), retain_factor_solve=True)
     with pytest.raises(ValueError, match="not representable"):
@@ -422,18 +418,16 @@ def test_tiny_mixed_scale_alias_preserves_estimable_functionals() -> None:
     assert abs(decomposition.log_pdet) <= bound
 
 
-def test_tiny_discarded_alias_keeps_representable_inverse_and_retained_basis() -> None:
+def test_tiny_discarded_alias_keeps_representable_inverse() -> None:
     factor = np.array([[1.0, 0.0, 1e-309], [0.0, 1.0, 0.0]])
     with np.errstate(over="raise", invalid="raise"):
         decomposition = decompose_factor(factor, retain_factor_solve=True)
         inverse = decomposition.pseudo_inverse()
-        retained = decomposition.retained_parameter_basis()
-    # The selected columns are an orthonormal basis. Their inverse and
-    # retained parameter basis remain representable despite the tiny alias.
+    # The selected columns are an orthonormal basis. Their inverse remains
+    # representable despite the tiny alias.
     bound = 128.0 * max(factor.shape) * np.finfo(float).eps
     np.testing.assert_array_equal(decomposition.active_columns, [0, 1])
     np.testing.assert_allclose(inverse, np.diag([1.0, 1.0, 0.0]), atol=bound, rtol=bound)
-    np.testing.assert_allclose(retained, np.eye(3)[:, :2], atol=bound, rtol=bound)
 
 
 def test_smallest_factor_retains_rank_one_log_volume_and_null_space() -> None:

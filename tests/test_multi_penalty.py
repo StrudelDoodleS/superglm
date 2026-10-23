@@ -546,65 +546,6 @@ class TestFitIrlsDirectSOverrideParity:
         np.testing.assert_allclose(inv_override, inv_internal, rtol=1e-10)
 
 
-@pytest.mark.slow
-class TestInvertXtWXPlusPenaltySOverrideParity:
-    """S_override in _invert_xtwx_plus_penalty matches internal path."""
-
-    def test_parity(self):
-        from superglm.features.spline import CubicRegressionSpline
-        from superglm.model import SuperGLM
-        from superglm.solvers.irls_direct import (
-            _build_penalty_matrix,
-            _invert_xtwx_plus_penalty,
-            fit_irls_direct,
-        )
-
-        rng = np.random.default_rng(42)
-        n = 500
-        x = rng.uniform(0, 1, n)
-        mu = np.exp(0.5 + np.sin(2 * np.pi * x))
-        y = rng.poisson(mu).astype(float)
-
-        df = pd.DataFrame({"x": x})
-        m = SuperGLM(
-            features={"x": CubicRegressionSpline(n_knots=8)},
-            family="poisson",
-        )
-        m.fit(df, y)
-
-        weights = np.ones(n)
-        offset = np.zeros(n)
-        lambdas = {"x": 5.0}
-
-        # Get XtWX from a fit
-        _, _, XtWX = fit_irls_direct(
-            X=m._dm,
-            y=y,
-            weights=weights,
-            family=m._distribution,
-            link=m._link,
-            groups=m._groups,
-            lambda2=lambdas,
-            offset=offset,
-            return_xtwx=True,
-            weight_semantics="frequency",
-        )
-
-        # Build S externally
-        p = XtWX.shape[0]
-        S = _build_penalty_matrix(m._dm.group_matrices, m._groups, lambdas, p)
-
-        # Invert without S_override
-        inv_internal = _invert_xtwx_plus_penalty(XtWX, m._dm.group_matrices, m._groups, lambdas)
-
-        # Invert with S_override
-        inv_override = _invert_xtwx_plus_penalty(
-            XtWX, m._dm.group_matrices, m._groups, lambdas, S_override=S
-        )
-
-        np.testing.assert_allclose(inv_override, inv_internal, rtol=1e-12)
-
-
 class TestEndToEndMultiPenaltyDirect:
     """End-to-end: optimize_direct_reml with pc.name != group_name.
 
