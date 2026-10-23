@@ -96,8 +96,9 @@ class _Crew:
     ``size`` is the most threads the crew may hold; :meth:`grow` starts them
     as sections admit helpers, so a crew never holds more threads than the
     widest section used.  A worker drops every reference to a finished job
-    before it blocks for the next one: the job's closure holds the section's
-    buffers, which must be released when the section returns.
+    before it reports the job done on the job's own queue: the job's closure
+    holds the section's buffers, which must be released when the section
+    returns.
     """
 
     def __init__(self, size: int, started: int = 0) -> None:
@@ -122,16 +123,20 @@ class _Crew:
     def _run(self) -> None:
         _mark_pool_thread()
         while True:
-            job = self._jobs.get()
-            if job is None:
+            item = self._jobs.get()
+            if item is None:
                 return
+            job, done = item
+            del item
             try:
                 job()
             finally:
                 del job
+                done.put(None)
 
-    def post(self, job: Callable[[], None]) -> None:
-        self._jobs.put(job)
+    def post(self, job: Callable[[], None], done: queue.SimpleQueue) -> None:
+        """Run ``job`` on a worker, which puts ``None`` on ``done`` once it holds no reference to it."""
+        self._jobs.put((job, done))
 
     def close(self) -> None:
         with self._lock:
@@ -588,16 +593,10 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
                     failures[index] = exc
                     return
 
-        def helper() -> None:
-            try:
-                claim()
-            finally:
-                finished.put(None)
-
         posted = 0
         try:
             for _ in range(helpers):
-                crew.post(partial(contextvars.copy_context().run, helper))
+                crew.post(partial(contextvars.copy_context().run, claim), finished)
                 posted += 1
             claim()
         except BaseException as exc:  # an interruption while posting: stop the posted helpers

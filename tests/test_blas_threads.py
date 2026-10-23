@@ -903,12 +903,12 @@ def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_pos
     post = _parallel._Crew.post
     posts, raised, gate, started, caught = [0], threading.Event(), threading.Event(), [], []
 
-    def interrupting(self, job):
+    def interrupting(self, job, done):
         posts[0] += 1
         if posts[0] == 2:
             raised.set()
             raise interrupt
-        post(self, job)
+        post(self, job, done)
 
     def fn(item):
         started.append(item)
@@ -996,22 +996,37 @@ def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatc
     assert not _named_threads("superglm-map-crew")
 
 
-def test_a_fit_crew_releases_a_finished_sections_buffers():
-    """An idle crew worker holds no reference to its last job, whose closure holds the section's
-    buffers: once the section returns they are collectable, as after a one-worker section."""
+def test_a_fit_crew_releases_a_finished_sections_buffers(monkeypatch):
+    """A crew worker reports a job done only once it holds no reference to it, whose closure holds
+    the section's buffers: once the section returns they are collectable, as after a one-worker
+    section.  Each worker is held right after it reports, until the buffers have been checked."""
     import gc
-    import time
+    import queue
+    import threading
     import weakref
 
+    from superglm import _parallel
     from superglm._parallel import fit_pool, parallel_config, pooled_for
 
+    checked = threading.Event()
+
+    class HeldAfterReport(queue.SimpleQueue):
+        def put(self, item, *args, **kwargs):
+            super().put(item, *args, **kwargs)
+            if threading.current_thread().name == "superglm-map-crew":
+                checked.wait(20)
+
+    monkeypatch.setattr(_parallel.queue, "SimpleQueue", HeldAfterReport)
     for workers in (1, 4):
+        checked.clear()
         with parallel_config(n_jobs=workers, max_memory=2**30), fit_pool():
             buffer = np.zeros(64)
             ref = weakref.ref(buffer)
+            started = threading.Barrier(min(workers, 2), timeout=20)
 
             def task(item, buffer=buffer):
-                time.sleep(0.002)
+                if item < 2 and workers > 1:
+                    started.wait()  # a helper runs items, so its job held the buffer
                 buffer[item] = 1.0
                 return item
 
@@ -1019,7 +1034,9 @@ def test_a_fit_crew_releases_a_finished_sections_buffers():
             assert ref() is not None
             del buffer, task
             gc.collect()
-            assert ref() is None, workers
+            alive = ref() is not None
+            checked.set()
+            assert not alive, workers
 
 
 def test_pooled_for_runs_every_task_on_one_blas_thread():
