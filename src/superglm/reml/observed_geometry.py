@@ -632,16 +632,6 @@ def compute_scop_observed_information_weights(
     return observed
 
 
-def requires_observed_reml_geometry(distribution: Any, link: Any) -> bool:
-    """Whether direct REML must replace its fitted Fisher geometry.
-
-    Canonical/equal-curvature combinations reuse the solver geometry and avoid
-    an unnecessary full data pass.  Every other supported built-in pair uses
-    Wood's negative observed likelihood Hessian.
-    """
-    return classify_reml_curvature(distribution, link) == "observed"
-
-
 def compute_observed_dW_deta(
     distribution: Any,
     link: Any,
@@ -660,65 +650,6 @@ def compute_observed_dW_deta(
         sample_weight,
         derivative_order=1,
     )
-    assert derivative is not None
-    return derivative
-
-
-def compute_observed_d2W_deta2(
-    distribution: Any,
-    link: Any,
-    y: NDArray,
-    mu: NDArray,
-    eta: NDArray,
-    sample_weight: NDArray,
-    *,
-    allow_approximate: bool = False,
-) -> NDArray:
-    """Return the second ``eta`` derivative of observed row curvature.
-
-    Production LAML always requests the exact analytic bundle.  The explicit
-    ``allow_approximate`` escape hatch is retained only for diagnostics with a
-    custom family or link that has not implemented the fourth/third derivative
-    protocol; built-ins never use it.
-    """
-    try:
-        _, _, derivative = _compute_observed_row_bundle(
-            distribution,
-            link,
-            y,
-            mu,
-            eta,
-            sample_weight,
-            derivative_order=2,
-        )
-    except NotImplementedError:
-        if not allow_approximate:
-            raise
-        y, _, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-        eps = 1e-5
-        eta_plus = eta + eps
-        eta_minus = eta - eps
-        mu_plus = clip_mu(link.inverse(eta_plus), distribution)
-        mu_minus = clip_mu(link.inverse(eta_minus), distribution)
-        plus = compute_observed_dW_deta(
-            distribution,
-            link,
-            y,
-            mu_plus,
-            eta_plus,
-            sample_weight,
-        )
-        minus = compute_observed_dW_deta(
-            distribution,
-            link,
-            y,
-            mu_minus,
-            eta_minus,
-            sample_weight,
-        )
-        derivative = (plus - minus) / (2.0 * eps)
-        if not np.all(np.isfinite(derivative)):
-            raise ValueError("second observed-information weight derivatives are not finite")
     assert derivative is not None
     return derivative
 
