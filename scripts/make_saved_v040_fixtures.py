@@ -270,6 +270,30 @@ def main(out: str) -> None:
     write_cap_refusal_record(out)
 
 
+def _response_with_portable_logarithms(values: np.ndarray) -> np.ndarray:
+    from decimal import Decimal, localcontext
+
+    moved = np.array(values, dtype=np.float64)
+    with localcontext() as context:
+        context.prec = 60
+        for index, value in enumerate(moved):
+            while True:
+                exact = Decimal(float(value)).ln()
+                rounded = float(exact)
+                gap = min(
+                    rounded - np.nextafter(rounded, -np.inf),
+                    np.nextafter(rounded, np.inf) - rounded,
+                )
+                if abs(exact - Decimal(rounded)) <= Decimal(float(gap)) / 4:
+                    break
+                value = np.nextafter(value, np.inf)
+            moved[index] = value
+        exact_logs = [float(Decimal(float(value)).ln()) for value in moved]
+    if not np.array_equal(np.log(moved), exact_logs):
+        raise RuntimeError("this platform's log does not round the moved responses correctly")
+    return moved
+
+
 def write_cap_refusal_record(out: str) -> None:
     """``lss_gamma_cap_refusal``: a fit whose history refuses a capped smoothing
     parameter as ``cap_not_stationary``.
@@ -278,6 +302,14 @@ def write_cap_refusal_record(out: str) -> None:
     disabled, so the scalar check of the first refuses its cap fit, whose
     retained score is above the tolerance but inside its rounding floor; such
     a receipt fails to load wherever its validator applies the floor.
+
+    Loading recomputes the Gamma carrier ``-log(y)`` and checks it bit for
+    bit, and implementations of ``log`` (numpy's AVX-512 loop, glibc, Apple's
+    and Microsoft's libm) can round a logarithm near a rounding boundary
+    differently. Each response is therefore moved up to the nearest double
+    whose logarithm lies within a quarter of a rounding interval of its
+    correctly rounded value, which every implementation within 0.75 ulp
+    rounds alike.
     """
     import superglm.distributional.efs as efs_module
     import superglm.distributional.smoothing.loop as smoothing_loop
@@ -314,9 +346,10 @@ def write_cap_refusal_record(out: str) -> None:
         coefficient_curvature="fisher",
     )
     cap = DistributionalEFSConfig().maximum_lambda
+    response = _response_with_portable_logarithms(0.5 * mean * residual)
     model.fit_reml(
         frame,
-        mean * residual,
+        response,
         sample_weight=0.65 + 0.7 * (w + 1.0) / 2.0,
         lambdas={"mean:x#wiggle": cap, "mean:z#wiggle": cap, "mean:w#wiggle": 2.0},
         max_reml_iter=120,
