@@ -753,12 +753,15 @@ def test_pooled_for_gives_the_serial_list_on_any_crew_and_ends_its_threads():
         assert len(seen) == len(items)
         assert set(seen) == {("raise", "ignore")}
 
-        started, finished = [0], [0]
+        started, finished, later_failed = [], [], threading.Event()
 
         def failing(item):
-            started[0] += 1
-            time.sleep(0.05 if item == 3 else 0.001)  # item 9 fails while item 3 still runs
-            finished[0] += 1
+            started.append(item)
+            if item == 3:
+                assert later_failed.wait(20)  # item 9 has failed while item 3 still runs
+            finished.append(item)
+            if item == 9:
+                later_failed.set()
             if item in (3, 9):
                 raise ValueError(item)
             return item
@@ -766,7 +769,7 @@ def test_pooled_for_gives_the_serial_list_on_any_crew_and_ends_its_threads():
         with pytest.raises(ValueError) as caught:
             pooled_for(failing, items, 1)
         assert caught.value.args == (3,)
-        assert started[0] == finished[0]  # no task of the section outlives it
+        assert len(started) == len(finished)  # no task of the section outlives it
 
         def outer(item):  # a section started from a crew thread runs on threads of its own
             return sum(pooled_for(lambda inner: inner, [1, 2, 3], 1)) + item

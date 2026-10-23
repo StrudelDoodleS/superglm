@@ -317,6 +317,18 @@ model = superglm.SuperLSS(
     negative_binomial, negative_binomial.mean(*terms), negative_binomial.theta(), discrete=True
 )
 model.fit_reml(frame, counts)
+
+# Binned factor smooths of both bases on a 50-level group: the structured
+# engine's FactorSmooth leaf pass, which warmup compiles by hand.
+from superglm import FactorSmooth
+from superglm import interaction as term_interaction
+
+frame["h"] = rng.integers(0, 50, n).astype(str)
+for smooths in (
+    [term_interaction(FactorSmooth("x", group="h", basis="fs", k=5))],
+    [s("x", kind="ps", k=7, m=2), term_interaction(FactorSmooth("x", group="h", basis="sz", kind="ps", k=5, m=2))],
+):
+    superglm.SuperGLM(family="poisson", discrete=True, terms=smooths).fit_reml(frame, counts)
 print(json.dumps({
     "problems": problems,
     "inlined": sorted(name for name, value in dispatchers.items() if is_inlined(value)),
@@ -345,8 +357,8 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     then run with the layouts and flags their callers pass and must reuse
     warmup's signatures, a second warmup compiles nothing, and first fits
     (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
-    spline, a categorical and a structured RandomEffect) compile nothing outside
-    ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
+    spline, a categorical and a structured RandomEffect; and binned ``fs`` and
+    ``sz`` factor smooths) compile nothing outside ``_FIRST_USE``.  ``warmup()`` stays a bare call: import compiles nothing.
     """
     assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(

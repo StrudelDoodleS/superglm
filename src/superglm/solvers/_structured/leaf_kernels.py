@@ -293,7 +293,7 @@ def _warmup_leaf_kernels() -> None:
 
     A RandomEffect large enough for the structured engine (one with a few
     hundred levels, nested or not) reaches these four, exact or binned; the
-    engine's other kernels serve FactorSmooth and compile on first use.
+    FactorSmooth kernels compile in ``block_leaves._warmup_factor_smooth``.
     """
     f1, i64 = np.zeros(0), np.zeros(0, dtype=np.int64)
     f2 = np.zeros((0, 0))

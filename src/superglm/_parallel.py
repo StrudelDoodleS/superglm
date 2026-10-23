@@ -570,8 +570,11 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
     woken, which the measured wake-up cost makes the cheapest cover of the
     items.  Nothing here changes what ``fn`` computes: each item's result goes
     to its own slot, so the list is the same at any worker count.  One
-    parallelism level, memory budget, per-task context and nested-section
-    rule as :func:`pooled_map`; the first failure in item order is raised once
+    parallelism level, memory budget and nested-section rule as
+    :func:`pooled_map`, but not its per-task context: each helper runs all its
+    items in one copy of the caller's context, and the caller's items run in
+    the caller's own, so ``fn`` must not set a ``ContextVar`` (no kernel
+    does).  The first failure in item order is raised once
     every started task has ended (no task outlives the section), and items
     after a failure are not started.  Helpers run on the fit's crew
     (:func:`fit_pool`) or, outside a fit or in a nested section, on threads
