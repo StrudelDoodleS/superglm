@@ -359,8 +359,8 @@ def test_free_levels_of_a_legacy_guard_compare_on_the_rows_both_fits_read(monkey
     on the rows they both read, as the release that saved it did.  Polars 1.x
     recomputes the old digest and recognises the retained frame and an equal
     copy alike.  Polars 2.x cannot: the retained frame stands with the one
-    warning, and a copy is reported as other rows, with the warning that names
-    the digest as the cause."""
+    warning, and a copy gets the notice that its rows cannot be checked (not
+    that they differ), with the warning that names the digest as the cause."""
     monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
     found = _captured_gaps(monkeypatch)
     frame, y, _k = _gaussian(43, effect=lambda k: 0.5 * (k == 5))
