@@ -576,7 +576,10 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
     the caller's own, so ``fn`` must not set a ``ContextVar`` (no kernel
     does).  The first failure in item order is raised once
     every started task has ended (no task outlives the section), and items
-    after a failure are not started.  Helpers run on the fit's crew
+    after a failure are not started.  An interruption while the caller waits
+    is raised at once: no item is left to claim by then, and the helpers' last
+    tasks end before their crew closes (this call's, or the fit's as the
+    interruption leaves it).  Helpers run on the fit's crew
     (:func:`fit_pool`) or, outside a fit or in a nested section, on threads
     started for this call.
     """
@@ -628,10 +631,12 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
             failures.setdefault(-1, exc)
             raise
         finally:
-            for _ in range(posted):  # only the jobs that were queued will report
-                finished.get()
-            if fit_threads is None:
-                crew.close()
+            try:
+                for _ in range(posted):  # only the jobs that were queued will report
+                    finished.get()
+            finally:  # an interruption while waiting still ends this call's helpers
+                if fit_threads is None:
+                    crew.close()
         if failures:
             raise failures[min(failures)]
         return results

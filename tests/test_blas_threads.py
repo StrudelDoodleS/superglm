@@ -951,6 +951,69 @@ def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_pos
     assert not _named_threads("superglm-map-crew")
 
 
+@pytest.mark.parametrize("scoped", [False, True])
+def test_an_interruption_while_waiting_for_helpers_ends_them_with_their_crew(monkeypatch, scoped):
+    """``KeyboardInterrupt`` on the caller's first wait for its helpers, while a helper holds an
+    item, reaches the caller; every item runs once, the held task ends before its crew closes
+    (the call's own before the call returns, the fit's with the fit), and no crew thread outlives
+    the scope."""
+    import contextlib
+    import queue
+    import threading
+
+    from superglm import _parallel
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    held, gate, raised, returned = (threading.Event() for _ in range(4))
+    hold, held_item, started, ended, at_return, caught = threading.Lock(), [], [], [], [], []
+
+    def fn(item):
+        started.append(item)
+        if threading.current_thread() is thread:
+            assert held.wait(20)  # the caller works on once a helper holds an item
+        else:
+            with hold:
+                first = not held_item
+                held_item.append(item)
+            if first:
+                held.set()
+                assert gate.wait(20)  # held until the test releases it
+        ended.append(item)
+        return item
+
+    def section():
+        with parallel_config(n_jobs=4, max_memory=2**30):
+            with fit_pool() if scoped else contextlib.nullcontext():
+                try:
+                    pooled_for(fn, list(range(8)), 1)
+                except KeyboardInterrupt as exc:
+                    caught.append(exc)
+                    at_return.extend(ended)
+                    returned.set()
+
+    class Finished(queue.SimpleQueue):
+        def get(self, *args, **kwargs):
+            if threading.current_thread() is thread and not raised.is_set():
+                raised.set()
+                raise KeyboardInterrupt
+            return super().get(*args, **kwargs)
+
+    monkeypatch.setattr(_parallel.queue, "SimpleQueue", Finished)
+    thread = threading.Thread(target=lambda: _bounded_into(section, caught), daemon=True)
+    thread.start()
+    assert raised.wait(20)
+    if scoped:  # the fit's crew stays open, so the call returns while its helper still holds
+        assert returned.wait(20)
+    gate.set()
+    thread.join(20)
+    assert not thread.is_alive(), "the interrupted section did not return"
+    assert [type(exc) for exc in caught] == [KeyboardInterrupt]
+    assert sorted(started) == list(range(8))  # no item was left to claim, and none ran twice
+    assert (held_item[0] in at_return) is not scoped  # the call's own crew closed first
+    assert sorted(ended) == list(range(8))
+    assert not _named_threads("superglm-map-crew")
+
+
 def test_a_crew_that_fails_to_start_a_helper_ends_the_ones_it_started(monkeypatch):
     """A failure to start the second helper re-raises and leaves no crew thread, whether the
     crew is built for one section or by the fit."""
