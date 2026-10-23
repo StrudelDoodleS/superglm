@@ -674,9 +674,13 @@ class DistributionalEFSResult:
                     movement = float(
                         np.linalg.norm(endpoint_fit.coefficients - source_fit.coefficients, ord=2)
                     )
-                # A replay that takes no step must be the projection of its
-                # source; a replay that steps stays within the refit envelope.
-                if cap_numerically_stationary and endpoint_fit.iterations == 0:
+                # Beside a stationary cap a replay must be the projection of
+                # its source, reached without a step; under the rounding-floor
+                # rule a replay that steps need only stay within the refit
+                # envelope.
+                if cap_numerically_stationary and (
+                    endpoint_fit.iterations == 0 or not self.rounding_floor_stationarity
+                ):
                     projection_bound = _endpoint_revalidation_projection_bound(
                         endpoint_face,
                         source_fit.coefficients,

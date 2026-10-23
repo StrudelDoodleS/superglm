@@ -417,7 +417,9 @@ def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> No
 def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kills demanding a zero-step replay beside a numerically stationary cap."""
+    """Kills demanding a zero-step replay beside a numerically stationary cap, and
+    accepting one beside a strictly stationary cap in a result saved before the
+    rounding-floor rule."""
     calls = 0
     real_check = efs_module._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
@@ -466,6 +468,16 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
     assert endpoint_fit.iterations > 0
     assert not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients)
     assert smoothing.terminal_fit is endpoint_fit
+
+    # The strict rule a saved result was made with requires the source's exact
+    # projection for every replay beside a strictly stationary cap.
+    fits = list(smoothing.coefficient_fits)
+    fits[revalidation.coefficient_fit_indices[0]] = replace(
+        cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score)
+    )
+    replace(smoothing, coefficient_fits=tuple(fits))
+    with pytest.raises(ValueError, match="changed the canonical endpoint state"):
+        replace(smoothing, coefficient_fits=tuple(fits), rounding_floor_stationarity=False)
 
 
 def _flagged_generalized_pareto_problem() -> tuple[pd.DataFrame, np.ndarray]:
