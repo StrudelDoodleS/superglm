@@ -16,7 +16,6 @@ import superglm.distributional.smoothing.faces as smoothing_faces
 import superglm.distributional.smoothing.loop as smoothing_loop
 import superglm.distributional.smoothing.objective as smoothing_objective
 import superglm.distributional.smoothing.proposals as smoothing_proposals
-import superglm.distributional.solver.solver as solver_module
 from superglm import Spline, SuperLSS
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.inference import compute_joint_inference
@@ -30,6 +29,7 @@ from superglm.distributional.result import (
 )
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
 from tests.bound_predictor_fixtures import model_from_templates
+from tests.test_distributional_endpoint_laml import _forge_nonstationary_scalar_caps
 
 _FACE_COMPONENTS = ("mean:x#wiggle", "mean:z#wiggle")
 _FINITE_COMPONENT = "mean:w#wiggle"
@@ -370,9 +370,7 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
 
     monkeypatch.setattr(smoothing_loop, "_try_joint_exact_face", disable_joint_activation)
     monkeypatch.setattr(efs_module, "_try_joint_exact_face", disable_joint_activation)
-    # Without its rounding-floor stop the cap fit steps on round-off and stops
-    # on its Newton decrement with a retained score above its rounding floor.
-    monkeypatch.setattr(solver_module, "_score_within_rounding_floor", lambda **_: False)
+    _forge_nonstationary_scalar_caps(monkeypatch)
     case = gamma_joint_face_case
     scalar_first = _fit_public_gamma_joint_face(case.frame, case.response, case.weights)
     fitted = scalar_first._require_fitted()

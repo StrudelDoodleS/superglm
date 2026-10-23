@@ -512,23 +512,35 @@ def _assessment_unchanged_failed_cap(
 
 def _score_within_rounding_floor(
     *,
+    config: DenseSolverConfig,
     penalty: NDArray,
     coefficients: NDArray,
     score: NDArray,
+    penalized_curvature: NDArray,
     face: PenaltyFace | None,
     objective: float,
     tolerance: float,
 ) -> bool:
-    """Return whether each retained score entry is within tolerance plus its rounding.
+    """Return whether the retained score is within its rounding floor and moves nothing.
 
     The solver forms ``g = s - P b`` in float64. Row ``i`` of ``P b`` errs by at
     most ``gamma_{k_i} (|P| |b|)_i``, ``k_i`` the nonzeros in that row, and the
     subtraction by ``u |g_i| / (1 - u)`` (Higham 2002, eqs. 3.5 and 3.12);
     reducing to a face adds ``gamma_w |Z|' |g|`` and carries the row bound
     through ``|Z|'``. At a large smoothing parameter this floor exceeds any
-    fixed relative tolerance, and no representable ``b`` resolves the score
-    below it. The data score's own summation error is left out, so the floor
-    understates the score's rounding and never admits more than it.
+    fixed relative tolerance. The data score's own summation error is left
+    out, so the floor understates the score's rounding.
+
+    The floor bounds the rounding error; it is not evidence that the score is
+    rounding. Along a direction the penalty does not act on, a representable
+    move changes the likelihood and leaves ``P b`` unchanged, so a genuine
+    score there can sit inside a floor taken from penalized rows. A score
+    within its floor is therefore stationary only when the Newton correction
+    it would drive is certified not to change the objective by more than
+    ``tolerance (1 + |f|)``. That is the objective condition of Gill, Murray
+    and Wright's termination test (1981, sec. 8.2.3), which must hold beside
+    the gradient condition's escape ``||g|| < eps_A`` that the floor states.
+    ``penalized_curvature`` is the observed penalized curvature at ``b``.
     """
     unit_roundoff = 0.5 * np.finfo(np.float64).eps
     penalty = np.asarray(penalty, dtype=np.float64)
@@ -553,7 +565,34 @@ def _score_within_rounding_floor(
         scale = np.nextafter(1.0 + abs(float(objective)), np.inf)
         limit = np.nextafter(tolerance * scale, np.inf)
         allowed = np.nextafter(limit + floor, np.inf)
-    return bool(np.all(np.isfinite(allowed)) and np.all(retained_score <= allowed))
+    if not (np.all(np.isfinite(allowed)) and np.all(retained_score <= allowed)):
+        return False
+    return _newton_decrement_is_certified(
+        config=config,
+        score=score,
+        penalized_curvature=penalized_curvature,
+        penalized_objective=objective,
+        face=face,
+        tolerance=tolerance,
+    )
+
+
+def _is_unfallbacked_observed(telemetry: CurvatureTelemetry) -> bool:
+    return bool(
+        isinstance(telemetry, CurvatureTelemetry)
+        and telemetry.requested_source == "observed"
+        and telemetry.actual_source == "observed"
+        and telemetry.fallback_count == 0
+    )
+
+
+def _assessment_is_strictly_stationary(result: DenseSolverResult, tolerance: float) -> bool:
+    """The stationarity rule before the rounding floor: retained score or validated resolution."""
+
+    return bool(
+        _assessment_retained_kkt_ratio(result) <= tolerance
+        or result.convergence_reason == "resolution_limited_stationarity"
+    )
 
 
 def _assessment_is_numerically_stationary(
@@ -565,15 +604,19 @@ def _assessment_is_numerically_stationary(
     optimizing = result.penalized_optimizing_log_likelihood
     assert optimizing is not None
     return bool(
-        _assessment_retained_kkt_ratio(result) <= tolerance
-        or result.convergence_reason == "resolution_limited_stationarity"
-        or _score_within_rounding_floor(
-            penalty=result.penalty,
-            coefficients=result.coefficients,
-            score=result.terminal_score,
-            face=result.coefficient_face,
-            objective=optimizing,
-            tolerance=tolerance,
+        _assessment_is_strictly_stationary(result, tolerance)
+        or (
+            _is_unfallbacked_observed(result.terminal_curvature)
+            and _score_within_rounding_floor(
+                config=result.config,
+                penalty=result.penalty,
+                coefficients=result.coefficients,
+                score=result.terminal_score,
+                penalized_curvature=result.terminal_penalized_curvature,
+                face=result.coefficient_face,
+                objective=optimizing,
+                tolerance=tolerance,
+            )
         )
     )
 
@@ -1357,18 +1400,24 @@ class DenseSolverResult:
             not self.converged
             or (
                 retained_kkt > self.config.tolerance
-                and not _score_within_rounding_floor(
-                    penalty=penalty,
-                    coefficients=coefficients,
-                    score=score,
-                    face=self.coefficient_face,
-                    objective=penalized_optimizing,
-                    tolerance=self.config.tolerance,
+                and not (
+                    _is_unfallbacked_observed(self.terminal_curvature)
+                    and _score_within_rounding_floor(
+                        config=self.config,
+                        penalty=penalty,
+                        coefficients=coefficients,
+                        score=score,
+                        penalized_curvature=penalized_curvature,
+                        face=self.coefficient_face,
+                        objective=penalized_optimizing,
+                        tolerance=self.config.tolerance,
+                    )
                 )
             )
         ):
             raise ValueError(
-                "score convergence requires retained KKT within tolerance and its rounding floor"
+                "score convergence requires retained KKT within tolerance, or within its "
+                "rounding floor with a certified Newton decrement"
             )
         if self.convergence_reason == "objective_and_step":
             _validate_objective_and_step_certificate(

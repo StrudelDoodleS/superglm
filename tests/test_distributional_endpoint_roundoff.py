@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -10,8 +11,20 @@ import superglm.distributional.efs as efs_module
 import superglm.distributional.result as result_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.faces as smoothing_faces
+import superglm.distributional.solver.solver as solver_module
 import tests.test_distributional_endpoint_laml as endpoint_tests
-from superglm import GaussianLS, GeneralizedParetoLSS, Predictor, Spline, SuperLSS, cat, re, s, ti
+from superglm import (
+    GaussianLS,
+    GeneralizedParetoLSS,
+    Numeric,
+    Predictor,
+    Spline,
+    SuperLSS,
+    cat,
+    re,
+    s,
+    ti,
+)
 from superglm._frame import as_eager_frame
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
@@ -239,7 +252,7 @@ def test_result_rejects_a_within_bound_state_change_receipt(
 
     # Beside a cap that is not stationary, direct face authority also needs
     # full observed rank.
-    fits[cap_index] = _score_above_rounding_floor(cap_fit)
+    fits[cap_index] = endpoint_tests._score_above_rounding_floor(cap_fit)
     fits[endpoint_index] = within_bound
     with pytest.raises(ValueError, match="within the refit envelope"):
         replace(smoothing, coefficient_fits=tuple(fits))
@@ -253,19 +266,6 @@ def test_result_rejects_a_within_bound_state_change_receipt(
     fits[endpoint_index] = bad_endpoint
     with pytest.raises(ValueError, match="full observed rank"):
         replace(smoothing, coefficient_fits=tuple(fits))
-
-
-def _score_above_rounding_floor(fit: DenseSolverResult) -> DenseSolverResult:
-    """``fit`` stopped on its certified Newton decrement, one unpenalized score above its floor."""
-    unpenalized = np.flatnonzero(~np.any(fit.penalty, axis=1))
-    assert unpenalized.size > 0
-    score = np.array(fit.terminal_score, copy=True)
-    objective = fit.penalized_optimizing_log_likelihood
-    assert objective is not None
-    score[unpenalized[0]] = 100.0 * fit.config.tolerance * (1.0 + abs(objective))
-    forged = replace(fit, terminal_score=score, convergence_reason="objective_and_step")
-    assert not result_module._assessment_is_numerically_stationary(forged, fit.config.tolerance)
-    return forged
 
 
 def _capped_spline_problem():
@@ -296,7 +296,7 @@ def _capped_spline_problem():
 
 
 def _capped_spline_fit(
-    *, max_iterations: int, initial: np.ndarray | None = None
+    *, max_iterations: int, initial: np.ndarray | None = None, curvature: str = "observed"
 ) -> DenseSolverResult:
     family, layout, response, plan, lambdas = _capped_spline_problem()
     return fit_dense_fixed_lambda(
@@ -306,7 +306,11 @@ def _capped_spline_fit(
         plan,
         layout.penalty_matrix(lambdas),
         initial=initial,
-        config=DenseSolverConfig(max_iterations=max_iterations, tolerance=1.0e-12),
+        config=DenseSolverConfig(
+            max_iterations=max_iterations,
+            tolerance=1.0e-12,
+            coefficient_curvature=curvature,  # type: ignore[arg-type]
+        ),
     )
 
 
@@ -507,3 +511,140 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     assert smoothing is not None
     assert smoothing.convergence_reason == "stationary"
     assert smoothing.converged is True
+    # No worse than v0.40.0's fit of this book, within the release
+    # differential's objective tolerance.
+    released = -395.1090527
+    assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
+
+
+def _null_direction_problem():
+    """Two constant location columns tied by a penalty at the cap, offset to cancel.
+
+    At ``b = (1e8, 1e8)`` the penalty term ``P b`` is exactly zero, but its
+    rounding floor ``gamma_2 (|P| |b|)`` is about 440. The location score
+    along ``b1 + b2``, the penalty's null direction, is a genuine likelihood
+    gain that no rounding of ``P b`` produces.
+    """
+    family = GaussianLS(scale_floor=0)
+    n = 40
+    weights = resolve_likelihood_weights(
+        np.ones(n), n_observations=n, contract=WeightContract(semantics="prior")
+    )
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"x": np.ones(n), "z": np.ones(n)})),
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"x": Numeric(), "z": Numeric()}, intercept=False),
+                Predictor("scale", {}, intercept=True),
+            ),
+            offsets={"location": np.full(n, -2.0e8)},
+        )
+    )
+    response = np.tile([0.0, 2.0], n // 2)
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    penalty = np.zeros((3, 3))
+    penalty[:2, :2] = 1.0e10 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    return family, layout, response, plan, penalty
+
+
+def test_a_score_inside_its_floor_that_a_newton_step_removes_is_not_stationary() -> None:
+    """Kills a rounding-floor stop that a material Newton correction does not refuse.
+
+    From ``b = (1e8, 1e8)``, location 0 and scale sqrt(2), the location scores
+    are 20 inside a floor of about 440, and the floor alone stopped the fit
+    there. The responses alternate 0 and 2, so the maximum likelihood location
+    and scale are both 1.
+    """
+    family, layout, response, plan, penalty = _null_direction_problem()
+    start = np.array([1.0e8, 1.0e8, math.log(math.sqrt(2.0))])
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+    floor = 2.0 * unit_roundoff * (np.abs(penalty) @ np.abs(start))
+    assert np.all(floor[:2] > 400.0)
+
+    fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        penalty,
+        initial=start,
+        config=DenseSolverConfig(max_iterations=100, tolerance=1.0e-12),
+    )
+
+    assert fit.converged is True
+    assert fit.iterations > 0
+    objective = fit.penalized_optimizing_log_likelihood
+    assert objective is not None
+    # The stop certifies a gap of at most tol (1 + |f|) in the quadratic model,
+    # whose location and log-scale curvatures at the optimum are n and 2n; the
+    # location sums three terms of magnitude up to 2e8, so it also carries
+    # their rounding.
+    n = len(response)
+    gap = fit.config.tolerance * (1.0 + abs(objective))
+    location, scale = fit.theta[0]
+    assert abs(location - 1.0) <= math.sqrt(2.0 * gap / n) + 3.0 * unit_roundoff * 4.0e8
+    assert abs(math.log(scale)) <= math.sqrt(2.0 * gap / (2.0 * n)) + 4.0 * unit_roundoff
+
+    # The same score forged onto the converged state is still inside its floor
+    # (P b = 0), and its Newton correction still moves the objective.
+    tolerance = fit.config.tolerance
+    score = np.array(fit.terminal_score, copy=True)
+    score[:2] = 20.0
+    unconverged = replace(
+        fit, terminal_score=score, converged=False, convergence_reason="max_iterations"
+    )
+    assert not result_module._assessment_is_numerically_stationary(unconverged, tolerance)
+    with pytest.raises(ValueError, match="rounding floor"):
+        replace(fit, terminal_score=score, convergence_reason="score")
+
+
+def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
+    """Kills certifying a floor stop's Newton correction on a fallback curvature."""
+    family, layout, response, plan, penalty = _null_direction_problem()
+    fit = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        plan,
+        penalty,
+        initial=np.array([1.0e8, 1.0e8, math.log(math.sqrt(2.0))]),
+        config=DenseSolverConfig(max_iterations=100, tolerance=1.0e-12),
+    )
+    tolerance = fit.config.tolerance
+    # A score along the penalized direction, above the bare tolerance and
+    # inside its floor, whose Newton correction is far below the tolerance.
+    score = np.array(fit.terminal_score, copy=True)
+    score[:2] = (1.0e-3, -1.0e-3)
+    within = replace(fit, terminal_score=score, convergence_reason="score")
+    assert result_module._assessment_retained_kkt_ratio(within) > tolerance
+    assert result_module._assessment_is_numerically_stationary(within, tolerance)
+
+    fallback = replace(fit.terminal_curvature, actual_source="fisher", fallback_count=1)
+    unconverged = replace(within, converged=False, convergence_reason="max_iterations")
+    assert not result_module._assessment_is_numerically_stationary(
+        replace(unconverged, terminal_curvature=fallback), tolerance
+    )
+    with pytest.raises(ValueError, match="rounding floor"):
+        replace(within, terminal_curvature=fallback)
+
+
+def test_a_fisher_scoring_solve_does_not_take_the_rounding_floor_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills certifying a floor stop on Fisher information instead of observed curvature."""
+    start = _one_ulp_from(_capped_spline_fit(max_iterations=150))
+    real_floor = solver_module._score_within_rounding_floor
+    calls = 0
+
+    def counted_floor(**kwargs: object) -> bool:
+        nonlocal calls
+        calls += 1
+        return real_floor(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(solver_module, "_score_within_rounding_floor", counted_floor)
+    _capped_spline_fit(max_iterations=150, initial=start, curvature="fisher")
+    assert calls == 0
+    _capped_spline_fit(max_iterations=150, initial=start)
+    assert calls > 0
