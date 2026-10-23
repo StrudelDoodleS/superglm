@@ -17,13 +17,12 @@ cache (``numba/typed/typedlist.py`` declares them without ``cache=True``).
 
 from __future__ import annotations
 
-from threading import Lock
+from threading import Lock, get_ident
 
 import numpy as np
 from numba import njit, types
 
-from superglm._group_matrix._group_matrix_kernels import _native
-from superglm._parallel import pool_workers, pooled_for
+from superglm._parallel import pooled_for
 
 # Bytes one target's task holds while it runs: its loop state, not its rows.
 _TASK_BYTES = 1 << 12
@@ -143,9 +142,10 @@ _batched_initialized = False
 def _initialize_batched_moments():
     """Compile the one native signature on warmup or first admitted call.
 
-    ``accumulate`` hands the kernel read-only C-contiguous channels
-    (``_native``: a view, or a copy of a strided or Fortran chunk), so one
-    signature serves every channel layout a caller passes.
+    The channels are typed read-only ``A``, and the closed dispatcher converts a
+    C, Fortran or strided chunk to that type without copying it, so one
+    signature serves every channel layout a caller passes and the reducer holds
+    no channel copy the workspace budget would have to count.
     """
     global _batched_initialized
     if _batched_initialized:
@@ -155,7 +155,7 @@ def _initialize_batched_moments():
             return
         table = types.Array(types.intp, 2, "C", readonly=True)
         buffer = types.Array(types.float64, 1, "C")
-        channels = types.Array(types.float64, 2, "C", readonly=True)
+        channels = types.Array(types.float64, 2, "A", readonly=True)
         _accumulate_targets.compile(
             (
                 table,
@@ -369,24 +369,25 @@ class _BatchedMomentReducers:
             self._output_buffer,
             self._panel_buffer,
             self._bins,
-            _native(score),
-            _native(curvature),
+            score,
+            curvature,
             int(n),
             self._n_histograms,
             self._n_matrices,
         )
         targets = list(range(self._metadata.shape[0]))
-        counts = pooled_for(
-            lambda target: _accumulate_targets(*operands, target, target + 1),
+        passes = pooled_for(
+            lambda target: (_accumulate_targets(*operands, target, target + 1), get_ident()),
             targets,
             _TASK_BYTES,
         )
         histogram_active = directional_work = vector_active = 0
-        for histogram, directional, vector in counts:
+        for (histogram, directional, vector), _ in passes:
             histogram_active += histogram
             directional_work += directional
             vector_active += vector
-        self.last_worker_count = pool_workers(len(targets), _TASK_BYTES)
+        # The threads that ran a target, all alive until the section returns.
+        self.last_worker_count = len({thread for _, thread in passes})
         self.last_vector_active_updates = int(vector_active)
         return int(histogram_active), int(directional_work)
 

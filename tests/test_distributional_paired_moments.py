@@ -151,7 +151,8 @@ def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threa
                     directional_work,
                 )
                 assert batch.last_vector_active_updates == vector_active
-                assert batch.last_worker_count == min(threads, targets)
+                helpers = min(threads - 1, (targets + 1) // 2)
+                assert 1 <= batch.last_worker_count <= 1 + helpers
                 for spec, expected_score, expected_mass in zip(
                     vectors, expected_scores, expected_masses, strict=True
                 ):
@@ -248,7 +249,7 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(m
     signatures = tuple(kernel.nopython_signatures)
     assert len(signatures) == 1
     for channel in signatures[0].args[5:7]:
-        assert channel.layout == "C"
+        assert channel.layout == "A"
         assert not channel.mutable
     calls = [0]
 

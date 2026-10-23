@@ -24,9 +24,8 @@ def _buffered(values):
     return buffer, views
 
 
-def _fixture(kind="both"):
+def _fixture(kind="both", capacity=11):
     rng = np.random.default_rng(104)
-    capacity = 11
     sizes = (3, 7, 2)
     panel_buffer, ordinary = _buffered([np.empty((capacity, width)) for width in (0, 2, 5)])
     bins = np.empty((len(sizes), capacity), dtype=np.intp)
@@ -96,9 +95,69 @@ def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind)
                 np.testing.assert_array_equal(spec[-1], expected)
             for spec, expected in zip(directions, direction_expected, strict=True):
                 np.testing.assert_array_equal(spec[-1], expected)
-            assert batch.last_worker_count == (
-                min(threads, len(histograms) + len(directions)) if histograms or directions else 0
+            targets = len(histograms) + len(directions)
+            # The caller and at most about half as many helpers as targets.
+            helpers = min(threads - 1, (targets + 1) // 2)
+            assert (
+                (1 if targets else 0) <= batch.last_worker_count <= (1 + helpers if targets else 0)
             )
+
+
+def test_last_worker_count_is_the_threads_that_ran_a_target(monkeypatch):
+    """Five targets admitted on sixteen workers run on the caller and three helpers (about half
+    as many helpers as targets), and the count is those four threads, not the five admitted.
+    Each thread holds its first target until all four have one."""
+    import threading
+
+    module = _module()
+    module._warmup_batched_moments()
+    kernel = module._accumulate_targets
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    batch = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    assert len(histograms) + len(directions) == 5
+    together, first = threading.Barrier(4, timeout=20), threading.local()
+
+    def held(*args):
+        if not getattr(first, "done", False):
+            first.done = True
+            together.wait()
+        return kernel(*args)
+
+    monkeypatch.setattr(module, "_accumulate_targets", held)
+    with parallel_config(n_jobs=16, max_memory=2**30):
+        batch.accumulate(np.ones((11, 3)), 11)
+    assert batch.last_worker_count == 4
+
+
+def test_accumulate_reads_fortran_and_strided_channels_in_place():
+    """The workspace budget counts no copy of a chunk's channels, so the reducer makes none:
+    Fortran and strided channel matrices are read where they are."""
+    import tracemalloc
+
+    module = _module()
+    module._warmup_batched_moments()
+    capacity = 1 << 14
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture(capacity=capacity)
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    batch = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
+        with parallel_config(n_jobs=1):
+            tracemalloc.start()
+            try:
+                batch.accumulate(weights, capacity)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        assert peak < weights[:, 0].nbytes, peak  # a copy holds all three columns
 
 
 def test_row_order_fixture_detects_reassociation():
