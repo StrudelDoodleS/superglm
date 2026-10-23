@@ -44,6 +44,7 @@ from superglm.distributional.kernels.negative_binomial import (
     negative_binomial_certified_predictor_curvature_directional,
     negative_binomial_certified_predictor_curvature_second_directional,
     negative_binomial_expected_information,
+    poisson_limit_row_count,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialInitializationError as NegativeBinomialInitializationError,
@@ -322,6 +323,61 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             "The negative-binomial fit could not establish a stable finite theta and is "
             "Poisson-like at the diagnostic boundary"
         )
+
+    def limit_row_count(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> tuple[int, int]:
+        """The size's parameter index and how many rows the kernel treats as Poisson.
+
+        The rows are those with ``max(mean, count - 1)`` below ``2**-52`` times
+        the size, in effective units, whether the size ran off or the mean is
+        negligible; the expected information of the size is zero there. That
+        alone does not make the size unidentified (the other rows may still
+        identify it), so the count is a figure for the disclosure, not its test
+        (the fit's terminal rank decision is); rows just short of the threshold
+        are not counted. A derived family may change the likelihood, so as with
+        ``diagnose_repeated_curvature_failure`` it reports no rows.
+        """
+        if type(self) is not NegativeBinomialLS:
+            return 1, 0
+        candidate = _typed_plan(plan, len(theta))
+        semantics = candidate.weights.provenance.contract.semantics
+        n = poisson_limit_row_count(
+            theta[:, 0], theta[:, 1], candidate.weights.values, semantics, candidate.exact_count
+        )
+        return 1, n
+
+    def limit_row_disclosure(
+        self,
+        n_limit: int,
+        n_rows: int,
+        constant_offered: bool,
+        offset_varies: bool = False,
+    ) -> str:
+        """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
+
+        The fit's terminal rank decision has left a size coefficient not estimable.
+        ``constant_offered`` is true when a constant size is offered (see
+        ``LimitRowDisclosingFamily``; without a size intercept the offer is
+        unchecked) and the size has terms to drop: it is then offered, with a
+        varying offset dropped too; otherwise (every row at the limit, no
+        curvature on the intercept, or a size already constant) only the
+        Poisson family remains. A derived family gets no text
+        (see ``limit_row_count``).
+        """
+        if type(self) is not NegativeBinomialLS:
+            return ""
+        head = (
+            f"SuperLSS NegativeBinomialLS fit: {n_limit} of {n_rows} rows have a size at the "
+            "Poisson limit (no overdispersion left there; rows close to it are not counted), "
+            "and the fit's final curvature is singular in a size direction, so the size "
+            "coefficients are not identified and the fit may stop short of convergence."
+        )
+        if not constant_offered:
+            return f"{head} No row identifies even a constant size; use the Poisson family instead."
+        dropped = "no terms and no size offset" if offset_varies else "no terms"
+        remedy = (
+            f"Fit a constant size (family.theta() with {dropped}) or the Poisson family instead."
+        )
+        return f"{head} {remedy}"
 
     def expected_information_natural(
         self,

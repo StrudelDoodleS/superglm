@@ -77,6 +77,10 @@ _EXPORTS = {
         "superglm.distributional.family",
         "LikelihoodPlanValidatingFamily",
     ),
+    "LimitRowDisclosingFamily": (
+        "superglm.distributional.family",
+        "LimitRowDisclosingFamily",
+    ),
     "NaturalLikelihoodEvaluation": (
         "superglm.distributional.family",
         "NaturalLikelihoodEvaluation",

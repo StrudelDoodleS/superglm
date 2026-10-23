@@ -24,6 +24,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
     FitFailureDiagnosingFamily,
+    LimitRowDisclosingFamily,
 )
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
@@ -461,13 +462,90 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _block_coefficients_estimable(solver_result: DenseSolverResult, block: slice) -> bool:
+    """Whether the fit estimated every coefficient of ``block`` within the face it kept.
+
+    A fit whose REML removed a term's penalized range (a random effect, or a
+    smooth's wiggle) through an exact coefficient face holds those directions
+    fixed, and the lifted terminal decomposition puts the face constraints in
+    its null space. A fixed direction is determined, not unidentified, so on a
+    face each coefficient is read as the functional ``null_basis[j] @ z`` of the
+    reduced coordinates ``z``, judged by the reduced decomposition's own
+    estimability decision: a coefficient the face fixes completely is the zero
+    functional and passes, and one it fixes only partly (a smooth's wiggle) is
+    judged by the part left free. No rank is recomputed.
+    """
+    face = solver_result.coefficient_face
+    if face is None:
+        return bool(solver_result.terminal_rank.coefficient_estimable()[block].all())
+    reduced = solver_result.terminal_reduced_rank
+    return all(reduced.is_estimable(face.null_basis[j]) for j in range(block.start, block.stop))
+
+
+def _limit_row_disclosure(
+    family: LimitRowDisclosingFamily,
+    solver_result: DenseSolverResult,
+    likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout,
+) -> str | None:
+    """Disclose rows at a parameter's limit when they leave its coefficients unidentified.
+
+    The family counts the rows its kernel treats as at the limit, where the
+    parameter has no expected information, and names the parameter. That count
+    alone proves nothing: the other rows may identify every direction. The
+    fit's own terminal rank decision says which coefficients are estimable (see
+    ``_block_coefficients_estimable``: ``solver_result.terminal_rank``, the
+    shared rank policy on the final penalized curvature, or within the retained
+    face when REML removed a penalized range, such as a random effect or a
+    smooth's wiggle), and a parameter is unidentified when one of its
+    coefficients is not: a nonsingular information matrix is
+    the condition for local identification (Rothenberg, *Econometrica* 39(3),
+    1971). No information is evaluated here, and a coefficient the fit's rank
+    policy treats as estimable is not disclosed, however small its
+    information. Nor is the null direction attributed to the limit rows: a
+    block singular by construction (nested factors, or a level term beside
+    its own factor smooth) is disclosed whenever any row is at the limit.
+    A constant parameter is offered as the remedy when the intercept
+    column alone carries data curvature, read from the fit's terminal data
+    curvature, and the parameter has terms to drop; one that is already
+    constant leaves only the alternative family. Without an intercept the fit
+    holds no curvature for a constant it never estimated, so the offer is
+    unchecked: made when some row is off the limit, though rows the offset pins
+    (a factor's base level) never reach it, and withheld only when every row
+    is at the limit. The alternative family is always named.
+    """
+    theta = solver_result.theta
+    index, n_limit = family.limit_row_count(theta, likelihood_plan)
+    if n_limit == 0:
+        return None
+    state = next(state for state in layout.predictors if state.parameter_index == index)
+    if _block_coefficients_estimable(solver_result, state.coefficient_slice):
+        return None
+    if state.intercept_index is None:
+        constant_offered = n_limit < len(theta)
+    else:
+        constant_offered = bool(
+            solver_result.terminal_data_curvature[state.intercept_index, state.intercept_index]
+            > 0.0
+        )
+    # A parameter without terms is already constant: dropping its terms is no remedy.
+    has_terms = state.coefficient_slice.stop - state.coefficient_slice.start > (
+        0 if state.intercept_index is None else 1
+    )
+    offset_varies = bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
+    return family.limit_row_disclosure(
+        n_limit, len(theta), constant_offered and has_terms, offset_varies
+    )
+
+
 def _curvature_disclosures(
     family: DistributionalFamily,
     solver_result: DenseSolverResult,
     response: NDArray,
     likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout | None = None,
 ) -> tuple[str, ...]:
-    """What a fit whose final curvature fell back discloses instead of refusing.
+    """The warnings a finished fit records in ``result_.warnings`` instead of refusing.
 
     Every fallback the fit used to refuse is disclosed, with the family's own
     diagnosis of repeated curvature failure when it has one. A projected
@@ -476,7 +554,11 @@ def _curvature_disclosures(
     before fits stopped refusing, and still is, except for a family that
     declares ``diagnoses_any_curvature_fallback``: one that gained expected
     information after fits stopped refusing, so every fallback of it used to
-    refuse and is disclosed whether or not its diagnosis fires.
+    refuse and is disclosed whether or not its diagnosis fires. A
+    :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
+    converged or not, when the fit's terminal rank decision leaves one of that
+    parameter's coefficients not estimable (see ``_limit_row_disclosure``); a
+    failed disclosure never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -500,6 +582,17 @@ def _curvature_disclosures(
             diagnosis = None
         if isinstance(diagnosis, Exception) and str(diagnosis):
             messages.append(str(diagnosis))
+    if (
+        isinstance(family, LimitRowDisclosingFamily)
+        and solver_result.theta is not None
+        and layout is not None
+    ):
+        try:
+            message = _limit_row_disclosure(family, solver_result, likelihood_plan, layout)
+        except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
+            message = None
+        if message:
+            messages.append(message)
     return tuple(messages)
 
 
@@ -592,7 +685,7 @@ def prepare_distributional_fit_state(
                 if solver_result.convergence_reason == "no_ascent_direction"
                 else ()
             ),
-            *_curvature_disclosures(family, solver_result, response, likelihood_plan),
+            *_curvature_disclosures(family, solver_result, response, likelihood_plan, layout),
             *(
                 ()
                 if compact_null.converged

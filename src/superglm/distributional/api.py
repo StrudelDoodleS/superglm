@@ -737,8 +737,9 @@ class SuperLSS:
         ).input_positions
         # Positional selection owns the retained rows and preserves pandas indices.
         self._training_frame = frame.take_rows(positions)
-        # A fit whose final curvature fell back records why in result_.warnings
-        # and warns the same text, whichever method fitted it.
+        # A fit whose final curvature fell back, or whose size has rows at the
+        # Poisson limit it cannot estimate, records why in result_.warnings and
+        # warns the same text, whichever method fitted it.
         for message in getattr(getattr(candidate, "fitted_result", None), "warnings", ()):
             warnings.warn(message, ConvergenceWarning, stacklevel=3)
         # Returned, not refused, and never silent: fit_reml warns, as its
