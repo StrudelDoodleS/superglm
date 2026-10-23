@@ -843,7 +843,7 @@ class FactorSmoothLeafData:
     leaf forms it by one more compact pass on first read
     (``trailing_source``), and the published leaf keeps it (``published``).
     No pass keeps a ``(K, p, p)`` stack for it (#432).  ``triangles`` holds
-    the whole triangles only where a caller formed them (``_assemble_system``).
+    the whole triangles only where a caller formed them.
     """
 
     top: NDArray
@@ -1687,74 +1687,8 @@ def _read_only_copy(values: NDArray) -> NDArray:
     return copy
 
 
-def _assemble_system(
-    R_acc: NDArray,
-    M_acc: NDArray | None,
-    E_acc: NDArray | None,
-    counts: NDArray,
-    merges: NDArray,
-    *,
-    center: NDArray,
-    generators: BorderGenerators | None,
-    signed: bool,
-    block_size: int,
-    weights: NDArray,
-    weighted_rhs: NDArray,
-    small_indices: NDArray,
-    structured_indices: NDArray,
-    group_index: int,
-    group_name: str,
-    basis: str = "fs",
-    thin_levels: tuple = (),
-    thin_counts: tuple[NDArray, NDArray] | None = None,
-):
-    """The leaf data (pseudo-rows or within Gram) and the raw moment operator by products.
-
-    The whole triangles ``R_acc`` are closed level by level into the compact
-    leaf data (``_close_levels``, the arithmetic of the compact pass) and the
-    system is assembled from it (``_assemble_compact``); signed rows read
-    their triangles and middle factors once more there, and an ``sz`` leaf
-    keeps the triangles.
-    """
-    k = block_size
-    K, p = R_acc.shape[0], R_acc.shape[2]
-    top = np.zeros((K, k, p))
-    tail_norms2 = np.zeros((K, p - k))
-    tail_gram = np.zeros((p - k, p - k))
-    _close_levels(R_acc, k, top, tail_norms2, tail_gram, not signed)
-    parts = _LeafParts(top, tail_norms2, None if signed else tail_gram, counts, merges)
-    if signed:
-        assert M_acc is not None
-        pseudo_rows, signature, level_rows, border = _signed_parts(R_acc, M_acc, k)
-        assert E_acc is not None
-        parts = parts._replace(
-            pseudo_rows=pseudo_rows,
-            signature=signature,
-            error_rows=np.ascontiguousarray(E_acc[:, :k, :]),
-            error_diagonal=np.diagonal(E_acc, axis1=1, axis2=2).copy(),
-            level_rows=level_rows,
-            border=border,
-        )
-    return _assemble_compact(
-        parts._replace(triangles=R_acc),
-        center=center,
-        generators=generators,
-        signed=signed,
-        block_size=block_size,
-        weights=weights,
-        weighted_rhs=weighted_rhs,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
-        group_index=group_index,
-        group_name=group_name,
-        basis=basis,
-        thin_levels=thin_levels,
-        thin_counts=thin_counts,
-    )
-
-
 class _LeafParts(NamedTuple):
-    """One iterate's compact leaf data as a pass or ``_assemble_system`` forms it.
+    """One iterate's compact leaf data as a pass forms it.
 
     ``top``, ``tail_norms2``, ``tail_gram`` (Fisher rows), ``counts`` and
     ``merges`` as ``FactorSmoothLeafData``; signed rows add the pseudo-rows,
@@ -2394,13 +2328,6 @@ class FactorSmoothLeafFactor:
         state["_inverse_bdlr_cache"] = None
         return state
 
-    @cached_property
-    def minimum_local_eigenvalue(self) -> float:
-        """``min_l lambda_min(D_l)`` (reporting only; formed on first read from the pivots)."""
-        if not self.n_levels:
-            return 0.0
-        return float(np.min(np.linalg.eigvalsh(np.einsum("kai,kaj->kij", self._U, self._U))))
-
     # -- the bound ---------------------------------------------------------
     @staticmethod
     def _border_bound(
@@ -3010,10 +2937,6 @@ class ProfiledFactorSmoothLeafFactor:
         self.small_indices = augmented_factor.small_indices[1:] - 1
         self.structured_indices = augmented_factor.structured_indices - 1
         self._inverse_bdlr_cache: _BlockDiagonalLowRank | None = None
-
-    @property
-    def minimum_local_eigenvalue(self) -> float:
-        return self.augmented_factor.minimum_local_eigenvalue
 
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
