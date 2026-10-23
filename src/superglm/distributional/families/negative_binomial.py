@@ -349,13 +349,13 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         self,
         n_limit: int,
         n_rows: int,
-        constant_identified: bool,
+        constant_offered: bool,
         offset_varies: bool = False,
     ) -> str:
         """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
 
         The fit's terminal rank decision has left a size coefficient not estimable.
-        ``constant_identified`` is true when a constant size is offered (see
+        ``constant_offered`` is true when a constant size is offered (see
         ``LimitRowDisclosingFamily``; without a size intercept the offer is
         unchecked) and the size has terms to drop: it is then offered, with a
         varying offset dropped too; otherwise (every row at the limit, no
@@ -371,7 +371,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             "and the fit's final curvature is singular in a size direction, so the size "
             "coefficients are not identified and the fit may stop short of convergence."
         )
-        if not constant_identified:
+        if not constant_offered:
             return f"{head} No row identifies even a constant size; use the Poisson family instead."
         dropped = "no terms and no size offset" if offset_varies else "no terms"
         remedy = (

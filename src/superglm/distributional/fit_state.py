@@ -502,7 +502,10 @@ def _limit_row_disclosure(
     the condition for local identification (Rothenberg, *Econometrica* 39(3),
     1971). No information is evaluated here, and a coefficient the fit's rank
     policy treats as estimable is not disclosed, however small its
-    information. A constant parameter is offered as the remedy when the intercept
+    information. Nor is the null direction attributed to the limit rows: a
+    block singular by construction (nested factors, or a level term beside
+    its own factor smooth) is disclosed whenever any row is at the limit.
+    A constant parameter is offered as the remedy when the intercept
     column alone carries data curvature, read from the fit's terminal data
     curvature, and the parameter has terms to drop; one that is already
     constant leaves only the alternative family. Without an intercept the fit
@@ -519,9 +522,9 @@ def _limit_row_disclosure(
     if _block_coefficients_estimable(solver_result, state.coefficient_slice):
         return None
     if state.intercept_index is None:
-        constant_identified = n_limit < len(theta)
+        constant_offered = n_limit < len(theta)
     else:
-        constant_identified = bool(
+        constant_offered = bool(
             solver_result.terminal_data_curvature[state.intercept_index, state.intercept_index]
             > 0.0
         )
@@ -531,7 +534,7 @@ def _limit_row_disclosure(
     )
     offset_varies = bool(state.offset.size and np.any(state.offset != state.offset.flat[0]))
     return family.limit_row_disclosure(
-        n_limit, len(theta), constant_identified and has_terms, offset_varies
+        n_limit, len(theta), constant_offered and has_terms, offset_varies
     )
 
 
