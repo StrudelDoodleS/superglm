@@ -38,7 +38,6 @@ from superglm.distributional.families import negative_binomial as negative_binom
 from superglm.distributional.families import two_piece as two_piece_module
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.posterior import posterior_covariance
-from superglm.distributional.results import smoothing as result_smoothing
 from superglm.distributional.results import solver as result_solver
 from superglm.distributional.serialization import (
     DistributionalSerializationError,
@@ -47,6 +46,7 @@ from superglm.distributional.serialization import (
 from superglm.distributional.smoothing import penalty_face as penalty_face_module
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 
+from . import test_distributional_endpoint_laml as endpoint_laml_tests
 from .test_userspace_040 import _lss_eta_rounding
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_portable_v041"
@@ -386,56 +386,83 @@ def test_a_face_model_loads_where_the_spectral_norm_rounds_differently(
     )
 
 
-def _stationary_caps(patch: pytest.MonkeyPatch) -> None:
-    """Treat every finite cap as numerically stationary.
-
-    A revalidation whose cap is stationary authenticates its endpoint as a
-    replay of the face projection of its source. This fit's cap misses that
-    by a tolerance, so the load grants it to reach the replay check.
-    """
-    patch.setattr(result_smoothing, "_assessment_is_numerically_stationary", lambda *_: True)
-
-
-def test_a_revalidated_endpoint_loads_where_the_projection_rounds_differently(
-    face_model, monkeypatch
-) -> None:
-    model, frame, saved = face_model
-    smoothing = model._require_fitted().fit_state.smoothing
-    moved = [
+@pytest.fixture(scope="module")
+def revalidated_face():
+    """An EFS result that revalidates an exact face beside its cap, and that event."""
+    smoothing = endpoint_laml_tests._gamma_isolated_cap_face_problem()[-1]
+    event = next(
         item
         for item in smoothing.history
-        if item.revalidated_face_components
-        and item.accepted_fit_index is not None
-        and not np.array_equal(
-            smoothing.coefficient_fits[item.source_fit_index].coefficients,
-            smoothing.coefficient_fits[item.accepted_fit_index].coefficients,
-        )
-    ]
-    assert moved  # the load replays a projection that moved its source
-    real_project = PenaltyFace.project
-    with monkeypatch.context() as patch:
-        _stationary_caps(patch)
-        patch.setattr(
-            PenaltyFace, "project", lambda face, values: _nudged(real_project(face, values))
-        )
-        loaded = sg.SuperLSS.from_bytes(saved)
-    np.testing.assert_array_equal(
-        loaded.predict_link(frame).to_numpy(), model.predict_link(frame).to_numpy()
+        if item.revalidated_face_components and item.accepted_fit_index is not None
     )
+    return smoothing, event
 
 
-def test_a_revalidated_endpoint_must_still_be_the_projection(face_model, monkeypatch) -> None:
-    _, _, saved = face_model
+def _forged_projection_replay(
+    revalidated_face, patch: pytest.MonkeyPatch, *, replay_gap: float
+) -> tuple[object, tuple]:
+    """The revalidation's fits with a forged endpoint, and a forged replay of its projection.
+
+    The stored endpoint is the source moved by an eighth of the projection
+    bound along one coordinate, reached without a step, beside a cap whose
+    score is zero, so the load authenticates it as a replay of the source's
+    face projection. The load's own replay is the stored endpoint moved by
+    ``replay_gap`` times the bound along that coordinate. Every margin is a
+    fixed fraction of the bound, far above one rounding of the coordinate, so
+    the decision is the same on every BLAS.
+    """
+    smoothing, event = revalidated_face
+    fits = list(smoothing.coefficient_fits)
+    cap_index, endpoint_index = event.coefficient_fit_indices[:2]
+    source = np.asarray(fits[event.source_fit_index].coefficients)
+    endpoint_fit = fits[endpoint_index]
+    face = endpoint_fit.coefficient_face
+    bound = result_solver._endpoint_revalidation_projection_bound(face, source)
+    assert bound is not None and bound > 0.0
+    row = int(np.argmax(np.abs(source)))
+    assert 2.0 * float(np.spacing(np.abs(source[row]))) < 1.0e-2 * bound
+    endpoint = np.array(source, copy=True)
+    endpoint[row] += 0.125 * bound
+    replay = np.array(endpoint, copy=True)
+    replay[row] += replay_gap * bound
+    fits[cap_index] = replace(
+        fits[cap_index], terminal_score=np.zeros_like(fits[cap_index].terminal_score)
+    )
+    fits[endpoint_index] = replace(endpoint_fit, coefficients=endpoint, iterations=0)
     real_project = PenaltyFace.project
+
+    def project(face_, values):
+        values = np.asarray(values)
+        if values.shape == source.shape and np.array_equal(values, source):
+            return replay.copy()
+        return real_project(face_, values)
+
+    patch.setattr(PenaltyFace, "project", project)
+    return smoothing, tuple(fits)
+
+
+@pytest.mark.parametrize("replay_gap", [0.0, 1.5])
+def test_a_revalidated_endpoint_loads_where_the_projection_rounds_differently(
+    revalidated_face, monkeypatch, replay_gap: float
+) -> None:
+    """A stored replay within twice the bound of the load's own replay is accepted.
+
+    Each replay lies within the bound of the exact projection on its own
+    machine, so two machines' replays differ by up to twice the bound.
+    """
     with monkeypatch.context() as patch:
-        _stationary_caps(patch)
-        patch.setattr(
-            PenaltyFace,
-            "project",
-            lambda face, values: _nudged(real_project(face, values), factor=1.0 + 1.0e-6),
-        )
-        with pytest.raises(DistributionalSerializationError, match="canonical endpoint state"):
-            sg.SuperLSS.from_bytes(saved)
+        smoothing, fits = _forged_projection_replay(revalidated_face, patch, replay_gap=replay_gap)
+        replace(smoothing, coefficient_fits=fits)
+
+
+@pytest.mark.parametrize("replay_gap", [2.5, 1.0e6])
+def test_a_revalidated_endpoint_must_still_be_the_projection(
+    revalidated_face, monkeypatch, replay_gap: float
+) -> None:
+    with monkeypatch.context() as patch:
+        smoothing, fits = _forged_projection_replay(revalidated_face, patch, replay_gap=replay_gap)
+        with pytest.raises(ValueError, match="canonical endpoint state"):
+            replace(smoothing, coefficient_fits=fits)
 
 
 def _rotated_face(face: PenaltyFace, angle: float) -> PenaltyFace:
