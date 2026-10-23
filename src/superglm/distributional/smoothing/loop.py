@@ -23,7 +23,10 @@ from superglm.distributional.result import (
     _maximum_relative_natural_parameter_change,
 )
 from superglm.distributional.results.smoothing import _practical_outward_window
-from superglm.distributional.results.solver import _PenaltyAssessmentContext
+from superglm.distributional.results.solver import (
+    _PenaltyAssessmentContext,
+    fit_time_face_geometry,
+)
 from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.authority import (
     _face_authority_config,
@@ -122,6 +125,7 @@ def _trial_laplace_objective(
         raise
 
 
+@fit_time_face_geometry()
 def _efs_result(
     *,
     layout: StackedLayout,

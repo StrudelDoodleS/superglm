@@ -1305,9 +1305,12 @@ make hostile pickle safe.
 
 Artifacts carry two independent version numbers. The envelope's
 `schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier unless explicitly supported**. This build writes envelope `11.0.0`
-and also reads `8.0.0`, `9.0.0` and `10.0.0`, so models saved by 0.40 load.
-Schema 11 records what a fit disclosed (`result_.warnings`) and that
+barrier unless explicitly supported**. This build writes envelope `12.0.0`
+and also reads `8.0.0`, `9.0.0`, `10.0.0` and `11.0.0`, so models saved by
+0.40, and by builds that wrote schema 11, load. Schema 12 names the
+likelihood plan by the inputs the artifact stores and drops the face
+tolerances described below, so a schema-11 reader refuses it at its version
+gate. Schema 11 records what a fit disclosed (`result_.warnings`) and that
 `NegativeBinomialLS` supplies Fisher information; schema 10 permitted compact
 historical row arrays and recorded the full-history opt-in. Older readers
 refuse a newer format before loading its payload. New fits record whether curvature diagnostics assessed
@@ -1316,7 +1319,25 @@ family-dependent interpretation. Unsupported majors receive a version error
 naming both versions. MINOR and PATCH promise readability. Because the loader
 recomputes the manifest and compares it for
 equality, any change to what the manifest describes must be a MAJOR bump — so a
-manifest mismatch always means corruption or tampering, never age. The
+manifest mismatch always means corruption or tampering, never age. A model
+also loads on a machine other than the one that saved it. The manifest binds
+what the artifact stores, not tolerances the loader recomputes with its own
+BLAS. A model fitted by this build names its likelihood by the weights as
+stored and, for every family except `GaussianLS`, by the response as stored,
+and the loader checks what the name covers exactly. The `GaussianLS`
+likelihood stores no response, so its name covers the weights only. The terms the loader
+recomputes from them with `log`, such as `-log y`, are checked against the
+saved fit within a rounding bound, because `log` can differ by an ulp between
+CPUs and maths libraries. A model fitted by an earlier build, with a family
+whose likelihood has such terms, named its likelihood with those terms
+included, which another machine cannot reproduce; it keeps that name when
+saved again. For such a model the loader checks the weights exactly, but
+checks the response only through the sum of those terms, within the same
+bound. That sum does not change when response rows are reordered, and for
+`GaussianLS` with prior weights and for `TwoPieceNormalLSS` it does not
+involve the response at all. Fitting the model again and saving it restores
+the exact check of the response for every family except `GaussianLS`, whose
+name never covered the response. The
 `public_api` block carries its own `schema_version` for the SuperLSS wrapper
 metadata alone; it moves independently of the envelope's, and both are written
 into every artifact so that whichever layer refuses a stale artifact names its

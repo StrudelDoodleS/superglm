@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -57,6 +57,11 @@ from superglm.distributional.kernels.log_normal import (
     mean_rows,
     predictor_fourth_derivatives,
 )
+from superglm.distributional.likelihood_identity import (
+    LOG_ERROR_UNITS,
+    CarrierRounding,
+    carrier_rounding_scale,
+)
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -104,6 +109,8 @@ def _validated_scale_floor(value: object) -> float:
 class LogNormalLikelihoodPlan:
     """One exact-response log-normal law and immutable carriers."""
 
+    legacy_identifier_tag: ClassVar[str] = "LogNormalLS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: LogNormalRowLaw
     family_config: tuple[str, str, str]
@@ -141,17 +148,27 @@ class LogNormalLikelihoodPlan:
     def plan_identifier(self) -> str:
         payload = "\0".join(
             (
-                "LogNormalLS/v1",
+                "LogNormalLS/v2",
                 self.row_law,
                 *self.family_config,
                 self.observation.kind,
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
-                self.carrier_digest,
             )
         ).encode("utf-8")
-        return f"LogNormalLS/v1:{hashlib.sha256(payload).hexdigest()}"
+        return f"LogNormalLS/v2:{hashlib.sha256(payload).hexdigest()}"
+
+    def carrier_rounding(self) -> CarrierRounding:
+        """The carrier ``-m (log y + 0.5 log 2 pi)`` varies by platform."""
+        carrier = self.parameter_independent_carrier
+        multiplier = (
+            self.weights.values
+            if self.weights.provenance.contract.semantics == "frequency"
+            else 1.0
+        )
+        scale = carrier_rounding_scale(carrier, multiplier, 2.0 * abs(_HALF_LOG_TWO_PI))
+        return CarrierRounding(carrier, scale, LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> LogNormalLikelihoodPlan:
         return LogNormalLikelihoodPlan._from_prepared(

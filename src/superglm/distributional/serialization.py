@@ -11,12 +11,16 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9 and
-  10 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
+* **MAJOR is a read barrier unless explicitly supported.** Schemas 8, 9, 10
+  and 11 are read. Schemas 8 and 9 retain full historical rows. Schema 8 also
   retains its original telemetry encoding and family-dependent curvature
   scope. Schema 11 added a fit's disclosures and NegativeBinomialLS's expected
   information to the manifest, so readers of schema 10 refuse its artifacts
-  at their version gate instead of reporting a manifest mismatch. Known
+  at their version gate instead of reporting a manifest mismatch. Schema 12
+  names likelihood plans with ``/v2`` identifiers and drops the three
+  tolerances a coefficient face recomputes at load (two from a LAPACK norm of
+  its constraint matrix, one from its shape), so readers of schema 11 refuse
+  its artifacts the same way. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
@@ -86,6 +90,7 @@ from superglm.distributional.fit_state import (
     DistributionalRowState,
 )
 from superglm.distributional.inference import JointInference
+from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.result import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
@@ -458,16 +463,31 @@ def _coefficient_face_manifest(result: DenseSolverResult) -> dict[str, Any] | No
         "constraint_matrix": _array_descriptor(face.constraint_matrix),
         "null_basis": _array_descriptor(face.null_basis),
         "constraint_basis": _array_descriptor(face.constraint_basis),
-        "rank_resolution": _finite_float(face.rank_resolution, name="face rank resolution"),
-        "null_residual_bound": _finite_float(
-            face.null_residual_bound,
-            name="face null residual bound",
-        ),
-        "orthogonality_bound": _finite_float(
-            face.orthogonality_bound,
-            name="face orthogonality bound",
-        ),
     }
+
+
+# Tolerances a penalty face recomputes at load. ``rank_resolution`` and
+# ``null_residual_bound`` scale with a LAPACK norm of its stored constraint
+# matrix and vary by an ulp with the BLAS kernel; ``orthogonality_bound`` is a
+# function of its shape, which the stored arrays already bind. A manifest binds
+# none of them; artifacts of schema 11 and earlier still carry all three.
+_DERIVED_FACE_KEYS = ("rank_resolution", "null_residual_bound", "orthogonality_bound")
+
+
+def _without_derived_face_values(value: Any) -> Any:
+    """``value`` with every coefficient face's derived tolerances removed."""
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                {k: v for k, v in item.items() if k not in _DERIVED_FACE_KEYS}
+                if key == "coefficient_face" and isinstance(item, Mapping)
+                else _without_derived_face_values(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_without_derived_face_values(item) for item in value]
+    return value
 
 
 def _solver_manifest(result: DenseSolverResult) -> dict[str, Any]:
@@ -729,7 +749,14 @@ def _validated_likelihood_state(model: DenseDistributionalModel) -> None:
         raise DistributionalSerializationError(
             "retained-row family likelihood plan failed live response reconstruction"
         ) from exc
-    if reconstructed_plan.plan_identifier != plan_identifier:
+    if (
+        rebound_plan_mismatch(
+            reconstructed_plan,
+            plan_identifier,
+            state.solver_result.parameter_independent_carrier,
+        )
+        is not None
+    ):
         raise DistributionalSerializationError(
             "retained-row family likelihood plan does not identify the live response"
         )
@@ -1507,9 +1534,12 @@ def deserialize_distributional_model(
         if capabilities.get("expected_information") is True:
             # Gained after the artifact was written; compare it as recorded.
             capabilities["expected_information"] = False
+    # Schema 12 manifests never record the derived face tolerances; older ones
+    # did, and their values are not compared.
+    expected_manifest = manifest if artifact_major >= 12 else _without_derived_face_values(manifest)
     if not hmac.compare_digest(
         _canonical_json(restored_manifest),
-        _canonical_json(manifest),
+        _canonical_json(expected_manifest),
     ):
         raise DistributionalSerializationError("manifest does not match fitted model payload")
     # A model re-saved after loading keeps the record of the artifact it came from.

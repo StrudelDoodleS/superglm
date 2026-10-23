@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -48,6 +48,11 @@ from superglm.distributional.kernels.gamma import (
     gamma_predictor_curvature_directional,
     gamma_predictor_fourth_derivatives,
     initialize_gamma,
+)
+from superglm.distributional.likelihood_identity import (
+    LOG_ERROR_UNITS,
+    CarrierRounding,
+    carrier_rounding_scale,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -101,6 +106,8 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 class GammaLikelihoodPlan:
     """One exact-response Gamma likelihood law and immutable row carriers."""
 
+    legacy_identifier_tag: ClassVar[str] = "GammaLS/v1"
+
     weights: ResolvedLikelihoodWeights
     row_law: GammaRowLaw
     invariant: GammaInvariant
@@ -141,7 +148,7 @@ class GammaLikelihoodPlan:
     def plan_identifier(self) -> str:
         payload = "\0".join(
             (
-                "GammaLS/v1",
+                "GammaLS/v2",
                 self.row_law,
                 self.invariant,
                 *self.family_config,
@@ -149,10 +156,14 @@ class GammaLikelihoodPlan:
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
-                self.carrier_digest,
             )
         ).encode("utf-8")
-        return f"GammaLS/v1:{hashlib.sha256(payload).hexdigest()}"
+        return f"GammaLS/v2:{hashlib.sha256(payload).hexdigest()}"
+
+    def carrier_rounding(self) -> CarrierRounding:
+        """The carrier ``-log y`` (times ``w`` for frequency weights) varies by platform."""
+        carrier = self.parameter_independent_carrier
+        return CarrierRounding(carrier, carrier_rounding_scale(carrier), LOG_ERROR_UNITS)
 
     def take(self, indices: NDArray[np.integer]) -> GammaLikelihoodPlan:
         return GammaLikelihoodPlan._from_prepared(

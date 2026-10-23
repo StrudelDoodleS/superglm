@@ -7,17 +7,30 @@ holds the data that policy consults, so the reader and the writer agree on it.
 
 from __future__ import annotations
 
-# 11.0.0 records a fit's disclosures (``fit.warnings``) and NegativeBinomialLS's
-# expected information in the manifest. 10.0.0 permitted compact historical
-# rows and the full-history retention flag.
-SCHEMA_VERSION = "11.0.0"
+# 12.0.0 changes the manifest in two ways against 11.0.0, so a schema-11 reader
+# refuses it at its version gate instead of reporting a manifest mismatch. A
+# fit of a built-in family whose log-likelihood carrier is transcendental names
+# its likelihood plan with a ``/v2`` identifier, which hashes only stored
+# inputs; 11.0.0 wrote ``/v1``, which also hashed the carrier, and a model
+# loaded from 11.0.0 keeps its ``/v1`` identifier when saved again. A
+# coefficient face records none of the tolerances it recomputes at load:
+# ``rank_resolution`` and ``null_residual_bound`` scale with a LAPACK norm of
+# its constraint matrix, and ``orthogonality_bound`` is a function of its
+# shape; 11.0.0 recorded all three. 11.0.0 records a fit's
+# disclosures (``fit.warnings``) and NegativeBinomialLS's expected information
+# in the manifest. 10.0.0 permitted compact historical rows and the
+# full-history retention flag.
+SCHEMA_VERSION = "12.0.0"
 
 # Schema 8 remains readable: its missing scope retains the family-dependent
 # interpretation, and omission from telemetry preserves the original manifest.
 # Schema 9 has full historical rows; migration derives their original shapes.
 # Schema 10 (0.40) carries no disclosures, and its NegativeBinomialLS manifest
 # records no expected information, which the reader compares as recorded.
-READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8, 9, 10})
+# Schema 11 is read as written: its ``/v1`` identifiers are accepted when their
+# carrier sum passes its rounding bound, and its derived face tolerances are
+# dropped before the manifest comparison, as they are for 8 to 10.
+READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8, 9, 10, 11})
 
 #: Manifest type names are the classes' canonical compatibility paths, held
 #: fixed across the package reorganisation so the manifest authenticates fitted

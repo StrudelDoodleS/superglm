@@ -158,12 +158,14 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
     allowed = {
         ROOT / "family.py": {"weights"},
         ROOT / "weights.py": set(),
+        ROOT / "likelihood_identity.py": set(),
         ADAPTERS / "_base.py": {"weights", "kernels._curvature_direction"},
         ADAPTERS / "_predictors.py": {"binding", "family"},
         ROOT / "binding.py": {"family", "predictor"},
         ADAPTERS / "gaussian.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.gaussian",
             "families._base",
             "families._predictors",
@@ -172,6 +174,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "gamma.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.gamma",
             "families._base",
             "families._predictors",
@@ -181,6 +184,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "generalized_gamma.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.generalized_gamma",
             "families._base",
             "families._predictors",
@@ -189,6 +193,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "negative_binomial.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.negative_binomial",
             "families._base",
             "families._predictors",
@@ -211,6 +216,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "two_piece.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.two_piece",
             "families._base",
             "families._predictors",
@@ -220,6 +226,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "log_normal.py": {
             "family",
             "weights",
+            "likelihood_identity",
             "kernels.log_normal",
             "families._base",
             "families._predictors",
