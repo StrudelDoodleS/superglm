@@ -919,10 +919,6 @@ class EditorWidget:
             "validation_scope": result.validation_scope,
         }
 
-    def _download_model(self, filename: str | None = None) -> tuple[bytes, str]:
-        result = self._export_bytes("joblib", filename)
-        return result.data, result.filename
-
     def _open_directory(self, path: str | None = None) -> dict[str, str]:
         opened = open_directory_path(path)
         return {"path": str(opened)}

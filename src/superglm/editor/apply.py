@@ -138,11 +138,6 @@ def _share_arrays_read_only(value, memo: dict) -> None:
                     stack.append(getattr(item, name, None))
 
 
-def apply_edits_to_model_copy(model, terms: dict[str, EditableTerm]):
-    """Return a deep-copied model with changed editor terms applied."""
-    return apply_edits_to_model_copy_with_data(model, terms)
-
-
 def apply_edits_to_model_copy_with_data(
     model,
     terms: dict[str, EditableTerm],

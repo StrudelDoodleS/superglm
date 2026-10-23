@@ -26,7 +26,7 @@ def build_difference_penalty(n_basis: int, order: int) -> NDArray:
     return Dm.T @ Dm
 
 
-def build_general_difference_penalty(knots: NDArray, degree: int, order: int) -> NDArray:
+def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tuple[NDArray, str]:
     """General difference penalty for B-spline coefficients on any knot vector.
 
     Li and Cao, "General P-splines for non-uniform B-splines" (2022,
@@ -66,12 +66,9 @@ def build_general_difference_penalty(knots: NDArray, degree: int, order: int) ->
     coefficients: the null space is still exactly the polynomials, the scale
     and spread are the standard penalty's, and the penalty is a Gram of its
     factor, never of a matrix with ``(hbar / span)**order`` entries.
-    """
-    return _general_difference_penalty(knots, degree, order)[0]
 
-
-def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tuple[NDArray, str]:
-    """``build_general_difference_penalty`` and which penalty it took: ``"general"`` or ``"projected"``.
+    Returns ``(penalty, kind)``: the penalty and which one it took, ``"general"`` or
+    ``"projected"``.
 
     The limit is on the general penalty's own condition, not on its condition
     over the standard penalty's on the same basis, although the standard

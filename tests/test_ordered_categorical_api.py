@@ -391,7 +391,7 @@ def test_step_mode_pickle_is_refused_by_the_editor_apply_path(monkeypatch) -> No
     """
     from superglm.editor import apply as apply_module
     from superglm.editor._types import EditableTerm
-    from superglm.editor.apply import apply_edits_to_model_copy
+    from superglm.editor.apply import apply_edits_to_model_copy_with_data
 
     writes: list[tuple] = []
     monkeypatch.setattr(
@@ -424,7 +424,7 @@ def test_step_mode_pickle_is_refused_by_the_editor_apply_path(monkeypatch) -> No
     )
 
     with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed") as excinfo:
-        apply_edits_to_model_copy(model, {"band": term})
+        apply_edits_to_model_copy_with_data(model, {"band": term})
 
     assert writes == [], "the edit was applied before the refusal surfaced"
     assert "Editable term 'band'" in str(excinfo.value)

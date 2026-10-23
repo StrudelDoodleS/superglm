@@ -1453,7 +1453,8 @@ def test_widget_evidence_and_export_reuse_materialized_model(
         metrics = widget._metrics("deviance", "in_force")
         report = widget._report("final")
         saved = widget._save_model(path=str(tmp_path / "edited-model.joblib"))
-        downloaded, filename = widget._download_model("edited-model.joblib")
+        exported = widget._export_bytes("joblib", "edited-model.joblib")
+        downloaded, filename = exported.data, exported.filename
     finally:
         widget.close()
 

@@ -154,13 +154,13 @@ def test_curvature_family_of_two_freedoms_reports_a_joint_test() -> None:
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:
-    from superglm.editor.apply import apply_edits_to_model_copy
+    from superglm.editor.apply import apply_edits_to_model_copy_with_data
     from superglm.editor.session import EditorSession
 
     session = EditorSession.from_model(segmented_model)
     term = session._require_term("band")
     term.edited_log_effect = term.edited_log_effect + 0.01
-    edited = apply_edits_to_model_copy(segmented_model, {"band": term})
+    edited = apply_edits_to_model_copy_with_data(segmented_model, {"band": term})
     text = str(edited.summary())
     assert "[ordered piecewise" in text
     assert "band[Mi000]" in text
@@ -806,13 +806,13 @@ def test_specials_ride_alongside_each_basis_in_the_summary() -> None:
         assert "smooth" not in level_line
 
         # The editor-stale row builder carries the same vocabulary.
-        from superglm.editor.apply import apply_edits_to_model_copy
+        from superglm.editor.apply import apply_edits_to_model_copy_with_data
         from superglm.editor.session import EditorSession
 
         session = EditorSession.from_model(model)
         term = session._require_term("band")
         term.edited_log_effect = term.edited_log_effect + 0.01
-        edited = apply_edits_to_model_copy(model, {"band": term})
+        edited = apply_edits_to_model_copy_with_data(model, {"band": term})
         stale_line = next(
             line for line in str(edited.summary()).splitlines() if "band[Mi000]" in line
         )
