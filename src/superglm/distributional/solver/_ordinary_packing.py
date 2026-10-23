@@ -67,4 +67,3 @@ _ORDINARY_WRITERS = (
         ),
     ),
 )
-

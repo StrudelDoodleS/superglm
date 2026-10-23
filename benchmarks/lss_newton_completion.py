@@ -33,10 +33,7 @@ from superglm import (
     s,
     ti,
 )
-from superglm.distributional.prediction_design import (
-    build_joint_prediction_design,
-    link_standard_errors,
-)
+from superglm.distributional.prediction_design import build_joint_prediction_design
 from superglm.distributional.smoothing import derivatives, loop, newton
 from superglm.distributional.solver import solver
 from superglm.distributional.timing import FitPhaseRecorder
@@ -273,7 +270,12 @@ def main():
             design = build_joint_prediction_design(
                 evaluation, fitted.compiled_predictors, fitted.layout
             )
-            errors = link_standard_errors(design, fitted.covariance, fitted.layout)
+            errors = {}
+            for state in fitted.layout.predictors:
+                block = fitted.covariance[state.coefficient_slice, state.coefficient_slice]
+                matrix = design.local[state.name]
+                variance = np.einsum("ij,jk,ik->i", matrix, block, matrix, optimize=True)
+                errors[state.name] = np.sqrt(np.maximum(variance, 0.0))
             theta = fitted.predict_parameters(evaluation, offsets=evaluation_offsets)
             payload = {
                 "theta": theta,

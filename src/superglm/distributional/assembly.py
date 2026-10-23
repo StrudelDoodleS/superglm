@@ -20,7 +20,6 @@ from superglm.distributional.solver.assembly import (
     _validated_coefficients,
     assemble_grouped_geometry,
     dense_predictor_matrices,
-    evaluate_predictors_dense,
     validated_dense_penalty,
 )
 from superglm.distributional.solver.packing import packed_pairs
