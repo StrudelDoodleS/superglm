@@ -1298,9 +1298,21 @@ restored_parameters = restored.predict_parameters(scoring_data)
 
 The file keeps the family configuration, links, compiled predictor state,
 penalties, coefficients, joint covariance, EDF, convergence and fallback
-telemetry, null model, and discrete configuration. It does not keep the
-training frame, so term-level reading methods on a restored model take
-`X_train=`. A joblib file is a pickle: load it only from sources you trust.
+telemetry, null model, and discrete configuration. It also keeps row-level
+fit state, one value per training row:
+
+- with the default `retain_rows=True`: the response, the likelihood weights,
+  the offsets, and the fitted and null linear predictors and parameters;
+- with any setting: the fitted linear predictors and parameters of the final
+  fit and of the last few fits in the smoothing history (the rows kept for
+  the plateau checks), and each predictor's offsets.
+
+It does not keep the training frame, so term-level reading methods on a
+restored model take `X_train=`. Treat the file as you treat the training
+data: the response and fitted values are in it. `retain_rows=False` drops the
+first group; no option drops the second, so a file saved without retained
+rows still holds fitted values for every training row. A joblib file is a
+pickle: load it only from sources you trust.
 
 `SuperLSS.to_bytes()` and `SuperLSS.from_bytes()` were removed. To convert a
 file that `to_bytes()` wrote, open it with superglm 0.41 and save the model
