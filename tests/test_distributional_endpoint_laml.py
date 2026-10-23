@@ -62,6 +62,7 @@ from superglm.features import Numeric, RandomEffect, Spline
 from superglm.links import IdentityLink, SqrtLink
 from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
+from tests._matched_certified import assert_matched_certified
 
 from ._distributional_weights import resolved_prior
 from ._endpoint_penalty import projected_finite_penalty_logdet
@@ -445,7 +446,7 @@ def test_practical_plateau_stops_an_immaterial_tail_without_certifying_infinity(
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.lambdas[component_name] < smoothing.config.maximum_lambda
     with pytest.raises(RuntimeError, match="strict smoothing convergence"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
     with pytest.raises(ValueError, match="fitted parameters"):
         replace(
             smoothing,
@@ -2535,7 +2536,7 @@ def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_c
     )
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="not certified"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
 
 
 class _LogLinkWithoutThirdDerivative:
@@ -3026,7 +3027,7 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
     assert all(not item.fit_indices for item in smoothing.terminal_endpoint_directions.values())
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="exact coefficient face"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
 
 
 def test_joint_terminal_revalidation_consumes_one_outer_iteration(
@@ -3938,7 +3939,7 @@ def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
     }
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="numerically supported but not certified"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
 
 
 def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
@@ -5173,7 +5174,7 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="terminal exact-face revalidation"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
     with pytest.raises(ValueError, match="terminal exact-face deactivation"):
         replace(smoothing, converged=True, convergence_reason="lambda_change")
 

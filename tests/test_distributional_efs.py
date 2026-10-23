@@ -60,6 +60,7 @@ from superglm.reml.penalty_algebra import (
     compute_logdet_s_plus,
 )
 from superglm.types import GroupSlice, LambdaPolicy
+from tests._matched_certified import assert_matched_certified
 
 from ._gaussian_lss_oracles import (
     GaussianFitCertificate,
@@ -3457,7 +3458,7 @@ def test_fixed_components_never_move_and_fixed_only_fit_stops_cleanly() -> None:
     )
     assert tampered.matched_certified is False
     with pytest.raises(RuntimeError, match="fresh convergence"):
-        tampered.assert_matched_certified()
+        assert_matched_certified(tampered)
 
 
 def _upper_cap_refusal_result(
@@ -3562,7 +3563,7 @@ def test_positive_raw_pressure_at_the_exact_upper_cap_is_unresolved(
         replace(refusal, endpoint_assessment_failure_reason="analytic_unavailable")
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="certification"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
     with pytest.raises(ValueError, match="finite and non-negative"):
         replace(smoothing, terminal_raw_max_log_step=-1.0)
     with pytest.raises(ValueError, match="positive fresh convergence"):
@@ -4215,7 +4216,7 @@ def test_curvature_fallback_is_auditable_and_blocks_matched_certification(
     assert smoothing.matched_certified is False
     assert smoothing.history[0].update_curvature.actual_source == "fisher"
     with pytest.raises(RuntimeError, match="curvature fallback"):
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
 
 
 def test_inner_and_smoothing_convergence_are_reported_separately(

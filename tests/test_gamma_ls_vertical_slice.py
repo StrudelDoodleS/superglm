@@ -39,6 +39,7 @@ from superglm.features import Numeric
 from superglm.group_matrix import DiscretizedSSPGroupMatrix
 from superglm.types import LambdaPolicy
 from tests._gamma_lss_oracles import gamma_row_reference
+from tests._matched_certified import assert_matched_certified
 from tests.bound_predictor_fixtures import model_from_templates
 from tests.test_distributional_efs import _spectral_logdet
 
@@ -1007,7 +1008,7 @@ def test_gamma_two_surface_smoothing_is_start_stable_and_algorithm_matched(
         assert all(math.isfinite(value) and value > 0.0 for value in smoothing.lambdas.values())
         assert math.isfinite(smoothing.objective)
         assert smoothing.matched_certified is True
-        smoothing.assert_matched_certified()
+        assert_matched_certified(smoothing)
 
     left, right = models
     unit_law = (fixture.response, np.ones(len(fixture.response)), "prior")
