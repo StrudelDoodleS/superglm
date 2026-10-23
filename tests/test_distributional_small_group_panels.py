@@ -108,15 +108,19 @@ def _build(*args, **kwargs):
 
 def _warm_panel_range_kernel():
     from superglm.distributional.solver._small_group_panels import (
+        _FACTOR_WRITER,
         _in_range,
         _warmup_small_group_panels,
+        compile_closed,
     )
 
     # Exclude one-time predicate/writer compilation and cache loading from
     # workspace tracing. All panel construction, optional support tables,
     # renderer buffers and contraction allocations remain inside the trace.
+    # The FactorSmooth writer compiles on first use, outside the warmup.
     assert _in_range(np.ones((2, 2), dtype=np.float64))
     _warmup_small_group_panels()
+    compile_closed(_FACTOR_WRITER)
 
 
 def _assert_cross(actual, left, right, weights):
