@@ -57,7 +57,8 @@ def listed_members(pages: Path, cls_name: str) -> list[str]:
 def test_every_public_member_is_grouped_exactly_once(cls_name: str) -> None:
     """The two big classes list every public member once, on one task page."""
     cls = getattr(superglm, cls_name)
-    public = {name for name in dir(cls) if not name.startswith("_")}
+    # A removed method stays in dir() only to raise its replacement; hasattr is False for it.
+    public = {name for name in dir(cls) if not name.startswith("_") and hasattr(cls, name)}
     listed = listed_members(MEMBER_PAGES[cls_name], cls_name)
     duplicates = sorted({m for m in listed if listed.count(m) > 1})
     missing = sorted(public - set(listed))
