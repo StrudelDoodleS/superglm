@@ -534,6 +534,14 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     released = -395.1090527
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
 
+    # Saving keeps the rule the receipts were made under. Its face and cap fits
+    # are stationary only within their rounding floors, so a load that read the
+    # result as made before the floor would validate it under the strict rule.
+    loaded = SuperLSS.from_bytes(model.to_bytes())._require_fitted().smoothing
+    assert loaded is not None
+    assert loaded.rounding_floor_stationarity is True
+    assert replace(loaded).convergence_reason == "stationary"
+
 
 def _null_direction_problem(offset: float = -2.0e8):
     """Two constant location columns tied by a penalty at the cap, offset to cancel.
