@@ -137,7 +137,7 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
     assert "if: ${{ always() }}" in floor[0]
-    assert "needs: test-compatibility" in floor[0]
+    assert "needs: [test-compatibility, polars-floor]" in floor[0]
     matrix = _jobs(workflow)["test-compatibility"]
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
         ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
@@ -199,24 +199,28 @@ def test_suite_runner_stages_report_both_failures(tmp_path: Path, stage: int) ->
     assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("floor_result", ["success", "failure", "cancelled", "skipped"])
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
-def test_python_floor_aggregate_executes_the_matrix_verdict(result: str) -> None:
+def test_python_floor_aggregate_executes_the_matrix_verdict(result: str, floor_result: str) -> None:
+    """The required context passes only when the matrix and the Polars floor both passed."""
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     aggregate = _jobs(workflow)["python-floor"]
     assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
+    assert "POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}" in aggregate
     commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
     assert len(commands) == 1
     command = shlex.split(commands[0])
     assert command[:2] == ["python", "-c"]
     completed = subprocess.run(
         [sys.executable, *command[1:]],
-        env=os.environ | {"TEST_RESULT": result},
+        env=os.environ | {"TEST_RESULT": result, "POLARS_FLOOR_RESULT": floor_result},
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
-    assert (completed.returncode == 0) == (result == "success"), completed.stderr
+    passed = result == floor_result == "success"
+    assert (completed.returncode == 0) == passed, completed.stderr
 
 
 def test_dev_ci_job_names_do_not_claim_merge_gate_membership() -> None:

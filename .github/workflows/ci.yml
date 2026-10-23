@@ -136,9 +136,7 @@ jobs:
         env:
           TEST_RESULT: ${{ needs.test-compatibility.result }}
           POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}
-        run: >-
-          python -c "import os, sys; sys.exit(any(os.environ[k] != 'success'
-          for k in ('TEST_RESULT', 'POLARS_FLOOR_RESULT')))"
+        run: python -c "import os, sys; sys.exit(any(os.environ[k] != 'success' for k in ('TEST_RESULT', 'POLARS_FLOOR_RESULT')))"
 
   polars-floor:
     # The lock holds the newest Polars, so the matrix never runs the declared
