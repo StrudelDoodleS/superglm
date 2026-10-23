@@ -13,7 +13,6 @@ from superglm.distributional.smoothing.endpoint_direction import (
     DEFAULT_STEP,
     FINITE_DIFFERENCE_AUTHORITY,
     FiniteDifferenceDirection,
-    _central,
     _curvature_packed,
     _theta_from_eta,
     finite_difference_curvature_direction,

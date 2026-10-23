@@ -265,16 +265,6 @@ class LikelihoodChunk:
     score_eta: NDArray[np.float64]
     curvature_packed: NDArray[np.float64]
 
-    @property
-    def reported_log_likelihood(self) -> NDArray[np.float64]:
-        result = np.array(
-            self.optimizing_log_likelihood + self.parameter_independent_carrier,
-            dtype=np.float64,
-            copy=True,
-        )
-        result.setflags(write=False)
-        return result
-
 
 @dataclass(frozen=True)
 class ChunkedLikelihoodSums:

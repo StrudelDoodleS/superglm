@@ -136,20 +136,6 @@ def _evaluated_curvature_packed(
     return np.asarray(transformed.curvature_packed, dtype=np.float64)
 
 
-def _central(
-    family: DistributionalFamily,
-    y: NDArray,
-    eta: NDArray[np.float64],
-    unit_direction: NDArray[np.float64],
-    links: Sequence[Link],
-    plan: FamilyLikelihoodPlan,
-    step: float,
-) -> NDArray[np.float64]:
-    plus = _curvature_packed(family, y, eta + step * unit_direction, links, plan)
-    minus = _curvature_packed(family, y, eta - step * unit_direction, links, plan)
-    return (plus - minus) / (2.0 * step)
-
-
 def _axis_stencil(
     family: DistributionalFamily,
     y: NDArray,
