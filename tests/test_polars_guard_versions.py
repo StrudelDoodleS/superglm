@@ -35,6 +35,7 @@ from superglm.model.fit_data_guard import FitDataGuard, require_unchanged_fit_da
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_polars_guard"
 POLARS_2 = int(pl.__version__.split(".")[0]) >= 2
 NOTICE = "fit-time digest was written by Polars 1.x"
+REFUSAL = "cannot be recognised as the training rows"
 
 
 def _load(kind: str) -> dict:
@@ -186,11 +187,14 @@ def test_a_guard_from_a_scheme_this_release_does_not_know_is_not_a_mutation(monk
         x_digest_scheme="polars-values-v9",
     )
 
-    with pytest.warns(UserWarning, match="polars-values-v9"):
+    with pytest.warns(UserWarning, match="polars-values-v9") as retained:
         assert future.matches_retained_values(X, y, own_frame=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with pytest.warns(UserWarning, match=REFUSAL) as other:
         assert not future.matches_retained_values(X.clone(), y)
+    for caught in (retained, other):
+        message = str(caught[0].message)
+        assert "'polars-values-v9', which this release cannot check" in message
+        assert "under this Polars" not in message
 
 
 def test_a_legacy_guard_does_not_vouch_for_a_frame_the_caller_supplies(monkeypatch) -> None:
@@ -198,19 +202,27 @@ def test_a_legacy_guard_does_not_vouch_for_a_frame_the_caller_supplies(monkeypat
     only.  Rows the caller passes to ``random_effects`` can be anything, so where
     the old digest cannot be recomputed they are refused as before, not read
     with the fitted posterior errors (here 58/1/1 groups against the 20/20/20
-    that were fitted).  The retained frame still reports, with its one warning."""
+    that were fitted).  An equal copy is refused too, with a warning that the
+    digest is the cause.  The retained frame still reports, with its one warning."""
     monkeypatch.setattr(guard_module, "_UNVERIFIABLE_WARNED", False)
     model = _load("legacy")["model"]
     changed = model._fit_X_ref.with_columns(pl.Series("group", ["a"] * 58 + ["b", "c"]))
+    rows = {"y": model._fit_y_ref, "sample_weight": model._fit_weights, "offset": model._fit_offset}
 
-    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
-        model.random_effects(
-            "group",
-            X=changed,
-            y=model._fit_y_ref,
-            sample_weight=model._fit_weights,
-            offset=model._fit_offset,
-        )
+    with (
+        pytest.warns(UserWarning, match=REFUSAL) if POLARS_2 else warnings.catch_warnings(),
+        pytest.raises(ValueError, match="must reproduce fitted training rows"),
+    ):
+        model.random_effects("group", X=changed, **rows)
+    if POLARS_2:
+        with (
+            pytest.warns(UserWarning, match=REFUSAL) as caught,
+            pytest.raises(ValueError, match="must reproduce fitted training rows"),
+        ):
+            model.random_effects("group", X=model._fit_X_ref.clone(), **rows)
+        assert NOTICE in str(caught[0].message)
+    else:
+        model.random_effects("group", X=model._fit_X_ref.clone(), **rows)
     with pytest.warns(UserWarning, match=NOTICE) if POLARS_2 else warnings.catch_warnings():
         model.random_effects("group")
 
@@ -237,15 +249,29 @@ def test_a_legacy_guard_refuses_a_copy_of_the_retained_frame(monkeypatch) -> Non
     _legacy_digest_unavailable(monkeypatch)
     model = _load("legacy")["model"]
 
-    with pytest.raises(RuntimeError, match="retained fit data were mutated"):
+    with (
+        pytest.warns(UserWarning, match=REFUSAL),
+        pytest.raises(RuntimeError, match="retained fit data were mutated"),
+    ):
         require_unchanged_fit_data(model, model._fit_X_ref.clone(), model._fit_y_ref)
     with pytest.warns(UserWarning, match=NOTICE):
         require_unchanged_fit_data(model, model._fit_X_ref, model._fit_y_ref)
 
 
+def test_metrics_on_the_retained_objects_is_not_told_its_frame_is_another(monkeypatch) -> None:
+    _legacy_digest_unavailable(monkeypatch)
+    model = _load("legacy")["model"]
+
+    with pytest.warns(UserWarning, match=NOTICE) as caught:
+        model.metrics(model._fit_X_ref, model._fit_y_ref)
+    assert not [w for w in caught if REFUSAL in str(w.message)]
+
+
 def test_a_legacy_geometry_guard_does_not_vouch_for_rows_of_a_released_fit(monkeypatch) -> None:
     """With the design released, only a guard match lets ``metrics`` read the
-    fit's covariance; rows it cannot verify are refused, not scored with it."""
+    fit's covariance; rows it cannot verify, an equal copy among them, are
+    refused with a warning that names the digest.  The digest is consulted, and
+    so warns, only once the weights and offset match the fit's."""
     _legacy_digest_unavailable(monkeypatch)
     rng = np.random.default_rng(518)
     X = pl.DataFrame({"x": np.linspace(0.0, 1.0, 120)})
@@ -258,8 +284,15 @@ def test_a_legacy_geometry_guard_does_not_vouch_for_rows_of_a_released_fit(monke
     ).fit(X, y)
     model._fit_geometry_guard = _as_legacy(model._fit_geometry_guard)
 
-    with pytest.raises(RuntimeError, match="does not match the fit geometry"):
-        model.metrics(X.with_columns(pl.col("x").reverse()), y).leverage
+    for rows in (X.with_columns(pl.col("x").reverse()), X.clone()):
+        with (
+            pytest.warns(UserWarning, match=REFUSAL),
+            pytest.raises(RuntimeError, match="does not match the fit geometry"),
+        ):
+            model.metrics(rows, y).leverage
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model.metrics(X.clone(), y, sample_weight=np.full(120, 2.0))
 
 
 def test_a_legacy_geometry_guard_does_not_lend_the_fit_covariance_to_other_rows(
@@ -280,7 +313,9 @@ def test_a_legacy_geometry_guard_does_not_lend_the_fit_covariance_to_other_rows(
 
     model._fit_geometry_guard = _as_legacy(model._fit_geometry_guard)
 
-    np.testing.assert_array_equal(model.metrics(changed, y).leverage, reference)
+    with pytest.warns(UserWarning, match=REFUSAL):
+        leverage = model.metrics(changed, y).leverage
+    np.testing.assert_array_equal(leverage, reference)
 
 
 def test_a_legacy_guard_does_not_pair_inherited_weights_with_other_rows(monkeypatch) -> None:
@@ -295,7 +330,10 @@ def test_a_legacy_guard_does_not_pair_inherited_weights_with_other_rows(monkeypa
     ).fit(X, y, sample_weight=rng.uniform(0.5, 2.0, size=200))
     model._fit_data_guard = _as_legacy(model._fit_data_guard)
 
-    with pytest.raises(ValueError, match="inherited from the fit"):
+    with (
+        pytest.warns(UserWarning, match=REFUSAL),
+        pytest.raises(ValueError, match="inherited from the fit"),
+    ):
         model.screen_interactions(X.with_columns(pl.col("x").reverse()), y)
 
 

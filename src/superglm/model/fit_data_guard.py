@@ -36,7 +36,8 @@ def _frame_digest_matches(
     and not on 2.x.  A digest that cannot be recomputed says nothing about the
     frame.  For the model's own retained frame (``own_frame``) that is not a
     mismatch, so it warns once and lets the retained data stand; any other frame
-    is refused, as the data it holds cannot be shown to be the training data.
+    is refused with a warning that names the cause, as the data it holds cannot
+    be shown to be the training data.
     """
     if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
         return frame.digest(columns, include_index=include_index) == expected
@@ -44,18 +45,23 @@ def _frame_digest_matches(
         try:
             return frame.legacy_polars_digest(columns) == expected
         except LegacyDigestUnavailableError:
-            origin = "written by Polars 1.x"
+            cause = "was written by Polars 1.x and cannot be checked under this Polars"
     else:
-        origin = f"written under the digest scheme {scheme!r}"
+        cause = f"was written under the digest scheme {scheme!r}, which this release cannot check"
     if not own_frame:
+        warnings.warn(
+            f"The model's fit-time digest {cause}, so a frame other than its retained "
+            "one cannot be recognised as the training rows; refit to restore the check.",
+            UserWarning,
+            stacklevel=4,
+        )
         return False
     global _UNVERIFIABLE_WARNED
     if not _UNVERIFIABLE_WARNED:
         _UNVERIFIABLE_WARNED = True
         warnings.warn(
-            f"The retained data's fit-time digest was {origin} and cannot be checked "
-            "under this Polars, so the results assume the retained data are unchanged; "
-            "refit to restore the check.",
+            f"The retained data's fit-time digest {cause}, so the results assume the "
+            "retained data are unchanged; refit to restore the check.",
             UserWarning,
             stacklevel=4,
         )
@@ -135,6 +141,8 @@ class FitGeometryGuard:
                 and n_weights == self.n_rows
                 and n_offsets == self.n_rows
                 and frame.backend == self.x_backend
+                and weight_digest == self.weight_digest
+                and offset_digest == self.offset_digest
                 and _frame_digest_matches(
                     frame,
                     self.x_columns,
@@ -143,8 +151,6 @@ class FitGeometryGuard:
                     include_index=False,
                     own_frame=own_frame,
                 )
-                and weight_digest == self.weight_digest
-                and offset_digest == self.offset_digest
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
