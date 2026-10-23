@@ -2973,8 +2973,12 @@ def test_the_key_column_header_is_absent_from_the_complete_level_set():
     assert not (block.table["age (axis 1)"] == 1.0).all()
 
 
-def test_levels_sharing_one_text_are_refused_rather_than_merged():
-    """Base ``1`` and level ``"1"`` would share the column ``"1"``: the export refuses by name."""
+@pytest.mark.parametrize("bin_strategy", ["exposure_quantile", "exact"])
+def test_levels_sharing_one_text_are_refused_rather_than_merged(monkeypatch, bin_strategy):
+    """Base ``1`` and level ``"1"`` would share the column ``"1"``: the export refuses
+    by name, on every route and before any banding pass."""
+    import superglm.diagnostics.exact_banding as exact_banding
+
     rng = np.random.default_rng(20261023)
     n = 600
     region = np.tile(np.array([1, "1", "A"], dtype=object), n // 3)
@@ -2991,8 +2995,14 @@ def test_levels_sharing_one_text_are_refused_rather_than_merged():
     model.fit(X, y)
     assert list(model._specs["region"]._levels) == [1, "1", "A"]
 
+    def banded(*args):
+        raise AssertionError("a band pass ran before the refusal")
+
+    monkeypatch.setattr(exact_banding, "exact_bands", banded)
     with pytest.raises(ValueError, match=r"levels of 'region' share the text \['1'\]"):
-        _payload(model, X, y, None, "native", continuous_kind="ppform")
+        build_rating_table_payload(
+            model, X, y, n_bins=150, continuous_kind="ppform", bin_strategy=bin_strategy
+        )
 
 
 def test_the_bin_representatives_need_the_frame_only_for_a_spline_parent():

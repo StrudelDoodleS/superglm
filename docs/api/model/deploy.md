@@ -164,6 +164,11 @@ does not occur there is not certified.
 A model carrying editor edits, or a term with a post-fit shape repair, is
 refused, because its standard errors are not the published curve's.
 
+A spline-by-categorical interaction's table keys each level's column by the
+level's text, so a categorical with two levels of one text, such as `1` and
+`"1"`, is refused under every `bin_strategy`; recode it so that its levels'
+texts are distinct.
+
 `export_rating_tables` writes the same payload as an Excel workbook: one sheet
 of rating tables laid out side by side for a rater to key on, one for the
 discretization impact above, and one for the model summary. The format comes

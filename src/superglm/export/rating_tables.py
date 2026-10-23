@@ -824,6 +824,29 @@ def _require_log_link_export(model: SuperGLM) -> None:
         )
 
 
+def _require_distinct_level_texts(model: SuperGLM) -> None:
+    """A spline-by-categorical block keys each level's column by the level's text.
+
+    Two levels with one text (``1`` and ``"1"``) would share a column and price
+    one level with the other's curve, on every route the block takes.
+    """
+    from superglm.diagnostics.discretize import is_spline_categorical
+
+    for name in model._interaction_order:
+        ispec = model._interaction_specs[name]
+        if not is_spline_categorical(ispec):
+            continue
+        levels = [str(level) for level in ispec._cat_levels]
+        shared = sorted({text for text in levels if levels.count(text) > 1})
+        if shared:
+            parent = ispec.parent_names[1]
+            raise ValueError(
+                f"Interaction {name!r} cannot be exported: levels of {parent!r} share the "
+                f"text {shared}, and a rating table keys each level by its text. Recode "
+                f"{parent!r} so that every level's text is distinct, then refit."
+            )
+
+
 def _require_unclamped_response_export(model: SuperGLM) -> None:
     """``clip_mu`` bounds a binomial mean, and a bound is not a factor.
 
@@ -1677,17 +1700,7 @@ def _spline_categorical_block(
         spline_categorical_bins,
     )
 
-    parent1, parent2 = ispec.parent_names
-    # A column is keyed by its level's text, so two levels with one text
-    # (1 and "1") would share a column and price one level with the other's curve.
-    levels = [str(level) for level in ispec._cat_levels]
-    shared = sorted({text for text in levels if levels.count(text) > 1})
-    if shared:
-        raise ValueError(
-            f"Interaction {name!r} cannot be exported: levels of {parent2!r} share the "
-            f"text {shared}, and a rating table keys each level by its text. Recode "
-            f"{parent2!r} so that every level's text is distinct, then refit."
-        )
+    parent1, _ = ispec.parent_names
     if has_ordinal_parent(model, ispec):
         keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
         kind = "cells"
@@ -1715,6 +1728,7 @@ def _spline_categorical_block(
         kind = "spline_cells"
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
+    levels = [str(level) for level in ispec._cat_levels]
     # A level named like the key column would overwrite it: the header is the
     # parent's name, suffixed until no level carries it.
     axis = parent1
@@ -2218,7 +2232,9 @@ def build_rating_table_payload(
     cell the level's curve relative to the base level's at the bin's
     representative -- its geometry-weighted mean covariate.  A consumer finds
     the interval its value falls in and the column of its level, as for a cell
-    table.  It reproduces ``model.predict`` to round-off for a row AT a
+    table.  A column is keyed by its level's text, so a categorical with two
+    levels of one text (``1`` and ``"1"``) is refused; recode it so that its
+    levels' texts are distinct.  It reproduces ``model.predict`` to round-off for a row AT a
     representative and is approximate between them; the sheet below measures
     it.  Under ``bin_strategy="exact"`` the intervals are not representatives
     but the covariate's exact bands, solved ONCE for the main effect and for
@@ -2602,6 +2618,8 @@ def build_rating_table_payload(
     # of the model that no frame can rescue -- and before it would be wrong,
     # since a binomial on a logit link should hear about its link first.
     _require_unclamped_response_export(model)
+    # Also the model alone, and before the banding passes a refused term would waste.
+    _require_distinct_level_texts(model)
 
     native_X = X
     frame = as_eager_frame(X)
