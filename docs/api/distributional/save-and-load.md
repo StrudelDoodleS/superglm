@@ -11,9 +11,7 @@ restored = joblib.load("severity.joblib")
 ```
 
 A restored model predicts exactly what the saved one predicted. It carries no
-training frame or machine timing, so the reading methods need `X_train=` and
-{py:meth}`~superglm.SuperLSS.diagnose` says the timing is absent. Load files
-only from sources you trust: joblib files are pickles, and a hostile pickle
+training frame, so the reading methods need `X_train=`. Load files only from sources you trust: joblib files are pickles, and a hostile pickle
 can run code.
 
 `SuperLSS.to_bytes()` and `SuperLSS.from_bytes()` were removed; both raise an

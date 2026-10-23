@@ -560,12 +560,13 @@ def test_exact_face_profile_distinguishes_fully_penalized_random_effects() -> No
     assert all("loaded artifact" not in limitation for limitation in report.limitations)
 
 
-def test_loaded_artifact_is_honest_when_machine_timing_is_unavailable(
+def test_report_is_honest_when_machine_timing_is_unavailable(
     profiled_face_fit,
 ) -> None:
     model, _measured = profiled_face_fit
 
     restored = pickle.loads(pickle.dumps(model))
+    restored._fit_phase_snapshot = None
     report = restored.diagnose()
 
     assert report.profile is not None

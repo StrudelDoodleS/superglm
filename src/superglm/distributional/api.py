@@ -810,8 +810,8 @@ class SuperLSS(metaclass=_SuperLSSMeta):
 
         The report leads with the work profile of the fit this object ran:
         phase timing shares, iteration and refit counts, and the terminal
-        state of every smoothing component.  A model restored from an
-        artifact carries no machine timing, and its report says so.
+        state of every smoothing component.  A model with no recorded fit
+        timing says so in its report.
         """
         return diagnose_distributional_fit(
             self._require_fitted(),

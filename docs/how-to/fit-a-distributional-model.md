@@ -1338,8 +1338,8 @@ The report leads with the fit's work profile (`report.profile`):
 
 Findings follow the profile, ranked as before. Phase timings are measurements
 of this fit on this machine, not benchmark claims or per-feature attribution.
-A model restored with joblib has no machine timing: its report renders
-the same work counts and smoothing metrics and says that timing is unavailable.
+A model with no recorded fit timing renders the same work counts and smoothing
+metrics and says that timing is unavailable.
 
 ## Current limits
 
