@@ -149,6 +149,35 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "continue-on-error: true" not in workflow
 
 
+def test_polars_floor_job_runs_the_declared_floor_with_the_matrix_extras() -> None:
+    """The floor job tests the Polars release pyproject.toml declares as the
+    floor, in the environment the matrix installs, and lists its skips."""
+    job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
+        "polars-floor"
+    ]
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [*project["dependencies"], *sum(project["optional-dependencies"].values(), [])]
+    floors = [
+        requirement.removeprefix("polars>=")
+        for requirement in requirements
+        if requirement.startswith("polars>=")
+    ]
+    assert floors == [job["env"]["POLARS_FLOOR"]], (
+        "the floor job must run the declared Polars floor"
+    )
+    assert f"Polars {floors[0]} floor" in job["name"]
+    runs = [step["run"] for step in job["steps"] if "run" in step]
+    assert any(
+        run.startswith("uv sync --locked ") and "--extra dev --extra bench --extra plotting" in run
+        for run in runs
+    ), "the Polars floor job must install the matrix's bench and plotting extras"
+    uv_runs = [line for run in runs for line in run.splitlines() if line.startswith("uv run ")]
+    assert len(uv_runs) == 2
+    assert all('--with "polars==${POLARS_FLOOR}"' in line for line in uv_runs)
+    assert "polars.__version__ == os.environ['POLARS_FLOOR']" in uv_runs[0]
+    assert " pytest " in uv_runs[1] and " -rs " in uv_runs[1]
+
+
 def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     block = _jobs(workflow)["test-compatibility"]
