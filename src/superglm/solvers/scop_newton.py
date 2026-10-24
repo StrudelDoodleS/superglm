@@ -28,6 +28,7 @@ at ``sqrt(eps)`` of its largest singular value (§3.2).
 from __future__ import annotations
 
 import math
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -36,6 +37,10 @@ import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_centered import (
+    _MAX_PACKED_HIST_CELLS,
+    _compact_support,
+)
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
     DenseGroupMatrix,
@@ -75,10 +80,35 @@ def _scop_bin_moments(bin_idx, W, z, eta, n_bins):
     return W_agg, Wr_agg
 
 
+@njit(cache=True)
+def _joint_weight_tables(codes, offsets, scop_bins, n_scop, W, total):
+    """Every group's weight table against the SCOP bins, in one pass over the rows.
+
+    ``table[offsets[g] + codes[r, g] * n_scop + scop_bins[r]] += W[r]``: the
+    sums ``_disc_disc_2d_hist`` forms for one pair of groups, here for every
+    group at once, each table summing its rows in ascending order.
+    """
+    table = np.zeros(total)
+    for r in range(W.shape[0]):
+        w = W[r]
+        s = scop_bins[r]
+        for g in range(codes.shape[1]):
+            table[offsets[g] + codes[r, g] * n_scop + s] += w
+    return table
+
+
 def _warmup_scop() -> None:
-    """Compile the SCOP bin moments for the operands a shape-constrained fit passes."""
+    """Compile the SCOP kernels for the operands a shape-constrained fit passes."""
     empty = np.zeros(0, dtype=np.float64)
     _scop_bin_moments(np.zeros(0, dtype=np.int64), empty, empty, empty, 0)
+    _joint_weight_tables(
+        np.zeros((0, 1), dtype=np.int32),
+        np.zeros(1, dtype=np.int64),
+        np.zeros(0, dtype=np.int64),
+        1,
+        empty,
+        1,
+    )
 
 
 @dataclass(frozen=True)
@@ -366,6 +396,100 @@ class _SCOPMoments:
         )
 
 
+@dataclass(frozen=True)
+class _CompactLayout:
+    """A discretized design's groups as compact supports, with their codes side by side."""
+
+    supports: tuple[tuple[NDArray, NDArray, NDArray | None], ...]
+    codes: NDArray
+    """``(n, groups)``: each row's support row in every group."""
+    bounds: NDArray
+    """Cumulative support rows: group ``g``'s table holds rows ``bounds[g]`` to ``bounds[g + 1]``."""
+    starts: NDArray
+    """Cumulative group widths: group ``g``'s columns are ``starts[g]`` to ``starts[g + 1]``."""
+
+
+# Owner: the reduced design, held weakly, so a REML run whose fits share one
+# reduced design (``SCOPRunCentring``) lays it out once and the layout dies
+# with the design. A layout depends on the design's group matrices alone,
+# which never change, so nothing invalidates it.
+_COMPACT_LAYOUTS: weakref.WeakKeyDictionary[DesignMatrix, _CompactLayout | None] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _compact_layout(design: DesignMatrix) -> _CompactLayout | None:
+    """The design's compact layout, or ``None`` when a group has no compact support."""
+    if design in _COMPACT_LAYOUTS:
+        return _COMPACT_LAYOUTS[design]
+    supports = tuple(_compact_support(gm) for gm in design.group_matrices)
+    layout = None
+    if all(support is not None for support in supports):
+        rows = np.array([values.shape[0] for values, _, _ in supports], dtype=np.int64)
+        codes = np.empty((design.n, len(supports)), dtype=np.int32)
+        for g, (_, group_codes, _) in enumerate(supports):
+            codes[:, g] = group_codes
+        if not codes.size or (codes.min() >= 0 and np.all(codes.max(axis=0) < rows)):
+            widths = [gm.shape[1] for gm in design.group_matrices]
+            layout = _CompactLayout(
+                supports=supports,
+                codes=codes,
+                bounds=np.concatenate(([0], np.cumsum(rows))).astype(np.int64),
+                starts=np.concatenate(([0], np.cumsum(widths))).astype(np.int64),
+            )
+    _COMPACT_LAYOUTS[design] = layout
+    return layout
+
+
+class _JointWeightCross:
+    """``X_r' W X_s`` from each ordinary group's weight table against the SCOP bins.
+
+    Every group of a discretized reduced design is a compact support, its rows
+    ``values[codes] @ transform`` (``_compact_support``), and a binned SCOP
+    group's columns are ``basis[bins]``, so group ``g``'s cross block is
+    ``transform' values' H_g basis`` with ``H_g`` the weight table of
+    ``(codes_g, bins)``: the anchor-support route's algebra on raw supports.
+    One row pass forms every ``H_g``, reading the weights and the SCOP bins
+    once rather than once per group. A design with a group that has no compact
+    support, or tables past the packed-histogram cap, is not built here.
+    """
+
+    def __init__(self, layout: _CompactLayout, columns) -> None:
+        self.layout = layout
+        self.columns = tuple(columns)
+
+    @classmethod
+    def build(
+        cls, reduced_design: DesignMatrix, columns: Sequence[tuple[NDArray, NDArray | None]]
+    ) -> _JointWeightCross | None:
+        if any(bins is None for _, bins in columns):
+            return None
+        layout = _compact_layout(reduced_design)
+        widest = max(basis.shape[0] for basis, _ in columns)
+        if layout is None or int(layout.bounds[-1]) * widest > _MAX_PACKED_HIST_CELLS:
+            return None
+        return cls(layout, columns)
+
+    def cross_moment(self, W: NDArray) -> NDArray:
+        layout = self.layout
+        q = sum(basis.shape[1] for basis, _ in self.columns)
+        cross = np.zeros((int(layout.starts[-1]), q))
+        column = 0
+        for basis, bins in self.columns:
+            n_scop = basis.shape[0]
+            edges = layout.bounds * n_scop
+            table = _joint_weight_tables(layout.codes, edges[:-1], bins, n_scop, W, int(edges[-1]))
+            block = slice(column, column + basis.shape[1])
+            for g, (values, _, transform) in enumerate(layout.supports):
+                weights = table[edges[g] : edges[g + 1]].reshape(-1, n_scop)
+                moment = values.T @ (weights @ basis)
+                if transform is not None:
+                    moment = transform.T @ moment
+                cross[layout.starts[g] : layout.starts[g + 1], block] = moment
+            column = block.stop
+        return cross
+
+
 def _exact_support(spec: SCOPGroupSpec) -> tuple[NDArray, NDArray | None]:
     """A group's columns as a basis and a row index into it, compressed where rows repeat."""
     if spec.bin_idx is not None:
@@ -411,8 +535,10 @@ class SCOPJointNewton:
             self.penalty[block, block] = lam * spec.S_scop
             self.penalty_root[block, block] = np.sqrt(max(lam, 0.0)) * _psd_root(spec.S_scop)
         self.columns = tuple(_exact_support(spec) for spec in self.specs)
-        self._cross: CrossMatrixExecutionPlan | None = None
+        self._cross: _JointWeightCross | CrossMatrixExecutionPlan | None = None
         if reduced_design.p:
+            self._cross = _JointWeightCross.build(reduced_design, self.columns)
+        if reduced_design.p and self._cross is None:
             columns = [
                 DenseGroupMatrix(basis) if bins is None else DiscretizedSCOPGroupMatrix(basis, bins)
                 for basis, bins in self.columns
