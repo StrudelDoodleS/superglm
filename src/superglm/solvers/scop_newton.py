@@ -38,14 +38,17 @@ from numba import njit
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_algebra import (
+    _MAX_CROSS_EXPANSION_BYTES,
     _MAX_DISC_DISC_HIST_CELLS,
     _support_support_raw_cross,
 )
 from superglm._group_matrix._group_matrix_centered import (
     _MAX_PACKED_HIST_CELLS,
     _compact_support,
+    _compact_support_rows,
 )
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
     CrossMatrixExecutionPlan,
     DenseGroupMatrix,
     DesignMatrix,
@@ -407,9 +410,15 @@ class _SCOPMoments:
 
 @dataclass(frozen=True)
 class _CompactLayout:
-    """A discretized design's groups as compact supports, with their codes side by side."""
+    """A discretized design's groups as compact supports, with their codes side by side.
 
-    supports: tuple[tuple[NDArray, NDArray, NDArray | None], ...]
+    A categorical's support, the identity with a zero row for its base level
+    (``_compact_support``), is never formed: its ``values`` are ``None``, and
+    its block of a cross moment is its table's level rows.
+    """
+
+    supports: tuple[tuple[NDArray | None, NDArray | None], ...]
+    """Each group's ``(values, transform)``: its rows are ``values[codes] @ transform``."""
     codes: NDArray
     """``(n, groups)``: each row's support row in every group."""
     bounds: NDArray
@@ -421,31 +430,37 @@ class _CompactLayout:
 # Owner: the reduced design, held weakly, so a REML run whose fits share one
 # reduced design (``SCOPRunCentring``) lays it out once and the layout dies
 # with the design. A layout depends on the design's group matrices alone,
-# which never change, so nothing invalidates it.
+# which never change, so nothing invalidates it. It retains the packed codes,
+# 4 bytes per row and group, and the supports the design does not own: a
+# discretized spline-by-category level's support with its zero row.
 _COMPACT_LAYOUTS: weakref.WeakKeyDictionary[DesignMatrix, _CompactLayout | None] = (
     weakref.WeakKeyDictionary()
 )
 
 
-def _compact_layout(design: DesignMatrix) -> _CompactLayout | None:
-    """The design's compact layout, or ``None`` when a group has no compact support."""
+def _compact_layout(design: DesignMatrix, rows: Sequence[int]) -> _CompactLayout | None:
+    """The design's compact layout; ``rows`` are its groups' support rows (``_compact_support_rows``)."""
     if design in _COMPACT_LAYOUTS:
         return _COMPACT_LAYOUTS[design]
-    supports = tuple(_compact_support(gm) for gm in design.group_matrices)
-    layout = None
-    if all(support is not None for support in supports):
-        rows = np.array([values.shape[0] for values, _, _ in supports], dtype=np.int64)
-        codes = np.empty((design.n, len(supports)), dtype=np.int32)
-        for g, (_, group_codes, _) in enumerate(supports):
+    supports = []
+    codes = np.empty((design.n, len(rows)), dtype=np.int32)
+    for g, gm in enumerate(design.group_matrices):
+        if isinstance(gm, CategoricalGroupMatrix):
+            supports.append((None, None))
+            codes[:, g] = gm.codes
+        else:
+            values, group_codes, transform = _compact_support(gm)
+            supports.append((values, transform))
             codes[:, g] = group_codes
-        if not codes.size or (codes.min() >= 0 and np.all(codes.max(axis=0) < rows)):
-            widths = [gm.shape[1] for gm in design.group_matrices]
-            layout = _CompactLayout(
-                supports=supports,
-                codes=codes,
-                bounds=np.concatenate(([0], np.cumsum(rows))).astype(np.int64),
-                starts=np.concatenate(([0], np.cumsum(widths))).astype(np.int64),
-            )
+    layout = None
+    if not codes.size or (codes.min() >= 0 and np.all(codes.max(axis=0) < rows)):
+        widths = [gm.shape[1] for gm in design.group_matrices]
+        layout = _CompactLayout(
+            supports=tuple(supports),
+            codes=codes,
+            bounds=np.concatenate(([0], np.cumsum(rows))).astype(np.int64),
+            starts=np.concatenate(([0], np.cumsum(widths))).astype(np.int64),
+        )
     _COMPACT_LAYOUTS[design] = layout
     return layout
 
@@ -459,8 +474,12 @@ class _JointWeightCross:
     ``transform' values' H_g basis`` with ``H_g`` the weight table of
     ``(codes_g, bins)``: the anchor-support route's algebra on raw supports.
     One row pass forms every ``H_g``, reading the weights and the SCOP bins
-    once rather than once per group. A design with a group that has no compact
-    support, or tables past the packed-histogram cap, is not built here.
+    once rather than once per group.
+
+    Sizes are read from the groups' metadata before anything is allocated
+    (``_compact_support_rows``, as ``_compact_supports_fit``): a design with a
+    group that has no compact support, tables past the packed-histogram cap,
+    or packed codes past the package's 64 MiB byte budget is not built here.
     """
 
     def __init__(self, layout: _CompactLayout, columns) -> None:
@@ -473,11 +492,16 @@ class _JointWeightCross:
     ) -> _JointWeightCross | None:
         if any(bins is None for _, bins in columns):
             return None
-        layout = _compact_layout(reduced_design)
+        rows = [_compact_support_rows(gm) for gm in reduced_design.group_matrices]
         widest = max(basis.shape[0] for basis, _ in columns)
-        if layout is None or int(layout.bounds[-1]) * widest > _MAX_PACKED_HIST_CELLS:
+        if (
+            any(count is None for count in rows)
+            or sum(rows) * widest > _MAX_PACKED_HIST_CELLS
+            or 4 * reduced_design.n * len(rows) > _MAX_CROSS_EXPANSION_BYTES
+        ):
             return None
-        return cls(layout, columns)
+        layout = _compact_layout(reduced_design, rows)
+        return None if layout is None else cls(layout, columns)
 
     def cross_moment(self, W: NDArray) -> NDArray:
         layout = self.layout
@@ -489,9 +513,10 @@ class _JointWeightCross:
             edges = layout.bounds * n_scop
             table = _joint_weight_tables(layout.codes, edges[:-1], bins, n_scop, W, int(edges[-1]))
             block = slice(column, column + basis.shape[1])
-            for g, (values, _, transform) in enumerate(layout.supports):
-                weights = table[edges[g] : edges[g + 1]].reshape(-1, n_scop)
-                moment = values.T @ (weights @ basis)
+            for g, (values, transform) in enumerate(layout.supports):
+                moment = table[edges[g] : edges[g + 1]].reshape(-1, n_scop) @ basis
+                # a categorical's support rows are its levels, then its base level's zero row
+                moment = moment[:-1] if values is None else values.T @ moment
                 if transform is not None:
                     moment = transform.T @ moment
                 cross[layout.starts[g] : layout.starts[g + 1], block] = moment
