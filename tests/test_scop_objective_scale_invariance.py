@@ -298,10 +298,27 @@ def test_scop_reml_fit_at_small_units_matches_the_unit_fit():
     assert shift <= math.sqrt(len(lambdas) * reference.result.beta.size) * tolerance
 
 
-def test_scop_warm_start_keeps_a_lambda_above_the_unit_ceiling():
-    """A refit from a large-units fit's estimates starts there, not at the unit box's ceiling."""
-    units = 1e5
-    warm = _fit_once(units, "linear").reml_diagnostics()["lambdas"]
+@pytest.mark.parametrize("units", [1e5, 1e9])
+def test_scop_warm_start_keeps_a_lambda_above_the_unit_ceiling(units):
+    """A refit from a large-units fit's estimates starts there and returns that fit.
+
+    It starts at the fit's own smoothing parameters, not at the unit box's
+    ceiling, so the two stop near one fixed point and agree to the bars the
+    small-units test derives.  At 1e9 the warm x2 lambda, applied unbounded
+    to the mapped coordinates of the QP initialization, put a data direction
+    of its Hessian under the rank cut and the refit raised.
+    """
+    reference = _fit_once(units, "linear")
+    warm = reference.reml_diagnostics()["lambdas"]
     refit = _fit(units, "linear", lambda2_init=warm)
     assert warm["x2"] > LAMBDA_CEILING
-    assert refit.reml_diagnostics()["lambda_history"][0]["x2"] == warm["x2"]
+    assert refit.reml_diagnostics()["lambda_history"][0] == warm
+    tolerance = 2.0 * _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
+    lambdas = refit.reml_diagnostics()["lambdas"]
+    assert max(abs(math.log(lambdas[name] / warm[name])) for name in warm) <= tolerance
+    edf = reference.result.effective_df
+    assert abs(refit.result.effective_df - edf) <= edf * tolerance
+    curve, _ = _x2_curve(refit, units)
+    reference_curve, standard_error = _x2_curve(reference, units)
+    shift = np.max(np.abs(curve - reference_curve) / standard_error)
+    assert shift <= math.sqrt(len(lambdas) * reference.result.beta.size) * tolerance
