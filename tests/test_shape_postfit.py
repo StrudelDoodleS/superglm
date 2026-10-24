@@ -1,4 +1,5 @@
 import copy
+import sys
 
 import numpy as np
 import pandas as pd
@@ -1074,6 +1075,41 @@ def test_compact_shape_penalty_quadratic_matches_dense_component_algebra():
     )
 
 
+def _patch_every_binding(monkeypatch, owner, name, replacement):
+    """Replace ``owner.name`` in every ``superglm`` module that holds a reference to it.
+
+    A function imported by name (``from m import f``) is a separate binding in the importing
+    module, so patching it on ``owner`` alone is blind to every importer. The importers are found
+    by identity over ``sys.modules`` rather than by a list that a new import would outdate.
+    """
+    original = getattr(owner, name)
+    patched = []
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("superglm"):
+            continue
+        for attribute, value in list(vars(module).items()):
+            if value is original:
+                monkeypatch.setattr(module, attribute, replacement)
+                patched.append((module, attribute))
+    assert (owner, name) in patched
+    return patched
+
+
+def _importers(owner, name):
+    """The ``superglm`` modules (other than ``owner``) that bind ``owner.name`` under ``name``."""
+    original = getattr(owner, name)
+    return sorted(
+        (
+            module
+            for module_name, module in list(sys.modules.items())
+            if module_name.startswith("superglm")
+            and module is not owner
+            and vars(module).get(name) is original
+        ),
+        key=lambda module: module.__name__,
+    )
+
+
 def _structured_shape_model(structured_kind: str):
     """A REML fit with a post-fit increasing spline beside a structured (re, fs or sz) term."""
     rng = np.random.default_rng(20260727)
@@ -1168,7 +1204,8 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         support_dimensions.add((tuple(matrix.shape for matrix in context.matrices), support.rank))
         return support
 
-    monkeypatch.setattr(
+    _patch_every_binding(
+        monkeypatch,
         penalty_algebra,
         "penalty_component_dense_matrix",
         reject_dense_component,
@@ -1205,19 +1242,33 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         penalty_algebra.penalty_component_dense_matrix(compact)
 
 
+def test_structured_guard_covers_every_importer_of_the_materialiser() -> None:
+    """The structured-penalty guard must see the modules that bind the materialiser by name."""
+    from superglm.reml import gradient, penalty_algebra, scop_efs, w_derivatives
+
+    importers = set(_importers(penalty_algebra, "penalty_component_dense_matrix"))
+    assert {gradient, scop_efs, w_derivatives} <= importers
+
+
 @pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+@pytest.mark.parametrize("importer", ["gradient", "scop_efs", "w_derivatives"])
 def test_expanding_a_structured_penalty_inside_the_repair_reaches_the_guard(
     structured_kind: str,
+    importer: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Positive control for the guard in the test above: a repair that did expand would fail.
 
     The repair's merit evaluation is replaced by one that expands a structured component through
-    the module-level name the guard patches; the refusal has to come out of
-    ``apply_shape_postfit`` rather than be absorbed on the way.
+    a module that imports the materialiser by name (the bindings a guard on the defining module
+    alone does not reach); the refusal has to come out of ``apply_shape_postfit`` rather than be
+    absorbed on the way.
     """
+    import importlib
+
     from superglm.reml import penalty_algebra
 
+    importing_module = importlib.import_module(f"superglm.reml.{importer}")
     model, X = _structured_shape_model(structured_kind)
     structured = next(c for c in model._reml_penalties if c.penalty_kind != "dense")
 
@@ -1227,9 +1278,11 @@ def test_expanding_a_structured_penalty_inside_the_repair_reaches_the_guard(
         raise AssertionError("unexpected dense component")
 
     def merit_that_expands(beta, terms):
-        return penalty_algebra.penalty_component_dense_matrix(structured)
+        return importing_module.penalty_component_dense_matrix(structured)
 
-    monkeypatch.setattr(penalty_algebra, "penalty_component_dense_matrix", reject_dense_component)
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "penalty_component_dense_matrix", reject_dense_component
+    )
     monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_expands)
 
     with pytest.raises(AssertionError, match="expanded a structured penalty"):
@@ -1269,34 +1322,117 @@ def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
     def reject_global_penalty(*args, **kwargs):
         raise AssertionError("shape repair requested a global dense p-by-p penalty")
 
-    monkeypatch.setattr(penalty_algebra, "build_penalty_matrix", reject_global_penalty)
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
 
     model.apply_shape_postfit(X, n_grid=80)
 
     assert np.all(np.isfinite(model.result.beta))
 
 
-def test_a_global_penalty_request_inside_the_repair_reaches_the_guard(monkeypatch):
-    """Positive control: were the repair to ask for the global penalty, the guard would fire.
+def test_global_penalty_guard_covers_every_importer_of_the_builder():
+    """The guard must see the modules that bind ``build_penalty_matrix`` by name."""
+    from superglm.model import reml_finalize
+    from superglm.reml import direct, discrete, efs, objective, penalty_algebra, scop_efs
 
-    The repair's merit evaluation is replaced by one that builds the global penalty through
-    the same name the guard above patches; the refusal must come out of ``apply_shape_postfit``
-    rather than be swallowed on the way (the fitted-state transaction catches and re-raises).
-    """
+    importers = set(_importers(penalty_algebra, "build_penalty_matrix"))
+    assert {objective, direct, efs, discrete, scop_efs, reml_finalize} <= importers
+
+
+def test_a_guard_on_the_defining_module_alone_misses_the_importers(monkeypatch):
+    """Why the guard patches every binding: patching ``penalty_algebra`` leaves importers live."""
     from superglm.reml import penalty_algebra
 
+    model, _ = _wide_postfit_model(0.5)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    monkeypatch.setattr(penalty_algebra, "build_penalty_matrix", reject_global_penalty)
+    for module in _importers(penalty_algebra, "build_penalty_matrix"):
+        built = module.build_penalty_matrix(
+            model._dm.group_matrices, model._groups, 1.0, model._dm.p
+        )
+        assert built.shape == (model._dm.p, model._dm.p)
+
+
+@pytest.mark.parametrize(
+    "importer",
+    [
+        "superglm.model.reml_finalize",
+        "superglm.reml.direct",
+        "superglm.reml.discrete",
+        "superglm.reml.efs",
+        "superglm.reml.objective",
+        "superglm.reml.scop_efs",
+    ],
+)
+def test_a_global_penalty_request_inside_the_repair_reaches_the_guard(monkeypatch, importer):
+    """Positive control: were the repair to ask for the global penalty, the guard would fire.
+
+    The repair's merit evaluation is replaced by one that builds the global penalty through a
+    module that imports the builder by name, the bindings a guard on ``penalty_algebra`` alone
+    does not reach; the refusal must come out of ``apply_shape_postfit`` rather than be
+    swallowed on the way (the fitted-state transaction catches and re-raises).
+    """
+    import importlib
+
+    from superglm.reml import penalty_algebra
+
+    importing_module = importlib.import_module(importer)
     model, X = _wide_postfit_model(0.5)
 
     def reject_global_penalty(*args, **kwargs):
         raise AssertionError("shape repair requested a global dense p-by-p penalty")
 
     def merit_that_builds_the_global_penalty(beta, terms):
-        return penalty_algebra.build_penalty_matrix(
+        return importing_module.build_penalty_matrix(
             model._dm.group_matrices, model._groups, 1.0, model._dm.p
         )
 
-    monkeypatch.setattr(penalty_algebra, "build_penalty_matrix", reject_global_penalty)
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
     monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_builds_the_global_penalty)
+
+    with pytest.raises(AssertionError, match="global dense p-by-p penalty"):
+        model.apply_shape_postfit(X, n_grid=80)
+
+
+def test_a_production_global_penalty_request_reaches_the_guard(monkeypatch):
+    """Positive control through production code: the REML objective builds the penalty itself.
+
+    The merit evaluation calls ``reml_laml_objective`` without retained penalty geometry, the
+    path that builds the dense penalty inside the objective module.
+    """
+    from superglm.model.shape_ops import model_weight_semantics
+    from superglm.reml import penalty_algebra
+    from superglm.reml.objective import reml_laml_objective
+
+    model, X = _wide_postfit_model(0.5)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    def merit_that_evaluates_the_reml_objective(beta, terms):
+        return reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            np.asarray(model._fit_y_ref, dtype=np.float64),
+            model._solver_result,
+            {group.name: 1.0 for group in model._groups},
+            np.asarray(model._fit_weights, dtype=np.float64),
+            np.zeros(len(model._fit_y_ref)),
+            weight_semantics=model_weight_semantics(model),
+        )
+
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_evaluates_the_reml_objective)
 
     with pytest.raises(AssertionError, match="global dense p-by-p penalty"):
         model.apply_shape_postfit(X, n_grid=80)
