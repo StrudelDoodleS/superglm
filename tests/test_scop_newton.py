@@ -603,3 +603,71 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
     fresh = DesignMatrix(ordinary, n=n, p=reduced.p)
     assert scop_newton._JointWeightCross.build(fresh, columns) is None
     assert formed == []
+
+
+def test_rounding_on_a_null_direction_is_dropped_whatever_its_sign():
+    """An eigenvalue inside the Gram's formation bound gives no curvature and no score."""
+    from superglm.solvers.rank import _gamma_up
+    from superglm.solvers.scop_newton import _resolved_root
+
+    rng = np.random.default_rng(3)
+    q, count = 5, 2 * 10_000 + 2
+    basis, _ = np.linalg.qr(rng.normal(size=(q, q)))
+    null = basis[:, 0]
+    scale = rng.uniform(0.5, 4.0, q)
+    for rounding in (-0.5, 0.5):
+        # the null direction carries half the formation bound, of either sign
+        spectrum = np.diag([rounding * _gamma_up(count) * q, 1e-6, 0.1, 1.0, 3.0])
+        unit = basis @ spectrum @ basis.T
+        gram = scale[:, None] * unit * scale[None, :]
+        score = scale * (basis @ rng.normal(size=q))
+        root, resolved = _resolved_root(gram, score, scale, count)
+
+        assert root.shape == (q - 1, q)
+        # the eigensolver's null vector is the exact one to within Davis & Kahan's
+        # sin(theta) <= q eps ||unit|| / gap (gap 1e-6 to the next eigenvalue)
+        angle = 4 * q * 2 * UNIT * np.linalg.norm(unit, 2) / 1e-6
+        direction = null / scale  # the null direction in the Gram's own coordinates
+        assert np.linalg.norm(root @ direction) <= angle * np.linalg.norm(root / scale[None, :], 2)
+        assert abs(resolved @ direction) <= angle * np.linalg.norm(score / scale)
+
+
+def _aliased_slope_fit(with_x):
+    """A Gaussian fit of a convex spline of x, beside x itself when ``with_x``."""
+    from superglm import Numeric, PSpline
+
+    rng = np.random.default_rng(3)
+    n = 20_000
+    x = rng.uniform(0, 1, n)
+    y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n)
+    weights = rng.uniform(0.3, 3, n)
+    features = {"s": PSpline(n_knots=4, constraint=Constraint.fit.convex)}
+    if with_x:
+        features = {"x": Numeric(), **features}
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
+    frame = pd.DataFrame({"x": x, "s": x})
+    model.fit_reml(frame, y, sample_weight=weights)
+    return model, model.predict(frame)
+
+
+def test_an_ordinary_column_aliased_with_a_scop_slope_changes_nothing():
+    """x beside a convex spline of x adds no direction: the Schur block's alias is null, not curvature.
+
+    The alias is an exact zero of ``G~ - C' A^-1 C``, and the square root of
+    its rounding sat at the factor's sqrt(eps) cut: read as curvature, it
+    sent the inner fits through refused 100-iteration runs and the REML
+    search stopped unconverged at lambda 6804 (edf 3.0006) on these rows.
+    """
+    aliased, aliased_mu = _aliased_slope_fit(with_x=True)
+    alone, alone_mu = _aliased_slope_fit(with_x=False)
+
+    assert aliased.reml_diagnostics()["converged"]
+    assert aliased.result.converged
+    # the outer search's own resolution in log lambda
+    assert abs(np.log(aliased._reml_lambdas["s"] / alone._reml_lambdas["s"])) <= 1e-6
+    # two certified modes of one model (the certificate's bar, sqrt(r eps), each)
+    bar = 2 * np.sqrt((alone.result.beta.size + 2) * 2 * UNIT)
+    assert np.max(np.abs(aliased_mu - alone_mu) / np.abs(alone_mu)) <= bar
+    assert abs(aliased.result.effective_df - alone.result.effective_df) <= bar * (
+        alone.result.beta.size + 2
+    )
