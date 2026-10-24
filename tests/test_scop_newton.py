@@ -1192,3 +1192,121 @@ def test_an_ordinary_column_within_sqrt_eps_of_a_scop_slope_is_held_not_chased()
     bar = 2 * np.sqrt((alone.result.beta.size + 2) * 2 * UNIT)
     mu, alone_mu = near.predict(frame), alone.predict(frame)
     assert np.max(np.abs(mu - alone_mu) / np.abs(alone_mu)) <= bar
+
+
+def _ordinary_inside_the_spline_fit():
+    """x beside an increasing spline of the same x, weights exp(U(-3, 3)), no penalty: Gaussian."""
+    from superglm import Numeric, PSpline
+
+    rng = np.random.default_rng(39)
+    x = rng.uniform(size=(2, 200))[0]
+    y = 0.2 + 2.2 * x + 0.6 * x * x + 0.05 * rng.normal(size=200)
+    weights = np.exp(rng.uniform(-3, 3, 200))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    frame = pd.DataFrame({"x": x, "s": x})
+    model.fit(frame, y, sample_weight=weights)
+    return model, frame, x, y, weights
+
+
+def test_a_damped_joint_step_never_stops_the_fit():
+    """x inside an increasing spline's span: the fit stops on a full step, at the ordinary block's mode.
+
+    A latent coordinate at the QP start's floor wants to grow, so its
+    Gauss-Newton step is millions long in log space and the line search
+    halves the joint step to 2^-20. The deviance changed by that fraction,
+    and the fit stopped there with intercept and slope scores -1.7 and -5.2.
+    A full step's decrease is, to second order, its Newton decrement ``s'
+    H^-1 s``, which bounds each score by ``sqrt(H_jj s' H^-1 s)``; the stop
+    holds that decrease within ``tol`` of the deviance.
+    """
+    model, frame, x, y, weights = _ordinary_inside_the_spline_fit()
+    residual = y - np.asarray(model.predict(frame))
+    deviance = float(np.sum(weights * residual**2))
+
+    assert model.result.converged
+    for column in (np.ones_like(x), x):
+        score = float(np.sum(weights * residual * column))
+        assert abs(score) <= np.sqrt(np.sum(weights * column**2) * model._tol * deviance)
+
+
+def test_a_damped_trial_takes_the_ordinary_solve_at_its_latent_coordinates(monkeypatch):
+    """Each trial's ordinary scores are ``1 - alpha`` times the committed iterate's (Gaussian, identity).
+
+    Given the latent coordinates the ordinary block is linear. A trial takes
+    its solve at the trial's own mapped coefficients, the part not owed to
+    the latent change damped along ``alpha``, and the scores are linear in
+    the distance to that solve: they are ``1 - alpha`` times the committed
+    ones, however far the latent step goes. Interpolating the ordinary block
+    along the joint step's linearisation of ``exp`` leaves the latent map's
+    curvature in them, which a step millions long in log space makes large.
+    The bound is each predictor's evaluation, ``gamma_(n)`` of its terms,
+    carried through the scores' sums.
+    """
+    trials = []
+    evaluate = irls_direct._evaluate_scop_trial
+
+    def recorded(**kwargs):
+        trial = evaluate(**kwargs)
+        trials.append((kwargs["alpha"], kwargs["committed"].irls, trial.irls))
+        return trial
+
+    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    model, frame, x, y, weights = _ordinary_inside_the_spline_fit()
+    design = model._dm.toarray()
+    columns = np.column_stack([np.ones_like(x), x])
+    gamma = (y.size + design.shape[1] + 2) * UNIT / (1 - (y.size + design.shape[1] + 2) * UNIT)
+
+    checked = 0
+    for alpha, before, after in trials:
+        if not np.all(np.isfinite(after.eta_unclipped)):
+            continue
+        terms = sum(
+            abs(state.intercept) + np.abs(design) @ np.abs(state.beta) for state in (before, after)
+        )
+        bound = gamma * (np.abs(columns).T @ (weights * (np.abs(y) + terms)))
+        scores = columns.T @ (weights * (y - after.eta_unclipped))
+        committed = columns.T @ (weights * (y - before.eta_unclipped))
+        assert np.all(np.abs(scores - (1 - alpha) * committed) <= bound)
+        checked += alpha <= 2.0**-10
+    assert checked
+
+
+def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch):
+    """A step the line search cut to 2^-20 changes the deviance by about that fraction: the fit goes on."""
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    decisions = []
+    select = irls_direct._select_irls_trial
+
+    def damp_the_second(**kwargs):
+        decisions.append(kwargs)
+        if len(decisions) == 2:
+            kwargs["evaluate_state"](2.0**-20)
+            return _IRLSStepDecision(2.0**-20, 20, False, trials_attempted=2)
+        return select(**kwargs)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", damp_the_second)
+    frame, y, offset = _correlated_monotone_frame(0.7)
+    model = _monotone_model()
+    y_fit, weights, offset_fit = model_build_design_matrix(model, frame, y, np.ones_like(y), offset)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 8.94, "x2": 0.770},
+        offset=offset_fit,
+        max_iter=100,
+        tol=1e-6,
+        weight_semantics="frequency",
+    )
+
+    assert result.converged
+    assert result.n_iter > 2

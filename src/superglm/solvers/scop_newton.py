@@ -179,6 +179,13 @@ class SCOPJointStep:
     intercept_shift: float
     """Subtracted from that solve's profiled intercept: ``x_s' J delta_theta``."""
 
+    coupled: NDArray
+    """``A^+ C``, the ordinary block's regression on the centred SCOP columns: a change
+    ``d gamma`` of the mapped coefficients moves that solve by ``-coupled @ d gamma``."""
+
+    mean: NDArray
+    """The SCOP columns' weighted means: ``d gamma`` moves the profiled intercept by ``-mean @ d gamma``."""
+
 
 def _append_scop_trace(
     debug_recorder,
@@ -1129,7 +1136,13 @@ class SCOPJointNewton:
         """
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
-            return SCOPJointStep(self._no_step(thetas), np.zeros_like(ordinary_change), 0.0)
+            return SCOPJointStep(
+                self._no_step(thetas),
+                np.zeros_like(ordinary_change),
+                0.0,
+                np.zeros((ordinary_change.shape[0], self.width)),
+                np.zeros(self.width),
+            )
         data_gram = moments.gram
         data_score = moments.score
         own = np.sqrt(np.maximum(np.diag(data_gram), 0.0))
@@ -1167,6 +1180,8 @@ class SCOPJointNewton:
             results=results,
             ordinary_correction=-(coupled @ mapped_change),
             intercept_shift=float(moments.mean @ mapped_change),
+            coupled=coupled,
+            mean=moments.mean,
         )
 
     def block_curvature(

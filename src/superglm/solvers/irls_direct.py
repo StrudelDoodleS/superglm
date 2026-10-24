@@ -394,6 +394,34 @@ class _SCOPTrialState:
 
 
 @dataclass(frozen=True)
+class _SCOPOrdinarySolve:
+    """The ordinary block's solve at one iterate, which a damped trial re-solves at its latent coordinates.
+
+    Given the latent coordinates the ordinary block is linear, so its
+    working-model solve at a trial's mapped coefficients ``gamma`` is
+    ``fixed - coupled (gamma - gamma_k)``, with centred level ``level -
+    mean' (gamma - gamma_k)``: the linear block eliminated exactly at every
+    value of the nonlinear one (variable projection, Golub & Pereyra 1973),
+    not along the joint step's linearisation of ``gamma``. The part a
+    trial does not owe to its latent change, ``fixed`` less the committed
+    coefficients, is a scoring step and is damped along ``alpha`` with it.
+    """
+
+    columns: NDArray
+    """The ordinary coefficients' positions in ``beta``."""
+    committed: NDArray
+    committed_level: float
+    """The committed intercept profiled about ``mean_x``."""
+    fixed: NDArray
+    """The solve with the latent coordinates held."""
+    level: float
+    """Its profiled intercept about ``mean_x``."""
+    coupled: NDArray
+    mean: NDArray
+    mean_x: NDArray
+
+
+@dataclass(frozen=True)
 class _CenteredFactorCertification:
     """One fit-local factor certificate tied to immutable centered geometry."""
 
@@ -419,13 +447,21 @@ def _evaluate_scop_trial(
     evaluation_id: int | None = None,
     basis_id: int | None = None,
     lambdas: tuple[tuple[str, object], ...] = (),
+    ordinary: _SCOPOrdinarySolve | None = None,
 ) -> _SCOPTrialState:
-    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state."""
+    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state.
+
+    With ``ordinary``, the trial's ordinary coefficients and intercept are
+    that block's solve at the trial's mapped coefficients
+    (``_SCOPOrdinarySolve``); otherwise they are interpolated as the latent
+    coordinates are. The groups are in the joint step's latent order.
+    """
     beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
     intercept_trial = committed.irls.intercept + alpha * (
         proposed.irls.intercept - committed.irls.intercept
     )
     trial_groups: list[_SCOPGroupState] = []
+    mapped_changes: list[NDArray] = []
     for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
         if committed_group.group_index != proposed_group.group_index:
             raise ValueError("SCOP trial group ordering does not match")
@@ -435,6 +471,7 @@ def _evaluate_scop_trial(
         )
         gamma_eff = spec.reparam.forward(beta_eff)
         beta_trial[spec.group.sl] = gamma_eff
+        mapped_changes.append(gamma_eff - spec.reparam.forward(committed_group.beta_eff))
         trial_groups.append(
             _SCOPGroupState(
                 group_index=committed_group.group_index,
@@ -451,6 +488,20 @@ def _evaluate_scop_trial(
     # coordinate the Newton model sent far out); such a trial's objective is
     # not finite and the line search rejects it, without a warning.
     with np.errstate(over="ignore", invalid="ignore"):
+        if ordinary is not None:
+            change = np.concatenate(mapped_changes)
+            solved = (
+                ordinary.committed
+                + alpha * (ordinary.fixed - ordinary.committed)
+                - ordinary.coupled @ change
+            )
+            level = (
+                ordinary.committed_level
+                + alpha * (ordinary.level - ordinary.committed_level)
+                - float(ordinary.mean @ change)
+            )
+            beta_trial[ordinary.columns] = solved
+            intercept_trial = level - float(ordinary.mean_x @ solved)
         irls = _evaluate_irls_state(
             dm,
             y,
@@ -2995,6 +3046,18 @@ def _fit_irls_direct_once(
                     debug_context={**base_debug_context, "pirls_iteration": it + 1},
                 )
                 scop_results = joint.results
+                committed_reduced = committed.beta[_reduced_to_full]
+                scop_ordinary = _SCOPOrdinarySolve(
+                    columns=_reduced_to_full,
+                    committed=committed_reduced,
+                    committed_level=committed.intercept
+                    + float(reduced_centered.mean_x @ committed_reduced),
+                    fixed=beta_reduced,
+                    level=reduced_centered.mean_z,
+                    coupled=joint.coupled,
+                    mean=joint.mean,
+                    mean_x=reduced_centered.mean_x,
+                )
                 beta_reduced = beta_reduced + joint.ordinary_correction
                 centred_level = reduced_centered.mean_z - joint.intercept_shift
                 intercept = centred_level - float(reduced_centered.mean_x @ beta_reduced)
@@ -3364,6 +3427,7 @@ def _fit_irls_direct_once(
                     evaluation_id=evaluation_id,
                     basis_id=trace_basis_id,
                     lambdas=resolved_lambdas,
+                    ordinary=scop_ordinary,
                 )
                 candidate = with_scop_merit(candidate)
                 emit_evaluation(
@@ -3822,6 +3886,13 @@ def _fit_irls_direct_once(
                         objective_scale=objective_merit_scale,
                     )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+                if _has_scop and n_halvings:
+                    # The decrease of a full joint Newton step is its Newton
+                    # decrement, which bounds the distance to the mode (Boyd &
+                    # Vandenberghe 2004, sec. 9.5.1); a damped step's is a
+                    # fraction of it and bounds nothing, so it never stops the
+                    # fit: the next full step's does.
+                    converged_this_iter = False
                 convergence_value = dev_rel_change
         else:
             converged_this_iter = False
