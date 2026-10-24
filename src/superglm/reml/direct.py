@@ -24,6 +24,7 @@ from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink, LogLink
+from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
@@ -145,6 +146,11 @@ _PRESOLVE_MIN_REML_ITER = 10
 # decision on both: above it a structured factor forms the same exact gradient
 # from its augmented factor's row quadratic forms, and both backends leave the
 # W(rho) cross terms out of the Newton model (``gradient_terms_only``).
+# Wood's prices hold for a dense design.  A random effect's or factor smooth's
+# Grams are block-sparse, a few columns a row, so such a model takes the
+# leverage route only where its solved-row pass is sparse too
+# (``reads_row_supports``: every group a dense column or an indexed support);
+# elsewhere that pass is the dense ``n p^2`` product, dearer than its Grams.
 _LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
@@ -393,13 +399,14 @@ def optimize_direct_reml(
     # too, the Newton model a structured factor builds: the derivative Grams
     # below the leverage work bar, and above it the exact gradient without the
     # W(rho) cross terms (``gradient_terms_only``), which both form at a
-    # candidate stop.  Both backends then take the same REML path
-    # (tests/test_factor_smooth_structured_parity.py,
+    # candidate stop, where its design reads row supports.  Both backends then
+    # take the same REML path (tests/test_factor_smooth_structured_parity.py,
     # tests/test_nested_structured_fit.py).
     structured_alternative = (
         select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
         is not None
     )
+    sparse_leverage = not structured_alternative or reads_row_supports(dm)
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
@@ -1206,6 +1213,7 @@ def optimize_direct_reml(
                 and w_correction_order == 1
                 and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
                 and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
+                and sparse_leverage
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:

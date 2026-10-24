@@ -74,14 +74,6 @@ from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 _SIGNED_GRAM_BATCH_BYTES = 64 << 20
-# The structured factors whose augmented factor gives row quadratic forms
-# ``[1, x] H_aug^-1 [1, x]'`` (``row_quadratic_forms``), which the leverage
-# route reads in place of solved rows.
-_ROW_FORM_FACTORS = (
-    ProfiledNestedSchurFactor,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledSumToZeroTreeFactor,
-)
 
 
 def _penalty_rhs(
@@ -97,35 +89,25 @@ def _penalty_rhs(
 
 
 def _structured_weight_cross(
-    factor: HessianFactor,
+    factor: ProfiledNestedSchurFactor,
     penalties: list[PenaltyComponent],
     lambdas: dict[str, float],
     operators: dict[int, NDArray | CompactSymmetricOperator],
 ) -> NDArray:
-    """The leverage route's cross terms ``-(P + P') / 2`` from a structured factor.
+    """The leverage route's cross terms ``-(P + P') / 2`` from the nested factor.
 
     ``P_ij = tr(H^-1 S_i H^-1 C_j)``, ``S_i = lambda_i Omega_i`` and ``C_j`` the
     weight-derivative operator, as ``_leverage_derivative_terms`` forms them
-    from solved rows.  The nested factor's derivative directions may carry an
-    operator without a penalty, so one ``derivative_cross_traces`` call over the
-    ``m`` penalty and ``m`` operator directions forms every ``P_ij``.  The leaf
-    and tree factors' directions each carry a penalty, so ``P_ij`` comes pair by
-    pair from ``penalty_operator_cross_trace``.
+    from solved rows.  The factor's derivative directions may carry an operator
+    without a penalty, so one ``derivative_cross_traces`` call over the ``m``
+    penalty and ``m`` operator directions forms every ``P_ij``.
     """
     m = len(penalties)
     # a structured factor's derivative operators are compact, never dense
     compact = [cast(CompactSymmetricOperator, operators[j]) for j in range(m)]
-    if isinstance(factor, ProfiledNestedSchurFactor):
-        directions: list = [(pc, lambdas[pc.name], None) for pc in penalties]
-        directions += [(None, 0.0, operator) for operator in compact]
-        cross = factor.derivative_cross_traces(directions)[:m, m:]
-    else:
-        cross = np.array(
-            [
-                [factor.penalty_operator_cross_trace(pc, lambdas[pc.name], C) for C in compact]
-                for pc in penalties
-            ]
-        )
+    directions: list = [(pc, lambdas[pc.name], None) for pc in penalties]
+    directions += [(None, 0.0, operator) for operator in compact]
+    cross = factor.derivative_cross_traces(directions)[:m, m:]
     return -0.5 * (cross + cross.T)
 
 
@@ -685,20 +667,21 @@ def reml_w_correction(
     derivatives cost ``O(M n p^2 / 2)``, first derivatives ``O(n p^2)``), is
     left out, as order 1 already leaves out the second weight derivatives.
     Callers add ``w_cross`` where they would add ``dH2_cross``.  When the
-    weight sum is not profiled, or the factor is neither dense nor one whose
-    augmented factor gives row quadratic forms (``_ROW_FORM_FACTORS``), the
-    request is not taken, and the derivative-Gram result is returned instead.
+    weight sum is not profiled, or the factor is neither dense nor the nested
+    factor (``ProfiledNestedSchurFactor``), whose augmented factor gives row
+    quadratic forms, the request is not taken, and the derivative-Gram result
+    is returned instead.
 
     When every group is a lookup or a dense column (``_lookup_tables``),
     the leverages are read back from term-pair tables and no row is solved:
     the result is ``(grad_correction, None, None)``, the same exact gradient
     and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
     (4 and 10 interaction pairs) leaving it out of the Newton model cost one
-    outer iteration of six.  A structured factor returns the same: its
+    outer iteration of six.  The nested factor returns the same: its
     augmented factor's row quadratic forms give the leverages, and no row is
     solved.  ``lookup_tables=False`` turns both off: a caller that needs
     ``w_cross`` at one point (the REML stop's second-order check,
-    ``reml/direct.py``) gets the solved-row result, or on a structured factor
+    ``reml/direct.py``) gets the solved-row result, or on the nested factor
     the derivative operators' ``w_cross`` (``_structured_weight_cross``).
 
     ``gradient_terms_only`` (read only with ``leverage_hessian``) returns
@@ -951,14 +934,16 @@ def reml_w_correction(
             return grad_correction, None, None
         return grad_correction, None, -0.5 * (penalty_weight_cross + penalty_weight_cross.T)
 
-    # A structured factor's leverage route: its augmented factor gives each
+    # The nested factor's leverage route (the only structured one a model
+    # reaches: a factor smooth's design reads no row supports, so it keeps its
+    # Grams, ``reml/direct.py``): its augmented factor gives each
     # row's ``[1, x] H_aug^-1 [1, x]' = 1/sum_w + x_c' H_c^-1 x_c``, the hat
     # diagonal of Bates et al. (2015, eqs. 63-65), so the row channel
     # ``w'(h + 1/sum_w) / 2`` forms the exact gradient with no derivative
     # operator.  ``lookup_tables=False`` forms the cross terms instead, from the
     # derivative operators below and the factor's cross traces.  As on the dense
     # routes, a row without a weight derivative is never formed.
-    structured_leverage = leverage_route and isinstance(factor, _ROW_FORM_FACTORS)
+    structured_leverage = leverage_route and isinstance(factor, ProfiledNestedSchurFactor)
     if structured_leverage and lookup_tables:
         leverage = grouped_augmented_row_quadratic_forms(
             dm, factor.augmented_factor.row_quadratic_forms, active=dW_deta != 0.0

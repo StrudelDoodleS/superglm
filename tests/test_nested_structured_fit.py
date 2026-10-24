@@ -81,6 +81,7 @@ from superglm import (
 )
 from superglm.inference.covariance import StructuredCovarianceAccessor
 from superglm.model.reml_setup import collect_reml_groups
+from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
@@ -658,25 +659,32 @@ def test_reml_derivatives_with_weight_derivatives_match_the_dense_ones(family: s
 # ── The leverage route above its work bar ─────────────────────────────────
 
 
+def _support_response(family: str):
+    """``_response(family)`` with ``x`` on a 0.01 grid: its spline's rows repeat, so the
+    design reads row supports and the leverage route may take it (``reml/direct.py``)."""
+    frame, y, offset, weight = _response(family)
+    return frame.assign(x=np.round(frame["x"], 2)), y, offset, weight
+
+
 @pytest.mark.parametrize("family", ["poisson", "tweedie", "gausslog"])
 def test_above_the_work_bar_both_backends_take_one_leverage_path(monkeypatch, family: str) -> None:
     """Above the leverage work bar both backends take the gradient-only Newton model.
 
-    The dense solver by ``gradient_terms_only``, the nested factor from its
+    The dense solver from its lookup tables, the nested factor from its
     augmented factor's row quadratic forms; both form the W(rho) cross terms
     at a candidate stop only.  One Newton model on one surface: the same route,
     iteration count and exit, the objectives within ``tau (1 + |V|)``, and the
     two REML fits, their smoothing parameters included, within small multiples
     of the same-lambda budget, as every quantity both backends derive from one
-    path.  Without ``gradient_terms_only`` the dense solver forms the cross
-    terms every iteration (``leverage_hessian``); the unfixed gate kept the
-    derivative Grams on both.
+    path.  The unfixed gate kept the derivative Grams on both.
     """
     monkeypatch.setattr(direct_reml, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
-    frame, y, offset, weight = _response(family)
-    dense = _fit(family, "gram")
-    nested = _fit(family, "structured")
+    data = _support_response(family)
+    frame, y, offset, weight = data
+    dense = _fit(family, "gram", data=data)
+    nested = _fit(family, "structured", data=data)
     _assert_nested(nested)
+    assert reads_row_supports(dense._dm)
     for model in (dense, nested):
         assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
         assert model._reml_result.converged
@@ -696,13 +704,13 @@ def test_above_the_work_bar_both_backends_take_one_leverage_path(monkeypatch, fa
 
 
 def _noise_data(family: str):
-    """``_response(family)`` with a ``noise`` random effect that REML takes to zero variance.
+    """``_support_response(family)`` with a ``noise`` random effect that REML takes to zero variance.
 
     Its six levels deal the rows out by the response's rank, so every level's
     rows span the response evenly and its level means agree more closely than
     chance: the variance's optimum is the boundary, whatever the path.
     """
-    frame, y, offset, weight = _response(family)
+    frame, y, offset, weight = _support_response(family)
     rank = np.argsort(np.argsort(y, kind="stable"), kind="stable")
     noise = np.array([f"n{code}" for code in rank % 6], dtype=object)
     return frame.assign(noise=noise), y, offset, weight

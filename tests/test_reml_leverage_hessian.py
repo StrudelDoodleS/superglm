@@ -28,11 +28,13 @@ from superglm import Categorical, FactorSmooth, Numeric, RandomEffect, Spline, S
 from superglm.distributions import Binomial, Poisson
 from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
 from superglm.links import LogitLink, LogLink
+from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.penalty_algebra import (
     penalty_component_dense_matrix,
     penalty_component_matvec,
 )
 from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
+from superglm.solvers.structured import ProfiledNestedSchurFactor
 from superglm.types import GroupSlice, PenaltyComponent
 
 _U = np.finfo(np.float64).eps / 2.0
@@ -443,12 +445,18 @@ def test_a_fit_whose_grams_are_cheap_keeps_them():
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
-def _grouped_poisson_frame(n: int = 400) -> tuple[pd.DataFrame, np.ndarray]:
-    """A Poisson response on ``x`` and ``z`` beside groupings of 6, 4 and 5 levels it ignores."""
+def _grouped_poisson_frame(n: int = 2000, grid: bool = True) -> tuple[pd.DataFrame, np.ndarray]:
+    """A Poisson response on ``x`` and ``z`` beside groupings of 6, 4 and 5 levels it ignores.
+
+    ``grid`` puts ``x`` on a 0.1 grid, so its spline's rows repeat and the
+    design reads row supports (``reads_row_supports``); off the grid the
+    spline is a sparse basis, which reads none.
+    """
     rng = np.random.default_rng(947)
+    x = rng.uniform(-1.0, 1.0, n)
     frame = pd.DataFrame(
         {
-            "x": rng.uniform(-1.0, 1.0, n),
+            "x": np.round(x, 1) if grid else x,
             "z": rng.normal(size=n),
             "segment": [f"s{code}" for code in rng.integers(0, 6, n)],
             "region": [f"r{code}" for code in rng.integers(0, 4, n)],
@@ -468,21 +476,37 @@ def _random_effect_features() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "structured"])
-@pytest.mark.parametrize("term", ["factor_smooth", "random_effect"])
-def test_a_model_the_structured_solver_can_fit_takes_the_leverage_route(
-    monkeypatch, term, direct_solve
+@pytest.mark.parametrize(
+    ("term", "mode"),
+    [
+        ("random_effect", "leverage_tables"),
+        ("random_effect_solved_rows", "leverage_tables"),
+        ("sparse_spline", "derivative_grams"),
+        ("factor_smooth", "derivative_grams"),
+    ],
+)
+def test_a_random_effect_takes_the_leverage_route_where_its_design_reads_row_supports(
+    monkeypatch, term, mode, direct_solve
 ):
-    """Above the work bar both backends take the leverage route's gradient-only Newton model.
+    """Above the work bar a random effect takes the leverage route where its design reads row supports.
 
-    The exact gradient every iteration and the W(rho) cross terms at a
-    candidate stop only: the dense solver by ``gradient_terms_only``, the
-    structured one from its augmented factor's row quadratic forms, so both
-    build one outer Hessian.  The unfixed gate kept the derivative Grams on
-    both; without ``gradient_terms_only`` the dense solver formed the cross
-    terms every iteration (``leverage_hessian``).
+    Both backends then take the gradient-only Newton model: the exact
+    gradient every iteration and the W(rho) cross terms at a candidate stop
+    only, the structured one from its augmented factor's row quadratic forms
+    and the dense one from its lookup tables, or, where it has none
+    (``random_effect_solved_rows``), from solved rows by
+    ``gradient_terms_only``.  Beside a sparse spline basis, or with a factor
+    smooth, the dense solved-row pass would be the ``n p^2`` product, dearer
+    than the block-sparse Grams, so both backends keep the Grams.  Mutations:
+    without ``sparse_leverage`` the sparse spline takes the leverage route, and
+    the factor smooth on the dense solver (its structured factor gives no row
+    forms); without ``gradient_terms_only`` the dense solved rows form the
+    cross terms every iteration (``leverage_hessian``).
     """
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
-    frame, y = _grouped_poisson_frame()
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
+    if term == "random_effect_solved_rows":
+        monkeypatch.setattr(w_derivatives, "lookup_plan", lambda dm: None)
+    frame, y = _grouped_poisson_frame(grid=term != "sparse_spline")
     if term == "factor_smooth":
         features: dict[str, Any] = {"x": Spline(n_knots=5), "z": Numeric()}
         interactions = [FactorSmooth("x", group="segment", k=6)]
@@ -498,8 +522,9 @@ def test_a_model_the_structured_solver_can_fit_takes_the_leverage_route(
     ).fit_reml(frame, y, runtime_validation="skip")
 
     assert len(model._reml_penalties) >= 4
+    assert reads_row_supports(model._dm) == term.startswith("random_effect")
     assert model._reml_profile["direct_backend"] == direct_solve
-    assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    assert model._reml_profile["reml_w_correction_mode"] == mode
 
 
 _REML_TOL = 1e-9  # NEWTON_REML_TOL_DEFAULT, passed explicitly so the bound below is its own
@@ -648,7 +673,7 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
     def recorded_correction(*args, **kwargs):
         result = correction(*args, **kwargs)
         dm, factor = args[0], args[4]
-        if kwargs.get("leverage_hessian") and isinstance(factor, w_derivatives._ROW_FORM_FACTORS):
+        if kwargs.get("leverage_hessian") and isinstance(factor, ProfiledNestedSchurFactor):
             if not overflows:
                 with np.errstate(over="ignore", invalid="ignore"):
                     forms = grouped_augmented_row_quadratic_forms(
@@ -667,7 +692,7 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
         ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL, runtime_validation="skip")
 
     gram = fit()
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
     leverage = fit()
 
@@ -692,32 +717,20 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
     assert abs(leverage._reml_result.objective - objective) <= bound
 
 
-def _binary_response(rng: np.random.Generator, eta: np.ndarray) -> np.ndarray:
-    return (rng.uniform(size=len(eta)) < 1.0 / (1.0 + np.exp(-eta))).astype(np.float64)
-
-
-def _structured_iterate(kind: str) -> tuple:
-    """One logistic PIRLS iterate at fixed lambdas on a nested chain, an fs leaf or an sz tree."""
+def _nested_iterate() -> tuple:
+    """One logistic PIRLS iterate at fixed lambdas on a nested chain."""
     from superglm.model.reml_setup import collect_reml_groups
     from superglm.reml.penalty_algebra import build_penalty_context
     from superglm.solvers.irls_direct import fit_irls_direct
-    from tests.test_factor_smooth_structured_parity import _factor_smooth_problem
     from tests.test_nested_structured_fit import _fit, _response
 
-    if kind == "nested":
-        _, y, _, weight = _response("binomial")
-        offset = np.zeros(len(y))
-        held = {"x": 3.0, "crossed": 20.0, "make": 5.0, "model": 8.0, "variant": 20.0}
-        model = _fit("binomial", "structured", lambdas=held)
-        dm, groups, lambdas = model._dm, model._groups, dict(model._reml_lambdas)
-        matrices = list(dm.group_matrices)
-        penalties, _, _ = build_penalty_context(matrices, collect_reml_groups(groups, matrices))
-        semantics = "prior"
-    else:
-        dm, groups, penalties, y, weight, offset, lambdas = _factor_smooth_problem(
-            _binary_response, factor_basis=kind
-        )
-        semantics = "frequency"
+    _, y, _, weight = _response("binomial")
+    offset = np.zeros(len(y))
+    held = {"x": 3.0, "crossed": 20.0, "make": 5.0, "model": 8.0, "variant": 20.0}
+    model = _fit("binomial", "structured", lambdas=held)
+    dm, groups, lambdas = model._dm, model._groups, dict(model._reml_lambdas)
+    matrices = list(dm.group_matrices)
+    penalties, _, _ = build_penalty_context(matrices, collect_reml_groups(groups, matrices))
     result, factor = fit_irls_direct(
         X=dm,
         y=y,
@@ -730,14 +743,13 @@ def _structured_iterate(kind: str) -> tuple:
         direct_solve="structured",
         reml_penalties=penalties,
         tol=1e-10,
-        weight_semantics=semantics,
+        weight_semantics="prior",
     )
     return dm, groups, penalties, lambdas, result, factor, weight, offset
 
 
-@pytest.mark.parametrize("kind", ["nested", "fs", "sz"])
-def test_a_structured_factor_takes_the_leverage_route_within_rounding(kind):
-    """The structured leverage route against the derivative operators at one PIRLS iterate.
+def test_the_nested_factor_takes_the_leverage_route_within_rounding():
+    """The nested factor's leverage route against the derivative operators at one PIRLS iterate.
 
     Its gradient reads each row's ``[1, x] H_aug^-1 [1, x]'`` from the
     augmented factor's row quadratic forms; the Gram route traces ``H^-1 C_j``
@@ -750,13 +762,12 @@ def test_a_structured_factor_takes_the_leverage_route_within_rounding(kind):
     the two within twice that.  The stop's cross terms (``lookup_tables=False``)
     are within ``gamma_K kappa_s(H) (F + F')`` of ``-(P + P') / 2`` formed from
     the materialised inverse and operators.  Mutations (each fails here): the
-    row channel without its ``1 / sum_w``; the nested factor's cross block read
-    as ``[:m, :m]``; the leaf and tree factors' pair traces at unit lambda.
+    row channel without its ``1 / sum_w``; the cross block read as ``[:m, :m]``.
     """
     from superglm.solvers.structured import materialize_compact_operator
 
-    dm, groups, penalties, lambdas, result, factor, weight, offset = _structured_iterate(kind)
-    assert isinstance(factor, w_derivatives._ROW_FORM_FACTORS)
+    dm, groups, penalties, lambdas, result, factor, weight, offset = _nested_iterate()
+    assert isinstance(factor, ProfiledNestedSchurFactor)
     args = (dm, LogitLink(), groups, result, factor, lambdas)
     kwargs = {
         "sample_weight": weight,

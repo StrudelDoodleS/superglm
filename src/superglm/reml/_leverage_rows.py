@@ -133,13 +133,15 @@ _POOLED_ROW_KERNELS = (_solved_rows_and_leverages,)
 writing only the block's own arrays."""
 
 
-def _support_plan(
-    dm: DesignMatrix,
-    inverse: NDArray,
-    centre_hi: NDArray,
-    centre_lo: NDArray | None,
-) -> _SupportPlan | None:
-    """The support route's tables, else ``None`` (another group type, or too large)."""
+def reads_row_supports(dm) -> bool:
+    """Whether the solved-row pass takes the support route on ``dm``, decided from metadata.
+
+    Every group a dense column or an indexed support (a categorical, a random
+    effect, a discretised or support-compressed spline) whose table reads as
+    float64, at least one of them indexed, and the tables within half the rows
+    and a quarter of ``max_memory``: :func:`_support_plan` builds its tables
+    exactly then.
+    """
     from superglm._group_matrix._group_matrix_centered import _reads_as_float64
     from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
     from superglm._parallel import resolve_max_memory
@@ -151,23 +153,43 @@ def _support_plan(
     )
 
     if type(dm) is not DesignMatrix:
-        return None
-    # Sized from metadata before any table is formed.
+        return False
     rows = 0
     for gm in dm.group_matrices:
         if type(gm) is DenseGroupMatrix:
             continue
         if isinstance(gm, DiscretizedSSPGroupMatrix):
-            rows += int(gm.B_unique.shape[0])
+            rows, operands = rows + int(gm.B_unique.shape[0]), (gm.B_unique, gm.R_inv)
         elif isinstance(gm, DiscretizedSCOPGroupMatrix):
-            rows += int(gm.B_scop_unique.shape[0])
+            rows, operands = rows + int(gm.B_scop_unique.shape[0]), (gm.B_scop_unique,)
         elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
-            rows += int(gm.n_bins) + 1
+            rows, operands = rows + int(gm.n_bins) + 1, (gm.B_unique, gm.R_inv)
         elif type(gm) in ONE_HOT_CODE_TYPES:
-            rows += int(gm.n_levels) + 1
+            rows, operands = rows + int(gm.n_levels) + 1, ()
         else:
-            return None
-    if 2 * rows > dm.n or 8 * rows * dm.p > resolve_max_memory() // 4:
+            return False
+        if not all(_reads_as_float64(np.asarray(operand).dtype) for operand in operands):
+            return False
+    return 0 < rows and 2 * rows <= dm.n and 8 * rows * dm.p <= resolve_max_memory() // 4
+
+
+def _support_plan(
+    dm: DesignMatrix,
+    inverse: NDArray,
+    centre_hi: NDArray,
+    centre_lo: NDArray | None,
+) -> _SupportPlan | None:
+    """The support route's tables, else ``None`` (:func:`reads_row_supports`)."""
+    from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
+    from superglm.group_matrix import (
+        DenseGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+    )
+
+    # Sized from metadata before any table is formed.
+    if not reads_row_supports(dm):
         return None
 
     p = dm.p
@@ -200,11 +222,6 @@ def _support_plan(
         elif type(gm) in ONE_HOT_CODE_TYPES:
             values, transform, codes = None, None, gm.codes
         else:  # pragma: no cover - sized above
-            return None
-        if any(
-            operand is not None and not _reads_as_float64(np.asarray(operand).dtype)
-            for operand in (values, transform)
-        ):
             return None
         if values is None:  # categorical: the identity, its base level the zero row
             raw = np.eye(width, dtype=np.float64)
@@ -248,8 +265,6 @@ def _support_plan(
         meta.append((table_rows, zero, column))
         table_rows += tables[-1].shape[0]
         column += width
-    if not meta:
-        return None
     widths = np.array([support.shape[1] for support in supports], dtype=np.intp)
     dense_columns = np.array(
         [column + j for column, width, _ in dense for j in range(width)], dtype=np.intp
