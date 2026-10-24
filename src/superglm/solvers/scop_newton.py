@@ -256,12 +256,17 @@ def _restrict_to_resolved_range(H: NDArray, discarded: NDArray) -> NDArray:
     enters the Hessian through ``diag(grad_data)`` as a *negative* diagonal.
     Consumers then see a materially indefinite matrix and refuse it.
 
-    Restricting removes the frozen direction together with its curvature.
-    Because ``P' H_full P == I + curvature`` for the retained basis, the
-    positive-definiteness test already applied to ``I + curvature`` is exactly
-    the statement that the restriction is positive definite, so what is
-    reported here is positive semidefinite by construction rather than by
-    hope. A step that discarded nothing is returned untouched.
+    Restricting removes the frozen direction together with its curvature, and
+    what is reported is positive semidefinite by construction rather than by
+    hope. For the block's own curvature (``block_curvature``) ``P' H P == I +
+    curvature`` in the retained basis, so the positive-definiteness test
+    already applied to ``I + curvature`` is exactly the statement that the
+    restriction is positive definite. A joint step's retained basis comes
+    from its Schur block ``J (G~ - C' A^-1 C) J + lambda S (+ E)``, which the
+    own block ``J G J + lambda S (+ E)`` dominates (``G - G~ + C' A^-1 C`` is
+    positive semidefinite), so the restriction of the own block is at least
+    as positive as the one the test certified. A curvature that discarded
+    nothing is returned untouched.
     """
     if not discarded.size:
         return H

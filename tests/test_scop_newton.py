@@ -178,9 +178,19 @@ def test_indefinite_map_curvature_takes_the_gauss_newton_block():
     assert all(result.used_fisher_fallback for result in step.results.values())
     bound = 64 * hessian.shape[0] * np.linalg.cond(hessian) * UNIT
     assert _relative_error(change, expected) <= bound
-    for result in step.results.values():
-        # the curvature the REML geometry reads is the one the step solved with
-        assert np.linalg.eigvalsh(result.H_penalized).min() > 0.0
+    # The step solved with the Schur block; the curvature it reports is the
+    # block's own Gauss-Newton Hessian J G J + lambda S, without the map's
+    # curvature E, on the range the step resolved (all of it here).
+    start = 1 + problem["X"].shape[1]
+    for spec in problem["specs"]:
+        result = step.results[spec.group_index]
+        width = spec.S_scop.shape[0]
+        own = hessian[start : start + width, start : start + width]
+        assert result.discarded_directions.shape[0] == 0
+        assert np.max(np.abs(result.H_penalized - own)) <= 64 * len(problem["W"]) * UNIT * np.max(
+            np.abs(own)
+        )
+        start += width
 
 
 def test_a_coordinate_at_its_log_space_boundary_is_discarded_and_held():
