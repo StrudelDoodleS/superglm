@@ -62,7 +62,7 @@ from superglm.group_matrix import (
     _disc_disc_2d_hist,
 )
 from superglm.solvers.centered_system import _dense_split, penalty_factor
-from superglm.solvers.mode_score import centred_matvec, dense_centred_rmatvec, dense_columns
+from superglm.solvers.mode_score import dense_columns
 from superglm.solvers.rank import (
     _GREY_FLOOR,
     _eigensolver_relative_bar,
@@ -726,6 +726,46 @@ class _OrdinaryCross:
         return cross, norms
 
 
+def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArray:
+    """``(X - 1 centre') change`` on a leaf's rows, every column of ``change`` at once.
+
+    ``centred_matvec``'s algebra: a ``DenseGroupMatrix`` block is centred row
+    by row before one product for all columns; every other block takes its
+    own product of each column less ``centre' change``.
+    """
+    result = np.zeros((part.n, change.shape[1]))
+    offset = 0
+    for matrix in part.group_matrices:
+        width = matrix.shape[1]
+        block, shift = change[offset : offset + width], centre[offset : offset + width]
+        if type(matrix) is DenseGroupMatrix:
+            result += (matrix.M - shift) @ block
+        else:
+            for j, column in enumerate(block.T):
+                result[:, j] += matrix.matvec(column) - float(shift @ column)
+        offset += width
+    return result
+
+
+def _leaf_transposed(part: DesignMatrix, rows: NDArray, centre: NDArray) -> NDArray:
+    """``X' rows`` on a leaf's rows, a ``DenseGroupMatrix`` block's centred row by row.
+
+    The products ``dense_centred_rmatvec`` and a bounded block's
+    ``rmatvec`` form, before their rank-one centring terms.
+    """
+    result = np.zeros((part.p, rows.shape[1]))
+    offset = 0
+    for matrix in part.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            result[offset : offset + width] = (matrix.M - centre[offset : offset + width]).T @ rows
+        else:
+            for j, column in enumerate(rows.T):
+                result[offset : offset + width, j] = matrix.rmatvec(column)
+        offset += width
+    return result
+
+
 def _exact_support(spec: SCOPGroupSpec, supports: dict | None) -> tuple[NDArray, NDArray | None]:
     """A group's columns as a basis and a row index into it.
 
@@ -940,6 +980,14 @@ class SCOPJointNewton:
         first pass's error times order ``n u kappa(A)``. The rows are then
         factored by the TSQR (``streamed_weighted_factor``).
 
+        The rows are formed a TSQR leaf at a time and never all at once: one
+        pass over the leaves accumulates the first pass's residual ``X~_r' W
+        Z``, a second forms each leaf's ``Z`` again, regresses the correction
+        out of it and hands it to the TSQR. A binned group's rows are read off
+        its support by bin, and every ordinary group takes its products on the
+        leaf's rows (``row_subset``), a discretized one by its bins, a dense
+        one in one product for all ``q`` columns (``_leaf_product``).
+
         ``g`` bounds each column's rounding: its SCOP column's norm plus
         ``|A^+ C|`` times each ordinary column's, the raw norm on a column the
         product does not centre row by row (``centred_matvec``), with the
@@ -947,47 +995,58 @@ class SCOPJointNewton:
         and the Householder QR's ``m q`` on ``m`` rows (Higham 2002, Thm 19.4).
         """
         q, p = self.width, coupled.shape[0]
-        columns = np.empty((self.n, q))
-        for (support, bins), block in zip(moments.centred, self.slices, strict=True):
-            columns[:, block] = support if bins is None else support[bins]
-        scale = np.sqrt(np.maximum(np.diag(moments.gram), 0.0))
-        penalty_rows = np.zeros((0, q))
-        if self._cross is not None and p:
-            design, bounded = self._cross.design, self._cross.bounded
-            centre, centre_lo = reduced.centre_pair()
-
-            def regress(change: NDArray) -> None:
-                for j, coefficients in enumerate(change.T):
-                    columns[:, j] -= centred_matvec(design, coefficients, centre)
-                    if centre_lo is not None:
-                        columns[:, j] += math.fsum(centre_lo * coefficients)
-
-            regress(coupled)
-            weighted = (W[:, None] * columns).T
-            residual = np.column_stack(
-                [dense_centred_rmatvec(design, values, centre, centre_lo) for values in weighted]
-            )
-            if bounded is not None:
-                index = self._cross.bounded_index
-                residual[index] = np.column_stack(
-                    [bounded.rmatvec(values) for values in weighted]
-                ) - np.outer(reduced.mean_x[index], weighted.sum(axis=1))
-            residual -= reduced.penalty @ coupled
-            correction = np.column_stack([solve(column) for column in residual.T])
-            regress(correction)
-            norms = np.sqrt(np.maximum(np.diag(reduced.hessian), 0.0))
-            raw = ~dense_columns(design)
-            norms[raw] += 2.0 * np.abs(reduced.mean_x[raw]) * math.sqrt(moments.sum_w)
-            scale = scale + (np.abs(coupled) + np.abs(correction)).T @ norms
-            penalty_rows = penalty_factor(reduced.penalty) @ (coupled + correction)
         leaf = tsqr_leaf_rows(q)
-        chunks = (
-            (start, min(start + leaf, self.n), columns[start : start + leaf])
-            for start in range(0, self.n, leaf)
+        spans = [(start, min(start + leaf, self.n)) for start in range(0, self.n, leaf)]
+
+        def scop_rows(start: int, stop: int) -> NDArray:
+            rows = np.empty((stop - start, q))
+            for (support, bins), block in zip(moments.centred, self.slices, strict=True):
+                rows[:, block] = support[start:stop] if bins is None else support[bins[start:stop]]
+            return rows
+
+        scale = np.sqrt(np.maximum(np.diag(moments.gram), 0.0))
+        if self._cross is None or not p:
+            leaves = ((start, stop, scop_rows(start, stop)) for start, stop in spans)
+            return streamed_weighted_factor(leaves, W), scale, self.n * q + 2 * (p + 3)
+
+        design = self._cross.design
+        centre, centre_lo = reduced.centre_pair()
+
+        def regressed(start: int, stop: int, *changes: NDArray) -> tuple[NDArray, DesignMatrix]:
+            """The leaf's SCOP rows less ``X~_r change`` for each change in turn, and its design rows."""
+            part = design.row_subset(np.arange(start, stop))
+            rows = scop_rows(start, stop)
+            for change in changes:
+                rows -= _leaf_product(part, change, centre)
+                if centre_lo is not None:
+                    rows += [math.fsum(centre_lo * column) for column in change.T]
+            return rows, part
+
+        residual = np.zeros((p, q))
+        total = np.zeros(q)
+        for start, stop in spans:
+            rows, part = regressed(start, stop, coupled)
+            rows *= W[start:stop, None]
+            residual += _leaf_transposed(part, rows, centre)
+            total += rows.sum(axis=0)
+        # the rank-one parts of each centring: the dense pair's remainder, and
+        # the mean of every column the product did not centre row by row
+        raw = ~dense_columns(design)
+        shift = np.where(raw, reduced.mean_x, 0.0 if centre_lo is None else centre_lo)
+        residual -= np.outer(shift, total)
+        residual -= reduced.penalty @ coupled
+        correction = np.column_stack([solve(column) for column in residual.T])
+        leaves = (
+            (start, stop, regressed(start, stop, coupled, correction)[0]) for start, stop in spans
         )
-        factor = np.vstack((streamed_weighted_factor(chunks, W), penalty_rows))
-        rows = self.n + penalty_rows.shape[0]
-        return factor, scale, rows * q + 2 * (p + 3)
+        factor = streamed_weighted_factor(leaves, W)
+
+        norms = np.sqrt(np.maximum(np.diag(reduced.hessian), 0.0))
+        norms[raw] += 2.0 * np.abs(reduced.mean_x[raw]) * math.sqrt(moments.sum_w)
+        scale = scale + (np.abs(coupled) + np.abs(correction)).T @ norms
+        penalty_rows = penalty_factor(reduced.penalty) @ (coupled + correction)
+        factor = np.vstack((factor, penalty_rows))
+        return factor, scale, (self.n + penalty_rows.shape[0]) * q + 2 * (p + 3)
 
     def step(
         self,
