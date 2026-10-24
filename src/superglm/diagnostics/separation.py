@@ -102,20 +102,30 @@ def response_boundaries(distribution: Any, link: Any) -> tuple[str, ...]:
     return ()
 
 
-def _level_codes(x: NDArray, spec: Any, *, context: str) -> tuple[NDArray, list[Any]]:
+def _level_codes(
+    x: NDArray, spec: Any, *, context: str, codes: NDArray | None = None
+) -> tuple[NDArray, list[Any]]:
     """Row codes against a built Categorical spec's full level universe.
 
     Applies the same raw -> collapsed -> fitted-domain label contract the
     interaction builder uses, then maps rows an ``unseen="base"`` policy
     routes to the base level onto the base index so their exposure and
     response anchor the cell they actually train in.
-    """
-    from superglm.features.categorical import _codes_against
-    from superglm.features.interaction import _categorical_build_labels
 
-    labels = _categorical_build_labels(x, spec, context=context)
+    ``codes``, when given, are the codes the term's own build already made
+    for these rows (``Categorical._build_with_codes``): the same labels
+    against the same universe, so coding the column again would only repeat
+    them.
+    """
     levels = list(spec._levels)
-    codes = _codes_against(labels, levels)
+    if codes is not None:
+        codes = codes.astype(np.intp, copy=False)
+    else:
+        from superglm.features.categorical import _codes_against
+        from superglm.features.interaction import _categorical_build_labels
+
+        labels = _categorical_build_labels(x, spec, context=context)
+        codes = _codes_against(labels, levels)
     if getattr(spec, "unseen", "error") == "base" and (codes < 0).any():
         base_index = levels.index(spec._base_level)
         codes = np.where(codes < 0, base_index, codes)
@@ -151,14 +161,17 @@ def scan_categorical_term(
     y: NDArray,
     sample_weight: NDArray,
     boundaries: tuple[str, ...],
+    build_codes: NDArray | None = None,
 ) -> list[SeparatedTerm]:
     """Scan one main-effect Categorical term for separated levels.
 
     Every level of the universe is scanned, base included: with the level's
     own indicator the recession direction is that coordinate; for the base
     level it is the intercept walking against every non-base indicator.
+    ``build_codes`` are the term's build codes, when the caller holds them;
+    the scan reads them instead of coding the column again.
     """
-    codes, levels = _level_codes(x, spec, context=name)
+    codes, levels = _level_codes(x, spec, context=name, codes=build_codes)
     findings: list[SeparatedTerm] = []
     for boundary in boundaries:
         flags, n_occupied = _separated_flags(codes, len(levels), y, sample_weight, boundary)

@@ -1205,7 +1205,13 @@ def build_design_matrix(
             if record[0] == "cat":
                 _, name_c, spec_c, x_c = record
                 found = scan_categorical_term(
-                    name_c, spec_c, x_c, y, sample_weight, separation_boundaries
+                    name_c,
+                    spec_c,
+                    x_c,
+                    y,
+                    sample_weight,
+                    separation_boundaries,
+                    compiled.scan_codes.pop(name_c, None),
                 )
                 findings.extend(found)
                 # predict names these levels when it meets them (_predict_eta)
@@ -1228,6 +1234,7 @@ def build_design_matrix(
                         separation_boundaries,
                     )
                 )
+        compiled.scan_codes.clear()
         emit_separation_findings(findings, separation)
         emit_curve_separation(curves, separation)
         emit_level_curve_separation(level_curves)

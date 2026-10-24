@@ -445,6 +445,24 @@ class Categorical:
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
+        return self._build_with_codes(x, sample_weight, stacklevel=3)[0]
+
+    def _build_with_codes(
+        self,
+        x: NDArray,
+        sample_weight: NDArray[np.floating] | None = None,
+        *,
+        stacklevel: int = 2,
+    ) -> tuple[GroupInfo, NDArray]:
+        """``build``, and every row's code against the fitted level universe.
+
+        The codes index ``_levels`` (base and pinned levels included) and are
+        never negative: a row outside the universe is refused above. A caller
+        that scans the same rows against the universe, as the separation scan
+        does, reads them instead of coding the column a second time.
+        ``stacklevel`` is the frame, counted from this method, that the
+        build's warnings are attributed to.
+        """
         import pandas as pd
 
         x = _resolve_categorical_labels(x, self._grouping, at_fit=True)
@@ -489,7 +507,9 @@ class Categorical:
             effective = np.bincount(codes, minlength=len(self._levels)).astype(np.float64)
         observed = effective > 0.0
 
-        self._base_level = self._resolve_base(effective, observed, sample_weight)
+        self._base_level = self._resolve_base(
+            effective, observed, sample_weight, stacklevel=stacklevel + 1
+        )
         self._pinned_levels = [
             lev for i, lev in enumerate(self._levels) if not observed[i] and lev != self._base_level
         ]
@@ -500,7 +520,7 @@ class Categorical:
                 f"{sorted(self._pinned_levels, key=str)}. They remain known levels "
                 f"and predict as the base level.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=stacklevel,
             )
 
         # Remap codes: drop the base level and every pinned level, producing
@@ -525,7 +545,7 @@ class Categorical:
         remap[emitted] = np.arange(n_levels, dtype=np.intp)
         cat_codes = remap[codes]
 
-        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes)
+        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes), codes
 
     def _require_unseen_group(self) -> None:
         """Refuse an ``unseen`` group this fit cannot route new levels to."""
@@ -555,6 +575,7 @@ class Categorical:
         effective: NDArray[np.floating],
         observed: NDArray[np.bool_],
         sample_weight: NDArray[np.floating] | None,
+        stacklevel: int = 3,
     ) -> Any:
         """Pick the reference level, falling back when the request is empty.
 
@@ -594,7 +615,7 @@ class Categorical:
                     f"rows in this fit; falling back to '{fallback}'. Coefficient "
                     f"identity changes; predictions do not.",
                     UserWarning,
-                    stacklevel=3,
+                    stacklevel=stacklevel,
                 )
                 self._base_fallback = (base_level, fallback)
                 base_level = fallback

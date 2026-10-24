@@ -81,6 +81,58 @@ def test_separated_level_warns_before_fitting_and_names_both_predictors() -> Non
     assert "collapse" in message
 
 
+def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them() -> None:
+    """The compiled predictors outlive the scan, and a pickled model carries them.
+
+    The scan pops each term's build codes, and a compiled design never pickles
+    them, so a saved model holds neither the integers nor a class for them.
+    Mutations: a scan that neither pops nor clears them leaves an integer per
+    row per term on the model; a design that pickles its ``__dict__`` whole
+    writes the field into the bytes.
+    """
+    from superglm.distributional.serialization import pickle_state
+
+    frame, y, exposure = _separated_tweedie_fixture()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model = _tweedie_model().fit(
+            frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0}
+        )
+    designs = [predictor.compiled for predictor in model._model.compiled_predictors]
+    assert [design.scan_codes for design in designs] == [{}, {}, {}]
+    designs[0].scan_codes["region"] = np.zeros(len(y), dtype=np.intp)
+    assert b"scan_codes" not in pickle_state(designs[0])
+    assert pickle.loads(pickle_state(designs[0])).scan_codes == {}
+    assert b"BuildCodes" not in pickle.dumps(model)
+
+
+def test_the_codes_held_until_the_scan_take_a_byte_a_row() -> None:
+    """Every scanned term's codes are held across the other builds, so they are stored narrow."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.predictor import compile_predictors
+    from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+
+    frame, y, exposure = _separated_tweedie_fixture()
+    family = TweedieLSS()
+    templates = (
+        Predictor("mean", {"region": Categorical()}),
+        Predictor("dispersion", {}),
+        Predictor("power", {}),
+    )
+    weights = resolve_likelihood_weights(
+        exposure, n_observations=len(y), contract=WeightContract(semantics="prior")
+    )
+    (mean, *_) = compile_predictors(
+        as_eager_frame(frame),
+        weights,
+        family.parameters,
+        templates,
+        separation_boundaries=(("zero",), ("zero",), ()),
+        separation_response=y,
+    )
+    assert {k: v.dtype for k, v in mean.compiled.scan_codes.items()} == {"region": np.uint8}
+
+
 def test_separated_tweedie_fit_finishes_on_the_nearest_semidefinite_curvature() -> None:
     """Kills the refusal for a family without expected information (master raised here)."""
     frame, y, exposure = _separated_tweedie_fixture()
@@ -174,3 +226,48 @@ def test_a_clean_fit_has_no_curvature_finding() -> None:
     model.fit(frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0})
     report = diagnose_distributional_fit(model._require_fitted())
     assert not [f for f in report.findings if f.code == "fit.curvature_indefinite"]
+
+
+def test_a_select_smooth_predictor_keeps_its_categorical_build_codes_for_the_scan(
+    monkeypatch,
+) -> None:
+    """Centring a ``select=True`` smooth rebuilds the compiled design; the codes must come along.
+
+    Each declared Categorical codes its column once in its build and the scan
+    reads those codes. Mutation: a rebuilt design that drops ``scan_codes``
+    makes the scan code the mean predictor's column again, one call more.
+    """
+    import superglm.features.categorical as categorical
+
+    frame, y, exposure = _separated_tweedie_fixture()
+    levels = ["a", "b", "c", "d"]
+    calls = []
+    real = categorical._codes_against
+    monkeypatch.setattr(
+        categorical,
+        "_codes_against",
+        lambda values, levels_: calls.append(len(values)) or real(values, levels_),
+    )
+    model = model_from_templates(
+        family=TweedieLSS(),
+        predictors=(
+            Predictor(
+                "mean",
+                {
+                    "x": Spline(kind="ps", n_knots=5, select=True),
+                    "region": Categorical(levels=levels),
+                },
+            ),
+            Predictor("dispersion", {"region": Categorical(levels=levels)}),
+            Predictor("power", {}),
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model.fit(
+            frame,
+            y,
+            sample_weight=exposure,
+            lambdas={"mean:x#null": 1.0, "mean:x#wiggle": 1.0},
+        )
+    assert calls == [len(y), len(y)]

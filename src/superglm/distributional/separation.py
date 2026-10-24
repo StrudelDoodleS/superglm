@@ -101,6 +101,7 @@ def scan_predictor_separation(
                         response,
                         weight_values,
                         predictor_boundaries,
+                        predictor.compiled.scan_codes.pop(term, None),
                     )
                 )
             else:
@@ -119,6 +120,8 @@ def scan_predictor_separation(
                         predictor_boundaries,
                     )
                 )
+    for predictor in compiled_tuple:
+        predictor.compiled.scan_codes.clear()
     emit_curve_separation(curves, "warn")
     emit_level_curve_separation(level_curves)
     return findings
