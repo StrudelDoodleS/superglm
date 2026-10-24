@@ -175,7 +175,7 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         dm=SimpleNamespace(group_matrices=[], p=1),
         distribution=SimpleNamespace(scale_known=True),
         link=SimpleNamespace(),
-        groups=[SimpleNamespace(monotone_engine="scop")],
+        groups=[SimpleNamespace(name="term", monotone_engine="scop")],
         y=np.array([0.0]),
         sample_weight=np.ones(1),
         offset_arr=np.zeros(1),

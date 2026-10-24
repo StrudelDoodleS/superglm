@@ -2878,6 +2878,8 @@ def optimize_scop_efs_reml(
         A warm start (a previous fit's estimates, keyed by component name).
         The bootstrap fit is taken at these values and the first EFS update
         starts from them; components it does not name bootstrap cold at 1e-4.
+        A SCOP block's value enters its box (``latent_lambda_box``) at the
+        bootstrap's increments; any other is clipped to ``LAMBDA_BOX`` first.
         A warm bootstrap with no certified mode is retried at the
         Hessian-scaled values, like a cold one.
 
@@ -2936,13 +2938,20 @@ def optimize_scop_efs_reml(
     # Fixed-policy lambdas keep their value; only estimated components get 1e-4,
     # unless a warm start names them: then the bootstrap is fitted at the warm
     # value and the EFS step below leaves it there, so the first outer
-    # iteration reuses this very mode instead of fitting it again.
+    # iteration reuses this very mode instead of fitting it again.  A SCOP
+    # block's box follows its increments, which only the bootstrap fits: its
+    # warm value is boxed at the bootstrap's state, as every later step is.
     warm_names = {
         name for name in estimated_names if warm_lambdas is not None and name in warm_lambdas
     }
+    scop_names = {group.name for group in groups if group.monotone_engine == "scop"}
     boot_lambdas = {
         name: (
-            float(np.clip(warm_lambdas[name], LAMBDA_FLOOR, LAMBDA_CEILING))
+            (
+                float(warm_lambdas[name])
+                if name in scop_names
+                else float(np.clip(warm_lambdas[name], *LAMBDA_BOX))
+            )
             if name in warm_names
             else (1e-4 if name in estimated_names else val)
         )
@@ -3032,9 +3041,10 @@ def optimize_scop_efs_reml(
         boot_alpha,
         {},
     )
+    boot_boxes = _lambda_boxes(boot_mode)
     for name in estimated_names:
         if name in warm_names:
-            lambdas[name] = boot_lambdas[name]
+            lambdas[name] = float(np.clip(boot_lambdas[name], *boot_boxes.get(name, LAMBDA_BOX)))
         elif name in boot_lambdas_new:
             lambdas[name] = boot_lambdas_new[name]
 

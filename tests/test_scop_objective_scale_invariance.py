@@ -201,7 +201,7 @@ def test_latent_lambda_box_stays_in_the_positive_normal_range():
     assert latent_lambda_box(np.full(3, -400.0)) == (TINY, LAMBDA_CEILING)
 
 
-def _fit(units, truth):
+def _fit(units, truth, lambda2_init=None):
     """A Gaussian/identity fit of ``units * y`` whose monotone x2 truth is linear or exp.
 
     The fit must converge: no ``ConvergenceWarning`` and a converged reason.
@@ -222,7 +222,7 @@ def _fit(units, truth):
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)
-        model.fit_reml(frame, units * y)
+        model.fit_reml(frame, units * y, lambda2_init=lambda2_init)
     assert not [str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)]
     diagnostics = model.reml_diagnostics()
     assert diagnostics["converged"], diagnostics["termination_reason"]
@@ -295,3 +295,11 @@ def test_scop_reml_fit_at_small_units_matches_the_unit_fit():
     shift = np.max(np.abs(curve - reference_curve) / standard_error)
     assert shift <= math.sqrt(len(lambdas) * reference.result.beta.size) * tolerance
 
+
+def test_scop_warm_start_keeps_a_lambda_above_the_unit_ceiling():
+    """A refit from a large-units fit's estimates starts there, not at the unit box's ceiling."""
+    units = 1e5
+    warm = _fit_once(units, "linear").reml_diagnostics()["lambdas"]
+    refit = _fit(units, "linear", lambda2_init=warm)
+    assert warm["x2"] > LAMBDA_CEILING
+    assert refit.reml_diagnostics()["lambda_history"][0]["x2"] == warm["x2"]
