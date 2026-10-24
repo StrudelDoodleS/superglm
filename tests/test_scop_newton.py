@@ -1023,3 +1023,47 @@ def test_a_fit_that_drives_coordinates_to_their_boundary_publishes_finite_infere
     # the intercept and every coefficient at most, each held direction at least one fewer
     assert 1.0 <= result.effective_df <= result.beta.size + 1
     assert np.isfinite(result.phi) and result.phi > 0.0
+
+
+def test_the_schur_rows_are_formed_a_leaf_at_a_time(monkeypatch):
+    """The row factor holds a TSQR leaf of rows, never an ``n x q`` copy (a memory envelope, not a time).
+
+    x beside a convex spline of x is an exact alias, so every joint step
+    takes the rows. The factor held the projected rows and their weighted
+    copy whole, two ``n x q`` arrays, and failed at a million rows under a
+    512 MiB address-space limit that master's fit stayed within.
+    """
+    import tracemalloc
+
+    from superglm import Numeric, PSpline
+    from superglm.solvers import scop_newton
+
+    # leaves of a few rows, so one leaf is far below the n x q the envelope bars
+    monkeypatch.setattr(scop_newton, "tsqr_leaf_rows", lambda width: 4 * width)
+    peaks = []
+    rows_of = SCOPJointNewton._schur_rows
+
+    def traced(self, *args):
+        tracemalloc.start()
+        try:
+            return rows_of(self, *args)
+        finally:
+            peaks.append((tracemalloc.get_traced_memory()[1], self.n * self.width * 8))
+            tracemalloc.stop()
+
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", traced)
+    rng = np.random.default_rng(3)
+    x = np.resize(np.linspace(0.0, 1.0, 100), 5_000)
+    y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=x.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        discrete=True,
+        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+    )
+    model.fit(pd.DataFrame({"x": x, "s": x}), y)
+
+    assert model.result.converged
+    assert peaks
+    assert all(peak < copy for peak, copy in peaks)
