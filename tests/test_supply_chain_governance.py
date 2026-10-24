@@ -449,13 +449,8 @@ _COOLDOWN_DAYS = 7
 # here) at the first lock bump after the window has passed that release.
 _COOLDOWN_EXEMPTIONS = {
     "certifi": "2026.10.19 fixes GHSA-6q48-6c7w-9gw2",
-    "pillow": (
-        "13.0.0 fixes GHSA-p4wg-p73j-c528, GHSA-65qm-jvmh-6pqg, GHSA-58r4-6rv3-gfh8, "
-        "GHSA-pchr-8j38-3x4p, GHSA-q45j-58j2-45rg, GHSA-462x-pgg6-55fp, "
-        "GHSA-c6hw-5grf-ff96 and GHSA-vx6w-vv9f-6gvg"
-    ),
     "filelock": "4.2.1 fixes GHSA-v4x8-3wr5-3wq8, GHSA-9vhv-jxww-xfm5 and GHSA-567q-5qvw-pf92",
-    "virtualenv": "21.14.10 fixes GHSA-4f8h-vr72-p32c",
+    "virtualenv": "21.14.13 fixes GHSA-4f8h-vr72-p32c and GHSA-cx6f-vjhg-g3cc",
 }
 # Packages a lock change may move below the base lock, each with its reason.
 _LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}
