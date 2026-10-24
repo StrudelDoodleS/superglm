@@ -19,7 +19,7 @@ from superglm.distributional.kernels.negative_binomial import (
     _POWER_SUM_BERNOULLI,
     _SERIES_ORDER,
     _SERIES_RATIO,
-    _TINY,
+    _SUBNORMAL,
 )
 
 
@@ -52,7 +52,7 @@ def _scaled_power_sums(count: int) -> tuple[NDArray[np.float64], NDArray[np.floa
             absolute = abs(coefficients[term]) + inverse_count * absolute
         denominator = _FLOAT(power + 1)
         values[power] = polynomial / denominator
-        errors[power] = _gamma(4 * power + 8) * absolute / denominator + _TINY
+        errors[power] = _gamma(4 * power + 8) * absolute / denominator + _SUBNORMAL
     return values, errors
 
 
@@ -108,7 +108,7 @@ def _theta_series(
                 offset_error = (
                     abs(offset_factor) * float(sum_errors[order - 1])
                     + _gamma(order + 2) * abs(offset)
-                    + _TINY
+                    + _SUBNORMAL
                 )
             else:
                 offset = offset_error = 0.0
@@ -144,7 +144,7 @@ def _theta_series(
         series_score_error = (
             x * x * (_gamma(80) * absolute + (1.0 + _gamma(32)) * coefficient_error_absolute)
             + score_tail
-            + _TINY
+            + _SUBNORMAL
         )
         total = row_mean + row_theta
         recurrence_score_scale = count / total * (
@@ -178,12 +178,14 @@ def _theta_series(
             / row_theta
             * (_gamma(96) * weighted_absolute + (1.0 + _gamma(32)) * weighted_error)
             + hessian_tail
-            + _TINY
+            + _SUBNORMAL
         )
         recurrence_hessian_scale = (
             recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
             + (row_mean / total) * mean_ratio / total
         )
-        use[row, 1] = series_hessian_error < (_gamma(count + 80) * recurrence_hessian_scale + _TINY)
+        use[row, 1] = series_hessian_error < (
+            _gamma(count + 80) * recurrence_hessian_scale + _SUBNORMAL
+        )
 
     return use, natural, direct

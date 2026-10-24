@@ -1,5 +1,6 @@
 """SCOP admission uses represented quadratic actions, not absolute units."""
 
+import functools
 import math
 import warnings
 
@@ -7,10 +8,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, Spline, SuperGLM
+from superglm import Constraint, ConvergenceWarning, Spline, SuperGLM
 from superglm._lambda_box import LAMBDA_CEILING, latent_lambda_ceiling
+from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS
 from superglm.distributions import Gaussian
 from superglm.links import IdentityLink
+from superglm.reml.scop_efs import _SCOP_SUPPRESSION_EDF
 from superglm.solvers.irls_state import _irls_objective_relative_change
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import (
@@ -190,7 +193,11 @@ def test_latent_lambda_ceiling_scales_with_the_squared_increments(units):
     assert latent_lambda_ceiling(np.full(3, 400.0)) == np.finfo(np.float64).max
 
 
-def _gaussian_identity_scop_fit(units):
+def _fit(units):
+    """A Gaussian/identity fit of ``units * y`` whose monotone x2 truth is linear.
+
+    The fit must converge: no ``ConvergenceWarning`` and a converged reason.
+    """
     rng = np.random.default_rng(20261024)
     n = 3000
     frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
@@ -204,28 +211,47 @@ def _gaussian_identity_scop_fit(units):
             "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
         },
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
         model.fit_reml(frame, units * y)
-    return model, frame
+    assert not [str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)]
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["converged"], diagnostics["termination_reason"]
+    assert diagnostics["termination_reason"] in _REML_CONVERGED_REASONS
+    return model
 
 
-def test_scop_reml_fit_does_not_depend_on_the_response_units():
+_fit_once = functools.cache(_fit)
+
+
+def _x2_curve(model, units):
+    """The x2 term on the link scale and its pointwise standard error, divided by ``units``."""
+    with np.errstate(over="ignore"):  # an identity link's relativity is exp of the curve
+        inference = model.term_inference("x2")
+    curve = np.asarray(inference.log_relativity, dtype=float)
+    return curve / units, np.asarray(inference.se_log_relativity, dtype=float) / units
+
+
+@pytest.mark.parametrize("units", [1e5])
+def test_scop_reml_fit_at_large_units_matches_the_unit_fit(units):
     """Rescaling y rescales the fit; the SCOP smoothing parameter scales with it.
 
-    The monotone term's truth is linear, so its smoothing parameter runs to
-    the top of the search box, which grows as the squared response units.
-    At y * 1e5 the unit box's 1e10 ceiling held it at 1e-3 of its optimum:
-    EDF 12.07 against 9.71 and predictions 12.7 standard errors away.
+    With a linear truth the x2 penalty climbs until its residual EDF falls
+    under ``_SCOP_SUPPRESSION_EDF``, where the increase is held, so each fit
+    stops within that EDF of the infinite-lambda limit and the two agree to
+    it.  To first order the curve moves by at most ``sqrt(rEDF)`` standard
+    errors per unit of log lambda; integrated from the bar to infinite
+    lambda that is ``2 sqrt(bar)`` per fit.  The unit box's 1e10 ceiling
+    held the 1e5 fit at 1e-3 of its optimum (EDF 12.07 against 9.71, the
+    curve 3.8 standard errors away).
     """
-    units = 1e5
-    reference, frame = _gaussian_identity_scop_fit(1.0)
-    scaled, _ = _gaussian_identity_scop_fit(units)
+    reference = _fit_once(1.0)
+    scaled = _fit_once(units)
     assert scaled.reml_diagnostics()["lambdas"]["x2"] > LAMBDA_CEILING
-    assert scaled.result.effective_df == pytest.approx(reference.result.effective_df, abs=0.05)
-    standard_error = float(np.min(reference.term_inference("x2").se_log_relativity))
-    shift = np.asarray(scaled.predict(frame), dtype=float) / units - np.asarray(
-        reference.predict(frame), dtype=float
-    )
-    # A change of units moves the fit by a small fraction of its own uncertainty.
-    assert float(np.max(np.abs(shift))) < 0.1 * standard_error
+    edf = reference.result.effective_df
+    assert abs(scaled.result.effective_df - edf) <= _SCOP_SUPPRESSION_EDF
+    curve, _ = _x2_curve(scaled, units)
+    reference_curve, standard_error = _x2_curve(reference, 1.0)
+    shift = np.max(np.abs(curve - reference_curve) / standard_error)
+    assert shift <= 4.0 * math.sqrt(_SCOP_SUPPRESSION_EDF)
+

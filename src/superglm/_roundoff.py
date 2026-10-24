@@ -29,7 +29,8 @@ def gamma(count):
     """``gamma_count``; infinite once ``count u`` reaches one.  Elementwise on an array."""
     product = count * UNIT_ROUNDOFF
     if np.ndim(product):
-        return product / (1.0 - product)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(product < 1.0, product / (1.0 - product), np.inf)
     return product / (1.0 - product) if product < 1.0 else float("inf")
 
 

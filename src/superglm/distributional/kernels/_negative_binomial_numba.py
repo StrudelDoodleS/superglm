@@ -26,7 +26,7 @@ from numpy.typing import NDArray
 
 from superglm._parallel import pooled_row_blocks
 from superglm._roundoff import EPS as _EPS
-from superglm._roundoff import SMALLEST_SUBNORMAL as _TINY
+from superglm._roundoff import SMALLEST_SUBNORMAL as _SUBNORMAL
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 
 # A block of 1,024 rows is about 0.2 ms of theta-series work and a section
@@ -76,7 +76,7 @@ def _scaled_power_sums(
             absolute = abs(coefficients[term]) + inverse_count * absolute
         denominator = float(power + 1)
         values[power] = polynomial / denominator
-        errors[power] = _gamma_bound(float(4 * power + 8)) * absolute / denominator + _TINY
+        errors[power] = _gamma_bound(float(4 * power + 8)) * absolute / denominator + _SUBNORMAL
 
 
 @njit(cache=True, nogil=True)
@@ -132,7 +132,7 @@ def theta_series_serial(
                 offset_error = (
                     abs(offset_factor) * sum_errors[order - 1]
                     + _gamma_bound(float(order + 2)) * abs(offset)
-                    + _TINY
+                    + _SUBNORMAL
                 )
             else:
                 offset = 0.0
@@ -173,7 +173,7 @@ def theta_series_serial(
                 + (1.0 + _gamma_bound(32.0)) * coefficient_error_absolute
             )
             + score_tail
-            + _TINY
+            + _SUBNORMAL
         )
         total = row_mean + row_theta
         recurrence_score_scale = (
@@ -208,14 +208,14 @@ def theta_series_serial(
             / row_theta
             * (_gamma_bound(96.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
             + hessian_tail
-            + _TINY
+            + _SUBNORMAL
         )
         recurrence_hessian_scale = (
             recurrence_score_scale * (1.0 / row_theta + 1.0 / total)
             + (row_mean / total) * mean_ratio / total
         )
         use[row, 1] = series_hessian_error < (
-            _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _TINY
+            _gamma_bound(float(count + 80)) * recurrence_hessian_scale + _SUBNORMAL
         )
 
 
@@ -301,7 +301,7 @@ def _log_third_row(
                 offset_error = (
                     abs(offset_factor) * sum_errors[order - 1]
                     + _gamma_bound(float(order + 2)) * abs(offset)
-                    + _TINY
+                    + _SUBNORMAL
                 )
             else:
                 offset = 0.0
@@ -329,7 +329,7 @@ def _log_third_row(
             lead
             * (_gamma_bound(64.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
             + tail
-            + _TINY
+            + _SUBNORMAL
         )
 
     if series_error < recurrence_error:
@@ -499,7 +499,7 @@ def _log_fourth_row(
                 offset_error = (
                     abs(offset_factor) * sum_errors[order - 1]
                     + _gamma_bound(float(order + 2)) * abs(offset)
-                    + _TINY
+                    + _SUBNORMAL
                 )
             else:
                 offset = 0.0
@@ -527,7 +527,7 @@ def _log_fourth_row(
             lead
             * (_gamma_bound(64.0) * weighted_absolute + (1.0 + _gamma_bound(32.0)) * weighted_error)
             + tail
-            + _TINY
+            + _SUBNORMAL
         )
 
     if series_error < recurrence_error:

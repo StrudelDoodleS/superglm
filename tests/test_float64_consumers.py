@@ -1,5 +1,7 @@
 """Range regressions for public consumers of binary64 numerical kernels."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -88,3 +90,15 @@ def test_scop_roundoff_retains_small_action_times_large_response():
     gamma = (50 * unit) / (1 - 50 * unit)
     expected = 4 * gamma / (1 - gamma) ** 2.5
     assert actual == pytest.approx(expected, rel=32 * np.finfo(float).eps, abs=0)
+
+
+def test_roundoff_gamma_is_infinite_once_count_u_reaches_one_on_an_array():
+    from superglm._roundoff import gamma
+
+    counts = np.array([3.0, 2.0**52, 2.0**53, 2.0**60])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        values = gamma(counts)
+    np.testing.assert_array_equal(values, [gamma(float(count)) for count in counts])
+    assert values[1] == 1.0
+    assert np.all(np.isposinf(values[2:]))

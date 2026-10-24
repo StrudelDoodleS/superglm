@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 import superglm.distributional.kernels._negative_binomial_numba as _compiled
 from superglm._parallel import pooled_row_blocks
 from superglm._roundoff import EPS as _EPS
-from superglm._roundoff import SMALLEST_SUBNORMAL as _TINY
+from superglm._roundoff import SMALLEST_SUBNORMAL as _SUBNORMAL
 from superglm._roundoff import gamma
 from superglm.distributional.kernels._common import (
     WeightSemantics,
@@ -479,7 +479,7 @@ def _ratio_remainder(
     logarithm = np.log1p(ratio)
     result = rational - logarithm
     scale = np.abs(rational) + np.abs(logarithm)
-    error = gamma(8) * scale + _TINY
+    error = gamma(8) * scale + _SUBNORMAL
     candidates = ratio < 1.0
     if not np.any(candidates):
         return result, error, scale
@@ -496,7 +496,7 @@ def _ratio_remainder(
     series = x * x * polynomial
     series_scale = x * x * absolute
     tail = _SERIES_ORDER / (_SERIES_ORDER + 1.0) * x ** (_SERIES_ORDER + 1)
-    series_error = gamma(2 * (2 * _SERIES_ORDER + 2)) * series_scale + tail + _TINY
+    series_error = gamma(2 * (2 * _SERIES_ORDER + 2)) * series_scale + tail + _SUBNORMAL
     indices = np.flatnonzero(candidates)
     use = series_error < error[candidates]
     chosen = indices[use]
@@ -668,7 +668,7 @@ def _retain_log_channels(
     bound = (
         gamma(2 * (counts + 128))[:, None]
         * (score_scale + np.abs(target_score) + np.abs(reconstructed_score))
-        + 16.0 * _TINY
+        + 16.0 * _SUBNORMAL
     )
     retained = np.all(
         np.isfinite(reconstructed_score) & (np.abs(reconstructed_score - target_score) <= bound),
@@ -687,7 +687,7 @@ def _retain_log_channels(
         bound = (
             gamma(2 * (counts + 160))[:, None]
             * (hessian_scale + np.abs(target_hessian) + np.abs(reconstructed_hessian))
-            + 24.0 * _TINY
+            + 24.0 * _SUBNORMAL
         )
         retained &= np.all(
             np.isfinite(reconstructed_hessian)
