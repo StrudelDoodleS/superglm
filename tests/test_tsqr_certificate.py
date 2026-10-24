@@ -31,6 +31,8 @@ from superglm.solvers.centered_system import (
 from tests._exact_reference import exact_matmul
 
 _U = 2.0**-53
+# Higham's unspecified constant in gamma~_{mn} (Thm 19.4) for the small-stack Householder bound.
+_HOUSEHOLDER_C = 4
 
 
 def _gamma(k: int) -> float:
@@ -44,6 +46,14 @@ def _assert_householder_accurate(factor: np.ndarray, a: np.ndarray) -> None:
 
     ``factor = Q'(a + da)`` with ``||da_j|| <= gamma_{mn} ||a_j||`` (Higham 2002, Thm 19.4), so
     each entry of ``factor'factor - a'a`` is within ``(2 gamma + gamma^2) ||a_i|| ||a_j||``.
+    Higham leaves the constant in ``gamma~_{mn}`` unspecified; it is taken as ``_HOUSEHOLDER_C``
+    here, so that ``gamma = _gamma(_HOUSEHOLDER_C * m * n)``. At width 1 with two rows the
+    reflector is one ``dlarfg``: ``dnrm2`` (about 2 roundings) and ``dlapy2``
+    (``w sqrt(1 + (z/w)^2)``: 5 roundings) put about ``4.25u`` in the single entry ``r``, so
+    ``r^2`` is off by about ``8.5u + u`` of ``||a||^2`` before the reference Gram's own ``2u``.
+    The unit constant gave ``7u`` there, which random 2-row stacks reach 80% of; four allows
+    ``19u`` and costs nothing where it matters, because a wrong factor or merge is wrong by
+    O(1) or by a relative ``1e-9``, far above ``gamma_{4mn}`` at every size used here.
     The two Grams are formed in floating point here, adding ``gamma_m + gamma_n`` of the same
     scale (a dot product of ``k`` terms is within ``gamma_k`` of its absolute sum, Thm 3.5,
     and that sum is at most ``||a_i|| ||a_j||``). This is what two implementations of one QR
@@ -51,7 +61,7 @@ def _assert_householder_accurate(factor: np.ndarray, a: np.ndarray) -> None:
     """
     m, n = a.shape
     norms = np.linalg.norm(a, axis=0)
-    gamma = _gamma(m * n)
+    gamma = _gamma(_HOUSEHOLDER_C * m * n)
     bound = (2.0 * gamma + gamma * gamma + _gamma(m) + _gamma(factor.shape[0])) * np.outer(
         norms, norms
     )
