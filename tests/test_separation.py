@@ -7,6 +7,7 @@ finite garbage on a separated design).
 
 import re
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -821,4 +822,4 @@ def test_a_fit_reports_the_build_warnings_where_master_did():
             family="poisson", features={"c": Categorical(base="z", levels=["a", "b", "z"])}
         ).fit(pd.DataFrame({"c": c}), y)
     attributed = [w for w in record if "falling back" in str(w.message)]
-    assert [w.filename.rsplit("/", 1)[-1] for w in attributed] == ["dm_builder.py"]
+    assert [Path(w.filename).name for w in attributed] == ["dm_builder.py"]

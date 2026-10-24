@@ -63,9 +63,8 @@ class CompiledPredictorDesign:
     # Each scanned Categorical's row codes from its build, by term name, until
     # that term's scan pops them.  They are scan scratch, not model state: a
     # fitted SuperLSS keeps its compiled predictors, so pickling leaves them out.
-    scan_codes: dict[str, NDArray] = field(
-        default_factory=dict, init=False, repr=False, compare=False
-    )
+    # An init field, so ``dataclasses.replace`` carries them to the new design.
+    scan_codes: dict[str, NDArray] = field(default_factory=dict, repr=False, compare=False)
 
     def __getstate__(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items() if k != "scan_codes"}

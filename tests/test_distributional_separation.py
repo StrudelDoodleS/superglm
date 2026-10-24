@@ -86,8 +86,9 @@ def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them
 
     The scan pops each term's build codes, and a compiled design never pickles
     them, so a saved model holds neither the integers nor a class for them.
-    Mutation: a scan that only reads them leaves an integer per row per term on
-    the model.
+    Mutations: a scan that neither pops nor clears them leaves an integer per
+    row per term on the model; a design that pickles its ``__dict__`` whole
+    writes the field into the bytes.
     """
     from superglm.distributional.serialization import pickle_state
 
@@ -100,6 +101,7 @@ def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them
     designs = [predictor.compiled for predictor in model._model.compiled_predictors]
     assert [design.scan_codes for design in designs] == [{}, {}, {}]
     designs[0].scan_codes["region"] = np.zeros(len(y), dtype=np.intp)
+    assert b"scan_codes" not in pickle_state(designs[0])
     assert pickle.loads(pickle_state(designs[0])).scan_codes == {}
     assert b"BuildCodes" not in pickle.dumps(model)
 
@@ -224,3 +226,48 @@ def test_a_clean_fit_has_no_curvature_finding() -> None:
     model.fit(frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0})
     report = diagnose_distributional_fit(model._require_fitted())
     assert not [f for f in report.findings if f.code == "fit.curvature_indefinite"]
+
+
+def test_a_select_smooth_predictor_keeps_its_categorical_build_codes_for_the_scan(
+    monkeypatch,
+) -> None:
+    """Centring a ``select=True`` smooth rebuilds the compiled design; the codes must come along.
+
+    Each declared Categorical codes its column once in its build and the scan
+    reads those codes. Mutation: a rebuilt design that drops ``scan_codes``
+    makes the scan code the mean predictor's column again, one call more.
+    """
+    import superglm.features.categorical as categorical
+
+    frame, y, exposure = _separated_tweedie_fixture()
+    levels = ["a", "b", "c", "d"]
+    calls = []
+    real = categorical._codes_against
+    monkeypatch.setattr(
+        categorical,
+        "_codes_against",
+        lambda values, levels_: calls.append(len(values)) or real(values, levels_),
+    )
+    model = model_from_templates(
+        family=TweedieLSS(),
+        predictors=(
+            Predictor(
+                "mean",
+                {
+                    "x": Spline(kind="ps", n_knots=5, select=True),
+                    "region": Categorical(levels=levels),
+                },
+            ),
+            Predictor("dispersion", {"region": Categorical(levels=levels)}),
+            Predictor("power", {}),
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model.fit(
+            frame,
+            y,
+            sample_weight=exposure,
+            lambdas={"mean:x#null": 1.0, "mean:x#wiggle": 1.0},
+        )
+    assert calls == [len(y), len(y)]
