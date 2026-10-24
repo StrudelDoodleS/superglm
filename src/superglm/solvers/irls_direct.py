@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 import numpy as np
 from numpy.typing import NDArray
@@ -391,6 +392,11 @@ class _SCOPTrialState:
 
     irls: _IRLSState
     groups: tuple[_SCOPGroupState, ...]
+    level: float | None = None
+    """The intercept about ``centre``, where the joint step formed it: the
+    raw ``irls.intercept`` reads it at ``u |m' beta|``."""
+    centre: tuple[NDArray, NDArray | None] | None = None
+    """The ordinary system's centre pair ``(hi, lo)`` that ``level`` is about."""
 
 
 @dataclass(frozen=True)
@@ -419,6 +425,12 @@ class _SCOPOrdinarySolve:
     coupled: NDArray
     mean: NDArray
     mean_x: NDArray
+    centre: tuple[NDArray, NDArray | None]
+    """The system's centre pair ``(hi, lo)``, which the levels are about."""
+    centred_rows: Callable[[NDArray], NDArray] | None = None
+    """``(X - 1 m') b`` about ``centre`` where the proposal formed its
+    predictor so (``_raw_centering_well_scaled`` refused the raw one); a trial
+    then forms its own the same way, never through its raw intercept."""
 
 
 @dataclass(frozen=True)
@@ -487,6 +499,7 @@ def _evaluate_scop_trial(
     # A latent step can map past the floating-point range (``exp`` of a
     # coordinate the Newton model sent far out); such a trial's objective is
     # not finite and the line search rejects it, without a warning.
+    level, eta_unclipped = None, None
     with np.errstate(over="ignore", invalid="ignore"):
         if ordinary is not None:
             change = np.concatenate(mapped_changes)
@@ -502,6 +515,12 @@ def _evaluate_scop_trial(
             )
             beta_trial[ordinary.columns] = solved
             intercept_trial = level - float(ordinary.mean_x @ solved)
+            if ordinary.centred_rows is not None:
+                latent_columns = beta_trial.copy()
+                latent_columns[ordinary.columns] = 0.0
+                eta_unclipped = (
+                    level + ordinary.centred_rows(solved) + dm.matvec(latent_columns) + offset
+                )
         irls = _evaluate_irls_state(
             dm,
             y,
@@ -511,12 +530,39 @@ def _evaluate_scop_trial(
             offset,
             beta_trial,
             intercept_trial,
+            eta_unclipped=eta_unclipped,
             state_id=state_id,
             evaluation_id=evaluation_id,
             basis_id=basis_id,
             lambdas=lambdas,
         )
-    return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
+    return _SCOPTrialState(
+        irls=irls,
+        groups=tuple(trial_groups),
+        level=level,
+        centre=None if ordinary is None else ordinary.centre,
+    )
+
+
+def _level_about(
+    level: float,
+    centre: tuple[NDArray, NDArray | None],
+    new_centre: tuple[NDArray, NDArray | None],
+    beta: NDArray,
+) -> float:
+    """``level`` about ``new_centre``: the same predictor, ``level + (m_new - m)' beta``.
+
+    Each centre is a pair ``(hi, lo)``; ``new_hi - hi`` is exact where the two
+    lie within a factor two (Sterbenz), as successive working means of one
+    column do, so the shift rounds at ``|m_new - m| |beta|``, not at ``|m' beta|``.
+    """
+    (hi, lo), (new_hi, new_lo) = centre, new_centre
+    shift = np.asarray(new_hi, dtype=np.float64) - hi
+    if lo is not None:
+        shift = shift - lo
+    if new_lo is not None:
+        shift = shift + new_lo
+    return float(level) + math.fsum(shift * beta)
 
 
 _LATENT_MAX_STEP = 1000.0
@@ -3101,16 +3147,31 @@ def _fit_irls_direct_once(
                 )
                 scop_results = joint.results
                 committed_reduced = committed.beta[_reduced_to_full]
+                centre = reduced_centered.centre_pair()
+                committed_level = committed.intercept + float(
+                    reduced_centered.mean_x @ committed_reduced
+                )
+                if centred_prediction and scop_committed.level is not None:
+                    # The committed level carried to this centre: its raw
+                    # intercept reads it at u |m' b|, and the trials start there.
+                    committed_level = _level_about(
+                        scop_committed.level, scop_committed.centre, centre, committed_reduced
+                    )
                 scop_ordinary = _SCOPOrdinarySolve(
                     columns=_reduced_to_full,
                     committed=committed_reduced,
-                    committed_level=committed.intercept
-                    + float(reduced_centered.mean_x @ committed_reduced),
+                    committed_level=committed_level,
                     fixed=beta_reduced,
                     level=reduced_centered.mean_z,
                     coupled=joint.coupled,
                     mean=joint.mean,
                     mean_x=reduced_centered.mean_x,
+                    centre=centre,
+                    centred_rows=(
+                        partial(_centred_system_matvec, _reduced_dm, system=reduced_centered)
+                        if centred_prediction
+                        else None
+                    ),
                 )
                 beta_reduced = beta_reduced + joint.ordinary_correction
                 centred_level = reduced_centered.mean_z - joint.intercept_shift
@@ -3447,6 +3508,8 @@ def _fit_irls_direct_once(
                     )
                     for gi in sorted(_scop_specs)
                 ),
+                level=centred_level,
+                centre=scop_ordinary.centre,
             )
             proposal_scop = with_scop_merit(proposal_scop)
             proposal_irls = proposal_scop.irls

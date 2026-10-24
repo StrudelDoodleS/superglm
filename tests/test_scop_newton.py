@@ -578,6 +578,52 @@ def test_a_translated_ordinary_column_leaves_the_joint_step_unchanged():
         assert deviance <= (64 * UNIT) ** 2 * 15.0
 
 
+def test_a_translated_ordinary_column_leaves_a_damped_step_unchanged(monkeypatch):
+    """x on [-8, 8] beside a convex spline of another column, weights exp(U(-3, 3)), no penalty (Sol's repro).
+
+    The line search damps six of the fit's steps. A damped trial's ordinary
+    level was read back from the raw intercept, and its predictor formed
+    from that intercept and the raw columns, both at u |m' b|, about 0.05
+    once x is translated by 1.5e15: every trial was refused at iteration 6
+    and the fit stopped there at deviance 2.33 (1.22 untranslated). Each
+    trial now forms its predictor about the system's centre, as its
+    proposal does, from the committed state's own level.
+    """
+    from superglm import Numeric, PSpline
+
+    steps = []
+    select = irls_direct._select_irls_trial
+
+    def recorded(**kwargs):
+        decision = select(**kwargs)
+        steps.append((decision.step_halvings, decision.step_rejected))
+        return decision
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded)
+    rng = np.random.default_rng(5)
+    x = rng.integers(-8, 9, 200).astype(float)
+    s = rng.uniform(size=200)
+    y = 0.2 + 0.3 * x + 2.2 * s + 0.6 * s * s + 0.05 * rng.normal(size=200)
+    weights = np.exp(rng.uniform(-3, 3, 200))
+    fits = {}
+    for shift in (0.0, 1.5e15):
+        steps.clear()
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        )
+        model.fit(pd.DataFrame({"x": x + shift, "s": s}), y, sample_weight=weights)
+        fits[shift] = (model.result, list(steps))
+
+    (plain, plain_steps), (shifted, shifted_steps) = fits.values()
+    assert sum(halvings > 0 for halvings, _ in plain_steps) >= 2
+    assert shifted_steps == plain_steps
+    assert plain.converged and shifted.converged
+    assert abs(shifted.deviance - plain.deviance) <= model._tol * plain.deviance
+
+
 def _repeated_rows_spec(index, rng, n, distinct, reparam):
     """An exact SCOP group whose ``n`` rows take ``distinct`` distinct values."""
     values = rng.normal(size=(distinct, reparam.q))
