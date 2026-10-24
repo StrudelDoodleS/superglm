@@ -1170,6 +1170,8 @@ def test_frequency_count_multiplies_complete_row_without_changing_window() -> No
     )
 
     assert result.terms[0] == result.terms[1]
+    # Exact: the terms are bitwise equal, and the kernel multiplies the row by its count with
+    # the one IEEE product ``7.0 * x`` this line forms.
     np.testing.assert_allclose(result.log_likelihood[1], 7.0 * result.log_likelihood[0], rtol=0)
     assert result.score is not None
     assert result.hessian_packed is not None

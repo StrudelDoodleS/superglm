@@ -3987,23 +3987,26 @@ def _table_cases():
 def test_link_fourth_derivatives_reproduce_the_removed_observed_geometry_table(name):
     """The order-2 observed weights read ``link.deriv4_inverse``; their values are the old table's.
 
-    Bit for bit on every built-in link but one: cauchit beyond ``|eta| = 1``
-    takes the ``1/eta`` form its third derivative already uses, which agrees
-    to within ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 +
-    eta^2)^4)`` (the symbolic oracle's tolerance for every link).
+    Each value agrees to ``64 u`` relative, the symbolic oracle's tolerance for every link
+    (``tests/test_family_derivatives_symbolic.py``). The two evaluate the same expression, but
+    a library call (``exp``, ``expit``, the normal density) may round differently between
+    SIMD and libm builds, and bit equality would then fail on a stack that computes
+    correctly; the identity and square-root links have no arithmetic and are held exactly
+    zero. Cauchit beyond ``|eta| = 1`` takes the ``1/eta`` form its third derivative already
+    uses, whose cancellation makes the relative error of a small value meaningless, so it is
+    held to ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 + eta^2)^4)``.
     """
     from superglm.reml.observed_geometry import _deriv4_inverse
 
+    u = 2.0**-53
     link, eta = _table_cases()[name]
     computed = _deriv4_inverse(link, eta)
     reference = _removed_table_deriv4(link, eta)
     if name != "cauchit":
-        np.testing.assert_array_equal(computed.view(np.uint64), reference.view(np.uint64))
+        np.testing.assert_allclose(computed, reference, rtol=64 * u, atol=0.0)
         return
-    inner = np.abs(eta) <= 1.0
-    np.testing.assert_array_equal(computed[inner].view(np.uint64), reference[inner].view(np.uint64))
     scale = 24.0 * np.abs(eta) * (1.0 + eta**2) / (np.pi * (1.0 + eta**2) ** 4)
-    assert np.all(np.abs(computed - reference) <= 64 * 2.0**-53 * scale)
+    assert np.all(np.abs(computed - reference) <= 64 * u * scale)
 
 
 def test_an_inherited_fourth_inverse_derivative_below_a_new_inverse_is_refused():

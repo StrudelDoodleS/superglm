@@ -34,6 +34,10 @@ WORKERS = (1, 2, 8)
 
 
 def _assert_bitwise(actual, expected) -> None:
+    # Bitwise by design, not by accident of this machine: the queue pins BLAS to one thread
+    # and reduces blocks in block order (``pooled_map``'s contract), so the worker count
+    # cannot change an operand or the order of a sum. A tolerance here would let a
+    # schedule-dependent reduction through, which is the defect the equality exists to catch.
     actual, expected = np.asarray(actual), np.asarray(expected)
     assert actual.shape == expected.shape and actual.dtype == expected.dtype
     # Compare encodings, so a -0.0 against 0.0 counts as a difference too.

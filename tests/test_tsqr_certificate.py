@@ -39,6 +39,25 @@ def _gamma(k: int) -> float:
     return k * _U / (1.0 - k * _U)
 
 
+def _assert_householder_accurate(factor: np.ndarray, a: np.ndarray) -> None:
+    """``factor'factor = a'a`` to what one Householder QR of ``a`` guarantees.
+
+    ``factor = Q'(a + da)`` with ``||da_j|| <= gamma_{mn} ||a_j||`` (Higham 2002, Thm 19.4), so
+    each entry of ``factor'factor - a'a`` is within ``(2 gamma + gamma^2) ||a_i|| ||a_j||``.
+    The two Grams are formed in floating point here, adding ``gamma_m + gamma_n`` of the same
+    scale (a dot product of ``k`` terms is within ``gamma_k`` of its absolute sum, Thm 3.5,
+    and that sum is at most ``||a_i|| ||a_j||``). This is what two implementations of one QR
+    share; it does not depend on how the library orders its sums.
+    """
+    m, n = a.shape
+    norms = np.linalg.norm(a, axis=0)
+    gamma = _gamma(m * n)
+    bound = (2.0 * gamma + gamma * gamma + _gamma(m) + _gamma(factor.shape[0])) * np.outer(
+        norms, norms
+    )
+    assert np.all(np.abs(factor.T @ factor - a.T @ a) <= bound)
+
+
 def _near_rank_rows(n: int, p: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Rows with an exact alias, a 1e-9 near alias and a column at an offset."""
     rng = np.random.default_rng(seed)
@@ -81,6 +100,9 @@ def test_tsqr_factor_is_bitwise_identical_across_worker_counts(monkeypatch):
     exactly, so that is the factor's error alone.
     """
     n, p, leaf = 1_000, 12, 24
+    # The worker-count comparisons below are bitwise on purpose: BLAS is pinned to one thread
+    # per leaf and the tree depends on (n, p) alone, so one code path runs whatever the
+    # schedule (``pooled_map``'s contract). Accuracy against the exact Gram follows, derived.
     X, weights = _near_rank_rows(n, p, seed=20261006)
     centre = weights @ X / np.sum(weights)
     dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=p)
@@ -290,6 +312,10 @@ def test_deferred_leaves_factor_the_materialised_rows_bitwise(monkeypatch, centr
     bit.  Mutation checks: subtracting ``c + c_lo`` at once, reading the
     sink code as a level, or weighting a materialising block's rows out of
     order each break the equality.
+
+    Bitwise on purpose, not a tolerance: the claim is that the rows are the same bits (a
+    rounding-order change moves them by one ulp, far below any accuracy bound), and the
+    factor of equal rows is one single-threaded LAPACK call per leaf at every worker count.
     """
     n, leaf = 300, 40
     dm = _mixed_design(n, seed=20261006)
@@ -366,7 +392,9 @@ def test_leaf_qr_is_scipys_dgeqrf_through_a_gil_free_pointer(shape, monkeypatch)
     ``np.linalg.qr`` holds the GIL while LAPACK runs, so the pooled TSQR's
     leaves ran one at a time on its workers.  The ctypes call releases it and
     reaches the routine ``scipy.linalg.qr`` calls with its queried workspace,
-    so ``R`` is that one to the bit, and the leaf leaves its operand as it was.
+    so ``R`` is that routine's, to Householder accuracy (BLAS inside either call may sum in
+    its own order, so the bits are not part of the claim), and the leaf leaves its operand
+    as it was.
     The GIL itself is checked structurally, so no timing is asserted: the
     routine the leaf calls is a ``ctypes.CFUNCTYPE`` pointer (which releases
     the GIL around the call), not a ``PYFUNCTYPE`` one or an f2py wrapper
@@ -398,17 +426,20 @@ def test_leaf_qr_is_scipys_dgeqrf_through_a_gil_free_pointer(shape, monkeypatch)
     monkeypatch.setattr(rank, "_lapack_nogil", recorded)
     factor = rank._leaf_qr(rows)
     assert called == ["dgeqrf"]
-    assert np.array_equal(factor.view(np.uint64), reference.view(np.uint64))
+    assert factor.shape == reference.shape
+    _assert_householder_accurate(factor, rows)
+    _assert_householder_accurate(reference, rows)
     assert np.array_equal(rows, kept)
 
 
 @pytest.mark.parametrize("width", [1, 5, 31, 32, 33, 70])
-def test_structured_merge_is_scipys_dtpqrt_bitwise(width):
+def test_structured_merge_agrees_with_scipys_dtpqrt_to_householder_accuracy(width):
     """The merge reaches SciPy's ``dtpqrt`` through its Cython LAPACK pointer, without the GIL.
 
     The f2py wrapper calls the same routine with the same block size ``nb =
-    min(width, 32)``, so the merged triangle is the same to the bit on both
-    sides of the block size, and the merge leaves its operands as they were.
+    min(width, 32)``, so the merged triangle is that routine's on both sides of the block
+    size, to Householder accuracy (BLAS inside either call may sum in its own order, so the
+    bits are not part of the claim), and the merge leaves its operands as they were.
     """
     from scipy.linalg.lapack import dtpqrt
 
@@ -422,7 +453,9 @@ def test_structured_merge_is_scipys_dtpqrt_bitwise(width):
         width, min(width, 32), np.asfortranarray(kept[0]), np.asfortranarray(kept[1])
     )
     assert info == 0
-    assert np.array_equal(merged.view(np.uint64), np.triu(reference).view(np.uint64))
+    stacked = np.vstack(kept)
+    _assert_householder_accurate(merged, stacked)
+    _assert_householder_accurate(np.triu(reference), stacked)
     assert np.array_equal(upper, kept[0]) and np.array_equal(lower, kept[1])
 
 

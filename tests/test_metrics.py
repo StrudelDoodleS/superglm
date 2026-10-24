@@ -724,6 +724,7 @@ class TestMetricsCaching:
         metrics = ModelMetrics(model, y=y, sample_weight=w)
 
         assert metrics._X is X
+        # Exact: ``_mu`` is the output of this same ``predict`` call on the same frame.
         np.testing.assert_allclose(metrics._mu, model.predict(X), rtol=0.0, atol=0.0)
 
     def test_evaluation_aliases_override_fit_time_estimability(self):
@@ -1544,6 +1545,7 @@ class TestResiduals:
         metrics_obj.__dict__["_working_eta_mu"] = (fitted_eta, mu)
 
         assert np.any(fitted_eta < 0.0)
+        # Exact: the seeded array is returned, not recomputed.
         np.testing.assert_allclose(metrics_obj.eta, fitted_eta, rtol=0.0, atol=0.0)
         expected_working = (y - mu) / (2.0 * fitted_eta)
         np.testing.assert_allclose(
@@ -1582,6 +1584,7 @@ class TestResiduals:
         metrics = model.metrics(holdout_X, holdout_y, offset=holdout_offset)
 
         assert not metrics._uses_fit_design
+        # Exact: both are the one exact-predictor routine on the same frame and offset.
         np.testing.assert_allclose(metrics.eta, fitted_eta, rtol=0.0, atol=0.0)
         expected_working = (y - metrics._mu) / (2.0 * fitted_eta)
         np.testing.assert_allclose(
@@ -1647,6 +1650,7 @@ class TestResiduals:
             seed=2192,
         )
 
+        # Exact: the weights are all one, so no operand differs between the two runs.
         np.testing.assert_allclose(weighted, unit_weight, rtol=0.0, atol=0.0)
 
     def test_gaussian_quantile_residuals_match_frequency_row_replication(self):

@@ -145,6 +145,9 @@ def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(mon
     )
     monkeypatch.setattr(chunks, "_assemble_grouped_chunk_geometry", replay)
     geometry, sums = _combined(context, coefficients)
+    # Exact on purpose: the replay runs the same per-chunk assembly, in the same order, as the
+    # run it is compared with. What the test guards is a likelihood sum that was not reset, an
+    # error of a whole chunk, so no rounding allowance is needed or wanted.
     assert sums == expected_sums
     np.testing.assert_allclose(geometry.score_data, expected_geometry.score_data, rtol=0, atol=0)
     np.testing.assert_allclose(
