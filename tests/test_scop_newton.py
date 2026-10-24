@@ -990,3 +990,36 @@ def test_a_run_finds_each_exact_support_once(monkeypatch):
 
     assert len(fits) > len(runs) > 0
     assert len(builds) == 2 * len(runs)
+
+
+def test_a_fit_that_drives_coordinates_to_their_boundary_publishes_finite_inference():
+    """x beside an increasing spline of x, unpenalized, weights over e^-3..e^3 (Sol's P1 repro).
+
+    The joint step drives several latent coordinates to their log-space
+    boundary (one to -1201, past the map's clip), where they are held. The
+    post-fit inference squared their vanishing Jacobians, so EDF and
+    dispersion came out NaN and ``fit()`` refused the converged fit; the
+    line search's trials past the floating-point range also warned.
+    """
+    from superglm import Numeric, PSpline
+
+    rng = np.random.default_rng(2)
+    x = rng.uniform(size=(2, 200))[0]
+    y = 0.2 + 2.2 * x + 0.6 * x * x + 0.05 * rng.normal(size=200)
+    weights = np.exp(rng.uniform(-3, 3, 200))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        discrete=False,
+        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        model.fit(pd.DataFrame({"x": x, "s": x}), y, sample_weight=weights)
+
+    result = model.result
+    assert result.converged
+    # the intercept and every coefficient at most, each held direction at least one fewer
+    assert 1.0 <= result.effective_df <= result.beta.size + 1
+    assert np.isfinite(result.phi) and result.phi > 0.0

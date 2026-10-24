@@ -1200,3 +1200,97 @@ def test_estimated_scop_reml_builds_postfit_inference_only_for_terminal_mode(mon
 
     assert calls == 1
     assert model._solver_result.scop_inference is not None
+
+
+def _held_direction_problem(keep_held: bool, held_theta: float = -800.0, lam: float = 0.0):
+    """An ordinary column and an increasing SCOP group of 3, the middle one held at ``held_theta``.
+
+    ``keep_held=False`` is the same model with that coordinate removed: an
+    active constraint fixes its coefficient at zero, so the two must agree.
+    """
+    from superglm.reml.scop_geometry import (
+        build_cached_scop_joint_geometry,
+        build_scop_postfit_inference,
+    )
+
+    rng = np.random.default_rng(20261024)
+    n = 120
+    design = rng.normal(size=(n, 4)) + np.array([0.3, 0.6, -0.2, 0.9])
+    weights = rng.uniform(0.4, 2.1, size=n)
+    theta = np.array([np.log(0.4), held_theta, np.log(1.3)])
+    penalty = np.zeros((4, 4))
+    penalty[1:, 1:] = lam * np.array([[1.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 1.0]])
+    held = np.zeros((1, 3))
+    held[0, 1] = 1.0
+    columns = [0, 1, 2, 3] if keep_held else [0, 1, 3]
+    if not keep_held:
+        theta, held = theta[[0, 2]], np.zeros((0, 2))
+    design, penalty = design[:, columns], penalty[np.ix_(columns, columns)]
+    width = design.shape[1]
+    states = {
+        1: {
+            "group_sl": slice(1, width),
+            "group_name": "mono",
+            "beta_eff": theta,
+            "discarded_directions": held,
+            "last_fisher_fallback": True,
+        }
+    }
+    groups = [
+        GroupSlice(name="ordinary", start=0, end=1),
+        GroupSlice(name="mono", start=1, end=width, monotone_engine="scop"),
+    ]
+    fisher = dict(
+        raw_fisher_gram=design.T @ (weights[:, None] * design),
+        fisher_xtw=design.T @ weights,
+        fisher_sum_w=float(np.sum(weights)),
+        latent_penalty=penalty,
+        scop_states=states,
+    )
+    geometry = build_cached_scop_joint_geometry(**fisher)
+    inference = build_scop_postfit_inference(**fisher, groups=groups, observed_geometry=geometry)
+    return geometry, inference
+
+
+@pytest.mark.parametrize(("held_theta", "lam"), [(-800.0, 0.0), (-30.0, 0.0), (-800.0, 0.3)])
+def test_a_held_boundary_direction_is_an_active_constraint_with_no_inference_width(held_theta, lam):
+    """A latent coordinate the step holds at its log-space boundary carries no covariance or EDF.
+
+    Unpenalized at theta = -800, the Jacobian is exp(-500) (the map's clip)
+    and its square underflows to zero: the inference kept the direction and
+    its decomposition refused the zero diagonal (a fit's EDF and dispersion
+    came out NaN, and ``fit()`` refused a converged fit). Where it survived,
+    the held coefficient kept a covariance. Held, the direction is an active
+    constraint: the inference is the model's with that coefficient removed.
+    """
+    # the Jacobian's square may underflow; nothing may divide by it
+    with np.errstate(divide="raise", over="raise", invalid="raise"):
+        geometry, inference = _held_direction_problem(True, held_theta, lam)
+    oracle_geometry, oracle = _held_direction_problem(False, held_theta, lam)
+    kept = [0, 1, 3]
+
+    for values in (
+        inference.coefficient_inverse,
+        inference.augmented_inverse,
+        inference.feature_edf,
+    ):
+        assert np.all(np.isfinite(values))
+    np.testing.assert_array_equal(inference.coefficient_inverse[2], 0.0)
+    assert inference.feature_edf[2] == 0.0
+    # one model reduced two ways: orthogonal changes of basis, each within a
+    # few u times the condition number of a well-conditioned 4 x 4 system
+    condition = np.linalg.cond(oracle_geometry.centered_hessian)
+    tolerance = 64 * 4 * condition * np.finfo(np.float64).eps
+    scale = np.max(np.abs(oracle.coefficient_inverse))
+    assert (
+        np.max(
+            np.abs(inference.coefficient_inverse[np.ix_(kept, kept)] - oracle.coefficient_inverse)
+        )
+        <= tolerance * scale
+    )
+    assert np.max(np.abs(inference.feature_edf[kept] - oracle.feature_edf)) <= tolerance
+    assert abs(inference.total_edf - oracle.total_edf) <= 4 * tolerance
+    assert geometry.hessian_rank == oracle_geometry.hessian_rank
+    assert abs(geometry.log_det_H - oracle_geometry.log_det_H) <= tolerance * max(
+        1.0, abs(oracle_geometry.log_det_H)
+    )

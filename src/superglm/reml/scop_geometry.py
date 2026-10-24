@@ -313,8 +313,9 @@ def _factor_certifier(
     fisher_weights: FisherWeights | None,
     jacobian: NDArray,
     latent_penalty: NDArray,
+    basis: NDArray | None = None,
 ) -> Callable[[NDArray | None], RankDecomposition] | None:
-    """Return a lazy factor-space certifier for expected SCOP curvature."""
+    """Return a lazy factor-space certifier for expected SCOP curvature, on the resolved range ``basis``."""
     if (dm is None) != (fisher_weights is None):
         raise ValueError("dm and fisher_weights must be provided together")
     if dm is None or fisher_weights is None:
@@ -341,7 +342,7 @@ def _factor_certifier(
         factor = (
             data_factor if smooth_factor.shape[0] == 0 else np.vstack((data_factor, smooth_factor))
         )
-        return decompose_factor(factor)
+        return decompose_factor(factor if basis is None else factor @ basis)
 
     return certify
 
@@ -426,6 +427,34 @@ def scop_resolved_range_basis(
         return None
     complete, _ = np.linalg.qr(discarded.T, mode="complete")
     return complete[:, discarded.shape[0] :]
+
+
+def _on_resolved_range(matrix: NDArray, basis: NDArray | None) -> NDArray:
+    """``matrix`` in the coordinates of the resolved range ``basis``; itself without one.
+
+    A direction the SCOP step holds at its log-space boundary is an active
+    constraint: it is not estimated, so it carries no curvature, covariance
+    or EDF. A shape-restricted least-squares fit is the projection onto the
+    face of the constraint cone it lands on, and its dimension counts only
+    the edges not held at zero (Meyer 2008, Ann. Appl. Stat. 2(3), Prop. 1
+    and sec. 4, after Meyer & Woodroofe 2000, Ann. Statist. 28(4)). Reducing
+    to the basis removes the direction before any decomposition, which then
+    never meets the vanishing Jacobian ``exp(theta)`` that put it there: its
+    square underflows below ``theta`` of about -373, and a Gram that keeps
+    the direction equilibrates by that zero.
+    """
+    if basis is None:
+        return matrix
+    reduced = basis.T @ matrix @ basis
+    return 0.5 * (reduced + reduced.T)
+
+
+def _from_resolved_range(matrix: NDArray, basis: NDArray | None) -> NDArray:
+    """A matrix in resolved coordinates (``_on_resolved_range``) back in the full ones, zero on the held directions."""
+    if basis is None:
+        return matrix
+    lifted = basis @ matrix @ basis.T
+    return 0.5 * (lifted + lifted.T)
 
 
 def decompose_on_scop_resolved_range(
@@ -571,19 +600,21 @@ def build_scop_postfit_inference(
     latent_data_gram = raw_fisher_gram * jacobian[:, None] * jacobian[None, :]
     latent_mean_x = fisher_mean_x * jacobian
     centered_data_gram = centered_fisher_gram * jacobian[:, None] * jacobian[None, :]
+    resolved = scop_resolved_range_basis(scop_states, width)
     certifier = _factor_certifier(
         dm=dm,
         fisher_weights=fisher_weights,
         jacobian=jacobian,
         latent_penalty=latent_penalty,
+        basis=resolved,
     )
 
     fisher_profile = _decompose_with_factor_certification(
-        centered_data_gram + latent_penalty,
+        _on_resolved_range(centered_data_gram + latent_penalty, resolved),
         certifier=certifier,
         center=fisher_mean_x,
     )
-    fisher_centered_inverse = fisher_profile.pseudo_inverse()
+    fisher_centered_inverse = _from_resolved_range(fisher_profile.pseudo_inverse(), resolved)
     fisher_augmented_inverse = _augmented_inverse_from_mean(
         fisher_centered_inverse,
         latent_mean_x,
@@ -595,11 +626,11 @@ def build_scop_postfit_inference(
     )
 
     coefficient_decomposition = _decompose_with_factor_certification(
-        latent_data_gram + latent_penalty,
+        _on_resolved_range(latent_data_gram + latent_penalty, resolved),
         certifier=certifier,
         center=None,
     )
-    coefficient_inverse = coefficient_decomposition.pseudo_inverse()
+    coefficient_inverse = _from_resolved_range(coefficient_decomposition.pseudo_inverse(), resolved)
     mapped_coefficient_inverse = coefficient_inverse * jacobian[:, None] * jacobian[None, :]
 
     observed_mean_x = (
@@ -730,9 +761,12 @@ def build_cached_scop_joint_geometry(
     # expected cross-terms around them still reach the directions the SCOP
     # steps froze. Leaving that leakage here would give this determinant a
     # different value from the one ``assemble_joint_hessian`` produces for the
-    # same mode, and the two are compared.
-    centered = restrict_to_scop_resolved_range(centered, scop_states)
-    expected_centered = restrict_to_scop_resolved_range(expected_centered, scop_states)
+    # same mode, and the two are compared. Both curvatures are decomposed in
+    # the resolved coordinates (``_on_resolved_range``), so the inverse too
+    # gives a held direction no width.
+    resolved = scop_resolved_range_basis(scop_states, width)
+    centered = _on_resolved_range(centered, resolved)
+    expected_centered = _on_resolved_range(expected_centered, resolved)
 
     if fallback_flags and all(fallback_flags):
         curvature_source: SCOPCurvatureSource = "fisher"
@@ -745,6 +779,7 @@ def build_cached_scop_joint_geometry(
         fisher_weights=fisher_weights,
         jacobian=jacobian,
         latent_penalty=latent_penalty,
+        basis=resolved,
     )
     restricted_decomposition: tuple[NDArray, NDArray, float, int] | None = None
     try:
@@ -793,18 +828,17 @@ def build_cached_scop_joint_geometry(
         centered, hessian_inverse, log_pdet, hessian_rank = restricted_decomposition
 
     # The determinant and the identified-coordinate count come from the
-    # resolved range, exactly as ``reml_laml_objective`` takes them, so a mode
-    # reproduced from stored state gets the same number this geometry stored.
-    # ``decompose_on_scop_resolved_range`` explains why restricting the matrix
-    # in place is not sufficient for that.
-    if scop_resolved_range_basis(scop_states, centered.shape[0]) is not None:
-        resolved_decomposition = decompose_on_scop_resolved_range(centered, scop_states)
+    # resolved range, exactly as ``reml_laml_objective`` takes them
+    # (``decompose_on_scop_resolved_range``), so a mode reproduced from stored
+    # state gets the same number this geometry stored.
+    if resolved is not None:
+        resolved_decomposition = decompose_gram(centered)
         log_pdet = resolved_decomposition.log_pdet
         hessian_rank = resolved_decomposition.rank
 
     return SCOPJointGeometry(
-        centered_hessian=_readonly(centered),
-        hessian_inverse=_readonly(hessian_inverse),
+        centered_hessian=_readonly(_from_resolved_range(centered, resolved)),
+        hessian_inverse=_readonly(_from_resolved_range(hessian_inverse, resolved)),
         transformed_intercept_cross=_readonly(transformed_cross),
         sum_w=float(fisher_sum_w),
         log_det_H=float(np.log(fisher_sum_w) + log_pdet),
@@ -959,6 +993,8 @@ def build_observed_scop_joint_geometry(
         centered[group_slice, group_slice] = block
     curvature_source: Literal["observed", "fisher"] = "observed"
     sum_w = observed_sum_w
+    resolved = scop_resolved_range_basis(scop_states, dm.p)
+    centered = _on_resolved_range(centered, resolved)
     try:
         decomposition = decompose_gram(centered)
     except (np.linalg.LinAlgError, ValueError):
@@ -978,7 +1014,9 @@ def build_observed_scop_joint_geometry(
             fisher_centered = np.asarray(centered_fisher_gram, dtype=np.float64)
             if fisher_mean.shape != (dm.p,) or fisher_centered.shape != (dm.p, dm.p):
                 raise ValueError("stable Fisher geometry must match the design")
-        centered = fisher_centered * jacobian[:, None] * jacobian[None, :] + penalty
+        centered = _on_resolved_range(
+            fisher_centered * jacobian[:, None] * jacobian[None, :] + penalty, resolved
+        )
         transformed_mean = fisher_mean * jacobian
         transformed_cross = float(fisher_sum_W) * transformed_mean
         decomposition = _decompose_with_factor_certification(
@@ -988,6 +1026,7 @@ def build_observed_scop_joint_geometry(
                 fisher_weights=fisher_weights,
                 jacobian=jacobian,
                 latent_penalty=penalty,
+                basis=resolved,
             ),
             center=fisher_mean,
         )
@@ -995,8 +1034,8 @@ def build_observed_scop_joint_geometry(
         sum_w = float(fisher_sum_W)
 
     return SCOPJointGeometry(
-        centered_hessian=_readonly(centered),
-        hessian_inverse=_readonly(decomposition.pseudo_inverse()),
+        centered_hessian=_readonly(_from_resolved_range(centered, resolved)),
+        hessian_inverse=_readonly(_from_resolved_range(decomposition.pseudo_inverse(), resolved)),
         transformed_intercept_cross=_readonly(transformed_cross),
         sum_w=sum_w,
         log_det_H=float(np.log(sum_w) + decomposition.log_pdet),
