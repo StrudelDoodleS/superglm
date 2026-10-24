@@ -3546,9 +3546,12 @@ def test_broken_offset_inputs_are_refused_with_the_reason(case, error, message):
 
 def test_discrete_offset_with_more_levels_than_allowed_is_refused_not_binned():
     call = _per_unit_offset_call(offset_kind="discrete", offset_max_exact_levels=10)
+    distinct = len(np.unique(call["offset_source"]))
+    assert distinct > 10
 
     with pytest.raises(
-        ValueError, match="40 distinct values, exceeding offset_max_exact_levels=10"
+        ValueError,
+        match=rf"'Term' has {distinct} distinct values, exceeding offset_max_exact_levels=10",
     ):
         build_rating_table_payload(**call)
 
