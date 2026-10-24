@@ -358,3 +358,59 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
 
     assert result.converged
     assert profile.get("irls_observed_newton_iters", 0) == result.n_iter
+
+
+def test_one_pass_cross_block_equals_the_per_pair_plan():
+    """The joint-weight route forms X_r' W X_s as the group-matrix kernels do, to rounding."""
+    from superglm import Categorical
+    from superglm.group_matrix import (
+        CrossMatrixExecutionPlan,
+        DiscretizedSCOPGroupMatrix,
+        MatrixExecutionPlan,
+    )
+    from superglm.solvers.scop_newton import _JointWeightCross
+
+    rng = np.random.default_rng(11)
+    n = 5000
+    frame = pd.DataFrame(
+        {
+            "a": rng.uniform(0, 1, n),
+            "b": rng.uniform(0, 1, n),
+            "m": rng.uniform(0, 1, n),
+            "c": rng.choice(list("pqrst"), n),
+        }
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "a": Spline(kind="ps", k=8),
+            "b": Spline(kind="ps", k=6),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "c": Categorical(base="most_exposed"),
+        },
+        interactions=[("a", "b")],
+    )
+    model_build_design_matrix(model, frame, rng.poisson(1.0, n).astype(float), np.ones(n), None)
+    pairs = list(zip(model._groups, model._dm.group_matrices))
+    scop = next(gm for g, gm in pairs if g.monotone_engine == "scop")
+    ordinary = [gm for g, gm in pairs if g.monotone_engine != "scop"]
+    reduced = DesignMatrix(ordinary, n=n, p=sum(gm.shape[1] for gm in ordinary))
+    weights = rng.uniform(0.1, 3.0, n)
+    plan = CrossMatrixExecutionPlan(
+        reduced.execution_plan,
+        MatrixExecutionPlan([DiscretizedSCOPGroupMatrix(scop.B_scop_unique, scop.bin_idx)], n=n),
+    )
+
+    one_pass = _JointWeightCross.build(reduced, [(scop.B_scop_unique, scop.bin_idx)])
+    expected = plan.cross_moment(weights)
+    # sums of the same n products in another order: within n u of the largest entry
+    np.testing.assert_allclose(
+        one_pass.cross_moment(weights), expected, rtol=0, atol=n * UNIT * np.abs(expected).max()
+    )
+    # a group with no compact support (a dense block) keeps the per-pair plan
+    dense = DesignMatrix(
+        [*ordinary, DenseGroupMatrix(frame[["a"]].to_numpy())], n=n, p=reduced.p + 1
+    )
+    assert _JointWeightCross.build(dense, [(scop.B_scop_unique, scop.bin_idx)]) is None
