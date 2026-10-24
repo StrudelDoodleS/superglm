@@ -6,6 +6,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import Constraint, Spline, SuperGLM
 from superglm._roundoff import UNIT_ROUNDOFF as UNIT
@@ -778,7 +779,9 @@ def test_rounding_on_a_null_direction_is_dropped_whatever_its_sign():
         values[0] = rounding * _gamma_up(count) * q
         gram = scale[:, None] * (basis @ np.diag(values) @ basis.T) * scale[None, :]
         score = scale * (basis @ rng.normal(size=q))
-        root, resolved = _resolved_root(gram, score, scale, count, lambda: (factor, scale, n * q))
+        root, resolved = _resolved_root(
+            gram, score, scale, count, lambda: (factor, scale, n * q), own=scale
+        )
 
         assert root.shape == (q - 1, q)
         # the computed null vector is the exact one to within Wedin's sin(theta) <=
@@ -831,13 +834,20 @@ def test_an_ordinary_column_aliased_with_a_scop_slope_changes_nothing():
     )
 
 
-def test_nearly_collinear_ordinary_columns_keep_every_scop_direction():
-    """b = a + 1e-7 v is full rank, so every SCOP direction is the data's and the fit reaches it.
+@pytest.mark.parametrize(
+    ("trend", "split"), [(0.0, 1e-7), (0.5, 5e-8)], ids=["independent", "correlated"]
+)
+def test_nearly_collinear_ordinary_columns_keep_every_scop_direction(trend, split):
+    """b = a + split v is full rank, so every SCOP direction is the data's and the fit reaches it.
 
     The pair's near-collinearity inflated the Gram's formation bound past
     genuine curvature: all but two of the seven Schur directions were
     dropped (the smallest eigenvalue, 0.0287, among them), and the fit
     reported convergence after two iterations at a training RMSE of 0.058.
+    With v correlated with s, the rows' rounding bound grows with the pair's
+    cancelling coefficients, and a sqrt(eps) cut taken in its units held two
+    genuine directions (training RMSE 0.0044); in the columns' own scale they
+    are a tenth of their columns or more.
     """
     from superglm import Numeric, PSpline
 
@@ -845,8 +855,8 @@ def test_nearly_collinear_ordinary_columns_keep_every_scop_direction():
     n = 300
     s = rng.uniform(0, 1, n)
     a = rng.normal(size=n)
-    v = rng.normal(size=n)
-    b = a + 1e-7 * v
+    v = trend * (s - s.mean()) / s.std() + rng.normal(size=n)
+    b = a + split * v
     y = 0.2 + 2 * s + 0.6 * s * s + 0.4 * v
     frame = pd.DataFrame({"a": a, "b": b, "s": s})
     model = SuperGLM(

@@ -290,12 +290,26 @@ def _psd_root(S: NDArray) -> NDArray:
     return np.sqrt(np.maximum(eigenvalues, 0.0))[:, None] * eigenvectors.T
 
 
+def _row_cut(rounding: NDArray, count: int) -> float:
+    """The rows' rank cut on singular values of the factor scaled by its SCOP columns' own norms.
+
+    ``rounding`` is each column's rounding bound in units of that norm: the
+    scaled factor is then within ``gamma_count ||rounding||_2`` of its exact
+    value in the 2-norm, and no singular value at or below that is the
+    data's (Weyl). The cut is also at least ``sqrt(eps)``, Pya & Wood's
+    (2015, sec. 3.2) for a factor whose columns have unit scale.
+    """
+    return max(_gamma_up(count) * float(np.linalg.norm(rounding)), _SQRT_EPS)
+
+
 def _resolved_root(
     gram: NDArray,
     score: NDArray,
     scale: NDArray,
     count: int,
     row_factor: Callable[[], tuple[NDArray, NDArray, int]],
+    *,
+    own: NDArray,
 ) -> tuple[NDArray, NDArray]:
     """``(R, s)``: a root of the Schur block's data part on the directions it resolves, and ``score`` there.
 
@@ -318,23 +332,29 @@ def _resolved_root(
     rows, ``row_factor()``, which returns ``(F, g, count)`` with ``F' F``
     the same block, each column of ``F`` within ``gamma_count g_j`` of its
     exact value: a factor squares no condition number, so its error in
-    ``g``-scaled singular values is ``gamma_count sqrt(q)`` (Weyl), not the
-    square root of the Gram's. A direction at or below that is one the rows
-    cannot tell from zero, and one at or below ``sqrt(eps)`` is the ordinary
-    design's to the precision Pya & Wood resolve (§3.2): their cut on the
-    joint factor's singular values, here in units where every column has its
-    scale ``g`` (van der Sluis equilibration), so that it does not depend on
-    how the ordinary columns are scaled. ``x + 1e-9 v`` beside a convex
-    spline of ``x`` is the case: its rows resolve the pair at ``3.5e-9``,
-    and the step went ``3.5e6`` along it, cancelling against the ordinary
-    correction, until the line search refused the fit. Neither direction
-    gets data curvature, and ``score``, whose component there is rounding
-    or below the cut (``|s_v| <= sigma_v ||r||_W``), loses it, so the
-    penalty alone decides the step along it. Every other direction keeps
-    its curvature and its score; whether the step can resolve it is the
-    factor cut's decision (``_truncated_factor_step``). On the Gram's route
-    every eigenvalue clears ``4 gamma_count q``, above ``eps`` for any
-    ``count``, so the cut never binds there.
+    singular values is the column bounds' 2-norm (Weyl), not the square root
+    of the Gram's. The factor is scaled by ``own``, the SCOP columns'
+    centred weighted norms, so that each of its columns is the part of a
+    SCOP column the ordinary design does not explain, as a fraction of that
+    column: a singular value is how much of a unit combination of SCOP
+    columns lies outside the ordinary design, however the ordinary columns
+    are scaled or conditioned. ``g`` is no such scale: it grows with the
+    cancelling coefficients of a nearly collinear ordinary pair, which says
+    how large the rounding can be, not how large the column is. A direction
+    at or below ``_row_cut`` is held: either the rows cannot tell it from
+    zero, or it lies within ``sqrt(eps)`` of the ordinary design, the
+    precision Pya & Wood resolve (§3.2) on a factor whose columns have unit
+    scale. ``x + 1e-9 v`` beside a convex spline of ``x`` is that case: the
+    rows resolve the pair at ``3.4e-9`` of its columns' scale, and the step
+    went ``3.5e6`` along it, cancelling against the ordinary correction,
+    until the line search refused the fit. Neither direction gets data
+    curvature, and ``score``, whose component there is rounding or below
+    the cut (``|s_v| <= sigma_v ||r||_W``), loses it, so the penalty alone
+    decides the step along it. Every other direction keeps its curvature
+    and its score; whether the step can resolve it is the factor cut's
+    decision (``_truncated_factor_step``). On the Gram's route every
+    eigenvalue clears ``4 gamma_count q``, above ``eps`` for any ``count``,
+    so the cut never binds there.
     """
     q = gram.shape[0]
     norms = np.where(scale > 0.0, scale, 1.0)
@@ -345,12 +365,12 @@ def _resolved_root(
     if np.all(values > _GREY_FLOOR * bar):
         singular, resolved = np.sqrt(values), np.full(q, True)
     else:
-        factor, scale, count = row_factor()
-        norms = np.where(scale > 0.0, scale, 1.0)
+        factor, rounding, count = row_factor()
+        norms = np.where(own > 0.0, own, 1.0)
         _, singular, right = np.linalg.svd(factor / norms[None, :])
         singular = np.concatenate((singular, np.zeros(q - singular.size)))
         vectors = right.T
-        resolved = singular > max(_gamma_up(count) * math.sqrt(q), _SQRT_EPS)
+        resolved = singular > _row_cut(rounding / norms, count)
     kept = vectors[:, resolved]
     root = singular[resolved][:, None] * kept.T * norms[None, :]
     return root, norms * (kept @ (kept.T @ (score / norms)))
@@ -1093,7 +1113,8 @@ class SCOPJointNewton:
             return SCOPJointStep(self._no_step(thetas), np.zeros_like(ordinary_change), 0.0)
         data_gram = moments.gram
         data_score = moments.score
-        scale = np.sqrt(np.maximum(np.diag(data_gram), 0.0))
+        own = np.sqrt(np.maximum(np.diag(data_gram), 0.0))
+        scale = own
         coupled = np.zeros((ordinary_change.shape[0], self.width))
         if self._cross is not None:
             cross, norms = self._cross.moment(W, moments, reduced)
@@ -1110,6 +1131,7 @@ class SCOPJointNewton:
             scale,
             2 * self.n + coupled.shape[0] + self.width + 2,
             lambda: self._schur_rows(W, moments, reduced, solve, coupled),
+            own=own,
         )
         gradient = -moments.jacobian * data_score + moments.pull
         step, used_fisher, discarded = self._solve(root, moments, gradient)
