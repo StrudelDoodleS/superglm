@@ -29,8 +29,9 @@ import scipy.sparse.csgraph
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import UNIT_ROUNDOFF, gamma
 from superglm.solvers.rank import (
-    _EPS,
     RankDecomposition,
     _symmetric_part,
     decompose_factor,
@@ -392,11 +393,9 @@ def _feasibility_scale(
 
 def _roundoff_tolerance(width: int) -> float:
     """A dot-product allowance in relative action units, with no magnitude floor."""
-    unit = np.finfo(float).eps / 2.0
-    product = (width + 2) * unit
-    if product >= 1.0:
+    if (width + 2) * UNIT_ROUNDOFF >= 1.0:
         raise ValueError("QP dimensions do not admit a dot-product error bound")
-    return product / (1.0 - product)
+    return gamma(width + 2)
 
 
 def _scaled_constraint_step(

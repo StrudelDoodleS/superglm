@@ -21,9 +21,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
+from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, scaled_lambda_box
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import LogLink, stabilize_eta
+from superglm.links import IdentityLink, LogLink, stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
@@ -62,7 +64,10 @@ from superglm.solvers.centered_system import (
     grouped_structural_nulls,
     grouped_weighted_factor,
 )
-from superglm.solvers.dispersion import dispersion_likelihood_size
+from superglm.solvers.dispersion import (
+    dispersion_likelihood_size,
+    pearson_residual_degrees_of_freedom,
+)
 from superglm.solvers.irls_direct import SCOPRunCentring, fit_irls_direct
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
@@ -376,7 +381,7 @@ def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
             return rank, float(cached_log_det), eigvals
 
     S_scop = st["S_scop"]
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    eps_thresh = PENALTY_RANK_CUT
     eigvals = np.linalg.eigvalsh(S_scop)
     thresh = eps_thresh * max(eigvals.max(), 1e-12)
     rank = float(np.sum(eigvals > thresh))
@@ -662,9 +667,12 @@ def compute_scop_aware_penalty_quad(
     For non-SCOP groups, result.beta @ S @ result.beta is correct (SSP space).
     For SCOP groups, ``result.beta`` contains the elementwise mapped
     ``gamma_eff = forward(beta_eff)``, but the penalty is defined on
-    ``beta_eff``: ``lambda * beta_eff^T @ S_scop @ beta_eff``.
-    We subtract the wrong gamma-space contribution and add the correct
-    beta_eff-space contribution.
+    ``beta_eff``: ``lambda * beta_eff^T @ S_scop @ beta_eff``.  The quadratic
+    is the sum of the ordinary penalty, read from ``S`` with every SCOP
+    group's diagonal block removed, and each SCOP group's latent penalty.
+    Each term is a nonnegative form, so the sum has no cancellation; taking
+    the mapped block away from the whole quadratic instead loses every digit
+    once that block outgrows the result by 1/u.
 
     Parameters
     ----------
@@ -676,16 +684,16 @@ def compute_scop_aware_penalty_quad(
     if not scop_states:
         return float(result_beta @ S @ result_beta)
 
-    pq = float(result_beta @ S @ result_beta)
+    # The complete mapped-coordinate block of each SCOP group goes, including
+    # every named component that may overlap it.
+    ordinary_penalty = S.copy()
+    for st in scop_states.values():
+        sl = st["group_sl"]
+        ordinary_penalty[sl, sl] = 0.0
+    pq = float(result_beta @ ordinary_penalty @ result_beta)
 
     for gi, st in scop_states.items():
-        sl = st["group_sl"]
         beta_eff = st["beta_eff"]
-        gamma_eff = result_beta[sl]
-
-        # Remove the complete mapped-coordinate block, including every named
-        # component that may overlap this SCOP group.
-        pq -= float(gamma_eff @ S[sl, sl] @ gamma_eff)
         matching = (
             [component for component in reml_penalties if component.group_index == gi]
             if reml_penalties is not None
@@ -1688,6 +1696,7 @@ def _backoff_scop_candidate_step(
     proposed_lambdas: dict[str, float],
     *,
     reml_iteration: int,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[_SCOPREMLMode, dict[str, float], float] | None:
     """Retry a failed candidate at damped steps toward its certified origin.
 
@@ -1705,7 +1714,9 @@ def _backoff_scop_candidate_step(
     produced it, or ``None`` when every damped attempt fails, in which case
     the caller keeps its raise.  A proposal-only name (absent from the
     origin) has no endpoint to interpolate from and is adopted undamped at
-    its proposed value, keeping the caller's key set intact.
+    its proposed value, keeping the caller's key set intact.  Each trial is
+    clipped to its name's box in ``boxes``, and to ``LAMBDA_BOX`` for a name
+    it omits or when it is ``None``.
     """
     changed_names = [
         name
@@ -1723,6 +1734,7 @@ def _backoff_scop_candidate_step(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
+    boxes = boxes or {}
     for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
         alpha = 0.5**attempt
         # Seeded from the proposal, not the origin: the adopted dict must
@@ -1731,7 +1743,7 @@ def _backoff_scop_candidate_step(
         trial_lambdas = proposed_lambdas.copy()
         for name in changed_names:
             log_trial = np.log(origin.lambdas[name]) + alpha * log_directions[name]
-            trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+            trial_lambdas[name] = float(np.clip(np.exp(log_trial), *boxes.get(name, LAMBDA_BOX)))
         mode = _fit_scop_reml_mode(
             context,
             trial_lambdas,
@@ -1756,8 +1768,12 @@ def _backtrack_scop_efs_candidate(
     reml_iteration: int,
     max_attempts: int = _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS,
     reflect: bool = True,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[_SCOPREMLMode, bool]:
     """Fit and score repeatedly damped log-lambda trials.
+
+    Each trial is clipped to its name's box in ``boxes``, and to
+    ``LAMBDA_BOX`` for a name it omits or when it is ``None``.
 
     The returned boolean is false only when every attempted converged candidate
     in both the proposed and reflected directions is uphill (or every inner
@@ -1794,6 +1810,7 @@ def _backtrack_scop_efs_candidate(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
+    boxes = boxes or {}
     trial_number = 0
     for direction_sign in (1.0, -1.0) if reflect else (1.0,):
         direction_attempts = (
@@ -1806,7 +1823,9 @@ def _backtrack_scop_efs_candidate(
             trial_lambdas = current.lambdas.copy()
             for name in changed_names:
                 log_trial = np.log(current.lambdas[name]) + alpha * log_directions[name]
-                trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+                trial_lambdas[name] = float(
+                    np.clip(np.exp(log_trial), *boxes.get(name, LAMBDA_BOX))
+                )
 
             trial_number += 1
             candidate = _fit_scop_reml_mode(
@@ -1843,6 +1862,41 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
     if state["group_name"] != pc.group_name or state["group_sl"] != pc.group_sl:
         return None
     return state
+
+
+def _scop_lambda_scale(
+    distribution, link, y: NDArray, sample_weight: NDArray, *, weight_semantics: str
+) -> float:
+    """The scale a SCOP block's smoothing-parameter box widens by (``scaled_lambda_box``).
+
+    A SCOP block penalizes the logs of its increments, which carry no units,
+    so its smoothing parameter carries the dispersion's.  Under the identity
+    link an ordinary term's coefficients carry the response's units, which
+    cancel the Gaussian dispersion's, so there the SCOP box alone makes the
+    fit follow the units: its scale is the intercept-only model's Pearson
+    dispersion, ``sum w (y - ybar)**2 / V(ybar)`` over its residual degrees
+    of freedom, the square of the response's units for Gaussian, their
+    ``2 - p`` power for Tweedie, none for Gamma, and one where the family
+    fixes the dispersion.  Under any other link every term's smoothing
+    parameter carries the dispersion's units, and the scale is one.  The data
+    alone set it: no start and no fit moves it, and a term that goes flat
+    leaves it where it was.
+    """
+    if getattr(distribution, "scale_known", True) or not isinstance(link, IdentityLink):
+        return 1.0
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    total = float(np.sum(weights))
+    if not total > 0.0:
+        return 1.0
+    mean = float(np.sum(weights * response)) / total
+    variance = float(np.asarray(distribution.variance(np.array([mean])))[0])
+    if not variance > 0.0:
+        return 1.0
+    pearson = float(np.sum(weights * (response - mean) ** 2)) / variance
+    return pearson / pearson_residual_degrees_of_freedom(
+        weights, 1.0, weight_semantics=weight_semantics
+    )
 
 
 def fit_fixed_scop_reml(
@@ -1987,6 +2041,7 @@ def _joint_efs_lambda_step(
     alpha: dict[str, float],
     prev_dlsp: dict[str, float],
     aitken_state: dict | None = None,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Joint EFS lambda step using rEDF/pSp (Wood & Fasiolo 2017, scasm-style).
 
@@ -2014,6 +2069,9 @@ def _joint_efs_lambda_step(
     aitken_state : dict, optional
         Per-component accepted-step history for the safeguarded Aitken jump
         (``_SCOP_EFS_AITKEN_*``); ``None`` disables it.
+    boxes : dict, optional
+        Each name's ``(floor, ceiling)``; a name it omits, or every name when
+        it is ``None``, has ``LAMBDA_BOX``.
 
     Returns
     -------
@@ -2091,9 +2149,10 @@ def _joint_efs_lambda_step(
         if abs(scaled_step) > max_step:
             scaled_step = max_step * np.sign(scaled_step)
 
-        # Apply step
-        log_lam_new = np.log(max(lambdas[pc.name], 1e-10)) + scaled_step
-        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), 1e-6, 1e10))
+        # Apply step, from inside the box
+        floor, ceiling = (boxes or {}).get(pc.name, LAMBDA_BOX)
+        log_lam_new = np.log(max(lambdas[pc.name], floor)) + scaled_step
+        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), floor, ceiling))
         dlsp_out[pc.name] = dlsp
 
     return lambdas_new, alpha, dlsp_out
@@ -2422,7 +2481,7 @@ def _scop_newton_step(system: _SCOPNewtonSystem, jacobian: NDArray | None = None
         # it to at least eps**0.7 (about 1e-11) times the largest, a relative
         # floor written in eps = 2**-52 (np.finfo spacing at 1.0), not in the
         # unit roundoff u = eps / 2.
-        floor = np.finfo(np.float64).eps ** 0.7 * max(float(np.max(np.abs(values))), 1e-300)
+        floor = NEWTON_EIGENVALUE_FLOOR * max(float(np.max(np.abs(values))), 1e-300)
         values = np.maximum(np.abs(values), floor)
         step[index] = -(vectors @ ((vectors.T @ g[index]) / values))
         blocked = free & (
@@ -2545,7 +2604,8 @@ def _hessian_scaled_bootstrap_lambdas(
     added to the offset moves no value.  ``lambda_j = sum A_ii / sum S_j,ii``
     over the coefficients ``S_j`` penalizes puts the typical one at 1/2.  A
     SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
-    Jacobian one).  Only ``names`` move, clipped to [1e-6, 1e10]; a
+    Jacobian one).  Only ``names`` move, clipped to the unit-increment box
+    [``LAMBDA_FLOOR``, ``LAMBDA_CEILING``]; a
     component whose ratio is not a positive finite number keeps its value.
 
     ``A_ii`` is formed from raw moments, ``diag(X' W X) - sum_w * mean**2``,
@@ -2597,7 +2657,7 @@ def _hessian_scaled_bootstrap_lambdas(
         support = diag > 0.0
         ratio = float(np.sum(gram_diag[support]) / np.sum(diag[support])) if support.any() else 0.0
         if np.isfinite(ratio) and ratio > 0.0:
-            scaled[name] = float(np.clip(ratio, 1e-6, 1e10))
+            scaled[name] = float(np.clip(ratio, LAMBDA_FLOOR, LAMBDA_CEILING))
     return scaled
 
 
@@ -2849,6 +2909,9 @@ def optimize_scop_efs_reml(
         A warm start (a previous fit's estimates, keyed by component name).
         The bootstrap fit is taken at these values and the first EFS update
         starts from them; components it does not name bootstrap cold at 1e-4.
+        Each value is clipped to its box first: a SCOP block's is
+        ``scaled_lambda_box`` of ``_scop_lambda_scale``, any other's
+        ``LAMBDA_BOX``.
         A warm bootstrap with no certified mode is retried at the
         Hessian-scaled values, like a cold one.
 
@@ -2908,12 +2971,21 @@ def optimize_scop_efs_reml(
     # unless a warm start names them: then the bootstrap is fitted at the warm
     # value and the EFS step below leaves it there, so the first outer
     # iteration reuses this very mode instead of fitting it again.
+    #
+    # A SCOP block's box widens by the dispersion's units under the identity
+    # link (``_scop_lambda_scale``).  The data alone set it: every start, warm
+    # or cold, and every step of the search share it, and a term whose
+    # increments collapse toward a flat fit leaves it where it was.
+    scop_box = scaled_lambda_box(
+        _scop_lambda_scale(distribution, link, y, sample_weight, weight_semantics=weight_semantics)
+    )
+    boxes = {group.name: scop_box for group in groups if group.monotone_engine == "scop"}
     warm_names = {
         name for name in estimated_names if warm_lambdas is not None and name in warm_lambdas
     }
     boot_lambdas = {
         name: (
-            float(np.clip(warm_lambdas[name], 1e-6, 1e10))
+            float(np.clip(warm_lambdas[name], *boxes.get(name, LAMBDA_BOX)))
             if name in warm_names
             else (1e-4 if name in estimated_names else val)
         )
@@ -3002,6 +3074,7 @@ def optimize_scop_efs_reml(
         boot_scop_states,
         boot_alpha,
         {},
+        boxes=boxes,
     )
     for name in estimated_names:
         if name in warm_names:
@@ -3113,6 +3186,7 @@ def optimize_scop_efs_reml(
                     step_origin,
                     lambdas,
                     reml_iteration=n_reml_iter,
+                    boxes=boxes,
                 )
                 if rescue is None:
                     raise ObservedModeNotConvergedError(
@@ -3248,7 +3322,9 @@ def optimize_scop_efs_reml(
                         system.names, system.log_lambdas, newton_step, strict=True
                     ):
                         if delta != 0.0:
-                            proposal[name] = float(np.clip(np.exp(log_lambda + delta), 1e-6, 1e10))
+                            proposal[name] = float(
+                                np.clip(np.exp(log_lambda + delta), *boxes.get(name, LAMBDA_BOX))
+                            )
                     retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
                         fit_context,
                         current_mode,
@@ -3256,6 +3332,7 @@ def optimize_scop_efs_reml(
                         reml_iteration=n_reml_iter,
                         max_attempts=_SCOP_NEWTON_MAX_BACKTRACK_ATTEMPTS,
                         reflect=False,
+                        boxes=boxes,
                     )
                     if not candidate_accepted:
                         # The guard: no forward trial was accepted, so the
@@ -3347,12 +3424,14 @@ def optimize_scop_efs_reml(
                 efs_alpha,
                 efs_prev_dlsp,
                 aitken_state,
+                boxes=boxes,
             )
             retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
                 fit_context,
                 current_mode,
                 lambdas_new,
                 reml_iteration=n_reml_iter,
+                boxes=boxes,
             )
         outer_steps.append(step_kind)
         lambdas_new = retained_mode.lambdas.copy()
@@ -3378,9 +3457,7 @@ def optimize_scop_efs_reml(
         else:
             for name in estimated_names:
                 if name in lambdas_new and name in lambdas:
-                    accepted_step = np.log(max(lambdas_new[name], 1e-10)) - np.log(
-                        max(lambdas[name], 1e-10)
-                    )
+                    accepted_step = np.log(lambdas_new[name]) - np.log(lambdas[name])
                     efs_prev_dlsp[name] = accepted_step
         # Aitken extrapolates a run of EFS steps contracting at one ratio, and
         # a Newton step is no part of that run: the next EFS step (an

@@ -19,6 +19,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink, LogLink
@@ -404,9 +406,8 @@ def optimize_direct_reml(
         estimated_mask = np.array([pc.name in estimated_names for pc in penalties])
     else:
         estimated_mask = np.ones(m, dtype=bool)
-    log_lo, log_hi = np.log(1e-6), np.log(1e10)
+    log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
     max_newton_step = 5.0
-    _eps = np.finfo(float).eps
     _tol = reml_tol
     # One-engine design §3.8: every PIRLS the criterion reads certifies its
     # mode at the bar this stopping tolerance needs (``mode_score``).
@@ -702,7 +703,7 @@ def optimize_direct_reml(
     bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values so they can be restored exactly
-    # after the exp(rho)->clip round-trip (which would clamp 0.0 to 1e-6).
+    # after the exp(rho)->clip round-trip (which would clamp 0.0 to LAMBDA_FLOOR).
     fixed_lambdas: dict[str, float] = {}
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
@@ -712,7 +713,7 @@ def optimize_direct_reml(
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
-            rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            rho[i] = np.clip(np.log(max(fixed_val, LAMBDA_FLOOR)), log_lo, log_hi)
             continue
         if warm_lambdas and pc.name in warm_lambdas:
             # The warm start is the iterate; no Fellner-Schall step from it.
@@ -737,9 +738,9 @@ def optimize_direct_reml(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), 1e-6)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), LAMBDA_FLOOR)
         log_prev = np.log(lam_prev)
-        log_target = np.log(max(lam_fp, 1e-6))
+        log_target = np.log(max(lam_fp, LAMBDA_FLOOR))
         if ":" in pc.group_name:
             log_target = np.clip(
                 log_target,
@@ -853,8 +854,8 @@ def optimize_direct_reml(
 
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
-        # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
+            cand_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
+        # Restore exact fixed values (exp->clip would clamp 0.0 to LAMBDA_FLOOR)
         cand_lambdas.update(fixed_lambdas)
 
         if _carry_forward is not None and _carry_forward[0] == cand_lambdas:
@@ -902,7 +903,7 @@ def optimize_direct_reml(
             n_mean_space_restorations += 1
             cand_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-                cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+                cand_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
             cand_lambdas.update(fixed_lambdas)
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
                 cand_lambdas, None, None, n_iter
@@ -1609,7 +1610,7 @@ def optimize_direct_reml(
 
             eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
             max_eig = max(abs(eigvals_h).max(), 1e-12)
-            eig_floor = max_eig * _eps**0.7
+            eig_floor = max_eig * NEWTON_EIGENVALUE_FLOOR
             eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
 
             hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T
@@ -1677,7 +1678,7 @@ def optimize_direct_reml(
             had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
-                trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+                trial_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1

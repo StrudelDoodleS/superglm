@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm.distributions import clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
@@ -180,7 +181,7 @@ def optimize_efs_reml(
         r_j = pc.rank if pc.rank > 0 else penalty_ranks[pc.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
-        lambdas[pc.name] = float(np.clip(lam_fp, 1e-6, 1e10))
+        lambdas[pc.name] = float(np.clip(lam_fp, LAMBDA_FLOOR, LAMBDA_CEILING))
 
     # Rebuild DM with bootstrapped lambdas -- refresh penalties + caches
     old_gms = dm.group_matrices
@@ -301,7 +302,7 @@ def optimize_efs_reml(
             log_step = np.clip(log_step, -5.0, 5.0)
             lam_new = lambdas[pc.name] * np.exp(log_step)
 
-            lambdas_new[pc.name] = float(np.clip(lam_new, 1e-6, 1e10))
+            lambdas_new[pc.name] = float(np.clip(lam_new, LAMBDA_FLOOR, LAMBDA_CEILING))
 
         # -- Anderson(1) acceleration on log-lambda --
         if aa_prev_log_x is not None and len(reml_update_names) > 0:
@@ -316,7 +317,9 @@ def optimize_efs_reml(
                 theta = max(-0.5, min(theta, 2.0))
                 log_acc = (1.0 + theta) * log_gx - theta * aa_prev_log_gx
                 for i, name in enumerate(reml_update_names):
-                    lambdas_new[name] = float(np.clip(np.exp(log_acc[i]), 1e-6, 1e10))
+                    lambdas_new[name] = float(
+                        np.clip(np.exp(log_acc[i]), LAMBDA_FLOOR, LAMBDA_CEILING)
+                    )
 
         if len(reml_update_names) > 0:
             aa_prev_log_x = np.array([np.log(lambdas[n_]) for n_ in reml_update_names])
@@ -370,7 +373,7 @@ def optimize_efs_reml(
                     log_old = np.log(max(lambdas[pc.name], 1e-10))
                     log_new = np.log(max(lambdas_new[pc.name], 1e-10))
                     lambdas_new[pc.name] = float(
-                        np.clip(np.exp(0.5 * (log_old + log_new)), 1e-6, 1e10)
+                        np.clip(np.exp(0.5 * (log_old + log_new)), LAMBDA_FLOOR, LAMBDA_CEILING)
                     )
                 if len(reml_update_names) > 0:
                     aa_prev_log_gx = np.array([np.log(lambdas_new[n_]) for n_ in reml_update_names])

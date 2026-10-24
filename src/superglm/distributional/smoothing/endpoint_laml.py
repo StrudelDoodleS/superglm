@@ -10,6 +10,7 @@ from numbers import Integral, Real
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
 from superglm.distributional._row_design import bounded_predictor_matrices, matrix_row_chunk
 from superglm.distributional.family import (
     DistributionalFamily,
@@ -477,11 +478,6 @@ def _row_certificate_error(
     slices = [state.coefficient_slice for state in layout.predictors]
     projector = basis @ np.asarray(inverse, dtype=np.float64) @ basis.T
     absolute_projector = np.abs(projector)
-    unit_roundoff = 0.5 * np.finfo(np.float64).eps
-
-    def gamma(count: int) -> float:
-        return count * unit_roundoff / (1.0 - count * unit_roundoff)
-
     leverage_rounding = gamma(2 * layout.n_coefficients + 4)
     n_observations = certificate.shape[0]
     chunk = matrix_row_chunk(matrices, 4096)

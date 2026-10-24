@@ -14,6 +14,8 @@ from types import MappingProxyType
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
+from superglm._roundoff import gamma as roundoff_gamma
 from superglm.distributional.results.endpoint_evidence import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
     DENSE_EXECUTION_BACKEND_IDENTIFIER,
@@ -490,13 +492,12 @@ def _face_projectors_agree(left: PenaltyFace, right: PenaltyFace) -> bool:
     if left_basis.shape != right_basis.shape:
         return False
     inner = left_basis.shape[1]
-    unit_roundoff = 2.0**-53
     # gamma_{2r + 4} covers both replays on two machines and the bound's own
     # products and sum; nonnegative operands keep each step monotone.
     count = 2 * inner + 4
-    if count * unit_roundoff >= 0.5:
+    if count * UNIT_ROUNDOFF >= 0.5:
         return False
-    gamma = float(np.nextafter(count * unit_roundoff / (1.0 - count * unit_roundoff), math.inf))
+    gamma = gamma_up(count)
     magnitude = (
         np.abs(left_basis) @ np.abs(left_basis).T + np.abs(right_basis) @ np.abs(right_basis).T
     )
@@ -702,9 +703,7 @@ def _assessment_scalar_error_bound(
     # produced those stored totals without letting a large common offset hide
     # a material change in their difference.
     operations = 32 + 4 * max(int(math.ceil(math.log2(max(width, 1)))), 0)
-    eps = np.finfo(np.float64).eps
-    gamma = operations * eps / (1.0 - operations * eps)
-    return gamma * scale
+    return roundoff_gamma(2 * operations) * scale
 
 
 def _assessment_coefficient_refit_bound(

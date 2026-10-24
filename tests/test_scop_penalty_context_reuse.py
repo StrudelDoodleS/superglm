@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,7 +25,7 @@ def _states(width=11, groups=2):
             "group_sl": slice(index * width, (index + 1) * width),
             "group_name": f"x{index}",
             "beta_eff": np.zeros(width),
-            "reparam": object(),
+            "reparam": SimpleNamespace(free_dim=1),
         }
         for index in range(groups)
     }

@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from superglm._blas_threads import solver_blas_threads
 from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._lambda_box import LAMBDA_CEILING
 from superglm._parallel import fit_pool
 from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
 from superglm.diagnostics.fit_report import FitDiagnosticReport
@@ -690,7 +691,7 @@ class SuperLSS:
         max_reml_iter: int = 100,
         reml_tol: float = 1.0e-6,
         max_log_step: float = 5.0,
-        max_lambda: float = 1.0e10,
+        max_lambda: float = LAMBDA_CEILING,
         initial_lambda: float | None = None,
         max_inner_iter: int = 100,
         inner_tol: float = 1.0e-7,

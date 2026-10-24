@@ -9,11 +9,12 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS, UNIT_ROUNDOFF
 from superglm.features._spline_ranges import _REML_RANK_THRESHOLD, derivative_design
 from superglm.solvers.rank import SHARED_RANK_POLICY
 
 # 1/sqrt(eps): solvers/rank.py's warning_condition for a Gram.
-_CONDITION_LIMIT = float(1.0 / np.sqrt(np.finfo(np.float64).eps))
+_CONDITION_LIMIT = float(1.0 / np.sqrt(EPS))
 
 
 def build_difference_penalty(n_basis: int, order: int) -> NDArray:
@@ -192,8 +193,7 @@ def _evenly_spaced(spec) -> bool:
         return True
     points = np.r_[spec._lo, interior, spec._hi]
     gaps = np.diff(points)
-    u = np.finfo(np.float64).eps / 2
-    return bool(np.ptp(gaps) <= 32 * u * np.abs(points).max())
+    return bool(np.ptp(gaps) <= 32 * UNIT_ROUNDOFF * np.abs(points).max())
 
 
 def build_integrated_derivative_penalty(

@@ -8,6 +8,7 @@ from numbers import Integral, Real
 
 import numpy as np
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
 from superglm.types import PenaltyComponent
@@ -51,7 +52,7 @@ def _finite_penalty_evaluation_from_components(
     rank = 0
     log_terms = []
     log_errors = []
-    unit = np.finfo(float).eps / 2
+    unit = UNIT_ROUNDOFF
     for indices in groups:
         components = tuple(finite_components[index] for index in indices)
         roots = []

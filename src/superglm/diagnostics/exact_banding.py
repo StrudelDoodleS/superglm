@@ -26,8 +26,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
+
 MAX_EXACT_VALUES = 5000
-_UNIT_ROUNDOFF = 2.0**-53
 _FACTOR_RTOL = 1e-6
 _TOLERANCE_CEILING = float(np.finfo(np.float64).max) / 4.0
 # Below this range the running moments w d and w d**2 stay finite for any band

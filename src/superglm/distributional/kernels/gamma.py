@@ -10,6 +10,7 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from scipy import special
 
+from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     _NumericalEvaluationError,
@@ -21,7 +22,6 @@ from superglm.distributional.kernels._common import (
 )
 
 _FLOAT = np.float64
-_EPS = np.finfo(_FLOAT).eps
 _MIN_FLOAT = np.nextafter(_FLOAT(0.0), _FLOAT(1.0))
 _MAX_FLOAT = np.finfo(_FLOAT).max
 _LOG_MIN_FLOAT = math.log(_MIN_FLOAT)

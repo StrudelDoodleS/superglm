@@ -53,6 +53,7 @@ import scipy.linalg
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.separation import _separated_flags, response_boundaries
 from superglm.distributions import clip_mu
 from superglm.editor.collapse import _require_not_interaction_parent
@@ -521,7 +522,7 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
     variance_slope = getattr(distribution, "variance_derivative", None)
     if second is None or variance_slope is None:
         return None
-    u = np.finfo(np.float64).eps / 2
+    u = UNIT_ROUNDOFF
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         mean = np.asarray(link.inverse(eta), dtype=np.float64)
         first = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
@@ -574,7 +575,7 @@ def _on_binding_face(model, active, width: int, apply) -> Any:
     # a row the others already span.
     _q, triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
     diagonal = np.abs(np.diag(triangle))
-    u = np.finfo(np.float64).eps / 2
+    u = UNIT_ROUNDOFF
     R = R[order[diagonal > width * u * diagonal[0]]]
     moves = np.column_stack([apply(row) for row in R])
     gram = 0.5 * (R @ moves + (R @ moves).T)

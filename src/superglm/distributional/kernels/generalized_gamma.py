@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import optimize, special
 
+from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import (
     readonly,
     readonly_bool,
@@ -40,7 +41,6 @@ Parametrisation = Literal["mean", "location"]
 _Evaluator = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 
 _FLOAT = np.float64
-_EPS = np.finfo(_FLOAT).eps
 _STIRLING_SWITCH = 8.0
 _U_SERIES_RADIUS = 1.0
 _U_SERIES_TERMS = 25

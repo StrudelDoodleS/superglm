@@ -50,6 +50,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
+from superglm._roundoff import gamma as _gamma
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -57,7 +59,6 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 
-_UNIT_ROUNDOFF = 2.0**-53
 _CHUNK = 8192
 
 
@@ -84,12 +85,6 @@ WEAK_IDENTIFICATION_NOTE = (
     "smoothing-parameter selection, and their estimates and standard errors carry little "
     "information."
 )
-
-
-def _gamma(count: int) -> float:
-    """Higham's ``gamma_k = k u / (1 - k u)`` for ``k`` roundings, ``u = 2^-53``."""
-    product = count * _UNIT_ROUNDOFF
-    return product / (1.0 - product) if product < 1.0 else float("inf")
 
 
 def penalized_columns(width: int, penalties: Sequence | None) -> NDArray:

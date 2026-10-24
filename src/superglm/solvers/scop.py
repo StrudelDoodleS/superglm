@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING
 from superglm.solvers.constrained_qp import solve_constrained_qp
 
 logger = logging.getLogger(__name__)
@@ -347,9 +348,17 @@ class SCOPSolverReparam:
         return S
 
     def qp_initialize(self, B_centered: NDArray, y: NDArray, **kwargs) -> NDArray:
-        """QP initialization in solver space."""
+        """QP initialization in solver space.
+
+        The QP's coefficients are the mapped coordinates, whose data curvature
+        ``B' W B`` carries no Jacobian, so a penalty on them has the unit box
+        and the QP takes ``lambda_penalty`` no larger than ``LAMBDA_CEILING``.
+        A SCOP smoothing parameter acts on the latent coordinates, whose box
+        widens with the dispersion's units (``scaled_lambda_box``); unbounded
+        here, it can sink a data direction of ``H`` under its rank cut.
+        """
         weights = kwargs.get("weights", None)
-        lambda_penalty = kwargs.get("lambda_penalty", 0.01)
+        lambda_penalty = min(kwargs.get("lambda_penalty", 0.01), LAMBDA_CEILING)
 
         if weights is not None:
             W = np.sqrt(weights)
