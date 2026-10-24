@@ -297,16 +297,22 @@ def _psd_root(S: NDArray) -> NDArray:
     return np.sqrt(np.maximum(eigenvalues, 0.0))[:, None] * eigenvectors.T
 
 
-def _row_cut(rounding: NDArray, count: int) -> float:
-    """The rows' rank cut on singular values of the factor scaled by its SCOP columns' own norms.
+def _row_cut(vectors: NDArray, rounding: NDArray, count: int) -> NDArray:
+    """The rows' rank cut on each right singular vector of the factor scaled by its SCOP columns' own norms.
 
-    ``rounding`` is each column's rounding bound in units of that norm: the
-    scaled factor is then within ``gamma_count ||rounding||_2`` of its exact
-    value in the 2-norm, and no singular value at or below that is the
-    data's (Weyl). The cut is also at least ``sqrt(eps)``, Pya & Wood's
-    (2015, sec. 3.2) for a factor whose columns have unit scale.
+    ``vectors`` holds the right singular vectors as columns and ``rounding``
+    each column's rounding bound in units of its norm. Along a unit ``v``
+    the scaled factor's rounding ``E`` is at most ``gamma_count sum_j |v_j|
+    rounding_j``, and ``(F + E) v = sigma u + E v``: a singular value at or
+    below that bound leaves ``v``, up to the rounding, a null vector of the
+    exact rows (Golub, Klema & Stewart 1977, sec. 3). A single bar serves
+    every direction only once the columns' errors are equal; these differ by
+    column, and a column drawn on a nearly collinear ordinary pair carries
+    rounding a direction made of other columns does not, so the bound is
+    taken direction by direction. The cut is also at least ``sqrt(eps)``,
+    Pya & Wood's (2015, sec. 3.2) for a factor whose columns have unit scale.
     """
-    return max(_gamma_up(count) * float(np.linalg.norm(rounding)), _SQRT_EPS)
+    return np.maximum(_gamma_up(count) * (np.abs(vectors).T @ rounding), _SQRT_EPS)
 
 
 def _resolved_root(
@@ -338,9 +344,10 @@ def _resolved_root(
     well. The decision is then taken on a factor of the
     rows, ``row_factor()``, which returns ``(F, g, count)`` with ``F' F``
     the same block, each column of ``F`` within ``gamma_count g_j`` of its
-    exact value: a factor squares no condition number, so its error in
-    singular values is the column bounds' 2-norm (Weyl), not the square root
-    of the Gram's. The factor is scaled by ``own``, the SCOP columns'
+    exact value: a factor squares no condition number, so its error along
+    each singular direction is the column bounds that direction draws on
+    (``_row_cut``), not the square root of the Gram's. The factor is scaled
+    by ``own``, the SCOP columns'
     centred weighted norms, so that each of its columns is the part of a
     SCOP column the ordinary design does not explain, as a fraction of that
     column: a singular value is how much of a unit combination of SCOP
@@ -377,7 +384,7 @@ def _resolved_root(
         _, singular, right = np.linalg.svd(factor / norms[None, :])
         singular = np.concatenate((singular, np.zeros(q - singular.size)))
         vectors = right.T
-        resolved = singular > _row_cut(rounding / norms, count)
+        resolved = singular > _row_cut(vectors, rounding / norms, count)
     kept = vectors[:, resolved]
     root = singular[resolved][:, None] * kept.T * norms[None, :]
     return root, norms * (kept @ (kept.T @ (score / norms)))

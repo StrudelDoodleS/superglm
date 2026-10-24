@@ -882,6 +882,62 @@ def test_nearly_collinear_ordinary_columns_keep_every_scop_direction(trend, spli
     assert np.sqrt(np.mean((mu - y) ** 2)) <= gamma * np.sqrt(np.mean(size**2))
 
 
+@pytest.mark.slow
+def test_a_group_beside_a_nearly_collinear_pair_holds_no_other_groups_direction(monkeypatch):
+    """Two increasing splines beside ``a, a + 5e-8 v``, v correlated with the first: the rows keep every direction.
+
+    The design is full rank (the ordinary block resolves the pair, and each
+    basis is), so every Schur direction is the data's. The first group's
+    columns draw on the pair's cancelling coefficients, with rounding bounds
+    4e6 to 1.4e7 times their norms; the second group's are at most 1.9e5.
+    One bar for every direction, the bounds' 2-norm (0.039 at the first step),
+    held a direction made of the second group's columns alone, at 0.038 of
+    their scale, whose own rounding is 5e-4 (Golub, Klema & Stewart 1977,
+    sec. 3: the bound along a direction is the bounds of the columns it
+    draws on).
+    """
+    from superglm import Numeric, PSpline
+    from superglm.solvers import scop_newton
+
+    captured, roots = [], []
+    rows_of, resolved_of = SCOPJointNewton._schur_rows, scop_newton._resolved_root
+
+    def capture(self, *args):
+        captured.append(rows_of(self, *args))
+        return captured[-1]
+
+    def resolve(gram, *args, own):
+        calls = len(captured)
+        root, score = resolved_of(gram, *args, own=own)
+        if len(captured) > calls:  # this decision was the rows'
+            roots.append((root.shape[0], gram.shape[0]))
+        return root, score
+
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", capture)
+    monkeypatch.setattr(scop_newton, "_resolved_root", resolve)
+    rng = np.random.default_rng(2)
+    n = 100_000
+    s, t, a = rng.uniform(0, 1, n), rng.uniform(0, 1, n), rng.normal(size=n)
+    v = 0.5 * (s - s.mean()) / s.std() + rng.normal(size=n)
+    y = 0.2 + 2 * s + 0.6 * s * s + 1.5 * np.sqrt(t) + 0.4 * v + 0.1 * rng.normal(size=n)
+    increasing = Constraint.fit.increasing
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        features={
+            "a": Numeric(),
+            "b": Numeric(),
+            "s": PSpline(n_knots=20, constraint=increasing),
+            "t": PSpline(n_knots=40, constraint=increasing),
+        },
+    )
+    model.fit(pd.DataFrame({"a": a, "b": a + 5e-8 * v, "s": s, "t": t}), y)
+
+    assert model.result.converged
+    assert roots and all(kept == q for kept, q in roots)
+
+
 def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(monkeypatch):
     """x beside a convex spline of x and a pair ``a, a + 1e-7 v``: the rows certify the alias null.
 
@@ -933,12 +989,12 @@ def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(m
     for (factor, rounding, count), (root, own) in zip(captured, roots, strict=True):
         q = factor.shape[1]
         norms = np.where(own > 0.0, own, 1.0)
-        singular = np.linalg.svd(factor / norms[None, :], compute_uv=False)
+        _, singular, right = np.linalg.svd(factor / norms[None, :])
         # the step keeps the q - 1 directions above the rows' cut and holds the alias,
-        # which is within the rows' own rounding in the columns' scale
+        # which is within the rows' own rounding along it in the columns' scale
         assert root.shape[0] == q - 1
-        assert np.sum(singular > scop_newton._row_cut(rounding / norms, count)) == q - 1
-        assert singular[-1] <= _gamma_up(count) * np.linalg.norm(rounding / norms)
+        assert np.sum(singular > scop_newton._row_cut(right.T, rounding / norms, count)) == q - 1
+        assert singular[-1] <= _gamma_up(count) * float(np.abs(right[-1]) @ (rounding / norms))
 
     alone = fit({"a": Numeric(), "b": Numeric(), "s": convex})
     # two certified modes of one model (the certificate's bar, sqrt(r eps), each)
