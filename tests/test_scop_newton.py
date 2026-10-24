@@ -463,3 +463,72 @@ def test_exact_supports_compress_only_when_they_pay_and_pair_tables_are_capped(m
     # sums of the same n products in another order (Higham 2002, eq. 3.5)
     bound = 2 * (2 * n + 2) * UNIT * (np.abs(rows[0]).T @ (W[:, None] * np.abs(rows[1])))
     assert np.all(np.abs(cross - rows[0].T @ (W[:, None] * rows[1])) <= bound)
+
+
+def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
+    """A K-level categorical's (K + 1, K) identity support is read off its table, never allocated."""
+    from superglm import Categorical
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        CrossMatrixExecutionPlan,
+        DiscretizedSCOPGroupMatrix,
+        MatrixExecutionPlan,
+    )
+    from superglm.solvers import scop_newton
+
+    formed = []
+    support = scop_newton._compact_support
+    monkeypatch.setattr(
+        scop_newton, "_compact_support", lambda gm: (formed.append(type(gm)), support(gm))[1]
+    )
+    rng = np.random.default_rng(12)
+    n, levels = 6000, 1500
+    frame = pd.DataFrame(
+        {
+            "a": rng.uniform(0, 1, n),
+            "m": rng.uniform(0, 1, n),
+            "c": np.concatenate([np.arange(levels), rng.integers(0, levels, n - levels)]).astype(
+                str
+            ),
+        }
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "a": Spline(kind="ps", k=8),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "c": Categorical(base="most_exposed"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model_build_design_matrix(model, frame, rng.poisson(1.0, n).astype(float), np.ones(n), None)
+    pairs = list(zip(model._groups, model._dm.group_matrices))
+    scop = next(gm for g, gm in pairs if g.monotone_engine == "scop")
+    ordinary = [gm for g, gm in pairs if g.monotone_engine != "scop"]
+    columns = [(scop.B_scop_unique, scop.bin_idx)]
+    categorical = next(i for i, gm in enumerate(ordinary) if isinstance(gm, CategoricalGroupMatrix))
+    reduced = DesignMatrix(ordinary, n=n, p=sum(gm.shape[1] for gm in ordinary))
+
+    one_pass = scop_newton._JointWeightCross.build(reduced, columns)
+    assert CategoricalGroupMatrix not in formed
+    assert one_pass.layout.supports[categorical] == (None, None)
+    weights = rng.uniform(0.1, 3.0, n)
+    plan = CrossMatrixExecutionPlan(
+        reduced.execution_plan,
+        MatrixExecutionPlan([DiscretizedSCOPGroupMatrix(scop.B_scop_unique, scop.bin_idx)], n=n),
+    )
+    expected = plan.cross_moment(weights)
+    # sums of the same n products in another order: within n u of the largest entry
+    np.testing.assert_allclose(
+        one_pass.cross_moment(weights), expected, rtol=0, atol=n * UNIT * np.abs(expected).max()
+    )
+
+    # Tables past the cap are refused from the groups' metadata, before any support is formed.
+    formed.clear()
+    monkeypatch.setattr(scop_newton, "_MAX_PACKED_HIST_CELLS", levels * scop.B_scop_unique.shape[0])
+    fresh = DesignMatrix(ordinary, n=n, p=reduced.p)
+    assert scop_newton._JointWeightCross.build(fresh, columns) is None
+    assert formed == []
