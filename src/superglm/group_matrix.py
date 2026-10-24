@@ -265,6 +265,7 @@ class DesignMatrix:
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
         state["_structured_layout_cache"] = {}
+        state["_centered_pattern_plan"] = None
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -301,7 +302,9 @@ class DesignMatrix:
             group_matrices,
             n=int(state["n"]),
         )
-        state.setdefault("_centered_pattern_plan", None)
+        # Rebuilt from the codes on first use, never read from a pickle: one
+        # written before the pattern key was exact past 2**53 holds a wrong plan.
+        state["_centered_pattern_plan"] = None
         state.setdefault("_centered_solver_supports", None)
         self.__dict__.update(state)
 

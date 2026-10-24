@@ -1691,31 +1691,72 @@ def _wide_tensor_fit(X: pd.DataFrame, y: np.ndarray, levels: dict[str, int]) -> 
     ).fit(X, y)
 
 
-def test_a_pattern_key_past_two_to_the_53_decodes_every_row(monkeypatch):
-    """Row patterns keyed past ``2**53`` decode to each row's own codes, and the fit is another route's.
+def test_a_pattern_key_past_two_to_the_53_decodes_every_row():
+    """Row patterns keyed past ``2**53`` decode to each row's own codes, and their Gram is the dense one.
 
     The key packs every group's code in mixed radix into a uint64.  Adding the
     signed codes ran in float64 (NumPy's uint64 + int64 loop), which drops the
     key's low digits past ``2**53``: rows took other rows' patterns and the
-    centred Gram was wrong.  Mutation: without the uint64 cast most rows decode
-    to other codes and the two fits disagree.
+    centred Gram was wrong.  The pattern route is called directly at fixed
+    weights, so no fit trajectory decides whether it runs.  Mutation: without
+    the uint64 cast most rows decode to other codes and the Gram is off.
     """
     from superglm._group_matrix import _group_matrix_centered as centered
     from superglm.group_matrix import CategoricalGroupMatrix
 
     X, y, levels = _wide_tensor_frame()
-    model = _wide_tensor_fit(X, y, levels)
-    groups = model._dm.group_matrices
-    plan = centered._build_pattern_plan(model._dm)
+    dm = _wide_tensor_fit(X, y, levels)._dm
+    plan = centered._build_pattern_plan(dm)
     assert plan is not None
     assert np.prod(np.asarray(plan.sizes, dtype=np.float64)) > 2.0**53
     codes = np.column_stack(
-        [gm.codes if isinstance(gm, CategoricalGroupMatrix) else gm.bin_idx for gm in groups]
+        [
+            gm.codes if isinstance(gm, CategoricalGroupMatrix) else gm.bin_idx
+            for gm in dm.group_matrices
+        ]
     )
     decoded = np.asarray(plan.unique_codes)[np.asarray(plan.row_patterns)]
     np.testing.assert_array_equal(decoded, codes)
 
-    monkeypatch.setattr(centered, "_build_pattern_plan", lambda dm: None)
-    reference = _wide_tensor_fit(X, y, levels)
-    assert reference._dm._centered_pattern_plan is False  # the cache records "no plan"
-    np.testing.assert_allclose(model.predict(X), reference.predict(X), rtol=1e-10, atol=0)
+    rng = np.random.default_rng(11)
+    w = rng.uniform(0.5, 1.5, dm.n)
+    z = rng.normal(size=dm.n)
+    z_centered = z - (w @ z) / w.sum()
+    attempted, centred = centered._try_pattern_tensor_centering(
+        dm=dm, W=w, z_centered=z_centered, weighted_z=w * z_centered, sum_w=float(w.sum())
+    )
+    assert attempted and centred is not None
+    _mean, gram, rhs = centred
+    dense = dm.toarray()
+    xc = dense - (w @ dense) / w.sum()
+    reference_gram = xc.T @ (w[:, None] * xc)
+    reference_rhs = xc.T @ (w * z_centered)
+    # well-conditioned weights and a 0/1 or B-spline design: a few hundred
+    # roundings per entry, far inside 1e-10 of the largest
+    assert np.max(np.abs(gram - reference_gram)) <= 1e-10 * np.max(np.abs(reference_gram))
+    assert np.max(np.abs(rhs - reference_rhs)) <= 1e-10 * np.max(np.abs(reference_rhs))
+
+
+def test_a_loaded_design_rebuilds_its_pattern_plan():
+    """A design read back from a pickle rebuilds its pattern plan from its codes.
+
+    The plan is a cache of the codes, and a pickle's copy may come from a build
+    whose keys lost digits past ``2**53``, so the pickle carries no plan and a
+    load drops whatever plan it finds.  Mutations: keeping the plan in
+    ``__getstate__``, or ``setdefault`` in ``__setstate__``, carries it through.
+    """
+    from superglm._group_matrix import _group_matrix_centered as centered
+
+    X, y, levels = _wide_tensor_frame()
+    dm = _wide_tensor_fit(X, y, levels)._dm
+    plan = centered._pattern_plan(dm)
+    assert plan is not None
+    state = dm.__getstate__()
+    assert state["_centered_pattern_plan"] is None
+    state["_centered_pattern_plan"] = plan  # as a pickle from an older build carries it
+    loaded = type(dm).__new__(type(dm))
+    loaded.__setstate__(state)
+    assert loaded._centered_pattern_plan is None
+    rebuilt = centered._pattern_plan(loaded)
+    np.testing.assert_array_equal(rebuilt.unique_codes, plan.unique_codes)
+    np.testing.assert_array_equal(rebuilt.row_patterns, plan.row_patterns)
