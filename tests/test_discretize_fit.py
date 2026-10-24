@@ -1657,3 +1657,65 @@ def test_raw_channel_stage_reaches_the_same_reml_optimum():
     assert raw.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
     np.testing.assert_allclose(raw.predict(X), dense.predict(X), rtol=1e-10, atol=0)
     assert raw.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-10)
+
+
+def _wide_tensor_frame(n: int = 6000) -> tuple[pd.DataFrame, np.ndarray, dict[str, int]]:
+    """A tensor beside five categoricals: the pattern key's radix product, about 1.3e17, passes 2**53."""
+    rng = np.random.default_rng(5)
+    levels = {"a": 300, "b": 200, "c": 150, "d": 100, "e": 60}
+    X = pd.DataFrame(
+        {
+            "x1": rng.integers(0, 40, n).astype(float),
+            "x2": rng.integers(0, 40, n).astype(float),
+            **{
+                name: [f"{name}{code}" for code in rng.integers(0, size, n)]
+                for name, size in levels.items()
+            },
+        }
+    )
+    y = rng.poisson(np.exp(0.02 * X.x1 - 0.01 * X.x2)).astype(np.float64)
+    return X, y, levels
+
+
+def _wide_tensor_fit(X: pd.DataFrame, y: np.ndarray, levels: dict[str, int]) -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "x1": Spline(n_knots=6),
+            "x2": Spline(n_knots=6),
+            **{name: Categorical() for name in levels},
+        },
+        interactions=[("x1", "x2")],
+    ).fit(X, y)
+
+
+def test_a_pattern_key_past_two_to_the_53_decodes_every_row(monkeypatch):
+    """Row patterns keyed past ``2**53`` decode to each row's own codes, and the fit is another route's.
+
+    The key packs every group's code in mixed radix into a uint64.  Adding the
+    signed codes ran in float64 (NumPy's uint64 + int64 loop), which drops the
+    key's low digits past ``2**53``: rows took other rows' patterns and the
+    centred Gram was wrong.  Mutation: without the uint64 cast most rows decode
+    to other codes and the two fits disagree.
+    """
+    from superglm._group_matrix import _group_matrix_centered as centered
+    from superglm.group_matrix import CategoricalGroupMatrix
+
+    X, y, levels = _wide_tensor_frame()
+    model = _wide_tensor_fit(X, y, levels)
+    groups = model._dm.group_matrices
+    plan = centered._build_pattern_plan(model._dm)
+    assert plan is not None
+    assert np.prod(np.asarray(plan.sizes, dtype=np.float64)) > 2.0**53
+    codes = np.column_stack(
+        [gm.codes if isinstance(gm, CategoricalGroupMatrix) else gm.bin_idx for gm in groups]
+    )
+    decoded = np.asarray(plan.unique_codes)[np.asarray(plan.row_patterns)]
+    np.testing.assert_array_equal(decoded, codes)
+
+    monkeypatch.setattr(centered, "_build_pattern_plan", lambda dm: None)
+    reference = _wide_tensor_fit(X, y, levels)
+    assert reference._dm._centered_pattern_plan is False  # the cache records "no plan"
+    np.testing.assert_allclose(model.predict(X), reference.predict(X), rtol=1e-10, atol=0)
