@@ -672,13 +672,13 @@ def test_above_the_work_bar_both_backends_take_one_leverage_path(monkeypatch, fa
 
     The dense solver from its lookup tables, the nested factor from its
     augmented factor's row quadratic forms; both form the W(rho) cross terms
-    at a candidate stop only.  One Newton model on one surface: the same route,
-    a converged exit within one iteration of each other (the backends round
-    differently, which may move a stop by an iteration or between the two
-    certified exits), the objectives within ``tau (1 + |V|)``, and the two REML
-    fits, their smoothing parameters included, within small multiples of the
-    same-lambda budget, as every quantity both backends derive from one path.
-    The unfixed gate kept the derivative Grams on both.
+    at a candidate stop only.  One Newton model on one surface: the same route
+    and iteration count, with either certified exit on that iterate (the
+    backends round differently, which can tip a stop between the two exits),
+    the objectives within ``tau (1 + |V|)``, and the two REML fits, their
+    smoothing parameters included, within small multiples of the same-lambda
+    budget, as every quantity both backends derive from one path.  The unfixed
+    gate kept the derivative Grams on both.
     """
     monkeypatch.setattr(direct_reml, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     data = _support_response(family)
@@ -690,7 +690,7 @@ def test_above_the_work_bar_both_backends_take_one_leverage_path(monkeypatch, fa
     for model in (dense, nested):
         assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
         assert model._reml_result.converged
-    assert abs(nested._reml_result.n_reml_iter - dense._reml_result.n_reml_iter) <= 1
+    assert nested._reml_result.n_reml_iter == dense._reml_result.n_reml_iter
     objective = dense._reml_result.objective
     assert abs(nested._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
 
