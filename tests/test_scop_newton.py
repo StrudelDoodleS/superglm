@@ -1092,6 +1092,29 @@ def test_the_schur_rows_are_formed_a_leaf_at_a_time(monkeypatch):
     assert all(peak < copy for peak, copy in peaks)
 
 
+def test_a_leaf_reads_a_dense_block_in_place_and_matches_its_row_subset():
+    """A leaf's C-ordered dense block is a view of its rows; every block equals ``row_subset``'s."""
+    from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.solvers.scop_newton import _leaf_design
+
+    rng = np.random.default_rng(5)
+    n = 50
+    ordered = rng.normal(size=(n, 3))
+    blocks = [
+        DenseGroupMatrix(ordered),
+        DenseGroupMatrix(np.asfortranarray(rng.normal(size=(n, 2)))),
+        CategoricalGroupMatrix(rng.integers(0, 4, n), 3),
+    ]
+    design = DesignMatrix(blocks, n=n, p=8)
+    leaf, copy = _leaf_design(design, 10, 30), design.row_subset(np.arange(10, 30))
+
+    assert np.shares_memory(leaf.group_matrices[0].M, ordered)
+    for got, want in zip(leaf.group_matrices, copy.group_matrices, strict=True):
+        assert np.array_equal(got.toarray(), want.toarray())
+    for got, want in zip(leaf.group_matrices[:2], copy.group_matrices[:2], strict=True):
+        assert got.M.flags.c_contiguous and want.M.flags.c_contiguous
+
+
 def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
     """A fit's only row-level SCOP group is compressed once per REML run, not once per fit (a count).
 

@@ -757,6 +757,25 @@ class _OrdinaryCross:
         return cross, norms
 
 
+def _leaf_design(design: DesignMatrix, start: int, stop: int) -> DesignMatrix:
+    """The design's rows ``start`` to ``stop``, a ``DenseGroupMatrix`` block's as a view of them.
+
+    ``row_subset`` copies a dense block's rows; a slice of a C-ordered
+    block is already the C-ordered array that copy would make, so it is
+    taken as it is, and only a block in another order is copied. Every
+    other block takes ``row_subset``.
+    """
+    rows = None
+    blocks = []
+    for matrix in design.group_matrices:
+        if type(matrix) is DenseGroupMatrix:
+            blocks.append(DenseGroupMatrix(np.ascontiguousarray(matrix.M[start:stop])))
+        else:
+            rows = np.arange(start, stop) if rows is None else rows
+            blocks.append(matrix.row_subset(rows))
+    return DesignMatrix(blocks, stop - start, design.p)
+
+
 def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArray:
     """``(X - 1 centre') change`` on a leaf's rows, every column of ``change`` at once.
 
@@ -1016,7 +1035,7 @@ class SCOPJointNewton:
         Z``, a second forms each leaf's ``Z`` again, regresses the correction
         out of it and hands it to the TSQR. A binned group's rows are read off
         its support by bin, and every ordinary group takes its products on the
-        leaf's rows (``row_subset``), a discretized one by its bins, a dense
+        leaf's rows (``_leaf_design``), a discretized one by its bins, a dense
         one in one product for all ``q`` columns (``_leaf_product``).
 
         ``g`` bounds each column's rounding: its SCOP column's norm plus
@@ -1045,7 +1064,7 @@ class SCOPJointNewton:
 
         def regressed(start: int, stop: int, *changes: NDArray) -> tuple[NDArray, DesignMatrix]:
             """The leaf's SCOP rows less ``X~_r change`` for each change in turn, and its design rows."""
-            part = design.row_subset(np.arange(start, stop))
+            part = _leaf_design(design, start, stop)
             rows = scop_rows(start, stop)
             for change in changes:
                 rows -= _leaf_product(part, change, centre)
