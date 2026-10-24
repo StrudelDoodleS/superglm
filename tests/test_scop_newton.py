@@ -1323,8 +1323,12 @@ def test_a_damped_trial_takes_the_ordinary_solve_at_its_latent_coordinates(monke
     assert checked
 
 
-def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch):
-    """A step the line search cut to 2^-20 changes the deviance by about that fraction: the fit goes on."""
+@pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
+def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
+    """A step the line search cut to 2^-20 changes the deviance, and the coefficients, by about that fraction: the fit goes on.
+
+    SCOP REML inner fits stop on the coefficients (``scop_efs``).
+    """
     from superglm.solvers.irls_state import _IRLSStepDecision
 
     decisions = []
@@ -1353,6 +1357,7 @@ def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch):
         max_iter=100,
         tol=1e-6,
         weight_semantics="frequency",
+        convergence=convergence,
     )
 
     assert result.converged

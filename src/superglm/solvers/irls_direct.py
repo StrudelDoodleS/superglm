@@ -3929,6 +3929,10 @@ def _fit_irls_direct_once(
                     coef_change = max(coef_change, latent_change)
                 convergence_value = coef_change
                 converged_this_iter = coef_change < tol
+                if _has_scop and n_halvings:
+                    # a damped step's change is a fraction of the full
+                    # step's and bounds nothing either (below)
+                    converged_this_iter = False
             else:
                 objective = (
                     retained.deviance
