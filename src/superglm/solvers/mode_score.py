@@ -99,6 +99,10 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from scipy import sparse
 
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import TINY as _TINY
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
+from superglm._roundoff import gamma as _gamma
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -108,9 +112,6 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
 )
 
-_UNIT_ROUNDOFF = 2.0**-53
-_EPS = float(np.finfo(np.float64).eps)
-_TINY = float(np.finfo(np.float64).tiny)
 _CHUNK = 8192
 # The bar of the mode certificate and the PIRLS stop rule: one bar, no margin
 # between them (the certificate IS the stop rule's residual at the mode PIRLS
@@ -196,12 +197,6 @@ def rate_exhausts_budget(ratios: list[float], window: int, done: int, max_iter: 
     if rate >= 1.0:
         return True
     return done + math.log(now) / -math.log(rate) > max_iter
-
-
-def _gamma(count: int) -> float:
-    """Higham's ``gamma_k = k u / (1 - k u)`` for ``k`` roundings, ``u = 2^-53``."""
-    product = count * _UNIT_ROUNDOFF
-    return product / (1.0 - product) if product < 1.0 else float("inf")
 
 
 def one_hot_columns(dm: DesignMatrix) -> NDArray:

@@ -40,6 +40,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
+
 #: Working-weight ratio past which an exhausted, stagnant IRLS run is treated
 #: as the runtime signature of separation (see ``format_runtime_message``).
 EXTREME_WEIGHT_RATIO = 1e12
@@ -399,12 +401,6 @@ def validate_separation_mode(mode: str) -> str:
 # ── sz factor smooths: each level's unpenalized line ───────────────────────
 
 
-def _rounding(count: int) -> float:
-    """Higham's ``gamma_n = n u / (1 - n u)`` (2002, Lemma 3.1), ``u = eps / 2``."""
-    unit = float(np.finfo(np.float64).eps) / 2.0
-    return count * unit / (1.0 - count * unit)
-
-
 def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray) -> bool:
     """Whether some ``g = b(x)' N_P Z h`` has ``sign * g >= 0`` on every row, ``> 0`` on one.
 
@@ -423,7 +419,7 @@ def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray
     D = sign[:, None] * rows
     k, m, q = natural.shape[1], null_space.shape[1], free.shape[1]
     scale = np.abs(natural) @ (np.abs(null_space) @ np.abs(free))
-    slack = _rounding(k + m + q)
+    slack = gamma(k + m + q)
 
     def certified(h: NDArray) -> bool:
         g = D @ h
@@ -493,7 +489,7 @@ def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: 
 
 def _numerical_rank(values: NDArray, shape: tuple[int, ...]) -> int:
     """Rank from singular ``values``: the rule of ``numpy.linalg.matrix_rank``, ``max(shape) eps`` of the largest."""
-    return int(np.sum(values > 2.0 * max(shape) * _rounding(1) * values[0])) if len(values) else 0
+    return int(np.sum(values > 2.0 * max(shape) * gamma(1) * values[0])) if len(values) else 0
 
 
 def _rank_and_null_space(rows: NDArray) -> tuple[int, NDArray]:
@@ -712,7 +708,7 @@ def separated_factor_smooth_spans(
                 value = dominant.B @ w
                 bound = abs(dominant.B) @ np.abs(w)
                 nnz = int(np.max(np.diff(dominant.B.indptr), initial=0))
-            clear = value > _rounding(nnz) * bound
+            clear = value > gamma(nnz) * bound
             unclear = np.bincount(codes[positive & ~clear], minlength=n_levels)
             separated |= one_sided & (unclear == 0)
 

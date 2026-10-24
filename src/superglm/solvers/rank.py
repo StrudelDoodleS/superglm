@@ -16,6 +16,9 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import gamma_up as _gamma_up
+
 
 @dataclass(frozen=True)
 class RankPolicy:
@@ -58,10 +61,8 @@ class RankPolicy:
     severe_condition: float
 
 
-_EPS = np.finfo(float).eps
-# ``gamma_6 = 6u / (1 - 6u)`` (Higham 2002, section 3.1), ``u = eps / 2``; the
-# quotient's one rounding taken outward.
-_GAMMA_6 = float(np.nextafter(3.0 * _EPS / (1.0 - 3.0 * _EPS), np.inf))
+# ``gamma_6`` (Higham 2002, section 3.1), the quotient's one rounding taken outward.
+_GAMMA_6 = _gamma_up(6)
 SHARED_RANK_POLICY = RankPolicy(
     # Version 2 -- the deficient path answers differently under version 1's
     # thresholds, in two independent ways.
@@ -2533,14 +2534,6 @@ def decompose_gram_if_authoritative(
 _GREY_FLOOR = 4.0
 _GREY_CEILING = 1e-4
 _GREY_GAP = 8.0
-
-
-def _gamma_up(count: float) -> float:
-    """``gamma_k = k u / (1 - k u)`` (Higham 2002, sec. 3.1), rounded up."""
-    product = float(count) * (_EPS / 2.0)
-    if product >= 1.0:
-        return float("inf")
-    return float(np.nextafter(product / (1.0 - product), np.inf))
 
 
 def decompose_gram_deflated(

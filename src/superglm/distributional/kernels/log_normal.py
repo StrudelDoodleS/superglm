@@ -33,6 +33,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import special
 
+from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import readonly, readonly_bool
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
@@ -42,7 +43,6 @@ from superglm.distributional.kernels.gaussian import (
 
 Parametrisation = Literal["mean", "location"]
 _FLOAT = np.float64
-_EPS = np.finfo(_FLOAT).eps
 _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
 _TAIL_INVERSE_RTOL = 64.0 * math.sqrt(_EPS)
 

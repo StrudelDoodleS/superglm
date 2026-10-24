@@ -7,6 +7,7 @@ from typing import Literal, cast
 
 import numpy as np
 
+from superglm._roundoff import EPS
 from superglm.diagnostics import (
     DiagnosticAction,
     DiagnosticEvidence,
@@ -38,7 +39,7 @@ _MIN_DOMINANCE_UPDATES = 4
 _MIN_DOMINANCE_EQUIVALENT_WINS = 3.0
 _DOMINANCE_SHARE = 0.5
 _MIN_UPWARD_DRIFT_UPDATES = 4
-_CONDITION_WARNING_THRESHOLD = 1.0 / np.sqrt(np.finfo(np.float64).eps)
+_CONDITION_WARNING_THRESHOLD = 1.0 / np.sqrt(EPS)
 _SMOOTHING_HISTORY = "smoothing_history"
 _CURVATURE_TELEMETRY = "curvature_telemetry"
 _ALL_FITTED_PARAMETERS = "all fitted distributional parameters"

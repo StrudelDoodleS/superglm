@@ -9,6 +9,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS, gamma
 from superglm.factor_smooth_geometry import (
     adjoint_sum_to_zero_blocks,
     expand_sum_to_zero_blocks,
@@ -854,11 +855,8 @@ def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> 
     """
     absolute = np.abs(transform)
     envelope = np.sum((absolute.T @ np.abs(raw)) * absolute.T, axis=1)
-    eps = np.finfo(float).eps
-    unit = eps / 2
-    count_u = 2 * np.count_nonzero(transform, axis=0) * unit
-    gamma = count_u / (1 - count_u)
-    return bool(np.any(gamma * envelope > max(100, gram.shape[0]) * eps * np.abs(np.diag(gram))))
+    rounding = gamma(2 * np.count_nonzero(transform, axis=0))
+    return bool(np.any(rounding * envelope > max(100, gram.shape[0]) * EPS * np.abs(np.diag(gram))))
 
 
 def _solver_space_gram(basis: sp.csr_matrix, transform: NDArray, weights: NDArray) -> NDArray:

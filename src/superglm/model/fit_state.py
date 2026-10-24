@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from superglm._roundoff import gamma
 from superglm.solvers.dispersion import model_weight_semantics
 
 if TYPE_CHECKING:
@@ -531,11 +532,10 @@ def _recorded_shift_reads_the_coefficients(model) -> bool:
             shift += float(means @ beta[start:end])
             magnitude += float(np.abs(means) @ np.abs(beta[start:end]))
             count += end - start
-    unit = float(np.finfo(np.float64).eps) / 2.0
     # gamma_(k+1) / (1 - gamma_k) <= gamma_(2k+2) / 2: the factor 2 covers the
     # computed magnitude's own rounding and the roundings that form and apply it.
-    gamma = 2 * (count + 1) * unit / (1.0 - 2 * (count + 1) * unit)
-    return abs(float(state.get("intercept_shift", 0.0)) - shift) <= 2.0 * gamma * magnitude
+    bound = 2.0 * gamma(2 * (count + 1)) * magnitude
+    return abs(float(state.get("intercept_shift", 0.0)) - shift) <= bound
 
 
 def _intercepts_read_the_shift(model) -> bool:
@@ -559,8 +559,7 @@ def _intercepts_read_the_shift(model) -> bool:
     if shift is None:
         return True
     public_intercept, solver_intercept = float(public.intercept), float(solver.intercept)
-    unit = float(np.finfo(np.float64).eps) / 2.0
-    gamma_2 = 2.0 * unit / (1.0 - 2.0 * unit)
+    gamma_2 = gamma(2.0)
     gap = abs(public_intercept - (solver_intercept + float(shift)))
     # Each magnitude is scaled before the sum, so the bound stays finite at the
     # binary64 limit, where a fit's own intercepts sit in a consistent state.

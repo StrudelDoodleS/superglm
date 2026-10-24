@@ -14,6 +14,7 @@ from superglm._group_matrix._group_matrix_centered import (
     _raw_centering_well_scaled,
     centered_rhs,
 )
+from superglm._roundoff import gamma
 from superglm.distributions import _VARIANCE_FLOOR, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
@@ -42,14 +43,6 @@ def _readonly(values: NDArray) -> NDArray:
     result = np.asarray(values, dtype=np.float64)
     result.setflags(write=False)
     return result
-
-
-def _dot_product_roundoff_factor(length: int) -> float:
-    """Return Higham's ``gamma_k`` bound for a length-``k`` dot product."""
-    scaled_epsilon = float(length) * np.finfo(np.float64).eps
-    if scaled_epsilon >= 1.0:  # pragma: no cover - impossible for resident arrays
-        return float("inf")
-    return scaled_epsilon / (1.0 - scaled_epsilon)
 
 
 SCOPCurvatureSource = Literal["observed", "fisher", "mixed"]
@@ -256,15 +249,13 @@ def scop_penalized_mode_score(
     # eps * |S| |beta|; dividing that noise by ``tiny`` turns a numerical zero
     # into a unit relative KKT residual.  Classify only residuals covered by a
     # dimension-aware floating-point accumulation bound as zero.
-    row_roundoff_factor = _dot_product_roundoff_factor(dm.n)
+    row_roundoff_factor = gamma(2 * dm.n)
     intercept_ratio = abs(intercept_score) / row_mass
     if abs(intercept_score) <= row_roundoff_factor * row_mass:
         intercept_ratio = 0.0
     slope_ratio = np.abs(slope_score) / slope_scale
     data_roundoff = row_roundoff_factor * row_mass * latent_scale
-    penalty_roundoff = _dot_product_roundoff_factor(dm.p) * (
-        np.abs(latent_penalty) @ np.abs(beta_latent)
-    )
+    penalty_roundoff = gamma(2 * dm.p) * (np.abs(latent_penalty) @ np.abs(beta_latent))
     # A large semidefinite penalty can have a large multiplication-error bound
     # in an exact null direction.  That uncertainty must never erase an
     # independent data residual.  Classify a coordinate as numerical zero only

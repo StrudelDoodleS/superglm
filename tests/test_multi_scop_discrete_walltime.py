@@ -185,8 +185,8 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         distribution=SimpleNamespace(scale_known=True),
         link=SimpleNamespace(),
         groups=[
-            SimpleNamespace(monotone_engine="scop"),
-            SimpleNamespace(monotone_engine="scop"),
+            SimpleNamespace(name="DrivAge", monotone_engine="scop"),
+            SimpleNamespace(name="BonusMalus", monotone_engine="scop"),
         ],
         y=np.array([0.0]),
         sample_weight=np.ones(1),

@@ -37,6 +37,9 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
+from superglm._roundoff import EPS as _EPS_FLOAT
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
+from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.distributions import (
     Binomial,
@@ -104,13 +107,10 @@ from superglm.solvers.irls_state import (
     mean_space_score_rows,
     mean_space_violation,
 )
-from superglm.solvers.mode_score import _EPS as _EPS_FLOAT
-from superglm.solvers.mode_score import _UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
-    _gamma,
     centre_offset_mean,
     centred_data_score,
     centred_intercept_remainder,
@@ -2640,10 +2640,7 @@ def _fit_irls_direct_once(
             scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
         scop_outer_penalty_abs = np.abs(scop_outer_penalty)
         scop_merit_errors: dict[int, float] = {}
-        merit_ku = (len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16) * (
-            np.finfo(float).eps / 2.0
-        )
-        merit_gamma = merit_ku / (1.0 - merit_ku) if merit_ku < 1.0 else np.inf
+        merit_gamma = _gamma(len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16)
         # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
         # This encloses residual formation without an observation-level
         # calculation on every trial. Other families supply deviance-unit

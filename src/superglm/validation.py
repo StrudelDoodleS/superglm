@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from superglm._roundoff import gamma
 from superglm._utils import _default_weights, _ensure_array
 
 if TYPE_CHECKING:
@@ -185,8 +186,7 @@ def _require_resolved(value, magnitude, count: int, name: str) -> None:
     correction sums), and the contraction's products are exact, so four such
     errors bound the result. A 2**24 margin keeps ratios of it within 1e-7.
     """
-    unit = (count + 8) * np.finfo(float).eps / 2
-    bound = 4 * 2.0**24 * (unit / (1 - unit)) ** 2 * magnitude[0], magnitude[1]
+    bound = 4 * 2.0**24 * gamma(count + 8) ** 2 * magnitude[0], magnitude[1]
     if value[0] <= 0 or _scaled_ratio(value, bound, name) <= 1:
         raise ValueError(f"{name} cancel below binary64 resolution")
 

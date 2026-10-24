@@ -14,9 +14,9 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL, UNIT_ROUNDOFF
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
-
-_EPS = np.finfo(np.float64).eps
 
 
 class PenaltyNumericalError(np.linalg.LinAlgError):
@@ -282,15 +282,14 @@ def _penalty_support_from_roots(
             )
             # Both nonnegative products include their own rounding; a final
             # nextafter alone cannot enclose a rounded positive matrix dot.
-            unit = np.finfo(np.float64).eps / 2
-            tiny = np.nextafter(0.0, 1.0)
             intermediate = error.copy(order="K") @ np.abs(plus)
-            allowance = (2 * width + 4) * unit
-            intermediate = (intermediate + (2 * width + 1) * tiny) / (1 - allowance)
+            allowance = (2 * width + 4) * UNIT_ROUNDOFF
+            intermediate = (intermediate + (2 * width + 1) * SMALLEST_SUBNORMAL) / (1 - allowance)
             projected_error = intermediate @ np.abs(plus.T)
-            allowance = (2 * rank + 4) * unit
+            allowance = (2 * rank + 4) * UNIT_ROUNDOFF
             selected_error = _finite_double(
-                (projected_error + (2 * rank + 1) * tiny) / (1 - allowance), "projected root error"
+                (projected_error + (2 * rank + 1) * SMALLEST_SUBNORMAL) / (1 - allowance),
+                "projected root error",
             )
         projection_bounds.append(np.abs(projected - root))
         selected.append(_readonly(projected))

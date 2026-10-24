@@ -600,6 +600,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS
 from superglm.screening._factor_kernels import _combine_row_factors, _penalty_root
 from superglm.screening._score_stat import ScreenedPair, _lambda_bracket
 
@@ -726,9 +727,7 @@ def _edf_roundoff(*values: float) -> float:
     """Scale-aware dust allowance for EDF identities and ordering."""
     return max(
         _EDF_ABSOLUTE_DUST,
-        _EDF_ROUNDOFF_FACTOR
-        * np.finfo(np.float64).eps
-        * sum(abs(float(value)) for value in values),
+        _EDF_ROUNDOFF_FACTOR * EPS * sum(abs(float(value)) for value in values),
     )
 
 

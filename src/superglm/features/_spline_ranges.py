@@ -24,6 +24,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline
 
+from superglm._roundoff import PENALTY_RANK_CUT as _REML_RANK_THRESHOLD
+
 JOINS = ("kink", "tangent", "smooth")
 SHAPE_NAMES = ("Flat", "Line", "Quadratic", "Cubic")
 
@@ -55,7 +57,6 @@ class NarrowGapError(RangeError):
 # knots lower the smallest genuine eigenvalue, so wider gaps can cost rank
 # too: certify_penalty_rank checks the penalty itself.
 NARROWEST_GAP = float(np.finfo(np.float64).eps) ** (2.0 / 9.0)
-_REML_RANK_THRESHOLD = float(np.finfo(np.float64).eps) ** (2.0 / 3.0)
 
 
 @dataclass(frozen=True)

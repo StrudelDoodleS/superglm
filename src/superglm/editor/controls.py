@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma as _gamma
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorIndexError, EditorTypeError
 
@@ -31,16 +32,8 @@ ORDERED_SPLINE_SHAPED = "Handles are off once a band is shaped. Undo the shape t
 ORDERED_SPLINE_POSITIONS = "Handles need each level at its own place on the spline's axis."
 ORDERED_SPLINE_UNAVAILABLE = "Handles are not available for this spline."
 
-_UNIT_ROUNDOFF = 2.0**-53
-
 
 _SUBNORMAL_SPACING = 2.0**-1074
-
-
-def _gamma(count: int) -> float:
-    """Higham's ``gamma_k = k u / (1 - k u)`` for ``k`` roundings, ``u = 2^-53``."""
-    product = count * _UNIT_ROUNDOFF
-    return product / (1.0 - product) if product < 1.0 else float("inf")
 
 
 @dataclass(frozen=True)

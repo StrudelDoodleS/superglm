@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
 from superglm._fit_trace import TraceRun
+from superglm._roundoff import EPS, gamma
 from superglm.distributions import Distribution
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -691,10 +692,9 @@ def _positive_product_ratio(left: float, right: float, denominator: float) -> fl
 
 
 def _roundoff_gamma(operations: int) -> float:
-    eps_count = operations * np.finfo(float).eps
-    if not 0.0 <= eps_count < 1.0:
+    if not 0.0 <= operations * EPS < 1.0:
         raise ValueError("dimensions do not admit the composite stationarity roundoff bound")
-    return eps_count / (1.0 - eps_count)
+    return gamma(2 * operations)
 
 
 def _stationarity_ratio(residual: float, scale: float, allowance: float, tol: float) -> float:

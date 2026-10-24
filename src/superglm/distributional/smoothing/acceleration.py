@@ -9,6 +9,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma as _roundoff_gamma
+
 AccelerationRefusalReason = Literal[
     "warming",
     "zero_raw_residual",
@@ -502,8 +504,7 @@ class WindowedTypeIIAnderson:
             return MultisecantDecision(proposal=None, refusal_reason="current_duplicate")
         accelerated_inf = float(np.linalg.norm(log_step, ord=np.inf))
         raw_step_inf = float(np.linalg.norm(raw_step, ord=np.inf))
-        eps = np.finfo(np.float64).eps
-        gamma_four = (4.0 * eps) / (1.0 - 4.0 * eps)
+        gamma_four = _roundoff_gamma(8)
         with np.errstate(over="ignore", invalid="ignore"):
             duplicate_bound = gamma_four * (accelerated_inf + raw_step_inf)
             duplicate_distance = float(np.linalg.norm(log_step - raw_step, ord=np.inf))

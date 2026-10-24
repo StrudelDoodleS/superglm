@@ -69,7 +69,7 @@ from typing import NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
-_UNIT_ROUNDOFF = 2.0**-53
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 
 LOG_ERROR_UNITS = 8
 """``kappa`` for one ``log`` evaluation: four ulps, each at most ``2 u`` relative."""

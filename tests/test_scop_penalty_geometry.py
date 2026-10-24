@@ -1,5 +1,8 @@
 """Penalty-coordinate oracles for SCOP REML."""
 
+from fractions import Fraction
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -27,6 +30,7 @@ def test_efs_matches_scop_component_by_parent_group_not_lambda_name():
             "group_name": "mono",
             "group_sl": slice(0, 2),
             "beta_eff": beta_eff,
+            "reparam": SimpleNamespace(free_dim=0),
         }
     }
     updated, _, _ = _joint_efs_lambda_step(
@@ -126,6 +130,7 @@ def test_penalty_quadratic_uses_every_named_component_in_latent_coordinates():
             "group_name": "mono",
             "group_sl": slice(0, 2),
             "beta_eff": beta_eff,
+            "reparam": SimpleNamespace(free_dim=0),
         }
     }
 
@@ -141,3 +146,56 @@ def test_penalty_quadratic_uses_every_named_component_in_latent_coordinates():
         for name, omega in zip(names, omegas, strict=True)
     )
     assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+
+def test_penalty_quadratic_has_no_cancellation_at_a_large_lambda():
+    """The latent penalty is summed with the ordinary one, not left over from a difference.
+
+    In units of 1e9 a SCOP lambda reaches 1e20 with increments near 1e8, where
+    the mapped block ``lambda gamma' S gamma`` is some 1e16 times the latent
+    penalty: taken away from the whole quadratic, its rounding swamped the
+    result and the ordinary penalty with it.  Each term is a nonnegative
+    form, so the computed sum is within ``gamma_n`` of the exact one relative
+    to the forms' absolute values.
+    """
+    from superglm._roundoff import gamma
+    from superglm.reml.scop_efs import compute_scop_aware_penalty_quad
+
+    ordinary_beta = np.array([1.0, -2.0])
+    ordinary_omega = np.array([[2.0, -1.0], [-1.0, 2.0]])
+    difference = np.array([[1.0, -2.0, 1.0]])
+    latent_omega = difference.T @ difference
+    beta_eff = np.log(1e8) + np.array([0.0, 0.01, 0.03])
+    lambdas = {"plain": 3e11, "mono": 1e20}
+    penalty = np.zeros((5, 5))
+    penalty[:2, :2] = lambdas["plain"] * ordinary_omega
+    penalty[2:, 2:] = lambdas["mono"] * latent_omega
+    states = {
+        1: {
+            "group_name": "mono",
+            "group_sl": slice(2, 5),
+            "beta_eff": beta_eff,
+            "S_scop": latent_omega,
+            "reparam": SimpleNamespace(free_dim=0),
+        }
+    }
+
+    actual = compute_scop_aware_penalty_quad(
+        np.concatenate([ordinary_beta, np.exp(beta_eff)]), penalty, states, lambdas
+    )
+
+    def form(matrix, vector, scale=1.0):
+        matrix = [[Fraction(value) for value in row] for row in matrix]
+        vector = [Fraction(value) for value in vector]
+        return Fraction(scale) * sum(
+            vector[i] * matrix[i][j] * vector[j]
+            for i in range(len(vector))
+            for j in range(len(vector))
+        )
+
+    exact = form(penalty[:2, :2], ordinary_beta) + form(latent_omega, beta_eff, lambdas["mono"])
+    magnitude = float(
+        form(np.abs(penalty[:2, :2]), np.abs(ordinary_beta))
+        + form(np.abs(latent_omega), np.abs(beta_eff), lambdas["mono"])
+    )
+    assert abs(Fraction(actual) - exact) <= Fraction(gamma(2 * 5 + 2 * 3 + 4) * magnitude)

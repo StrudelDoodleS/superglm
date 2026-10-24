@@ -29,6 +29,8 @@ from superglm._group_matrix._group_matrix_centered import (
     try_raw_moment_centering,
 )
 from superglm._group_matrix._lookup_tables import table_centred_system, table_gram_plan
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import (
     corrected_two_pass_pair,
@@ -39,7 +41,6 @@ from superglm.solvers.mode_score import (
 
 _FACTOR_CHUNK_BYTES = 16 * 1024 * 1024
 _GREY_LEAF_ROWS = 2048
-_UNIT = float(np.finfo(np.float64).eps) / 2.0
 _GREY_SPAN_ROWS = 65536
 _FACTOR_CHUNK_ROWS = 8192
 
@@ -618,7 +619,7 @@ def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     D||_2, cut)``, the bar ``rank.decompose_gram`` refuses as materially
     indefinite.
     """
-    from superglm.solvers.rank import _EPS, _eigensolver_relative_bar
+    from superglm.solvers.rank import _eigensolver_relative_bar
 
     diagonal = np.diag(block)
     if not np.all(diagonal > 0.0):
