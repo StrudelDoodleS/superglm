@@ -14,8 +14,7 @@ from superglm._roundoff import TINY
 from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS
 from superglm.distributions import Gaussian
 from superglm.links import IdentityLink
-from superglm.model.reml_execute import STEP_REML_TOL_DEFAULT
-from superglm.reml.scop_efs import _SCOP_SUPPRESSION_EDF
+from superglm.reml.scop_efs import _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT, _SCOP_SUPPRESSION_EDF
 from superglm.solvers.irls_state import _irls_objective_relative_change
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import (
@@ -252,9 +251,9 @@ def test_scop_reml_fit_at_large_units_matches_the_unit_fit(units):
     errors per unit of log lambda; integrated from the bar to infinite
     lambda that is ``2 sqrt(bar)`` per fit.  The unit box's 1e10 ceiling
     held the 1e5 fit at 1e-3 of its optimum (EDF 12.07 against 9.71, the
-    curve 3.8 standard errors away), and at 1e9 the penalty quadratic, the
-    difference of two quadratics near 6e31, came out negative and the fit
-    raised.
+    curve 3.8 standard errors away), and the 1e9 fit further from it.  With
+    the ceiling lifted, a penalty quadratic formed as the difference of two
+    quadratics near 6e31 came out negative at 1e9 and the fit raised.
     """
     reference = _fit_once(1.0, "linear")
     scaled = _fit_once(units, "linear")
@@ -272,9 +271,12 @@ def test_scop_reml_fit_at_small_units_matches_the_unit_fit():
 
     The truth has curvature, so the optimum is interior: lambda 1.09 at unit
     scale and 1.09e-8 at y * 1e-4, where the unit box's 1e-6 floor held it
-    (EDF 12.45 against 16.01, the curve 4.3 standard errors away).  Each fit
-    stops once its last step moves log lambda by less than ``reml_tol``, so
-    the two agree to ``2 reml_tol`` in log lambda.  To first order EDF then
+    (EDF 12.45 against 16.01, the curve 4.3 standard errors away).  A
+    converged fit stops within ``_SCOP_EFS_PLATEAU_REMAINING_MOVEMENT`` of
+    its fixed point in log lambda: the plateau exit's bound on the movement
+    left, the loosest converged exit (a full Newton step under ``reml_tol``
+    leaves less than ``reml_tol``), so the two fits agree to twice that
+    whichever exits they take.  To first order EDF then
     moves by at most EDF times that, and the curve by
     ``sum_j sqrt(rEDF_j) |d log lambda_j|`` standard errors, at most
     ``sqrt(n_lambda p)`` times it.
@@ -282,7 +284,7 @@ def test_scop_reml_fit_at_small_units_matches_the_unit_fit():
     units = 1e-4
     reference = _fit_once(1.0, "exp")
     scaled = _fit_once(units, "exp")
-    tolerance = 2.0 * STEP_REML_TOL_DEFAULT
+    tolerance = 2.0 * _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
     lambdas = scaled.reml_diagnostics()["lambdas"]
     reference_lambdas = reference.reml_diagnostics()["lambdas"]
     assert lambdas["x2"] < LAMBDA_FLOOR
