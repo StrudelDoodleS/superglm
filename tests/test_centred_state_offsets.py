@@ -2536,3 +2536,80 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     assert selection.result.converged
     assert sum(calls.values()) == 0, dict(calls)
     assert ran["_dense_group_centring"] > 0, dict(ran)
+
+
+# ------------------------------------ 7. the weight correction refuses tampered rank metadata
+def _w_correction_inputs_with_metadata(source: str, *, mean_x=None, sum_w=None) -> dict:
+    """A fitted state whose centred moments are read from ``source`` with chosen values."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    state = _dense_binomial_state(1)
+    result = state["pirls_result"]
+    mean = result.rank_info.mean_x if mean_x is None else mean_x
+    total = result.rank_info.sum_w if sum_w is None else sum_w
+    if source == "rank_info":
+        tampered = dataclasses.replace(
+            result,
+            rank_info=dataclasses.replace(result.rank_info, mean_x=mean, sum_w=total),
+            reml_geometry=None,
+        )
+    else:
+        tampered = dataclasses.replace(
+            result,
+            rank_info=None,
+            reml_geometry=SimpleNamespace(mean_x=mean, sum_w=total),
+        )
+    return {**state, "pirls_result": tampered}
+
+
+@pytest.mark.parametrize("source", ["rank_info", "geometry_summary"])
+def test_weight_correction_reads_the_centred_moments_of_a_coherent_summary(source):
+    """Positive control: untampered metadata, from either carrier, gives the correction."""
+    from superglm.reml.w_derivatives import reml_w_correction
+
+    correction = reml_w_correction(**_w_correction_inputs_with_metadata(source))
+
+    assert correction is not None
+    assert np.all(np.isfinite(correction[0]))
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "message"),
+    [
+        ("rank_info", "wrong_width", "PIRLS rank metadata does not match the REML coefficient"),
+        ("rank_info", "zero_sum", "PIRLS rank metadata has an invalid working-weight sum"),
+        ("rank_info", "negative_sum", "PIRLS rank metadata has an invalid working-weight sum"),
+        ("rank_info", "nan_sum", "PIRLS rank metadata has an invalid working-weight sum"),
+        (
+            "geometry_summary",
+            "wrong_width",
+            "PIRLS geometry summary does not match the REML coefficient",
+        ),
+        (
+            "geometry_summary",
+            "zero_sum",
+            "PIRLS geometry summary has an invalid working-weight sum",
+        ),
+        (
+            "geometry_summary",
+            "nan_sum",
+            "PIRLS geometry summary has an invalid working-weight sum",
+        ),
+    ],
+)
+def test_weight_correction_refuses_incoherent_rank_metadata(source, kind, message):
+    """A wrong centring moment would silently bend the W-correction, so it must refuse."""
+    from superglm.reml.w_derivatives import reml_w_correction
+
+    coherent = _w_correction_inputs_with_metadata(source)["pirls_result"]
+    carrier = coherent.rank_info if source == "rank_info" else coherent.reml_geometry
+    tamper = {
+        "wrong_width": {"mean_x": np.append(np.asarray(carrier.mean_x, dtype=np.float64), 0.0)},
+        "zero_sum": {"sum_w": 0.0},
+        "negative_sum": {"sum_w": -1.0},
+        "nan_sum": {"sum_w": float("nan")},
+    }[kind]
+
+    with pytest.raises(ValueError, match=message):
+        reml_w_correction(**_w_correction_inputs_with_metadata(source, **tamper))

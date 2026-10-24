@@ -1734,3 +1734,277 @@ def test_the_repaired_frame_is_found_under_a_non_string_feature_label():
         assert model.term_inference(0, with_se=True).se_log_relativity is None
     (row,) = [r for r in model.summary()._coef_rows if r.group == "0" and r.is_spline]
     assert row.wald_p is None
+
+
+# -- publication refusals: fault injection at the producer, nothing published --------------
+
+
+def _fitted_for_publication_refusal(family="gaussian"):
+    """A fitted model whose convex post-fit repair binds (the data are concave)."""
+    rng = np.random.default_rng(20261024)
+    x = np.linspace(0.0, 1.0, 240)
+    X = pd.DataFrame({"x": x})
+    if family == "poisson":
+        y = rng.poisson(np.exp(1.2 - 2.0 * (x - 0.45) ** 2)).astype(np.float64)
+    else:
+        y = -((x - 0.4) ** 2) + 0.03 * rng.normal(size=x.size)
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.convex)},
+    ).fit(X, y)
+    return model, X
+
+
+def _publication_snapshot(model, X):
+    return {
+        "dict": model.__dict__,
+        "result": model.result,
+        "revision": model._fit_revision,
+        "beta": model.result.beta.copy(),
+        "predictions": model.predict(X),
+    }
+
+
+def _assert_nothing_published(model, X, snapshot):
+    assert model.__dict__ is snapshot["dict"]
+    assert model.result is snapshot["result"]
+    assert model._fit_revision == snapshot["revision"]
+    assert not getattr(model, "_shape_repairs", {})
+    assert not getattr(model, "_monotone_repairs", {})
+    np.testing.assert_array_equal(model.result.beta, snapshot["beta"])
+    np.testing.assert_array_equal(model.predict(X), snapshot["predictions"])
+
+
+def _repairer_with_fault(monkeypatch, mutate):
+    """Route the real repair through ``mutate(result, group_slices)`` before validation."""
+    real_repairer = shape_ops._repairer
+
+    def faulty_repairer(kind):
+        delegate = real_repairer(kind)
+
+        class Faulty:
+            def repair(self, spec, beta, groups, *, weights, n_grid):
+                result = delegate.repair(spec, beta, groups, weights=weights, n_grid=n_grid)
+                mutate(result, spec, groups)
+                return result
+
+        return Faulty()
+
+    monkeypatch.setattr(shape_ops, "_repairer", faulty_repairer)
+
+
+def _fault_non_finite_coefficients(result, spec, groups):
+    result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+    result.repaired_beta_reparam[groups[0].start] = np.nan
+
+
+def _fault_wrong_coefficient_shape(result, spec, groups):
+    result.repaired_beta_reparam = result.repaired_beta_reparam[:-1].copy()
+
+
+def _fault_degenerate_grid(result, spec, groups):
+    result.grid = result.grid[:2].copy()
+
+
+def _fault_worse_than_zero_term(result, spec, groups):
+    # Scaling stays inside the convex cone, so only the objective can object.
+    scaled = result.repaired_beta_reparam.copy()
+    for group in groups:
+        scaled[group.sl] *= 1e3
+    result.repaired_beta_reparam = scaled
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        (_fault_non_finite_coefficients, "invalid coefficients"),
+        (_fault_wrong_coefficient_shape, "invalid coefficients"),
+        (_fault_degenerate_grid, "invalid repair grid"),
+        (
+            _fault_worse_than_zero_term,
+            "candidate objective is worse than the feasible zero-term fallback",
+        ),
+    ],
+)
+def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, fault, message):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _repairer_with_fault(monkeypatch, fault)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_repair_curve_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    spec = model._specs["x"]
+    real_transform = spec.transform
+    short_grid = 7
+
+    def shorten_grid(result, _spec, _groups):
+        result.grid = np.linspace(_spec._lo, _spec._hi, short_grid)
+
+    def transform_with_overflow(values, *args, **kwargs):
+        basis = real_transform(values, *args, **kwargs)
+        # Only the publication certificate evaluates the fitted basis on the short grid.
+        # NaN stands in for a basis that overflowed.
+        return np.full_like(basis, np.nan) if np.shape(values) == (short_grid,) else basis
+
+    _repairer_with_fault(monkeypatch, shorten_grid)
+    monkeypatch.setattr(spec, "transform", transform_with_overflow)
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*non-finite repair curve"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_repair_that_moves_the_fitted_mean_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    real_delta = shape_ops._shape_term_eta_delta
+    calls = 0
+
+    def delta_with_mean_shift(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        delta = real_delta(*args, **kwargs)
+        # The first evaluation is the candidate repair, the second the zero-term fallback.
+        return delta + 1.0 if calls == 1 else delta
+
+    monkeypatch.setattr(shape_ops, "_shape_term_eta_delta", delta_with_mean_shift)
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*centering changed"):
+        model.apply_shape_postfit(X)
+
+    assert calls >= 1
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal(family="poisson")
+    snapshot = _publication_snapshot(model, X)
+
+    def vast_information(**kwargs):
+        # A Newton step of score/information ~ 1e-30 never reaches the score tolerance.
+        return np.full(np.shape(kwargs["mu"]), 1e30)
+
+    monkeypatch.setattr(shape_ops, "fisher_working_weights", vast_information)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Unsafe shape repair rejected.*conditional intercept optimization did not converge",
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_repair_without_retained_response_is_refused_and_nothing_is_published():
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    model._fit_y_ref = None
+
+    with pytest.raises(RuntimeError, match="requires retained fit features and response"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_repair_without_retained_row_scale_state_is_refused():
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    model._retain_fit_state = False
+
+    with pytest.raises(RuntimeError, match="requires row-scale fitted state"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _scaled_solution(x, spec):
+    return 1e3 * x
+
+
+def _strictly_concave_solution(x, spec):
+    # Negative second derivative at the middle of the domain: outside the convex cone.
+    row = shape_derivative_matrix(spec, np.asarray([0.5 * (spec._lo + spec._hi)]), 2)[0]
+    return -row / np.linalg.norm(row)
+
+
+def _non_finite_solution(x, spec):
+    return np.full_like(x, np.nan)
+
+
+@pytest.mark.parametrize(
+    ("solution", "span_search", "message"),
+    [
+        (
+            _scaled_solution,
+            "real",
+            "Curvature projection failed its feasible-zero objective certificate",
+        ),
+        (
+            _strictly_concave_solution,
+            "blind",
+            "Curvature projection returned an infeasible fitted state",
+        ),
+        (_non_finite_solution, "blind", "Curvature projection returned non-finite fitted state"),
+        (
+            None,
+            "stuck_on_a_known_point",
+            "Curvature projection could not certify a constrained derivative span",
+        ),
+        (
+            None,
+            "endless_new_points",
+            "Curvature projection exhausted its derivative-span refinements",
+        ),
+    ],
+)
+def test_faulty_projection_is_refused_and_nothing_is_published(
+    monkeypatch, solution, span_search, message
+):
+    """Each certificate of the cone projection refuses its own fault; the model is untouched."""
+    from types import SimpleNamespace
+
+    import scipy.optimize
+
+    from superglm import constraints
+
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    real_minimize = scipy.optimize.minimize
+    real_violations = constraints._violating_shape_constraint_points
+    emitted = 0
+
+    def minimize_with_fault(*args, **kwargs):
+        result = real_minimize(*args, **kwargs)
+        if solution is None:
+            return result
+        return SimpleNamespace(
+            success=True, status=0, message="", x=solution(result.x, model._specs["x"])
+        )
+
+    def violations_with_fault(spec, beta, kind, tolerance):
+        nonlocal emitted
+        if span_search == "real":
+            return real_violations(spec, beta, kind, tolerance)
+        if span_search == "blind":
+            return np.empty(0)
+        if span_search == "stuck_on_a_known_point":
+            return np.asarray([spec._lo])
+        emitted += 1
+        return np.asarray([spec._lo + 1e-3 * emitted * (spec._hi - spec._lo)])
+
+    monkeypatch.setattr(scipy.optimize, "minimize", minimize_with_fault)
+    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", violations_with_fault)
+
+    with pytest.raises(RuntimeError, match=message):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
