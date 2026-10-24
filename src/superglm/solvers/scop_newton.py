@@ -11,8 +11,9 @@ intercept profiled out by centring, the penalized Hessian in ``(b, theta)`` is
 
 where ``A`` is the ordinary block's penalized Hessian, ``C = X' W X_s`` and
 ``G = X_s' W X_s`` are the centred cross and SCOP moments in mapped
-coordinates, ``J = diag(gamma'(theta))``, and ``E = -diag(gamma''(theta) *
-X_s' W r)`` is the curvature of the map at the working residual ``r``.
+coordinates, each a sum of products of centred columns, ``J =
+diag(gamma'(theta))``, and ``E = -diag(gamma''(theta) * X_s' W r)`` is the
+curvature of the map at the working residual ``r``.
 
 The step is taken by block elimination. The caller has already solved the
 ordinary block with ``theta`` held fixed; ``SCOPJointNewton.step`` reduces
@@ -21,8 +22,10 @@ takes the Newton step there and corrects the ordinary solve by
 back-substitution. Pya & Wood (2015, §3.2) report that Fisher scoring caused
 convergence problems for these models, so ``E`` is kept unless the reduced
 block is then not positive definite, when that iteration takes the
-Gauss-Newton block instead; directions the block cannot resolve are truncated
-at ``sqrt(eps)`` of its largest singular value (§3.2).
+Gauss-Newton block instead. Directions whose data curvature lies within the
+Grams' rounding get none (``_resolved_root``), and directions the block
+cannot resolve are truncated at ``sqrt(eps)`` of its largest singular value
+(§3.2).
 """
 
 from __future__ import annotations
