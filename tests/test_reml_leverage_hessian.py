@@ -475,14 +475,17 @@ def _random_effect_features() -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
 @pytest.mark.parametrize(
-    ("term", "mode"),
+    ("term", "mode", "direct_solve"),
     [
-        ("random_effect", "leverage_tables"),
-        ("random_effect_solved_rows", "leverage_tables"),
-        ("sparse_spline", "derivative_grams"),
-        ("factor_smooth", "derivative_grams"),
+        ("random_effect", "leverage_tables", "gram"),
+        ("random_effect", "leverage_tables", "structured"),
+        # the dense solver's own route: the nested factor reads row forms, never the plan
+        ("random_effect_solved_rows", "leverage_tables", "gram"),
+        ("sparse_spline", "derivative_grams", "gram"),
+        ("sparse_spline", "derivative_grams", "structured"),
+        ("factor_smooth", "derivative_grams", "gram"),
+        ("factor_smooth", "derivative_grams", "structured"),
     ],
 )
 def test_a_random_effect_takes_the_leverage_route_where_its_design_reads_row_supports(

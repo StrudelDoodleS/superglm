@@ -147,10 +147,13 @@ _PRESOLVE_MIN_REML_ITER = 10
 # from its augmented factor's row quadratic forms, and both backends leave the
 # W(rho) cross terms out of the Newton model (``gradient_terms_only``).
 # Wood's prices hold for a dense design.  A random effect's or factor smooth's
-# Grams are block-sparse, a few columns a row, so such a model takes the
-# leverage route only where its solved-row pass is sparse too
-# (``reads_row_supports``: every group a dense column or an indexed support);
-# elsewhere that pass is the dense ``n p^2`` product, dearer than its Grams.
+# Grams are block-sparse, a few columns a row, so a model the structured
+# solvers can fit (``structured_alternative``) takes the leverage route only
+# where its solved-row pass is sparse too (``reads_row_supports``: every group
+# a dense column or an indexed support); elsewhere that pass is the dense
+# ``n p^2`` product, dearer than its Grams.  Every other model, a random
+# effect beside a group the structured selection rejects included, is priced
+# as a dense design.
 _LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
