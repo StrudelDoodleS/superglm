@@ -22,10 +22,11 @@ takes the Newton step there and corrects the ordinary solve by
 back-substitution. Pya & Wood (2015, §3.2) report that Fisher scoring caused
 convergence problems for these models, so ``E`` is kept unless the reduced
 block is then not positive definite, when that iteration takes the
-Gauss-Newton block instead. Directions whose data curvature lies within the
-Grams' rounding get none (``_resolved_root``), and directions the block
-cannot resolve are truncated at ``sqrt(eps)`` of its largest singular value
-(§3.2).
+Gauss-Newton block instead. The Schur block's data part comes from its Grams
+when their rounding resolves every direction, and otherwise from a factor of
+its rows, where a direction the rows cannot tell from zero gets no curvature
+(``_resolved_root``). Directions the block cannot resolve are truncated at
+``sqrt(eps)`` of its largest singular value (§3.2).
 """
 
 from __future__ import annotations
@@ -60,9 +61,15 @@ from superglm.group_matrix import (
     MatrixExecutionPlan,
     _disc_disc_2d_hist,
 )
-from superglm.solvers.centered_system import _dense_split
-from superglm.solvers.mode_score import dense_columns
-from superglm.solvers.rank import _eigensolver_relative_bar, _gamma_up
+from superglm.solvers.centered_system import _dense_split, penalty_factor
+from superglm.solvers.mode_score import centred_matvec, dense_centred_rmatvec, dense_columns
+from superglm.solvers.rank import (
+    _GREY_FLOOR,
+    _eigensolver_relative_bar,
+    _gamma_up,
+    streamed_weighted_factor,
+    tsqr_leaf_rows,
+)
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_exact_support import build_exact_scop_support
 from superglm.types import GroupSlice
@@ -283,25 +290,40 @@ def _psd_root(S: NDArray) -> NDArray:
 
 
 def _resolved_root(
-    gram: NDArray, score: NDArray, scale: NDArray, count: int
+    gram: NDArray,
+    score: NDArray,
+    scale: NDArray,
+    count: int,
+    row_factor: Callable[[], tuple[NDArray, NDArray, int]],
 ) -> tuple[NDArray, NDArray]:
-    """``(R, s)``: a root of ``gram`` on the directions its formation resolves, and ``score`` there.
+    """``(R, s)``: a root of the Schur block's data part on the directions it resolves, and ``score`` there.
 
-    ``gram`` is the Schur block's data part ``G~ - C' A^-1 C``, formed from
-    Grams of centred columns. To first order its rounding is the joint
-    Gram's along ``(v, -A^-1 C v)``, so ``|dG_ij| <= gamma_count g_i g_j``
-    with ``g = scale``: each SCOP column's weighted norm plus the norms of
-    the ordinary columns its regression ``A^-1 C`` draws on (Higham 2002,
-    sec. 3.5, for every formed product, ``count`` terms deep). Scaled by
-    ``g`` that error is at most ``gamma_count q`` in the 2-norm, and the
-    eigensolver adds ``q eps`` of the largest eigenvalue (*LAPACK Users'
-    Guide*, sec. 4.7). An eigenvalue at or below their sum is rounding,
-    whatever its sign: an ordinary column aliased with a SCOP direction
-    leaves exactly zero there, and the square root of its rounding sits at
-    the factor's own ``sqrt(eps)`` cut, which then cannot tell it from
-    curvature. Such a direction gets no data curvature, and ``score``, whose
-    component there is rounding too, loses it: the penalty alone decides the
-    step along it.
+    ``gram`` is that data part ``G~ - C' A^-1 C``, formed from Grams of
+    centred columns. To first order its rounding is the joint Gram's along
+    ``(v, -A^-1 C v)``, so ``|dG_ij| <= gamma_count g_i g_j`` with ``g =
+    scale``: each SCOP column's weighted norm plus the norms of the ordinary
+    columns its regression ``A^-1 C`` draws on (Higham 2002, sec. 3.5, for
+    every formed product, ``count`` terms deep). Scaled by ``g`` that error
+    is at most ``gamma_count q`` in the 2-norm, and the eigensolver adds ``q
+    eps`` of the largest eigenvalue (*LAPACK Users' Guide*, sec. 4.7). When
+    every eigenvalue clears ``_GREY_FLOOR`` times their sum, as on the
+    freMTPL2 fits, the Gram is the root.
+
+    Otherwise the Gram cannot decide, and not always because of the data: an
+    exact alias (an ordinary column equal to a SCOP slope) puts a true zero
+    inside the bound, but nearly collinear ordinary columns in a full-rank
+    design make ``g`` large enough to put genuine curvature inside it as
+    well. The decision is then taken on a factor of the
+    rows, ``row_factor()``, which returns ``(F, g, count)`` with ``F' F``
+    the same block, each column of ``F`` within ``gamma_count g_j`` of its
+    exact value: a factor squares no condition number, so its error in
+    ``g``-scaled singular values is ``gamma_count sqrt(q)`` (Weyl), not the
+    square root of the Gram's. A direction at or below that is one the rows
+    cannot tell from zero: it gets no data curvature, and ``score``, whose
+    component there is rounding (``|s_v| <= sigma_v ||r||_W``), loses it,
+    so the penalty alone decides the step along it. Every other direction
+    keeps its curvature and its score; whether the step can resolve it is
+    the factor cut's decision (``_truncated_factor_step``).
     """
     q = gram.shape[0]
     norms = np.where(scale > 0.0, scale, 1.0)
@@ -309,9 +331,17 @@ def _resolved_root(
     values, vectors = np.linalg.eigh(0.5 * (scaled + scaled.T))
     largest = float(np.max(np.abs(values), initial=0.0))
     bar = _gamma_up(count) * q + _eigensolver_relative_bar(q) * largest
-    resolved = values > bar
+    if np.all(values > _GREY_FLOOR * bar):
+        singular, resolved = np.sqrt(values), np.full(q, True)
+    else:
+        factor, scale, count = row_factor()
+        norms = np.where(scale > 0.0, scale, 1.0)
+        _, singular, right = np.linalg.svd(factor / norms[None, :])
+        singular = np.concatenate((singular, np.zeros(q - singular.size)))
+        vectors = right.T
+        resolved = singular > _gamma_up(count) * math.sqrt(q)
     kept = vectors[:, resolved]
-    root = np.sqrt(values[resolved])[:, None] * kept.T * norms[None, :]
+    root = singular[resolved][:, None] * kept.T * norms[None, :]
     return root, norms * (kept @ (kept.T @ (score / norms)))
 
 
@@ -872,6 +902,81 @@ class SCOPJointNewton:
             return np.zeros(self.width), True, np.zeros((0, self.width))
         return step, used_fisher, discarded
 
+    def _schur_rows(
+        self,
+        W: NDArray,
+        moments: _SCOPMoments,
+        reduced: CenteredSystem,
+        solve: Callable[[NDArray], NDArray],
+        coupled: NDArray,
+    ) -> tuple[NDArray, NDArray, int]:
+        """``(F, g, count)``: a factor of the Schur block's data part, from the rows (``_resolved_root``).
+
+        The centred SCOP columns less their regression on the ordinary
+        design, ``Z = X~_s - X~_r A^+ C``, over the penalty's rows ``L_r A^+
+        C`` (``L_r' L_r = S_r``): ``[sqrt(W) Z; L_r A^+ C]`` has the Gram ``G~
+        - C' A^+ C`` that the step's back-substitution takes, ``A^+`` being
+        the ordinary block's own ``solve``. That is one block of classical
+        Gram-Schmidt against the ordinary design through its seminormal
+        equations, so it is projected twice. The first pass takes ``coupled
+        = A^+ C`` from the formed cross block, whose rounding ``dC`` leaves
+        ``sqrt(dC' A^+ dC)`` in ``Z`` however small ``Z`` is; the second
+        regresses what the first left, as Bjorck's corrected seminormal
+        equations refine a seminormal solve (*Linear Algebra Appl.* 88, 1987)
+        and as reorthogonalized block Gram-Schmidt projects each block twice
+        (BCGSI+; Carson, Lund, Ma & Oktay, arXiv 2408.10109). It leaves the
+        first pass's error times order ``n u kappa(A)``. The rows are then
+        factored by the TSQR (``streamed_weighted_factor``).
+
+        ``g`` bounds each column's rounding: its SCOP column's norm plus
+        ``|A^+ C|`` times each ordinary column's, the raw norm on a column the
+        product does not centre row by row (``centred_matvec``), with the
+        penalty's diagonal. ``count`` is two such products of ``p + 3`` terms
+        and the Householder QR's ``m q`` on ``m`` rows (Higham 2002, Thm 19.4).
+        """
+        q, p = self.width, coupled.shape[0]
+        columns = np.empty((self.n, q))
+        for (support, bins), block in zip(moments.centred, self.slices, strict=True):
+            columns[:, block] = support if bins is None else support[bins]
+        scale = np.sqrt(np.maximum(np.diag(moments.gram), 0.0))
+        penalty_rows = np.zeros((0, q))
+        if self._cross is not None and p:
+            design, bounded = self._cross.design, self._cross.bounded
+            centre, centre_lo = reduced.centre_pair()
+
+            def regress(change: NDArray) -> None:
+                for j, coefficients in enumerate(change.T):
+                    columns[:, j] -= centred_matvec(design, coefficients, centre)
+                    if centre_lo is not None:
+                        columns[:, j] += math.fsum(centre_lo * coefficients)
+
+            regress(coupled)
+            weighted = (W[:, None] * columns).T
+            residual = np.column_stack(
+                [dense_centred_rmatvec(design, values, centre, centre_lo) for values in weighted]
+            )
+            if bounded is not None:
+                index = self._cross.bounded_index
+                residual[index] = np.column_stack(
+                    [bounded.rmatvec(values) for values in weighted]
+                ) - np.outer(reduced.mean_x[index], weighted.sum(axis=1))
+            residual -= reduced.penalty @ coupled
+            correction = np.column_stack([solve(column) for column in residual.T])
+            regress(correction)
+            norms = np.sqrt(np.maximum(np.diag(reduced.hessian), 0.0))
+            raw = ~dense_columns(design)
+            norms[raw] += 2.0 * np.abs(reduced.mean_x[raw]) * math.sqrt(moments.sum_w)
+            scale = scale + (np.abs(coupled) + np.abs(correction)).T @ norms
+            penalty_rows = penalty_factor(reduced.penalty) @ (coupled + correction)
+        leaf = tsqr_leaf_rows(q)
+        chunks = (
+            (start, min(start + leaf, self.n), columns[start : start + leaf])
+            for start in range(0, self.n, leaf)
+        )
+        factor = np.vstack((streamed_weighted_factor(chunks, W), penalty_rows))
+        rows = self.n + penalty_rows.shape[0]
+        return factor, scale, rows * q + 2 * (p + 3)
+
     def step(
         self,
         thetas: Sequence[NDArray],
@@ -898,8 +1003,8 @@ class SCOPJointNewton:
         X~_r' W X~_s`` the centred cross block, the reduced SCOP gradient is
         ``-J (X~_s' W r - C' delta_b) + lambda S theta``: the residual the
         fixed-``theta`` solve leaves, without forming it. The block's data
-        part is taken on the directions its rounding resolves
-        (``_resolved_root``).
+        part is taken on the directions the data resolve, from the rows when
+        the Grams cannot decide (``_resolved_root``, ``_schur_rows``).
         """
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
@@ -918,7 +1023,11 @@ class SCOPJointNewton:
             centred = np.sqrt(np.maximum(np.diag(reduced.data_gram), 0.0))
             scale = scale + np.abs(coupled).T @ np.maximum(np.sqrt(2.0) * centred, norms)
         root, data_score = _resolved_root(
-            data_gram, data_score, scale, 2 * self.n + coupled.shape[0] + self.width + 2
+            data_gram,
+            data_score,
+            scale,
+            2 * self.n + coupled.shape[0] + self.width + 2,
+            lambda: self._schur_rows(W, moments, reduced, solve, coupled),
         )
         gradient = -moments.jacobian * data_score + moments.pull
         step, used_fisher, discarded = self._solve(root, moments, gradient)
