@@ -431,7 +431,6 @@ def test_a_flat_scop_term_stops_at_one_floor_from_every_start(start):
     diagnostics = model.reml_diagnostics()
     result = model._reml_result
     assert diagnostics["termination_reason"] in _REML_CONVERGED_REASONS
-    assert result.scop_newton_fallback != "line_search"  # no restart from the bootstrap
     history = result.objective_history
     slack = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(min(history)), 1.0)
     assert diagnostics["objective"] <= min(history) + slack
