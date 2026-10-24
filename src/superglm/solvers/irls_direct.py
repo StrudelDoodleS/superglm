@@ -210,6 +210,10 @@ class SCOPRunCentring:
     - the SCOP step's reduced design (the non-SCOP groups), which
       owns its compact-support caches (pattern plan, solver supports,
       execution plan).  These depend on the basis only;
+    - each row-level SCOP group's exact support for the joint step
+      (``scop_newton._exact_support``): its distinct rows and row index, or
+      ``None`` where compressing does not pay.  It depends on the group's
+      rows only, so it is found once per run, not once per fit;
     - the refusals (``_CARRIED_REFUSALS``) of the raw-moment and tensor raw
       rungs, on the full design and on the reduced one.
 
@@ -239,6 +243,7 @@ class SCOPRunCentring:
     owners: tuple = ()
     reduced_key: tuple = ()
     reduced_dm: DesignMatrix | None = None
+    exact_supports: dict = field(default_factory=dict)
     full_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
     reduced_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
 
@@ -251,6 +256,7 @@ class SCOPRunCentring:
         self.owners = owners
         self.reduced_key = ()
         self.reduced_dm = None
+        self.exact_supports = {}
         self.full_refusals = TabmatCenteringState()
         self.reduced_refusals = TabmatCenteringState()
 
@@ -2188,7 +2194,11 @@ def _fit_irls_direct_once(
         }
         _scop_order = sorted(_scop_specs)
         _scop_newton = SCOPJointNewton(
-            [_scop_specs[gi] for gi in _scop_order], lambda2, _reduced_dm, n
+            [_scop_specs[gi] for gi in _scop_order],
+            lambda2,
+            _reduced_dm,
+            n,
+            supports=None if _scop_run is None else _scop_run.exact_supports,
         )
 
         # QP/warm initialization is part of the first committed state, not the

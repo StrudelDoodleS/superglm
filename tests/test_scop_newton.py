@@ -703,6 +703,59 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
     assert formed == []
 
 
+def test_packed_codes_past_their_byte_budget_are_refused_before_any_support(monkeypatch):
+    """The one-pass cross block's packed codes, 4 bytes per row and group, are sized from the design first.
+
+    At the budget the layout is built; one byte under it the route is
+    refused, and no group's compact support is formed.
+    """
+    from superglm import Categorical
+    from superglm.solvers import scop_newton
+
+    formed = []
+    support = scop_newton._compact_support
+    monkeypatch.setattr(
+        scop_newton, "_compact_support", lambda gm: (formed.append(type(gm)), support(gm))[1]
+    )
+    rng = np.random.default_rng(13)
+    n = 500
+    frame = pd.DataFrame(
+        {
+            "a": rng.uniform(0, 1, n),
+            "m": rng.uniform(0, 1, n),
+            "c": rng.integers(0, 5, n).astype(str),
+        }
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        features={
+            "a": Spline(kind="ps", k=8),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "c": Categorical(base="most_exposed"),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model_build_design_matrix(model, frame, rng.poisson(1.0, n).astype(float), np.ones(n), None)
+    pairs = list(zip(model._groups, model._dm.group_matrices))
+    scop = next(gm for g, gm in pairs if g.monotone_engine == "scop")
+    ordinary = [gm for g, gm in pairs if g.monotone_engine != "scop"]
+    columns = [(scop.B_scop_unique, scop.bin_idx)]
+    width = sum(gm.shape[1] for gm in ordinary)
+    packed = 4 * n * len(ordinary)
+
+    monkeypatch.setattr(scop_newton, "_MAX_CROSS_EXPANSION_BYTES", packed - 1)
+    refused = scop_newton._JointWeightCross.build(DesignMatrix(ordinary, n=n, p=width), columns)
+    assert refused is None
+    assert formed == []
+    monkeypatch.setattr(scop_newton, "_MAX_CROSS_EXPANSION_BYTES", packed)
+    built = scop_newton._JointWeightCross.build(DesignMatrix(ordinary, n=n, p=width), columns)
+    assert built is not None
+    assert built.layout.codes.nbytes == packed
+
+
 def test_rounding_on_a_null_direction_is_dropped_whatever_its_sign():
     """A Gram that cannot decide hands the decision to the rows, which drop an exact null.
 
@@ -891,3 +944,49 @@ def test_a_well_conditioned_fit_never_reads_the_rows(monkeypatch):
 
     assert calls["steps"] > 0
     assert calls["rows"] == 0
+
+
+def test_a_run_finds_each_exact_support_once(monkeypatch):
+    """Two row-level SCOP groups' supports are found once per REML run, not once per fit (a count).
+
+    One group's rows repeat (101 distinct values), so it compresses; the
+    other's are almost unique, so it does not. Each was found again on every
+    inner fit of the run.
+    """
+    from superglm.reml import scop_efs
+    from superglm.solvers import scop_newton
+
+    builds, runs, fits = [], set(), []
+    build = scop_newton.build_exact_scop_support
+    fit = scop_efs.fit_irls_direct
+
+    def counted_build(rows):
+        builds.append(rows.shape)
+        return build(rows)
+
+    def counted_fit(*args, **kwargs):
+        fits.append(1)
+        if kwargs.get("_scop_run_centring") is not None:
+            runs.add(id(kwargs["_scop_run_centring"]))
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(scop_newton, "build_exact_scop_support", counted_build)
+    monkeypatch.setattr(scop_efs, "fit_irls_direct", counted_fit)
+    rng = np.random.default_rng(8)
+    n = 2000
+    frame = pd.DataFrame({"a": np.round(rng.uniform(0, 1, n), 2), "b": rng.uniform(0, 1, n)})
+    y = 1.0 + np.log1p(3 * frame["a"]) + 2 * frame["b"] ** 2 + 0.3 * rng.normal(size=n)
+    increasing = Constraint.fit.increasing
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "a": Spline(kind="ps", k=6, constraint=increasing),
+            "b": Spline(kind="ps", k=6, constraint=increasing),
+        },
+    )
+    model.fit_reml(frame, y.to_numpy())
+
+    assert len(fits) > len(runs) > 0
+    assert len(builds) == 2 * len(runs)
