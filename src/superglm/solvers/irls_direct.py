@@ -2779,6 +2779,20 @@ def _fit_irls_direct_once(
                 if type(family) is Gaussian
                 else 0.0
             )
+        # NB2's unit deviance errs by u (y + theta) whatever its size: it
+        # takes the log of (y + theta) / (mu + theta), or of (mu + theta) /
+        # theta where y = 0, a ratio within gamma_3 of its own, and multiplies
+        # it back by y + theta. That puts at most 2 gamma_4 (2y + theta) on
+        # each row (8.9e-8 at theta = 1e8), beside the rounding of the two
+        # terms Poisson's unit deviance also has, which the deviance's own
+        # allowance covers. A backtracking search finds a step only when its
+        # allowance bounds the merit's noise (Berahas, Byrd & Nocedal 2019,
+        # Theorem 4.2).
+        nb2_unit_roundoff = (
+            2.0 * _gamma(4) * float(np.sum(np.abs(weights) * (2.0 * y + family.theta)))
+            if type(family) is NegativeBinomial
+            else 0.0
+        )
 
         def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
             """Attach deviance plus the latent-coordinate quadratic penalty."""
@@ -2809,7 +2823,7 @@ def _fit_irls_direct_once(
                     penalized_deviance=float(trial.irls.deviance + penalty_quad),
                 ),
             )
-            deviance_roundoff = merit_gamma * abs(trial.irls.deviance)
+            deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + nb2_unit_roundoff
             if type(family) is Gaussian:
                 deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
             with np.errstate(over="ignore", invalid="ignore"):

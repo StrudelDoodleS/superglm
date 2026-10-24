@@ -1464,3 +1464,46 @@ def test_a_trial_past_binary64s_range_is_refused_without_a_warning(monkeypatch):
 
     assert max(largest) > np.sqrt(np.finfo(float).max)
     assert model.result.converged
+
+
+def test_an_nb2_fit_at_the_poisson_limit_stops_on_a_full_step():
+    """NB2 at theta = 1e8 on sparse counts, under a REML inner fit's criterion (coefficients, 1e-10).
+
+    NB2's unit deviance rounds at about u theta a row whatever its size, so
+    near the mode one row's rounding moving by an ulp moved the merit by
+    4.4e-8, a hundred times its allowance: every full step was refused and,
+    a damped step never stopping the fit, it ran out its 100 iterations (a
+    REML fit refuses such a fit, as the release differential's NB2 SCOP case
+    did). The allowance now carries each row's 2 gamma_4 (2y + theta), which
+    bounds the unit deviance's error against its log1p form.
+    """
+    from scipy.special import xlogy
+
+    model, frame, y, offset = _sparse_counts_model(400, 3, 1e8)
+    y_fit, weights, offset_fit = model_build_design_matrix(model, frame, y, np.ones_like(y), offset)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 10.0, "x2": 4.4},
+        offset=offset_fit,
+        max_iter=100,
+        tol=1e-10,
+        weight_semantics="frequency",
+        convergence="coefficients",
+    )
+
+    assert result.converged
+    theta, mu = 1e8, np.geomspace(1e-3, 3.0, 999)
+    gamma4 = 4 * UNIT / (1 - 4 * UNIT)
+    for count in (0.0, 1.0, 3.0):
+        first = xlogy(count, count / mu)
+        second = (count + theta) * np.log1p((count - mu) / (mu + theta))
+        error = model._distribution.deviance_unit(np.full_like(mu, count), mu) - 2 * (
+            first - second
+        )
+        terms = np.abs(first) + np.abs(second)
+        assert np.all(np.abs(error) <= 2 * gamma4 * (2 * count + theta + terms))
