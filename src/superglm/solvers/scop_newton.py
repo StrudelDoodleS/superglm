@@ -59,6 +59,7 @@ from superglm.group_matrix import (
 )
 from superglm.solvers.centered_system import _dense_split
 from superglm.solvers.mode_score import dense_columns
+from superglm.solvers.rank import _eigensolver_relative_bar, _gamma_up
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_exact_support import build_exact_scop_support
 from superglm.types import GroupSlice
@@ -271,6 +272,39 @@ def _psd_root(S: NDArray) -> NDArray:
     """Return ``R`` with ``R.T @ R == S``, for symmetric PSD ``S``."""
     eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (S + S.T))
     return np.sqrt(np.maximum(eigenvalues, 0.0))[:, None] * eigenvectors.T
+
+
+def _resolved_root(
+    gram: NDArray, score: NDArray, scale: NDArray, count: int
+) -> tuple[NDArray, NDArray]:
+    """``(R, s)``: a root of ``gram`` on the directions its formation resolves, and ``score`` there.
+
+    ``gram`` is the Schur block's data part ``G~ - C' A^-1 C``, formed from
+    Grams of centred columns. To first order its rounding is the joint
+    Gram's along ``(v, -A^-1 C v)``, so ``|dG_ij| <= gamma_count g_i g_j``
+    with ``g = scale``: each SCOP column's weighted norm plus the norms of
+    the ordinary columns its regression ``A^-1 C`` draws on (Higham 2002,
+    sec. 3.5, for every formed product, ``count`` terms deep). Scaled by
+    ``g`` that error is at most ``gamma_count q`` in the 2-norm, and the
+    eigensolver adds ``q eps`` of the largest eigenvalue (*LAPACK Users'
+    Guide*, sec. 4.7). An eigenvalue at or below their sum is rounding,
+    whatever its sign: an ordinary column aliased with a SCOP direction
+    leaves exactly zero there, and the square root of its rounding sits at
+    the factor's own ``sqrt(eps)`` cut, which then cannot tell it from
+    curvature. Such a direction gets no data curvature, and ``score``, whose
+    component there is rounding too, loses it: the penalty alone decides the
+    step along it.
+    """
+    q = gram.shape[0]
+    norms = np.where(scale > 0.0, scale, 1.0)
+    scaled = gram / norms[:, None] / norms[None, :]
+    values, vectors = np.linalg.eigh(0.5 * (scaled + scaled.T))
+    largest = float(np.max(np.abs(values), initial=0.0))
+    bar = _gamma_up(count) * q + _eigensolver_relative_bar(q) * largest
+    resolved = values > bar
+    kept = vectors[:, resolved]
+    root = np.sqrt(values[resolved])[:, None] * kept.T * norms[None, :]
+    return root, norms * (kept @ (kept.T @ (score / norms)))
 
 
 def _truncated_factor_step(
@@ -812,11 +846,11 @@ class SCOPJointNewton:
         }
 
     def _solve(
-        self, data_gram: NDArray, moments: _SCOPMoments, gradient: NDArray
+        self, root: NDArray, moments: _SCOPMoments, gradient: NDArray
     ) -> tuple[NDArray, bool, NDArray]:
-        """Newton step of a SCOP block whose data part is ``J data_gram J``.
+        """Newton step of a SCOP block whose data part is ``J R' R J``.
 
-        The factor is ``[R J ; sqrt(lambda) rS]`` with ``R' R = data_gram``:
+        The factor is ``[R J ; sqrt(lambda) rS]`` with ``R = root``:
         ``J`` scales the factor's columns rather than a Gram's, so a latent
         coordinate running to its log-space boundary (``J -> 0``) is resolved
         to the factor's accuracy, not its square. Returns the step with the
@@ -824,7 +858,7 @@ class SCOPJointNewton:
         Gauss-Newton block was used, and the discarded directions. No
         identifiable direction at all gives no step.
         """
-        factor = np.vstack([_psd_root(data_gram) * moments.jacobian[None, :], self.penalty_root])
+        factor = np.vstack([root * moments.jacobian[None, :], self.penalty_root])
         step, used_fisher, discarded = _truncated_factor_step(factor, moments.curvature, gradient)
         if step is None:
             return np.zeros(self.width), True, np.zeros((0, self.width))
@@ -855,22 +889,31 @@ class SCOPJointNewton:
         With ``r`` the working residual, ``delta_b`` that step and ``C =
         X~_r' W X~_s`` the centred cross block, the reduced SCOP gradient is
         ``-J (X~_s' W r - C' delta_b) + lambda S theta``: the residual the
-        fixed-``theta`` solve leaves, without forming it.
+        fixed-``theta`` solve leaves, without forming it. The block's data
+        part is taken on the directions its rounding resolves
+        (``_resolved_root``).
         """
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
             return SCOPJointStep(self._no_step(thetas), np.zeros_like(ordinary_change), 0.0)
         data_gram = moments.gram
         data_score = moments.score
+        scale = np.sqrt(np.maximum(np.diag(data_gram), 0.0))
         coupled = np.zeros((ordinary_change.shape[0], self.width))
         if self._cross is not None:
-            cross, _ = self._cross.moment(W, moments, reduced)
+            cross, norms = self._cross.moment(W, moments, reduced)
             coupled = np.column_stack([solve(column) for column in cross.T])
             data_gram = data_gram - cross.T @ coupled
             data_score = data_score - cross.T @ ordinary_change
-        data_gram = 0.5 * (data_gram + data_gram.T)
+            # the reduced Gram's raw rungs admit a column at kappa^2 <= 2
+            # (``_raw_centering_well_scaled``): its rounding is within sqrt(2) of the norm
+            centred = np.sqrt(np.maximum(np.diag(reduced.data_gram), 0.0))
+            scale = scale + np.abs(coupled).T @ np.maximum(np.sqrt(2.0) * centred, norms)
+        root, data_score = _resolved_root(
+            data_gram, data_score, scale, 2 * self.n + coupled.shape[0] + self.width + 2
+        )
         gradient = -moments.jacobian * data_score + moments.pull
-        step, used_fisher, discarded = self._solve(data_gram, moments, gradient)
+        step, used_fisher, discarded = self._solve(root, moments, gradient)
         mapped_change = -moments.jacobian * step
         results = self._results(thetas, -step, moments, used_fisher, discarded)
         for spec in self.specs:
@@ -900,5 +943,6 @@ class SCOPJointNewton:
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
             return self._no_step(thetas)
-        _, used_fisher, discarded = self._solve(moments.own_gram, moments, np.zeros(self.width))
+        root = _psd_root(moments.own_gram)
+        _, used_fisher, discarded = self._solve(root, moments, np.zeros(self.width))
         return self._results(thetas, np.zeros(self.width), moments, used_fisher, discarded)
