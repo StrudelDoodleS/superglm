@@ -429,20 +429,24 @@ def _evaluate_scop_trial(
             )
         )
 
-    irls = _evaluate_irls_state(
-        dm,
-        y,
-        weights,
-        family,
-        link,
-        offset,
-        beta_trial,
-        intercept_trial,
-        state_id=state_id,
-        evaluation_id=evaluation_id,
-        basis_id=basis_id,
-        lambdas=lambdas,
-    )
+    # A latent step can map past the floating-point range (``exp`` of a
+    # coordinate the Newton model sent far out); such a trial's objective is
+    # not finite and the line search rejects it, without a warning.
+    with np.errstate(over="ignore", invalid="ignore"):
+        irls = _evaluate_irls_state(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            offset,
+            beta_trial,
+            intercept_trial,
+            state_id=state_id,
+            evaluation_id=evaluation_id,
+            basis_id=basis_id,
+            lambdas=lambdas,
+        )
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
@@ -3266,15 +3270,18 @@ def _fit_irls_direct_once(
 
         if _has_scop:
             _t0 = time.perf_counter()
-            proposal_irls = evaluate_state(
-                beta,
-                intercept,
-                phase="scop_proposal",
-                iteration=it + 1,
-                alpha=1.0,
-                eta_unclipped=scop_proposal_eta_unclipped,
-                emit_trace=False,
-            )
+            # as ``_evaluate_scop_trial``: a proposal past the floating-point
+            # range is rejected by the line search, without a warning
+            with np.errstate(over="ignore", invalid="ignore"):
+                proposal_irls = evaluate_state(
+                    beta,
+                    intercept,
+                    phase="scop_proposal",
+                    iteration=it + 1,
+                    alpha=1.0,
+                    eta_unclipped=scop_proposal_eta_unclipped,
+                    emit_trace=False,
+                )
             proposal_scop = _SCOPTrialState(
                 irls=proposal_irls,
                 groups=tuple(
