@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, ConvergenceWarning, Spline, SuperGLM
+from superglm import Categorical, Constraint, ConvergenceWarning, PSpline, Spline, SuperGLM
 from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_box
 from superglm._roundoff import TINY
 from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS
@@ -322,3 +322,51 @@ def test_scop_warm_start_keeps_a_lambda_above_the_unit_ceiling(units):
     reference_curve, standard_error = _x2_curve(reference, units)
     shift = np.max(np.abs(curve - reference_curve) / standard_error)
     assert shift <= math.sqrt(len(lambdas) * reference.result.beta.size) * tolerance
+
+
+def test_scop_box_stays_where_the_bootstrap_set_it():
+    """A SCOP block's box is set by the bootstrap's increments, not by where they collapse to.
+
+    The release differential's sparse log-link binomial case: the data leave
+    the increasing x1 term flat, so along the search its increments collapse
+    (mean square 7e-3 at the bootstrap, 1e-26 at the end) and the criterion
+    keeps falling as its lambda falls with them.  The bootstrap's box ends
+    that descent at its floor, 1e-6 times 7e-3.  A box read at each iterate
+    followed the collapse down: the search reached lambda 4e-14, a Newton
+    line search failed there, and the run restarted from the bootstrap on EFS
+    steps and published a criterion 9 above the lowest it had accepted.
+    """
+    rng = np.random.default_rng(1190)
+    n, total = 4000, 6000
+    x1, x2 = rng.uniform(0, 10, total), rng.uniform(-2, 2, total)
+    levels = [f"a{i}" for i in range(6)]
+    c1 = rng.choice(levels, total, p=[0.3, 0.25, 0.2, 0.12, 0.08, 0.05])
+    c2 = rng.choice([f"g{i:02d}" for i in range(25)], total)
+    lin = rng.normal(0, 1, total)
+    rng.uniform(0, 1, (2, total))  # two columns this model does not use
+    c1_effect = dict(zip(levels, [0, 0.2, -0.15, 0.3, -0.1, 0.25], strict=True))
+    c2_effect = dict(zip(sorted(set(c2)), rng.normal(0, 0.15, 25), strict=False))
+    eta = (
+        0.06 * x1
+        + 0.3 * np.sin(1.3 * x2)
+        + np.array([c1_effect[v] for v in c1])
+        + np.array([c2_effect[v] for v in c2])
+        + 0.1 * lin
+        + 0.04 * x1 * np.tanh(x2)
+    )
+    probability = np.clip(0.15 * np.exp(0.5 * (eta - eta.mean()) - 1.5), 0, 0.9)
+    y = (rng.uniform(size=total) < probability).astype(float)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={
+            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="cr", k=8),
+            "c1": Categorical(),
+        },
+    )
+    model.fit_reml(pd.DataFrame({"x1": x1, "x2": x2, "c1": c1}).iloc[:n], y[:n])
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["termination_reason"] in _REML_CONVERGED_REASONS
+    assert model._reml_result.scop_newton_fallback is None
+    assert diagnostics["objective"] == min(model._reml_result.objective_history)

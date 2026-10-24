@@ -1693,6 +1693,7 @@ def _backoff_scop_candidate_step(
     proposed_lambdas: dict[str, float],
     *,
     reml_iteration: int,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[_SCOPREMLMode, dict[str, float], float] | None:
     """Retry a failed candidate at damped steps toward its certified origin.
 
@@ -1710,7 +1711,9 @@ def _backoff_scop_candidate_step(
     produced it, or ``None`` when every damped attempt fails, in which case
     the caller keeps its raise.  A proposal-only name (absent from the
     origin) has no endpoint to interpolate from and is adopted undamped at
-    its proposed value, keeping the caller's key set intact.
+    its proposed value, keeping the caller's key set intact.  Each trial is
+    clipped to its name's box in ``boxes``, and to ``LAMBDA_BOX`` for a name
+    it omits or when it is ``None``.
     """
     changed_names = [
         name
@@ -1728,7 +1731,7 @@ def _backoff_scop_candidate_step(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
-    boxes = _lambda_boxes(origin)
+    boxes = boxes or {}
     for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
         alpha = 0.5**attempt
         # Seeded from the proposal, not the origin: the adopted dict must
@@ -1762,8 +1765,12 @@ def _backtrack_scop_efs_candidate(
     reml_iteration: int,
     max_attempts: int = _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS,
     reflect: bool = True,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[_SCOPREMLMode, bool]:
     """Fit and score repeatedly damped log-lambda trials.
+
+    Each trial is clipped to its name's box in ``boxes``, and to
+    ``LAMBDA_BOX`` for a name it omits or when it is ``None``.
 
     The returned boolean is false only when every attempted converged candidate
     in both the proposed and reflected directions is uphill (or every inner
@@ -1800,7 +1807,7 @@ def _backtrack_scop_efs_candidate(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
-    boxes = _lambda_boxes(current)
+    boxes = boxes or {}
     trial_number = 0
     for direction_sign in (1.0, -1.0) if reflect else (1.0,):
         direction_attempts = (
@@ -2014,6 +2021,7 @@ def _joint_efs_lambda_step(
     alpha: dict[str, float],
     prev_dlsp: dict[str, float],
     aitken_state: dict | None = None,
+    boxes: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Joint EFS lambda step using rEDF/pSp (Wood & Fasiolo 2017, scasm-style).
 
@@ -2041,6 +2049,9 @@ def _joint_efs_lambda_step(
     aitken_state : dict, optional
         Per-component accepted-step history for the safeguarded Aitken jump
         (``_SCOP_EFS_AITKEN_*``); ``None`` disables it.
+    boxes : dict, optional
+        Each name's ``(floor, ceiling)``; a name it omits, or every name when
+        it is ``None``, has ``LAMBDA_BOX``.
 
     Returns
     -------
@@ -2119,7 +2130,7 @@ def _joint_efs_lambda_step(
             scaled_step = max_step * np.sign(scaled_step)
 
         # Apply step, from inside the box
-        floor, ceiling = LAMBDA_BOX if scop_st is None else _scop_lambda_box(scop_st)
+        floor, ceiling = (boxes or {}).get(pc.name, LAMBDA_BOX)
         log_lam_new = np.log(max(lambdas[pc.name], floor)) + scaled_step
         lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), floor, ceiling))
         dlsp_out[pc.name] = dlsp
@@ -3027,6 +3038,12 @@ def optimize_scop_efs_reml(
         fallback_likelihood_size=fit_context.likelihood_size,
     )
 
+    # Each SCOP block's box is set here, once, at the bootstrap's increments,
+    # which carry the response's units, and bounds the whole search.  Read at
+    # each iterate instead, the floor follows a block whose increments
+    # collapse toward a flat fit down with them, and bounds nothing.
+    boxes = _lambda_boxes(boot_mode)
+
     # One EFS step on bootstrap beta — uses rEDF/pSp formula for ALL terms
     # (including SCOP). This gives SCOP lambdas their first meaningful move.
     boot_alpha = {name: 1.0 for name in estimated_names}
@@ -3040,11 +3057,11 @@ def optimize_scop_efs_reml(
         boot_scop_states,
         boot_alpha,
         {},
+        boxes=boxes,
     )
-    boot_boxes = _lambda_boxes(boot_mode)
     for name in estimated_names:
         if name in warm_names:
-            lambdas[name] = float(np.clip(boot_lambdas[name], *boot_boxes.get(name, LAMBDA_BOX)))
+            lambdas[name] = float(np.clip(boot_lambdas[name], *boxes.get(name, LAMBDA_BOX)))
         elif name in boot_lambdas_new:
             lambdas[name] = boot_lambdas_new[name]
 
@@ -3152,6 +3169,7 @@ def optimize_scop_efs_reml(
                     step_origin,
                     lambdas,
                     reml_iteration=n_reml_iter,
+                    boxes=boxes,
                 )
                 if rescue is None:
                     raise ObservedModeNotConvergedError(
@@ -3283,7 +3301,6 @@ def optimize_scop_efs_reml(
                     retained_mode, candidate_accepted = current_mode, True
                 else:
                     proposal = lambdas.copy()
-                    boxes = _lambda_boxes(current_mode)
                     for name, log_lambda, delta in zip(
                         system.names, system.log_lambdas, newton_step, strict=True
                     ):
@@ -3298,6 +3315,7 @@ def optimize_scop_efs_reml(
                         reml_iteration=n_reml_iter,
                         max_attempts=_SCOP_NEWTON_MAX_BACKTRACK_ATTEMPTS,
                         reflect=False,
+                        boxes=boxes,
                     )
                     if not candidate_accepted:
                         # The guard: no forward trial was accepted, so the
@@ -3389,12 +3407,14 @@ def optimize_scop_efs_reml(
                 efs_alpha,
                 efs_prev_dlsp,
                 aitken_state,
+                boxes=boxes,
             )
             retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
                 fit_context,
                 current_mode,
                 lambdas_new,
                 reml_iteration=n_reml_iter,
+                boxes=boxes,
             )
         outer_steps.append(step_kind)
         lambdas_new = retained_mode.lambdas.copy()
