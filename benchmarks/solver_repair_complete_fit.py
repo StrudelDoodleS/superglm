@@ -185,6 +185,7 @@ def _solver_dispatch(sampler=None):
     targets = {
         constrained_qp.solve_constrained_qp.__code__: "solve_constrained_qp",
         scop_newton.SCOPJointNewton.step.__code__: "scop_joint_step",
+        scop_newton.SCOPJointNewton._schur_rows.__code__: "scop_schur_rows",
         scop_newton._compute_cross_gram.__code__: "scop_cross_gram",
         scop_newton._disc_disc_2d_hist.__code__: "discrete_cross_histogram",
         balance_tree.SumToZeroTreeFactor.__init__.__code__: "SumToZeroTreeFactor.__init__",
@@ -199,6 +200,8 @@ def _solver_dispatch(sampler=None):
         "callers": Counter(),
         "scop_group_counts": Counter(),
         "scop_support_layouts": Counter(),
+        "scop_ordinary_cross_routes": Counter(),
+        "scop_schur_routes": Counter(),
         "scop_cross_routes": Counter(),
         "scop_cross_histogram_returns": 0,
         "qp_results": [],
@@ -206,6 +209,7 @@ def _solver_dispatch(sampler=None):
         "sum_to_zero_factors": [],
         "observer_errors": [],
     }
+    schur_rows = [False]
 
     def observe(frame, event, result):
         name = targets.get(frame.f_code)
@@ -220,17 +224,32 @@ def _solver_dispatch(sampler=None):
                 caller = frame.f_back.f_code.co_name if frame.f_back is not None else ""
                 receipt["callers"][f"{name} <- {caller}"] += 1
                 if name == "scop_joint_step":
-                    specs = local["self"].specs
-                    receipt["scop_group_counts"][str(len(specs))] += 1
+                    # the layout the step runs on: each group's columns as
+                    # ``_exact_support`` left them, compressed or not
+                    engine = local["self"]
+                    receipt["scop_group_counts"][str(len(engine.specs))] += 1
                     layout = [
                         {
                             "group": int(spec.group_index),
-                            "basis_shape": list(spec.B_scop.shape),
-                            "bin_indices": spec.bin_idx is not None,
+                            "basis_shape": list(basis.shape),
+                            "bin_indices": bins is not None,
                         }
-                        for spec in specs
+                        for spec, (basis, bins) in zip(engine.specs, engine.columns, strict=True)
                     ]
                     receipt["scop_support_layouts"][json.dumps(layout, sort_keys=True)] += 1
+                    cross = engine._cross
+                    if cross is None:
+                        route = "no ordinary design"
+                    elif cross.bounded is None:
+                        route = "dense rows only"
+                    elif cross.tables is not None:
+                        route = "one-pass tables"
+                    else:
+                        route = "per-pair plan"
+                    receipt["scop_ordinary_cross_routes"][route] += 1
+                    schur_rows[0] = False
+                elif name == "scop_schur_rows":
+                    schur_rows[0] = True
                 return
             if result is not None:
                 receipt["returned_calls"][name] += 1
@@ -242,6 +261,8 @@ def _solver_dispatch(sampler=None):
                 item["constraint_slack"] = local["A"] @ result.beta - local["b"]
                 receipt["qp_results"].append(_json_value(item))
             elif name == "scop_joint_step" and result is not None:
+                # the Schur block's data part: from its Grams, or a row factor
+                receipt["scop_schur_routes"]["rows" if schur_rows[0] else "gram"] += 1
                 for index, step in result.results.items():
                     item = _attributes(
                         step, ("step_norm", "used_fisher_fallback", "discarded_directions")
