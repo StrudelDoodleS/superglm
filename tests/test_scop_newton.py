@@ -415,3 +415,52 @@ def test_one_pass_cross_block_equals_the_per_pair_plan():
         [*ordinary, DenseGroupMatrix(frame[["a"]].to_numpy())], n=n, p=reduced.p + 1
     )
     assert _JointWeightCross.build(dense, [(scop.B_scop_unique, scop.bin_idx)]) is None
+
+
+def _repeated_rows_spec(index, rng, n, distinct, reparam):
+    """An exact SCOP group whose ``n`` rows take ``distinct`` distinct values."""
+    values = rng.normal(size=(distinct, reparam.q))
+    codes = np.concatenate([np.arange(distinct), rng.integers(0, distinct, n - distinct)])
+    return _spec(index, f"g{index}", reparam, values[rng.permutation(codes)])
+
+
+def test_exact_supports_compress_only_when_they_pay_and_pair_tables_are_capped(monkeypatch):
+    """No SCOP pair allocates a weight table past the cap: a count of cells, never a time."""
+    from superglm.solvers import scop_newton
+
+    cells = []
+    table = scop_newton._disc_disc_2d_hist
+
+    def counted(bins_i, bins_j, W, rows_i, rows_j):
+        cells.append(rows_i * rows_j)
+        return table(bins_i, bins_j, W, rows_i, rows_j)
+
+    monkeypatch.setattr(scop_newton, "_disc_disc_2d_hist", counted)
+    rng = np.random.default_rng(4)
+    increasing = build_scop_solver_reparam(6, kind="increasing")
+
+    # Almost-unique supports (n - 1 distinct rows) stay at row level.
+    n = 3000
+    specs = [_repeated_rows_spec(k, rng, n, n - 1, increasing) for k in (0, 1)]
+    engine = SCOPJointNewton(specs, {"g0": 1.0, "g1": 1.0}, DesignMatrix([], n=n, p=0), n)
+    assert all(bins is None for _, bins in engine.columns)
+    thetas = [np.zeros(increasing.q), np.zeros(increasing.q)]
+    W = rng.uniform(0.5, 2.0, n)
+    engine.block_curvature(thetas, W=W, z=rng.normal(size=n), eta=np.zeros(n))
+    assert cells == []
+
+    # Supports at most half the rows compress; their pair, past the cap, takes no table.
+    n = 5000
+    distinct = 2300
+    assert distinct**2 > scop_newton._MAX_DISC_DISC_HIST_CELLS
+    specs = [_repeated_rows_spec(k, rng, n, distinct, increasing) for k in (0, 1)]
+    engine = SCOPJointNewton(specs, {"g0": 1.0, "g1": 1.0}, DesignMatrix([], n=n, p=0), n)
+    assert [basis.shape[0] for basis, _ in engine.columns] == [distinct, distinct]
+    W = rng.uniform(0.5, 2.0, n)
+    engine.block_curvature(thetas, W=W, z=rng.normal(size=n), eta=np.zeros(n))
+    assert max(cells, default=0) <= scop_newton._MAX_DISC_DISC_HIST_CELLS
+    cross = scop_newton._compute_cross_gram(*engine.columns[0], *engine.columns[1], W)
+    rows = [spec.B_scop for spec in specs]
+    # sums of the same n products in another order (Higham 2002, eq. 3.5)
+    bound = 2 * (2 * n + 2) * UNIT * (np.abs(rows[0]).T @ (W[:, None] * np.abs(rows[1])))
+    assert np.all(np.abs(cross - rows[0].T @ (W[:, None] * rows[1])) <= bound)

@@ -37,6 +37,10 @@ import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_algebra import (
+    _MAX_DISC_DISC_HIST_CELLS,
+    _support_support_raw_cross,
+)
 from superglm._group_matrix._group_matrix_centered import (
     _MAX_PACKED_HIST_CELLS,
     _compact_support,
@@ -356,11 +360,16 @@ def _compute_cross_gram(
 ) -> NDArray:
     """Cross-group weighted Gram ``B_i' diag(W) B_j`` of two SCOP groups.
 
-    Each group is a basis and an optional bin index into it; two
-    discretized groups meet in a 2D weight histogram, otherwise the binned
-    side is scattered to observation level.
+    Each group is a basis and an optional bin index into it. Two binned
+    groups meet in their joint weight table when it holds at most
+    ``_MAX_DISC_DISC_HIST_CELLS`` cells, the group-matrix kernels' cap, and
+    otherwise in one group's weighted rows added onto the other's support
+    (``_support_support_raw_cross``), whose memory does not grow with the
+    rows. Otherwise the binned side is scattered to observation level.
     """
     if bin_i is not None and bin_j is not None:
+        if B_i.shape[0] * B_j.shape[0] > _MAX_DISC_DISC_HIST_CELLS:
+            return _support_support_raw_cross(B_i, bin_i, B_j, bin_j, W)
         W_2d = _disc_disc_2d_hist(bin_i, bin_j, W, B_i.shape[0], B_j.shape[0])
         return B_i.T @ W_2d @ B_j
     rows_i = B_i if bin_i is None else B_i[bin_i]
@@ -491,11 +500,17 @@ class _JointWeightCross:
 
 
 def _exact_support(spec: SCOPGroupSpec) -> tuple[NDArray, NDArray | None]:
-    """A group's columns as a basis and a row index into it, compressed where rows repeat."""
+    """A group's columns as a basis and a row index into it.
+
+    A group with no bins is compressed to its distinct rows only when they
+    are at most half its rows: its moments then cost a bincount over the
+    rows plus at most half the row-level products. An almost-unique
+    support saves nothing, and every table it indexes grows with its rows.
+    """
     if spec.bin_idx is not None:
         return spec.B_scop, spec.bin_idx
     support = build_exact_scop_support(spec.B_scop)
-    if support is None:
+    if support is None or 2 * support.n_unique > spec.B_scop.shape[0]:
         return spec.B_scop, None
     return support.B_unique, support.row_to_support
 
