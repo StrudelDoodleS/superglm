@@ -1203,9 +1203,9 @@ def build_design_matrix(
                 level_curves.append(record[1:])
                 continue
             if record[0] == "cat":
-                _, name_c, spec_c, x_c = record
+                _, name_c, spec_c, x_c, build_codes_c = record
                 found = scan_categorical_term(
-                    name_c, spec_c, x_c, y, sample_weight, separation_boundaries
+                    name_c, spec_c, x_c, y, sample_weight, separation_boundaries, build_codes_c
                 )
                 findings.extend(found)
                 # predict names these levels when it meets them (_predict_eta)

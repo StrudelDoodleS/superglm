@@ -628,3 +628,109 @@ def test_two_positive_anchors_fix_a_lines_both_coefficients_at_any_origin(origin
     none = np.zeros(3, dtype=bool)
     assert _level_recession(natural, lower, none, inside, np.eye(2)) is None
     assert _level_recession(natural, lower, none, inside, np.eye(2), span=False) is None
+
+
+# ── The scan reads the build's level codes ───────────────────────
+
+
+def _separated_level_column(seed=5, n=2500):
+    rng = np.random.default_rng(seed)
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    y = np.where(c == "c6", 0.0, rng.poisson(0.5, size=n).astype(float) + (c != "c6"))
+    return c, y
+
+
+def _build_separated_main_effect(spec, c, y):
+    from superglm._frame import as_eager_frame
+    from superglm.dm_builder import build_design_matrix
+
+    specs = {"c": spec}
+    return build_design_matrix(
+        as_eager_frame(pd.DataFrame({"c": c})),
+        y,
+        np.ones(len(y)),
+        None,
+        family="poisson",
+        link_spec=None,
+        specs=specs,
+        feature_order=["c"],
+        interaction_specs={},
+        interaction_order=[],
+        pending_interactions=[],
+        model_discrete=False,
+        n_bins_config=32,
+        lambda2=0.1,
+        weight_semantics="frequency",
+    )
+
+
+def _spec_for(kind, c):
+    from superglm import collapse_levels
+
+    if kind == "declared":
+        return Categorical(levels=sorted(set(c)))
+    if kind == "grouped":
+        grouping = collapse_levels(sorted(set(c)), groups={"c01": ["c0", "c1"]})
+        return Categorical(grouping=grouping)
+    return Categorical()
+
+
+@pytest.mark.parametrize("kind", ["inferred", "declared", "grouped"])
+def test_a_main_effect_columns_level_codes_are_computed_once_per_build(monkeypatch, kind):
+    """The build codes the column against its universe; the separation scan reads those codes.
+
+    Both used to call ``_codes_against`` on the same column, one pass over every
+    row each. A declared universe codes once in the build (an inferred or grouped
+    one comes from ``factorize``) and the scan then codes nothing. Mutation:
+    a scan that codes the column itself again makes this one call more.
+    """
+    import superglm.features.categorical as categorical
+
+    c, y = _separated_level_column()
+    calls = []
+    real = categorical._codes_against
+    monkeypatch.setattr(
+        categorical,
+        "_codes_against",
+        lambda values, levels: calls.append(len(values)) or real(values, levels),
+    )
+    with pytest.warns(SeparationWarning, match="'c6'"):
+        built = _build_separated_main_effect(_spec_for(kind, c), c, y)
+    assert built.compiled.specs["c"]._separated_levels_at_fit == ("c6",)
+    assert calls == ([len(c)] if kind == "declared" else [])
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param(np.array(["b", "a", "c", "a", "b"] * 40, dtype=object), id="object"),
+        pytest.param(np.array(["b", "a", "c", "a", "b"] * 40), id="unicode"),
+        pytest.param(np.array([3, 1, 2, 1, 3] * 40), id="int"),
+        pytest.param(np.array([0.5, -0.0, 0.0, 2.5, 0.5] * 40), id="float"),
+        pytest.param(np.array([True, False, True, True, False] * 40), id="bool"),
+        pytest.param(np.array([1, 1.0, True, "x", 2] * 40, dtype=object), id="mixed-object"),
+    ],
+)
+@pytest.mark.parametrize("declared", [False, True])
+def test_build_codes_are_the_codes_the_scan_would_make(values, declared):
+    """``build_with_codes`` returns exactly ``_codes_against(column, levels)``: coding the column again is redundant.
+
+    The inferred universe comes out of ``factorize``, whose row codes must be
+    the unique-index lookup's for the scan to take them as its own.
+    """
+    from superglm.diagnostics.separation import BuildCodes, scan_categorical_term
+    from superglm.features.categorical import _codes_against
+
+    spec = Categorical(levels=pd.unique(values).tolist()) if declared else Categorical()
+    info, codes = spec.build_with_codes(values)
+    assert info.cat_codes is not None
+    expected = _codes_against(values, spec._levels)
+    assert codes.dtype == expected.dtype
+    assert np.array_equal(codes, expected)
+    y = np.arange(len(values)) % 2 * 1.0
+    weight = np.ones(len(values))
+    build_codes = BuildCodes(codes)
+    assert scan_categorical_term("c", spec, values, y, weight, ("zero",), build_codes) == (
+        scan_categorical_term("c", spec, values, y, weight, ("zero",))
+    )
+    assert build_codes.take() is None

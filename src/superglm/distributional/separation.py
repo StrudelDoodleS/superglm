@@ -92,7 +92,7 @@ def scan_predictor_separation(
             elif record[0] == "level_curve":
                 level_curves.append((f"{predictor.name}:{record[1]}", record[2]))
             elif record[0] == "cat":
-                _, term, spec, column = record
+                _, term, spec, column, build_codes = record
                 findings.extend(
                     scan_categorical_term(
                         f"{predictor.name}:{term}",
@@ -101,6 +101,7 @@ def scan_predictor_separation(
                         response,
                         weight_values,
                         predictor_boundaries,
+                        build_codes,
                     )
                 )
             else:

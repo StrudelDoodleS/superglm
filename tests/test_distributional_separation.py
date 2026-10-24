@@ -81,6 +81,29 @@ def test_separated_level_warns_before_fitting_and_names_both_predictors() -> Non
     assert "collapse" in message
 
 
+def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them() -> None:
+    """The compiled predictors outlive the scan, and a pickled model carries them.
+
+    The scan takes each term's build codes, so the record the model keeps holds
+    none of them. Mutation: a scan that only reads them leaves an integer per
+    row per term in the model, and in its pickle.
+    """
+    frame, y, exposure = _separated_tweedie_fixture()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model = _tweedie_model().fit(
+            frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0}
+        )
+    held = [
+        record[4]
+        for predictor in model._model.compiled_predictors
+        for record in predictor.compiled.separation_records
+        if record[0] == "cat"
+    ]
+    assert len(held) == 2
+    assert [codes.take() for codes in held] == [None, None]
+
+
 def test_separated_tweedie_fit_finishes_on_the_nearest_semidefinite_curvature() -> None:
     """Kills the refusal for a family without expected information (master raised here)."""
     frame, y, exposure = _separated_tweedie_fixture()

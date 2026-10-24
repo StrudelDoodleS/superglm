@@ -262,10 +262,8 @@ def compile_predictor_design(
         if isinstance(spec, OrderedCategorical):
             spec._inner_geometry_physical_rows = physical_rows
         x_col = X.column_array(name)
-        if separation_boundaries and isinstance(spec, Categorical):
-            # Scanned after the loops, once the spec has learned its levels
-            # and the GroupSlices exist for the penalty exemption.
-            separation_records.append(("cat", name, spec, x_col))
+        scan_levels = bool(separation_boundaries) and isinstance(spec, Categorical)
+        level_codes: NDArray | None = None
         # Supply level universes the feature cannot discover from its observed
         # rows. A column's declared categorical dtype takes precedence over a
         # caller's full-frame binding. Both hooks decline when the feature
@@ -480,6 +478,10 @@ def compile_predictor_design(
                             reporting_weight=ordered_reporting_weight,
                             geometry_weight=feature_build_weight,
                         )
+                    elif scan_levels:
+                        result, level_codes = cast(Categorical, spec).build_with_codes(
+                            x_col, sample_weight=feature_build_weight
+                        )
                     else:
                         result = spec.build(x_col, sample_weight=feature_build_weight)
             except ValueError as err:
@@ -495,6 +497,15 @@ def compile_predictor_design(
                     stacklevel=2,
                 )
             infos = result if isinstance(result, list) else [result]
+        if scan_levels:
+            # Scanned after the loops, once the spec has learned its levels
+            # and the GroupSlices exist for the penalty exemption. The scan
+            # takes the build's codes rather than coding the column again.
+            from superglm.diagnostics.separation import BuildCodes
+
+            separation_records.append(
+                ("cat", name, spec, x_col, None if level_codes is None else BuildCodes(level_codes))
+            )
 
         # Resolve lambda_policies from the spec onto each GroupInfo.
         # build() does this internally, but the discrete path constructs

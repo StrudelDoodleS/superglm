@@ -445,6 +445,22 @@ class Categorical:
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
+        return self.build_with_codes(x, sample_weight, stacklevel=3)[0]
+
+    def build_with_codes(
+        self,
+        x: NDArray,
+        sample_weight: NDArray[np.floating] | None = None,
+        *,
+        stacklevel: int = 2,
+    ) -> tuple[GroupInfo, NDArray]:
+        """``build``, and every row's code against the fitted level universe.
+
+        The codes index ``_levels`` (base and pinned levels included) and are
+        never negative: a row outside the universe is refused above. A caller
+        that scans the same rows against the universe, as the separation scan
+        does, reads them instead of coding the column a second time.
+        """
         import pandas as pd
 
         x = _resolve_categorical_labels(x, self._grouping, at_fit=True)
@@ -500,7 +516,7 @@ class Categorical:
                 f"{sorted(self._pinned_levels, key=str)}. They remain known levels "
                 f"and predict as the base level.",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=stacklevel,
             )
 
         # Remap codes: drop the base level and every pinned level, producing
@@ -525,7 +541,7 @@ class Categorical:
         remap[emitted] = np.arange(n_levels, dtype=np.intp)
         cat_codes = remap[codes]
 
-        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes)
+        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes), codes
 
     def _require_unseen_group(self) -> None:
         """Refuse an ``unseen`` group this fit cannot route new levels to."""
