@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,7 +35,11 @@ from superglm.reml.penalty_algebra import (
     penalty_component_matvec,
 )
 from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
-from superglm.solvers.centered_system import dense_mean_pair, iter_grouped_design_chunks
+from superglm.solvers.centered_system import (
+    dense_mean_pair,
+    grouped_augmented_row_quadratic_forms,
+    iter_grouped_design_chunks,
+)
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     HessianFactor,
@@ -70,6 +74,59 @@ from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 _SIGNED_GRAM_BATCH_BYTES = 64 << 20
+# The structured factors whose augmented factor gives row quadratic forms
+# ``[1, x] H_aug^-1 [1, x]'`` (``row_quadratic_forms``), which the leverage
+# route reads in place of solved rows.
+_ROW_FORM_FACTORS = (
+    ProfiledNestedSchurFactor,
+    ProfiledFactorSmoothLeafFactor,
+    ProfiledSumToZeroTreeFactor,
+)
+
+
+def _penalty_rhs(
+    penalties: list[PenaltyComponent], lambdas: dict[str, float], beta: NDArray, gms, p: int
+) -> NDArray:
+    """The ``(p, m)`` penalty directions ``s_j = S_j beta``, each on its own block."""
+    rhs = np.zeros((p, len(penalties)), dtype=np.float64)
+    for i, pc in enumerate(penalties):
+        rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
+            pc, beta[pc.group_sl], gms[pc.group_index]
+        )
+    return rhs
+
+
+def _structured_weight_cross(
+    factor: HessianFactor,
+    penalties: list[PenaltyComponent],
+    lambdas: dict[str, float],
+    operators: dict[int, NDArray | CompactSymmetricOperator],
+) -> NDArray:
+    """The leverage route's cross terms ``-(P + P') / 2`` from a structured factor.
+
+    ``P_ij = tr(H^-1 S_i H^-1 C_j)``, ``S_i = lambda_i Omega_i`` and ``C_j`` the
+    weight-derivative operator, as ``_leverage_derivative_terms`` forms them
+    from solved rows.  The nested factor's derivative directions may carry an
+    operator without a penalty, so one ``derivative_cross_traces`` call over the
+    ``m`` penalty and ``m`` operator directions forms every ``P_ij``.  The leaf
+    and tree factors' directions each carry a penalty, so ``P_ij`` comes pair by
+    pair from ``penalty_operator_cross_trace``.
+    """
+    m = len(penalties)
+    # a structured factor's derivative operators are compact, never dense
+    compact = [cast(CompactSymmetricOperator, operators[j]) for j in range(m)]
+    if isinstance(factor, ProfiledNestedSchurFactor):
+        directions: list = [(pc, lambdas[pc.name], None) for pc in penalties]
+        directions += [(None, 0.0, operator) for operator in compact]
+        cross = factor.derivative_cross_traces(directions)[:m, m:]
+    else:
+        cross = np.array(
+            [
+                [factor.penalty_operator_cross_trace(pc, lambdas[pc.name], C) for C in compact]
+                for pc in penalties
+            ]
+        )
+    return -0.5 * (cross + cross.T)
 
 
 def _leverage_gradient_rhs(
@@ -169,7 +226,8 @@ def _leverage_derivative_terms(
     batches: list[_PenaltyBatch],
     penalty_rhs: NDArray,
     mean_lo: NDArray | None = None,
-) -> tuple[NDArray, NDArray]:
+    cross_terms: bool = True,
+) -> tuple[NDArray, NDArray | None]:
     """The W(rho) gradient correction and the Hessian's penalty-by-weight cross traces, in one pass.
 
     For each centred row ``x_r`` with a nonzero weight derivative ``w'_r``,
@@ -190,7 +248,8 @@ def _leverage_derivative_terms(
     Rows are centred as ``(x - mean_x) - mean_lo`` when the centre is an exact
     pair.  The work is one solved row per data row whatever ``m`` is, ``O(n
     p_i^2)`` per penalty block and ``O(n m^2)`` for ``P``: never a ``p x p``
-    Gram per penalty.
+    Gram per penalty.  ``cross_terms=False`` forms the gradient alone and
+    returns ``None`` for ``P``.
     """
     m = penalty_rhs.shape[1]
     block_rhs = [
@@ -214,7 +273,7 @@ def _leverage_derivative_terms(
         if block is None:
             return None
         rows, solved, leverage = block
-        quadratic = np.empty((rows.size, m), dtype=np.float64)
+        quadratic = np.empty((rows.size, m), dtype=np.float64) if cross_terms else None
         directions = np.empty((rows.size, m), dtype=np.float64)
         for batch, rhs in zip(batches, block_rhs, strict=True):
             # (blocks, rows, width): a view of each block's solved rows, for matmul
@@ -225,6 +284,8 @@ def _leverage_derivative_terms(
                 .transpose(1, 0, 2)
             )
             directions[:, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
+            if quadratic is None:
+                continue
             # Row sums over a block's width as one matrix-vector product: a
             # level is a dozen columns wide, too short for a loop per row.
             ones = np.ones(width, dtype=np.float64)
@@ -246,14 +307,13 @@ def _leverage_derivative_terms(
                     squares.T[:, :, None] * batch.identity_scales[None, :, :]
                 )
         weighted = row_weights[rows, None] * directions
-        return (
-            weighted.T @ (0.5 * (leverage + 1.0 / sum_w)),
-            quadratic.T @ weighted,
-        )
+        gradient = weighted.T @ (0.5 * (leverage + 1.0 / sum_w))
+        return (gradient,) if quadratic is None else (gradient, quadratic.T @ weighted)
 
     # Blocks are formed and reduced on the pool when they are independent;
     # their terms are summed here in row order either way, so the totals are
     # the same at every worker count (``_parallel.pooled_map``).
+    sums = [(grad, grad_compensation)] + ([(cross, cross_compensation)] if cross_terms else [])
     blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
     if blocks.block_bytes is None:
         # The chunked route reads one stream of chunks on this thread: no pool
@@ -266,10 +326,7 @@ def _leverage_derivative_terms(
         for part in parts:
             if part is None:
                 continue
-            for total, compensation, contribution in (
-                (grad, grad_compensation, part[0]),
-                (cross, cross_compensation, part[1]),
-            ):
+            for (total, compensation), contribution in zip(sums, part, strict=True):
                 corrected = contribution - compensation
                 updated = total + corrected
                 compensation[...] = (updated - total) - corrected
@@ -278,7 +335,7 @@ def _leverage_derivative_terms(
         # A raise in the loop leaves the generator parked inside the pool's
         # BLAS scope; closing it restores the BLAS policy and stops the pool.
         parts.close()
-    return grad, cross
+    return grad, cross if cross_terms else None
 
 
 def _leverage_cross_batches(
@@ -559,6 +616,7 @@ def reml_w_correction(
     gradient_only: bool = False,
     leverage_hessian: bool = False,
     lookup_tables: bool = True,
+    gradient_terms_only: bool = False,
 ) -> (
     tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
     | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None, NDArray | None]
@@ -614,9 +672,9 @@ def reml_w_correction(
     Hessian ``X_c' W X_c`` (including both weighted-mean outer terms) and the
     scalar curvature of ``0.5 * log(sum(W))``.
 
-    ``leverage_hessian`` (first order, dense inverse, profiled intercept)
-    replaces the ``m`` derivative Grams ``C_j = X_c' diag(dw/drho_j) X_c`` by
-    one row pass (``_leverage_derivative_terms``) and returns
+    ``leverage_hessian`` (first order, profiled intercept) replaces, on a
+    dense inverse, the ``m`` derivative Grams ``C_j = X_c' diag(dw/drho_j) X_c``
+    by one row pass (``_leverage_derivative_terms``) and returns
     ``(grad_correction, None, w_cross)``.  The gradient correction is the same
     exact quantity, by the leverage identity.  ``w_cross`` is the additive
     ``(m, m)`` outer-Hessian term ``-(P + P') / 2`` with ``P_ij = tr(H^-1 S_i
@@ -627,17 +685,27 @@ def reml_w_correction(
     derivatives cost ``O(M n p^2 / 2)``, first derivatives ``O(n p^2)``), is
     left out, as order 1 already leaves out the second weight derivatives.
     Callers add ``w_cross`` where they would add ``dH2_cross``.  When the
-    factor is not dense or the weight sum is not profiled the request is not
-    taken, and the derivative-Gram result is returned instead.
+    weight sum is not profiled, or the factor is neither dense nor one whose
+    augmented factor gives row quadratic forms (``_ROW_FORM_FACTORS``), the
+    request is not taken, and the derivative-Gram result is returned instead.
 
     When every group is a lookup or a dense column (``_lookup_tables``),
     the leverages are read back from term-pair tables and no row is solved:
     the result is ``(grad_correction, None, None)``, the same exact gradient
     and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
     (4 and 10 interaction pairs) leaving it out of the Newton model cost one
-    outer iteration of six.  ``lookup_tables=False`` turns that route off: a
-    caller that needs ``w_cross`` at one point (the REML stop's second-order
-    check, ``reml/direct.py``) gets the solved-row result.
+    outer iteration of six.  A structured factor returns the same: its
+    augmented factor's row quadratic forms give the leverages, and no row is
+    solved.  ``lookup_tables=False`` turns both off: a caller that needs
+    ``w_cross`` at one point (the REML stop's second-order check,
+    ``reml/direct.py``) gets the solved-row result, or on a structured factor
+    the derivative operators' ``w_cross`` (``_structured_weight_cross``).
+
+    ``gradient_terms_only`` (read only with ``leverage_hessian``) returns
+    ``(grad_correction, None, None)`` from the solved rows too, forming no
+    ``P_ij``, while ``lookup_tables`` is on.  The REML loop sets it for a model
+    the structured solvers can fit, so the dense solver builds the Newton
+    model a structured factor does, whichever groups the design holds.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if gradient_only and w_correction_order != 1:
@@ -857,14 +925,9 @@ def reml_w_correction(
         grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
         return grad_correction, None
 
-    if leverage_hessian and isinstance(factor, DenseHessianFactor) and sum_w is not None:
-        penalty_rhs = np.zeros((p, m), dtype=np.float64)
-        for i, pc in enumerate(penalties):
-            penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
-                pc,
-                pirls_result.beta[pc.group_sl],
-                gms[pc.group_index],
-            )
+    leverage_route = leverage_hessian and sum_w is not None
+    if leverage_route and isinstance(factor, DenseHessianFactor):
+        penalty_rhs = _penalty_rhs(penalties, lambdas, pirls_result.beta, gms, p)
         plan = lookup_plan(dm) if lookup_tables else None
         if plan is not None:
             # Every group a lookup or a dense column: leverages read back from
@@ -882,8 +945,26 @@ def reml_w_correction(
             _leverage_cross_batches(penalties, lambdas, gms),
             penalty_rhs,
             mean_lo=centre_lo,
+            cross_terms=not (gradient_terms_only and lookup_tables),
         )
+        if penalty_weight_cross is None:
+            return grad_correction, None, None
         return grad_correction, None, -0.5 * (penalty_weight_cross + penalty_weight_cross.T)
+
+    # A structured factor's leverage route: its augmented factor gives each
+    # row's ``[1, x] H_aug^-1 [1, x]' = 1/sum_w + x_c' H_c^-1 x_c``, the hat
+    # diagonal of Bates et al. (2015, eqs. 63-65), so the row channel
+    # ``w'(h + 1/sum_w) / 2`` forms the exact gradient with no derivative
+    # operator.  ``lookup_tables=False`` forms the cross terms instead, from the
+    # derivative operators below and the factor's cross traces.
+    structured_leverage = leverage_route and isinstance(factor, _ROW_FORM_FACTORS)
+    if structured_leverage and lookup_tables:
+        leverage = grouped_augmented_row_quadratic_forms(
+            dm, factor.augmented_factor.row_quadratic_forms
+        )
+        penalty_rhs = _penalty_rhs(penalties, lambdas, pirls_result.beta, gms, p)
+        grad_correction[:] = centered_rmatvec(0.5 * dW_deta * leverage) @ -factor.solve(penalty_rhs)
+        return grad_correction, None, None
 
     batch_moments = (
         type(dm) is DesignMatrix
@@ -1198,6 +1279,8 @@ def reml_w_correction(
                 dH2_cross[i, j] = val
                 dH2_cross[j, i] = val
 
+    if structured_leverage:
+        return grad_correction, None, _structured_weight_cross(factor, penalties, lambdas, dH_extra)
     if w_correction_order >= 2:
         return grad_correction, dH_extra, dH2_cross
     return grad_correction, dH_extra

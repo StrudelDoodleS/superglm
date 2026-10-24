@@ -445,15 +445,25 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
 
 
 def _hand_built_design(
-    n: int = 2 * 8192 + 4096, *, empty_level: bool = False, seed: int = 17, basis: int = 6
+    n: int = 2 * 8192 + 4096,
+    *,
+    empty_level: bool = False,
+    seed: int = 17,
+    basis: int = 6,
+    random_effect: bool = False,
 ):
     """Two dense groups (three columns, offset), two categoricals and a support spline, by hand.
 
     Large enough for the table Gram's row rule and three leverage row blocks.
     ``empty_level`` puts a zero-width categorical between the groups;
-    ``basis=100`` makes the design wide enough for the table Gram's column rule.
+    ``basis=100`` makes the design wide enough for the table Gram's column rule;
+    ``random_effect`` makes the last categorical a random effect over every level.
     """
-    from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
+    from superglm.group_matrix import (
+        DesignMatrix,
+        RandomEffectGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
 
     rng = np.random.default_rng(seed)
     support = max(40, 2 * basis)
@@ -468,7 +478,9 @@ def _hand_built_design(
         CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
         spline,
         DenseGroupMatrix(rng.normal(-50.0, 2.0, (n, 1))),
-        CategoricalGroupMatrix(rng.integers(-1, 3, n), 3),
+        RandomEffectGroupMatrix(rng.integers(0, 3, n), 3)
+        if random_effect
+        else CategoricalGroupMatrix(rng.integers(-1, 3, n), 3),
     ]
     if empty_level:
         groups.insert(2, CategoricalGroupMatrix(np.full(n, -1), 0))
@@ -483,7 +495,7 @@ def _hand_built_magnitudes(dm, centre: np.ndarray) -> tuple[np.ndarray, int]:
         cols = slice(column, column + gm.shape[1])
         if type(gm) is DenseGroupMatrix:
             rows.append(np.abs(gm.M - centre[cols]))
-        elif type(gm) is CategoricalGroupMatrix:
+        elif isinstance(gm, CategoricalGroupMatrix):
             rows.append(np.abs(gm.toarray()) + 2.0 * np.abs(centre[cols]))
         else:
             support = np.abs(gm.B_unique) @ np.abs(gm.R_inv)
@@ -540,6 +552,44 @@ def test_hand_built_dense_columns_match_the_materialised_design(monkeypatch, pai
     m_largest = max(term.raw.shape[0] for term in plan.terms)
     rmatvec_bound = _gamma(dm.n + m_largest + 4 * widest + 3) * (magnitude.T @ np.abs(values))
     assert np.all(np.abs(product - centred.T @ values) <= rmatvec_bound)
+
+
+def test_a_random_effect_is_a_lookup_on_both_leverage_routes():
+    """A random effect is a categorical over every level, its codes never the sink code.
+
+    The table plan and the solved-row support route both take it, and both
+    give ``x_r' V x_r`` of the materialised design within their bounds: the
+    table route's of ``test_hand_built_dense_columns_match_the_materialised_design``,
+    and the support route's ``gamma_(2p + G + 2)`` of the same magnitudes
+    (``_leverage_rows``, module docstring: ``K = p + G + 2`` for the solved row,
+    ``p`` more for its leverage).  An exact type check sent the subclass to
+    neither: no plan, and the chunked rows.
+    """
+    import superglm.reml._leverage_rows as leverage_rows
+
+    dm = _hand_built_design(random_effect=True)
+    plan = leverage_tables.lookup_plan(dm)
+    assert plan is not None
+    inverse, centre_hi, centre_lo, active = _hand_built_operands(dm)
+    centred = (dm.toarray() - centre_hi) - centre_lo
+    reference = np.where(active, np.einsum("ij,jk,ik->i", centred, inverse, centred), 0.0)
+    magnitude, widest = _hand_built_magnitudes(dm, centre_hi + centre_lo)
+    eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
+
+    leverage = leverage_tables.table_leverages(plan, inverse, centre_hi, centre_lo, active)
+    bound = _gamma(_count_roundings(plan) + 2 * dm.p + 2 + 4 * widest + 4) * eta
+    assert np.all(np.abs(leverage - reference) <= bound)
+
+    blocks = leverage_rows.solved_row_blocks(dm, inverse, centre_hi, centre_lo, active)
+    assert blocks.block_bytes is not None  # the support route
+    solved = np.zeros(dm.n)
+    for job in blocks.jobs:
+        block = job()
+        if block is not None:
+            rows, _, values = block
+            solved[rows] = values
+    support_bound = _gamma(2 * dm.p + len(dm.group_matrices) + 2) * eta
+    assert np.all(np.abs(solved - reference) <= support_bound)
 
 
 def test_an_empty_categorical_adds_nothing_to_the_tables():

@@ -69,6 +69,7 @@ import pandas as pd
 import pytest
 import scipy.linalg
 
+import superglm.reml.direct as direct_reml
 from superglm import (
     Categorical,
     LambdaPolicy,
@@ -204,7 +205,9 @@ def _fit(
     discrete: bool = False,
     lambdas: dict[str, float] | None = None,
     data=None,
+    extra: tuple[str, ...] = (),
 ) -> SuperGLM:
+    """A fit of the chain fixture; ``extra`` names more random effects in ``data``."""
     frame, y, offset, weight = _response(family) if data is None else data
     policy = {
         name: None if lambdas is None else LambdaPolicy.fixed(lambdas[name]) for name in PENALIZED
@@ -213,6 +216,7 @@ def _fit(
         "x": Spline(n_knots=8, lambda_policy=policy["x"]),
         "cat": Categorical(),
         **{name: RandomEffect(lambda_policy=policy[name]) for name in ("crossed", *CHAIN)},
+        **{name: RandomEffect() for name in extra},
     }
     model = SuperGLM(
         family=_family(family),
@@ -649,6 +653,103 @@ def test_reml_derivatives_with_weight_derivatives_match_the_dense_ones(family: s
         assert np.all(np.abs(second - dense_second) <= 8 * budget * cs)
     cs = np.sqrt(np.outer(np.abs(np.diag(dense_hessian)), np.abs(np.diag(dense_hessian))))
     assert np.all(np.abs(hessian - dense_hessian) <= 8 * budget * cs)
+
+
+# ── The leverage route above its work bar ─────────────────────────────────
+
+
+@pytest.mark.parametrize("family", ["poisson", "tweedie", "gausslog"])
+def test_above_the_work_bar_both_backends_take_one_leverage_path(monkeypatch, family: str) -> None:
+    """Above the leverage work bar both backends take the gradient-only Newton model.
+
+    The dense solver by ``gradient_terms_only``, the nested factor from its
+    augmented factor's row quadratic forms; both form the W(rho) cross terms
+    at a candidate stop only.  One Newton model on one surface: the same route,
+    iteration count and exit, the objectives within ``tau (1 + |V|)``, and the
+    two REML fits, their smoothing parameters included, within small multiples
+    of the same-lambda budget, as every quantity both backends derive from one
+    path.  Without ``gradient_terms_only`` the dense solver forms the cross
+    terms every iteration (``leverage_hessian``); the unfixed gate kept the
+    derivative Grams on both.
+    """
+    monkeypatch.setattr(direct_reml, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
+    frame, y, offset, weight = _response(family)
+    dense = _fit(family, "gram")
+    nested = _fit(family, "structured")
+    _assert_nested(nested)
+    for model in (dense, nested):
+        assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+        assert model._reml_result.converged
+    assert nested._reml_result.n_reml_iter == dense._reml_result.n_reml_iter
+    assert nested._reml_result.termination_reason == dense._reml_result.termination_reason
+    objective = dense._reml_result.objective
+    assert abs(nested._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
+
+    certified = max(_certified_gap(model, y, offset, weight) for model in (nested, dense))
+    for model in (nested, dense):
+        assert _fixed_point_gap(model, y, offset, weight) <= certified
+    budget = _budget(nested, y, offset, weight, stopping_gap=certified)
+    lambdas = nested._reml_lambdas, dense._reml_lambdas
+    log_ratio = np.log([lambdas[0][name] / lambdas[1][name] for name in lambdas[1]])
+    assert np.max(np.abs(log_ratio)) <= 8 * budget
+    _assert_same_fit(nested, dense, frame, y, offset, weight, budget)
+
+
+def _noise_data(family: str):
+    """``_response(family)`` with a ``noise`` random effect that REML takes to zero variance.
+
+    Its six levels deal the rows out by the response's rank, so every level's
+    rows span the response evenly and its level means agree more closely than
+    chance: the variance's optimum is the boundary, whatever the path.
+    """
+    frame, y, offset, weight = _response(family)
+    rank = np.argsort(np.argsort(y, kind="stable"), kind="stable")
+    noise = np.array([f"n{code}" for code in rank % 6], dtype=object)
+    return frame.assign(noise=noise), y, offset, weight
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+@pytest.mark.parametrize("family", ["poisson", "tweedie"])
+def test_a_variance_at_its_boundary_converges_on_the_leverage_route(
+    monkeypatch, family: str, direct_solve: str
+) -> None:
+    """A random-effect variance at zero: the leverage route converges where the Grams do.
+
+    Near the boundary the noise direction is flat, so each route freezes it
+    wherever its gradient falls below the freeze bar ``max(0.1 tau, 1e-7) (1 +
+    |V|)`` (``reml.convergence``), or reaches the ``1e10`` clip, and the two
+    routes stop it at different lambdas.  Along it the objective may still fall
+    by up to that bar per unit of log lambda, and along the others by the
+    stopping rule's ``tau (1 + |V|)``: the routes' objectives agree within the
+    sum.  The stop's cross terms read from the nested factor's penalty block in
+    place of its cross block fail here on the structured backend.
+    """
+    from superglm.reml.convergence import _freeze_gradient_bar, _score_scale
+
+    data = _noise_data(family)
+    gram = _fit(family, direct_solve, data=data, extra=("noise",))
+    monkeypatch.setattr(direct_reml, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
+    leverage = _fit(family, direct_solve, data=data, extra=("noise",))
+    names = [pc.name for pc in gram._reml_penalties]
+    flat = np.zeros(len(names), dtype=bool)
+    rho = {}
+    for model, mode in ((gram, "derivative_grams"), (leverage, "leverage_tables")):
+        profile = model._reml_profile
+        assert profile["direct_backend"] == direct_solve
+        assert profile["reml_w_correction_mode"] == mode
+        assert model._reml_result.converged
+        rho[mode] = np.log([model._reml_lambdas[name] for name in names])
+        flat |= np.asarray(profile["reml_freeze_decision"]["frozen"], dtype=bool)
+        flat |= rho[mode] >= np.log(1e10) - 1e-12
+    # the event: the noise variance at its boundary on both routes, the others interior
+    assert flat.tolist() == [name == "noise" for name in names]
+
+    objective = gram._reml_result.objective
+    flat_change = np.sum(np.abs(rho["leverage_tables"] - rho["derivative_grams"])[flat])
+    bound = REML_TOL * _score_scale(objective) + _freeze_gradient_bar(objective, REML_TOL) * (
+        flat_change
+    )
+    assert abs(leverage._reml_result.objective - objective) <= bound
 
 
 # ── Routing ───────────────────────────────────────────────────────────────

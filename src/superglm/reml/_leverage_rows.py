@@ -163,7 +163,7 @@ def _support_plan(
             rows += int(gm.B_scop_unique.shape[0])
         elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
             rows += int(gm.n_bins) + 1
-        elif type(gm) is CategoricalGroupMatrix:
+        elif isinstance(gm, CategoricalGroupMatrix):
             rows += int(gm.n_levels) + 1
         else:
             return None
@@ -197,7 +197,7 @@ def _support_plan(
             values, transform, codes = gm.B_unique, gm.R_inv, gm.bin_idx
         elif isinstance(gm, DiscretizedSCOPGroupMatrix):
             values, transform, codes = gm.B_scop_unique, None, gm.bin_idx
-        elif type(gm) is CategoricalGroupMatrix:
+        elif isinstance(gm, CategoricalGroupMatrix):
             values, transform, codes = None, None, gm.codes
         else:  # pragma: no cover - sized above
             return None

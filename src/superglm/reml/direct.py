@@ -140,7 +140,11 @@ _PRESOLVE_MIN_REML_ITER = 10
 # first derivatives at ``O(n p^2)``, and prefers the cheaper scheme only for
 # large ``M``.  1e11 is about two seconds a REML iteration on the reference host
 # (a freMTPL2 fit with one interaction pair is 2.7e11); below it a fit keeps the
-# exact first-order Hessian and its established path.
+# exact first-order Hessian and its established path.  The bar reads the dense
+# cost on either backend, so a model the structured solvers can fit makes one
+# decision on both: above it a structured factor forms the same exact gradient
+# from its augmented factor's row quadratic forms, and both backends leave the
+# W(rho) cross terms out of the Newton model (``gradient_terms_only``).
 _LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
@@ -385,9 +389,13 @@ def optimize_direct_reml(
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
-    # A model the structured solvers can also fit keeps the derivative Grams on
-    # the dense solver too: both backends then build the same outer Hessian and
-    # take the same REML path (tests/test_factor_smooth_structured_parity.py).
+    # A model the structured solvers can also fit builds, on the dense solver
+    # too, the Newton model a structured factor builds: the derivative Grams
+    # below the leverage work bar, and above it the exact gradient without the
+    # W(rho) cross terms (``gradient_terms_only``), which both form at a
+    # candidate stop.  Both backends then take the same REML path
+    # (tests/test_factor_smooth_structured_parity.py,
+    # tests/test_nested_structured_fit.py).
     structured_alternative = (
         select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
         is not None
@@ -1195,7 +1203,6 @@ def optimize_direct_reml(
             )
             leverage_hessian = bool(
                 not leverage_gradient
-                and not structured_alternative
                 and w_correction_order == 1
                 and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
                 and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
@@ -1234,6 +1241,7 @@ def optimize_direct_reml(
                 "geometry": geometry,
                 "gradient_only": leverage_gradient,
                 "leverage_hessian": leverage_hessian,
+                "gradient_terms_only": structured_alternative,
             }
             w_corr = _usable_w_correction(
                 reml_w_correction, w_correction_args, w_correction_kwargs, distribution
@@ -1247,7 +1255,7 @@ def optimize_direct_reml(
                     correction_mode = "derivative_grams"
                 elif len(w_corr) > 2:
                     # The leverage route's last entry: its cross terms, or None
-                    # when the tables formed the gradient alone.
+                    # when its Newton model takes the gradient alone.
                     correction_mode = (
                         "leverage_hessian" if w_corr[-1] is not None else "leverage_tables"
                     )
@@ -1268,8 +1276,9 @@ def optimize_direct_reml(
             grad = grad_partial.copy()
             dH_extra = None
             dH2_cross = None
-        # The leverage route read back from term-pair tables: an exact gradient
-        # and no W(rho) cross terms (``reml_w_correction``).
+        # The leverage route's gradient-only Newton model (term-pair tables, a
+        # structured factor's row forms, or ``gradient_terms_only``): an exact
+        # gradient and no W(rho) cross terms (``reml_w_correction``).
         table_route = (
             leverage_hessian
             and w_corr is not None
@@ -1348,12 +1357,13 @@ def optimize_direct_reml(
             # for (``concave_live_directions``): on a concave shoulder of a
             # plateau the gradient is small however far the optimum is.
             #
-            # On the table route the Newton model leaves out the W(rho) cross
+            # On the gradient-only route the Newton model leaves out the W(rho) cross
             # terms -(P + P')/2, P_ij = tr(H^-1 S_i H^-1 C_j), whose diagonal
             # -P_ii has no fixed sign.  The stop's second-order check and its
             # freeze decision read the v0.40.0 leverage route's Hessian
-            # instead: one solved-row pass forms the cross terms here, at the
-            # candidate stop only.  A stop they refuse steps on that Hessian
+            # instead: one solved-row pass (on a structured factor, its
+            # derivative operators' cross traces) forms the cross terms here, at
+            # the candidate stop only.  A stop they refuse steps on that Hessian
             # too, as v0.40.0 did: the step's own freeze then keeps the
             # directions the revalidation reactivated.  (Stepping on the
             # gradient-only Hessian refroze them, and the next stop was refused

@@ -201,7 +201,7 @@ def _lookup_parts(gm):
         return gm.B_unique, gm.R_inv, gm.bin_idx, None
     if isinstance(gm, DiscretizedSCOPGroupMatrix):
         return gm.B_scop_unique, None, gm.bin_idx, None
-    if type(gm) is CategoricalGroupMatrix:
+    if isinstance(gm, CategoricalGroupMatrix):
         return None, None, gm.codes, None
     return None
 

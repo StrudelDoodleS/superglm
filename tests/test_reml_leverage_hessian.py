@@ -9,7 +9,9 @@ both row producers, and its cost: one solved-row pass per REML iteration,
 whatever the number of smoothing parameters.  A design of lookups reads its
 leverages back from term-pair tables instead (``_group_matrix/_lookup_tables.py``,
 ``tests/test_reml_leverage_tables.py``); the solved-row tests here turn that
-route off with ``_solved_rows_only``.
+route off with ``_solved_rows_only``.  A structured factor reads them from its
+augmented factor's row quadratic forms, pinned the same way against its
+derivative operators.
 """
 
 from __future__ import annotations
@@ -22,10 +24,10 @@ import pytest
 
 import superglm.reml.direct as direct
 import superglm.reml.w_derivatives as w_derivatives
-from superglm import Categorical, FactorSmooth, Numeric, Spline, SuperGLM
-from superglm.distributions import Poisson
+from superglm import Categorical, FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
+from superglm.distributions import Binomial, Poisson
 from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
-from superglm.links import LogLink
+from superglm.links import LogitLink, LogLink
 from superglm.reml.penalty_algebra import (
     penalty_component_dense_matrix,
     penalty_component_matvec,
@@ -100,6 +102,47 @@ def _correction_inputs(model: SuperGLM) -> tuple[tuple, dict]:
     return args, kwargs
 
 
+def _penalty_operands(dm, penalties, lambdas, beta) -> tuple[np.ndarray, np.ndarray]:
+    """``S_i = lambda_i Omega_i`` stacked ``(p, p, m)`` and the directions ``s_j = S_j beta``."""
+    p, m = dm.p, len(penalties)
+    smoothing = np.zeros((p, p, m))
+    penalty_rhs = np.zeros((p, m))
+    for i, pc in enumerate(penalties):
+        gm = dm.group_matrices[pc.group_index]
+        smoothing[pc.group_sl, pc.group_sl, i] = lambdas[pc.name] * penalty_component_dense_matrix(
+            pc, gm
+        )
+        penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
+            pc, beta[pc.group_sl], gm
+        )
+    return smoothing, penalty_rhs
+
+
+def _term_scales(
+    magnitude, inverse, weight_derivative, penalty_rhs, smoothing, sum_w
+) -> tuple[np.ndarray, np.ndarray]:
+    """``E_j`` and ``F_ij`` of ``_rounding_bounds`` from the row magnitudes ``M_r``."""
+    absolute_inverse = np.abs(inverse)
+    weight_scale = np.abs(weight_derivative)[:, None] * (
+        magnitude @ absolute_inverse @ np.abs(penalty_rhs)
+    )
+    leverage_scale = np.einsum("ij,jk,ik->i", magnitude, absolute_inverse, magnitude)
+    gradient_scale = 0.5 * weight_scale.T @ (leverage_scale + 1.0 / sum_w)
+    quadratic_scale = np.stack(
+        [
+            np.einsum(
+                "ij,jk,ik->i",
+                magnitude,
+                absolute_inverse @ np.abs(smoothing[:, :, i]) @ absolute_inverse,
+                magnitude,
+            )
+            for i in range(smoothing.shape[2])
+        ],
+        axis=1,
+    )
+    return gradient_scale, quadratic_scale.T @ weight_scale
+
+
 def _rounding_bounds(
     model: SuperGLM, *, raw_centre_copies: int = 1, extra_roundings: int = 0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -135,35 +178,10 @@ def _rounding_bounds(
     weight_derivative = w_derivatives.compute_dW_deta(
         link, model._distribution, mu, eta, kwargs["sample_weight"]
     )
-    smoothing = np.zeros((p, p, m))
-    penalty_rhs = np.zeros((p, m))
-    for i, pc in enumerate(penalties):
-        block = lambdas[pc.name] * penalty_component_dense_matrix(
-            pc, dm.group_matrices[pc.group_index]
-        )
-        smoothing[pc.group_sl, pc.group_sl, i] = block
-        penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
-            pc, model.result.beta[pc.group_sl], dm.group_matrices[pc.group_index]
-        )
-    absolute_inverse = np.abs(inverse)
-    weight_scale = np.abs(weight_derivative)[:, None] * (
-        magnitude @ absolute_inverse @ np.abs(penalty_rhs)
+    smoothing, penalty_rhs = _penalty_operands(dm, penalties, lambdas, model.result.beta)
+    gradient_scale, cross_scale = _term_scales(
+        magnitude, inverse, weight_derivative, penalty_rhs, smoothing, summary.sum_w
     )
-    leverage_scale = np.einsum("ij,jk,ik->i", magnitude, absolute_inverse, magnitude)
-    gradient_scale = 0.5 * weight_scale.T @ (leverage_scale + 1.0 / summary.sum_w)
-    quadratic_scale = np.stack(
-        [
-            np.einsum(
-                "ij,jk,ik->i",
-                magnitude,
-                absolute_inverse @ np.abs(smoothing[:, :, i]) @ absolute_inverse,
-                magnitude,
-            )
-            for i in range(m)
-        ],
-        axis=1,
-    )
-    cross_scale = quadratic_scale.T @ weight_scale
     k = n + 4 * p + 16 + extra_roundings
     hessian_terms = []
     for i in range(m):
@@ -425,9 +443,21 @@ def test_a_fit_whose_grams_are_cheap_keeps_them():
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
-def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams(monkeypatch):
-    """Both backends must build one outer Hessian, so the dense one keeps the Grams."""
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+@pytest.mark.parametrize("term", ["factor_smooth", "random_effect"])
+def test_a_model_the_structured_solver_can_fit_takes_the_leverage_route(
+    monkeypatch, term, direct_solve
+):
+    """Above the work bar both backends take the leverage route's gradient-only Newton model.
+
+    The exact gradient every iteration and the W(rho) cross terms at a
+    candidate stop only: the dense solver by ``gradient_terms_only``, the
+    structured one from its augmented factor's row quadratic forms, so both
+    build one outer Hessian.  The unfixed gate kept the derivative Grams on
+    both; without ``gradient_terms_only`` the dense solver formed the cross
+    terms every iteration (``leverage_hessian``).
+    """
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
     rng = np.random.default_rng(947)
     n = 400
     frame = pd.DataFrame(
@@ -435,20 +465,33 @@ def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams(monkey
             "x": rng.uniform(-1.0, 1.0, n),
             "z": rng.normal(size=n),
             "segment": [f"s{code}" for code in rng.integers(0, 6, n)],
+            "region": [f"r{code}" for code in rng.integers(0, 4, n)],
+            "branch": [f"b{code}" for code in rng.integers(0, 5, n)],
         }
     )
     eta = -0.2 + 0.3 * np.sin(2.0 * frame.x) + 0.1 * frame.z
     y = rng.poisson(np.exp(eta)).astype(np.float64)
+    if term == "factor_smooth":
+        features: dict[str, Any] = {"x": Spline(n_knots=5), "z": Numeric()}
+        interactions = [FactorSmooth("x", group="segment", k=6)]
+    else:
+        features = {
+            "x": Spline(n_knots=5),
+            "z": Numeric(),
+            **{name: RandomEffect() for name in ("segment", "region", "branch")},
+        }
+        interactions = []
     model = SuperGLM(
         family="poisson",
-        features={"x": Spline(n_knots=5), "z": Numeric()},
-        interactions=[FactorSmooth("x", group="segment", k=6)],
+        features=features,
+        interactions=interactions,
         selection_penalty=0.0,
-        direct_solve="gram",
+        direct_solve=direct_solve,
     ).fit_reml(frame, y, runtime_validation="skip")
 
     assert len(model._reml_penalties) >= 4
-    assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
+    assert model._reml_profile["direct_backend"] == direct_solve
+    assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
 
 
 _REML_TOL = 1e-9  # NEWTON_REML_TOL_DEFAULT, passed explicitly so the bound below is its own
@@ -567,3 +610,111 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
                 bar *= DECREMENT_GRADIENT_CEILING
         assert stop_norm(own[0]) < bar
         assert stop_norm(other[0]) < bar
+
+
+def _binary_response(rng: np.random.Generator, eta: np.ndarray) -> np.ndarray:
+    return (rng.uniform(size=len(eta)) < 1.0 / (1.0 + np.exp(-eta))).astype(np.float64)
+
+
+def _structured_iterate(kind: str) -> tuple:
+    """One logistic PIRLS iterate at fixed lambdas on a nested chain, an fs leaf or an sz tree."""
+    from superglm.model.reml_setup import collect_reml_groups
+    from superglm.reml.penalty_algebra import build_penalty_context
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from tests.test_factor_smooth_structured_parity import _factor_smooth_problem
+    from tests.test_nested_structured_fit import _fit, _response
+
+    if kind == "nested":
+        _, y, _, weight = _response("binomial")
+        offset = np.zeros(len(y))
+        held = {"x": 3.0, "crossed": 20.0, "make": 5.0, "model": 8.0, "variant": 20.0}
+        model = _fit("binomial", "structured", lambdas=held)
+        dm, groups, lambdas = model._dm, model._groups, dict(model._reml_lambdas)
+        matrices = list(dm.group_matrices)
+        penalties, _, _ = build_penalty_context(matrices, collect_reml_groups(groups, matrices))
+        semantics = "prior"
+    else:
+        dm, groups, penalties, y, weight, offset, lambdas = _factor_smooth_problem(
+            _binary_response, factor_basis=kind
+        )
+        semantics = "frequency"
+    result, factor = fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weight,
+        family=Binomial(),
+        link=LogitLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="structured",
+        reml_penalties=penalties,
+        tol=1e-10,
+        weight_semantics=semantics,
+    )
+    return dm, groups, penalties, lambdas, result, factor, weight, offset
+
+
+@pytest.mark.parametrize("kind", ["nested", "fs", "sz"])
+def test_a_structured_factor_takes_the_leverage_route_within_rounding(kind):
+    """The structured leverage route against the derivative operators at one PIRLS iterate.
+
+    Its gradient reads each row's ``[1, x] H_aug^-1 [1, x]'`` from the
+    augmented factor's row quadratic forms; the Gram route traces ``H^-1 C_j``
+    through the factor.  Both are the exact gradient, evaluated from one factor
+    by different recursions and from no explicit inverse (``1 / sum_w`` is
+    the intercept's part of each row's form, nonzero in a logistic fit, whose
+    weight derivative is not a multiple of its weight), so each term ``j``
+    is within ``gamma_K kappa_s(H) E_j`` of it (``_rounding_bounds``' ``E_j``
+    and ``K``, ``kappa_s`` the Jacobi-scaled condition number of ``H``), and
+    the two within twice that.  The stop's cross terms (``lookup_tables=False``)
+    are within ``gamma_K kappa_s(H) (F + F')`` of ``-(P + P') / 2`` formed from
+    the materialised inverse and operators.  Mutations (each fails here): the
+    row channel without its ``1 / sum_w``; the nested factor's cross block read
+    as ``[:m, :m]``; the leaf and tree factors' pair traces at unit lambda.
+    """
+    from superglm.solvers.structured import materialize_compact_operator
+
+    dm, groups, penalties, lambdas, result, factor, weight, offset = _structured_iterate(kind)
+    assert isinstance(factor, w_derivatives._ROW_FORM_FACTORS)
+    args = (dm, LogitLink(), groups, result, factor, lambdas)
+    kwargs = {
+        "sample_weight": weight,
+        "offset_arr": offset,
+        "distribution": Binomial(),
+        "reml_penalties": penalties,
+    }
+    gradient, operators = w_derivatives.reml_w_correction(*args, **kwargs)
+    leverage = w_derivatives.reml_w_correction(*args, **kwargs, leverage_hessian=True)
+    stop = w_derivatives.reml_w_correction(
+        *args, **kwargs, leverage_hessian=True, lookup_tables=False
+    )
+    # the gradient-only Newton model, and the stop's cross terms in place of the operators
+    assert leverage[1] is None and leverage[2] is None
+    assert stop[1] is None and stop[2] is not None
+
+    p, m = dm.p, len(penalties)
+    inverse = factor.solve(np.eye(p))
+    hessian = np.linalg.inv(inverse)
+    jacobi = 1.0 / np.sqrt(np.abs(np.diag(hessian)))
+    kappa = float(np.linalg.cond(jacobi[:, None] * hessian * jacobi[None, :]))
+    smoothing, penalty_rhs = _penalty_operands(dm, penalties, lambdas, result.beta)
+    eta = dm.matvec(result.beta) + result.intercept + offset
+    weight_derivative = w_derivatives.compute_dW_deta(
+        LogitLink(), Binomial(), LogitLink().inverse(eta), eta, weight
+    )
+    magnitude = np.abs(dm.toarray() - factor.mean_x)
+    gradient_scale, cross_scale = _term_scales(
+        magnitude, inverse, weight_derivative, penalty_rhs, smoothing, factor.sum_w
+    )
+    weight_operators = [inverse @ materialize_compact_operator(operators[j]) for j in range(m)]
+    cross = np.array(
+        [
+            [float(np.sum((inverse @ smoothing[:, :, i]) * C.T)) for C in weight_operators]
+            for i in range(m)
+        ]
+    )
+    reference_cross = -0.5 * (cross + cross.T)
+    rounding = _gamma(dm.n + 4 * p + 16) * kappa
+    assert np.all(np.abs(leverage[0] - gradient) <= 2.0 * rounding * gradient_scale)
+    assert np.all(np.abs(stop[2] - reference_cross) <= rounding * (cross_scale + cross_scale.T))
