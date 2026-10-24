@@ -519,6 +519,42 @@ def _evaluate_scop_trial(
     return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
 
 
+_LATENT_MAX_STEP = 1000.0
+"""The longest step a SCOP line search tries on any exponentiated latent coordinate.
+
+Dennis & Schnabel's maximum step (1983, sec. 6.3): a step that would overflow
+the objective or leave the region of interest is shortened to it before the
+line search, which then backtracks from there with its usual budget. Here it
+is the width of ``[-500, 500]``, the domain outside which
+``SCOPSolverReparam.forward`` clips a coordinate: a longer step carries a
+coordinate past the clip from anywhere inside it, where its mapped
+coefficient no longer moves with the step, and halving through such trials
+spends the budget on the clip's one value. The free coordinates, mapped by
+the identity on the data's own scale, are not bounded.
+"""
+
+
+def _latent_step_depth(
+    committed: _SCOPTrialState, proposed: _SCOPTrialState, specs: dict[int, SCOPGroupSpec]
+) -> int:
+    """The first halving depth whose step is within ``_LATENT_MAX_STEP`` on every exponentiated coordinate.
+
+    ``0`` for a step within it already, and for a step that is not finite,
+    which no halving can bring back and the line search refuses as it is.
+    """
+    largest = 0.0
+    for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
+        free = specs[committed_group.group_index].reparam.free_dim
+        change = proposed_group.beta_eff[free:] - committed_group.beta_eff[free:]
+        largest = max(largest, float(np.max(np.abs(change), initial=0.0)))
+    if not math.isfinite(largest):
+        return 0
+    depth = 0
+    while math.ldexp(largest, -depth) > _LATENT_MAX_STEP:
+        depth += 1
+    return depth
+
+
 def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
@@ -3440,15 +3476,21 @@ def _fit_irls_direct_once(
                 scop_trial_cache[alpha] = candidate
                 return candidate.irls
 
+            # A step past ``_LATENT_MAX_STEP`` is searched from its first
+            # halving within it, on the same halving grid, with the full
+            # budget from there; the full step is not tried.
+            latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
+            shortened = math.ldexp(1.0, -latent_depth)
+            search_proposal = evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
             decision = _select_irls_trial(
                 committed=scop_committed.irls,
-                proposal=proposal_scop.irls,
-                evaluate_state=evaluate_scop_trial,
+                proposal=search_proposal,
+                evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
                 invalid_state=observed_rows_invalid if _observed_newton_active else None,
                 max_halving=max_halving,
                 extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=scop_committed.irls,
-                    proposal=proposal_scop.irls,
+                    proposal=search_proposal,
                     y=y,
                     weights=weights,
                     family=family,
@@ -3460,6 +3502,20 @@ def _fit_irls_direct_once(
                     scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
                 ),
             )
+            if latent_depth:
+                # in fractions of the full step, which was evaluated but not tried
+                decision = replace(
+                    decision,
+                    trials_attempted=decision.trials_attempted + 1,
+                    **(
+                        {}
+                        if decision.step_rejected
+                        else {
+                            "alpha": decision.alpha * shortened,
+                            "step_halvings": decision.step_halvings + latent_depth,
+                        }
+                    ),
+                )
             retained_scop = (
                 scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
             )

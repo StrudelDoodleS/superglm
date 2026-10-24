@@ -1234,6 +1234,53 @@ def test_a_damped_joint_step_never_stops_the_fit():
         assert abs(score) <= np.sqrt(np.sum(weights * column**2) * model._tol * deviance)
 
 
+def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypatch):
+    """x inside a convex spline's span, weights exp(U(-3, 3)), no penalty (Sol's round-5 repro).
+
+    A latent coordinate at the QP start's floor wants to grow, and its
+    Newton step is 6.6e7 long in log space. Every trial within the line
+    search's 20 halvings left it past the map's clip, so the step was
+    rejected on the first iteration (weighted RSS 29.98, scores 55 and 60).
+    The search now starts from the step's first halving within
+    ``_LATENT_MAX_STEP`` and tries nothing longer; the fit stops on a full
+    step, each ordinary score within its Newton-decrement bound (as in
+    ``test_a_damped_joint_step_never_stops_the_fit``).
+    """
+    from superglm import Numeric, PSpline
+
+    lengths = []
+    evaluate = irls_direct._evaluate_scop_trial
+
+    def recorded(**kwargs):
+        trial = evaluate(**kwargs)
+        for before, after in zip(kwargs["committed"].groups, trial.groups, strict=True):
+            free = kwargs["specs"][before.group_index].reparam.free_dim
+            lengths.append(np.max(np.abs(after.beta_eff - before.beta_eff)[free:], initial=0.0))
+        return trial
+
+    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    rng = np.random.default_rng(11)
+    x = rng.uniform(size=200)
+    y = 0.2 + 2.2 * x + 0.6 * x * x + 0.05 * rng.normal(size=200)
+    weights = np.exp(rng.uniform(-3, 3, 200))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+    )
+    frame = pd.DataFrame({"x": x, "s": x})
+    model.fit(frame, y, sample_weight=weights)
+    residual = y - np.asarray(model.predict(frame))
+    deviance = float(np.sum(weights * residual**2))
+
+    assert lengths and max(lengths) <= irls_direct._LATENT_MAX_STEP
+    assert model.result.converged
+    for column in (np.ones_like(x), x):
+        score = float(np.sum(weights * residual * column))
+        assert abs(score) <= np.sqrt(np.sum(weights * column**2) * model._tol * deviance)
+
+
 def test_a_damped_trial_takes_the_ordinary_solve_at_its_latent_coordinates(monkeypatch):
     """Each trial's ordinary scores are ``1 - alpha`` times the committed iterate's (Gaussian, identity).
 
