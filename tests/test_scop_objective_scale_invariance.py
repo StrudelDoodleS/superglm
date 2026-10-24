@@ -349,22 +349,20 @@ def _sparse_binomial_fit(start):
 
 
 @pytest.mark.parametrize("start", ["cold", "warm", "refit"])
-def test_a_flat_scop_term_stops_at_one_floor_from_every_start(start):
-    """A log-link SCOP block's box is the unit box, whatever the start and the increments.
+def test_a_flat_scop_term_publishes_one_fit_from_every_start(start):
+    """A log-link SCOP block keeps the unit box, and every start publishes the same fit.
 
-    The data leave the increasing x1 term flat, so its increments collapse
-    along the search and the criterion keeps falling as its lambda falls
-    with them, until the box's floor stops it.  The binomial dispersion is
-    fixed at one, so x1 keeps the unit box and stops at its 1e-6 floor from
-    a cold start, from a warm one and when refitted from its own estimates.
-    A box read from the increments followed them down, at every iterate or
-    from a warm start's bootstrap (1e-6 times 7e-3 cold, 3e-24 warm): below
+    The data leave the increasing x1 term flat: every increment is held at
+    its log-space boundary, so x1 adds nothing to the fit and its lambda
+    moves no fitted value.  From a cold start, a warm one and a refit from
+    its own estimates, the fit converges, publishes a criterion no higher
+    than the lowest it accepted (up to the line search's acceptance slack),
+    and gives the cold fit's EDF within the plateau's remaining movement.
+    x1's lambda only has to stay inside the unit box.  A box read from the
+    increments followed them down (1e-6 times 7e-3 cold, 3e-24 warm): below
     about 1e-8 a Newton line search failed, the run restarted from the
     bootstrap on EFS steps and published a criterion as much as 9.6 above
-    the lowest it had accepted, at x1 lambda near 1.  A published criterion may
-    sit above the lowest in its history by the line search's acceptance
-    slack, and a converged lambda short of the floor by the plateau's
-    remaining movement.
+    the lowest it had accepted.
     """
     model = _sparse_binomial_fit(start)
     diagnostics = model.reml_diagnostics()
@@ -373,5 +371,7 @@ def test_a_flat_scop_term_stops_at_one_floor_from_every_start(start):
     history = result.objective_history
     slack = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(min(history)), 1.0)
     assert diagnostics["objective"] <= min(history) + slack
+    assert LAMBDA_FLOOR <= diagnostics["lambdas"]["x1"] <= LAMBDA_CEILING
     tolerance = 2.0 * _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
-    assert LAMBDA_FLOOR <= diagnostics["lambdas"]["x1"] <= LAMBDA_FLOOR * math.exp(tolerance)
+    edf = _sparse_binomial_fit("cold").result.effective_df
+    assert abs(model.result.effective_df - edf) <= edf * tolerance
