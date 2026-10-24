@@ -354,7 +354,7 @@ class SCOPSolverReparam:
         ``B' W B`` carries no Jacobian, so a penalty on them has the unit box
         and the QP takes ``lambda_penalty`` no larger than ``LAMBDA_CEILING``.
         A SCOP smoothing parameter acts on the latent coordinates, whose box
-        widens with the squared increments (``latent_lambda_box``); unbounded
+        widens with the dispersion's units (``scaled_lambda_box``); unbounded
         here, it can sink a data direction of ``H`` under its rank cut.
         """
         weights = kwargs.get("weights", None)

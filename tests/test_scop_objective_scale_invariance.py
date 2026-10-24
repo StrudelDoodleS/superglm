@@ -9,12 +9,17 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, Constraint, ConvergenceWarning, PSpline, Spline, SuperGLM
-from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_box
+from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, scaled_lambda_box
 from superglm._roundoff import TINY
 from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS
-from superglm.distributions import Gaussian
-from superglm.links import IdentityLink
-from superglm.reml.scop_efs import _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT, _SCOP_SUPPRESSION_EDF
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
+from superglm.links import IdentityLink, LogLink
+from superglm.reml.scop_efs import (
+    _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT,
+    _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE,
+    _SCOP_SUPPRESSION_EDF,
+    _scop_lambda_scale,
+)
 from superglm.solvers.irls_state import _irls_objective_relative_change
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import (
@@ -180,24 +185,58 @@ def test_objective_change_ratio_has_explicit_zero_action_semantics():
     )
 
 
-@pytest.mark.parametrize("units", [1e-100, 1e-3, 1.0, 1e5, 1e100])
-def test_latent_lambda_box_widens_by_the_squared_increments(units):
-    """Each end of the box follows the squared increments past one; the box never narrows."""
-    latent = np.log(np.array([0.5, 2.0, 3.0]))
-    floor, ceiling = latent_lambda_box(latent + math.log(units))
-    mean_square = units**2 * float(np.mean(np.exp(2.0 * latent)))
-    # exp of a log-domain sum of a few terms: its error is u times their magnitude.
-    terms = math.log(LAMBDA_CEILING) + 2.0 * abs(math.log(units)) + 2.0
-    rel = 8 * np.finfo(float).eps * terms
-    assert floor == pytest.approx(LAMBDA_FLOOR * min(mean_square, 1.0), rel=rel, abs=0.0)
-    assert ceiling == pytest.approx(LAMBDA_CEILING * max(mean_square, 1.0), rel=rel, abs=0.0)
+@pytest.mark.parametrize("scale", [1e-100, 1e-3, 1.0, 1e5, 1e100])
+def test_scaled_lambda_box_widens_by_the_scale(scale):
+    """Each end of the box follows the scale past one; the box never narrows."""
+    floor, ceiling = scaled_lambda_box(scale)
+    # Each end is one correctly rounded product.
+    assert floor == LAMBDA_FLOOR * min(scale, 1.0)
+    assert ceiling == LAMBDA_CEILING * max(scale, 1.0)
 
 
-def test_latent_lambda_box_stays_in_the_positive_normal_range():
-    assert latent_lambda_box(np.zeros(3)) == LAMBDA_BOX
-    assert latent_lambda_box(np.array([0.0, np.nan])) == LAMBDA_BOX
-    assert latent_lambda_box(np.full(3, 400.0)) == (LAMBDA_FLOOR, np.finfo(np.float64).max)
-    assert latent_lambda_box(np.full(3, -400.0)) == (TINY, LAMBDA_CEILING)
+def test_scaled_lambda_box_stays_in_the_positive_normal_range():
+    for scale in (0.0, -1.0, np.nan, np.inf):
+        assert scaled_lambda_box(scale) == LAMBDA_BOX
+    assert scaled_lambda_box(1e300) == (LAMBDA_FLOOR, np.finfo(np.float64).max)
+    assert scaled_lambda_box(1e-310) == (TINY, LAMBDA_CEILING)
+
+
+@pytest.mark.parametrize(
+    ("family", "power"), [(Gaussian(), 0.0), (Tweedie(1.5), 1.5), (Gamma(), 2.0)]
+)
+@pytest.mark.parametrize("weight_semantics", ["prior", "frequency"])
+def test_scop_box_scale_carries_the_dispersions_units(family, power, weight_semantics):
+    """Under the identity link y -> c y moves the scale by c**(2 - p), as it moves the dispersion.
+
+    Each scale is a few sums of n positive terms and one power, so each is
+    within (n + 4) u of its exact value and their ratio within twice that.
+    """
+    rng = np.random.default_rng(530)
+    n = 200
+    y, weights = rng.gamma(2.0, 1.5, n), rng.uniform(0.5, 2.0, n)
+
+    def scale(response):
+        return _scop_lambda_scale(
+            family, IdentityLink(), response, weights, weight_semantics=weight_semantics
+        )
+
+    reference = scale(y)
+    assert np.isfinite(reference) and reference > 0.0
+    for units in (1e-3, 1e4):
+        expected = units ** (2.0 - power)
+        assert scale(units * y) / reference == pytest.approx(
+            expected, rel=4 * (n + 4) * np.finfo(float).eps, abs=0.0
+        )
+
+
+@pytest.mark.parametrize(
+    ("family", "link"),
+    [(Poisson(), IdentityLink()), (Binomial(), IdentityLink()), (Gaussian(), LogLink())],
+)
+def test_scop_box_scale_is_one_without_units_to_follow(family, link):
+    """A fixed dispersion has no units; under a log link every term's lambda carries them."""
+    y = np.random.default_rng(530).uniform(0.5, 2.0, 50)
+    assert _scop_lambda_scale(family, link, 1e4 * y, np.ones(50), weight_semantics="prior") == 1.0
 
 
 def _fit(units, truth, lambda2_init=None):
@@ -324,17 +363,12 @@ def test_scop_warm_start_keeps_a_lambda_above_the_unit_ceiling(units):
     assert shift <= math.sqrt(len(lambdas) * reference.result.beta.size) * tolerance
 
 
-def test_scop_box_stays_where_the_bootstrap_set_it():
-    """A SCOP block's box is set by the bootstrap's increments, not by where they collapse to.
+@functools.cache
+def _sparse_binomial_fit(start):
+    """The release differential's sparse log-link binomial SCOP case, from ``start``.
 
-    The release differential's sparse log-link binomial case: the data leave
-    the increasing x1 term flat, so along the search its increments collapse
-    (mean square 7e-3 at the bootstrap, 1e-26 at the end) and the criterion
-    keeps falling as its lambda falls with them.  The bootstrap's box ends
-    that descent at its floor, 1e-6 times 7e-3.  A box read at each iterate
-    followed the collapse down: the search reached lambda 4e-14, a Newton
-    line search failed there, and the run restarted from the bootstrap on EFS
-    steps and published a criterion 9 above the lowest it had accepted.
+    ``"cold"``; ``"warm"``, at x1 lambda 1 and x2 lambda 3000; or
+    ``"refit"``, from the cold fit's own estimates.
     """
     rng = np.random.default_rng(1190)
     n, total = 4000, 6000
@@ -356,6 +390,11 @@ def test_scop_box_stays_where_the_bootstrap_set_it():
     )
     probability = np.clip(0.15 * np.exp(0.5 * (eta - eta.mean()) - 1.5), 0, 0.9)
     y = (rng.uniform(size=total) < probability).astype(float)
+    starts = {
+        "cold": lambda: None,
+        "warm": lambda: {"x1": 1.0, "x2": 3000.0},
+        "refit": lambda: _sparse_binomial_fit("cold").reml_diagnostics()["lambdas"],
+    }
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -365,8 +404,36 @@ def test_scop_box_stays_where_the_bootstrap_set_it():
             "c1": Categorical(),
         },
     )
-    model.fit_reml(pd.DataFrame({"x1": x1, "x2": x2, "c1": c1}).iloc[:n], y[:n])
+    frame = pd.DataFrame({"x1": x1, "x2": x2, "c1": c1})
+    model.fit_reml(frame.iloc[:n], y[:n], lambda2_init=starts[start]())
+    return model
+
+
+@pytest.mark.parametrize("start", ["cold", "warm", "refit"])
+def test_a_flat_scop_term_stops_at_one_floor_from_every_start(start):
+    """A log-link SCOP block's box is the unit box, whatever the start and the increments.
+
+    The data leave the increasing x1 term flat, so its increments collapse
+    along the search and the criterion keeps falling as its lambda falls
+    with them, until the box's floor stops it.  The binomial dispersion is
+    fixed at one, so x1 keeps the unit box and stops at its 1e-6 floor from
+    a cold start, from a warm one and when refitted from its own estimates.
+    A box read from the increments followed them down, at every iterate or
+    from a warm start's bootstrap (1e-6 times 7e-3 cold, 3e-24 warm): below
+    about 1e-8 a Newton line search failed, the run restarted from the
+    bootstrap on EFS steps and published a criterion as much as 9.6 above
+    the lowest it had accepted, at x1 lambda near 1.  A published criterion may
+    sit above the lowest in its history by the line search's acceptance
+    slack, and a converged lambda short of the floor by the plateau's
+    remaining movement.
+    """
+    model = _sparse_binomial_fit(start)
     diagnostics = model.reml_diagnostics()
+    result = model._reml_result
     assert diagnostics["termination_reason"] in _REML_CONVERGED_REASONS
-    assert model._reml_result.scop_newton_fallback is None
-    assert diagnostics["objective"] == min(model._reml_result.objective_history)
+    assert result.scop_newton_fallback != "line_search"  # no restart from the bootstrap
+    history = result.objective_history
+    slack = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(min(history)), 1.0)
+    assert diagnostics["objective"] <= min(history) + slack
+    tolerance = 2.0 * _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
+    assert LAMBDA_FLOOR <= diagnostics["lambdas"]["x1"] <= LAMBDA_FLOOR * math.exp(tolerance)

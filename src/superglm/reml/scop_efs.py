@@ -21,11 +21,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
-from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_box
+from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, scaled_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import LogLink, stabilize_eta
+from superglm.links import IdentityLink, LogLink, stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
@@ -64,7 +64,10 @@ from superglm.solvers.centered_system import (
     grouped_structural_nulls,
     grouped_weighted_factor,
 )
-from superglm.solvers.dispersion import dispersion_likelihood_size
+from superglm.solvers.dispersion import (
+    dispersion_likelihood_size,
+    pearson_residual_degrees_of_freedom,
+)
 from superglm.solvers.irls_direct import SCOPRunCentring, fit_irls_direct
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
@@ -1861,22 +1864,39 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
     return state
 
 
-def _scop_lambda_box(state: dict) -> tuple[float, float]:
-    """A SCOP block's smoothing-parameter ``(floor, ceiling)`` at its state (``latent_lambda_box``)."""
-    latent = np.asarray(state["beta_eff"], dtype=np.float64)[state["reparam"].free_dim :]
-    return latent_lambda_box(latent)
+def _scop_lambda_scale(
+    distribution, link, y: NDArray, sample_weight: NDArray, *, weight_semantics: str
+) -> float:
+    """The scale a SCOP block's smoothing-parameter box widens by (``scaled_lambda_box``).
 
-
-def _lambda_boxes(mode) -> dict[str, tuple[float, float]]:
-    """The box of each SCOP component at ``mode``, by name; any other has ``LAMBDA_BOX``."""
-    if not mode.scop_states:
-        return {}
-    boxes: dict[str, tuple[float, float]] = {}
-    for pc in mode.penalty_components:
-        state = _is_scop_component(pc, mode.scop_states)
-        if state is not None:
-            boxes[pc.name] = _scop_lambda_box(state)
-    return boxes
+    A SCOP block penalizes the logs of its increments, which carry no units,
+    so its smoothing parameter carries the dispersion's.  Under the identity
+    link an ordinary term's coefficients carry the response's units, which
+    cancel the Gaussian dispersion's, so there the SCOP box alone makes the
+    fit follow the units: its scale is the intercept-only model's Pearson
+    dispersion, ``sum w (y - ybar)**2 / V(ybar)`` over its residual degrees
+    of freedom, the square of the response's units for Gaussian, their
+    ``2 - p`` power for Tweedie, none for Gamma, and one where the family
+    fixes the dispersion.  Under any other link every term's smoothing
+    parameter carries the dispersion's units, and the scale is one.  The data
+    alone set it: no start and no fit moves it, and a term that goes flat
+    leaves it where it was.
+    """
+    if getattr(distribution, "scale_known", True) or not isinstance(link, IdentityLink):
+        return 1.0
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    total = float(np.sum(weights))
+    if not total > 0.0:
+        return 1.0
+    mean = float(np.sum(weights * response)) / total
+    variance = float(np.asarray(distribution.variance(np.array([mean])))[0])
+    if not variance > 0.0:
+        return 1.0
+    pearson = float(np.sum(weights * (response - mean) ** 2)) / variance
+    return pearson / pearson_residual_degrees_of_freedom(
+        weights, 1.0, weight_semantics=weight_semantics
+    )
 
 
 def fit_fixed_scop_reml(
@@ -2889,8 +2909,9 @@ def optimize_scop_efs_reml(
         A warm start (a previous fit's estimates, keyed by component name).
         The bootstrap fit is taken at these values and the first EFS update
         starts from them; components it does not name bootstrap cold at 1e-4.
-        A SCOP block's value enters its box (``latent_lambda_box``) at the
-        bootstrap's increments; any other is clipped to ``LAMBDA_BOX`` first.
+        Each value is clipped to its box first: a SCOP block's is
+        ``scaled_lambda_box`` of ``_scop_lambda_scale``, any other's
+        ``LAMBDA_BOX``.
         A warm bootstrap with no certified mode is retried at the
         Hessian-scaled values, like a cold one.
 
@@ -2949,20 +2970,22 @@ def optimize_scop_efs_reml(
     # Fixed-policy lambdas keep their value; only estimated components get 1e-4,
     # unless a warm start names them: then the bootstrap is fitted at the warm
     # value and the EFS step below leaves it there, so the first outer
-    # iteration reuses this very mode instead of fitting it again.  A SCOP
-    # block's box follows its increments, which only the bootstrap fits: its
-    # warm value is boxed at the bootstrap's state, as every later step is.
+    # iteration reuses this very mode instead of fitting it again.
+    #
+    # A SCOP block's box widens by the dispersion's units under the identity
+    # link (``_scop_lambda_scale``).  The data alone set it: every start, warm
+    # or cold, and every step of the search share it, and a term whose
+    # increments collapse toward a flat fit leaves it where it was.
+    scop_box = scaled_lambda_box(
+        _scop_lambda_scale(distribution, link, y, sample_weight, weight_semantics=weight_semantics)
+    )
+    boxes = {group.name: scop_box for group in groups if group.monotone_engine == "scop"}
     warm_names = {
         name for name in estimated_names if warm_lambdas is not None and name in warm_lambdas
     }
-    scop_names = {group.name for group in groups if group.monotone_engine == "scop"}
     boot_lambdas = {
         name: (
-            (
-                float(warm_lambdas[name])
-                if name in scop_names
-                else float(np.clip(warm_lambdas[name], *LAMBDA_BOX))
-            )
+            float(np.clip(warm_lambdas[name], *boxes.get(name, LAMBDA_BOX)))
             if name in warm_names
             else (1e-4 if name in estimated_names else val)
         )
@@ -3038,12 +3061,6 @@ def optimize_scop_efs_reml(
         fallback_likelihood_size=fit_context.likelihood_size,
     )
 
-    # Each SCOP block's box is set here, once, at the bootstrap's increments,
-    # which carry the response's units, and bounds the whole search.  Read at
-    # each iterate instead, the floor follows a block whose increments
-    # collapse toward a flat fit down with them, and bounds nothing.
-    boxes = _lambda_boxes(boot_mode)
-
     # One EFS step on bootstrap beta — uses rEDF/pSp formula for ALL terms
     # (including SCOP). This gives SCOP lambdas their first meaningful move.
     boot_alpha = {name: 1.0 for name in estimated_names}
@@ -3061,7 +3078,7 @@ def optimize_scop_efs_reml(
     )
     for name in estimated_names:
         if name in warm_names:
-            lambdas[name] = float(np.clip(boot_lambdas[name], *boxes.get(name, LAMBDA_BOX)))
+            lambdas[name] = boot_lambdas[name]
         elif name in boot_lambdas_new:
             lambdas[name] = boot_lambdas_new[name]
 
