@@ -232,7 +232,7 @@ def _x2_curve(model, units):
     return curve / units, np.asarray(inference.se_log_relativity, dtype=float) / units
 
 
-@pytest.mark.parametrize("units", [1e5])
+@pytest.mark.parametrize("units", [1e5, 1e9])
 def test_scop_reml_fit_at_large_units_matches_the_unit_fit(units):
     """Rescaling y rescales the fit; the SCOP smoothing parameter scales with it.
 
@@ -243,7 +243,9 @@ def test_scop_reml_fit_at_large_units_matches_the_unit_fit(units):
     errors per unit of log lambda; integrated from the bar to infinite
     lambda that is ``2 sqrt(bar)`` per fit.  The unit box's 1e10 ceiling
     held the 1e5 fit at 1e-3 of its optimum (EDF 12.07 against 9.71, the
-    curve 3.8 standard errors away).
+    curve 3.8 standard errors away), and at 1e9 the penalty quadratic, the
+    difference of two quadratics near 6e31, came out negative and the fit
+    raised.
     """
     reference = _fit_once(1.0)
     scaled = _fit_once(units)

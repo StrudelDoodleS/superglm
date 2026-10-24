@@ -664,9 +664,12 @@ def compute_scop_aware_penalty_quad(
     For non-SCOP groups, result.beta @ S @ result.beta is correct (SSP space).
     For SCOP groups, ``result.beta`` contains the elementwise mapped
     ``gamma_eff = forward(beta_eff)``, but the penalty is defined on
-    ``beta_eff``: ``lambda * beta_eff^T @ S_scop @ beta_eff``.
-    We subtract the wrong gamma-space contribution and add the correct
-    beta_eff-space contribution.
+    ``beta_eff``: ``lambda * beta_eff^T @ S_scop @ beta_eff``.  The quadratic
+    is the sum of the ordinary penalty, read from ``S`` with every SCOP
+    group's diagonal block removed, and each SCOP group's latent penalty.
+    Each term is a nonnegative form, so the sum has no cancellation; taking
+    the mapped block away from the whole quadratic instead loses every digit
+    once that block outgrows the result by 1/u.
 
     Parameters
     ----------
@@ -678,16 +681,16 @@ def compute_scop_aware_penalty_quad(
     if not scop_states:
         return float(result_beta @ S @ result_beta)
 
-    pq = float(result_beta @ S @ result_beta)
+    # The complete mapped-coordinate block of each SCOP group goes, including
+    # every named component that may overlap it.
+    ordinary_penalty = S.copy()
+    for st in scop_states.values():
+        sl = st["group_sl"]
+        ordinary_penalty[sl, sl] = 0.0
+    pq = float(result_beta @ ordinary_penalty @ result_beta)
 
     for gi, st in scop_states.items():
-        sl = st["group_sl"]
         beta_eff = st["beta_eff"]
-        gamma_eff = result_beta[sl]
-
-        # Remove the complete mapped-coordinate block, including every named
-        # component that may overlap this SCOP group.
-        pq -= float(gamma_eff @ S[sl, sl] @ gamma_eff)
         matching = (
             [component for component in reml_penalties if component.group_index == gi]
             if reml_penalties is not None
