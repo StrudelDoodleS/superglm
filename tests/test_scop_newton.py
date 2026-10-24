@@ -704,27 +704,35 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
 
 
 def test_rounding_on_a_null_direction_is_dropped_whatever_its_sign():
-    """An eigenvalue inside the Gram's formation bound gives no curvature and no score."""
+    """A Gram that cannot decide hands the decision to the rows, which drop an exact null.
+
+    The Gram's null direction carries half its formation bound, of either
+    sign; the rows are null there and resolve every other direction.
+    """
     from superglm.solvers.rank import _gamma_up
     from superglm.solvers.scop_newton import _resolved_root
 
     rng = np.random.default_rng(3)
-    q, count = 5, 2 * 10_000 + 2
+    q, n = 5, 10_000
+    count = 2 * n + 2
     basis, _ = np.linalg.qr(rng.normal(size=(q, q)))
     null = basis[:, 0]
     scale = rng.uniform(0.5, 4.0, q)
+    values = np.array([0.0, 1e-6, 0.1, 1.0, 3.0])
+    left, _ = np.linalg.qr(rng.normal(size=(n, q)))
+    rows = (left * np.sqrt(values)) @ basis.T
+    factor = np.linalg.qr(rows * scale[None, :], mode="r")
     for rounding in (-0.5, 0.5):
-        # the null direction carries half the formation bound, of either sign
-        spectrum = np.diag([rounding * _gamma_up(count) * q, 1e-6, 0.1, 1.0, 3.0])
-        unit = basis @ spectrum @ basis.T
-        gram = scale[:, None] * unit * scale[None, :]
+        values[0] = rounding * _gamma_up(count) * q
+        gram = scale[:, None] * (basis @ np.diag(values) @ basis.T) * scale[None, :]
         score = scale * (basis @ rng.normal(size=q))
-        root, resolved = _resolved_root(gram, score, scale, count)
+        root, resolved = _resolved_root(gram, score, scale, count, lambda: (factor, scale, n * q))
 
         assert root.shape == (q - 1, q)
-        # the eigensolver's null vector is the exact one to within Davis & Kahan's
-        # sin(theta) <= q eps ||unit|| / gap (gap 1e-6 to the next eigenvalue)
-        angle = 4 * q * 2 * UNIT * np.linalg.norm(unit, 2) / 1e-6
+        # the computed null vector is the exact one to within Wedin's sin(theta) <=
+        # ||dF|| / gap, the QR's gamma_(n q) ||rows|| (Higham 2002, Thm 19.4) over
+        # the gap 1e-3 to the next singular value
+        angle = _gamma_up(n * q) * np.sqrt(q) * np.linalg.norm(rows, 2) / 1e-3
         direction = null / scale  # the null direction in the Gram's own coordinates
         assert np.linalg.norm(root @ direction) <= angle * np.linalg.norm(root / scale[None, :], 2)
         assert abs(resolved @ direction) <= angle * np.linalg.norm(score / scale)
@@ -769,3 +777,117 @@ def test_an_ordinary_column_aliased_with_a_scop_slope_changes_nothing():
     assert abs(aliased.result.effective_df - alone.result.effective_df) <= bar * (
         alone.result.beta.size + 2
     )
+
+
+def test_nearly_collinear_ordinary_columns_keep_every_scop_direction():
+    """b = a + 1e-7 v is full rank, so every SCOP direction is the data's and the fit reaches it.
+
+    The pair's near-collinearity inflated the Gram's formation bound past
+    genuine curvature: all but two of the seven Schur directions were
+    dropped (the smallest eigenvalue, 0.0287, among them), and the fit
+    reported convergence after two iterations at a training RMSE of 0.058.
+    """
+    from superglm import Numeric, PSpline
+
+    rng = np.random.default_rng(2)
+    n = 300
+    s = rng.uniform(0, 1, n)
+    a = rng.normal(size=n)
+    v = rng.normal(size=n)
+    b = a + 1e-7 * v
+    y = 0.2 + 2 * s + 0.6 * s * s + 0.4 * v
+    frame = pd.DataFrame({"a": a, "b": b, "s": s})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        features={
+            "a": Numeric(),
+            "b": Numeric(),
+            "s": PSpline(n_knots=4, constraint=Constraint.fit.increasing),
+        },
+    )
+    model.fit(frame, y)
+
+    mu = np.asarray(model.predict(frame))
+    beta, alpha = np.asarray(model.result.beta), float(model.result.intercept)
+    ordinary = beta[0] * a + beta[1] * b
+    # y is exact in the model up to b's rounding times beta_b, so the floor is the
+    # predictor's evaluation: gamma_(p+2) (|alpha| + sum_j |beta_j x_j|) per row
+    # (Higham 2002, sec. 3.1), the spline's terms all of one sign
+    size = np.abs(alpha) + np.abs(beta[0] * a) + np.abs(beta[1] * b) + np.abs(mu - alpha - ordinary)
+    gamma = (beta.size + 2) * UNIT / (1 - (beta.size + 2) * UNIT)
+    assert np.sqrt(np.mean((mu - y) ** 2)) <= gamma * np.sqrt(np.mean(size**2))
+
+
+def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(monkeypatch):
+    """x beside a convex spline of x and a pair ``a, a + 1e-7 v``: the rows certify the alias null.
+
+    The pair makes the ordinary block near-singular, so one projection
+    through the formed cross block leaves ``sqrt(dC' A^-1 dC)`` along the
+    alias: 1.3e3 times the rows' rounding bound on these rows, read as
+    curvature. The second pass leaves it at 4e-4 of the bound on every step.
+    """
+    from superglm import Numeric, PSpline
+    from superglm.solvers.rank import _gamma_up
+
+    captured = []
+    rows_of = SCOPJointNewton._schur_rows
+
+    def capture(self, *args):
+        captured.append(rows_of(self, *args))
+        return captured[-1]
+
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", capture)
+    rng = np.random.default_rng(3)
+    n = 150
+    x = rng.uniform(0, 1, n)
+    a = np.random.default_rng(11).normal(size=n)
+    v = np.random.default_rng(12).normal(size=n)
+    y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n) + 0.3 * v
+    weights = rng.uniform(0.3, 3, n)
+    frame = pd.DataFrame({"x": x, "s": x, "a": a, "b": a + 1e-7 * v})
+    convex = PSpline(n_knots=4, constraint=Constraint.fit.convex)
+
+    def fit(features):
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, spline_penalty=0.1, features=features
+        )
+        model.fit(frame, y, sample_weight=weights)
+        return model
+
+    aliased = fit({"x": Numeric(), "a": Numeric(), "b": Numeric(), "s": convex})
+    assert aliased.result.converged
+    assert captured
+    for factor, scale, count in captured:
+        q = factor.shape[1]
+        singular = np.linalg.svd(factor / scale[None, :], compute_uv=False)
+        assert np.sum(singular > _gamma_up(count) * np.sqrt(q)) == q - 1
+
+    alone = fit({"a": Numeric(), "b": Numeric(), "s": convex})
+    # two certified modes of one model (the certificate's bar, sqrt(r eps), each)
+    bar = 2 * np.sqrt((alone.result.beta.size + 2) * 2 * UNIT)
+    mu, alone_mu = aliased.predict(frame), alone.predict(frame)
+    assert np.max(np.abs(mu - alone_mu) / np.abs(alone_mu)) <= bar
+
+
+def test_a_well_conditioned_fit_never_reads_the_rows(monkeypatch):
+    """Strongly coupled but full rank: every joint step takes the Gram, none the rows (a count)."""
+    calls = {"steps": 0, "rows": 0}
+    step, rows_of = SCOPJointNewton.step, SCOPJointNewton._schur_rows
+
+    def counted_step(self, *args, **kwargs):
+        calls["steps"] += 1
+        return step(self, *args, **kwargs)
+
+    def counted_rows(self, *args):
+        calls["rows"] += 1
+        return rows_of(self, *args)
+
+    monkeypatch.setattr(SCOPJointNewton, "step", counted_step)
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", counted_rows)
+    frame, y, offset = _correlated_monotone_frame(0.9, n=2000)
+    _monotone_model().fit(frame, y, offset=offset)
+
+    assert calls["steps"] > 0
+    assert calls["rows"] == 0
