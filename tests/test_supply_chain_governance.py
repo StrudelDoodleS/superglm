@@ -454,7 +454,8 @@ _COOLDOWN_EXEMPTIONS = {
         "GHSA-pchr-8j38-3x4p, GHSA-q45j-58j2-45rg, GHSA-462x-pgg6-55fp, "
         "GHSA-c6hw-5grf-ff96 and GHSA-vx6w-vv9f-6gvg"
     ),
-    "virtualenv": "21.14.9 fixes GHSA-c978-59m8-c77v",
+    "filelock": "4.2.1 fixes GHSA-v4x8-3wr5-3wq8, GHSA-9vhv-jxww-xfm5 and GHSA-567q-5qvw-pf92",
+    "virtualenv": "21.14.10 fixes GHSA-4f8h-vr72-p32c",
 }
 # Packages a lock change may move below the base lock, each with its reason.
 _LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}
