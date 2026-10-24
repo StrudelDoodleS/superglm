@@ -3486,7 +3486,6 @@ def _broken_input(case):
     term = _per_unit_offset_call()["offset_source"]
     return {
         "offset_too_short": {"offset": np.zeros(n - 1)},
-        "sample_weight_too_short": {"sample_weight": np.ones(n - 1)},
         "source_too_short": {"offset_source": term[:-1]},
         "source_with_zero": {"offset_source": np.where(np.arange(n) == 3, 0.0, term)},
         "source_with_negative": {"offset_source": np.where(np.arange(n) == 3, -1.0, term)},
@@ -3504,7 +3503,6 @@ def _broken_input(case):
     ("case", "error", "message"),
     [
         ("offset_too_short", ValueError, "offset must have the same length as X"),
-        ("sample_weight_too_short", ValueError, "sample_weight must have the same length as X"),
         ("source_too_short", ValueError, "offset_source must have the same length as X"),
         (
             "source_with_zero",

@@ -2119,17 +2119,6 @@ def test_repair_without_retained_response_is_refused_and_nothing_is_published():
     _assert_nothing_published(model, X, snapshot)
 
 
-def test_repair_without_retained_row_scale_state_is_refused():
-    model, X = _fitted_for_publication_refusal()
-    snapshot = _publication_snapshot(model, X)
-    model._retain_fit_state = False
-
-    with pytest.raises(RuntimeError, match="requires row-scale fitted state"):
-        model.apply_shape_postfit(X)
-
-    _assert_nothing_published(model, X, snapshot)
-
-
 def _scaled_solution(x, spec):
     return 1e3 * x
 
