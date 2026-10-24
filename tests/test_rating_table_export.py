@@ -3452,3 +3452,151 @@ def test_exact_banding_is_refused_for_a_binned_offset():
         build_rating_table_payload(
             model, X, y, sample_weight=w, offset_kind="binned", bin_strategy="exact"
         )
+
+
+# -- offset and input refusals: one test per branch, each against a working call ----------
+
+
+def _per_unit_offset_call(**overrides):
+    """A per-unit offset export that works as it stands; each case below breaks one input."""
+    model, X, y, w, term, offset = _fit_term_offset_export_model(distinct_terms=40)
+    call = {
+        "model": model,
+        "X": X,
+        "y": y,
+        "sample_weight": w,
+        "offset": offset,
+        "offset_source": term,
+        "offset_name": "Term",
+        "offset_kind": "per_unit",
+    }
+    call.update(overrides)
+    return call
+
+
+def test_per_unit_offset_export_works_before_any_input_is_broken():
+    payload = build_rating_table_payload(**_per_unit_offset_call())
+
+    assert any(block.kind == "offset_per_unit" for block in payload.main_effects)
+
+
+def _broken_input(case):
+    """The keyword overrides for one broken input, built from the working call."""
+    n = len(_per_unit_offset_call()["X"])
+    term = _per_unit_offset_call()["offset_source"]
+    return {
+        "offset_too_short": {"offset": np.zeros(n - 1)},
+        "sample_weight_too_short": {"sample_weight": np.ones(n - 1)},
+        "source_too_short": {"offset_source": term[:-1]},
+        "source_with_zero": {"offset_source": np.where(np.arange(n) == 3, 0.0, term)},
+        "source_with_negative": {"offset_source": np.where(np.arange(n) == 3, -1.0, term)},
+        "source_with_infinity": {"offset_source": np.where(np.arange(n) == 3, np.inf, term)},
+        "source_not_numeric": {"offset_source": np.array(["a", "b"] * (n // 2), dtype=object)},
+        "unnamed_source": {"offset_name": None},
+        "blank_name": {"offset_name": "  "},
+        "reserved_name": {"offset_name": "Relativity"},
+        "missing_source_column": {"offset_source": "no_such_column"},
+        "unknown_offset_kind": {"offset_kind": "median"},
+    }[case]
+
+
+@pytest.mark.parametrize(
+    ("case", "error", "message"),
+    [
+        ("offset_too_short", ValueError, "offset must have the same length as X"),
+        ("sample_weight_too_short", ValueError, "sample_weight must have the same length as X"),
+        ("source_too_short", ValueError, "offset_source must have the same length as X"),
+        (
+            "source_with_zero",
+            OffsetRelationError,
+            "has non-positive or non-finite values, so the offset cannot be a log of it",
+        ),
+        (
+            "source_with_negative",
+            OffsetRelationError,
+            "has non-positive or non-finite values, so the offset cannot be a log of it",
+        ),
+        (
+            "source_with_infinity",
+            OffsetRelationError,
+            "has non-positive or non-finite values, so the offset cannot be a log of it",
+        ),
+        (
+            "source_not_numeric",
+            OffsetRelationError,
+            "is not numeric, so the offset cannot be a log of it",
+        ),
+        ("unnamed_source", ValueError, "offset_name is required when offset_source is an unnamed"),
+        ("blank_name", ValueError, "offset_name must not be blank"),
+        ("reserved_name", ValueError, "offset_name cannot be one of the reserved columns"),
+        (
+            "missing_source_column",
+            ValueError,
+            "offset_source column 'no_such_column' is not present",
+        ),
+        ("unknown_offset_kind", ValueError, "offset_kind must be one of"),
+    ],
+)
+def test_broken_offset_inputs_are_refused_with_the_reason(case, error, message):
+    call = _per_unit_offset_call(**_broken_input(case))
+
+    with pytest.raises(error, match=message):
+        build_rating_table_payload(**call)
+
+
+def test_discrete_offset_with_more_levels_than_allowed_is_refused_not_binned():
+    call = _per_unit_offset_call(offset_kind="discrete", offset_max_exact_levels=10)
+
+    with pytest.raises(
+        ValueError, match="40 distinct values, exceeding offset_max_exact_levels=10"
+    ):
+        build_rating_table_payload(**call)
+
+
+def test_fit_offset_of_the_wrong_length_is_refused_when_the_fit_frame_is_exported():
+    model, X, y, w, term, _offset = _fit_term_offset_export_model()
+    # The fit frame is exported with its own stored offset, which here is one row short.
+    model._fit_offset = np.asarray(model._fit_offset)[:-1]
+
+    with pytest.raises(ValueError, match="The fitted offset has a different length from X"):
+        build_rating_table_payload(
+            model, X, y, sample_weight=w, offset_source=term, offset_name="Term"
+        )
+
+
+def test_unfitted_model_is_refused_before_any_table_is_built():
+    model = SuperGLM(family="poisson", features={"x": Numeric()})
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 5)})
+
+    with pytest.raises(RuntimeError, match="Model must be fitted before exporting rating tables"):
+        build_rating_table_payload(model, X, np.ones(5))
+
+
+def test_sample_weight_of_the_wrong_length_is_refused_without_an_offset():
+    model, X, y, w = _fit_export_model()
+
+    with pytest.raises(ValueError, match="sample_weight must have the same length as X"):
+        build_rating_table_payload(model, X, y, sample_weight=w[:-1])
+
+
+def test_x_and_y_of_different_lengths_are_refused():
+    model, X, y, w = _fit_export_model()
+
+    with pytest.raises(ValueError, match="X and y must have the same length"):
+        build_rating_table_payload(model, X, y[:-1], sample_weight=w)
+
+
+@pytest.mark.parametrize(
+    ("name", "format", "quoted"),
+    [("tables.parquet", None, "'.parquet'"), ("tables.xlsx", "csv", "'csv'")],
+)
+def test_export_writes_no_file_for_an_unsupported_format(tmp_path, name, format, quoted):
+    model, X, y, w = _fit_export_model()
+    target = tmp_path / name
+
+    with pytest.raises(
+        ValueError, match=f"Unsupported rating table export format: {re.escape(quoted)}"
+    ):
+        export_rating_tables(model, target, X, y, sample_weight=w, format=format)
+
+    assert not target.exists()
