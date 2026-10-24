@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from superglm import Constraint, Spline, SuperGLM
+from superglm.distributions import Tweedie
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model.base import model_build_design_matrix
 from superglm.solvers import irls_direct
@@ -310,3 +311,51 @@ def test_inner_fit_at_fixed_lambda_needs_few_iterations():
 
     assert result.converged
     assert result.n_iter <= 20
+
+
+def test_tweedie_log_scop_fit_takes_observed_newton_rows():
+    """The joint step is full Newton: Tweedie/log rows carry the observed information.
+
+    On Fisher rows a Tweedie/log SCOP inner fit contracts only linearly where
+    the observed information exceeds Fisher's, as heavy-tailed pure premiums
+    give: 0.8 to 0.94 per iteration on 50,000 freMTPL2 rows, where most inner
+    fits exhausted their 100 iterations.
+    """
+    rng = np.random.default_rng(5)
+    n = 4000
+    frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+    exposure = rng.uniform(0.02, 1.0, n)
+    rate = 0.1 * np.exp(
+        0.5 * np.sin(2 * np.pi * frame["x1"]) + 1.2 / (1 + np.exp(-8 * (frame["x2"] - 0.5)))
+    )
+    counts = rng.poisson(rate * exposure)
+    y = np.array([rng.gamma(0.5, 2000.0, c).sum() for c in counts]) / exposure
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "x1": Spline(kind="ps", k=10),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+        },
+    )
+    y_fit, weights, offset = model_build_design_matrix(model, frame, y, exposure, None)
+    profile: dict = {}
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 1.0, "x2": 1.0},
+        offset=offset,
+        max_iter=100,
+        tol=1e-10,
+        convergence="coefficients",
+        weight_semantics="prior",
+        profile=profile,
+    )
+
+    assert result.converged
+    assert profile.get("irls_observed_newton_iters", 0) == result.n_iter

@@ -2020,10 +2020,13 @@ def _fit_irls_direct_once(
     # Newton rows when its optimizer asks (``_working_newton``): the discrete
     # route's working model then carries the observed curvature its REML
     # criterion is (``reml.discrete``).
+    # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
+    # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
+    # information, and the REML geometry it hands on reads Fisher rows at the
+    # retained model either way.
     _observed_newton_active = bool(
         _use_observed_newton
         and not has_constraints
-        and not _has_scop
         and (
             (_working_newton and concave_observed_rows(family, link))
             if _return_working_system
