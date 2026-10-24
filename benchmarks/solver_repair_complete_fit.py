@@ -5,8 +5,8 @@ benchmarks.solver_repair_complete_fit --case qp --label baseline --out receipt.j
 The default is untimed and records actual solver dispatch. ``--measure-time``
 disables solver instrumentation; arrange exclusive execution separately.
 ``qp`` is the inactive-constraint control; ``qp_binding`` requires observed
-active-set iterations. ``scop_single`` means one SCOP group using the default
-joint routing, not coverage of the separate ``scop_newton_step`` kernel.
+active-set iterations. ``scop_single`` means one SCOP group through the joint
+Newton step.
 """
 
 from __future__ import annotations
@@ -184,8 +184,7 @@ def _solver_dispatch(sampler=None):
     """Observe Python call/return events, including aliases, without replacing solvers."""
     targets = {
         constrained_qp.solve_constrained_qp.__code__: "solve_constrained_qp",
-        scop_newton.scop_newton_step.__code__: "scop_newton_step",
-        scop_newton.scop_joint_newton_step.__code__: "scop_joint_newton_step",
+        scop_newton.SCOPJointNewton.step.__code__: "scop_joint_step",
         scop_newton._compute_cross_gram.__code__: "scop_cross_gram",
         scop_newton._disc_disc_2d_hist.__code__: "discrete_cross_histogram",
         balance_tree.SumToZeroTreeFactor.__init__.__code__: "SumToZeroTreeFactor.__init__",
@@ -220,16 +219,16 @@ def _solver_dispatch(sampler=None):
                 receipt["calls"][name] += 1
                 caller = frame.f_back.f_code.co_name if frame.f_back is not None else ""
                 receipt["callers"][f"{name} <- {caller}"] += 1
-                if name == "scop_joint_newton_step":
-                    states = local["scop_states"]
-                    receipt["scop_group_counts"][str(len(states))] += 1
+                if name == "scop_joint_step":
+                    specs = local["self"].specs
+                    receipt["scop_group_counts"][str(len(specs))] += 1
                     layout = [
                         {
-                            "group": int(index),
-                            "basis_shape": list(state["B_scop"].shape),
-                            "bin_indices": state.get("bin_idx") is not None,
+                            "group": int(spec.group_index),
+                            "basis_shape": list(spec.B_scop.shape),
+                            "bin_indices": spec.bin_idx is not None,
                         }
-                        for index, state in sorted(states.items())
+                        for spec in specs
                     ]
                     receipt["scop_support_layouts"][json.dumps(layout, sort_keys=True)] += 1
                 return
@@ -242,24 +241,14 @@ def _solver_dispatch(sampler=None):
                 )
                 item["constraint_slack"] = local["A"] @ result.beta - local["b"]
                 receipt["qp_results"].append(_json_value(item))
-            elif name in {"scop_newton_step", "scop_joint_newton_step"} and result is not None:
-                results = result.items() if isinstance(result, dict) else [(None, result)]
-                for index, step in results:
+            elif name == "scop_joint_step" and result is not None:
+                for index, step in result.results.items():
                     item = _attributes(
-                        step,
-                        (
-                            "objective_before",
-                            "objective_after",
-                            "step_norm",
-                            "used_fisher_fallback",
-                            "linear_solver",
-                            "linear_iterations",
-                            "discarded_directions",
-                        ),
+                        step, ("step_norm", "used_fisher_fallback", "discarded_directions")
                     )
                     receipt["scop_steps"].append(_json_value({"group": index, **item}))
             elif name == "scop_cross_gram" and result is not None:
-                route = tuple(local[key].get("bin_idx") is not None for key in ("st_i", "st_j"))
+                route = tuple(local[key] is not None for key in ("bin_i", "bin_j"))
                 receipt["scop_cross_routes"][str(route)] += 1
             elif name == "discrete_cross_histogram" and result is not None:
                 if frame.f_back.f_code is scop_newton._compute_cross_gram.__code__:
@@ -292,9 +281,7 @@ def _dispatch_requirements(case, dispatch):
             )
     elif case.startswith("scop_"):
         groups = "1" if case == "scop_single" else "2"
-        requirements["joint_step_returned"] = (
-            dispatch["returned_calls"]["scop_joint_newton_step"] > 0
-        )
+        requirements["joint_step_returned"] = dispatch["returned_calls"]["scop_joint_step"] > 0
         requirements["requested_group_count_observed"] = dispatch["scop_group_counts"][groups] > 0
         if case == "scop_joint_discrete":
             requirements["cross_histogram_returned"] = dispatch["scop_cross_histogram_returns"] > 0

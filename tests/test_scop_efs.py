@@ -1753,7 +1753,6 @@ class TestSCOPEFSOuterLoop:
             max_pirls_iter=10,
             reml_penalties=[],
             convergence="coefficients",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
@@ -1796,7 +1795,6 @@ class TestSCOPEFSOuterLoop:
             max_pirls_iter=100,
             reml_penalties=None,
             convergence="coefficients",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=float(np.sum(sample_weight)),
             gamma_scale_data=None,
@@ -1855,7 +1853,6 @@ class TestSCOPEFSOuterLoop:
             max_pirls_iter=1,
             reml_penalties=None,
             convergence="coefficients",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=float(len(y)),
             gamma_scale_data=None,
@@ -2246,7 +2243,6 @@ class TestSCOPEFSOuterLoop:
             max_pirls_iter=10,
             reml_penalties=[],
             convergence="deviance",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
@@ -2311,7 +2307,6 @@ class TestSCOPEFSOuterLoop:
             max_pirls_iter=10,
             reml_penalties=[],
             convergence="deviance",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
@@ -2619,7 +2614,6 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             max_pirls_iter=200,
             reml_penalties=[],
             convergence="coefficients",
-            scop_joint=True,
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
@@ -2716,10 +2710,12 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
     def test_a_genuinely_non_converging_fit_is_published_unconverged(self, monkeypatch):
         """A real SCOP fit that never settles is reported as not converged.
 
-        This quasi-separated Poisson exhausts all its PIRLS iterations with
-        zero halvings and zero rejections, its deviance still moving by ~1e-3
-        relative per iteration, at the cold bootstrap and again at its
-        Hessian-scaled retry. Neither is accepted as a mode; the retry's fit
+        This quasi-separated Poisson drifts toward the link's overflow guard,
+        which takes it more than the two inner iterations allowed here, so it
+        exhausts its PIRLS budget at the cold bootstrap and again at its
+        Hessian-scaled retry. The budget forces the event: joint Newton
+        reaches the guard in about a dozen iterations, so the default budget
+        no longer would. Neither attempt is accepted as a mode; the retry's fit
         is published with ``converged=False`` (owner decision 3, 2026-09-30:
         disclose, never refuse; 37f73863 raised here).
 
@@ -2758,7 +2754,7 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             },
         )
         with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
-            model.fit_reml(frame, response, max_reml_iter=20)
+            model.fit_reml(frame, response, max_reml_iter=20, max_pirls_iter=2)
         diagnostics = model.reml_diagnostics()
         assert not diagnostics["converged"]
         assert diagnostics["termination_reason"] == "bootstrap_uncertified"
@@ -6326,304 +6322,7 @@ class TestSCOPEFSRegression:
 
 
 class TestSCOPNewtonLineSearchSafety:
-    """Newton step-halving rejects non-finite trial states cleanly."""
-
-    def _make_scop_inputs(self, q_eff=7, n=100, seed=42):
-        """Build synthetic SCOP Newton inputs."""
-        from superglm.solvers.scop import build_scop_solver_reparam
-
-        rng = np.random.default_rng(seed)
-        reparam = build_scop_solver_reparam(q_eff + 1, direction="increasing")
-        B_scop = rng.standard_normal((n, q_eff))
-        W = np.abs(rng.standard_normal(n)) + 0.1
-        beta_scop = rng.standard_normal(q_eff) * 0.3
-        gamma = reparam.forward(beta_scop)
-        z = B_scop @ gamma + rng.standard_normal(n) * 0.1
-        S_scop = reparam.penalty_matrix()
-        return B_scop, W, z, beta_scop, reparam, S_scop
-
-    def test_overflow_starting_point_noop_no_warning(self):
-        """Starting from huge beta_eff (overflow in exp) → no-op, no warning."""
-        import warnings
-
-        from superglm.solvers.scop_newton import scop_newton_step
-
-        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
-        beta_huge = np.full_like(beta_scop, 600.0)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            result = scop_newton_step(
-                B_scop,
-                W,
-                z,
-                beta_huge,
-                reparam,
-                S_scop,
-                lambda2=1.0,
-                max_halving=10,
-            )
-
-        # Step rejected entirely — beta unchanged
-        np.testing.assert_array_equal(result.beta_new, beta_huge)
-        assert result.step_norm == 0.0
-        assert result.objective_after == result.objective_before
-
-    def test_overflow_trial_halved_to_safety(self):
-        """Moderate beta_eff where full step overflows but halving recovers."""
-        import warnings
-
-        from superglm.solvers.scop_newton import scop_newton_step
-
-        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
-        # Moderate starting point — finite obj_before, but Newton step may overshoot
-        beta_mod = np.full_like(beta_scop, 3.0)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            result = scop_newton_step(
-                B_scop,
-                W,
-                z,
-                beta_mod,
-                reparam,
-                S_scop,
-                lambda2=1.0,
-                max_halving=20,
-            )
-
-        assert np.isfinite(result.objective_after)
-        assert result.objective_after <= result.objective_before + 1e-14
-
-    def test_exhausted_halvings_rejects_step(self):
-        """When all halvings fail, step is rejected: beta unchanged, step_norm=0."""
-        from superglm.solvers.scop_newton import scop_newton_step
-
-        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
-        # Very large beta_eff + tiny max_halving → all trials overflow
-        beta_huge = np.full_like(beta_scop, 700.0)
-
-        result = scop_newton_step(
-            B_scop,
-            W,
-            z,
-            beta_huge,
-            reparam,
-            S_scop,
-            lambda2=1.0,
-            max_halving=2,
-        )
-
-        np.testing.assert_array_equal(result.beta_new, beta_huge)
-        assert result.step_norm == 0.0
-        assert result.objective_after == result.objective_before
-
-    def test_objective_delta_preserves_sub_ulp_descent(self):
-        """Single and joint line searches retain descent hidden by full objectives."""
-        from superglm.solvers.scop import build_scop_solver_reparam
-        from superglm.solvers.scop_newton import (
-            _build_joint_objective_cache,
-            _joint_objective_from_gammas,
-            _safe_joint_trial_objective_delta,
-            _safe_trial_objective,
-            _safe_trial_objective_delta,
-        )
-
-        reparam = build_scop_solver_reparam(2, direction="increasing")
-        basis = np.ones((2, 1))
-        weights = np.ones(2)
-        beta = np.zeros(1)
-        gamma = reparam.forward(beta)
-        residual = np.array([1.0e8, -1.0e8 + 1.0e-6])
-        response = basis @ gamma + residual
-        penalty = np.zeros((1, 1))
-        beta_trial = np.array([5.0e-7])
-        gram = basis.T @ (basis * weights[:, None])
-        projected_residual = basis.T @ (weights * residual)
-
-        objective_before = _safe_trial_objective(
-            basis,
-            weights,
-            response,
-            beta,
-            reparam,
-            penalty,
-            0.0,
-            None,
-        )
-        objective_trial = _safe_trial_objective(
-            basis,
-            weights,
-            response,
-            beta_trial,
-            reparam,
-            penalty,
-            0.0,
-            None,
-        )
-        single_delta = _safe_trial_objective_delta(
-            beta,
-            beta_trial,
-            gamma,
-            reparam,
-            penalty,
-            0.0,
-            projected_residual,
-            gram,
-        )
-
-        state = {
-            "B_scop": basis,
-            "S_scop": penalty,
-            "beta_scop": beta,
-            "reparam": reparam,
-            "bin_idx": None,
-        }
-        scop_items = [(0, state)]
-        slices = [slice(0, 1)]
-        cache = _build_joint_objective_cache(scop_items, weights, response)
-        cache.diag_btwb = [gram]
-        cache.cross_btwb = {}
-        joint_delta = _safe_joint_trial_objective_delta(
-            scop_items,
-            beta_trial,
-            slices,
-            [0.0],
-            [gamma],
-            [projected_residual],
-            cache,
-        )
-        joint_objective_before = _joint_objective_from_gammas(
-            [gamma],
-            beta,
-            slices,
-            [0.0],
-            scop_items,
-            cache,
-        )
-        joint_objective_trial = _joint_objective_from_gammas(
-            [reparam.forward(beta_trial)],
-            beta_trial,
-            slices,
-            [0.0],
-            scop_items,
-            cache,
-        )
-
-        assert objective_trial == objective_before
-        assert joint_objective_trial == joint_objective_before
-        assert single_delta < 0.0
-        assert joint_delta == pytest.approx(single_delta, rel=1.0e-12, abs=1.0e-18)
-
-    def test_joint_delta_keeps_projected_residual_for_near_collinear_fit(self):
-        """Large fitted components cannot cancel the joint linear delta term."""
-        from superglm.solvers.scop import build_scop_solver_reparam
-        from superglm.solvers.scop_newton import (
-            _build_joint_objective_cache,
-            _safe_joint_trial_objective_delta,
-        )
-
-        rng = np.random.default_rng(1)
-        u = rng.normal(size=100)
-        v = rng.normal(size=100)
-        v -= u * float(u @ v) / float(u @ u)
-        basis = np.column_stack([u, u + 1.0e-9 * v])
-        weights = np.ones(100)
-        reparam = build_scop_solver_reparam(3, direction="increasing")
-        beta = np.log(np.full(2, 1.0e8))
-        gamma = reparam.forward(beta)
-        response = basis @ gamma - v
-        penalty = np.zeros((2, 2))
-        state = {
-            "B_scop": basis,
-            "S_scop": penalty,
-            "beta_scop": beta,
-            "reparam": reparam,
-            "bin_idx": None,
-        }
-        scop_items = [(0, state)]
-        slices = [slice(0, 2)]
-        gram = basis.T @ basis
-        cache = _build_joint_objective_cache(scop_items, weights, response)
-        cache.diag_btwb = [gram]
-        cache.cross_btwb = {}
-
-        beta_trial = np.log(gamma + np.array([1.0, -1.0]))
-        gamma_delta = reparam.forward(beta_trial) - gamma
-        residual = response - basis @ gamma
-        projected_residual = basis.T @ (weights * residual)
-        expected_delta = -float(gamma_delta @ projected_residual) + 0.5 * float(
-            gamma_delta @ gram @ gamma_delta
-        )
-        reported_delta = _safe_joint_trial_objective_delta(
-            scop_items,
-            beta_trial,
-            slices,
-            [0.0],
-            [gamma],
-            [projected_residual],
-            cache,
-        )
-
-        assert expected_delta < 0.0
-        assert reported_delta == pytest.approx(expected_delta, rel=1.0e-10, abs=1.0e-14)
-
-    def test_single_and_joint_line_searches_use_stable_delta(self, monkeypatch):
-        """Both public Newton paths route trial acceptance through delta algebra."""
-        from superglm.solvers import scop_newton as scop_newton_module
-
-        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
-        calls = {"single": 0, "joint": 0}
-        single_delta = scop_newton_module._safe_trial_objective_delta
-        joint_delta = scop_newton_module._safe_joint_trial_objective_delta
-
-        def record_single(*args, **kwargs):
-            calls["single"] += 1
-            return single_delta(*args, **kwargs)
-
-        def record_joint(*args, **kwargs):
-            calls["joint"] += 1
-            return joint_delta(*args, **kwargs)
-
-        monkeypatch.setattr(
-            scop_newton_module,
-            "_safe_trial_objective_delta",
-            record_single,
-        )
-        monkeypatch.setattr(
-            scop_newton_module,
-            "_safe_joint_trial_objective_delta",
-            record_joint,
-        )
-
-        scop_newton_module.scop_newton_step(
-            B_scop,
-            W,
-            z,
-            beta_scop,
-            reparam,
-            S_scop,
-            lambda2=1.0,
-        )
-        state = {
-            "B_scop": B_scop,
-            "S_scop": S_scop,
-            "beta_scop": beta_scop,
-            "reparam": reparam,
-            "bin_idx": None,
-            "group_sl": slice(0, beta_scop.size),
-            "group_name": "x",
-        }
-        scop_newton_module.scop_joint_newton_step(
-            {0: state},
-            W,
-            z,
-            {"x": 1.0},
-            [SimpleNamespace(name="x", sl=state["group_sl"])],
-        )
-
-        assert calls["single"] > 0
-        assert calls["joint"] > 0
+    """A SCOP fit warns nothing on its way to the mode."""
 
     @pytest.mark.slow
     def test_mixed_model_no_overflow_warning(self):
@@ -7118,385 +6817,8 @@ class TestMultiSCOPIntegration:
 # ---------------------------------------------------------------------------
 
 
-class TestJointSCOPNewton:
-    """Tests for scop_joint_newton_step."""
-
-    def _build_single_group_inputs(self, rng=None, q_eff=7, n=100, lam=1.0):
-        """Build single-group SCOP problem inputs for testing."""
-        from superglm.solvers.scop import build_scop_solver_reparam
-
-        if rng is None:
-            rng = np.random.default_rng(42)
-
-        reparam = build_scop_solver_reparam(q_eff + 1, direction="increasing")
-        B_scop = rng.standard_normal((n, q_eff))
-        W = np.abs(rng.standard_normal(n)) + 0.1
-        beta_scop = rng.standard_normal(q_eff) * 0.3
-        gamma = reparam.forward(beta_scop)
-        z = B_scop @ gamma + rng.standard_normal(n) * 0.1
-        S_scop = reparam.penalty_matrix()
-
-        return B_scop, W, z, beta_scop, reparam, S_scop
-
-    def _build_two_group_inputs(self, rng=None, q1=7, q2=5, n=200, discretized=False):
-        """Build two-group SCOP problem inputs for testing."""
-        from superglm.solvers.scop import build_scop_solver_reparam
-
-        if rng is None:
-            rng = np.random.default_rng(99)
-
-        reparam1 = build_scop_solver_reparam(q1 + 1, direction="increasing")
-        reparam2 = build_scop_solver_reparam(q2 + 1, direction="increasing")
-
-        if discretized:
-            n_bins1 = 50
-            n_bins2 = 40
-            B1 = rng.standard_normal((n_bins1, q1))
-            B2 = rng.standard_normal((n_bins2, q2))
-            bi1 = rng.integers(0, n_bins1, size=n)
-            bi2 = rng.integers(0, n_bins2, size=n)
-        else:
-            B1 = rng.standard_normal((n, q1))
-            B2 = rng.standard_normal((n, q2))
-            bi1 = None
-            bi2 = None
-
-        W = np.abs(rng.standard_normal(n)) + 0.1
-        beta1 = rng.standard_normal(q1) * 0.3
-        beta2 = rng.standard_normal(q2) * 0.3
-
-        gamma1 = reparam1.forward(beta1)
-        gamma2 = reparam2.forward(beta2)
-
-        eta1 = B1 @ gamma1
-        eta2 = B2 @ gamma2
-        if bi1 is not None:
-            eta1 = eta1[bi1]
-        if bi2 is not None:
-            eta2 = eta2[bi2]
-
-        z = eta1 + eta2 + rng.standard_normal(n) * 0.1
-
-        S1 = reparam1.penalty_matrix()
-        S2 = reparam2.penalty_matrix()
-
-        scop_states = {
-            0: {
-                "B_scop": B1,
-                "S_scop": S1,
-                "beta_scop": beta1,
-                "reparam": reparam1,
-                "bin_idx": bi1,
-                "group_sl": slice(0, q1),
-                "group_name": "x1",
-            },
-            1: {
-                "B_scop": B2,
-                "S_scop": S2,
-                "beta_scop": beta2,
-                "reparam": reparam2,
-                "bin_idx": bi2,
-                "group_sl": slice(q1, q1 + q2),
-                "group_name": "x2",
-            },
-        }
-
-        return scop_states, W, z
-
-    def _make_mock_groups(self, scop_states):
-        """Create minimal mock GroupSlice objects for testing."""
-        from dataclasses import dataclass
-
-        @dataclass
-        class MockGroup:
-            name: str
-            sl: slice
-
-        groups = []
-        for gi in sorted(scop_states.keys()):
-            st = scop_states[gi]
-            groups.append(MockGroup(name=st["group_name"], sl=st["group_sl"]))
-        return groups
-
-    @pytest.mark.parametrize("discretized", [False, True], ids=["dense", "discrete"])
-    def test_joint_curvature_mixed_map_objective_matches_brute_force(self, discretized):
-        """Joint line search must use mapped coefficients, not Jacobian diagonals."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step
-        from tests._scop_objective import safe_joint_objective
-
-        rng = np.random.default_rng(216)
-        n = 180
-        q1, q2 = 5, 4
-        reparam1 = _curvature_solver_reparam(q1 + 1, "convex")
-        reparam2 = _curvature_solver_reparam(q2 + 1, "concave")
-        if discretized:
-            bin1 = rng.integers(0, 37, size=n)
-            bin2 = rng.integers(0, 29, size=n)
-            basis1 = rng.normal(size=(37, q1))
-            basis2 = rng.normal(size=(29, q2))
-        else:
-            bin1 = None
-            bin2 = None
-            basis1 = rng.normal(size=(n, q1))
-            basis2 = rng.normal(size=(n, q2))
-
-        beta1 = rng.normal(scale=0.25, size=q1)
-        beta2 = rng.normal(scale=0.25, size=q2)
-        beta1[0] = -0.7
-        beta2[0] = 1.4
-        eta1 = basis1 @ reparam1.forward(beta1)
-        eta2 = basis2 @ reparam2.forward(beta2)
-        if discretized:
-            eta1 = eta1[bin1]
-            eta2 = eta2[bin2]
-        weights = rng.uniform(0.2, 2.0, size=n)
-        response = eta1 + eta2 + rng.normal(scale=0.2, size=n)
-        states = {
-            0: {
-                "B_scop": basis1,
-                "S_scop": reparam1.penalty_matrix(),
-                "beta_scop": beta1,
-                "reparam": reparam1,
-                "bin_idx": bin1,
-                "group_sl": slice(0, q1),
-                "group_name": "x1",
-            },
-            1: {
-                "B_scop": basis2,
-                "S_scop": reparam2.penalty_matrix(),
-                "beta_scop": beta2,
-                "reparam": reparam2,
-                "bin_idx": bin2,
-                "group_sl": slice(q1, q1 + q2),
-                "group_name": "x2",
-            },
-        }
-        groups = self._make_mock_groups(states)
-        scop_items = sorted(states.items())
-        slices = [slice(0, q1), slice(q1, q1 + q2)]
-        lambdas = {"x1": 0.7, "x2": 0.3}
-        lambda_list = [lambdas["x1"], lambdas["x2"]]
-        beta_before = np.concatenate((beta1, beta2))
-        objective_before = safe_joint_objective(
-            scop_items,
-            weights,
-            response,
-            beta_before,
-            slices,
-            lambda_list,
-        )
-
-        results = scop_joint_newton_step(
-            states,
-            weights,
-            response,
-            lambdas,
-            groups,
-        )
-        beta_after = np.concatenate((results[0].beta_new, results[1].beta_new))
-        objective_after = safe_joint_objective(
-            scop_items,
-            weights,
-            response,
-            beta_after,
-            slices,
-            lambda_list,
-        )
-
-        assert beta1[0] != reparam1.jacobian_diagonal(beta1)[0]
-        assert beta2[0] != reparam2.jacobian_diagonal(beta2)[0]
-        for result in results.values():
-            np.testing.assert_allclose(result.objective_before, objective_before, atol=1e-10)
-            np.testing.assert_allclose(result.objective_after, objective_after, atol=1e-10)
-        assert objective_after <= objective_before + 1e-12
-
-    def test_single_group_matches_existing(self):
-        """Joint step with one group should match sequential scop_newton_step."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
-
-        B_scop, W, z, beta_scop, reparam, S_scop = self._build_single_group_inputs()
-        q_eff = len(beta_scop)
-
-        # Single-group result via existing sequential step
-        result_single = scop_newton_step(B_scop, W, z, beta_scop, reparam, S_scop, lambda2=1.0)
-
-        # Joint result (one group)
-        scop_states = {
-            0: {
-                "B_scop": B_scop,
-                "S_scop": S_scop,
-                "beta_scop": beta_scop.copy(),
-                "reparam": reparam,
-                "bin_idx": None,
-                "group_sl": slice(0, q_eff),
-                "group_name": "x",
-            }
-        }
-        groups = self._make_mock_groups(scop_states)
-        joint_results = scop_joint_newton_step(scop_states, W, z, {"x": 1.0}, groups)
-
-        np.testing.assert_allclose(joint_results[0].beta_new, result_single.beta_new, rtol=1e-8)
-        np.testing.assert_allclose(
-            joint_results[0].objective_after, result_single.objective_after, rtol=1e-8
-        )
-
-    def test_fisher_fallback_exports_the_curvature_that_was_actually_solved(self):
-        """An indefinite observed block must not leak into REML after Fisher fallback."""
-        from types import SimpleNamespace
-
-        from superglm.solvers.scop import build_scop_solver_reparam
-        from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
-
-        rng = np.random.default_rng(1801)
-        n, q = 40, 4
-        basis = np.abs(rng.normal(size=(n, q))) + 0.5
-        weights = np.ones(n)
-        beta = np.zeros(q)
-        reparam = build_scop_solver_reparam(q + 1, direction="increasing")
-        penalty = reparam.penalty_matrix()
-        response = basis @ reparam.forward(beta) + 1_000.0
-
-        single = scop_newton_step(
-            basis,
-            weights,
-            response,
-            beta,
-            reparam,
-            penalty,
-            lambda2=1.0,
-        )
-        states = {
-            0: {
-                "B_scop": basis,
-                "S_scop": penalty,
-                "beta_scop": beta,
-                "reparam": reparam,
-                "bin_idx": None,
-                "group_sl": slice(0, q),
-                "group_name": "x",
-            }
-        }
-        joint = scop_joint_newton_step(
-            states,
-            weights,
-            response,
-            {"x": 1.0},
-            [SimpleNamespace(name="x", sl=slice(0, q))],
-        )[0]
-
-        for result in (single, joint):
-            assert result.used_fisher_fallback is True
-            assert np.linalg.eigvalsh(result.H_penalized).min() > 0.0
-
-    def test_single_group_discretized_matches(self):
-        """Joint step with one discretized group matches sequential."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
-
-        rng = np.random.default_rng(77)
-        q_eff = 6
-        n = 200
-        n_bins = 40
-
-        from superglm.solvers.scop import build_scop_solver_reparam
-
-        reparam = build_scop_solver_reparam(q_eff + 1, direction="increasing")
-        B_scop = rng.standard_normal((n_bins, q_eff))
-        W = np.abs(rng.standard_normal(n)) + 0.1
-        beta_scop = rng.standard_normal(q_eff) * 0.3
-        bin_idx = rng.integers(0, n_bins, size=n)
-        gamma = reparam.forward(beta_scop)
-        z = (B_scop @ gamma)[bin_idx] + rng.standard_normal(n) * 0.1
-        S_scop = reparam.penalty_matrix()
-
-        result_single = scop_newton_step(
-            B_scop, W, z, beta_scop, reparam, S_scop, lambda2=1.0, bin_idx=bin_idx
-        )
-
-        scop_states = {
-            0: {
-                "B_scop": B_scop,
-                "S_scop": S_scop,
-                "beta_scop": beta_scop.copy(),
-                "reparam": reparam,
-                "bin_idx": bin_idx,
-                "group_sl": slice(0, q_eff),
-                "group_name": "x",
-            }
-        }
-        groups = self._make_mock_groups(scop_states)
-        joint_results = scop_joint_newton_step(scop_states, W, z, {"x": 1.0}, groups)
-
-        np.testing.assert_allclose(joint_results[0].beta_new, result_single.beta_new, rtol=1e-8)
-        np.testing.assert_allclose(
-            joint_results[0].objective_after, result_single.objective_after, rtol=1e-8
-        )
-
-    def test_joint_gradient_finite_differences(self):
-        """Joint gradient should match centered finite differences."""
-        from tests._scop_objective import safe_joint_objective
-
-        scop_states, W, z = self._build_two_group_inputs()
-        scop_items = sorted(scop_states.items())
-
-        # Build slices and lambdas
-        lambdas_list = [1.0, 0.5]
-        q_effs = [len(st["beta_scop"]) for _, st in scop_items]
-        slices = []
-        off = 0
-        for q in q_effs:
-            slices.append(slice(off, off + q))
-            off += q
-        q_total = off
-
-        beta_joint = np.concatenate([st["beta_scop"] for _, st in scop_items])
-
-        # Compute gradient analytically (same as in scop_joint_newton_step)
-        # Re-derive: forward map, shared residual, per-group grad
-        j_diags = []
-        etas = []
-        for gi, st in scop_items:
-            gamma_i = st["reparam"].forward(st["beta_scop"])
-            j_diags.append(gamma_i)
-            eta_i = st["B_scop"] @ gamma_i
-            if st["bin_idx"] is not None:
-                eta_i = eta_i[st["bin_idx"]]
-            etas.append(eta_i)
-
-        total_eta = sum(etas)
-        residual = z - total_eta
-
-        grad = np.zeros(q_total)
-        for idx, (gi, st) in enumerate(scop_items):
-            sl_i = slices[idx]
-            B_i = st["B_scop"]
-            bi_i = st["bin_idx"]
-            j_i = j_diags[idx]
-            lam_i = lambdas_list[idx]
-            beta_i = beta_joint[sl_i]
-
-            if bi_i is not None:
-                n_bins = B_i.shape[0]
-                Wr_agg = np.bincount(bi_i, weights=W * residual, minlength=n_bins)
-                r_eff_i = B_i.T @ Wr_agg
-            else:
-                r_eff_i = B_i.T @ (W * residual)
-
-            grad_data_i = -(j_i * r_eff_i)
-            grad[sl_i] = grad_data_i + lam_i * (st["S_scop"] @ beta_i)
-
-        # Finite difference gradient
-        eps = 1e-5
-        grad_fd = np.zeros(q_total)
-        for k in range(q_total):
-            bp = beta_joint.copy()
-            bm = beta_joint.copy()
-            bp[k] += eps
-            bm[k] -= eps
-            fp = safe_joint_objective(scop_items, W, z, bp, slices, lambdas_list)
-            fm = safe_joint_objective(scop_items, W, z, bm, slices, lambdas_list)
-            grad_fd[k] = (fp - fm) / (2 * eps)
-
-        np.testing.assert_allclose(grad, grad_fd, atol=1e-4)
+class TestSCOPCrossGram:
+    """Cross-group weighted Grams of two SCOP groups."""
 
     def test_cross_gram_disc_disc(self):
         """Cross-gram for two discretized groups matches naive matmul."""
@@ -7513,10 +6835,7 @@ class TestJointSCOPNewton:
         bi2 = rng.integers(0, nb2, size=n)
         W = np.abs(rng.standard_normal(n)) + 0.1
 
-        st_i = {"B_scop": B1, "bin_idx": bi1}
-        st_j = {"B_scop": B2, "bin_idx": bi2}
-
-        result = _compute_cross_gram(st_i, st_j, W)
+        result = _compute_cross_gram(B1, bi1, B2, bi2, W)
 
         # Naive: scatter to observation level
         B1_full = B1[bi1]
@@ -7524,98 +6843,6 @@ class TestJointSCOPNewton:
         expected = B1_full.T @ (B2_full * W[:, None])
 
         np.testing.assert_allclose(result, expected, rtol=1e-10)
-
-    def test_discretized_joint_objective_cache_matches_observation_objective(self):
-        """Cached discretized objective must match the observation-level oracle."""
-        from superglm.solvers.scop_newton import (
-            _build_joint_objective_cache,
-            _joint_objective_from_gammas,
-            _safe_joint_trial_objective_delta,
-        )
-        from tests._scop_objective import safe_joint_objective
-
-        scop_states, W, z = self._build_two_group_inputs(discretized=True)
-        scop_items = sorted(scop_states.items())
-        betas = [st["beta_scop"] for _, st in scop_items]
-        beta_joint = np.concatenate(betas)
-        slices = []
-        offset = 0
-        for beta_i in betas:
-            slices.append(slice(offset, offset + len(beta_i)))
-            offset += len(beta_i)
-        lambdas_list = [1.0, 0.5]
-
-        cache = _build_joint_objective_cache(scop_items, W, z)
-        assert cache is not None
-
-        gammas = []
-        for _, st in scop_items:
-            gamma = st["reparam"].forward(st["beta_scop"])
-            gammas.append(gamma)
-        cache.diag_btwb = []
-        cache.cross_btwb = {}
-        for idx, (_, st) in enumerate(scop_items):
-            B = st["B_scop"]
-            bin_idx = st["bin_idx"]
-            w_agg = np.bincount(bin_idx, weights=W, minlength=B.shape[0])
-            cache.diag_btwb.append(B.T @ (B * w_agg[:, None]))
-        for left in range(len(scop_items)):
-            st_left = scop_items[left][1]
-            for right in range(left + 1, len(scop_items)):
-                st_right = scop_items[right][1]
-                w_2d = np.zeros((st_left["B_scop"].shape[0], st_right["B_scop"].shape[0]))
-                np.add.at(w_2d, (st_left["bin_idx"], st_right["bin_idx"]), W)
-                cache.cross_btwb[(left, right)] = st_left["B_scop"].T @ w_2d @ st_right["B_scop"]
-
-        obj_cached = _joint_objective_from_gammas(
-            gammas,
-            beta_joint,
-            slices,
-            lambdas_list,
-            scop_items,
-            cache,
-        )
-        obj_oracle = safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
-
-        np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
-
-        total_eta = np.zeros_like(z)
-        for gamma, (_, state) in zip(gammas, scop_items, strict=True):
-            eta = state["B_scop"] @ gamma
-            total_eta += eta[state["bin_idx"]]
-        residual = z - total_eta
-        projected_residuals = []
-        for _, state in scop_items:
-            weighted_residual = np.bincount(
-                state["bin_idx"],
-                weights=W * residual,
-                minlength=state["B_scop"].shape[0],
-            )
-            projected_residuals.append(state["B_scop"].T @ weighted_residual)
-
-        beta_trial = beta_joint + np.linspace(-0.03, 0.02, beta_joint.size)
-        gammas_trial = [
-            state["reparam"].forward(beta_trial[group_slice])
-            for (_, state), group_slice in zip(scop_items, slices, strict=True)
-        ]
-        obj_trial = _joint_objective_from_gammas(
-            gammas_trial,
-            beta_trial,
-            slices,
-            lambdas_list,
-            scop_items,
-            cache,
-        )
-        stable_delta = _safe_joint_trial_objective_delta(
-            scop_items,
-            beta_trial,
-            slices,
-            lambdas_list,
-            gammas,
-            projected_residuals,
-            cache,
-        )
-        assert stable_delta == pytest.approx(obj_trial - obj_cached, rel=1e-10, abs=1e-11)
 
     def test_cross_gram_dense_dense(self):
         """Cross-gram for two dense groups matches naive matmul."""
@@ -7629,10 +6856,7 @@ class TestJointSCOPNewton:
         B2 = rng.standard_normal((n, q2))
         W = np.abs(rng.standard_normal(n)) + 0.1
 
-        st_i = {"B_scop": B1, "bin_idx": None}
-        st_j = {"B_scop": B2, "bin_idx": None}
-
-        result = _compute_cross_gram(st_i, st_j, W)
+        result = _compute_cross_gram(B1, None, B2, None, W)
         expected = B1.T @ (B2 * W[:, None])
 
         np.testing.assert_allclose(result, expected, rtol=1e-10)
@@ -7651,10 +6875,7 @@ class TestJointSCOPNewton:
         bi1 = rng.integers(0, nb1, size=n)
         W = np.abs(rng.standard_normal(n)) + 0.1
 
-        st_i = {"B_scop": B1, "bin_idx": bi1}
-        st_j = {"B_scop": B2, "bin_idx": None}
-
-        result = _compute_cross_gram(st_i, st_j, W)
+        result = _compute_cross_gram(B1, bi1, B2, None, W)
 
         # Naive
         B1_full = B1[bi1]
@@ -7663,134 +6884,10 @@ class TestJointSCOPNewton:
         np.testing.assert_allclose(result, expected, rtol=1e-10)
 
         # Also test the reverse (dense, disc)
-        st_i2 = {"B_scop": B2, "bin_idx": None}
-        st_j2 = {"B_scop": B1, "bin_idx": bi1}
-        result2 = _compute_cross_gram(st_i2, st_j2, W)
+        result2 = _compute_cross_gram(B2, None, B1, bi1, W)
         expected2 = B2.T @ (B1_full * W[:, None])
 
         np.testing.assert_allclose(result2, expected2, rtol=1e-10)
-
-    def test_joint_step_reduces_objective(self):
-        """Joint Newton step should reduce objective for all groups."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step
-
-        scop_states, W, z = self._build_two_group_inputs()
-        groups = self._make_mock_groups(scop_states)
-
-        joint_results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
-
-        # Check that at least one group has obj_after <= obj_before
-        # (joint step shares the objective, so all should agree)
-        for gi, result in joint_results.items():
-            assert result.objective_after <= result.objective_before + 1e-14
-            assert np.all(np.isfinite(result.beta_new))
-
-    def test_joint_step_reduces_objective_discretized(self):
-        """Joint step reduces objective for discretized two-group problem."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step
-
-        scop_states, W, z = self._build_two_group_inputs(discretized=True)
-        groups = self._make_mock_groups(scop_states)
-
-        joint_results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
-
-        for gi, result in joint_results.items():
-            assert result.objective_after <= result.objective_before + 1e-14
-            assert np.all(np.isfinite(result.beta_new))
-
-    def test_h_penalized_is_diagonal_block(self):
-        """H_penalized for each group is the diagonal block of the joint H."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step
-
-        scop_states, W, z = self._build_two_group_inputs()
-        groups = self._make_mock_groups(scop_states)
-
-        joint_results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
-
-        for gi, result in joint_results.items():
-            q_i = len(scop_states[gi]["beta_scop"])
-            assert result.H_penalized.shape == (q_i, q_i)
-            # H_penalized should be finite
-            assert np.all(np.isfinite(result.H_penalized))
-
-    def test_scalar_lambda(self):
-        """Joint step works with scalar lambda (not dict)."""
-        from superglm.solvers.scop_newton import scop_joint_newton_step
-
-        scop_states, W, z = self._build_two_group_inputs()
-        groups = self._make_mock_groups(scop_states)
-
-        # Scalar lambda
-        joint_results = scop_joint_newton_step(scop_states, W, z, 1.0, groups)
-
-        for gi, result in joint_results.items():
-            assert result.objective_after <= result.objective_before + 1e-14
-            assert np.all(np.isfinite(result.beta_new))
-
-    def test_minres_matches_direct_on_two_group_problem(self):
-        """Iterative MINRES prototype should match direct solve closely."""
-        from superglm.solvers.scop_newton import (
-            configure_scop_prototype,
-            reset_scop_prototype,
-            scop_joint_newton_step,
-        )
-
-        scop_states, W, z = self._build_two_group_inputs()
-        groups = self._make_mock_groups(scop_states)
-
-        try:
-            reset_scop_prototype()
-            direct_results = scop_joint_newton_step(
-                scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups
-            )
-
-            configure_scop_prototype(
-                solve_mode="minres",
-                iterative_q_total_min=1,
-                iterative_rtol=1e-12,
-                iterative_maxiter=200,
-            )
-            iter_results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
-        finally:
-            reset_scop_prototype()
-
-        for gi in direct_results:
-            np.testing.assert_allclose(
-                iter_results[gi].beta_new,
-                direct_results[gi].beta_new,
-                rtol=1e-8,
-                atol=1e-10,
-            )
-            np.testing.assert_allclose(
-                iter_results[gi].objective_after,
-                direct_results[gi].objective_after,
-                rtol=1e-10,
-                atol=1e-12,
-            )
-            assert iter_results[gi].linear_solver == "minres"
-            assert iter_results[gi].linear_iterations > 0
-
-    def test_cross_block_truncation_keeps_objective_finite(self):
-        """Prototype cross-block dropping still returns a usable step."""
-        from superglm.solvers.scop_newton import (
-            configure_scop_prototype,
-            reset_scop_prototype,
-            scop_joint_newton_step,
-        )
-
-        scop_states, W, z = self._build_two_group_inputs()
-        groups = self._make_mock_groups(scop_states)
-
-        try:
-            configure_scop_prototype(cross_block_rel_tol=10.0)
-            results = scop_joint_newton_step(scop_states, W, z, {"x1": 1.0, "x2": 0.5}, groups)
-        finally:
-            reset_scop_prototype()
-
-        for result in results.values():
-            assert np.isfinite(result.objective_after)
-            assert result.objective_after <= result.objective_before + 1e-8
-            assert result.dropped_cross_blocks >= 1
 
 
 def _convex_beside_cr_fixture():

@@ -379,7 +379,6 @@ def test_scop_and_non_gamma_do_not_populate_the_payload():
         intercept_init=0.0,
         max_iter=1,
         S_override=np.zeros((1, 1)),
-        _scop_joint=False,
         scop_state_init={0: {"beta_eff": np.zeros(1), "S_scop": np.zeros((1, 1))}},
         _compute_scop_postfit_inference=False,
         weight_semantics="frequency",
