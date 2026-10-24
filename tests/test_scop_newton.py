@@ -1111,3 +1111,37 @@ def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
 
     assert len(fits) > len(runs) > 0
     assert len(builds) == len(runs)
+
+
+def test_an_ordinary_column_within_sqrt_eps_of_a_scop_slope_is_held_not_chased():
+    """x + 1e-9 v beside a convex spline of x: their split is below the Pya-Wood cut, so it is held.
+
+    The rows resolve the pair above their rounding (3.5e-9 of its column
+    scale), so the step chased the split between x and the spline's free
+    slope: 3.5e6 along it, cancelling against the ordinary correction, until
+    the line search refused the fit after four iterations, its deviance 1.8%
+    above the block-coordinate fit's. Below sqrt(eps) of its scale the
+    split is the ordinary design's (``_resolved_root``), and the fit is the
+    spline's alone.
+    """
+    from superglm import Numeric, PSpline
+
+    rng = np.random.default_rng(31)
+    n = 2000
+    x = rng.uniform(0, 1, n)
+    y = 0.2 + 2.2 * x + 0.6 * x * x + 0.1 * rng.normal(size=n)
+    frame = pd.DataFrame({"x": x + 1e-9 * rng.normal(size=n), "s": x})
+
+    def fit(features):
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, tol=1e-12, features=features)
+        model.fit(frame, y)
+        return model
+
+    convex = PSpline(n_knots=8, constraint=Constraint.fit.convex)
+    near, alone = fit({"x": Numeric(), "s": convex}), fit({"s": convex})
+
+    assert near.result.converged
+    # two modes of one model, each stopped within sqrt(r eps) (the certificate's bar)
+    bar = 2 * np.sqrt((alone.result.beta.size + 2) * 2 * UNIT)
+    mu, alone_mu = near.predict(frame), alone.predict(frame)
+    assert np.max(np.abs(mu - alone_mu) / np.abs(alone_mu)) <= bar

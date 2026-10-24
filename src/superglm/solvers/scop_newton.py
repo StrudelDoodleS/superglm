@@ -24,7 +24,8 @@ convergence problems for these models, so ``E`` is kept unless the reduced
 block is then not positive definite, when that iteration takes the
 Gauss-Newton block instead. The Schur block's data part comes from its Grams
 when their rounding resolves every direction, and otherwise from a factor of
-its rows, where a direction the rows cannot tell from zero gets no curvature
+its rows, where a direction the rows cannot tell from zero, or resolve only
+within ``sqrt(eps)`` of its scale from the ordinary design, gets no curvature
 (``_resolved_root``). Directions the block cannot resolve are truncated at
 ``sqrt(eps)`` of its largest singular value (§3.2).
 """
@@ -319,11 +320,21 @@ def _resolved_root(
     exact value: a factor squares no condition number, so its error in
     ``g``-scaled singular values is ``gamma_count sqrt(q)`` (Weyl), not the
     square root of the Gram's. A direction at or below that is one the rows
-    cannot tell from zero: it gets no data curvature, and ``score``, whose
-    component there is rounding (``|s_v| <= sigma_v ||r||_W``), loses it,
-    so the penalty alone decides the step along it. Every other direction
-    keeps its curvature and its score; whether the step can resolve it is
-    the factor cut's decision (``_truncated_factor_step``).
+    cannot tell from zero, and one at or below ``sqrt(eps)`` is the ordinary
+    design's to the precision Pya & Wood resolve (§3.2): their cut on the
+    joint factor's singular values, here in units where every column has its
+    scale ``g`` (van der Sluis equilibration), so that it does not depend on
+    how the ordinary columns are scaled. ``x + 1e-9 v`` beside a convex
+    spline of ``x`` is the case: its rows resolve the pair at ``3.5e-9``,
+    and the step went ``3.5e6`` along it, cancelling against the ordinary
+    correction, until the line search refused the fit. Neither direction
+    gets data curvature, and ``score``, whose component there is rounding
+    or below the cut (``|s_v| <= sigma_v ||r||_W``), loses it, so the
+    penalty alone decides the step along it. Every other direction keeps
+    its curvature and its score; whether the step can resolve it is the
+    factor cut's decision (``_truncated_factor_step``). On the Gram's route
+    every eigenvalue clears ``4 gamma_count q``, above ``eps`` for any
+    ``count``, so the cut never binds there.
     """
     q = gram.shape[0]
     norms = np.where(scale > 0.0, scale, 1.0)
@@ -339,7 +350,7 @@ def _resolved_root(
         _, singular, right = np.linalg.svd(factor / norms[None, :])
         singular = np.concatenate((singular, np.zeros(q - singular.size)))
         vectors = right.T
-        resolved = singular > _gamma_up(count) * math.sqrt(q)
+        resolved = singular > max(_gamma_up(count) * math.sqrt(q), _SQRT_EPS)
     kept = vectors[:, resolved]
     root = singular[resolved][:, None] * kept.T * norms[None, :]
     return root, norms * (kept @ (kept.T @ (score / norms)))
