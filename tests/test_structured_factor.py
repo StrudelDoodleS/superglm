@@ -128,10 +128,19 @@ def test_a_non_finite_low_rank_part_is_refused_as_curvature(part, bad) -> None:
 
 def test_structured_solver_module_exists():
     assert importlib.util.find_spec("superglm.solvers.structured") is not None
+    structured = import_module("superglm.solvers.structured")
+    assert callable(structured.build_structured_system)
+    assert callable(structured.build_augmented_structured_factor)
 
 
 def test_hessian_factor_module_exists():
     assert importlib.util.find_spec("superglm.solvers.hessian_factor") is not None
+    hessian_factor = import_module("superglm.solvers.hessian_factor")
+    inverse = np.eye(3)
+    factor = hessian_factor.as_hessian_factor(inverse)
+    assert isinstance(factor, hessian_factor.DenseHessianFactor)
+    assert isinstance(factor, hessian_factor.HessianFactor)
+    assert factor.shape == (3, 3)
 
 
 def test_dense_hessian_factor_and_protocol_are_available():

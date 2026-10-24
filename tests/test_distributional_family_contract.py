@@ -284,7 +284,9 @@ class _ExplodingFeature:
     ],
 )
 def test_family_contract_module_declares_explicit_extension_boundaries(name: str) -> None:
-    assert getattr(family_contracts, name, None) is not None
+    declared = getattr(family_contracts, name)
+    # Declared in the contract module itself, not re-exported from elsewhere.
+    assert declared.__module__ == family_contracts.__name__
 
 
 def test_public_package_exports_complete_fit_and_plan_validation_protocols() -> None:

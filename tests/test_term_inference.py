@@ -117,7 +117,10 @@ class TestTermInferenceSpline:
 
     def test_smoothing_lambda_present(self, fitted_model):
         ti = fitted_model.term_inference("age")
-        assert ti.smoothing_lambda is not None
+        # One penalized spline block: a single positive, finite smoothing parameter.
+        assert isinstance(ti.smoothing_lambda, float)
+        assert np.isfinite(ti.smoothing_lambda)
+        assert ti.smoothing_lambda > 0
 
     def test_absorbs_intercept(self, fitted_model):
         ti = fitted_model.term_inference("age")
@@ -205,8 +208,10 @@ class TestTermInferenceCategorical:
 
     def test_ci_present(self, fitted_model):
         ti = fitted_model.term_inference("region")
-        assert ti.ci_lower is not None
-        assert ti.ci_upper is not None
+        # One pointwise interval per level, on the relativity scale, enclosing its estimate.
+        assert ti.ci_lower.shape == ti.ci_upper.shape == ti.relativity.shape
+        assert np.all(ti.ci_lower <= ti.relativity)
+        assert np.all(ti.relativity <= ti.ci_upper)
 
     def test_x_is_none(self, fitted_model):
         ti = fitted_model.term_inference("region")

@@ -391,7 +391,8 @@ class TestSklearnShorthand:
         X, y, _ = sample_data
         model = SuperGLMRegressor(penalty="group_lasso", selection_penalty=0.01)
         model.fit(X, y)
-        assert model.coef_ is not None
+        assert type(model._model.penalty) is GroupLasso
+        assert model._model.penalty.lambda1 == 0.01
 
     def test_string_ridge(self, sample_data):
         X, y, _ = sample_data
@@ -410,7 +411,8 @@ class TestSklearnShorthand:
             n_knots=10,
         )
         model.fit(X, y)
-        assert model.coef_ is not None
+        assert type(model._model.penalty) is SparseGroupLasso
+        assert model._model.penalty.lambda1 == 0.01
 
     def test_object_penalty(self, sample_data):
         X, y, sample_weight = sample_data
@@ -420,7 +422,9 @@ class TestSklearnShorthand:
             n_knots=10,
         )
         model.fit(X, y, sample_weight=sample_weight)
-        assert model.coef_ is not None
+        assert type(model._model.penalty) is GroupLasso
+        assert model._model.penalty.lambda1 == 0.01
+        assert isinstance(model._model.penalty.flavor, Adaptive)
 
     def test_string_group_elastic_net(self, sample_data):
         X, y, _ = sample_data
@@ -431,7 +435,8 @@ class TestSklearnShorthand:
             n_knots=10,
         )
         model.fit(X, y)
-        assert model.coef_ is not None
+        assert type(model._model.penalty) is GroupElasticNet
+        assert model._model.penalty.lambda1 == 0.01
 
     def test_unknown_string_raises(self):
         with pytest.raises(ValueError, match="Unknown penalty"):

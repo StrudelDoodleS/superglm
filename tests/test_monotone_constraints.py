@@ -22,10 +22,14 @@ class TestBSplineSmoothMonotoneConstraints:
         assert info.monotone_engine == "qp"
 
     def test_monotone_decreasing_builds(self):
-        s = BSplineSmooth(n_knots=8, constraint=Constraint.fit.decreasing)
+        increasing = BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)
+        decreasing = BSplineSmooth(n_knots=8, constraint=Constraint.fit.decreasing)
         x = np.linspace(0, 1, 200)
-        info = s.build(x)
-        assert info.constraints is not None
+        info = decreasing.build(x)
+        assert info.monotone_engine == "qp"
+        # Decreasing is the increasing cone reflected: the same rows with the sign flipped.
+        np.testing.assert_array_equal(info.constraints.A, -increasing.build(x).constraints.A)
+        np.testing.assert_array_equal(info.constraints.b, increasing.build(x).constraints.b)
 
     def test_no_monotone_no_constraints(self):
         s = BSplineSmooth(n_knots=8)

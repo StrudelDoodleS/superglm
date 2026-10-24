@@ -372,10 +372,12 @@ class TestCollapseLevels:
 
     def test_exports(self):
         """T-D7 (partial): LevelGrouping and collapse_levels importable from superglm."""
+        import superglm
         from superglm import collapse_levels as cl
 
-        assert LevelGrouping is not None
-        assert cl is not None
+        assert cl is collapse_levels
+        assert superglm.LevelGrouping is LevelGrouping
+        assert isinstance(cl(["A", "B"], groups={"G": ["A"]}), LevelGrouping)
 
 
 class TestOrderedCategoricalGrouping:
@@ -490,6 +492,8 @@ class TestCategoricalGrouping:
 class TestGroupingPlot:
     def test_plot_with_grouping(self, sample_data):
         """T-D10: Plot with grouping produces figure without error."""
+        import plotly.graph_objects as go
+
         X, y, sw, midpoints = sample_data
         g = collapse_levels(
             X["age_band"],
@@ -506,4 +510,5 @@ class TestGroupingPlot:
         )
         model.fit(X, y, sample_weight=sw)
         fig = model.plot(engine="plotly", X=X, sample_weight=sw)
-        assert fig is not None
+        assert isinstance(fig, go.Figure)
+        assert len(fig.data) > 0

@@ -1074,13 +1074,8 @@ def test_compact_shape_penalty_quadratic_matches_dense_component_algebra():
     )
 
 
-@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
-def test_structured_postfit_shape_repair_uses_compact_penalties(
-    structured_kind: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from superglm.reml import penalty_algebra, penalty_support
-
+def _structured_shape_model(structured_kind: str):
+    """A REML fit with a post-fit increasing spline beside a structured (re, fs or sz) term."""
     rng = np.random.default_rng(20260727)
     n_levels = 36
     repeats = 8
@@ -1134,6 +1129,17 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         max_reml_iter=2,
         runtime_validation="skip",
     )
+    return model, X
+
+
+@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+def test_structured_postfit_shape_repair_uses_compact_penalties(
+    structured_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from superglm.reml import penalty_algebra, penalty_support
+
+    model, X = _structured_shape_model(structured_kind)
     x_groups = [group for group in model._groups if group.feature_name == "x"]
     beta_before = np.concatenate([model.result.beta[group.sl] for group in x_groups])
     revision_before = model._fit_revision
@@ -1199,14 +1205,38 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         penalty_algebra.penalty_component_dense_matrix(compact)
 
 
-@pytest.mark.parametrize("spline_penalty", [0.0, 0.5])
-def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
-    monkeypatch,
-    spline_penalty,
-):
-    """Publication merit must scale with penalty blocks, not total model width squared."""
+@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+def test_expanding_a_structured_penalty_inside_the_repair_reaches_the_guard(
+    structured_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for the guard in the test above: a repair that did expand would fail.
+
+    The repair's merit evaluation is replaced by one that expands a structured component through
+    the module-level name the guard patches; the refusal has to come out of
+    ``apply_shape_postfit`` rather than be absorbed on the way.
+    """
     from superglm.reml import penalty_algebra
 
+    model, X = _structured_shape_model(structured_kind)
+    structured = next(c for c in model._reml_penalties if c.penalty_kind != "dense")
+
+    def reject_dense_component(component, *args, **kwargs):
+        if component.penalty_kind != "dense":
+            raise AssertionError("post-fit repair expanded a structured penalty component")
+        raise AssertionError("unexpected dense component")
+
+    def merit_that_expands(beta, terms):
+        return penalty_algebra.penalty_component_dense_matrix(structured)
+
+    monkeypatch.setattr(penalty_algebra, "penalty_component_dense_matrix", reject_dense_component)
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_expands)
+
+    with pytest.raises(AssertionError, match="expanded a structured penalty"):
+        model.apply_shape_postfit(X, n_grid=120)
+
+
+def _wide_postfit_model(spline_penalty):
     rng = np.random.default_rng(20260725)
     n = 130
     x = np.linspace(0.0, 1.0, n)
@@ -1223,6 +1253,18 @@ def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
         features=features,
     ).fit(X, y)
     assert model._dm.p > 90
+    return model, X
+
+
+@pytest.mark.parametrize("spline_penalty", [0.0, 0.5])
+def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
+    monkeypatch,
+    spline_penalty,
+):
+    """Publication merit must scale with penalty blocks, not total model width squared."""
+    from superglm.reml import penalty_algebra
+
+    model, X = _wide_postfit_model(spline_penalty)
 
     def reject_global_penalty(*args, **kwargs):
         raise AssertionError("shape repair requested a global dense p-by-p penalty")
@@ -1232,6 +1274,32 @@ def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
     model.apply_shape_postfit(X, n_grid=80)
 
     assert np.all(np.isfinite(model.result.beta))
+
+
+def test_a_global_penalty_request_inside_the_repair_reaches_the_guard(monkeypatch):
+    """Positive control: were the repair to ask for the global penalty, the guard would fire.
+
+    The repair's merit evaluation is replaced by one that builds the global penalty through
+    the same name the guard above patches; the refusal must come out of ``apply_shape_postfit``
+    rather than be swallowed on the way (the fitted-state transaction catches and re-raises).
+    """
+    from superglm.reml import penalty_algebra
+
+    model, X = _wide_postfit_model(0.5)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    def merit_that_builds_the_global_penalty(beta, terms):
+        return penalty_algebra.build_penalty_matrix(
+            model._dm.group_matrices, model._groups, 1.0, model._dm.p
+        )
+
+    monkeypatch.setattr(penalty_algebra, "build_penalty_matrix", reject_global_penalty)
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_builds_the_global_penalty)
+
+    with pytest.raises(AssertionError, match="global dense p-by-p penalty"):
+        model.apply_shape_postfit(X, n_grid=80)
 
 
 def test_degree_zero_monotone_postfit_certifies_and_repairs_knot_jumps():

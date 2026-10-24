@@ -5634,7 +5634,9 @@ class TestIterationDiagnosticsSmallSample:
             features={"x": PSpline(n_knots=4, penalty="ssp", constraint=Constraint.fit.increasing)},
         )
         model.fit_reml(frame, response, max_reml_iter=2)
-        assert model.result.beta is not None
+        assert model.result.beta.shape == (model._dm.p,)
+        assert np.all(np.isfinite(model.result.beta))
+        assert np.all(np.isfinite(model.predict(frame)))
 
     def test_debug_weights_survives_small_samples(self):
         """Exercises the helper, not a copy of it.

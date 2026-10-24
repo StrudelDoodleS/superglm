@@ -16,7 +16,7 @@ def test_unadmitted_and_explicit_requests_keep_existing_resolution(monkeypatch, 
     def forbidden(*args, **kwargs):
         pytest.fail("unadmitted or explicit request attempted global batch growth")
 
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden, raising=False)
+    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden)
     expected = (
         None
         if requested is None
@@ -37,7 +37,7 @@ def test_explicit_request_stays_explicit_even_when_global_is_admitted(monkeypatc
     def forbidden(*args, **kwargs):
         pytest.fail("explicit request attempted global batch growth")
 
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden, raising=False)
+    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden)
     assert chunks._resolve_fitting_chunk_size(family, layout, plan, 7) == 7
 
 
@@ -54,7 +54,7 @@ def test_admitted_auto_resolution_reaches_every_phase_and_reuse_certificate(monk
         selections.append(17)
         return 17
 
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", select, raising=False)
+    monkeypatch.setattr(chunks, "global_moment_chunk_size", select)
     penalty = np.eye(layout.n_coefficients)
     kwargs = dict(coefficient_curvature="observed", coefficient_face=None)
     context = solver._validated_context(

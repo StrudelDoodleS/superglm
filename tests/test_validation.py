@@ -70,7 +70,8 @@ class TestLiftChartBasic:
 
     def test_figure_returned(self):
         result = lift_chart([1, 2, 3], [1, 2, 3], n_bins=3)
-        assert result.figure is not None
+        assert isinstance(result.figure, matplotlib.figure.Figure)
+        assert len(result.figure.axes) >= 1
 
 
 # ── T7: lift_chart with sample_weight and exposure ────────────────
@@ -376,7 +377,8 @@ class TestAxParameter:
 
     def test_no_ax_returns_figure(self):
         result = lift_chart([1, 2, 3], [1, 2, 3], n_bins=3)
-        assert result.figure is not None
+        assert isinstance(result.figure, matplotlib.figure.Figure)
+        assert len(result.figure.axes) >= 1
 
     def test_lorenz_ax_parameter(self):
         import matplotlib.pyplot as plt
