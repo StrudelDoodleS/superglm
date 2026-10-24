@@ -7,12 +7,12 @@ import operator
 from collections.abc import Iterator
 
 import numpy as np
-import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
-from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+from superglm.group_matrix import DesignMatrix
+from superglm.solvers.centered_system import grouped_augmented_row_quadratic_forms
 
 # Diagnostic algebra can keep the dense block, a shifted copy, a weighted copy,
 # and matrix-product workspaces live at the same time.  Budget five row-sized
@@ -327,41 +327,6 @@ def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray
         yield start, stop, np.asarray(design.row_subset(rows).toarray(), dtype=np.float64)
 
 
-def iter_row_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray]]:
-    """Yield row blocks for row-local algebra that accepts sparse rows.
-
-    A grouped design yields CSR blocks whose categorical and random-effect
-    groups stay one-hot, bounded by the stored entries per row instead of the
-    design width; other designs yield their bounded dense blocks.
-    """
-    if not isinstance(design, DesignMatrix):
-        yield from iter_dense_chunks(design)
-        return
-    matrices = design.group_matrices
-    stored = sum(1 if isinstance(gm, CategoricalGroupMatrix) else gm.shape[1] for gm in matrices)
-    chunk_rows = _bounded_chunk_rows(algebra_width=stored)
-    for start in range(0, design.n, chunk_rows):
-        stop = min(start + chunk_rows, design.n)
-        blocks = [_row_block(gm, start, stop) for gm in matrices]
-        yield start, stop, scipy.sparse.hstack(blocks, format="csr")
-
-
-def _row_block(gm, start: int, stop: int) -> scipy.sparse.csr_array:
-    """Rows ``start:stop`` of one design block; a one-hot block stays sparse from its codes."""
-    if isinstance(gm, CategoricalGroupMatrix):
-        return _one_hot_rows(gm.codes[start:stop], gm.n_levels)
-    return scipy.sparse.csr_array(gm.row_subset(np.arange(start, stop)).toarray())
-
-
-def _one_hot_rows(codes: NDArray, n_levels: int) -> scipy.sparse.csr_array:
-    """CSR one-hot rows of categorical codes; the base-level sink code stays empty."""
-    present = codes < n_levels
-    return scipy.sparse.csr_array(
-        (np.ones(np.count_nonzero(present)), (np.flatnonzero(present), codes[present])),
-        shape=(len(codes), n_levels),
-    )
-
-
 def quadratic_form_diagonal(
     design: MetricsDesign, matrix: NDArray, *, center: NDArray | None = None
 ) -> NDArray:
@@ -377,17 +342,16 @@ def augmented_row_quadratic_forms(design: MetricsDesign, forms) -> NDArray:
     """Return ``[1, x_i] H_aug^+ [1, x_i]'`` per row from an augmented factor's row forms.
 
     ``forms`` is the augmented factor's ``row_quadratic_forms``, whose first
-    coordinate is the intercept; each row block gains a leading column of
-    ones and keeps its sparse one-hot groups.
+    coordinate is the intercept.  A grouped design keeps its sparse one-hot
+    groups (``centered_system.grouped_augmented_row_quadratic_forms``); any
+    other design's bounded dense blocks gain a leading column of ones.
     """
+    if isinstance(design, DesignMatrix):
+        return grouped_augmented_row_quadratic_forms(design, forms)
     result = np.empty(design.shape[0], dtype=np.float64)
-    for start, stop, block in iter_row_chunks(design):
+    for start, stop, block in iter_dense_chunks(design):
         ones = np.ones((stop - start, 1))
-        if scipy.sparse.issparse(block):
-            rows = scipy.sparse.hstack((scipy.sparse.csr_array(ones), block), format="csr")
-        else:
-            rows = np.hstack((ones, np.asarray(block, dtype=np.float64)))
-        result[start:stop] = forms(rows)
+        result[start:stop] = forms(np.hstack((ones, np.asarray(block, dtype=np.float64))))
     return result
 
 
