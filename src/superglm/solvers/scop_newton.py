@@ -57,6 +57,8 @@ from superglm.group_matrix import (
     MatrixExecutionPlan,
     _disc_disc_2d_hist,
 )
+from superglm.solvers.centered_system import _dense_split
+from superglm.solvers.mode_score import dense_columns
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_exact_support import build_exact_scop_support
 from superglm.types import GroupSlice
@@ -378,31 +380,61 @@ def _compute_cross_gram(
     return rows_i.T @ (rows_j * W[:, None])
 
 
+def _centre_rows(values: NDArray, mass: NDArray, sum_w: float) -> tuple[NDArray, NDArray]:
+    """``values`` less their ``mass``-weighted mean, and that mean.
+
+    The rows are differenced from the heaviest row before the mean of the
+    differences is taken, as ``_anchor_center_support`` centres a support:
+    no row meets the mean's rounding at its own magnitude.
+    """
+    anchor = int(np.argmax(mass))
+    centred = values - values[anchor]
+    shift = (mass @ centred) / sum_w
+    centred -= shift
+    return centred, values[anchor] + shift
+
+
 @dataclass(frozen=True)
 class _SCOPMoments:
     """The SCOP block's weighted moments at one iterate, joint over its groups.
 
-    Moments are in mapped coordinates (``gamma``) and uncentred; ``score``
-    is ``X_s' W r`` for the working residual ``r = z - eta``.
+    Moments are in mapped coordinates (``gamma``). ``gram`` and ``score``
+    are products of columns centred about their weighted means, ``X~_s' W
+    X~_s`` and ``X~_s' W r`` for the working residual ``r = z - eta``; the
+    block's own, uncentred moments follow from them and ``mean``.
     """
 
     gram: NDArray
-    xtw: NDArray
     score: NDArray
-    residual_sum: float
+    mean: NDArray
+    """Each SCOP column's weighted mean."""
+    weighted_sum: NDArray
+    """``X~_s' W 1``: zero but for rounding."""
+    sum_w: float
+    centred: tuple[tuple[NDArray, NDArray | None], ...]
+    """Each group's centred support and its row index (``None``: the rows themselves)."""
     jacobian: NDArray
     pull: NDArray
     """``lambda S theta``, the penalty's gradient."""
+    own_gram: NDArray
+    """The block's own Gram ``X_s' W X_s``, uncentred."""
     gauss_newton: NDArray
-    """The block's Gauss-Newton Hessian ``J G J + lambda S``."""
+    """The block's Gauss-Newton Hessian ``J X_s' W X_s J + lambda S``."""
     curvature: NDArray
-    """The diagonal of the map's curvature ``E = -gamma''(theta) * score``."""
+    """The diagonal of the map's curvature ``E = -gamma''(theta) * X_s' W r``."""
 
     @property
     def finite(self) -> bool:
         return all(
             bool(np.all(np.isfinite(values)))
-            for values in (self.gram, self.score, self.pull, self.gauss_newton, self.curvature)
+            for values in (
+                self.gram,
+                self.score,
+                self.mean,
+                self.pull,
+                self.gauss_newton,
+                self.curvature,
+            )
         )
 
 
@@ -464,15 +496,18 @@ def _compact_layout(design: DesignMatrix, rows: Sequence[int]) -> _CompactLayout
 
 
 class _JointWeightCross:
-    """``X_r' W X_s`` from each ordinary group's weight table against the SCOP bins.
+    """``X~_r' W X~_s`` from each ordinary group's weight table against the SCOP bins.
 
-    Every group of a discretized reduced design is a compact support, its rows
+    Every group of a discretized design is a compact support, its rows
     ``values[codes] @ transform`` (``_compact_support``), and a binned SCOP
     group's columns are ``basis[bins]``, so group ``g``'s cross block is
-    ``transform' values' H_g basis`` with ``H_g`` the weight table of
-    ``(codes_g, bins)``: the anchor-support route's algebra on raw supports.
-    One row pass forms every ``H_g``, reading the weights and the SCOP bins
-    once rather than once per group.
+    ``transform' values~' H_g basis~`` with ``H_g`` the weight table of
+    ``(codes_g, bins)`` and both supports centred about their weighted means
+    before any product: the anchor-support route's algebra
+    (``_anchor_support_gram_rhs``). The table's row sums are the support's
+    weights, so centring costs no pass over the rows. One row pass forms
+    every ``H_g``, reading the weights and the SCOP bins once rather than once
+    per group.
 
     Sizes are read from the groups' metadata before anything is allocated
     (``_compact_support_rows``, as ``_compact_supports_fit``): a design with a
@@ -480,46 +515,143 @@ class _JointWeightCross:
     or packed codes past the package's 64 MiB byte budget is not built here.
     """
 
-    def __init__(self, layout: _CompactLayout, columns) -> None:
+    def __init__(self, layout: _CompactLayout) -> None:
         self.layout = layout
-        self.columns = tuple(columns)
 
     @classmethod
     def build(
-        cls, reduced_design: DesignMatrix, columns: Sequence[tuple[NDArray, NDArray | None]]
+        cls, design: DesignMatrix, columns: Sequence[tuple[NDArray, NDArray | None]]
     ) -> _JointWeightCross | None:
         if any(bins is None for _, bins in columns):
             return None
-        rows = [_compact_support_rows(gm) for gm in reduced_design.group_matrices]
+        rows = [_compact_support_rows(gm) for gm in design.group_matrices]
         widest = max(basis.shape[0] for basis, _ in columns)
         if (
             any(count is None for count in rows)
             or sum(rows) * widest > _MAX_PACKED_HIST_CELLS
-            or 4 * reduced_design.n * len(rows) > _MAX_CROSS_EXPANSION_BYTES
+            or 4 * design.n * len(rows) > _MAX_CROSS_EXPANSION_BYTES
         ):
             return None
-        layout = _compact_layout(reduced_design, rows)
-        return None if layout is None else cls(layout, columns)
+        layout = _compact_layout(design, rows)
+        return None if layout is None else cls(layout)
 
-    def cross_moment(self, W: NDArray) -> NDArray:
+    def cross_moment(
+        self, W: NDArray, scop: Sequence[tuple[NDArray, NDArray]], sum_w: float
+    ) -> NDArray:
+        """The centred cross block against ``scop``, each group's centred support and bins."""
         layout = self.layout
-        q = sum(basis.shape[1] for basis, _ in self.columns)
-        cross = np.zeros((int(layout.starts[-1]), q))
+        cross = np.zeros((int(layout.starts[-1]), sum(basis.shape[1] for basis, _ in scop)))
+        supports = None
         column = 0
-        for basis, bins in self.columns:
+        for basis, bins in scop:
             n_scop = basis.shape[0]
             edges = layout.bounds * n_scop
             table = _joint_weight_tables(layout.codes, edges[:-1], bins, n_scop, W, int(edges[-1]))
+            if supports is None:
+                supports = [
+                    _centred_support(values, table[a:b].reshape(-1, n_scop).sum(axis=1), sum_w)
+                    for (values, _), a, b in zip(
+                        layout.supports, edges[:-1], edges[1:], strict=True
+                    )
+                ]
             block = slice(column, column + basis.shape[1])
-            for g, (values, transform) in enumerate(layout.supports):
+            for g, ((values, transform), support) in enumerate(
+                zip(layout.supports, supports, strict=True)
+            ):
                 moment = table[edges[g] : edges[g + 1]].reshape(-1, n_scop) @ basis
-                # a categorical's support rows are its levels, then its base level's zero row
-                moment = moment[:-1] if values is None else values.T @ moment
+                if values is None:
+                    # a categorical's centred support rows are its levels' indicators less
+                    # their weighted frequencies ``support``, then its base level's -support
+                    moment = moment[:-1] - np.outer(support, moment.sum(axis=0))
+                else:
+                    moment = support.T @ moment
                 if transform is not None:
                     moment = transform.T @ moment
                 cross[layout.starts[g] : layout.starts[g + 1], block] = moment
             column = block.stop
         return cross
+
+
+def _centred_support(values: NDArray | None, mass: NDArray, sum_w: float) -> NDArray:
+    """A compact support centred about its weighted mean; a categorical's level frequencies."""
+    if values is None:
+        return mass[:-1] / sum_w
+    return _centre_rows(np.asarray(values, dtype=np.float64), mass, sum_w)[0]
+
+
+class _OrdinaryCross:
+    """``X~_r' W X~_s``, the centred cross block of the ordinary design and the SCOP columns.
+
+    Every entry is a sum of products of centred columns; no raw moment is
+    subtracted, as the reduced system itself never subtracts one outside its
+    certificate (``build_centered_system``). The design splits by column
+    type, as ``centred_data_score`` does:
+
+    - a ``DenseGroupMatrix`` column, whose type does not bound its offset,
+      is centred row by row about the system's exact pair, weighted, and
+      summed onto each SCOP group's bins;
+    - the other groups take one pass of joint weight tables
+      (``_JointWeightCross``) when each has a compact support within the
+      caps, and otherwise the per-pair group-matrix kernels against the
+      centred SCOP supports, less ``mean_x (1' W X~_s)``, a product of two
+      roundings.
+
+    ``moment`` also returns the weighted norm with which each ordinary column
+    entered its products: centred on the first two routes, raw on the
+    per-pair one, whose rows meet the SCOP columns uncentred.
+    """
+
+    def __init__(self, design: DesignMatrix, columns) -> None:
+        self.design = design
+        dense = dense_columns(design)
+        self.bounded_index = np.flatnonzero(~dense)
+        bounded = design if not dense.any() else _dense_split(design).bounded
+        self.bounded = bounded if bounded.p else None
+        self.tables = None if self.bounded is None else _JointWeightCross.build(bounded, columns)
+
+    def _dense_columns(self):
+        offset = 0
+        for matrix in self.design.group_matrices:
+            if type(matrix) is DenseGroupMatrix:
+                for local in range(matrix.shape[1]):
+                    yield offset + local, matrix.M[:, local]
+            offset += matrix.shape[1]
+
+    def moment(self, W: NDArray, moments: _SCOPMoments, system: CenteredSystem):
+        """``(cross, norms)``: the centred cross block and each ordinary column's product norm."""
+        scop = moments.centred
+        cross = np.zeros((self.design.p, moments.gram.shape[0]))
+        norms = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0))
+        if self.bounded is not None:
+            index = self.bounded_index
+            if self.tables is not None:
+                cross[index] = self.tables.cross_moment(W, scop, moments.sum_w)
+            else:
+                columns = [
+                    DenseGroupMatrix(basis)
+                    if bins is None
+                    else DiscretizedSCOPGroupMatrix(basis, bins)
+                    for basis, bins in scop
+                ]
+                plan = CrossMatrixExecutionPlan(
+                    self.bounded.execution_plan, MatrixExecutionPlan(columns, n=self.design.n)
+                )
+                mean = system.mean_x[index]
+                cross[index] = plan.cross_moment(W) - np.outer(mean, moments.weighted_sum)
+                norms[index] = np.sqrt(norms[index] ** 2 + moments.sum_w * mean**2)
+        centre, centre_lo = system.centre_pair()
+        for k, values in self._dense_columns():
+            rows = values - centre[k]
+            if centre_lo is not None:
+                rows -= centre_lo[k]
+            rows *= W
+            column = 0
+            for basis, bins in scop:
+                block = slice(column, column + basis.shape[1])
+                summed = rows if bins is None else np.bincount(bins, rows, basis.shape[0])
+                cross[k, block] = basis.T @ summed
+                column = block.stop
+        return cross, norms
 
 
 def _exact_support(spec: SCOPGroupSpec) -> tuple[NDArray, NDArray | None]:
@@ -548,9 +680,8 @@ class SCOPJointNewton:
     Holds what is fixed for the fit: the groups in latent order, their
     penalties at the fit's smoothing parameters, each group's columns on
     its exact support (a basis and a row index into it, the distinct rows
-    of a non-discretized group), and the cross-moment plan between the
-    ordinary (reduced) design and those columns, which uses the
-    group-matrix kernels and bins the reduced Gram is built on.
+    of a non-discretized group), and the centred cross block between the
+    ordinary (reduced) design and those columns (``_OrdinaryCross``).
     """
 
     def __init__(
@@ -573,17 +704,7 @@ class SCOPJointNewton:
             self.penalty[block, block] = lam * spec.S_scop
             self.penalty_root[block, block] = np.sqrt(max(lam, 0.0)) * _psd_root(spec.S_scop)
         self.columns = tuple(_exact_support(spec) for spec in self.specs)
-        self._cross: _JointWeightCross | CrossMatrixExecutionPlan | None = None
-        if reduced_design.p:
-            self._cross = _JointWeightCross.build(reduced_design, self.columns)
-        if reduced_design.p and self._cross is None:
-            columns = [
-                DenseGroupMatrix(basis) if bins is None else DiscretizedSCOPGroupMatrix(basis, bins)
-                for basis, bins in self.columns
-            ]
-            self._cross = CrossMatrixExecutionPlan(
-                reduced_design.execution_plan, MatrixExecutionPlan(columns, n=self.n)
-            )
+        self._cross = _OrdinaryCross(reduced_design, self.columns) if reduced_design.p else None
 
     def predictor(self, thetas: Sequence[NDArray]) -> NDArray:
         """``X_s gamma(theta)`` at observation level, summed over the groups."""
@@ -597,12 +718,14 @@ class SCOPJointNewton:
         self, thetas: Sequence[NDArray], W: NDArray, z: NDArray, eta: NDArray
     ) -> _SCOPMoments:
         q = self.width
+        sum_w = float(np.sum(W))
         gram = np.zeros((q, q))
-        xtw = np.empty(q)
         score = np.empty(q)
+        mean = np.empty(q)
+        weighted_sum = np.empty(q)
         jacobian = np.empty(q)
         second = np.empty(q)
-        residual_sum = 0.0
+        centred = []
         for spec, (basis, bins), block, theta in zip(
             self.specs, self.columns, self.slices, thetas, strict=True
         ):
@@ -610,22 +733,40 @@ class SCOPJointNewton:
                 weights, weighted_residual = W, W * (z - eta)
             else:
                 weights, weighted_residual = _scop_bin_moments(bins, W, z, eta, basis.shape[0])
-            gram[block, block] = basis.T @ (basis * weights[:, None])
-            xtw[block] = basis.T @ weights
-            score[block] = basis.T @ weighted_residual
-            residual_sum = float(np.sum(weighted_residual))
+            support, mean[block] = _centre_rows(basis, weights, sum_w)
+            centred.append((support, bins))
+            gram[block, block] = support.T @ (support * weights[:, None])
+            score[block] = support.T @ weighted_residual
+            weighted_sum[block] = support.T @ weights
             jacobian[block] = spec.reparam.jacobian_diagonal(theta)
             second[block] = spec.reparam.second_derivative_diagonal(theta)
+        # every group's weighted residuals, by bin or by row, sum to ``W' r``
+        residual_sum = float(np.sum(weighted_residual))
         for a in range(len(self.specs)):
             for b in range(a + 1, len(self.specs)):
-                cross = _compute_cross_gram(*self.columns[a], *self.columns[b], W)
+                cross = _compute_cross_gram(*centred[a], *centred[b], W)
                 gram[self.slices[a], self.slices[b]] = cross
                 gram[self.slices[b], self.slices[a]] = cross.T
         pull = self.penalty @ np.concatenate(thetas)
         with np.errstate(over="ignore", invalid="ignore"):
-            gauss_newton = jacobian[:, None] * gram * jacobian[None, :] + self.penalty
-            curvature = -second * score
-        return _SCOPMoments(gram, xtw, score, residual_sum, jacobian, pull, gauss_newton, curvature)
+            # X_s = X~_s + 1 mean', so X_s' W X_s and X_s' W r follow exactly
+            shift = np.outer(weighted_sum, mean)
+            own_gram = gram + shift + shift.T + sum_w * np.outer(mean, mean)
+            gauss_newton = jacobian[:, None] * own_gram * jacobian[None, :] + self.penalty
+            curvature = -second * (score + mean * residual_sum)
+        return _SCOPMoments(
+            gram=gram,
+            score=score,
+            mean=mean,
+            weighted_sum=weighted_sum,
+            sum_w=sum_w,
+            centred=tuple(centred),
+            jacobian=jacobian,
+            pull=pull,
+            own_gram=own_gram,
+            gauss_newton=gauss_newton,
+            curvature=curvature,
+        )
 
     def _results(
         self,
@@ -711,21 +852,19 @@ class SCOPJointNewton:
         (pseudo-)inverse; ``ordinary_change`` is that block's step with the
         SCOP coordinates held fixed.
 
-        With ``r`` the working residual and ``delta_b`` that step, the
-        reduced SCOP gradient is ``-J (X_s' W r - C' delta_b) + lambda S
-        theta`` in centred moments: the residual the fixed-``theta`` solve
-        leaves, without forming it.
+        With ``r`` the working residual, ``delta_b`` that step and ``C =
+        X~_r' W X~_s`` the centred cross block, the reduced SCOP gradient is
+        ``-J (X~_s' W r - C' delta_b) + lambda S theta``: the residual the
+        fixed-``theta`` solve leaves, without forming it.
         """
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
             return SCOPJointStep(self._no_step(thetas), np.zeros_like(ordinary_change), 0.0)
-        sum_w = reduced.sum_w
-        mean_s = moments.xtw / sum_w
-        data_gram = moments.gram - np.outer(moments.xtw, mean_s)
-        data_score = moments.score - moments.xtw * (moments.residual_sum / sum_w)
+        data_gram = moments.gram
+        data_score = moments.score
         coupled = np.zeros((ordinary_change.shape[0], self.width))
         if self._cross is not None:
-            cross = self._cross.cross_moment(W) - np.outer(reduced.mean_x, moments.xtw)
+            cross, _ = self._cross.moment(W, moments, reduced)
             coupled = np.column_stack([solve(column) for column in cross.T])
             data_gram = data_gram - cross.T @ coupled
             data_score = data_score - cross.T @ ordinary_change
@@ -744,7 +883,7 @@ class SCOPJointNewton:
         return SCOPJointStep(
             results=results,
             ordinary_correction=-(coupled @ mapped_change),
-            intercept_shift=float(mean_s @ mapped_change),
+            intercept_shift=float(moments.mean @ mapped_change),
         )
 
     def block_curvature(
@@ -761,6 +900,5 @@ class SCOPJointNewton:
         moments = self._moments(thetas, W, z, eta)
         if not moments.finite:
             return self._no_step(thetas)
-        gradient = -moments.jacobian * moments.score + moments.pull
-        _, used_fisher, discarded = self._solve(moments.gram, moments, gradient)
+        _, used_fisher, discarded = self._solve(moments.own_gram, moments, np.zeros(self.width))
         return self._results(thetas, np.zeros(self.width), moments, used_fisher, discarded)

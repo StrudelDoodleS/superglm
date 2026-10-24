@@ -360,14 +360,9 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
     assert profile.get("irls_observed_newton_iters", 0) == result.n_iter
 
 
-def test_one_pass_cross_block_equals_the_per_pair_plan():
-    """The joint-weight route forms X_r' W X_s as the group-matrix kernels do, to rounding."""
+def test_cross_block_routes_form_the_centred_cross_product():
+    """Both routes for bounded groups form X~_r' W X~_s from centred columns, to their rounding."""
     from superglm import Categorical
-    from superglm.group_matrix import (
-        CrossMatrixExecutionPlan,
-        DiscretizedSCOPGroupMatrix,
-        MatrixExecutionPlan,
-    )
     from superglm.solvers.scop_newton import _JointWeightCross
 
     rng = np.random.default_rng(11)
@@ -377,7 +372,7 @@ def test_one_pass_cross_block_equals_the_per_pair_plan():
             "a": rng.uniform(0, 1, n),
             "b": rng.uniform(0, 1, n),
             "m": rng.uniform(0, 1, n),
-            "c": rng.choice(list("pqrst"), n),
+            "c": rng.choice(list("pqrst"), n, p=[0.9, 0.04, 0.03, 0.02, 0.01]),
         }
     )
     model = SuperGLM(
@@ -394,26 +389,94 @@ def test_one_pass_cross_block_equals_the_per_pair_plan():
     )
     model_build_design_matrix(model, frame, rng.poisson(1.0, n).astype(float), np.ones(n), None)
     pairs = list(zip(model._groups, model._dm.group_matrices))
-    scop = next(gm for g, gm in pairs if g.monotone_engine == "scop")
+    scop_group, scop = next((g, gm) for g, gm in pairs if g.monotone_engine == "scop")
     ordinary = [gm for g, gm in pairs if g.monotone_engine != "scop"]
     reduced = DesignMatrix(ordinary, n=n, p=sum(gm.shape[1] for gm in ordinary))
-    weights = rng.uniform(0.1, 3.0, n)
-    plan = CrossMatrixExecutionPlan(
-        reduced.execution_plan,
-        MatrixExecutionPlan([DiscretizedSCOPGroupMatrix(scop.B_scop_unique, scop.bin_idx)], n=n),
+    reparam = build_scop_solver_reparam(scop.B_scop_unique.shape[1] + 1, kind="increasing")
+    spec = SCOPGroupSpec(
+        0, scop_group, reparam, scop.B_scop_unique, reparam.penalty_matrix(), scop.bin_idx
     )
+    engine = SCOPJointNewton([spec], {scop_group.name: 1.0}, reduced, n)
+    W = rng.uniform(0.1, 3.0, n)
+    z = rng.normal(size=n)
+    moments = engine._moments([np.zeros(reparam.q)], W=W, z=z, eta=np.zeros(n))
+    system = build_centered_system(dm=reduced, W=W, z_off=z, penalty=np.zeros((reduced.p,) * 2))
 
-    one_pass = _JointWeightCross.build(reduced, [(scop.B_scop_unique, scop.bin_idx)])
-    expected = plan.cross_moment(weights)
-    # sums of the same n products in another order: within n u of the largest entry
-    np.testing.assert_allclose(
-        one_pass.cross_moment(weights), expected, rtol=0, atol=n * UNIT * np.abs(expected).max()
+    X = reduced.toarray()
+    S = scop.B_scop_unique[scop.bin_idx]
+    centred_X = X - (W @ X) / W.sum()
+    centred_S = S - (W @ S) / W.sum()
+    oracle = centred_X.T @ (W[:, None] * centred_S)
+    # every route sums n weighted products, then at most n support or bin rows,
+    # of operands centred to within their means' rounding (Higham 2002, eq. 3.5)
+    gamma = 4 * (2 * n + 2) * UNIT
+    assert isinstance(engine._cross.tables, _JointWeightCross)
+    one_pass, _ = engine._cross.moment(W, moments, system)
+    assert np.all(
+        np.abs(one_pass - oracle)
+        <= gamma * (np.abs(centred_X).T @ (W[:, None] * np.abs(centred_S)))
     )
+    # the per-pair kernels take the bounded rows uncentred against the centred SCOP support
+    engine._cross.tables = None
+    per_pair, norms = engine._cross.moment(W, moments, system)
+    assert np.all(
+        np.abs(per_pair - oracle) <= gamma * (np.abs(X).T @ (W[:, None] * np.abs(centred_S)))
+    )
+    np.testing.assert_allclose(norms, np.sqrt(np.sum(W[:, None] * X**2, axis=0)), rtol=n * UNIT)
     # a group with no compact support (a dense block) keeps the per-pair plan
     dense = DesignMatrix(
         [*ordinary, DenseGroupMatrix(frame[["a"]].to_numpy())], n=n, p=reduced.p + 1
     )
     assert _JointWeightCross.build(dense, [(scop.B_scop_unique, scop.bin_idx)]) is None
+
+
+def _fit_translated(shift):
+    """The joint step iterated on an exact Gaussian model with one ordinary column at ``shift``."""
+    s = np.array([-0.4375, -0.1875, 0.0625, 0.5625])[:, None]
+    x = np.array([-1.0, 0.0, 1.0, 2.0])
+    W = np.array([1.0, 2.0, 4.0, 8.0])
+    y = 0.2 + 0.3 * x + 2.0 * s[:, 0]
+    X = (x + shift)[:, None]
+    design = DesignMatrix([DenseGroupMatrix(X)], n=4, p=1)
+    reparam = build_scop_solver_reparam(2, kind="increasing")
+    engine = SCOPJointNewton([_spec(0, "s", reparam, s)], {"s": 0.0}, design, 4)
+    theta, b, eta = np.zeros(1), np.zeros(1), engine.predictor([np.zeros(1)])
+    for _ in range(30):
+        reduced = build_centered_system(
+            dm=design, W=W, z_off=y - engine.predictor([theta]), penalty=np.zeros((1, 1))
+        )
+        rank = decompose_gram_if_authoritative(reduced.hessian)
+        b_fixed = rank.solve(reduced.rhs)
+        step = engine.step(
+            [theta],
+            W=W,
+            z=y,
+            eta=eta,
+            reduced=reduced,
+            solve=rank.solve,
+            ordinary_change=b_fixed - b,
+        )
+        b = b_fixed + step.ordinary_correction
+        theta = step.results[0].beta_new
+        centre, centre_lo = reduced.centre_pair()
+        rows = (X - centre) - (0.0 if centre_lo is None else centre_lo)
+        level = reduced.mean_z - step.intercept_shift
+        eta = level + rows @ b + engine.predictor([theta])
+    return float(reparam.forward(theta)[0]), float(b[0]), float(W @ (y - eta) ** 2)
+
+
+def test_a_translated_ordinary_column_leaves_the_joint_step_unchanged():
+    """The cross block is a product of centred columns: an exact 1.5e15 shift of x changes nothing.
+
+    From raw moments the shift turned the centred cross product 4.7 into 5.0,
+    and the fit stopped at the SCOP coefficient 1 with deviance 0.067.
+    """
+    for shift in (0.0, 1.5e15):
+        gamma, slope, deviance = _fit_translated(shift)
+        # an exact model on a well-conditioned 3-parameter system
+        assert abs(gamma - 2.0) <= 64 * UNIT * 2.0
+        assert abs(slope - 0.3) <= 64 * UNIT
+        assert deviance <= (64 * UNIT) ** 2 * 15.0
 
 
 def _repeated_rows_spec(index, rng, n, distinct, reparam):
@@ -516,14 +579,21 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
     assert CategoricalGroupMatrix not in formed
     assert one_pass.layout.supports[categorical] == (None, None)
     weights = rng.uniform(0.1, 3.0, n)
+    sum_w = float(weights.sum())
+    mass = np.bincount(scop.bin_idx, weights, scop.B_scop_unique.shape[0])
+    centred, _ = scop_newton._centre_rows(scop.B_scop_unique, mass, sum_w)
     plan = CrossMatrixExecutionPlan(
         reduced.execution_plan,
-        MatrixExecutionPlan([DiscretizedSCOPGroupMatrix(scop.B_scop_unique, scop.bin_idx)], n=n),
+        MatrixExecutionPlan([DiscretizedSCOPGroupMatrix(centred, scop.bin_idx)], n=n),
     )
-    expected = plan.cross_moment(weights)
+    mean_x = reduced.rmatvec(weights) / sum_w
+    expected = plan.cross_moment(weights) - np.outer(mean_x, centred.T @ mass)
     # sums of the same n products in another order: within n u of the largest entry
     np.testing.assert_allclose(
-        one_pass.cross_moment(weights), expected, rtol=0, atol=n * UNIT * np.abs(expected).max()
+        one_pass.cross_moment(weights, [(centred, scop.bin_idx)], sum_w),
+        expected,
+        rtol=0,
+        atol=n * UNIT * np.abs(expected).max(),
     )
 
     # Tables past the cap are refused from the groups' metadata, before any support is formed.
