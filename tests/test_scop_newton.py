@@ -312,16 +312,9 @@ def test_inner_fit_at_fixed_lambda_needs_few_iterations():
     assert result.n_iter <= 20
 
 
-def test_tweedie_log_scop_fit_takes_observed_newton_rows():
-    """The joint step is full Newton: Tweedie/log rows carry the observed information.
-
-    On Fisher rows a Tweedie/log SCOP inner fit contracts only linearly where
-    the observed information exceeds Fisher's, as heavy-tailed pure premiums
-    give: 0.8 to 0.94 per iteration on 50,000 freMTPL2 rows, where most inner
-    fits exhausted their 100 iterations.
-    """
+def _fit_tweedie_scop(n=4000, profile=None):
+    """A Tweedie/log fit of a smooth and an increasing SCOP spline, heavy-tailed pure premiums."""
     rng = np.random.default_rng(5)
-    n = 4000
     frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
     exposure = rng.uniform(0.02, 1.0, n)
     rate = 0.1 * np.exp(
@@ -339,7 +332,6 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
         },
     )
     y_fit, weights, offset = model_build_design_matrix(model, frame, y, exposure, None)
-    profile: dict = {}
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y_fit,
@@ -355,9 +347,105 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
         weight_semantics="prior",
         profile=profile,
     )
+    return result, model, y_fit, weights
+
+
+def test_tweedie_log_scop_fit_takes_observed_newton_rows():
+    """The joint step is full Newton: Tweedie/log rows carry the observed information.
+
+    On Fisher rows a Tweedie/log SCOP inner fit contracts only linearly where
+    the observed information exceeds Fisher's, as heavy-tailed pure premiums
+    give: 0.8 to 0.94 per iteration on 50,000 freMTPL2 rows, where most inner
+    fits exhausted their 100 iterations.
+    """
+    profile: dict = {}
+    result, *_ = _fit_tweedie_scop(profile=profile)
 
     assert result.converged
     assert profile.get("irls_observed_newton_iters", 0) == result.n_iter
+
+
+def test_the_scop_line_search_rejects_trials_without_finite_observed_rows(monkeypatch):
+    """An observed fit's SCOP trials pass the finiteness test its ordinary trials do.
+
+    Every accepted trial then has finite observed rows, so the next
+    iteration's rows can only be non-finite at the entry state.
+    """
+    from types import SimpleNamespace
+
+    predicates = []
+    select = irls_direct._select_irls_trial
+
+    def recorded(**kwargs):
+        predicates.append(kwargs.get("invalid_state"))
+        return select(**kwargs)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded)
+    result, model, y, weights = _fit_tweedie_scop(n=1000)
+
+    assert result.converged
+    assert predicates and all(predicate is not None for predicate in predicates)
+    eta = np.zeros_like(y)
+    assert not predicates[0](SimpleNamespace(eta=eta, mu=np.exp(eta)))
+    eta[0] = 800.0  # past exp's range: the observed row is not finite
+    with np.errstate(over="ignore"):
+        assert predicates[0](SimpleNamespace(eta=eta, mu=np.exp(eta)))
+
+
+def test_a_rejected_last_step_publishes_the_retained_models_curvature(monkeypatch):
+    """The terminal SCOP curvature is the block's own at the retained theta, however the loop ends.
+
+    A rejected last step used to leave the curvature, fallback flag and
+    discarded directions of the step before it, taken at the previous
+    iterate on the step's Schur block.
+    """
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    selections = []
+    select = irls_direct._select_irls_trial
+
+    def reject_third(**kwargs):
+        selections.append(kwargs)
+        if len(selections) == 3:
+            return _IRLSStepDecision(alpha=0.0, step_halvings=0, step_rejected=True)
+        return select(**kwargs)
+
+    terminal = []
+    block_curvature = SCOPJointNewton.block_curvature
+
+    def recorded(self, thetas, **kwargs):
+        curvature = block_curvature(self, thetas, **kwargs)
+        terminal.append(([np.array(theta) for theta in thetas], curvature))
+        return curvature
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_third)
+    monkeypatch.setattr(SCOPJointNewton, "block_curvature", recorded)
+    frame, y, offset = _correlated_monotone_frame(0.7)
+    model = _monotone_model()
+    y_fit, weights, offset_fit = model_build_design_matrix(model, frame, y, np.ones_like(y), offset)
+    result, _, states = irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 8.94, "x2": 0.770},
+        offset=offset_fit,
+        max_iter=100,
+        tol=1e-6,
+        convergence="coefficients",
+        weight_semantics="frequency",
+        return_scop_state=True,
+    )
+
+    assert not result.converged
+    assert len(selections) == 3
+    ((thetas, curvature),) = terminal
+    for theta, gi in zip(thetas, sorted(states), strict=True):
+        np.testing.assert_array_equal(theta, states[gi]["beta_eff"])
+        np.testing.assert_array_equal(states[gi]["H_scop_penalized"], curvature[gi].H_penalized)
+        assert states[gi]["last_fisher_fallback"] == curvature[gi].used_fisher_fallback
 
 
 def test_cross_block_routes_form_the_centred_cross_product():

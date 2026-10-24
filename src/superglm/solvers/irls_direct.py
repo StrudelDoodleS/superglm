@@ -2048,6 +2048,26 @@ def _fit_irls_direct_once(
     )
     if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
         _observed_newton_active = True
+
+    def observed_rows_invalid(candidate: _IRLSState) -> bool:
+        """Whether a trial's observed rows are not finite, which rejects it.
+
+        One-engine design §3.11: finiteness is the one condition the declared
+        observed rows keep; a trial without finite rows is not a state the
+        next Newton step can start from. Every line search of an observed fit
+        reads it, the SCOP one included.
+        """
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=candidate.mu,
+            eta=candidate.eta,
+            sample_weight=weights,
+            prefer_observed=True,
+        )
+        return rows.rejection_reason is not None
+
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -3317,6 +3337,7 @@ def _fit_irls_direct_once(
                 committed=scop_committed.irls,
                 proposal=proposal_scop.irls,
                 evaluate_state=evaluate_scop_trial,
+                invalid_state=observed_rows_invalid if _observed_newton_active else None,
                 max_halving=max_halving,
                 extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=scop_committed.irls,
@@ -3422,24 +3443,7 @@ def _fit_irls_direct_once(
 
             committed_constraints_feasible = True
             proposal_constraints_feasible = True
-            constraint_trial_is_invalid = None
-            if _observed_newton_active:
-                # one-engine design §3.11: finiteness is the one condition the
-                # declared observed rows keep; a trial without finite rows is
-                # not a state the next Newton step can start from
-
-                def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
-                    rows = coefficient_working_rows(
-                        distribution=family,
-                        link=link,
-                        y=y,
-                        mu=candidate.mu,
-                        eta=candidate.eta,
-                        sample_weight=weights,
-                        prefer_observed=True,
-                    )
-                    return rows.rejection_reason is not None
-
+            constraint_trial_is_invalid = observed_rows_invalid if _observed_newton_active else None
             if has_constraints:
                 if A_all is None or b_all is None:  # pragma: no cover - construction invariant
                     raise RuntimeError("constrained fit omitted its aggregate constraint system")
@@ -4279,23 +4283,21 @@ def _fit_irls_direct_once(
         W = final_rows.weights
         z = final_rows.response
 
-        needs_initial_hessian = any(
-            state.get("H_scop_penalized") is None for state in _scop_state.values()
+        # ``block_curvature`` takes no step, so however the loop exited (a
+        # rejected last step included) the curvature, fallback flag and
+        # discarded directions are the retained model's. The working residual
+        # is read off the exact committed predictor; rebuilding X beta +
+        # intercept would lose score digits for a translated ordinary column.
+        terminal = _scop_newton.block_curvature(
+            [_scop_state[gi]["beta_scop"] for gi in _scop_order],
+            W=W,
+            z=z,
+            eta=eta_unclipped,
         )
-        if not step_rejected or needs_initial_hessian:
-            # The working residual is read off the exact committed predictor;
-            # rebuilding X beta + intercept would lose score digits for a
-            # translated ordinary column.
-            terminal = _scop_newton.block_curvature(
-                [_scop_state[gi]["beta_scop"] for gi in _scop_order],
-                W=W,
-                z=z,
-                eta=eta_unclipped,
-            )
-            for gi, refresh in terminal.items():
-                _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
-                _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
-                _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
+        for gi, refresh in terminal.items():
+            _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
+            _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
+            _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
 
     # Every public/exported matrix and rank claim is evaluated at the retained
     # model. Private fREML performance iterations deliberately reuse the
