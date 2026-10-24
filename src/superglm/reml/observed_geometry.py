@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
+from superglm._roundoff import gamma as _gamma
 from superglm.distributions import (
     _VARIANCE_FLOOR,
     Binomial,
@@ -55,7 +56,6 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
-    _gamma,
     centre_offset_mean,
     centred_matvec,
     corrected_two_pass_pair,

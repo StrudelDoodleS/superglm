@@ -133,6 +133,9 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
+from superglm._roundoff import gamma as _gamma
 from superglm.solvers._structured.border import (
     BorderCertificate,
     BorderGenerators,
@@ -156,20 +159,9 @@ if TYPE_CHECKING:
     from superglm.solvers._structured.block_leaves import FactorSmoothLeafData
     from superglm.solvers._structured.factors import DerivativeDirection
 
-# IEEE binary64 unit roundoff (Higham 2002, section 2.1) and gamma_n (section 3.1).
-_UNIT = 2.0**-53
-_EPS = float(np.finfo(np.float64).eps)
 # Block-factor note §4.3: a pivot direction whose scaled pivot squared is below
 # 20 k eps is deferred to the border (cost only).
 _DEFERRAL_FACTOR = 20.0
-
-
-def _gamma(count: float) -> float:
-    return count * _UNIT / (1.0 - count * _UNIT)
-
-
-def _gamma_array(count: NDArray) -> NDArray:
-    return count * _UNIT / (1.0 - count * _UNIT)
 
 
 def _append_generators(
@@ -1809,7 +1801,7 @@ class SumToZeroTreeFactor:
         # per-level row-stage factors (leaf pass, leaf trial)
         m_trial = (p + k) if leaf.signed else 2 * k
         g_level = (
-            2.0 * _gamma_array(2.0 * np.maximum(counts, 1.0) * p)
+            2.0 * _gamma(2.0 * np.maximum(counts, 1.0) * p)
             + 2.0 * merges * _gamma(4.0 * p * p)
             + 2.0 * _gamma(2.0 * m_trial * p)
             + _gamma(2)
@@ -1899,8 +1891,8 @@ class SumToZeroTreeFactor:
         kappa, sigma_extra, middle_norm = self._kappa, self._sigma_extra, self._middle_norm
         assert kappa is not None and sigma_extra is not None and middle_norm is not None
         sigma_level = (
-            2.0 * math.sqrt(p) * _gamma_array(2.0 * np.maximum(counts, 1.0) * p)
-            + p * _gamma_array(np.maximum(counts, 1.0))
+            2.0 * math.sqrt(p) * _gamma(2.0 * np.maximum(counts, 1.0) * p)
+            + p * _gamma(np.maximum(counts, 1.0))
             + p * p * _UNIT
             + 2.0 * math.sqrt(p) * _gamma(2.0 * m_trial * p)
             + p * _gamma(m_trial)

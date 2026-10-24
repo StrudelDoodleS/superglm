@@ -22,6 +22,8 @@ from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
+from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
@@ -40,7 +42,7 @@ from superglm.reml.convergence import (
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.identified import IdentifiedLaplace, _gamma, dense_hessian
+from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
     reml_laml_objective,
@@ -621,7 +623,6 @@ def optimize_discrete_reml_cached_w(
     warm_deviance: float | None = None
     max_newton_step = 5.0
     max_halving = 25
-    _eps = np.finfo(float).eps
     _tol = max(float(reml_tol), 1e-12)
 
     best_obj = np.inf
@@ -1370,7 +1371,7 @@ def optimize_discrete_reml_cached_w(
 
             eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
             max_eig_d = max(abs(eigvals_h).max(), 1e-12)
-            eig_floor_d = max_eig_d * _eps**0.7
+            eig_floor_d = max_eig_d * NEWTON_EIGENVALUE_FLOOR
             eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
             delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
             delta[active_idx_d] = delta_sub_d

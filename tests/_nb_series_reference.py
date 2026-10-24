@@ -13,14 +13,19 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
 from superglm.distributional.kernels.negative_binomial import (
     _FLOAT,
     _POWER_SUM_BERNOULLI,
     _SERIES_ORDER,
     _SERIES_RATIO,
     _TINY,
-    _gamma,
 )
+
+
+def _gamma(operations):
+    """The kernel's bounds count in eps = 2u: ``n eps / (1 - n eps)`` is gamma_2n."""
+    return gamma(2 * operations)
 
 
 def _scaled_power_sums(count: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:

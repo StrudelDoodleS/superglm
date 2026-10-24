@@ -100,24 +100,20 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL as _UNDERFLOW_UNIT
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
+from superglm._roundoff import gamma as _gamma
 
 # LAPACK's double-precision Cholesky, pivoted Cholesky and Cholesky inverse
 dpotrf, dpstrf, dpotri = scipy.linalg.get_lapack_funcs(
     ("potrf", "pstrf", "potri"), dtype=np.float64
 )
 
-# Rump (2006) works in the unit roundoff u = 2^-53 and the underflow unit
-# eta = 2^-1074 of IEEE binary64 (section 1).
-_UNIT_ROUNDOFF = 2.0**-53
-_UNDERFLOW_UNIT = 2.0**-1074
-_EPS = float(np.finfo(np.float64).eps)
+# Rump (2006) works in the unit roundoff u and the underflow unit eta, the
+# smallest positive binary64 number (section 1).
 # Lemma 2.5 of Rump (2006): fl(d - phi |d|) <= a - b for d = fl(a - b).
 _PHI = _UNIT_ROUNDOFF * (1.0 + 2.0 * _UNIT_ROUNDOFF)
-
-
-def _gamma(count: float) -> float:
-    """Higham's ``gamma_n = n u / (1 - n u)`` (2002, Lemma 3.1)."""
-    return count * _UNIT_ROUNDOFF / (1.0 - count * _UNIT_ROUNDOFF)
 
 
 @dataclass(frozen=True, eq=False)

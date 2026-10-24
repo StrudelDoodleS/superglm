@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogitLink, LogLink
@@ -407,7 +408,6 @@ def optimize_direct_reml(
         estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
     max_newton_step = 5.0
-    _eps = np.finfo(float).eps
     _tol = reml_tol
     # One-engine design §3.8: every PIRLS the criterion reads certifies its
     # mode at the bar this stopping tolerance needs (``mode_score``).
@@ -1610,7 +1610,7 @@ def optimize_direct_reml(
 
             eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub)
             max_eig = max(abs(eigvals_h).max(), 1e-12)
-            eig_floor = max_eig * _eps**0.7
+            eig_floor = max_eig * NEWTON_EIGENVALUE_FLOOR
             eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor)
 
             hess_pd = (eigvecs_h * eigvals_pd) @ eigvecs_h.T

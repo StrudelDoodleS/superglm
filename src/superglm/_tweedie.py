@@ -18,11 +18,11 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import digamma, gammaln, lambertw, polygamma
 
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import TINY as _TINY
 from superglm._tweedie_series import _LOG_CUTOFF, log_peak_index, series_moments
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
-_EPS = float(np.finfo(np.float64).eps)
-_TINY = float(np.finfo(np.float64).tiny)
 # The series' float64 error in l_sat stays below _SERIES_ERROR eps (a + 1) j log j
 # against the 50-digit oracle (benchmarks/tweedie_series_oracle.py) over
 # p in [1.001, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j

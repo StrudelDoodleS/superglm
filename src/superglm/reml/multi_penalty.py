@@ -16,6 +16,9 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL as _SMALLEST_SUBNORMAL
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 from superglm.reml._compensated import _dot2_selected, _dot2_value, _native_operand
 from superglm.reml.penalty_support import (
     PenaltyNumericalError,
@@ -27,9 +30,6 @@ from superglm.reml.penalty_support import (
 )
 from superglm.solvers.rank import SHARED_RANK_POLICY
 
-_EPS = np.finfo(float).eps
-_UNIT_ROUNDOFF = _EPS / 2
-_SMALLEST_SUBNORMAL = np.nextafter(0.0, 1.0)
 # A work threshold, not an accuracy threshold: tiny reductions reuse the
 # scalar recurrence without loading Numba's native runtime on a small fit.
 _DOT2_NATIVE_MIN_WORK = 256

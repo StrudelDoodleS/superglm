@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_ceiling
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
@@ -377,7 +378,7 @@ def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
             return rank, float(cached_log_det), eigvals
 
     S_scop = st["S_scop"]
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    eps_thresh = PENALTY_RANK_CUT
     eigvals = np.linalg.eigvalsh(S_scop)
     thresh = eps_thresh * max(eigvals.max(), 1e-12)
     rank = float(np.sum(eigvals > thresh))
@@ -2448,7 +2449,7 @@ def _scop_newton_step(system: _SCOPNewtonSystem, jacobian: NDArray | None = None
         # it to at least eps**0.7 (about 1e-11) times the largest, a relative
         # floor written in eps = 2**-52 (np.finfo spacing at 1.0), not in the
         # unit roundoff u = eps / 2.
-        floor = np.finfo(np.float64).eps ** 0.7 * max(float(np.max(np.abs(values))), 1e-300)
+        floor = NEWTON_EIGENVALUE_FLOOR * max(float(np.max(np.abs(values))), 1e-300)
         values = np.maximum(np.abs(values), floor)
         step[index] = -(vectors @ ((vectors.T @ g[index]) / values))
         blocked = free & (

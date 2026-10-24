@@ -96,6 +96,9 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
 from superglm._numba_compile import collect_after_compile
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
+from superglm._roundoff import gamma as _gamma
 from superglm.solvers._structured.border import (
     BorderCertificate,
     BorderGenerators,
@@ -125,9 +128,6 @@ from superglm.types import PenaltyComponent
 if TYPE_CHECKING:
     from superglm.solvers._structured.factors import DerivativeDirection
 
-# IEEE binary64 unit roundoff (Higham 2002, section 2.1) and gamma_n (section 3.1).
-_UNIT = 2.0**-53
-_EPS = float(np.finfo(np.float64).eps)
 _CHUNK = 8192
 # LLVM flags of the dense kernels: reassociation lets a dot product vectorize and
 # contraction fuses multiply-adds.  Neither drops NaN or infinity semantics, the
@@ -137,14 +137,6 @@ _KERNEL_MATH = {"reassoc", "contract"}
 # A flag a kernel passes to another as a numpy boolean: a literal ``True``
 # would compile the callee once more for that value.
 _TRUE = np.bool_(True)
-
-
-def _gamma(count: float) -> float:
-    return count * _UNIT / (1.0 - count * _UNIT)
-
-
-def _gamma_array(count: NDArray) -> NDArray:
-    return count * _UNIT / (1.0 - count * _UNIT)
 
 
 # ---------------------------------------------------------------- kernels --
@@ -2367,7 +2359,7 @@ class FactorSmoothLeafFactor:
         v_tilde = a[:, k : k + q1] + np.matmul(a[:, None, :k], np.abs(F))[:, 0, :]
         m_trial = (p + k) if leaf.signed else 2 * k
         g_row = (
-            2.0 * _gamma_array(2.0 * np.maximum(counts, 1.0) * p)
+            2.0 * _gamma(2.0 * np.maximum(counts, 1.0) * p)
             + 2.0 * merges * _gamma(4.0 * p * p)
             + 2.0 * _gamma(2.0 * m_trial * p)
             + _gamma(2)
@@ -2388,8 +2380,8 @@ class FactorSmoothLeafFactor:
         # sandwiched errors, per level
         if leaf.signed:
             sigma = (
-                2.0 * math.sqrt(p) * _gamma_array(2.0 * np.maximum(counts, 1.0) * p)
-                + p * _gamma_array(np.maximum(counts, 1.0))
+                2.0 * math.sqrt(p) * _gamma(2.0 * np.maximum(counts, 1.0) * p)
+                + p * _gamma(np.maximum(counts, 1.0))
                 + p * p * _UNIT
                 + 2.0 * math.sqrt(p) * _gamma(2.0 * m_trial * p)
                 + p * _gamma(m_trial)

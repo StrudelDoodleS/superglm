@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._negative_binomial_numba as _compiled
 from superglm._parallel import pooled_row_blocks
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL as _TINY
+from superglm._roundoff import gamma
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,
@@ -29,8 +32,6 @@ _MAX_EXACT_INTEGER = 2**53
 _MAX_RECURRENCE_CELLS = 200_000_000
 _RECURRENCE_BLOCK_SIZE = 256
 _MAX_RECURRENCE_TILE_CELLS = 65_536
-_EPS = np.finfo(_FLOAT).eps
-_TINY = np.nextafter(_FLOAT(0.0), _FLOAT(1.0))
 _DOMAIN_MIN = math.ldexp(1.0, -450)
 _DOMAIN_MAX = math.ldexp(1.0, 450)
 # The kernel is NB2 at every mean/theta ratio; no ratio is refused.
@@ -94,20 +95,6 @@ class NegativeBinomialPoissonBoundaryError(NegativeBinomialNumericalDomainError)
 
 class NegativeBinomialDerivativeRepresentationError(NegativeBinomialNumericalDomainError):
     """Natural derivatives cannot retain the direct log-link channels."""
-
-
-@overload
-def _gamma(operations: int) -> float: ...
-
-
-@overload
-def _gamma(operations: NDArray[np.int64]) -> NDArray[np.float64]: ...
-
-
-def _gamma(operations: int | NDArray[np.int64]) -> float | NDArray[np.float64]:
-    scaled = np.asarray(operations, dtype=_FLOAT) * _EPS
-    result = scaled / (1.0 - scaled)
-    return float(result) if result.ndim == 0 else result
 
 
 @dataclass(frozen=True)
@@ -492,7 +479,7 @@ def _ratio_remainder(
     logarithm = np.log1p(ratio)
     result = rational - logarithm
     scale = np.abs(rational) + np.abs(logarithm)
-    error = _gamma(4) * scale + _TINY
+    error = gamma(8) * scale + _TINY
     candidates = ratio < 1.0
     if not np.any(candidates):
         return result, error, scale
@@ -509,7 +496,7 @@ def _ratio_remainder(
     series = x * x * polynomial
     series_scale = x * x * absolute
     tail = _SERIES_ORDER / (_SERIES_ORDER + 1.0) * x ** (_SERIES_ORDER + 1)
-    series_error = _gamma(2 * _SERIES_ORDER + 2) * series_scale + tail + _TINY
+    series_error = gamma(2 * (2 * _SERIES_ORDER + 2)) * series_scale + tail + _TINY
     indices = np.flatnonzero(candidates)
     use = series_error < error[candidates]
     chosen = indices[use]
@@ -679,7 +666,7 @@ def _retain_log_channels(
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         reconstructed_score = score * np.column_stack((mean, theta))
     bound = (
-        _gamma(counts + 128)[:, None]
+        gamma(2 * (counts + 128))[:, None]
         * (score_scale + np.abs(target_score) + np.abs(reconstructed_score))
         + 16.0 * _TINY
     )
@@ -698,7 +685,7 @@ def _retain_log_channels(
                 )
             )
         bound = (
-            _gamma(counts + 160)[:, None]
+            gamma(2 * (counts + 160))[:, None]
             * (hessian_scale + np.abs(target_hessian) + np.abs(reconstructed_hessian))
             + 24.0 * _TINY
         )
@@ -958,7 +945,7 @@ def negative_binomial_log_third_derivatives(
     _poisson_limit_theta_channels(third, error, poisson)
     with np.errstate(over="ignore", invalid="ignore"):
         third = third * multiplier[:, None]
-        error = (1.0 + _gamma(2)) * (error * multiplier)
+        error = (1.0 + gamma(4)) * (error * multiplier)
     _finite_output(third, "third derivative", NegativeBinomialDerivativeRepresentationError)
     _finite_output(error, "third-derivative bound", NegativeBinomialDerivativeRepresentationError)
     return third, error
@@ -1070,7 +1057,7 @@ def negative_binomial_log_fourth_derivatives(
         fourth[:, 4] = bbbb
         _poisson_limit_theta_channels(fourth, error, poisson)
         fourth *= multiplier[:, None]
-        error = (1.0 + _gamma(2)) * (error * multiplier)
+        error = (1.0 + gamma(4)) * (error * multiplier)
     _finite_output(fourth, "fourth derivative", NegativeBinomialDerivativeRepresentationError)
     _finite_output(error, "fourth-derivative bound", NegativeBinomialDerivativeRepresentationError)
     return fourth, error

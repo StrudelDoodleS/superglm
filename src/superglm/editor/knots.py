@@ -21,6 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 from superglm.dm_builder import knot_geometry_weight, resolve_discrete_n_bins, should_discretize
 from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
@@ -59,8 +60,6 @@ _RULE_TEXT = {
 LEVEL_OPERATIONS = frozenset({"collapse", "ungroup", "special", "on_curve"})
 # The display step a knot snaps to on an ordered term's level axis.
 _ORDERED_STEP = 0.1
-# Unit roundoff of float64, u = 2**-53: the bound on the relative error of one rounding.
-_UNIT_ROUNDOFF = 2.0**-53
 
 _NOT_SPLINE = "Knots are for spline terms and ordered terms with a spline basis."
 _INTERACTION = "A term used by an interaction keeps its knots."

@@ -33,11 +33,11 @@ from numpy.typing import NDArray
 from scipy.linalg import cho_factor, cho_solve, norm
 from scipy.sparse.linalg import LinearOperator, minres
 
+from superglm._roundoff import SQRT_EPS as _SQRT_EPS
+from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
-
-_SQRT_EPS = float(np.finfo(np.float64).eps) ** 0.5
 
 
 @njit(cache=True)
@@ -362,10 +362,9 @@ def _objective_delta_roundoff(
     """
     width = sum(len(beta) for beta in betas)
     count = 4 * n_rows + 6 * width + 4 * len(betas) + 32
-    ku = count * (np.finfo(float).eps / 2.0)
-    if ku >= 1.0:
+    gamma_k = _gamma(count)
+    if gamma_k == np.inf:
         return np.inf
-    gamma_k = ku / (1.0 - ku)
     inflation = 1.0 / (1.0 - gamma_k)
     # Retain separate norm exponents until multiplication. A tiny direction
     # times a large response can be finite despite an unrepresentable ratio

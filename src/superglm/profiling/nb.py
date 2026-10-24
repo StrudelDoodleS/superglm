@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq
 from scipy.special import digamma
 
+from superglm._roundoff import EPS
 from superglm.distributions import NegativeBinomial, clip_mu, weighted_log_likelihood
 from superglm.links import stabilize_eta
 from superglm.model.base import model_has_lambda1_targets, resolve_selection_penalty_for_fit
@@ -594,7 +595,7 @@ class NBProfileResult:
             # at most (n - 1) u sum|w l_i| (Higham 2002, section 4.2), where
             # sum|w l_i| = size * nll since no row's log-probability is positive.
             # eps = 2u leaves each row its own rounding.
-            roundoff = self._y.size * np.finfo(np.float64).eps * abs(optimum_nll)
+            roundoff = self._y.size * EPS * abs(optimum_nll)
             # Rooted in log theta: the range spans up to eighteen decades, and
             # an endpoint's own magnitude is its only yardstick.
             found, log_centre, centre_nll = likelihood_ratio_interval(

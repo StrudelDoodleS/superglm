@@ -21,6 +21,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._roundoff import PENALTY_RANK_CUT, SMALLEST_SUBNORMAL, UNIT_ROUNDOFF
 from superglm.factor_smooth_geometry import (
     adjoint_sum_to_zero_blocks,
     expand_sum_to_zero_blocks,
@@ -99,9 +100,7 @@ def _enclosed_bound_sum(*bounds: NDArray | float | np.float64) -> NDArray:
     from superglm.reml.multi_penalty import _gamma, _upper
 
     computed = np.sum(np.asarray(bounds, dtype=np.float64), axis=0)
-    unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(0.0, 1.0)
-    return _upper((computed + len(bounds) * tiny) / (1 - _gamma(len(bounds) + 2, unit)))
+    return _upper((computed + len(bounds) * SMALLEST_SUBNORMAL) / (1 - _gamma(len(bounds) + 2)))
 
 
 def _enclosed_root_gram(root: NDArray, error: NDArray) -> tuple[NDArray, NDArray]:
@@ -171,8 +170,7 @@ def _retained_coordinate_map(
     # The Neumann series gives an elementwise enclosure of G^-1:
     # |G^-1| <= I + |G-I| + eta**2/(1-eta), since every tail entry is
     # bounded by the corresponding sum of spectral norms.
-    unit = np.finfo(np.float64).eps / 2
-    tail = _upper(np.float64(eta) ** 2 / (1 - eta) / (1 - _gamma(5, unit)))
+    tail = _upper(np.float64(eta) ** 2 / (1 - eta) / (1 - _gamma(5)))
     inverse_bound = _enclosed_bound_sum(np.eye(rank), defect_bound, np.full_like(gram, tail))
     return result, _positive_product(inverse_bound, residual)
 
@@ -232,8 +230,8 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
         + eta_value**2 / (2 * (1 - eta_value))
         + np.float64(_gamma(len(gram) + 2)) * math.fsum(map(float, np.abs(diagonal)))
     )
-    unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(0.0, 1.0)
+    unit = UNIT_ROUNDOFF
+    tiny = SMALLEST_SUBNORMAL
     return value, float(_upper((bound + 8 * tiny) / (1 - _gamma(8, unit))))
 
 
@@ -347,8 +345,8 @@ def _active_support_volume_error(support) -> float:
     width = basis.shape[0]
     if rank == 0 or rank == width:
         return 0.0
-    unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(0.0, 1.0)
+    unit = UNIT_ROUNDOFF
+    tiny = SMALLEST_SUBNORMAL
     roots, errors = [], []
     for root, error in zip(
         support.component_roots, support.component_root_error_bounds, strict=True
@@ -433,8 +431,8 @@ def _joint_near_isometry_volume_error(
     gram, arithmetic = _matmul_enclosed(row_map, row_map.T)
     # Enclose subtraction rounding too. This avoids
     # relying on exact diagonal subtraction when the map is malformed.
-    unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(0.0, 1.0)
+    unit = UNIT_ROUNDOFF
+    tiny = SMALLEST_SUBNORMAL
     difference = gram - np.eye(len(gram))
     defect = _enclosed_bound_sum(
         np.abs(difference), arithmetic, _gamma(1, unit) * np.abs(difference) + tiny
@@ -1698,7 +1696,7 @@ def build_tensor_pair_logdet_summaries(
     cache: dict | None = None,
 ) -> dict[str, TensorPairLogdetSummary]:
     """Build closed-form tensor summaries for eligible shared tensor penalty pairs."""
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    eps_thresh = PENALTY_RANK_CUT
     summaries: dict[str, TensorPairLogdetSummary] = {}
     summary_cache = None if cache is None else cache.setdefault("tensor_pair_logdet_summaries", {})
     for group_name, indices in _group_penalties(penalties).items():
@@ -1782,8 +1780,8 @@ def evaluate_tensor_pair_logdet_summaries(
 ) -> dict[str, TensorPairLogdetEvaluation]:
     """Evaluate cached tensor summaries for one lambda dictionary."""
     evaluations: dict[str, TensorPairLogdetEvaluation] = {}
-    unit = np.finfo(float).eps / 2.0
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    unit = UNIT_ROUNDOFF
+    eps_thresh = PENALTY_RANK_CUT
 
     def marginal_logs(
         values: NDArray, weight: float, structural_rank: int | None
@@ -2054,7 +2052,7 @@ def build_penalty_components(
     """
     components: list[PenaltyComponent] = []
     component_cache = None if cache is None else cache.setdefault("penalty_components", {})
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
+    eps_thresh = PENALTY_RANK_CUT
 
     def _canonicalize_ssp_penalty(
         omega_ssp: NDArray,
@@ -3021,7 +3019,7 @@ def _compute_penalty_logdet_evaluation(
     log_terms = []
     log_errors = []
     rank = 0
-    unit = np.finfo(float).eps / 2
+    unit = UNIT_ROUNDOFF
     for group_name, indices in _group_penalties(penalties).items():
         grouped = [penalties[index] for index in indices]
         group_names = [component.name for component in grouped]

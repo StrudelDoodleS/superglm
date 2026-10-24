@@ -25,9 +25,10 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._parallel import pooled_row_blocks
+from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL as _TINY
+from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 
-_EPS = 2.220446049250313e-16
-_TINY = 5e-324
 # A block of 1,024 rows is about 0.2 ms of theta-series work and a section
 # costs about 0.15 ms to wake its workers: at eight workers a call over 12,000
 # rows takes 0.7 ms in blocks of 1,024 and 1.3 ms in blocks of 4,096 (which
@@ -629,7 +630,6 @@ def log_fourth_derivative(
 # integer multiple of it below 2**20 is exact.
 _LN2_HIGH = 0.6931471803691238
 _LN2_LOW = 1.9082149292705877e-10
-_UNIT_ROUNDOFF = 1.1102230246251565e-16
 _RESCALE_ABOVE = 2.0**300
 _RESCALE_BY = 2.0**-300
 

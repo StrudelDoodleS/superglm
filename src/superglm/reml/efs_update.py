@@ -40,6 +40,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._roundoff import EPS
+from superglm._roundoff import gamma as _gamma
 from superglm.types import LambdaPolicy
 
 EFSProposalKind = Literal[
@@ -172,16 +174,12 @@ def _bounded_lambda_from_raw_log_step(
 def _quadratic_psd_error_bound(beta: NDArray, penalty: NDArray) -> float:
     """Bound admitted PSD and floating-point error in ``beta.T @ S @ beta``."""
 
-    width = len(beta)
-    epsilon = np.finfo(np.float64).eps
-    operations = 2 * width + 2
-    product = operations * epsilon
-    if product >= 1.0:
+    gamma = _gamma(2 * (2 * len(beta) + 2))
+    if gamma == math.inf:
         return math.inf
-    gamma = product / (1.0 - product)
     absolute_sum = float(np.abs(beta) @ np.abs(penalty) @ np.abs(beta))
     penalty_scale = max(1.0, float(np.linalg.norm(penalty, ord=np.inf)))
-    admission = 32.0 * epsilon * penalty_scale * float(beta @ beta)
+    admission = 32.0 * EPS * penalty_scale * float(beta @ beta)
     bound = gamma * absolute_sum + admission
     return float(np.nextafter(bound, math.inf)) if math.isfinite(bound) else math.inf
 
