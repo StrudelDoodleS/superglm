@@ -371,6 +371,12 @@ def test_a_flat_scop_term_publishes_one_fit_from_every_start(start):
     history = result.objective_history
     slack = _SCOP_LINE_SEARCH_RELATIVE_TOLERANCE * max(abs(min(history)), 1.0)
     assert diagnostics["objective"] <= min(history) + slack
+    # The premise of the box-only check on x1: the fit holds every one of its
+    # increments.  A held direction is not estimated and carries no effective
+    # degrees of freedom, and a coefficient's EDF within 100 eps of zero is
+    # published as zero, so the term's is within its size times that.
+    size = sum(group.size for group in model._groups if group.feature_name == "x1")
+    assert abs(model.term_inference("x1").edf) <= size * 100 * np.finfo(float).eps
     assert LAMBDA_FLOOR <= diagnostics["lambdas"]["x1"] <= LAMBDA_CEILING
     tolerance = 2.0 * _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
     edf = _sparse_binomial_fit("cold").result.effective_df

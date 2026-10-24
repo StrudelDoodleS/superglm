@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -1336,6 +1337,55 @@ def test_a_damped_joint_step_never_stops_the_fit():
         assert abs(score) <= np.sqrt(np.sum(weights * column**2) * model._tol * deviance)
 
 
+def _latent_step_depth_of(*changes, free_dim=2):
+    """``_latent_step_depth`` of a trial moving group ``i`` by ``changes[i]``, its first ``free_dim`` coordinates free."""
+
+    def trial(betas):
+        groups = tuple(
+            irls_direct._SCOPGroupState(i, beta, np.zeros_like(beta), None, 0.0, False)
+            for i, beta in enumerate(betas)
+        )
+        return irls_direct._SCOPTrialState(irls=None, groups=groups)
+
+    moved = [np.asarray(change, dtype=float) for change in changes]
+    specs = {
+        i: SimpleNamespace(reparam=SimpleNamespace(free_dim=free_dim)) for i in range(len(moved))
+    }
+    return irls_direct._latent_step_depth(
+        trial([np.zeros_like(m) for m in moved]), trial(moved), specs
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "depth"),
+    [
+        pytest.param([[1e12, -1e12, 0, 0, 0]], 0, id="free-coordinates-are-not-bounded"),
+        pytest.param([[0, 1e300, 0, 0, 0]], 0, id="last-free-coordinate-is-not-bounded"),
+        pytest.param([[0, 0, 1000.0, 0, 0]], 0, id="first-exponentiated-at-the-maximum"),
+        pytest.param([[0, 0, 0, 0, -1000.0]], 0, id="a-decrease-counts-by-its-length"),
+        pytest.param([[0, 0, 0, 1000.4, 0]], 1, id="just-past-the-maximum"),
+        pytest.param([[0, 0, 2000.0, 0, 0]], 1, id="halved-onto-the-maximum"),
+        pytest.param([[0, 0, 2000.5, 0, 0]], 2, id="halved-just-past-the-maximum"),
+        pytest.param([[0, 0, 0, 4000.0, 0]], 2, id="quartered-onto-the-maximum"),
+        pytest.param([[0, 0, 0, 0, 6.6e7]], 17, id="the-repro-step"),
+        pytest.param([[0, 0, 0, np.inf, 0]], 0, id="an-infinite-step-is-left-to-the-search"),
+        pytest.param([[0, 0, 0, 0, -np.inf]], 0, id="a-negative-infinite-step"),
+        pytest.param([[0, 0, 10.0, 0, 0], [0, 0, 0, 4000.5, 0]], 3, id="the-longest-group-last"),
+        pytest.param([[0, 0, 4000.5, 0, 0], [0, 0, 0, 10.0, 0]], 3, id="the-longest-group-first"),
+        pytest.param([[0, 0, 0, np.inf, 0], [0, 0, 0, 4000.5, 0]], 0, id="infinite-in-any-group"),
+    ],
+)
+def test_the_latent_step_depth_is_the_first_halving_within_the_maximum_step(changes, depth):
+    """The smallest ``d`` with ``max |step| / 2^d <= _LATENT_MAX_STEP`` over the exponentiated coordinates.
+
+    A step of exactly the maximum is within it (depth 0), a free coordinate's
+    step is not counted whatever its length, and a step that is not finite is
+    depth 0: no halving brings it back, and the line search refuses it as it is.
+    """
+    assert irls_direct._LATENT_MAX_STEP == 1000.0
+    assert _latent_step_depth_of(*changes) == depth
+
+
 def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypatch):
     """x inside a convex spline's span, weights exp(U(-3, 3)), no penalty (Sol's round-5 repro).
 
@@ -1350,8 +1400,9 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
     """
     from superglm import Numeric, PSpline
 
-    lengths = []
+    lengths, depths = [], []
     evaluate = irls_direct._evaluate_scop_trial
+    depth_of = irls_direct._latent_step_depth
 
     def recorded(**kwargs):
         trial = evaluate(**kwargs)
@@ -1360,7 +1411,12 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
             lengths.append(np.max(np.abs(after.beta_eff - before.beta_eff)[free:], initial=0.0))
         return trial
 
+    def recorded_depth(*args):
+        depths.append(depth_of(*args))
+        return depths[-1]
+
     monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    monkeypatch.setattr(irls_direct, "_latent_step_depth", recorded_depth)
     rng = np.random.default_rng(11)
     x = rng.uniform(size=200)
     y = 0.2 + 2.2 * x + 0.6 * x * x + 0.05 * rng.normal(size=200)
@@ -1376,6 +1432,8 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
     residual = y - np.asarray(model.predict(frame))
     deviance = float(np.sum(weights * residual**2))
 
+    # the bound below is the shortening's, not a trajectory that never needed it
+    assert any(depths)
     assert lengths and max(lengths) <= irls_direct._LATENT_MAX_STEP
     assert model.result.converged
     for column in (np.ones_like(x), x):
@@ -1425,6 +1483,31 @@ def test_a_damped_trial_takes_the_ordinary_solve_at_its_latent_coordinates(monke
     assert checked
 
 
+_COUPLED_MONOTONE_TOL = 1e-6
+
+
+def _fit_coupled_monotone(convergence):
+    """The corr(x1, x2) = 0.7 monotone fixture's inner fit at fixed lambda, stopping on ``convergence``."""
+    frame, y, offset = _correlated_monotone_frame(0.7)
+    model = _monotone_model()
+    y_fit, weights, offset_fit = model_build_design_matrix(model, frame, y, np.ones_like(y), offset)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 8.94, "x2": 0.770},
+        offset=offset_fit,
+        max_iter=100,
+        tol=_COUPLED_MONOTONE_TOL,
+        weight_semantics="frequency",
+        convergence=convergence,
+    )
+    return result
+
+
 @pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
 def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
     """A step the line search cut to 2^-20 changes the deviance, and the coefficients, by about that fraction: the fit goes on.
@@ -1444,26 +1527,75 @@ def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
         return select(**kwargs)
 
     monkeypatch.setattr(irls_direct, "_select_irls_trial", damp_the_second)
-    frame, y, offset = _correlated_monotone_frame(0.7)
-    model = _monotone_model()
-    y_fit, weights, offset_fit = model_build_design_matrix(model, frame, y, np.ones_like(y), offset)
-    result, _ = irls_direct.fit_irls_direct(
-        model._dm,
-        y_fit,
-        weights,
-        model._distribution,
-        model._link,
-        model._groups,
-        lambda2={"x1": 8.94, "x2": 0.770},
-        offset=offset_fit,
-        max_iter=100,
-        tol=1e-6,
-        weight_semantics="frequency",
-        convergence=convergence,
-    )
+    result = _fit_coupled_monotone(convergence)
 
     assert result.converged
     assert result.n_iter > 2
+
+
+@pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
+def test_a_step_shortened_into_the_latent_range_is_never_where_the_fit_stops(
+    monkeypatch, convergence
+):
+    """A proposal cut to 2^-30 of the Newton step by the latent range, then taken whole by the search, is not a stop.
+
+    The second iteration's ``_latent_step_depth`` is forced to 30 and
+    ``_select_irls_trial`` is left alone, so the search accepts the shortened
+    proposal at its own alpha = 1: its decision reports no halving, and only
+    the depth added to ``step_halvings`` tells the stop rules the step is
+    damped. Without it the change in deviance, and in the coefficients, is
+    that same 2^-30 of a full step's and the fit stops on it at iteration 2.
+    The depth is deep enough that this change is below ``tol``; a depth of
+    3 is not, and the fit would go on whether or not the depth is counted.
+    The retained iterate is the trial evaluated at 2^-30, not the full
+    proposal the search never tried.
+    """
+    depth = 30
+    states, trials, decisions = [], [], []
+    depth_of = irls_direct._latent_step_depth
+    evaluate = irls_direct._evaluate_scop_trial
+    select = irls_direct._select_irls_trial
+
+    def shortened_second(committed, proposed, specs):
+        states.append((committed, proposed))
+        return depth if len(states) == 2 else depth_of(committed, proposed, specs)
+
+    def recorded_trial(**kwargs):
+        trial = evaluate(**kwargs)
+        trials.append((len(states), kwargs["alpha"], trial))
+        return trial
+
+    def recorded_decision(**kwargs):
+        decision = select(**kwargs)
+        decisions.append((len(states), decision))
+        return decision
+
+    monkeypatch.setattr(irls_direct, "_latent_step_depth", shortened_second)
+    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded_trial)
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded_decision)
+    result = _fit_coupled_monotone(convergence)
+
+    assert result.converged
+    assert result.n_iter > 2
+
+    # the event: the search took the shortened proposal at its own alpha = 1
+    (forced,) = [decision for iteration, decision in decisions if iteration == 2]
+    assert (forced.alpha, forced.step_halvings, forced.step_rejected) == (1.0, 0, False)
+    (shortened,) = [
+        trial for iteration, alpha, trial in trials if iteration == 2 and alpha == 2.0**-depth
+    ]
+    committed, proposed = states[1]
+    retained = states[2][0]
+    latent_change = 0.0
+    for before, full, trial, after in zip(
+        committed.groups, proposed.groups, shortened.groups, retained.groups, strict=True
+    ):
+        assert np.array_equal(after.beta_eff, trial.beta_eff)
+        assert not np.array_equal(after.beta_eff, full.beta_eff)
+        move = np.abs(after.beta_eff - before.beta_eff) / np.maximum(1.0, np.abs(after.beta_eff))
+        latent_change = max(latent_change, float(np.max(move)))
+    # the premise: a stop read off this step's change would have fired
+    assert latent_change < _COUPLED_MONOTONE_TOL
 
 
 def _sparse_counts_model(n, seed, theta):
