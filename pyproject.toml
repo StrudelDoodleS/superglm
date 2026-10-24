@@ -106,13 +106,12 @@ required-version = "==0.12.1"
 # tests/test_supply_chain_governance.py; drop it once the window has passed it.
 exclude-newer = "7 days"
 # certifi 2026.10.19 (uploaded 2026-10-20T02:24:16Z) fixes GHSA-6q48-6c7w-9gw2.
-# pillow 13.0.0 (uploaded by 2026-10-16T22:18:10Z) fixes GHSA-p4wg-p73j-c528,
-# GHSA-65qm-jvmh-6pqg, GHSA-58r4-6rv3-gfh8, GHSA-pchr-8j38-3x4p,
-# GHSA-q45j-58j2-45rg, GHSA-462x-pgg6-55fp, GHSA-c6hw-5grf-ff96 and
-# GHSA-vx6w-vv9f-6gvg.
-# virtualenv 21.14.9 (uploaded 2026-10-17T16:09:40Z) fixes GHSA-c978-59m8-c77v;
-# 21.14.10 followed at 2026-10-17T17:31:53Z and stays outside the cutoff.
-exclude-newer-package = { certifi = "2026-10-20T02:25:00Z", pillow = "2026-10-16T22:19:00Z", virtualenv = "2026-10-17T16:10:00Z" }
+# filelock 4.2.1 (uploaded 2026-10-17T16:48:12Z) fixes GHSA-v4x8-3wr5-3wq8,
+# GHSA-9vhv-jxww-xfm5 and GHSA-567q-5qvw-pf92; 4.2.2 followed at
+# 2026-10-18T07:26:43Z and stays outside the cutoff.
+# virtualenv 21.14.13 (uploaded 2026-10-22T20:10:16Z) fixes GHSA-4f8h-vr72-p32c and
+# GHSA-cx6f-vjhg-g3cc.
+exclude-newer-package = { certifi = "2026-10-20T02:25:00Z", filelock = "2026-10-17T16:49:00Z", virtualenv = "2026-10-22T20:11:00Z" }
 
 [build-system]
 requires = ["hatchling>=1.27"]
