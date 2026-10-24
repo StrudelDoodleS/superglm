@@ -1066,3 +1066,48 @@ def test_the_schur_rows_are_formed_a_leaf_at_a_time(monkeypatch):
     assert model.result.converged
     assert peaks
     assert all(peak < copy for peak, copy in peaks)
+
+
+def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
+    """A fit's only row-level SCOP group is compressed once per REML run, not once per fit (a count).
+
+    The lone group takes its own route, compressing whenever a row repeats;
+    it read the group's rows and sorted them on every inner fit of the run.
+    """
+    from superglm import Numeric
+    from superglm.reml import scop_efs
+    from superglm.solvers import scop_exact_support
+
+    builds, runs, fits = [], set(), []
+    build = scop_exact_support.build_exact_scop_support
+    fit = scop_efs.fit_irls_direct
+
+    def counted_build(rows):
+        builds.append(rows.shape)
+        return build(rows)
+
+    def counted_fit(*args, **kwargs):
+        fits.append(1)
+        if kwargs.get("_scop_run_centring") is not None:
+            runs.add(id(kwargs["_scop_run_centring"]))
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(scop_exact_support, "build_exact_scop_support", counted_build)
+    monkeypatch.setattr(scop_efs, "fit_irls_direct", counted_fit)
+    rng = np.random.default_rng(8)
+    n = 2000
+    frame = pd.DataFrame({"a": np.round(rng.uniform(0, 1, n), 2), "z": rng.normal(size=n)})
+    y = 1.0 + np.log1p(3 * frame["a"]) + 0.5 * frame["z"] + 0.3 * rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "a": Spline(kind="ps", k=6, constraint=Constraint.fit.increasing),
+            "z": Numeric(),
+        },
+    )
+    model.fit_reml(frame, y.to_numpy())
+
+    assert len(fits) > len(runs) > 0
+    assert len(builds) == len(runs)

@@ -210,10 +210,11 @@ class SCOPRunCentring:
     - the SCOP step's reduced design (the non-SCOP groups), which
       owns its compact-support caches (pattern plan, solver supports,
       execution plan).  These depend on the basis only;
-    - each row-level SCOP group's exact support for the joint step
-      (``scop_newton._exact_support``): its distinct rows and row index, or
-      ``None`` where compressing does not pay.  It depends on the group's
-      rows only, so it is found once per run, not once per fit;
+    - each row-level SCOP group's exact support: its distinct rows and row
+      index, or ``None`` where compressing does not pay
+      (``scop_newton._exact_support``) or, for a fit's only SCOP group,
+      where every row is distinct (``_lone_scop_support``).  It depends on
+      the group's rows only, so it is found once per run, not once per fit;
     - the refusals (``_CARRIED_REFUSALS``) of the raw-moment and tensor raw
       rungs, on the full design and on the reduced one.
 
@@ -345,6 +346,23 @@ def _solve_constrained_qp_with_cold_retry(
         if safeguarded.converged:
             return safeguarded
     return result
+
+
+def _lone_scop_support(gm, index: int, supports: dict | None) -> tuple[NDArray, NDArray] | None:
+    """A fit's only row-level SCOP group as its distinct rows and row index; ``None`` if every row is distinct.
+
+    With one SCOP group there are no pair tables, so it compresses whenever
+    any row repeats. ``supports`` is the run's record by group
+    (``SCOPRunCentring.exact_supports``): the rows never change within a
+    run, so they are read and sorted once per run, not once per fit.
+    """
+    if supports is not None and index in supports:
+        return supports[index]
+    support = scop_exact_support.build_exact_scop_support(gm.toarray())
+    compressed = None if support is None else (support.B_unique, support.row_to_support)
+    if supports is not None:
+        supports[index] = compressed
+    return compressed
 
 
 def _immutable_or_none(values: NDArray | None) -> NDArray | None:
@@ -2082,6 +2100,17 @@ def _fit_irls_direct_once(
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
     _scop_state: dict[int, dict] = {}
+    # A REML run's fits share one reduced design, their rung refusals and
+    # their exact supports (``SCOPRunCentring``); a traced or debugged fit
+    # stays fresh, as the Newton engine's carried policy does.
+    if (
+        _has_scop
+        and _scop_run_centring is not None
+        and debug_recorder is None
+        and trace_run is None
+    ):
+        _scop_run = _scop_run_centring
+        _scop_run.bind((dm, family, link, *gms, *groups))
     if _has_scop:
         for gi, g in enumerate(groups):
             if g.monotone_engine == "scop":
@@ -2117,25 +2146,27 @@ def _fit_irls_direct_once(
                         "beta_scop_prev": None,
                     }
                 else:
-                    B_scop = _gm.toarray()
-                    support = None
-                    if _n_scop_groups == 1:
-                        support = scop_exact_support.build_exact_scop_support(B_scop)
-
-                    if support is not None:
+                    compressed = (
+                        _lone_scop_support(
+                            _gm, gi, None if _scop_run is None else _scop_run.exact_supports
+                        )
+                        if _n_scop_groups == 1
+                        else None
+                    )
+                    if compressed is not None:
                         _expose_exact_support_state = True
                         state = {
                             "reparam": reparam,
-                            "B_scop": support.B_unique,
+                            "B_scop": compressed[0],
                             "S_scop": S_scop,
-                            "bin_idx": support.row_to_support,
+                            "bin_idx": compressed[1],
                             "beta_scop": warm_beta_scop,
                             "beta_scop_prev": None,
                         }
                     else:
                         state = {
                             "reparam": reparam,
-                            "B_scop": B_scop,
+                            "B_scop": _gm.toarray(),
                             "S_scop": S_scop,
                             "bin_idx": None,
                             "beta_scop": warm_beta_scop,
@@ -2170,12 +2201,7 @@ def _fit_irls_direct_once(
         _reduced_gms = []
         for gi in _non_scop_groups_idx:
             _reduced_gms.append(gms[gi])
-        # A REML run's fits share one reduced design and their rung refusals
-        # (``SCOPRunCentring``); a traced or debugged fit stays fresh, as the
-        # Newton engine's carried policy does.
-        if _scop_run_centring is not None and debug_recorder is None and trace_run is None:
-            _scop_run = _scop_run_centring
-            _scop_run.bind((dm, family, link, *gms, *groups))
+        if _scop_run is not None:
             _reduced_dm = _scop_run.reduced_design(
                 tuple(_non_scop_groups_idx), _reduced_gms, n, _p_reduced
             )
