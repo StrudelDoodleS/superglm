@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_ceiling
+from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
@@ -1728,7 +1728,7 @@ def _backoff_scop_candidate_step(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
-    ceilings = _lambda_ceilings(origin)
+    boxes = _lambda_boxes(origin)
     for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
         alpha = 0.5**attempt
         # Seeded from the proposal, not the origin: the adopted dict must
@@ -1737,9 +1737,7 @@ def _backoff_scop_candidate_step(
         trial_lambdas = proposed_lambdas.copy()
         for name in changed_names:
             log_trial = np.log(origin.lambdas[name]) + alpha * log_directions[name]
-            trial_lambdas[name] = float(
-                np.clip(np.exp(log_trial), LAMBDA_FLOOR, ceilings.get(name, LAMBDA_CEILING))
-            )
+            trial_lambdas[name] = float(np.clip(np.exp(log_trial), *boxes.get(name, LAMBDA_BOX)))
         mode = _fit_scop_reml_mode(
             context,
             trial_lambdas,
@@ -1802,7 +1800,7 @@ def _backtrack_scop_efs_candidate(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
-    ceilings = _lambda_ceilings(current)
+    boxes = _lambda_boxes(current)
     trial_number = 0
     for direction_sign in (1.0, -1.0) if reflect else (1.0,):
         direction_attempts = (
@@ -1816,7 +1814,7 @@ def _backtrack_scop_efs_candidate(
             for name in changed_names:
                 log_trial = np.log(current.lambdas[name]) + alpha * log_directions[name]
                 trial_lambdas[name] = float(
-                    np.clip(np.exp(log_trial), LAMBDA_FLOOR, ceilings.get(name, LAMBDA_CEILING))
+                    np.clip(np.exp(log_trial), *boxes.get(name, LAMBDA_BOX))
                 )
 
             trial_number += 1
@@ -1856,22 +1854,22 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
     return state
 
 
-def _scop_lambda_ceiling(state: dict) -> float:
-    """A SCOP block's smoothing-parameter ceiling at its state (``latent_lambda_ceiling``)."""
+def _scop_lambda_box(state: dict) -> tuple[float, float]:
+    """A SCOP block's smoothing-parameter ``(floor, ceiling)`` at its state (``latent_lambda_box``)."""
     latent = np.asarray(state["beta_eff"], dtype=np.float64)[state["reparam"].free_dim :]
-    return latent_lambda_ceiling(latent)
+    return latent_lambda_box(latent)
 
 
-def _lambda_ceilings(mode) -> dict[str, float]:
-    """The ceiling of each SCOP component at ``mode``, by name; any other has ``LAMBDA_CEILING``."""
+def _lambda_boxes(mode) -> dict[str, tuple[float, float]]:
+    """The box of each SCOP component at ``mode``, by name; any other has ``LAMBDA_BOX``."""
     if not mode.scop_states:
         return {}
-    ceilings: dict[str, float] = {}
+    boxes: dict[str, tuple[float, float]] = {}
     for pc in mode.penalty_components:
         state = _is_scop_component(pc, mode.scop_states)
         if state is not None:
-            ceilings[pc.name] = _scop_lambda_ceiling(state)
-    return ceilings
+            boxes[pc.name] = _scop_lambda_box(state)
+    return boxes
 
 
 def fit_fixed_scop_reml(
@@ -2120,10 +2118,10 @@ def _joint_efs_lambda_step(
         if abs(scaled_step) > max_step:
             scaled_step = max_step * np.sign(scaled_step)
 
-        # Apply step
-        log_lam_new = np.log(max(lambdas[pc.name], 1e-10)) + scaled_step
-        ceiling = LAMBDA_CEILING if scop_st is None else _scop_lambda_ceiling(scop_st)
-        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), LAMBDA_FLOOR, ceiling))
+        # Apply step, from inside the box
+        floor, ceiling = LAMBDA_BOX if scop_st is None else _scop_lambda_box(scop_st)
+        log_lam_new = np.log(max(lambdas[pc.name], floor)) + scaled_step
+        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), floor, ceiling))
         dlsp_out[pc.name] = dlsp
 
     return lambdas_new, alpha, dlsp_out
@@ -3275,17 +3273,13 @@ def optimize_scop_efs_reml(
                     retained_mode, candidate_accepted = current_mode, True
                 else:
                     proposal = lambdas.copy()
-                    ceilings = _lambda_ceilings(current_mode)
+                    boxes = _lambda_boxes(current_mode)
                     for name, log_lambda, delta in zip(
                         system.names, system.log_lambdas, newton_step, strict=True
                     ):
                         if delta != 0.0:
                             proposal[name] = float(
-                                np.clip(
-                                    np.exp(log_lambda + delta),
-                                    LAMBDA_FLOOR,
-                                    ceilings.get(name, LAMBDA_CEILING),
-                                )
+                                np.clip(np.exp(log_lambda + delta), *boxes.get(name, LAMBDA_BOX))
                             )
                     retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
                         fit_context,
@@ -3416,9 +3410,7 @@ def optimize_scop_efs_reml(
         else:
             for name in estimated_names:
                 if name in lambdas_new and name in lambdas:
-                    accepted_step = np.log(max(lambdas_new[name], 1e-10)) - np.log(
-                        max(lambdas[name], 1e-10)
-                    )
+                    accepted_step = np.log(lambdas_new[name]) - np.log(lambdas[name])
                     efs_prev_dlsp[name] = accepted_step
         # Aitken extrapolates a run of EFS steps contracting at one ratio, and
         # a Newton step is no part of that run: the next EFS step (an
