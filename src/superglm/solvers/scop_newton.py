@@ -726,20 +726,30 @@ class _OrdinaryCross:
         return cross, norms
 
 
-def _exact_support(spec: SCOPGroupSpec) -> tuple[NDArray, NDArray | None]:
+def _exact_support(spec: SCOPGroupSpec, supports: dict | None) -> tuple[NDArray, NDArray | None]:
     """A group's columns as a basis and a row index into it.
 
     A group with no bins is compressed to its distinct rows only when they
     are at most half its rows: its moments then cost a bincount over the
     rows plus at most half the row-level products. An almost-unique
     support saves nothing, and every table it indexes grows with its rows.
+    ``supports``, the run's record by group (``SCOPRunCentring``), keeps
+    the compressed support or ``None`` for the next fit of the same rows.
     """
     if spec.bin_idx is not None:
         return spec.B_scop, spec.bin_idx
-    support = build_exact_scop_support(spec.B_scop)
-    if support is None or 2 * support.n_unique > spec.B_scop.shape[0]:
-        return spec.B_scop, None
-    return support.B_unique, support.row_to_support
+    if supports is not None and spec.group_index in supports:
+        compressed = supports[spec.group_index]
+    else:
+        support = build_exact_scop_support(spec.B_scop)
+        compressed = (
+            None
+            if support is None or 2 * support.n_unique > spec.B_scop.shape[0]
+            else (support.B_unique, support.row_to_support)
+        )
+        if supports is not None:
+            supports[spec.group_index] = compressed
+    return (spec.B_scop, None) if compressed is None else compressed
 
 
 def _group_lambda(lambdas: dict[str, float] | float, group: GroupSlice) -> float:
@@ -752,8 +762,9 @@ class SCOPJointNewton:
     Holds what is fixed for the fit: the groups in latent order, their
     penalties at the fit's smoothing parameters, each group's columns on
     its exact support (a basis and a row index into it, the distinct rows
-    of a non-discretized group), and the centred cross block between the
-    ordinary (reduced) design and those columns (``_OrdinaryCross``).
+    of a non-discretized group, read from the run's ``supports`` when it
+    has them), and the centred cross block between the ordinary (reduced)
+    design and those columns (``_OrdinaryCross``).
     """
 
     def __init__(
@@ -762,6 +773,7 @@ class SCOPJointNewton:
         lambdas: dict[str, float] | float,
         reduced_design: DesignMatrix,
         n: int,
+        supports: dict | None = None,
     ) -> None:
         self.specs = tuple(specs)
         self.n = int(n)
@@ -775,7 +787,7 @@ class SCOPJointNewton:
             lam = _group_lambda(lambdas, spec.group)
             self.penalty[block, block] = lam * spec.S_scop
             self.penalty_root[block, block] = np.sqrt(max(lam, 0.0)) * _psd_root(spec.S_scop)
-        self.columns = tuple(_exact_support(spec) for spec in self.specs)
+        self.columns = tuple(_exact_support(spec, supports) for spec in self.specs)
         self._cross = _OrdinaryCross(reduced_design, self.columns) if reduced_design.p else None
 
     def predictor(self, thetas: Sequence[NDArray]) -> NDArray:
