@@ -38,6 +38,20 @@ def test_build_exact_scop_support_reproduces_row_level_products_exactly():
     assert_allclose(BtWz_support, BtWz_row)
 
 
+def test_build_exact_scop_support_is_numpys_row_unique():
+    """The keyed grouping returns np.unique's rows, order and inverse, collisions included."""
+    rng = np.random.default_rng(3)
+    values = rng.integers(0, 40, size=5000).astype(float) / 7.0
+    smooth = np.column_stack([np.tanh(values - k) for k in range(6)])
+    # rows [2, 0] and [0, 1] share the key 2 * 1 + 0 * 2 = 0 * 1 + 1 * 2
+    colliding = np.array([[2.0, 0.0], [0.0, 1.0], [2.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    for B in (smooth, colliding):
+        support = build_exact_scop_support(B)
+        expected_rows, expected_inverse = np.unique(B, axis=0, return_inverse=True)
+        np.testing.assert_array_equal(support.B_unique, expected_rows)
+        np.testing.assert_array_equal(support.row_to_support, expected_inverse)
+
+
 def test_build_exact_scop_support_returns_none_when_no_repeated_rows():
     B = np.eye(5)
     support = build_exact_scop_support(B)

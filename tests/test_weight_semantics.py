@@ -458,12 +458,11 @@ class TestAFarZeroWeightRowIsNotInTheFit:
 
     @pytest.mark.parametrize("method", ["fit", "fit_reml"])
     def test_a_constrained_spline_reads_the_row_as_an_ordinary_one(self, method):
-        """SCOP's cached working objective ``sum(W z**2)`` masks the row too.
+        """A far zero-weight response row leaves a monotone (SCOP) fit as it was.
 
-        With only the deviance masked, the response row made that sum NaN and
-        the monotone fit stopped where it started, moved 53x in relative mean
-        and reporting ``converged=True``.  Mutation: the mask removed from the
-        ``half_zwz`` sums in ``solvers/scop_newton.py``.
+        The SCOP step reads the response only through ``W * (z - eta)``, which
+        the zero weight cancels; a working objective summing ``W z**2`` would
+        read it as NaN and stop the fit where it started.
         """
         frame, y = _gaussian_rows(600, slope=0.5)
         frame = frame[["g", "x"]]

@@ -1,292 +1,211 @@
-"""Stabilized full Newton solver for SCOP (Shape Constrained P-spline) terms.
+"""Joint Newton step for shape-constrained (SCOP) terms.
 
-One damped Newton step on the penalized WLS objective in SCOP solver space.
+Pya & Wood (2015, Appendix 1) fit a shape-constrained additive model by one
+full Newton step on all of its coefficients at once: the ordinary
+coefficients ``b`` and each SCOP term's latent coordinates ``theta``, whose
+mapped coefficients ``gamma(theta)`` enter the predictor linearly. With the
+intercept profiled out by centring, the penalized Hessian in ``(b, theta)`` is
 
-The objective is:
-    L = 0.5 * sum(W * (z - B @ gamma_eff(beta))^2) + 0.5 * lambda * beta^T S beta
+    [[A,        C J               ],
+     [J C',     J G J + lambda S + E]]
 
-where gamma_eff = reparam.forward(beta) is the elementwise SCOP map. Shape
-coordinates use an exponential map; a curvature-constrained term also keeps
-one identity-mapped affine slope coordinate.
+where ``A`` is the ordinary block's penalized Hessian, ``C = X' W X_s`` and
+``G = X_s' W X_s`` are the centred cross and SCOP moments in mapped
+coordinates, each a sum of products of centred columns, ``J =
+diag(gamma'(theta))``, and ``E = -diag(gamma''(theta) * X_s' W r)`` is the
+curvature of the map at the working residual ``r``.
 
-Full Newton (not Gauss-Newton) is required because Fisher scoring causes
-convergence problems for SCOP terms (Pya & Wood 2015, p. 6, lines 470-476).
-The second-order terms from d^2(gamma_eff)/d(beta)^2 are included in the
-Hessian. If the resulting Hessian is not positive definite, we fall back to
-Fisher scoring (Gauss-Newton) for that iteration only.
-
-For multi-SCOP models, ``scop_joint_newton_step`` solves for ALL SCOP groups
-simultaneously via a joint Hessian with proper cross-group blocks, replacing
-the sequential Gauss-Seidel loop that causes slow convergence.
+The step is taken by block elimination. The caller has already solved the
+ordinary block with ``theta`` held fixed; ``SCOPJointNewton.step`` reduces
+the SCOP block to its Schur complement ``J (G - C' A^-1 C) J + lambda S + E``,
+takes the Newton step there and corrects the ordinary solve by
+back-substitution. Pya & Wood (2015, §3.2) report that Fisher scoring caused
+convergence problems for these models, so ``E`` is kept unless the reduced
+block is then not positive definite, when that iteration takes the
+Gauss-Newton block instead. The Schur block's data part comes from its Grams
+when their rounding resolves every direction, and otherwise from a factor of
+its rows, where a direction the rows cannot tell from zero, or resolve only
+within ``sqrt(eps)`` of its scale from the ordinary design, gets no curvature
+(``_resolved_root``). Directions the block cannot resolve are truncated at
+``sqrt(eps)`` of its largest singular value (§3.2).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
-from scipy.linalg import cho_factor, cho_solve, norm
-from scipy.sparse.linalg import LinearOperator, minres
 
-from superglm._utils import weighted_row_sum
-from superglm.group_matrix import _disc_disc_2d_hist
+from superglm._group_matrix._group_matrix_algebra import (
+    _MAX_CROSS_EXPANSION_BYTES,
+    _MAX_DISC_DISC_HIST_CELLS,
+    _support_support_raw_cross,
+)
+from superglm._group_matrix._group_matrix_centered import (
+    _MAX_PACKED_HIST_CELLS,
+    _compact_support,
+    _compact_support_rows,
+)
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    CrossMatrixExecutionPlan,
+    DenseGroupMatrix,
+    DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
+    MatrixExecutionPlan,
+    _disc_disc_2d_hist,
+)
+from superglm.solvers.centered_system import _dense_split, penalty_factor
+from superglm.solvers.mode_score import dense_columns
+from superglm.solvers.rank import (
+    _GREY_FLOOR,
+    _eigensolver_relative_bar,
+    _gamma_up,
+    streamed_weighted_factor,
+    tsqr_leaf_rows,
+)
 from superglm.solvers.scop import SCOPSolverReparam
+from superglm.solvers.scop_exact_support import build_exact_scop_support
+from superglm.types import GroupSlice
+
+if TYPE_CHECKING:
+    from superglm.solvers.centered_system import CenteredSystem
 
 _SQRT_EPS = float(np.finfo(np.float64).eps) ** 0.5
-
-
-@njit(cache=True)
-def _scop_bin_aggregates(bin_idx, W, z, eta_bin, n_bins):
-    """``bincount(W)``, ``bincount(W*z)`` and ``bincount(W*(z - eta_bin[bin]))`` in one pass.
-
-    For one discretized SCOP group. Each bin accumulates the same products in
-    the same ascending-row order as the three ``np.bincount`` calls it
-    replaces, so the sums are bitwise identical, and the n-length eta,
-    residual and weighted products are never formed (perf_scout_scop,
-    finding 4: about 10 O(n) passes per joint step fused into one).
-    """
-    W_agg = np.zeros(n_bins)
-    Wz_agg = np.zeros(n_bins)
-    Wr_agg = np.zeros(n_bins)
-    for r in range(W.shape[0]):
-        b = bin_idx[r]
-        w = W[r]
-        zr = z[r]
-        W_agg[b] += w
-        Wz_agg[b] += w * zr
-        Wr_agg[b] += w * (zr - eta_bin[b])
-    return W_agg, Wz_agg, Wr_agg
-
-
-def _warmup_scop() -> None:
-    """Compile the SCOP bin aggregates for the operands a shape-constrained fit passes."""
-    empty = np.zeros(0, dtype=np.float64)
-    _scop_bin_aggregates(np.zeros(0, dtype=np.int64), empty, empty, empty, 0)
-
-
 """Pya & Wood (2015) §3.2 singular-value cutoff, relative to the largest."""
 
 _NEWTON_CURVATURE_MARGIN = 1e-10
 """Guard band on the ``I + curvature`` positive-definiteness test."""
 
 
-@dataclass
-class _SCOPPrototypeConfig:
-    """Private prototype switches for numerical experiments on the joint solve."""
+@njit(cache=True)
+def _scop_bin_moments(bin_idx, W, z, eta, n_bins):
+    """``bincount(W)`` and ``bincount(W * (z - eta))`` in one pass over the rows.
 
-    solve_mode: Literal["direct", "minres", "minres_inexact"] = "direct"
-    iterative_q_total_min: int = 96
-    iterative_rtol: float = 1e-10
-    iterative_maxiter: int | None = None
-    cross_block_rel_tol: float = 0.0
+    For one discretized SCOP group: the working residual is never formed at
+    observation level.
+    """
+    W_agg = np.zeros(n_bins)
+    Wr_agg = np.zeros(n_bins)
+    for r in range(W.shape[0]):
+        b = bin_idx[r]
+        w = W[r]
+        W_agg[b] += w
+        Wr_agg[b] += w * (z[r] - eta[r])
+    return W_agg, Wr_agg
 
 
-_PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
+@njit(cache=True)
+def _joint_weight_tables(codes, offsets, scop_bins, n_scop, W, total):
+    """Every group's weight table against the SCOP bins, in one pass over the rows.
+
+    ``table[offsets[g] + codes[r, g] * n_scop + scop_bins[r]] += W[r]``: the
+    sums ``_disc_disc_2d_hist`` forms for one pair of groups, here for every
+    group at once, each table summing its rows in ascending order.
+    """
+    table = np.zeros(total)
+    for r in range(W.shape[0]):
+        w = W[r]
+        s = scop_bins[r]
+        for g in range(codes.shape[1]):
+            table[offsets[g] + codes[r, g] * n_scop + s] += w
+    return table
+
+
+def _warmup_scop() -> None:
+    """Compile the SCOP kernels for the operands a shape-constrained fit passes."""
+    empty = np.zeros(0, dtype=np.float64)
+    _scop_bin_moments(np.zeros(0, dtype=np.int64), empty, empty, empty, 0)
+    _joint_weight_tables(
+        np.zeros((0, 1), dtype=np.int32),
+        np.zeros(1, dtype=np.int64),
+        np.zeros(0, dtype=np.int64),
+        1,
+        empty,
+        1,
+    )
+
+
+@dataclass(frozen=True)
+class SCOPGroupSpec:
+    """Static definition of one SCOP group, separate from trial state."""
+
+    group_index: int
+    group: GroupSlice
+    reparam: SCOPSolverReparam
+    B_scop: NDArray
+    S_scop: NDArray
+    bin_idx: NDArray | None
 
 
 @dataclass
 class SCOPNewtonResult:
-    """Result of a single SCOP Newton step."""
+    """One SCOP group's share of a joint Newton step."""
 
     beta_new: NDArray
-    """Updated solver-space parameters (q_eff,)."""
-
-    objective_before: float
-    """Penalized WLS objective before the step."""
-
-    objective_after: float
-    """Penalized WLS objective after the step."""
+    """Updated latent coordinates (q_eff,)."""
 
     step_norm: float
-    """L2 norm of the parameter update."""
+    """L2 norm of the latent update."""
 
     used_fisher_fallback: bool
-    """True if the full Newton Hessian was not PD and Fisher scoring was used."""
+    """True if the step took the Gauss-Newton block because the full one was not PD."""
 
     H_penalized: NDArray | None = None
-    """(q_eff, q_eff) penalized Hessian from the Newton step, or None."""
-
-    linear_solver: str = "direct"
-    """Linear solver used for the Newton direction."""
-
-    linear_iterations: int = 0
-    """Iteration count for iterative solvers, else 0."""
-
-    dropped_cross_blocks: int = 0
-    """Number of cross-group blocks dropped by prototype sparsification."""
+    """(q_eff, q_eff) block of the SCOP Hessian the step used, on its resolved range."""
 
     discarded_directions: NDArray | None = None
     """This group's columns of the directions the step could not resolve.
 
-    Rows are the below-cutoff right singular vectors of the augmented factor,
-    restricted to this group's parameters. For a joint solve every group's
-    result carries the same number of rows in the same order, so the full
-    joint direction is recovered by concatenating groups row-wise.
+    Rows are the below-cutoff right singular vectors of the step's factor,
+    restricted to this group's parameters. Every group's result carries the
+    same number of rows in the same order, so the full joint direction is
+    recovered by concatenating groups row-wise.
     """
 
 
-@dataclass
-class _JointObjectiveCache:
-    """Cached exact objective algebra for multi-SCOP problems."""
+@dataclass(frozen=True)
+class SCOPJointStep:
+    """A joint Newton step: each SCOP group's result and the ordinary block's correction."""
 
-    half_zwz: float
-    btwz: list[NDArray]
-    diag_btwb: list[NDArray] | None = None
-    cross_btwb: dict[tuple[int, int], NDArray] | None = None
+    results: dict[int, SCOPNewtonResult]
+    ordinary_correction: NDArray
+    """Added to the ordinary solve taken with the latent coordinates held fixed."""
+
+    intercept_shift: float
+    """Subtracted from that solve's profiled intercept: ``x_s' J delta_theta``."""
 
 
 def _append_scop_trace(
     debug_recorder,
     *,
-    mode: str,
     result: SCOPNewtonResult,
-    debug_context: dict[str, object] | None = None,
-    group_name: str | None = None,
+    debug_context: dict[str, object] | None,
+    group_name: str,
 ) -> None:
     """Append a private SCOP step summary when debug tracing is enabled."""
     if debug_recorder is None or getattr(debug_recorder, "enabled_level", 0) < 2:
         return
 
     payload = dict(debug_context or {})
-    if group_name is not None:
-        payload["group_name"] = group_name
+    payload["group_name"] = group_name
     payload.update(
         {
-            "mode": mode,
-            "objective_before": float(result.objective_before),
-            "objective_after": float(result.objective_after),
+            "mode": "joint",
             "step_norm": float(result.step_norm),
             "used_fisher_fallback": bool(result.used_fisher_fallback),
-            "linear_solver": result.linear_solver,
-            "linear_iterations": int(result.linear_iterations),
-            "dropped_cross_blocks": int(result.dropped_cross_blocks),
+            "discarded_directions": int(
+                0 if result.discarded_directions is None else result.discarded_directions.shape[0]
+            ),
         }
     )
     debug_recorder.append_jsonl("scop", payload)
-
-
-def configure_scop_prototype(
-    *,
-    solve_mode: Literal["direct", "minres", "minres_inexact"] | None = None,
-    iterative_q_total_min: int | None = None,
-    iterative_rtol: float | None = None,
-    iterative_maxiter: int | None = None,
-    cross_block_rel_tol: float | None = None,
-) -> None:
-    """Configure private prototype switches for SCOP numerical experiments."""
-    global _PROTOTYPE_CONFIG
-    cfg = _PROTOTYPE_CONFIG
-    if solve_mode is not None:
-        cfg.solve_mode = solve_mode
-    if iterative_q_total_min is not None:
-        cfg.iterative_q_total_min = iterative_q_total_min
-    if iterative_rtol is not None:
-        cfg.iterative_rtol = iterative_rtol
-    if iterative_maxiter is not None:
-        cfg.iterative_maxiter = iterative_maxiter
-    if cross_block_rel_tol is not None:
-        cfg.cross_block_rel_tol = cross_block_rel_tol
-
-
-def reset_scop_prototype() -> None:
-    """Reset prototype switches to the exact direct-solve defaults."""
-    global _PROTOTYPE_CONFIG
-    _PROTOTYPE_CONFIG = _SCOPPrototypeConfig()
-
-
-def get_scop_prototype_config() -> dict[str, object]:
-    """Return the current private prototype configuration."""
-    cfg = _PROTOTYPE_CONFIG
-    return {
-        "solve_mode": cfg.solve_mode,
-        "iterative_q_total_min": cfg.iterative_q_total_min,
-        "iterative_rtol": cfg.iterative_rtol,
-        "iterative_maxiter": cfg.iterative_maxiter,
-        "cross_block_rel_tol": cfg.cross_block_rel_tol,
-    }
-
-
-def set_scop_prototype_config(cfg: dict[str, object]) -> None:
-    """Replace the private prototype configuration from a config dict."""
-    reset_scop_prototype()
-    configure_scop_prototype(**cfg)
-
-
-def _safe_trial_objective(
-    B_scop: NDArray,
-    W: NDArray,
-    z: NDArray,
-    beta_trial: NDArray,
-    reparam: SCOPSolverReparam,
-    S_scop: NDArray,
-    lambda2: float,
-    bin_idx: NDArray | None,
-) -> float:
-    """Evaluate trial-step objective, returning np.inf on any non-finite quantity.
-
-    Overflow in exp(beta_eff), residual**2, or the penalty term is treated
-    as a rejected line-search proposal rather than a warning-producing path.
-    """
-    with np.errstate(over="ignore", invalid="ignore"):
-        gamma_trial = reparam.forward(beta_trial)
-        if not np.all(np.isfinite(gamma_trial)):
-            return np.inf
-        eta_bin = B_scop @ gamma_trial
-        if bin_idx is not None:
-            eta_trial = eta_bin[bin_idx]
-        else:
-            eta_trial = eta_bin
-        res = z - eta_trial
-        data_term = 0.5 * weighted_row_sum(W, np.square, res)
-        penalty_term = 0.5 * lambda2 * float(beta_trial @ S_scop @ beta_trial)
-        obj = data_term + penalty_term
-    if not np.isfinite(obj):
-        return np.inf
-    return float(obj)
-
-
-def _quadratic_form_delta(
-    beta: NDArray,
-    beta_delta: NDArray,
-    matrix: NDArray,
-) -> float:
-    """Evaluate ``0.5 * ((beta + delta)' M (beta + delta) - beta' M beta)``.
-
-    Expanding around the retained coefficients preserves changes that are much
-    smaller than either complete quadratic form.  Keep both cross terms so the
-    identity also holds for a matrix with roundoff-level asymmetry.
-    """
-    matrix_beta = matrix @ beta
-    matrix_delta = matrix @ beta_delta
-    return 0.5 * float(beta @ matrix_delta + beta_delta @ matrix_beta + beta_delta @ matrix_delta)
-
-
-def _safe_trial_objective_delta(
-    beta: NDArray,
-    beta_trial: NDArray,
-    gamma: NDArray,
-    reparam: SCOPSolverReparam,
-    S_scop: NDArray,
-    lambda2: float,
-    r_eff: NDArray,
-    BtWB: NDArray,
-) -> float:
-    """Return a cancellation-resistant single-group objective change."""
-    with np.errstate(over="ignore", invalid="ignore"):
-        gamma_trial = reparam.forward(beta_trial)
-        if not np.all(np.isfinite(gamma_trial)):
-            return np.inf
-        gamma_delta = gamma_trial - gamma
-        beta_delta = beta_trial - beta
-        data_delta = -float(gamma_delta @ r_eff) + 0.5 * float(gamma_delta @ BtWB @ gamma_delta)
-        penalty_delta = lambda2 * _quadratic_form_delta(beta, beta_delta, S_scop)
-        objective_delta = data_delta + penalty_delta
-    return float(objective_delta) if np.isfinite(objective_delta) else np.inf
 
 
 def _positive_sum_parts(values: NDArray, exponents: NDArray) -> tuple[float, int]:
@@ -335,351 +254,6 @@ def _positive_quadratic_roundoff(
         return float(np.ldexp(mantissa, exponent))
 
 
-def _objective_delta_roundoff(
-    *,
-    gammas: list[NDArray],
-    trial_gammas: list[NDArray],
-    betas: list[NDArray],
-    trial_betas: list[NDArray],
-    grams: list[NDArray],
-    penalties: list[NDArray],
-    lambdas: list[float],
-    response_norm: float,
-    n_rows: int,
-) -> float:
-    """Bound rounding in the expanded, represented WLS objective difference.
-
-    Cauchy--Schwarz gives ||sqrt(W) B gamma|| <= sum_j |gamma_j|
-    sqrt((B'WB)_jj). Thus cached Gram diagonals bound the absolute expanded
-    data actions without an observation-level trial calculation. Include the
-    formation of projected residuals: |B'W r| alone misses cancellation in r.
-    Bound penalty cross actions explicitly; |S| need not be positive definite.
-
-    gamma_k = k*u/(1-k*u) covers weighted row accumulation (including bins),
-    matrix/vector products, subtraction and summation in the delta. The bound
-    concerns the represented gamma endpoints; it does not assert a libm error
-    bound for exp. No additive objective unit or optimizer tolerance enters.
-    """
-    width = sum(len(beta) for beta in betas)
-    count = 4 * n_rows + 6 * width + 4 * len(betas) + 32
-    ku = count * (np.finfo(float).eps / 2.0)
-    if ku >= 1.0:
-        return np.inf
-    gamma_k = ku / (1.0 - ku)
-    inflation = 1.0 / (1.0 - gamma_k)
-    # Retain separate norm exponents until multiplication. A tiny direction
-    # times a large response can be finite despite an unrepresentable ratio
-    # between their norms, so one common normalization would lose that term.
-    column_norms = [np.sqrt(np.diag(gram)) * np.sqrt(inflation) for gram in grams]
-    terms = [[], [], []]
-    powers = [[], [], []]
-    for current, trial, columns in zip(gammas, trial_gammas, column_norms, strict=True):
-        cm, ce = np.frexp(columns)
-        endpoints = []
-        for endpoint in (current, trial):
-            em, ee = np.frexp(endpoint)
-            product = em * cm
-            exponent = ee + ce
-            endpoints.append((product, exponent))
-        unit = np.maximum(
-            *(np.where(value != 0, exponent, -10000) for value, exponent in endpoints)
-        )
-        delta = np.abs(
-            np.ldexp(endpoints[1][0], endpoints[1][1] - unit)
-            - np.ldexp(endpoints[0][0], endpoints[0][1] - unit)
-        )
-        for index, (value, exponent) in enumerate([*endpoints, (delta, unit)]):
-            terms[index].extend(np.abs(value))
-            powers[index].extend(exponent)
-    current_bound, trial_bound, delta_bound = [
-        _positive_sum_parts(np.asarray(value), np.asarray(exponent, dtype=int))
-        for value, exponent in zip(terms, powers, strict=True)
-    ]
-    response_mantissa, response_exponent = math.frexp(response_norm)
-    response_bound = (response_mantissa * inflation, response_exponent)
-    pairs = [
-        (delta_bound, response_bound, 1.0),
-        (delta_bound, current_bound, 1.0),
-        (delta_bound, delta_bound, 0.5),
-    ]
-    for endpoint in (current_bound, trial_bound):
-        pairs.extend(
-            (endpoint, other, 1.0) for other in (response_bound, current_bound, delta_bound)
-        )
-        pairs.extend((endpoint, other, 0.5 * gamma_k) for other in (current_bound, trial_bound))
-    action, action_exponent = _positive_sum_parts(
-        np.array([left[0] * right[0] * coefficient for left, right, coefficient in pairs]),
-        np.array([left[1] + right[1] for left, right, _ in pairs]),
-    )
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        allowance = np.ldexp(gamma_k * inflation * action, action_exponent)
-        for current, trial, penalty, lam in zip(
-            betas, trial_betas, penalties, lambdas, strict=True
-        ):
-            if lam == 0:
-                continue
-            ordinary = all(
-                np.all((value == 0) | ((np.abs(value) >= 2.0**-128) & (np.abs(value) <= 2.0**128)))
-                for value in (current, trial, penalty)
-            )
-            if not ordinary:
-                x, t, delta = np.abs(current), np.abs(trial), np.abs(trial - current)
-                # Expand endpoint sums before arithmetic. They need not be
-                # representable individually for the weighted bound to be.
-                pairs = [(x, delta, 1.0), (delta, x, 1.0), (delta, delta, 1.0)]
-                for endpoint in (x, t):
-                    pairs.extend(
-                        [
-                            (x, endpoint, 1.0),
-                            (endpoint, x, 1.0),
-                            (delta, endpoint, 1.0),
-                            (endpoint, delta, 1.0),
-                        ]
-                    )
-                    pairs.extend((endpoint, other, gamma_k) for other in (x, t))
-                for left, right, coefficient in pairs:
-                    allowance += _positive_quadratic_roundoff(
-                        left,
-                        penalty,
-                        0.5 * gamma_k * inflation,
-                        abs(lam),
-                        coefficient,
-                        right=right,
-                    )
-                continue
-            beta_unit = int(np.frexp(max(np.max(np.abs(current)), np.max(np.abs(trial))))[1])
-            matrix_unit = int(np.frexp(np.max(np.abs(penalty), initial=0.0))[1])
-            lam_mantissa, lam_exponent = np.frexp(abs(lam))
-            current, trial = np.ldexp(current, -beta_unit), np.ldexp(trial, -beta_unit)
-            x = np.abs(current)
-            delta = np.abs(trial - current)
-            endpoint_sum = x + np.abs(trial)
-            matrix = np.ldexp(np.abs(penalty), -matrix_unit)
-            matrix_x = matrix @ x
-            matrix_delta = matrix @ delta
-            matrix_sum = matrix @ endpoint_sum
-            expansion = x @ matrix_delta + delta @ matrix_x + delta @ matrix_delta
-            subtraction = (
-                x @ matrix_sum
-                + endpoint_sum @ matrix_x
-                + delta @ matrix_sum
-                + endpoint_sum @ matrix_delta
-                + gamma_k * (endpoint_sum @ matrix_sum)
-            )
-            allowance += np.ldexp(
-                0.5 * gamma_k * inflation * lam_mantissa * (expansion + subtraction),
-                2 * beta_unit + matrix_unit + int(lam_exponent),
-            )
-    if not np.isfinite(allowance):
-        return np.inf
-    return float(np.nextafter(allowance, np.inf)) if allowance > 0.0 else 0.0
-
-
-def scop_newton_step(
-    B_scop: NDArray,
-    W: NDArray,
-    z: NDArray,
-    beta_scop: NDArray,
-    reparam: SCOPSolverReparam,
-    S_scop: NDArray,
-    lambda2: float,
-    max_halving: int = 10,
-    bin_idx: NDArray | None = None,
-    debug_recorder=None,
-    debug_context: dict[str, object] | None = None,
-) -> SCOPNewtonResult:
-    """One damped full Newton step on the SCOP penalized WLS objective.
-
-    Parameters
-    ----------
-    B_scop : (n, q_eff) or (n_bins, q_eff)
-        Centered design matrix for the SCOP term.  When *bin_idx* is provided
-        this is the bin-level design ``(n_bins, q_eff)``.
-    W : (n,)
-        IRLS working weights (always observation-level).
-    z : (n,)
-        Working response (always observation-level).
-    beta_scop : (q_eff,)
-        Current SCOP solver-space parameters.
-    reparam : SCOPSolverReparam
-        Solver-space reparameterization (forward, jacobian).
-    S_scop : (q_eff, q_eff)
-        SCOP penalty matrix in solver space.
-    lambda2 : float
-        Penalty weight (non-negative).
-    max_halving : int
-        Maximum number of step halvings for line search.
-    bin_idx : (n,) array of int or None
-        If provided, *B_scop* is ``(n_bins, q_eff)`` and predictions are
-        scattered: ``eta = (B_scop @ gamma)[bin_idx]``.  Gradient and Hessian
-        are computed via bin-level aggregation to avoid the full ``(n, q_eff)``
-        matrix.
-
-    Returns
-    -------
-    SCOPNewtonResult
-        Updated parameters and diagnostics.
-    """
-    beta = beta_scop.copy()
-
-    # --- Forward map and residual ---
-    gamma_eff = reparam.forward(beta)
-    j_diag = reparam.jacobian_diagonal(beta)
-    second_diag = reparam.second_derivative_diagonal(beta)
-
-    eta_bin = B_scop @ gamma_eff  # (n_bins,) or (n,)
-    if bin_idx is not None:
-        eta = eta_bin[bin_idx]  # scatter to (n,)
-    else:
-        eta = eta_bin
-    residual = z - eta
-
-    obj_before = _safe_trial_objective(B_scop, W, z, beta, reparam, S_scop, lambda2, bin_idx)
-
-    # If the starting point is already non-finite, we cannot compute a
-    # meaningful gradient or Hessian.  Return a no-op.
-    if not np.isfinite(obj_before):
-        result = SCOPNewtonResult(
-            beta_new=beta,
-            objective_before=np.inf,
-            objective_after=np.inf,
-            step_norm=0.0,
-            used_fisher_fallback=False,
-            H_penalized=lambda2 * S_scop,
-        )
-        _append_scop_trace(
-            debug_recorder,
-            mode="single",
-            result=result,
-            debug_context=debug_context,
-        )
-        return result
-
-    # --- Weighted design products (exploit diagonal J) ---
-    # J_eff = diag(j_diag), so J^T @ BtWB @ J = diag(j) @ BtWB @ diag(j)
-    # and J^T @ r_eff = j_diag * r_eff (elementwise)
-    if bin_idx is not None:
-        n_bins = B_scop.shape[0]
-        W_agg = np.bincount(bin_idx, weights=W, minlength=n_bins)
-        Wr_agg = np.bincount(bin_idx, weights=W * residual, minlength=n_bins)
-        BtWB = B_scop.T @ (B_scop * W_agg[:, None])  # (q_eff, q_eff)
-        r_eff = B_scop.T @ Wr_agg  # (q_eff,)
-        # A single group's own bin grid is the row space of its factor, so the
-        # square-root form costs nothing in discretization here. Only the
-        # multi-group joint factor has to scatter, because the groups sit on
-        # different grids.
-        factor_weights = W_agg
-    else:
-        BtW = B_scop.T * W[np.newaxis, :]
-        BtWB = BtW @ B_scop
-        r_eff = BtW @ residual
-        factor_weights = W
-
-    # --- Gradient (exploit diagonal J: J^T @ r = j * r) ---
-    grad_data = -(j_diag * r_eff)  # elementwise, not matrix multiply
-    grad = grad_data + lambda2 * (S_scop @ beta)
-
-    # --- Gauss-Newton Hessian (exploit diagonal J: J^T BtWB J = j j^T * BtWB) ---
-    jj = j_diag[:, None] * j_diag[None, :]  # (q_eff, q_eff) outer product
-    H_gn = jj * BtWB + lambda2 * S_scop  # elementwise Hadamard, not matmul
-
-    # --- Second-order correction (full Newton) ---
-    second_order_data = -(second_diag * r_eff)
-    H_full = H_gn + np.diag(second_order_data)
-
-    # --- Newton step from the augmented factor (rank truncated first) ---
-    factor = _augmented_factor(
-        np.sqrt(np.maximum(factor_weights, 0.0))[:, None] * (B_scop * j_diag[None, :]),
-        np.sqrt(max(lambda2, 0.0)) * _penalty_root(S_scop),
-    )
-    step, used_fisher, discarded = _truncated_factor_step(
-        factor,
-        second_order_data,
-        grad,
-    )
-    if step is None:
-        # No identifiable direction at all: fall back to a short gradient step
-        # rather than claiming a Newton direction.
-        used_fisher = True
-        step = -1e-4 * grad
-    H_solved = _restrict_to_resolved_range(H_gn if used_fisher else H_full, discarded)
-
-    # --- Damped step (step halving) ---
-    # Non-finite trial states (overflow in exp(beta_eff), residual**2, etc.)
-    # are treated as rejected line-search proposals, never as accepted iterates.
-    alpha = 1.0
-    accepted = False
-    response_norm = float(norm(np.sqrt(W) * z, check_finite=False))
-
-    for _ in range(max_halving + 1):  # +1 for the initial full step
-        beta_trial = beta - alpha * step
-        objective_delta = _safe_trial_objective_delta(
-            beta,
-            beta_trial,
-            gamma_eff,
-            reparam,
-            S_scop,
-            lambda2,
-            r_eff,
-            BtWB,
-        )
-        allowance = (
-            _objective_delta_roundoff(
-                gammas=[gamma_eff],
-                trial_gammas=[reparam.forward(beta_trial)],
-                betas=[beta],
-                trial_betas=[beta_trial],
-                grams=[BtWB],
-                penalties=[S_scop],
-                lambdas=[lambda2],
-                response_norm=response_norm,
-                n_rows=len(W),
-            )
-            if np.isfinite(objective_delta)
-            else np.inf
-        )
-        if np.isfinite(objective_delta) and np.isfinite(allowance) and objective_delta <= allowance:
-            accepted = True
-            break
-        alpha *= 0.5
-
-    if accepted:
-        beta_new = beta_trial
-        obj_new = obj_before + objective_delta
-        step_norm = float(np.linalg.norm(alpha * step))
-    else:
-        # All halvings failed — reject the step entirely
-        beta_new = beta
-        obj_new = obj_before
-        step_norm = 0.0
-
-    result = SCOPNewtonResult(
-        beta_new=beta_new,
-        objective_before=float(obj_before),
-        objective_after=float(obj_new),
-        step_norm=step_norm,
-        used_fisher_fallback=used_fisher,
-        H_penalized=H_solved,
-        discarded_directions=discarded,
-    )
-    _append_scop_trace(
-        debug_recorder,
-        mode="single",
-        result=result,
-        debug_context=debug_context,
-    )
-    return result
-
-
-def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
-    """Solve H @ step = grad via Cholesky. Returns None if H is not PD."""
-    try:
-        L, low = cho_factor(H)
-        return cho_solve((L, low), grad)
-    except np.linalg.LinAlgError:
-        return None
-
-
 def _restrict_to_resolved_range(H: NDArray, discarded: NDArray) -> NDArray:
     """Project ``H`` onto the range the step could actually resolve.
 
@@ -693,12 +267,17 @@ def _restrict_to_resolved_range(H: NDArray, discarded: NDArray) -> NDArray:
     enters the Hessian through ``diag(grad_data)`` as a *negative* diagonal.
     Consumers then see a materially indefinite matrix and refuse it.
 
-    Restricting removes the frozen direction together with its curvature.
-    Because ``P' H_full P == I + curvature`` for the retained basis, the
-    positive-definiteness test already applied to ``I + curvature`` is exactly
-    the statement that the restriction is positive definite, so what is
-    reported here is positive semidefinite by construction rather than by
-    hope. A step that discarded nothing is returned untouched.
+    Restricting removes the frozen direction together with its curvature, and
+    what is reported is positive semidefinite by construction rather than by
+    hope. For the block's own curvature (``block_curvature``) ``P' H P == I +
+    curvature`` in the retained basis, so the positive-definiteness test
+    already applied to ``I + curvature`` is exactly the statement that the
+    restriction is positive definite. A joint step's retained basis comes
+    from its Schur block ``J (G~ - C' A^-1 C) J + lambda S (+ E)``, which the
+    own block ``J G J + lambda S (+ E)`` dominates (``G - G~ + C' A^-1 C`` is
+    positive semidefinite), so the restriction of the own block is at least
+    as positive as the one the test certified. A curvature that discarded
+    nothing is returned untouched.
     """
     if not discarded.size:
         return H
@@ -707,18 +286,76 @@ def _restrict_to_resolved_range(H: NDArray, discarded: NDArray) -> NDArray:
     return 0.5 * (restricted + restricted.T)
 
 
-def _penalty_root(S: NDArray) -> NDArray:
-    """Return ``rS`` with ``rS.T @ rS == S``, for symmetric PSD ``S``."""
+def _psd_root(S: NDArray) -> NDArray:
+    """Return ``R`` with ``R.T @ R == S``, for symmetric PSD ``S``."""
     eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (S + S.T))
     return np.sqrt(np.maximum(eigenvalues, 0.0))[:, None] * eigenvectors.T
 
 
-def _augmented_factor(
-    weighted_design: NDArray,
-    penalty_root: NDArray,
-) -> NDArray:
-    """Stack a weighted design on a penalty root to form the augmented factor."""
-    return np.vstack([weighted_design, penalty_root])
+def _resolved_root(
+    gram: NDArray,
+    score: NDArray,
+    scale: NDArray,
+    count: int,
+    row_factor: Callable[[], tuple[NDArray, NDArray, int]],
+) -> tuple[NDArray, NDArray]:
+    """``(R, s)``: a root of the Schur block's data part on the directions it resolves, and ``score`` there.
+
+    ``gram`` is that data part ``G~ - C' A^-1 C``, formed from Grams of
+    centred columns. To first order its rounding is the joint Gram's along
+    ``(v, -A^-1 C v)``, so ``|dG_ij| <= gamma_count g_i g_j`` with ``g =
+    scale``: each SCOP column's weighted norm plus the norms of the ordinary
+    columns its regression ``A^-1 C`` draws on (Higham 2002, sec. 3.5, for
+    every formed product, ``count`` terms deep). Scaled by ``g`` that error
+    is at most ``gamma_count q`` in the 2-norm, and the eigensolver adds ``q
+    eps`` of the largest eigenvalue (*LAPACK Users' Guide*, sec. 4.7). When
+    every eigenvalue clears ``_GREY_FLOOR`` times their sum, as on the
+    freMTPL2 fits, the Gram is the root.
+
+    Otherwise the Gram cannot decide, and not always because of the data: an
+    exact alias (an ordinary column equal to a SCOP slope) puts a true zero
+    inside the bound, but nearly collinear ordinary columns in a full-rank
+    design make ``g`` large enough to put genuine curvature inside it as
+    well. The decision is then taken on a factor of the
+    rows, ``row_factor()``, which returns ``(F, g, count)`` with ``F' F``
+    the same block, each column of ``F`` within ``gamma_count g_j`` of its
+    exact value: a factor squares no condition number, so its error in
+    ``g``-scaled singular values is ``gamma_count sqrt(q)`` (Weyl), not the
+    square root of the Gram's. A direction at or below that is one the rows
+    cannot tell from zero, and one at or below ``sqrt(eps)`` is the ordinary
+    design's to the precision Pya & Wood resolve (§3.2): their cut on the
+    joint factor's singular values, here in units where every column has its
+    scale ``g`` (van der Sluis equilibration), so that it does not depend on
+    how the ordinary columns are scaled. ``x + 1e-9 v`` beside a convex
+    spline of ``x`` is the case: its rows resolve the pair at ``3.5e-9``,
+    and the step went ``3.5e6`` along it, cancelling against the ordinary
+    correction, until the line search refused the fit. Neither direction
+    gets data curvature, and ``score``, whose component there is rounding
+    or below the cut (``|s_v| <= sigma_v ||r||_W``), loses it, so the
+    penalty alone decides the step along it. Every other direction keeps
+    its curvature and its score; whether the step can resolve it is the
+    factor cut's decision (``_truncated_factor_step``). On the Gram's route
+    every eigenvalue clears ``4 gamma_count q``, above ``eps`` for any
+    ``count``, so the cut never binds there.
+    """
+    q = gram.shape[0]
+    norms = np.where(scale > 0.0, scale, 1.0)
+    scaled = gram / norms[:, None] / norms[None, :]
+    values, vectors = np.linalg.eigh(0.5 * (scaled + scaled.T))
+    largest = float(np.max(np.abs(values), initial=0.0))
+    bar = _gamma_up(count) * q + _eigensolver_relative_bar(q) * largest
+    if np.all(values > _GREY_FLOOR * bar):
+        singular, resolved = np.sqrt(values), np.full(q, True)
+    else:
+        factor, scale, count = row_factor()
+        norms = np.where(scale > 0.0, scale, 1.0)
+        _, singular, right = np.linalg.svd(factor / norms[None, :])
+        singular = np.concatenate((singular, np.zeros(q - singular.size)))
+        vectors = right.T
+        resolved = singular > max(_gamma_up(count) * math.sqrt(q), _SQRT_EPS)
+    kept = vectors[:, resolved]
+    root = singular[resolved][:, None] * kept.T * norms[None, :]
+    return root, norms * (kept @ (kept.T @ (score / norms)))
 
 
 def _truncated_factor_step(
@@ -736,9 +373,9 @@ def _truncated_factor_step(
     demands a correction along a direction the data cannot resolve.
 
     The published algorithm works from a factor rather than the Gram.
-    ``factor`` is the augmented weighted design ``[sqrt(W) B J ;
-    sqrt(lambda) rS]``, whose cross-product is the Gauss-Newton Hessian, and
-    the order of operations is the point:
+    ``factor`` is ``[R J ; sqrt(lambda) rS]``, with ``R`` a root of the SCOP
+    block's data Gram in mapped coordinates, so its cross-product is the
+    block's Gauss-Newton Hessian; the order of operations is the point:
 
     1. ``R`` from a QR of the factor, then an SVD of ``R``, discarding
        directions below ``sigma_max * sqrt(eps)`` -- Pya & Wood (2015) §3.2
@@ -749,11 +386,14 @@ def _truncated_factor_step(
     2. Only then is the second-order Newton term introduced, expressed in the
        basis where the Gauss-Newton Hessian is the identity.
 
-    Truncating the Gram instead cannot work, and not merely for want of a
-    better threshold: forming ``B' W B`` squares the condition number, so the
-    unidentifiable directions this is meant to discard have already been
-    ground into the same rounding noise as small-but-real ones. On a measured
-    boundary fit the Gram's spectrum leaves no threshold that separates them.
+    Truncating the Gram ``J R' R J`` instead cannot work, and not merely for
+    want of a better threshold: it squares the condition number that ``J``
+    contributes, so the unidentifiable directions this is meant to discard
+    have already been ground into the same rounding noise as small-but-real
+    ones. On a measured boundary fit the Gram's spectrum leaves no threshold
+    that separates them. ``J`` is applied to the factor's columns here; only
+    ``R``, whose conditioning is the data's in mapped coordinates and does
+    not involve ``J``, comes from a Gram.
 
     Handling rank first is also what keeps the second-order term safe. That
     term is what makes the full Newton Hessian indefinite, and applied to an
@@ -799,760 +439,711 @@ def _truncated_factor_step(
     return step, False, discarded
 
 
-def _build_minres_preconditioner(
-    scop_items: list[tuple[int, dict]],
-    joint_slices: list[slice],
-    BtWBs: list[NDArray],
-    j_diags: list[NDArray],
-    lambdas_list: list[float],
-) -> LinearOperator:
-    """Build a block-Jacobi inverse preconditioner for MINRES.
-
-    Uses the positive semidefinite Gauss-Newton diagonal blocks plus a small
-    ridge, falling back to a diagonal inverse if Cholesky still fails.
-    """
-    block_solvers: list[tuple[str, object]] = []
-    for idx, (_, st) in enumerate(scop_items):
-        j_i = j_diags[idx]
-        jj_ii = j_i[:, None] * j_i[None, :]
-        block = jj_ii * BtWBs[idx] + lambdas_list[idx] * st["S_scop"]
-        eye = np.eye(block.shape[0])
-        solved = False
-        for ridge in (1e-10, 1e-8, 1e-6, 1e-4):
-            try:
-                fac = cho_factor(block + ridge * eye)
-                block_solvers.append(("chol", fac))
-                solved = True
-                break
-            except np.linalg.LinAlgError:
-                continue
-        if not solved:
-            diag = np.maximum(np.abs(np.diag(block)), 1e-8)
-            block_solvers.append(("diag", 1.0 / diag))
-
-    size = joint_slices[-1].stop if joint_slices else 0
-
-    def _matvec(v: NDArray) -> NDArray:
-        out = np.empty_like(v)
-        for sl_i, (kind, solver) in zip(joint_slices, block_solvers, strict=True):
-            block_v = v[sl_i]
-            if kind == "chol":
-                out[sl_i] = cho_solve(solver, block_v)
-            else:
-                out[sl_i] = solver * block_v
-        return out
-
-    return LinearOperator((size, size), matvec=_matvec, dtype=np.float64)
-
-
-def _solve_step_minres(
-    H: NDArray,
-    grad: NDArray,
-    scop_items: list[tuple[int, dict]],
-    joint_slices: list[slice],
-    BtWBs: list[NDArray],
-    j_diags: list[NDArray],
-    lambdas_list: list[float],
-    *,
-    rtol: float,
-    maxiter: int | None,
-    allow_inexact: bool,
-) -> tuple[NDArray | None, int]:
-    """Solve H @ step = grad with MINRES and a block-Jacobi preconditioner."""
-    iters = 0
-
-    def _callback(_x: NDArray) -> None:
-        nonlocal iters
-        iters += 1
-
-    A = LinearOperator(H.shape, matvec=lambda v: H @ v, dtype=np.float64)
-    M = _build_minres_preconditioner(scop_items, joint_slices, BtWBs, j_diags, lambdas_list)
-    step, info = minres(
-        A,
-        grad,
-        M=M,
-        rtol=rtol,
-        maxiter=maxiter,
-        callback=_callback,
-        check=False,
-    )
-
-    residual = np.linalg.norm(H @ step - grad)
-    grad_norm = max(np.linalg.norm(grad), 1e-300)
-    tol_mult = 10.0 if allow_inexact else 1.0
-    residual_tol = tol_mult * max(rtol, 1e-12) * grad_norm
-    if info == 0 and np.isfinite(residual) and residual <= residual_tol:
-        return step, iters
-    if allow_inexact and np.isfinite(residual) and residual <= residual_tol:
-        return step, iters
-    return None, iters
-
-
-def _gauss_newton_hessian(
-    H: NDArray,
-    joint_slices: list[slice],
-    second_order_datas: list[NDArray],
-) -> NDArray:
-    """Strip the second-order Newton term, leaving the PSD Gauss-Newton part."""
-    gauss_newton = H.copy()
-    for idx, sl_i in enumerate(joint_slices):
-        block = gauss_newton[sl_i, sl_i].copy()
-        block[np.diag_indices_from(block)] -= second_order_datas[idx]
-        gauss_newton[sl_i, sl_i] = block
-    return gauss_newton
-
-
-def _gauss_newton_conditioning(
-    H: NDArray,
-    joint_slices: list[slice],
-    second_order_datas: list[NDArray],
-) -> float:
-    """Smallest-to-largest eigenvalue of the Gauss-Newton Gram.
-
-    Costs one ``q x q`` symmetric eigendecomposition, which is negligible
-    beside the ``n x q`` factor it decides whether to build. Zero when the
-    Gram is not usable at all, which routes to the factor.
-    """
-    eigenvalues = np.linalg.eigvalsh(_gauss_newton_hessian(H, joint_slices, second_order_datas))
-    if eigenvalues.size == 0:
-        return 0.0
-    largest = float(eigenvalues[-1])
-    if not np.isfinite(largest) or largest <= 0.0:
-        return 0.0
-    return float(eigenvalues[0]) / largest
-
-
-def _joint_augmented_factor(
-    scop_items: list[tuple[int, dict]],
-    joint_slices: list[slice],
-    j_diags: list[NDArray],
-    lambdas_list: list[float],
-    W: NDArray,
-) -> NDArray:
-    """Augmented weighted design whose cross-product is the joint GN Hessian.
-
-    Groups sit on independent bin grids -- their cross-grams go through a 2D
-    weight histogram -- so a multi-group factor has no common bin-level row
-    space and its data block is built at observation level. A lone group keeps
-    its own grid, where the factor is exactly as cheap as the Gram.
-    """
-    q_total = joint_slices[-1].stop if joint_slices else 0
-
-    if len(scop_items) == 1:
-        state = scop_items[0][1]
-        design, bin_idx = state["B_scop"], state["bin_idx"]
-        if bin_idx is not None:
-            weights = np.bincount(bin_idx, weights=W, minlength=design.shape[0])
-        else:
-            weights = W
-        data_block = np.sqrt(np.maximum(weights, 0.0))[:, None] * (design * j_diags[0][None, :])
-    else:
-        data_block = np.empty((W.shape[0], q_total), dtype=float)
-        for idx, (_, state) in enumerate(scop_items):
-            design, bin_idx = state["B_scop"], state["bin_idx"]
-            scattered = design[bin_idx] if bin_idx is not None else design
-            data_block[:, joint_slices[idx]] = scattered * j_diags[idx][None, :]
-        data_block *= np.sqrt(np.maximum(W, 0.0))[:, None]
-
-    penalty_block = np.zeros((q_total, q_total), dtype=float)
-    for idx, (_, state) in enumerate(scop_items):
-        sl_i = joint_slices[idx]
-        penalty_block[sl_i, sl_i] = np.sqrt(max(lambdas_list[idx], 0.0)) * _penalty_root(
-            state["S_scop"]
-        )
-
-    return _augmented_factor(data_block, penalty_block)
-
-
-def _solve_joint_step(
-    make_factor: Callable[[], NDArray],
-    second_order: NDArray,
-    conditioning: float,
-    H: NDArray,
-    grad: NDArray,
-    scop_items: list[tuple[int, dict]],
-    joint_slices: list[slice],
-    second_order_datas: list[NDArray],
-    BtWBs: list[NDArray],
-    j_diags: list[NDArray],
-    lambdas_list: list[float],
-) -> tuple[NDArray | None, bool, NDArray, str, int]:
-    """Solve the joint Newton direction using the active prototype policy.
-
-    ``make_factor`` is a thunk rather than a matrix because a multi-group
-    factor is ``n x q`` and most solves never need one; see the conditioning
-    gate below.
-
-    Returns ``(step, used_fisher, discarded, solver_name, iterations)``.
-    """
-    cfg = _PROTOTYPE_CONFIG
-    q_total = H.shape[0]
-    nothing_discarded = np.zeros((0, q_total), dtype=float)
-
-    use_iterative = cfg.solve_mode != "direct" and q_total >= cfg.iterative_q_total_min
-    if not use_iterative:
-        if conditioning > _SQRT_EPS:
-            # Far enough from singular that no direction is near the truncation
-            # cutoff: the Gram carries the step exactly and the factor would
-            # discard nothing. This is the common case and it keeps the
-            # observation-level factor out of the hot path.
-            step = _solve_step(H, grad)
-            if step is not None:
-                return step, False, nothing_discarded, "direct_gram", 0
-            gauss_newton = _gauss_newton_hessian(
-                H,
-                joint_slices,
-                second_order_datas,
-            )
-            return _solve_step(gauss_newton, grad), True, nothing_discarded, "direct_gram", 0
-        step, used_fisher, discarded = _truncated_factor_step(make_factor(), second_order, grad)
-        return step, used_fisher, discarded, "direct", 0
-
-    allow_inexact = cfg.solve_mode == "minres_inexact"
-    step, iters = _solve_step_minres(
-        H,
-        grad,
-        scop_items,
-        joint_slices,
-        BtWBs,
-        j_diags,
-        lambdas_list,
-        rtol=cfg.iterative_rtol,
-        maxiter=cfg.iterative_maxiter,
-        allow_inexact=allow_inexact,
-    )
-    if step is not None:
-        solver_name = "minres_inexact" if allow_inexact else "minres"
-        # MINRES solves the untruncated system, so nothing was discarded.
-        return step, False, nothing_discarded, solver_name, iters
-
-    step, used_fisher, discarded = _truncated_factor_step(make_factor(), second_order, grad)
-    return step, used_fisher, discarded, "direct_fallback", iters
-
-
-# ---------------------------------------------------------------------------
-# Joint multi-group SCOP Newton step
-# ---------------------------------------------------------------------------
-
-
-def _build_joint_objective_cache(
-    scop_items: list[tuple[int, dict]],
-    W: NDArray,
-    z_scop: NDArray,
-) -> _JointObjectiveCache:
-    """Build exact objective caches shared by all SCOP objective evaluations."""
-    Wz = W * z_scop
-    btwz: list[NDArray] = []
-    for _, st in scop_items:
-        if st["bin_idx"] is not None:
-            wz_agg = np.bincount(st["bin_idx"], weights=Wz, minlength=st["B_scop"].shape[0])
-            btwz.append(st["B_scop"].T @ wz_agg)
-        else:
-            btwz.append(st["B_scop"].T @ Wz)
-    return _JointObjectiveCache(
-        half_zwz=0.5 * weighted_row_sum(W, np.square, z_scop),
-        btwz=btwz,
-    )
-
-
-def _joint_objective_from_gammas(
-    gammas: list[NDArray],
-    beta_joint: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-    scop_items: list[tuple[int, dict]],
-    cache: _JointObjectiveCache,
-) -> float:
-    """Evaluate the exact joint objective from gamma-space quadratic forms."""
-    if cache.diag_btwb is None or cache.cross_btwb is None:
-        raise ValueError("quadratic objective cache missing BtWB blocks")
-
-    with np.errstate(over="ignore", invalid="ignore"):
-        penalty = 0.0
-        data_term = cache.half_zwz
-        for idx, ((_, st), sl_i, lam_i, gamma_i) in enumerate(
-            zip(scop_items, slices, lambdas_list, gammas)
-        ):
-            beta_i = beta_joint[sl_i]
-            penalty += 0.5 * lam_i * float(beta_i @ st["S_scop"] @ beta_i)
-            data_term -= float(gamma_i @ cache.btwz[idx])
-            data_term += 0.5 * float(gamma_i @ cache.diag_btwb[idx] @ gamma_i)
-
-        for a in range(len(gammas)):
-            gamma_a = gammas[a]
-            for b in range(a + 1, len(gammas)):
-                data_term += float(gamma_a @ cache.cross_btwb[(a, b)] @ gammas[b])
-
-        obj = data_term + penalty
-    return float(obj) if np.isfinite(obj) else np.inf
-
-
-def _safe_joint_trial_objective_delta(
-    scop_items: list[tuple[int, dict]],
-    beta_trial: NDArray,
-    slices: list[slice],
-    lambdas_list: list[float],
-    gammas_current: list[NDArray],
-    projected_residuals: list[NDArray],
-    cache: _JointObjectiveCache,
-) -> float:
-    """Return the exact joint objective change without subtracting full objectives.
-
-    The cached gamma-space products retain discretization's ``n``-independent
-    trial cost.  The linear term uses the already computed projected residuals
-    rather than reconstructing them by subtracting large fitted products.
-    Expanding the remaining data and penalty quadratics around the current
-    coefficients preserves a final Newton descent that is below one ulp of the
-    complete objective.
-    """
-    if cache.diag_btwb is None or cache.cross_btwb is None:
-        raise ValueError("quadratic objective cache missing BtWB blocks")
-
-    with np.errstate(over="ignore", invalid="ignore"):
-        gamma_deltas: list[NDArray] = []
-        data_delta = 0.0
-        penalty_delta = 0.0
-
-        for idx, ((_, state), group_slice, lam, gamma_current, projected_residual) in enumerate(
-            zip(
-                scop_items,
-                slices,
-                lambdas_list,
-                gammas_current,
-                projected_residuals,
-                strict=True,
-            )
-        ):
-            beta_current = state["beta_scop"]
-            beta_next = beta_trial[group_slice]
-            gamma_next = state["reparam"].forward(beta_next)
-            if not np.all(np.isfinite(gamma_next)):
-                return np.inf
-
-            gamma_delta = gamma_next - gamma_current
-            gamma_deltas.append(gamma_delta)
-            gram = cache.diag_btwb[idx]
-            data_delta -= float(gamma_delta @ projected_residual)
-            data_delta += 0.5 * float(gamma_delta @ gram @ gamma_delta)
-
-            beta_delta = beta_next - beta_current
-            penalty_delta += lam * _quadratic_form_delta(
-                beta_current,
-                beta_delta,
-                state["S_scop"],
-            )
-
-        for left in range(len(gamma_deltas)):
-            for right in range(left + 1, len(gamma_deltas)):
-                cross = cache.cross_btwb[(left, right)]
-                delta_left = gamma_deltas[left]
-                delta_right = gamma_deltas[right]
-                data_delta += float(delta_left @ cross @ delta_right)
-
-        objective_delta = data_delta + penalty_delta
-    return float(objective_delta) if np.isfinite(objective_delta) else np.inf
-
-
 def _compute_cross_gram(
-    st_i: dict,
-    st_j: dict,
+    B_i: NDArray,
+    bin_i: NDArray | None,
+    B_j: NDArray,
+    bin_j: NDArray | None,
     W: NDArray,
 ) -> NDArray:
-    """Compute cross-group weighted gram matrix B_i^T @ diag(W) @ B_j.
+    """Cross-group weighted Gram ``B_i' diag(W) B_j`` of two SCOP groups.
 
-    Handles all combinations of discretized and dense groups.
-
-    Parameters
-    ----------
-    st_i, st_j : SCOP state dicts with B_scop, bin_idx keys
-    W : (n,) observation weights
-
-    Returns
-    -------
-    (q_i, q_j) cross-gram matrix
+    Each group is a basis and an optional bin index into it. Two binned
+    groups meet in their joint weight table when it holds at most
+    ``_MAX_DISC_DISC_HIST_CELLS`` cells, the group-matrix kernels' cap, and
+    otherwise in one group's weighted rows added onto the other's support
+    (``_support_support_raw_cross``), whose memory does not grow with the
+    rows. Otherwise the binned side is scattered to observation level.
     """
-    B_i, bi_i = st_i["B_scop"], st_i["bin_idx"]
-    B_j, bi_j = st_j["B_scop"], st_j["bin_idx"]
-
-    if bi_i is not None and bi_j is not None:
-        # Both discretized: 2D weight histogram
-        nb_i = B_i.shape[0]
-        nb_j = B_j.shape[0]
-        W_2d = _disc_disc_2d_hist(bi_i, bi_j, W, nb_i, nb_j)
+    if bin_i is not None and bin_j is not None:
+        if B_i.shape[0] * B_j.shape[0] > _MAX_DISC_DISC_HIST_CELLS:
+            return _support_support_raw_cross(B_i, bin_i, B_j, bin_j, W)
+        W_2d = _disc_disc_2d_hist(bin_i, bin_j, W, B_i.shape[0], B_j.shape[0])
         return B_i.T @ W_2d @ B_j
-    elif bi_i is None and bi_j is None:
-        # Both dense
-        return B_i.T @ (B_j * W[:, None])
-    elif bi_i is not None and bi_j is None:
-        # i discretized, j dense: scatter i to observation level
-        B_i_full = B_i[bi_i]
-        return B_i_full.T @ (B_j * W[:, None])
-    else:
-        # i dense, j discretized: scatter j to observation level
-        B_j_full = B_j[bi_j]
-        return B_i.T @ (B_j_full * W[:, None])
+    rows_i = B_i if bin_i is None else B_i[bin_i]
+    rows_j = B_j if bin_j is None else B_j[bin_j]
+    return rows_i.T @ (rows_j * W[:, None])
 
 
-def scop_joint_newton_step(
-    scop_states: dict[int, dict],
-    W: NDArray,
-    z_scop: NDArray,
-    lambdas: dict[str, float] | float,
-    groups: list,
-    max_halving: int = 10,
-    debug_recorder=None,
-    debug_context: dict[str, object] | None = None,
-) -> dict[int, SCOPNewtonResult]:
-    """Joint Newton step for all SCOP groups simultaneously.
+def _centre_rows(values: NDArray, mass: NDArray, sum_w: float) -> tuple[NDArray, NDArray]:
+    """``values`` less their ``mass``-weighted mean, and that mean.
 
-    Instead of sequential Gauss-Seidel updates (which cause slow convergence
-    with cross-correlated SCOP terms), this solves for ALL SCOP beta_eff
-    parameters in one Newton step with proper cross-group Hessian blocks.
-
-    For a single SCOP group, degenerates to one block with no cross-terms,
-    producing identical results to ``scop_newton_step``.
-
-    Parameters
-    ----------
-    scop_states : dict[int, dict]
-        Per-group SCOP state. Keys are group indices into ``groups``.
-        Each dict has: B_scop, S_scop, beta_scop, reparam, bin_idx,
-        group_sl, group_name.
-    W : (n,) array
-        IRLS working weights (observation-level).
-    z_scop : (n,) array
-        Working response minus non-SCOP eta contributions.
-    lambdas : dict[str, float] or float
-        Per-group penalty weights (keyed by group name), or a scalar
-        applied to all groups.
-    groups : list of GroupSlice
-        Full group list (used for name lookup).
-    max_halving : int
-        Maximum number of step halvings for joint line search.
-
-    Returns
-    -------
-    dict[int, SCOPNewtonResult]
-        Per-group Newton results keyed by group index.
+    The rows are differenced from the heaviest row before the mean of the
+    differences is taken, as ``_anchor_center_support`` centres a support:
+    no row meets the mean's rounding at its own magnitude.
     """
-    # --- Setup: ordered list of (group_index, state) pairs ---
-    scop_items = sorted(scop_states.items())
-    n_groups = len(scop_items)
+    anchor = int(np.argmax(mass))
+    centred = values - values[anchor]
+    shift = (mass @ centred) / sum_w
+    centred -= shift
+    return centred, values[anchor] + shift
 
-    # Per-group dimensions and slice mapping into joint vector
-    q_effs = []
-    joint_slices = []
-    lambdas_list = []
-    offset = 0
-    for gi, st in scop_items:
-        q_i = len(st["beta_scop"])
-        q_effs.append(q_i)
-        joint_slices.append(slice(offset, offset + q_i))
-        # Look up lambda for this group
-        g_i = groups[gi]
-        if isinstance(lambdas, dict):
-            lam_i = lambdas.get(g_i.name, 0.0)
-        else:
-            lam_i = float(lambdas)
-        lambdas_list.append(lam_i)
-        offset += q_i
 
-    q_total = offset
-    # One discretized group (the shipped case): fuse its bin aggregates.
-    fused = n_groups == 1 and scop_items[0][1]["bin_idx"] is not None
-    if fused:
-        state0 = scop_items[0][1]
-        eta_bin0 = state0["B_scop"] @ state0["reparam"].forward(state0["beta_scop"].copy())
-        W_agg0, Wz_agg0, Wr_agg0 = _scop_bin_aggregates(
-            state0["bin_idx"], W, z_scop, eta_bin0, state0["B_scop"].shape[0]
+@dataclass(frozen=True)
+class _SCOPMoments:
+    """The SCOP block's weighted moments at one iterate, joint over its groups.
+
+    Moments are in mapped coordinates (``gamma``). ``gram`` and ``score``
+    are products of columns centred about their weighted means, ``X~_s' W
+    X~_s`` and ``X~_s' W r`` for the working residual ``r = z - eta``; the
+    block's own, uncentred moments follow from them and ``mean``.
+    """
+
+    gram: NDArray
+    score: NDArray
+    mean: NDArray
+    """Each SCOP column's weighted mean."""
+    weighted_sum: NDArray
+    """``X~_s' W 1``: zero but for rounding."""
+    sum_w: float
+    centred: tuple[tuple[NDArray, NDArray | None], ...]
+    """Each group's centred support and its row index (``None``: the rows themselves)."""
+    jacobian: NDArray
+    pull: NDArray
+    """``lambda S theta``, the penalty's gradient."""
+    own_gram: NDArray
+    """The block's own Gram ``X_s' W X_s``, uncentred."""
+    gauss_newton: NDArray
+    """The block's Gauss-Newton Hessian ``J X_s' W X_s J + lambda S``."""
+    curvature: NDArray
+    """The diagonal of the map's curvature ``E = -gamma''(theta) * X_s' W r``."""
+
+    @property
+    def finite(self) -> bool:
+        return all(
+            bool(np.all(np.isfinite(values)))
+            for values in (
+                self.gram,
+                self.score,
+                self.mean,
+                self.pull,
+                self.gauss_newton,
+                self.curvature,
+            )
         )
-        objective_cache = _JointObjectiveCache(
-            half_zwz=0.5 * weighted_row_sum(W, np.square, z_scop),
-            btwz=[state0["B_scop"].T @ Wz_agg0],
-        )
-    else:
-        objective_cache = _build_joint_objective_cache(scop_items, W, z_scop)
 
-    # --- Step 1: Forward map and derivatives, compute shared residual ---
-    betas = []
-    gammas = []
-    j_diags = []
-    second_diags = []
-    etas = []
-    for gi, st in scop_items:
-        beta_i = st["beta_scop"].copy()
-        betas.append(beta_i)
-        gamma_i = st["reparam"].forward(beta_i)
-        gammas.append(gamma_i)
-        j_diags.append(st["reparam"].jacobian_diagonal(beta_i))
-        second_diags.append(st["reparam"].second_derivative_diagonal(beta_i))
-        if fused:
-            etas.append(None)
-            continue
-        eta_bin_i = st["B_scop"] @ gamma_i
-        eta_i = eta_bin_i
-        if st["bin_idx"] is not None:
-            eta_i = eta_i[st["bin_idx"]]
-        etas.append(eta_i)
 
-    # Shared residual: z_scop minus ALL SCOP group etas (the fused path has
-    # already aggregated it by bin and never forms it row by row)
-    if fused:
-        total_scop_eta = residual = None
-    else:
-        total_scop_eta = np.zeros_like(z_scop)
-        for eta_i in etas:
-            total_scop_eta += eta_i
-        residual = z_scop - total_scop_eta
+@dataclass(frozen=True)
+class _CompactLayout:
+    """A discretized design's groups as compact supports, with their codes side by side.
 
-    # --- Step 2: Per-group BtWB and gradient ---
-    beta_joint = np.concatenate(betas)
-    BtWBs = []
-    r_effs = []
-    grad_datas = []
-    second_order_datas = []
-    for idx, (gi, st) in enumerate(scop_items):
-        B_i = st["B_scop"]
-        bi_i = st["bin_idx"]
-        j_i = j_diags[idx]
+    A categorical's support, the identity with a zero row for its base level
+    (``_compact_support``), is never formed: its ``values`` are ``None``, and
+    its block of a cross moment is its table's level rows.
+    """
 
-        if fused:
-            W_agg, Wr_agg = W_agg0, Wr_agg0
-            BtWB_ii = B_i.T @ (B_i * W_agg[:, None])
-            r_eff_i = B_i.T @ Wr_agg
-        elif bi_i is not None:
-            n_bins = B_i.shape[0]
-            W_agg = np.bincount(bi_i, weights=W, minlength=n_bins)
-            Wr_agg = np.bincount(bi_i, weights=W * residual, minlength=n_bins)
-            BtWB_ii = B_i.T @ (B_i * W_agg[:, None])
-            r_eff_i = B_i.T @ Wr_agg
+    supports: tuple[tuple[NDArray | None, NDArray | None], ...]
+    """Each group's ``(values, transform)``: its rows are ``values[codes] @ transform``."""
+    codes: NDArray
+    """``(n, groups)``: each row's support row in every group."""
+    bounds: NDArray
+    """Cumulative support rows: group ``g``'s table holds rows ``bounds[g]`` to ``bounds[g + 1]``."""
+    starts: NDArray
+    """Cumulative group widths: group ``g``'s columns are ``starts[g]`` to ``starts[g + 1]``."""
+
+
+# Owner: the reduced design, held weakly, so a REML run whose fits share one
+# reduced design (``SCOPRunCentring``) lays it out once and the layout dies
+# with the design. A layout depends on the design's group matrices alone,
+# which never change, so nothing invalidates it. It retains the packed codes,
+# 4 bytes per row and group, and the supports the design does not own: a
+# discretized spline-by-category level's support with its zero row.
+_COMPACT_LAYOUTS: weakref.WeakKeyDictionary[DesignMatrix, _CompactLayout | None] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _compact_layout(design: DesignMatrix, rows: Sequence[int]) -> _CompactLayout | None:
+    """The design's compact layout; ``rows`` are its groups' support rows (``_compact_support_rows``)."""
+    if design in _COMPACT_LAYOUTS:
+        return _COMPACT_LAYOUTS[design]
+    supports = []
+    codes = np.empty((design.n, len(rows)), dtype=np.int32)
+    for g, gm in enumerate(design.group_matrices):
+        if isinstance(gm, CategoricalGroupMatrix):
+            supports.append((None, None))
+            codes[:, g] = gm.codes
         else:
-            BtW_i = B_i.T * W[np.newaxis, :]
-            BtWB_ii = BtW_i @ B_i
-            r_eff_i = BtW_i @ residual
+            values, group_codes, transform = _compact_support(gm)
+            supports.append((values, transform))
+            codes[:, g] = group_codes
+    layout = None
+    if not codes.size or (codes.min() >= 0 and np.all(codes.max(axis=0) < rows)):
+        widths = [gm.shape[1] for gm in design.group_matrices]
+        layout = _CompactLayout(
+            supports=tuple(supports),
+            codes=codes,
+            bounds=np.concatenate(([0], np.cumsum(rows))).astype(np.int64),
+            starts=np.concatenate(([0], np.cumsum(widths))).astype(np.int64),
+        )
+    _COMPACT_LAYOUTS[design] = layout
+    return layout
 
-        BtWBs.append(BtWB_ii)
-        r_effs.append(r_eff_i)
-        grad_data_i = -(j_i * r_eff_i)
-        grad_datas.append(grad_data_i)
-        second_order_datas.append(-(second_diags[idx] * r_eff_i))
 
-    # --- Step 3: Assemble joint Hessian and gradient ---
-    H = np.zeros((q_total, q_total))
-    grad = np.zeros(q_total)
-    dropped_cross_blocks = 0
-    cross_btwb: dict[tuple[int, int], NDArray] = {}
+class _JointWeightCross:
+    """``X~_r' W X~_s`` from each ordinary group's weight table against the SCOP bins.
 
-    for idx, (gi, st) in enumerate(scop_items):
-        sl_i = joint_slices[idx]
-        j_i = j_diags[idx]
-        lam_i = lambdas_list[idx]
-        beta_i = betas[idx]
+    Every group of a discretized design is a compact support, its rows
+    ``values[codes] @ transform`` (``_compact_support``), and a binned SCOP
+    group's columns are ``basis[bins]``, so group ``g``'s cross block is
+    ``transform' values~' H_g basis~`` with ``H_g`` the weight table of
+    ``(codes_g, bins)`` and both supports centred about their weighted means
+    before any product: the anchor-support route's algebra
+    (``_anchor_support_gram_rhs``). The table's row sums are the support's
+    weights, so centring costs no pass over the rows. One row pass forms
+    every ``H_g``, reading the weights and the SCOP bins once rather than once
+    per group.
 
-        # Diagonal block: J^T BtWB J + lambda*S + map-curvature correction.
-        jj_ii = j_i[:, None] * j_i[None, :]
-        block = jj_ii * BtWBs[idx] + lam_i * st["S_scop"]
-        block[np.diag_indices_from(block)] += second_order_datas[idx]
-        H[sl_i, sl_i] = block
+    Sizes are read from the groups' metadata before anything is allocated
+    (``_compact_support_rows``, as ``_compact_supports_fit``): a design with a
+    group that has no compact support, tables past the packed-histogram cap,
+    or packed codes past the package's 64 MiB byte budget is not built here.
+    """
 
-        # Gradient
-        grad[sl_i] = grad_datas[idx] + lam_i * (st["S_scop"] @ beta_i)
+    def __init__(self, layout: _CompactLayout) -> None:
+        self.layout = layout
 
-    # Cross-group blocks
-    cfg = _PROTOTYPE_CONFIG
-    for a in range(n_groups):
-        for b in range(a + 1, n_groups):
-            gi_a, st_a = scop_items[a]
-            gi_b, st_b = scop_items[b]
-            sl_a = joint_slices[a]
-            sl_b = joint_slices[b]
-            j_a = j_diags[a]
-            j_b = j_diags[b]
+    @classmethod
+    def build(
+        cls, design: DesignMatrix, columns: Sequence[tuple[NDArray, NDArray | None]]
+    ) -> _JointWeightCross | None:
+        if any(bins is None for _, bins in columns):
+            return None
+        rows = [_compact_support_rows(gm) for gm in design.group_matrices]
+        widest = max(basis.shape[0] for basis, _ in columns)
+        if (
+            any(count is None for count in rows)
+            or sum(rows) * widest > _MAX_PACKED_HIST_CELLS
+            or 4 * design.n * len(rows) > _MAX_CROSS_EXPANSION_BYTES
+        ):
+            return None
+        layout = _compact_layout(design, rows)
+        return None if layout is None else cls(layout)
 
-            BtWB_ab = _compute_cross_gram(st_a, st_b, W)
-            cross_btwb[(a, b)] = BtWB_ab
-            if cfg.cross_block_rel_tol > 0.0:
-                norm_scale = np.sqrt(
-                    np.linalg.norm(BtWBs[a], ord="fro") * np.linalg.norm(BtWBs[b], ord="fro")
+    def cross_moment(
+        self, W: NDArray, scop: Sequence[tuple[NDArray, NDArray]], sum_w: float
+    ) -> NDArray:
+        """The centred cross block against ``scop``, each group's centred support and bins."""
+        layout = self.layout
+        cross = np.zeros((int(layout.starts[-1]), sum(basis.shape[1] for basis, _ in scop)))
+        supports = None
+        column = 0
+        for basis, bins in scop:
+            n_scop = basis.shape[0]
+            edges = layout.bounds * n_scop
+            table = _joint_weight_tables(layout.codes, edges[:-1], bins, n_scop, W, int(edges[-1]))
+            if supports is None:
+                supports = [
+                    _centred_support(values, table[a:b].reshape(-1, n_scop).sum(axis=1), sum_w)
+                    for (values, _), a, b in zip(
+                        layout.supports, edges[:-1], edges[1:], strict=True
+                    )
+                ]
+            block = slice(column, column + basis.shape[1])
+            for g, ((values, transform), support) in enumerate(
+                zip(layout.supports, supports, strict=True)
+            ):
+                moment = table[edges[g] : edges[g + 1]].reshape(-1, n_scop) @ basis
+                if values is None:
+                    # a categorical's centred support rows are its levels' indicators less
+                    # their weighted frequencies ``support``, then its base level's -support
+                    moment = moment[:-1] - np.outer(support, moment.sum(axis=0))
+                else:
+                    moment = support.T @ moment
+                if transform is not None:
+                    moment = transform.T @ moment
+                cross[layout.starts[g] : layout.starts[g + 1], block] = moment
+            column = block.stop
+        return cross
+
+
+def _centred_support(values: NDArray | None, mass: NDArray, sum_w: float) -> NDArray:
+    """A compact support centred about its weighted mean; a categorical's level frequencies."""
+    if values is None:
+        return mass[:-1] / sum_w
+    return _centre_rows(np.asarray(values, dtype=np.float64), mass, sum_w)[0]
+
+
+class _OrdinaryCross:
+    """``X~_r' W X~_s``, the centred cross block of the ordinary design and the SCOP columns.
+
+    Every entry is a sum of products of centred columns; no raw moment is
+    subtracted, as the reduced system itself never subtracts one outside its
+    certificate (``build_centered_system``). The design splits by column
+    type, as ``centred_data_score`` does:
+
+    - a ``DenseGroupMatrix`` column, whose type does not bound its offset,
+      is centred row by row about the system's exact pair, weighted, and
+      summed onto each SCOP group's bins;
+    - the other groups take one pass of joint weight tables
+      (``_JointWeightCross``) when each has a compact support within the
+      caps, and otherwise the per-pair group-matrix kernels against the
+      centred SCOP supports, less ``mean_x (1' W X~_s)``, a product of two
+      roundings.
+
+    ``moment`` also returns the weighted norm with which each ordinary column
+    entered its products: centred on the first two routes, raw on the
+    per-pair one, whose rows meet the SCOP columns uncentred.
+    """
+
+    def __init__(self, design: DesignMatrix, columns) -> None:
+        self.design = design
+        dense = dense_columns(design)
+        self.bounded_index = np.flatnonzero(~dense)
+        bounded = design if not dense.any() else _dense_split(design).bounded
+        self.bounded = bounded if bounded.p else None
+        self.tables = None if self.bounded is None else _JointWeightCross.build(bounded, columns)
+
+    def _dense_columns(self):
+        offset = 0
+        for matrix in self.design.group_matrices:
+            if type(matrix) is DenseGroupMatrix:
+                for local in range(matrix.shape[1]):
+                    yield offset + local, matrix.M[:, local]
+            offset += matrix.shape[1]
+
+    def moment(self, W: NDArray, moments: _SCOPMoments, system: CenteredSystem):
+        """``(cross, norms)``: the centred cross block and each ordinary column's product norm."""
+        scop = moments.centred
+        cross = np.zeros((self.design.p, moments.gram.shape[0]))
+        norms = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0))
+        if self.bounded is not None:
+            index = self.bounded_index
+            if self.tables is not None:
+                cross[index] = self.tables.cross_moment(W, scop, moments.sum_w)
+            else:
+                columns = [
+                    DenseGroupMatrix(basis)
+                    if bins is None
+                    else DiscretizedSCOPGroupMatrix(basis, bins)
+                    for basis, bins in scop
+                ]
+                plan = CrossMatrixExecutionPlan(
+                    self.bounded.execution_plan, MatrixExecutionPlan(columns, n=self.design.n)
                 )
-                if norm_scale > 0.0:
-                    rel_cross = np.linalg.norm(BtWB_ab, ord="fro") / norm_scale
-                    if rel_cross < cfg.cross_block_rel_tol:
-                        dropped_cross_blocks += 1
-                        continue
-            cross = BtWB_ab * j_a[:, np.newaxis] * j_b[np.newaxis, :]
-            H[sl_a, sl_b] = cross
-            H[sl_b, sl_a] = cross.T
+                mean = system.mean_x[index]
+                cross[index] = plan.cross_moment(W) - np.outer(mean, moments.weighted_sum)
+                norms[index] = np.sqrt(norms[index] ** 2 + moments.sum_w * mean**2)
+        centre, centre_lo = system.centre_pair()
+        for k, values in self._dense_columns():
+            rows = values - centre[k]
+            if centre_lo is not None:
+                rows -= centre_lo[k]
+            rows *= W
+            column = 0
+            for basis, bins in scop:
+                block = slice(column, column + basis.shape[1])
+                summed = rows if bins is None else np.bincount(bins, rows, basis.shape[0])
+                cross[k, block] = basis.T @ summed
+                column = block.stop
+        return cross, norms
 
-    # --- Check starting objective ---
-    objective_cache.diag_btwb = BtWBs
-    objective_cache.cross_btwb = cross_btwb
-    obj_before = _joint_objective_from_gammas(
-        gammas,
-        beta_joint,
-        joint_slices,
-        lambdas_list,
-        scop_items,
-        objective_cache,
-    )
 
-    if not np.isfinite(obj_before):
-        # Non-finite starting point: return no-op for all groups
-        results = {}
-        for idx, (gi, st) in enumerate(scop_items):
-            results[gi] = SCOPNewtonResult(
-                beta_new=st["beta_scop"].copy(),
-                objective_before=np.inf,
-                objective_after=np.inf,
+def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArray:
+    """``(X - 1 centre') change`` on a leaf's rows, every column of ``change`` at once.
+
+    ``centred_matvec``'s algebra: a ``DenseGroupMatrix`` block is centred row
+    by row before one product for all columns; every other block takes its
+    own product of each column less ``centre' change``.
+    """
+    result = np.zeros((part.n, change.shape[1]))
+    offset = 0
+    for matrix in part.group_matrices:
+        width = matrix.shape[1]
+        block, shift = change[offset : offset + width], centre[offset : offset + width]
+        if type(matrix) is DenseGroupMatrix:
+            result += (matrix.M - shift) @ block
+        else:
+            for j, column in enumerate(block.T):
+                result[:, j] += matrix.matvec(column) - float(shift @ column)
+        offset += width
+    return result
+
+
+def _leaf_transposed(part: DesignMatrix, rows: NDArray, centre: NDArray) -> NDArray:
+    """``X' rows`` on a leaf's rows, a ``DenseGroupMatrix`` block's centred row by row.
+
+    The products ``dense_centred_rmatvec`` and a bounded block's
+    ``rmatvec`` form, before their rank-one centring terms.
+    """
+    result = np.zeros((part.p, rows.shape[1]))
+    offset = 0
+    for matrix in part.group_matrices:
+        width = matrix.shape[1]
+        if type(matrix) is DenseGroupMatrix:
+            result[offset : offset + width] = (matrix.M - centre[offset : offset + width]).T @ rows
+        else:
+            for j, column in enumerate(rows.T):
+                result[offset : offset + width, j] = matrix.rmatvec(column)
+        offset += width
+    return result
+
+
+def _exact_support(spec: SCOPGroupSpec, supports: dict | None) -> tuple[NDArray, NDArray | None]:
+    """A group's columns as a basis and a row index into it.
+
+    A group with no bins is compressed to its distinct rows only when they
+    are at most half its rows: its moments then cost a bincount over the
+    rows plus at most half the row-level products. An almost-unique
+    support saves nothing, and every table it indexes grows with its rows.
+    ``supports``, the run's record by group (``SCOPRunCentring``), keeps
+    the compressed support or ``None`` for the next fit of the same rows.
+    """
+    if spec.bin_idx is not None:
+        return spec.B_scop, spec.bin_idx
+    if supports is not None and spec.group_index in supports:
+        compressed = supports[spec.group_index]
+    else:
+        support = build_exact_scop_support(spec.B_scop)
+        compressed = (
+            None
+            if support is None or 2 * support.n_unique > spec.B_scop.shape[0]
+            else (support.B_unique, support.row_to_support)
+        )
+        if supports is not None:
+            supports[spec.group_index] = compressed
+    return (spec.B_scop, None) if compressed is None else compressed
+
+
+def _group_lambda(lambdas: dict[str, float] | float, group: GroupSlice) -> float:
+    return float(lambdas.get(group.name, 0.0) if isinstance(lambdas, dict) else lambdas)
+
+
+class SCOPJointNewton:
+    """The joint Newton step of one inner fit's shape-constrained groups.
+
+    Holds what is fixed for the fit: the groups in latent order, their
+    penalties at the fit's smoothing parameters, each group's columns on
+    its exact support (a basis and a row index into it, the distinct rows
+    of a non-discretized group, read from the run's ``supports`` when it
+    has them), and the centred cross block between the ordinary (reduced)
+    design and those columns (``_OrdinaryCross``).
+    """
+
+    def __init__(
+        self,
+        specs: Sequence[SCOPGroupSpec],
+        lambdas: dict[str, float] | float,
+        reduced_design: DesignMatrix,
+        n: int,
+        supports: dict | None = None,
+    ) -> None:
+        self.specs = tuple(specs)
+        self.n = int(n)
+        widths = [spec.S_scop.shape[0] for spec in self.specs]
+        offsets = np.concatenate(([0], np.cumsum(widths))).astype(int)
+        self.slices = tuple(slice(int(a), int(b)) for a, b in zip(offsets[:-1], offsets[1:]))
+        self.width = int(offsets[-1])
+        self.penalty = np.zeros((self.width, self.width))
+        self.penalty_root = np.zeros((self.width, self.width))
+        for spec, block in zip(self.specs, self.slices, strict=True):
+            lam = _group_lambda(lambdas, spec.group)
+            self.penalty[block, block] = lam * spec.S_scop
+            self.penalty_root[block, block] = np.sqrt(max(lam, 0.0)) * _psd_root(spec.S_scop)
+        self.columns = tuple(_exact_support(spec, supports) for spec in self.specs)
+        self._cross = _OrdinaryCross(reduced_design, self.columns) if reduced_design.p else None
+
+    def predictor(self, thetas: Sequence[NDArray]) -> NDArray:
+        """``X_s gamma(theta)`` at observation level, summed over the groups."""
+        total = np.zeros(self.n)
+        for spec, (basis, bins), theta in zip(self.specs, self.columns, thetas, strict=True):
+            values = basis @ spec.reparam.forward(theta)
+            total += values if bins is None else values[bins]
+        return total
+
+    def _moments(
+        self, thetas: Sequence[NDArray], W: NDArray, z: NDArray, eta: NDArray
+    ) -> _SCOPMoments:
+        q = self.width
+        sum_w = float(np.sum(W))
+        gram = np.zeros((q, q))
+        score = np.empty(q)
+        mean = np.empty(q)
+        weighted_sum = np.empty(q)
+        jacobian = np.empty(q)
+        second = np.empty(q)
+        centred = []
+        for spec, (basis, bins), block, theta in zip(
+            self.specs, self.columns, self.slices, thetas, strict=True
+        ):
+            if bins is None:
+                weights, weighted_residual = W, W * (z - eta)
+            else:
+                weights, weighted_residual = _scop_bin_moments(bins, W, z, eta, basis.shape[0])
+            support, mean[block] = _centre_rows(basis, weights, sum_w)
+            centred.append((support, bins))
+            gram[block, block] = support.T @ (support * weights[:, None])
+            score[block] = support.T @ weighted_residual
+            weighted_sum[block] = support.T @ weights
+            jacobian[block] = spec.reparam.jacobian_diagonal(theta)
+            second[block] = spec.reparam.second_derivative_diagonal(theta)
+        # every group's weighted residuals, by bin or by row, sum to ``W' r``
+        residual_sum = float(np.sum(weighted_residual))
+        for a in range(len(self.specs)):
+            for b in range(a + 1, len(self.specs)):
+                cross = _compute_cross_gram(*centred[a], *centred[b], W)
+                gram[self.slices[a], self.slices[b]] = cross
+                gram[self.slices[b], self.slices[a]] = cross.T
+        pull = self.penalty @ np.concatenate(thetas)
+        with np.errstate(over="ignore", invalid="ignore"):
+            # X_s = X~_s + 1 mean', so X_s' W X_s and X_s' W r follow exactly
+            shift = np.outer(weighted_sum, mean)
+            own_gram = gram + shift + shift.T + sum_w * np.outer(mean, mean)
+            gauss_newton = jacobian[:, None] * own_gram * jacobian[None, :] + self.penalty
+            curvature = -second * (score + mean * residual_sum)
+        return _SCOPMoments(
+            gram=gram,
+            score=score,
+            mean=mean,
+            weighted_sum=weighted_sum,
+            sum_w=sum_w,
+            centred=tuple(centred),
+            jacobian=jacobian,
+            pull=pull,
+            own_gram=own_gram,
+            gauss_newton=gauss_newton,
+            curvature=curvature,
+        )
+
+    def _results(
+        self,
+        thetas: Sequence[NDArray],
+        theta_change: NDArray,
+        moments: _SCOPMoments,
+        used_fisher: bool,
+        discarded: NDArray,
+    ) -> dict[int, SCOPNewtonResult]:
+        """Per-group results carrying the block curvature the step used.
+
+        That curvature is the SCOP block's own Hessian ``J G J + lambda S +
+        E`` (without ``E`` after a Gauss-Newton fallback), uncentred and on
+        the resolved range: the REML geometry substitutes it for the SCOP
+        diagonal block of the joint Hessian it assembles.
+        """
+        hessian = moments.gauss_newton.copy()
+        if not used_fisher:
+            hessian[np.diag_indices_from(hessian)] += moments.curvature
+        hessian = _restrict_to_resolved_range(hessian, discarded)
+        return {
+            spec.group_index: SCOPNewtonResult(
+                beta_new=theta + theta_change[block],
+                step_norm=float(np.linalg.norm(theta_change[block])),
+                used_fisher_fallback=used_fisher,
+                H_penalized=hessian[block, block].copy(),
+                discarded_directions=discarded[:, block].copy(),
+            )
+            for spec, block, theta in zip(self.specs, self.slices, thetas, strict=True)
+        }
+
+    def _no_step(self, thetas: Sequence[NDArray]) -> dict[int, SCOPNewtonResult]:
+        """A non-finite SCOP system takes no step and reports the penalty as its curvature."""
+        return {
+            spec.group_index: SCOPNewtonResult(
+                beta_new=np.array(theta, dtype=float, copy=True),
                 step_norm=0.0,
                 used_fisher_fallback=False,
-                H_penalized=lambdas_list[idx] * st["S_scop"],
+                H_penalized=self.penalty[block, block].copy(),
+                discarded_directions=np.zeros((0, block.stop - block.start)),
             )
-        for gi, result in results.items():
+            for spec, block, theta in zip(self.specs, self.slices, thetas, strict=True)
+        }
+
+    def _solve(
+        self, root: NDArray, moments: _SCOPMoments, gradient: NDArray
+    ) -> tuple[NDArray, bool, NDArray]:
+        """Newton step of a SCOP block whose data part is ``J R' R J``.
+
+        The factor is ``[R J ; sqrt(lambda) rS]`` with ``R = root``:
+        ``J`` scales the factor's columns rather than a Gram's, so a latent
+        coordinate running to its log-space boundary (``J -> 0``) is resolved
+        to the factor's accuracy, not its square. Returns the step with the
+        sign of a Newton direction subtracted from ``theta``, whether the
+        Gauss-Newton block was used, and the discarded directions. No
+        identifiable direction at all gives no step.
+        """
+        factor = np.vstack([root * moments.jacobian[None, :], self.penalty_root])
+        step, used_fisher, discarded = _truncated_factor_step(factor, moments.curvature, gradient)
+        if step is None:
+            return np.zeros(self.width), True, np.zeros((0, self.width))
+        return step, used_fisher, discarded
+
+    def _schur_rows(
+        self,
+        W: NDArray,
+        moments: _SCOPMoments,
+        reduced: CenteredSystem,
+        solve: Callable[[NDArray], NDArray],
+        coupled: NDArray,
+    ) -> tuple[NDArray, NDArray, int]:
+        """``(F, g, count)``: a factor of the Schur block's data part, from the rows (``_resolved_root``).
+
+        The centred SCOP columns less their regression on the ordinary
+        design, ``Z = X~_s - X~_r A^+ C``, over the penalty's rows ``L_r A^+
+        C`` (``L_r' L_r = S_r``): ``[sqrt(W) Z; L_r A^+ C]`` has the Gram ``G~
+        - C' A^+ C`` that the step's back-substitution takes, ``A^+`` being
+        the ordinary block's own ``solve``. That is one block of classical
+        Gram-Schmidt against the ordinary design through its seminormal
+        equations, so it is projected twice. The first pass takes ``coupled
+        = A^+ C`` from the formed cross block, whose rounding ``dC`` leaves
+        ``sqrt(dC' A^+ dC)`` in ``Z`` however small ``Z`` is; the second
+        regresses what the first left, as Bjorck's corrected seminormal
+        equations refine a seminormal solve (*Linear Algebra Appl.* 88, 1987)
+        and as reorthogonalized block Gram-Schmidt projects each block twice
+        (BCGSI+; Carson, Lund, Ma & Oktay, arXiv 2408.10109). It leaves the
+        first pass's error times order ``n u kappa(A)``. The rows are then
+        factored by the TSQR (``streamed_weighted_factor``).
+
+        The rows are formed a TSQR leaf at a time and never all at once: one
+        pass over the leaves accumulates the first pass's residual ``X~_r' W
+        Z``, a second forms each leaf's ``Z`` again, regresses the correction
+        out of it and hands it to the TSQR. A binned group's rows are read off
+        its support by bin, and every ordinary group takes its products on the
+        leaf's rows (``row_subset``), a discretized one by its bins, a dense
+        one in one product for all ``q`` columns (``_leaf_product``).
+
+        ``g`` bounds each column's rounding: its SCOP column's norm plus
+        ``|A^+ C|`` times each ordinary column's, the raw norm on a column the
+        product does not centre row by row (``centred_matvec``), with the
+        penalty's diagonal. ``count`` is two such products of ``p + 3`` terms
+        and the Householder QR's ``m q`` on ``m`` rows (Higham 2002, Thm 19.4).
+        """
+        q, p = self.width, coupled.shape[0]
+        leaf = tsqr_leaf_rows(q)
+        spans = [(start, min(start + leaf, self.n)) for start in range(0, self.n, leaf)]
+
+        def scop_rows(start: int, stop: int) -> NDArray:
+            rows = np.empty((stop - start, q))
+            for (support, bins), block in zip(moments.centred, self.slices, strict=True):
+                rows[:, block] = support[start:stop] if bins is None else support[bins[start:stop]]
+            return rows
+
+        scale = np.sqrt(np.maximum(np.diag(moments.gram), 0.0))
+        if self._cross is None or not p:
+            leaves = ((start, stop, scop_rows(start, stop)) for start, stop in spans)
+            return streamed_weighted_factor(leaves, W), scale, self.n * q + 2 * (p + 3)
+
+        design = self._cross.design
+        centre, centre_lo = reduced.centre_pair()
+
+        def regressed(start: int, stop: int, *changes: NDArray) -> tuple[NDArray, DesignMatrix]:
+            """The leaf's SCOP rows less ``X~_r change`` for each change in turn, and its design rows."""
+            part = design.row_subset(np.arange(start, stop))
+            rows = scop_rows(start, stop)
+            for change in changes:
+                rows -= _leaf_product(part, change, centre)
+                if centre_lo is not None:
+                    rows += [math.fsum(centre_lo * column) for column in change.T]
+            return rows, part
+
+        residual = np.zeros((p, q))
+        total = np.zeros(q)
+        for start, stop in spans:
+            rows, part = regressed(start, stop, coupled)
+            rows *= W[start:stop, None]
+            residual += _leaf_transposed(part, rows, centre)
+            total += rows.sum(axis=0)
+        # the rank-one parts of each centring: the dense pair's remainder, and
+        # the mean of every column the product did not centre row by row
+        raw = ~dense_columns(design)
+        shift = np.where(raw, reduced.mean_x, 0.0 if centre_lo is None else centre_lo)
+        residual -= np.outer(shift, total)
+        residual -= reduced.penalty @ coupled
+        correction = np.column_stack([solve(column) for column in residual.T])
+        leaves = (
+            (start, stop, regressed(start, stop, coupled, correction)[0]) for start, stop in spans
+        )
+        factor = streamed_weighted_factor(leaves, W)
+
+        norms = np.sqrt(np.maximum(np.diag(reduced.hessian), 0.0))
+        norms[raw] += 2.0 * np.abs(reduced.mean_x[raw]) * math.sqrt(moments.sum_w)
+        scale = scale + (np.abs(coupled) + np.abs(correction)).T @ norms
+        penalty_rows = penalty_factor(reduced.penalty) @ (coupled + correction)
+        factor = np.vstack((factor, penalty_rows))
+        return factor, scale, (self.n + penalty_rows.shape[0]) * q + 2 * (p + 3)
+
+    def step(
+        self,
+        thetas: Sequence[NDArray],
+        *,
+        W: NDArray,
+        z: NDArray,
+        eta: NDArray,
+        reduced: CenteredSystem,
+        solve: Callable[[NDArray], NDArray],
+        ordinary_change: NDArray,
+        debug_recorder=None,
+        debug_context: dict[str, object] | None = None,
+    ) -> SCOPJointStep:
+        """One joint Newton step, completing an ordinary solve taken with ``theta`` fixed.
+
+        ``W`` and ``z`` are the working weights and response, ``eta`` the
+        committed predictor (unclipped, offset included), so ``z - eta`` is
+        the working residual at the current coefficients. ``reduced`` is the
+        ordinary block's centred system and ``solve`` applies its
+        (pseudo-)inverse; ``ordinary_change`` is that block's step with the
+        SCOP coordinates held fixed.
+
+        With ``r`` the working residual, ``delta_b`` that step and ``C =
+        X~_r' W X~_s`` the centred cross block, the reduced SCOP gradient is
+        ``-J (X~_s' W r - C' delta_b) + lambda S theta``: the residual the
+        fixed-``theta`` solve leaves, without forming it. The block's data
+        part is taken on the directions the data resolve, from the rows when
+        the Grams cannot decide (``_resolved_root``, ``_schur_rows``).
+        """
+        moments = self._moments(thetas, W, z, eta)
+        if not moments.finite:
+            return SCOPJointStep(self._no_step(thetas), np.zeros_like(ordinary_change), 0.0)
+        data_gram = moments.gram
+        data_score = moments.score
+        scale = np.sqrt(np.maximum(np.diag(data_gram), 0.0))
+        coupled = np.zeros((ordinary_change.shape[0], self.width))
+        if self._cross is not None:
+            cross, norms = self._cross.moment(W, moments, reduced)
+            coupled = np.column_stack([solve(column) for column in cross.T])
+            data_gram = data_gram - cross.T @ coupled
+            data_score = data_score - cross.T @ ordinary_change
+            # the reduced Gram's raw rungs admit a column at kappa^2 <= 2
+            # (``_raw_centering_well_scaled``): its rounding is within sqrt(2) of the norm
+            centred = np.sqrt(np.maximum(np.diag(reduced.data_gram), 0.0))
+            scale = scale + np.abs(coupled).T @ np.maximum(np.sqrt(2.0) * centred, norms)
+        root, data_score = _resolved_root(
+            data_gram,
+            data_score,
+            scale,
+            2 * self.n + coupled.shape[0] + self.width + 2,
+            lambda: self._schur_rows(W, moments, reduced, solve, coupled),
+        )
+        gradient = -moments.jacobian * data_score + moments.pull
+        step, used_fisher, discarded = self._solve(root, moments, gradient)
+        mapped_change = -moments.jacobian * step
+        results = self._results(thetas, -step, moments, used_fisher, discarded)
+        for spec in self.specs:
             _append_scop_trace(
                 debug_recorder,
-                mode="joint",
-                result=result,
+                result=results[spec.group_index],
                 debug_context=debug_context,
-                group_name=groups[gi].name,
+                group_name=spec.group.name,
             )
-        return results
-
-    # --- Step 4: Solve ---
-    # The square-root form exists to resolve directions the Gram cannot, and it
-    # is only worth its cost when there are any. A multi-group factor has to be
-    # built at observation level -- the groups sit on different bin grids, so
-    # there is no shared coarser row space -- which is the O(n q^2) work
-    # discretization exists to avoid, repeated every Newton step.
-    #
-    # When the Gauss-Newton Gram is comfortably far from singular, no direction
-    # is anywhere near the truncation cutoff, the Gram carries the step to full
-    # accuracy, and nothing would have been discarded anyway. Measured on a
-    # three-term fit at n=50000: smallest-to-largest singular value 4.7e-03,
-    # zero directions truncated in every one of its solves, and the factor was
-    # 50000 rows each time.
-    #
-    # The gate is the truncation rule read backwards. Directions are discarded
-    # below ``sigma_max * sqrt(eps)``, which on the Gram is ``lambda_max *
-    # eps``; requiring ``lambda_min / lambda_max`` to clear ``sqrt(eps)`` keeps
-    # a margin of ``1 / sqrt(eps)`` -- eight orders of magnitude -- between the
-    # cheapest system that takes this path and the dearest one that could have
-    # lost a direction to rounding.
-    second_order = np.concatenate(second_order_datas)
-    step, used_fisher, discarded, linear_solver, linear_iterations = _solve_joint_step(
-        lambda: _joint_augmented_factor(scop_items, joint_slices, j_diags, lambdas_list, W),
-        second_order,
-        _gauss_newton_conditioning(H, joint_slices, second_order_datas),
-        H,
-        grad,
-        scop_items,
-        joint_slices,
-        second_order_datas,
-        BtWBs,
-        j_diags,
-        lambdas_list,
-    )
-
-    if step is None:
-        # No identifiable direction at all: a short gradient step rather than
-        # a claimed Newton direction.
-        used_fisher = True
-        step = -1e-4 * grad
-        discarded = np.zeros((0, q_total), dtype=float)
-        linear_solver = "gradient_fallback"
-        linear_iterations = 0
-
-    if used_fisher:
-        # Report the Gauss-Newton curvature, which is what the step used.
-        H_solved = H.copy()
-        for idx in range(n_groups):
-            sl_i = joint_slices[idx]
-            H_block = H_solved[sl_i, sl_i].copy()
-            H_block[np.diag_indices_from(H_block)] -= second_order_datas[idx]
-            H_solved[sl_i, sl_i] = H_block
-    else:
-        H_solved = H
-    H_solved = _restrict_to_resolved_range(H_solved, discarded)
-
-    # --- Step 5: Joint line search ---
-    alpha = 1.0
-    accepted = False
-    response_norm = float(norm(np.sqrt(W) * z_scop, check_finite=False))
-
-    for _ in range(max_halving + 1):
-        beta_trial = beta_joint - alpha * step
-        objective_delta = _safe_joint_trial_objective_delta(
-            scop_items,
-            beta_trial,
-            joint_slices,
-            lambdas_list,
-            gammas,
-            r_effs,
-            objective_cache,
-        )
-        allowance = (
-            _objective_delta_roundoff(
-                gammas=gammas,
-                trial_gammas=[
-                    state["reparam"].forward(beta_trial[group_slice])
-                    for (_, state), group_slice in zip(scop_items, joint_slices, strict=True)
-                ],
-                betas=betas,
-                trial_betas=[beta_trial[group_slice] for group_slice in joint_slices],
-                grams=BtWBs,
-                penalties=[state["S_scop"] for _, state in scop_items],
-                lambdas=lambdas_list,
-                response_norm=response_norm,
-                n_rows=len(W),
-            )
-            if np.isfinite(objective_delta)
-            else np.inf
-        )
-        if np.isfinite(objective_delta) and np.isfinite(allowance) and objective_delta <= allowance:
-            accepted = True
-            break
-        alpha *= 0.5
-
-    if accepted:
-        beta_new_joint = beta_trial
-        obj_new = obj_before + objective_delta
-    else:
-        beta_new_joint = beta_joint
-        obj_new = obj_before
-
-    # --- Step 6: Distribute results ---
-    results = {}
-    for idx, (gi, st) in enumerate(scop_items):
-        sl_i = joint_slices[idx]
-        beta_new_i = beta_new_joint[sl_i]
-        if accepted:
-            step_norm_i = float(np.linalg.norm(alpha * step[sl_i]))
-        else:
-            step_norm_i = 0.0
-
-        # Diagonal block of the joint curvature used for the accepted solve.
-        H_block_i = H_solved[sl_i, sl_i]
-
-        results[gi] = SCOPNewtonResult(
-            beta_new=beta_new_i,
-            objective_before=float(obj_before),
-            objective_after=float(obj_new),
-            step_norm=step_norm_i,
-            used_fisher_fallback=used_fisher,
-            H_penalized=H_block_i,
-            linear_solver=linear_solver,
-            linear_iterations=linear_iterations,
-            dropped_cross_blocks=dropped_cross_blocks,
-            discarded_directions=discarded[:, sl_i],
+        return SCOPJointStep(
+            results=results,
+            ordinary_correction=-(coupled @ mapped_change),
+            intercept_shift=float(moments.mean @ mapped_change),
         )
 
-    for gi, result in results.items():
-        _append_scop_trace(
-            debug_recorder,
-            mode="joint",
-            result=result,
-            debug_context=debug_context,
-            group_name=groups[gi].name,
-        )
+    def block_curvature(
+        self, thetas: Sequence[NDArray], *, W: NDArray, z: NDArray, eta: NDArray
+    ) -> dict[int, SCOPNewtonResult]:
+        """The SCOP block's own curvature at ``theta``, which does not move.
 
-    return results
+        The Newton Hessian ``J G J + lambda S + E`` of the SCOP block alone
+        (uncentred, the ordinary coefficients held fixed), whether it is
+        positive definite on the block's resolved range, and the directions
+        that block cannot resolve: what the REML geometry reads for the
+        retained model.
+        """
+        moments = self._moments(thetas, W, z, eta)
+        if not moments.finite:
+            return self._no_step(thetas)
+        root = _psd_root(moments.own_gram)
+        _, used_fisher, discarded = self._solve(root, moments, np.zeros(self.width))
+        return self._results(thetas, np.zeros(self.width), moments, used_fisher, discarded)
