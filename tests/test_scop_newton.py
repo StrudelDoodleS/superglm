@@ -1418,3 +1418,49 @@ def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
 
     assert result.converged
     assert result.n_iter > 2
+
+
+def _sparse_counts_model(n, seed, theta):
+    """Counts of mean about 0.05 beside an increasing spline: NB2 data at the Poisson limit."""
+    from superglm import PSpline
+    from superglm.distributions import NegativeBinomial
+
+    rng = np.random.default_rng(seed)
+    x1, x2 = rng.uniform(0, 10, n), rng.uniform(-2, 2, n)
+    exposure = rng.uniform(0.2, 1.0, n)
+    y = rng.poisson(np.exp(0.06 * x1 + 0.3 * np.sin(1.3 * x2) - 3.0) * exposure)
+    model = SuperGLM(
+        family=NegativeBinomial(theta=theta),
+        features={
+            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="cr", k=8),
+        },
+    )
+    return model, pd.DataFrame({"x1": x1, "x2": x2}), y.astype(float), np.log(exposure)
+
+
+def test_a_trial_past_binary64s_range_is_refused_without_a_warning(monkeypatch):
+    """NB2 with theta estimated on sparse counts (the release differential's NB2 SCOP case, reduced).
+
+    A latent coordinate at the QP start's floor takes a step past
+    ``_LATENT_MAX_STEP``, whose first halving within it maps to about
+    exp(500); the trial's ordinary block, solved at those mapped
+    coefficients, is as large, and its penalty's quadratic overflowed in
+    the merit, warning on a trial the line search refuses anyway.
+    """
+    largest = []
+    evaluate = irls_direct._evaluate_scop_trial
+
+    def recorded(**kwargs):
+        trial = evaluate(**kwargs)
+        largest.append(float(np.max(np.abs(trial.irls.beta))))
+        return trial
+
+    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    model, frame, y, offset = _sparse_counts_model(400, 2, "auto")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        model.fit(frame, y, offset=offset)
+
+    assert max(largest) > np.sqrt(np.finfo(float).max)
+    assert model.result.converged

@@ -2782,7 +2782,11 @@ def _fit_irls_direct_once(
 
         def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
             """Attach deviance plus the latent-coordinate quadratic penalty."""
-            penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
+            # A trial whose mapped coefficients carry its ordinary block past
+            # binary64's range has a merit that is not finite, which the line
+            # search refuses, without a warning (as ``_evaluate_scop_trial``).
+            with np.errstate(over="ignore", invalid="ignore"):
+                penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
             magnitude = np.abs(trial.irls.beta)
             penalty_roundoff = _positive_quadratic_roundoff(
                 magnitude, scop_outer_penalty_abs, merit_gamma
