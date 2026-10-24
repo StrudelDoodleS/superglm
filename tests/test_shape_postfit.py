@@ -1,4 +1,5 @@
 import copy
+import sys
 
 import numpy as np
 import pandas as pd
@@ -1074,13 +1075,43 @@ def test_compact_shape_penalty_quadratic_matches_dense_component_algebra():
     )
 
 
-@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
-def test_structured_postfit_shape_repair_uses_compact_penalties(
-    structured_kind: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from superglm.reml import penalty_algebra, penalty_support
+def _patch_every_binding(monkeypatch, owner, name, replacement):
+    """Replace ``owner.name`` in every ``superglm`` module that holds a reference to it.
 
+    A function imported by name (``from m import f``) is a separate binding in the importing
+    module, so patching it on ``owner`` alone is blind to every importer. The importers are found
+    by identity over ``sys.modules`` rather than by a list that a new import would outdate.
+    """
+    original = getattr(owner, name)
+    patched = []
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("superglm"):
+            continue
+        for attribute, value in list(vars(module).items()):
+            if value is original:
+                monkeypatch.setattr(module, attribute, replacement)
+                patched.append((module, attribute))
+    assert (owner, name) in patched
+    return patched
+
+
+def _importers(owner, name):
+    """The ``superglm`` modules (other than ``owner``) that bind ``owner.name`` under ``name``."""
+    original = getattr(owner, name)
+    return sorted(
+        (
+            module
+            for module_name, module in list(sys.modules.items())
+            if module_name.startswith("superglm")
+            and module is not owner
+            and vars(module).get(name) is original
+        ),
+        key=lambda module: module.__name__,
+    )
+
+
+def _structured_shape_model(structured_kind: str):
+    """A REML fit with a post-fit increasing spline beside a structured (re, fs or sz) term."""
     rng = np.random.default_rng(20260727)
     n_levels = 36
     repeats = 8
@@ -1134,6 +1165,17 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         max_reml_iter=2,
         runtime_validation="skip",
     )
+    return model, X
+
+
+@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+def test_structured_postfit_shape_repair_uses_compact_penalties(
+    structured_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from superglm.reml import penalty_algebra, penalty_support
+
+    model, X = _structured_shape_model(structured_kind)
     x_groups = [group for group in model._groups if group.feature_name == "x"]
     beta_before = np.concatenate([model.result.beta[group.sl] for group in x_groups])
     revision_before = model._fit_revision
@@ -1162,7 +1204,8 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         support_dimensions.add((tuple(matrix.shape for matrix in context.matrices), support.rank))
         return support
 
-    monkeypatch.setattr(
+    _patch_every_binding(
+        monkeypatch,
         penalty_algebra,
         "penalty_component_dense_matrix",
         reject_dense_component,
@@ -1199,14 +1242,54 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
         penalty_algebra.penalty_component_dense_matrix(compact)
 
 
-@pytest.mark.parametrize("spline_penalty", [0.0, 0.5])
-def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
-    monkeypatch,
-    spline_penalty,
-):
-    """Publication merit must scale with penalty blocks, not total model width squared."""
+def test_structured_guard_covers_every_importer_of_the_materialiser() -> None:
+    """The structured-penalty guard must see the modules that bind the materialiser by name."""
+    from superglm.reml import gradient, penalty_algebra, scop_efs, w_derivatives
+
+    importers = set(_importers(penalty_algebra, "penalty_component_dense_matrix"))
+    assert {gradient, scop_efs, w_derivatives} <= importers
+
+
+@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+@pytest.mark.parametrize("importer", ["gradient", "scop_efs", "w_derivatives"])
+def test_expanding_a_structured_penalty_inside_the_repair_reaches_the_guard(
+    structured_kind: str,
+    importer: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for the guard in the test above: a repair that did expand would fail.
+
+    The repair's merit evaluation is replaced by one that expands a structured component through
+    a module that imports the materialiser by name (the bindings a guard on the defining module
+    alone does not reach); the refusal has to come out of ``apply_shape_postfit`` rather than be
+    absorbed on the way.
+    """
+    import importlib
+
     from superglm.reml import penalty_algebra
 
+    importing_module = importlib.import_module(f"superglm.reml.{importer}")
+    model, X = _structured_shape_model(structured_kind)
+    structured = next(c for c in model._reml_penalties if c.penalty_kind != "dense")
+
+    def reject_dense_component(component, *args, **kwargs):
+        if component.penalty_kind != "dense":
+            raise AssertionError("post-fit repair expanded a structured penalty component")
+        raise AssertionError("unexpected dense component")
+
+    def merit_that_expands(beta, terms):
+        return importing_module.penalty_component_dense_matrix(structured)
+
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "penalty_component_dense_matrix", reject_dense_component
+    )
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_expands)
+
+    with pytest.raises(AssertionError, match="expanded a structured penalty"):
+        model.apply_shape_postfit(X, n_grid=120)
+
+
+def _wide_postfit_model(spline_penalty):
     rng = np.random.default_rng(20260725)
     n = 130
     x = np.linspace(0.0, 1.0, n)
@@ -1223,15 +1306,136 @@ def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
         features=features,
     ).fit(X, y)
     assert model._dm.p > 90
+    return model, X
+
+
+@pytest.mark.parametrize("spline_penalty", [0.0, 0.5])
+def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
+    monkeypatch,
+    spline_penalty,
+):
+    """Publication merit must scale with penalty blocks, not total model width squared."""
+    from superglm.reml import penalty_algebra
+
+    model, X = _wide_postfit_model(spline_penalty)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
+
+    model.apply_shape_postfit(X, n_grid=80)
+
+    assert np.all(np.isfinite(model.result.beta))
+
+
+def test_global_penalty_guard_covers_every_importer_of_the_builder():
+    """The guard must see the modules that bind ``build_penalty_matrix`` by name."""
+    from superglm.model import reml_finalize
+    from superglm.reml import direct, discrete, efs, objective, penalty_algebra, scop_efs
+
+    importers = set(_importers(penalty_algebra, "build_penalty_matrix"))
+    assert {objective, direct, efs, discrete, scop_efs, reml_finalize} <= importers
+
+
+def test_a_guard_on_the_defining_module_alone_misses_the_importers(monkeypatch):
+    """Why the guard patches every binding: patching ``penalty_algebra`` leaves importers live."""
+    from superglm.reml import penalty_algebra
+
+    model, _ = _wide_postfit_model(0.5)
 
     def reject_global_penalty(*args, **kwargs):
         raise AssertionError("shape repair requested a global dense p-by-p penalty")
 
     monkeypatch.setattr(penalty_algebra, "build_penalty_matrix", reject_global_penalty)
+    for module in _importers(penalty_algebra, "build_penalty_matrix"):
+        built = module.build_penalty_matrix(
+            model._dm.group_matrices, model._groups, 1.0, model._dm.p
+        )
+        assert built.shape == (model._dm.p, model._dm.p)
 
-    model.apply_shape_postfit(X, n_grid=80)
 
-    assert np.all(np.isfinite(model.result.beta))
+@pytest.mark.parametrize(
+    "importer",
+    [
+        "superglm.model.reml_finalize",
+        "superglm.reml.direct",
+        "superglm.reml.discrete",
+        "superglm.reml.efs",
+        "superglm.reml.objective",
+        "superglm.reml.scop_efs",
+    ],
+)
+def test_a_global_penalty_request_inside_the_repair_reaches_the_guard(monkeypatch, importer):
+    """Positive control: were the repair to ask for the global penalty, the guard would fire.
+
+    The repair's merit evaluation is replaced by one that builds the global penalty through a
+    module that imports the builder by name, the bindings a guard on ``penalty_algebra`` alone
+    does not reach; the refusal must come out of ``apply_shape_postfit`` rather than be
+    swallowed on the way (the fitted-state transaction catches and re-raises).
+    """
+    import importlib
+
+    from superglm.reml import penalty_algebra
+
+    importing_module = importlib.import_module(importer)
+    model, X = _wide_postfit_model(0.5)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    def merit_that_builds_the_global_penalty(beta, terms):
+        return importing_module.build_penalty_matrix(
+            model._dm.group_matrices, model._groups, 1.0, model._dm.p
+        )
+
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_builds_the_global_penalty)
+
+    with pytest.raises(AssertionError, match="global dense p-by-p penalty"):
+        model.apply_shape_postfit(X, n_grid=80)
+
+
+def test_a_production_global_penalty_request_reaches_the_guard(monkeypatch):
+    """Positive control through production code: the REML objective builds the penalty itself.
+
+    The merit evaluation calls ``reml_laml_objective`` without retained penalty geometry, the
+    path that builds the dense penalty inside the objective module.
+    """
+    from superglm.model.shape_ops import model_weight_semantics
+    from superglm.reml import penalty_algebra
+    from superglm.reml.objective import reml_laml_objective
+
+    model, X = _wide_postfit_model(0.5)
+
+    def reject_global_penalty(*args, **kwargs):
+        raise AssertionError("shape repair requested a global dense p-by-p penalty")
+
+    def merit_that_evaluates_the_reml_objective(beta, terms):
+        return reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            np.asarray(model._fit_y_ref, dtype=np.float64),
+            model._solver_result,
+            {group.name: 1.0 for group in model._groups},
+            np.asarray(model._fit_weights, dtype=np.float64),
+            np.zeros(len(model._fit_y_ref)),
+            weight_semantics=model_weight_semantics(model),
+        )
+
+    _patch_every_binding(
+        monkeypatch, penalty_algebra, "build_penalty_matrix", reject_global_penalty
+    )
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", merit_that_evaluates_the_reml_objective)
+
+    with pytest.raises(AssertionError, match="global dense p-by-p penalty"):
+        model.apply_shape_postfit(X, n_grid=80)
 
 
 def test_degree_zero_monotone_postfit_certifies_and_repairs_knot_jumps():
@@ -1734,3 +1938,462 @@ def test_the_repaired_frame_is_found_under_a_non_string_feature_label():
         assert model.term_inference(0, with_se=True).se_log_relativity is None
     (row,) = [r for r in model.summary()._coef_rows if r.group == "0" and r.is_spline]
     assert row.wald_p is None
+
+
+# -- publication refusals: fault injection at the producer, nothing published --------------
+
+
+def _fitted_for_publication_refusal(family="gaussian"):
+    """A fitted model whose convex post-fit repair binds (the data are concave)."""
+    rng = np.random.default_rng(20261024)
+    x = np.linspace(0.0, 1.0, 240)
+    X = pd.DataFrame({"x": x})
+    if family == "poisson":
+        y = rng.poisson(np.exp(1.2 - 2.0 * (x - 0.45) ** 2)).astype(np.float64)
+    else:
+        y = -((x - 0.4) ** 2) + 0.03 * rng.normal(size=x.size)
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.convex)},
+    ).fit(X, y)
+    return model, X
+
+
+def _publication_snapshot(model, X):
+    return {
+        "dict": model.__dict__,
+        "result": model.result,
+        "revision": model._fit_revision,
+        "beta": model.result.beta.copy(),
+        "predictions": model.predict(X),
+    }
+
+
+def _assert_nothing_published(model, X, snapshot):
+    assert model.__dict__ is snapshot["dict"]
+    assert model.result is snapshot["result"]
+    assert model._fit_revision == snapshot["revision"]
+    assert not getattr(model, "_shape_repairs", {})
+    assert not getattr(model, "_monotone_repairs", {})
+    np.testing.assert_array_equal(model.result.beta, snapshot["beta"])
+    np.testing.assert_array_equal(model.predict(X), snapshot["predictions"])
+
+
+def _repairer_with_fault(monkeypatch, mutate):
+    """Route the real repair through ``mutate(result, group_slices)`` before validation."""
+    real_repairer = shape_ops._repairer
+
+    def faulty_repairer(kind):
+        delegate = real_repairer(kind)
+
+        class Faulty:
+            def repair(self, spec, beta, groups, *, weights, n_grid):
+                result = delegate.repair(spec, beta, groups, weights=weights, n_grid=n_grid)
+                mutate(result, spec, groups)
+                return result
+
+        return Faulty()
+
+    monkeypatch.setattr(shape_ops, "_repairer", faulty_repairer)
+
+
+def _fault_non_finite_coefficients(result, spec, groups):
+    result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+    result.repaired_beta_reparam[groups[0].start] = np.nan
+
+
+def _fault_wrong_coefficient_shape(result, spec, groups):
+    result.repaired_beta_reparam = result.repaired_beta_reparam[:-1].copy()
+
+
+def _fault_degenerate_grid(result, spec, groups):
+    result.grid = result.grid[:2].copy()
+
+
+def _fault_worse_than_zero_term(result, spec, groups):
+    # Scaling stays inside the convex cone, so only the objective can object.
+    scaled = result.repaired_beta_reparam.copy()
+    for group in groups:
+        scaled[group.sl] *= 1e3
+    result.repaired_beta_reparam = scaled
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        (_fault_non_finite_coefficients, "invalid coefficients"),
+        (_fault_wrong_coefficient_shape, "invalid coefficients"),
+        (_fault_degenerate_grid, "invalid repair grid"),
+        (
+            _fault_worse_than_zero_term,
+            "candidate objective is worse than the feasible zero-term fallback",
+        ),
+    ],
+)
+def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, fault, message):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _repairer_with_fault(monkeypatch, fault)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_repair_curve_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    spec = model._specs["x"]
+    real_transform = spec.transform
+    short_grid = 7
+
+    def shorten_grid(result, _spec, _groups):
+        result.grid = np.linspace(_spec._lo, _spec._hi, short_grid)
+
+    def transform_with_overflow(values, *args, **kwargs):
+        basis = real_transform(values, *args, **kwargs)
+        # Only the publication certificate evaluates the fitted basis on the short grid.
+        # NaN stands in for a basis that overflowed.
+        return np.full_like(basis, np.nan) if np.shape(values) == (short_grid,) else basis
+
+    _repairer_with_fault(monkeypatch, shorten_grid)
+    monkeypatch.setattr(spec, "transform", transform_with_overflow)
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*non-finite repair curve"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_repair_that_moves_the_fitted_mean_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    real_delta = shape_ops._shape_term_eta_delta
+    calls = 0
+
+    def delta_with_mean_shift(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        delta = real_delta(*args, **kwargs)
+        # The first evaluation is the candidate repair, the second the zero-term fallback.
+        return delta + 1.0 if calls == 1 else delta
+
+    monkeypatch.setattr(shape_ops, "_shape_term_eta_delta", delta_with_mean_shift)
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*centering changed"):
+        model.apply_shape_postfit(X)
+
+    assert calls >= 1
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal(family="poisson")
+    snapshot = _publication_snapshot(model, X)
+
+    def vast_information(**kwargs):
+        # A Newton step of score/information ~ 1e-30 never reaches the score tolerance.
+        return np.full(np.shape(kwargs["mu"]), 1e30)
+
+    monkeypatch.setattr(shape_ops, "fisher_working_weights", vast_information)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Unsafe shape repair rejected.*conditional intercept optimization did not converge",
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_repair_without_retained_response_is_refused_and_nothing_is_published():
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    model._fit_y_ref = None
+
+    with pytest.raises(RuntimeError, match="requires retained fit features and response"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _fault_unrepaired_coefficients(model):
+    """A repair that hands back the fitted coefficients, which break the declared convexity."""
+
+    def fault(result, spec, groups):
+        result.repaired_beta_reparam = model.result.beta.copy()
+
+    return fault
+
+
+def test_repair_that_leaves_the_curvature_infeasible_is_refused_and_nothing_is_published(
+    monkeypatch,
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _repairer_with_fault(monkeypatch, _fault_unrepaired_coefficients(model))
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*infeasible curvature"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _corrupt_validation_input(monkeypatch, **corrupt):
+    """Hand ``_validate_repair_for_publication`` an input the real producer would not."""
+    real = shape_ops._validate_repair_for_publication
+
+    def validate(*args, **kwargs):
+        kwargs.update({name: change(kwargs[name]) for name, change in corrupt.items()})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shape_ops, "_validate_repair_for_publication", validate)
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    [
+        ({"y": lambda y: y[:-1]}, "incoherent intercept geometry"),
+        ({"scoring_weights": np.zeros_like}, "invalid scoring weights"),
+        (
+            {"scoring_weights": lambda w: np.where(np.arange(w.size) == 0, np.nan, w)},
+            "invalid scoring weights",
+        ),
+        (
+            {"current_eta": lambda eta: np.where(np.arange(eta.size) == 0, np.inf, eta)},
+            "invalid profiled intercept",
+        ),
+    ],
+    ids=[
+        "response_of_the_wrong_length",
+        "weights_that_sum_to_zero",
+        "non_finite_weight",
+        "predictor_that_overflows_the_gaussian_shift",
+    ],
+)
+def test_incoherent_scoring_inputs_are_refused_and_nothing_is_published(
+    monkeypatch, corrupt, message
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _corrupt_validation_input(monkeypatch, **corrupt)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _profiled_eta_with_fault(monkeypatch, mutate):
+    """Route the real intercept profile through ``mutate(eta)`` on the way out."""
+    real = shape_ops._profile_repaired_intercept
+
+    def profiled(*args, **kwargs):
+        eta, shift = real(*args, **kwargs)
+        return mutate(eta), shift
+
+    monkeypatch.setattr(shape_ops, "_profile_repaired_intercept", profiled)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda eta: eta[:-1], "invalid predictor"),
+        (
+            lambda eta: np.where(np.arange(eta.size) == 3, np.nan, eta),
+            "non-finite linear predictor",
+        ),
+    ],
+    ids=["predictor_of_the_wrong_length", "non_finite_predictor"],
+)
+def test_faulty_repaired_predictor_is_refused_and_nothing_is_published(
+    monkeypatch, mutate, message
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _profiled_eta_with_fault(monkeypatch, mutate)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_deviance_that_is_not_finite_on_the_link_scale_is_refused_and_nothing_is_published(
+    monkeypatch,
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            model._distribution,
+            "deviance_unit",
+            lambda y, mu: np.full(np.shape(mu), np.nan),
+        )
+        with pytest.raises(
+            RuntimeError, match="Unsafe shape repair rejected.*invalid link-domain predictions"
+        ):
+            model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_fitted_objective_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", lambda beta, terms: np.nan)
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*non-finite fitted objective"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_term_predictor_is_refused_and_nothing_is_published():
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    index = next(i for i, group in enumerate(model._groups) if group.feature_name == "x")
+    group_type = type(model._dm.group_matrices[index])
+    real_matvec = group_type.matvec
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            group_type,
+            "matvec",
+            lambda self, beta: np.full_like(real_matvec(self, beta), np.nan),
+        )
+        with pytest.raises(
+            RuntimeError, match="Unsafe shape repair rejected.*non-finite term predictor"
+        ):
+            model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_basis_that_does_not_match_the_repaired_coefficients_is_refused(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    spec = model._specs["x"]
+    real_transform = spec.transform
+    short_grid = 7
+
+    def shorten_grid(result, _spec, _groups):
+        result.grid = np.linspace(_spec._lo, _spec._hi, short_grid)
+
+    def transform_missing_a_column(values, *args, **kwargs):
+        basis = real_transform(values, *args, **kwargs)
+        return basis[:, :-1] if np.shape(values) == (short_grid,) else basis
+
+    _repairer_with_fault(monkeypatch, shorten_grid)
+    monkeypatch.setattr(spec, "transform", transform_missing_a_column)
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*incoherent fitted-basis geometry"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_intercept_profile_without_a_finite_score_is_refused(monkeypatch):
+    model, X = _fitted_for_publication_refusal(family="poisson")
+    snapshot = _publication_snapshot(model, X)
+    monkeypatch.setattr(
+        shape_ops,
+        "fisher_working_weights",
+        lambda **kwargs: np.full(np.shape(kwargs["mu"]), np.nan),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*invalid profiled intercept"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _scaled_solution(x, spec):
+    return 1e3 * x
+
+
+def _strictly_concave_solution(x, spec):
+    # Negative second derivative at the middle of the domain: outside the convex cone.
+    row = shape_derivative_matrix(spec, np.asarray([0.5 * (spec._lo + spec._hi)]), 2)[0]
+    return -row / np.linalg.norm(row)
+
+
+def _non_finite_solution(x, spec):
+    return np.full_like(x, np.nan)
+
+
+@pytest.mark.parametrize(
+    ("solution", "span_search", "message"),
+    [
+        (
+            _scaled_solution,
+            "real",
+            "Curvature projection failed its feasible-zero objective certificate",
+        ),
+        (
+            _strictly_concave_solution,
+            "blind",
+            "Curvature projection returned an infeasible fitted state",
+        ),
+        (_non_finite_solution, "blind", "Curvature projection returned non-finite fitted state"),
+        (
+            None,
+            "stuck_on_a_known_point",
+            "Curvature projection could not certify a constrained derivative span",
+        ),
+        (
+            None,
+            "endless_new_points",
+            "Curvature projection exhausted its derivative-span refinements",
+        ),
+    ],
+)
+def test_faulty_projection_is_refused_and_nothing_is_published(
+    monkeypatch, solution, span_search, message
+):
+    """Each certificate of the cone projection refuses its own fault; the model is untouched."""
+    from types import SimpleNamespace
+
+    import scipy.optimize
+
+    from superglm import constraints
+
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    real_minimize = scipy.optimize.minimize
+    real_violations = constraints._violating_shape_constraint_points
+    emitted = 0
+
+    def minimize_with_fault(*args, **kwargs):
+        result = real_minimize(*args, **kwargs)
+        if solution is None:
+            return result
+        return SimpleNamespace(
+            success=True, status=0, message="", x=solution(result.x, model._specs["x"])
+        )
+
+    def violations_with_fault(spec, beta, kind, tolerance):
+        nonlocal emitted
+        if span_search == "real":
+            return real_violations(spec, beta, kind, tolerance)
+        if span_search == "blind":
+            return np.empty(0)
+        if span_search == "stuck_on_a_known_point":
+            return np.asarray([spec._lo])
+        emitted += 1
+        return np.asarray([spec._lo + 1e-3 * emitted * (spec._hi - spec._lo)])
+
+    monkeypatch.setattr(scipy.optimize, "minimize", minimize_with_fault)
+    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", violations_with_fault)
+
+    with pytest.raises(RuntimeError, match=message):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)

@@ -81,6 +81,8 @@ def test_polars_evaluation_metrics_are_chunked_without_whole_frame_conversion(
 
     assert len(seen_chunks) > 1
     assert max(seen_chunks) <= 17
+    # Exact: both frame types reach the same chunked kernel with the same design block per
+    # chunk, so the backend is the only difference and it must change no operand.
     np.testing.assert_allclose(polars_leverage, pandas_leverage, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(polars_info[2], pandas_info[2], rtol=0.0, atol=0.0)
     np.testing.assert_allclose(polars_info[3], pandas_info[3], rtol=0.0, atol=0.0)

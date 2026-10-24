@@ -364,7 +364,7 @@ def _count_row_passes(monkeypatch) -> dict:
     monkeypatch.setattr(direct, "reml_w_correction", counted_correction)
     monkeypatch.setattr(w_derivatives, "centered_gram_rhs", counted_gram)
     monkeypatch.setattr(w_derivatives, "centered_signed_grams", counted_grams)
-    monkeypatch.setattr(w_derivatives, "solved_row_blocks", counted_passes, raising=False)
+    monkeypatch.setattr(w_derivatives, "solved_row_blocks", counted_passes)
     return counts
 
 
@@ -377,7 +377,7 @@ def test_weight_correction_makes_one_row_pass_per_reml_iteration(monkeypatch, pa
     number of iterations whatever ``m`` is.
     """
     # A small fixture: admit it below the work bar that keeps cheap Grams.
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     _solved_rows_only(monkeypatch)
     counts = _count_row_passes(monkeypatch)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
@@ -427,7 +427,7 @@ def test_a_fit_whose_grams_are_cheap_keeps_them():
 
 def test_a_model_the_structured_solver_can_fit_keeps_the_derivative_grams(monkeypatch):
     """Both backends must build one outer Hessian, so the dense one keeps the Grams."""
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     rng = np.random.default_rng(947)
     n = 400
     frame = pd.DataFrame(
@@ -491,7 +491,7 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
         mask_frozen_stop_gradient,
     )
 
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     frame, y, weights = _poisson_frame(1500, 1.0e3)
     correction = direct.reml_w_correction
     partial = direct.reml_direct_gradient

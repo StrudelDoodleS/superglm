@@ -141,24 +141,40 @@ class TestNB2DevianceUnit:
         assert np.isfinite(result.deviance)
         assert result.intercept < 60.0
 
-    def test_values_are_the_both_branch_formula_bit_for_bit(self):
+    def test_values_are_the_both_branch_formula_to_the_log_ulps(self):
         theta = 1.7
         y = np.array([0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 1.0, 2.0, 0.0, 5.0])
         mu = np.array([1e30, np.inf, 0.0, 0.4, 1e30, np.inf, 0.0, 2.5, 5e-324, 1e-300])
         with np.errstate(all="ignore"):
+            positive_branch = [
+                y * np.log(np.maximum(y, 1e-300) / mu),
+                (y + theta) * np.log((y + theta) / (mu + theta)),
+            ]
+            zero_branch = theta * np.log((mu + theta) / theta)
             expected = np.where(
+                y > 0, 2 * (positive_branch[0] - positive_branch[1]), 2 * zero_branch
+            )
+            # Sum of the magnitudes of the two products the deviance subtracts.
+            scale = np.where(
                 y > 0,
-                2
-                * (
-                    y * np.log(np.maximum(y, 1e-300) / mu)
-                    - (y + theta) * np.log((y + theta) / (mu + theta))
-                ),
-                2 * theta * np.log((mu + theta) / theta),
+                2 * (np.abs(positive_branch[0]) + np.abs(positive_branch[1])),
+                2 * zero_branch,
             )
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             actual = NegativeBinomial(theta=theta).deviance_unit(y, mu)
-        np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+        # np.log is not a correctly rounded function: the SIMD and libm builds NumPy
+        # dispatches among each promise at most 4 ulp, so two evaluations of one log may
+        # differ by 8 ulp = 16 u relative (one ulp is at most 2 u of the value, u = 2**-53).
+        # Each log is multiplied into a term whose magnitude is in ``scale``; the division,
+        # product and subtraction around it are correctly rounded and may be ordered either
+        # way by the two evaluations, 4 u more. A branch that took the wrong formula, or
+        # dropped a term, is out by O(1) of ``scale``.
+        u = 2.0**-53
+        finite = np.isfinite(expected)
+        np.testing.assert_array_equal(actual[~finite], expected[~finite])
+        assert np.all(np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite])
 
 
 class TestNB2LogLikelihood:

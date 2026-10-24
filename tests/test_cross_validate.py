@@ -1347,7 +1347,7 @@ class TestErrorHandling:
             penalty=GroupLasso(lambda1=0.0),
             features={"x": Spline(n_knots=5)},
         )
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="X must be non-empty"):
             cross_validate(
                 model,
                 df,

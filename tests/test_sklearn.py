@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+from sklearn.exceptions import NotFittedError
 from sklearn.utils.validation import check_is_fitted
 
 import superglm.sklearn as sklearn_module
@@ -280,20 +281,21 @@ class TestSklearnContract:
 
     def test_check_is_fitted_before_fit(self):
         model = SuperGLMRegressor()
-        with pytest.raises(Exception):
+        with pytest.raises(NotFittedError, match="not fitted yet"):
             check_is_fitted(model)
 
     def test_sample_weight(self, sample_data):
         X, y, sample_weight = sample_data
         model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y, sample_weight=sample_weight)
-        assert model.coef_ is not None
+        # The weights the caller passed are the weights the fit used.
+        np.testing.assert_array_equal(model._model._fit_weights, sample_weight)
 
     def test_no_sample_weight(self, sample_data):
         X, y, _ = sample_data
         model = SuperGLMRegressor(selection_penalty=0.01)
         model.fit(X, y)
-        assert model.coef_ is not None
+        np.testing.assert_array_equal(model._model._fit_weights, np.ones(len(y)))
 
 
 # ── ndarray input ─────────────────────────────────────────────────
@@ -528,7 +530,8 @@ class TestRegressorFamilyGuard:
         X, y, _ = sample_data
         m = SuperGLMRegressor(family="gaussian")
         m.fit(X, y)
-        assert m.coef_ is not None
+        assert type(m._model._distribution).__name__ == "Gaussian"
+        assert type(m._model._link).__name__ == "IdentityLink"
 
     def test_clone_binomial_is_constructable(self):
         """clone() should work — error is deferred to fit()."""
@@ -790,7 +793,8 @@ class TestNativeFeatures:
             degree=3,
         )
         m.fit(X, y)
-        assert m.coef_ is not None
+        # The declared terms are used as they stand, not rebuilt from n_knots/degree.
+        assert m._feature_types == {"age": "Numeric()", "density": "Numeric()"}
 
     def test_pickle_roundtrip(self, sample_data):
         """Pickle round-trip preserves predictions."""

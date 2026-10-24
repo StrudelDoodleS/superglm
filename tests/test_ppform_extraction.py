@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -106,3 +108,65 @@ def test_an_underdetermined_solve_is_refused_rather_than_answered():
         extract_ppform(model, "age", n_points=5)
 
     assert "rank" in str(excinfo.value)
+
+
+class _TermInferenceStub:
+    """A model that reports one term's curve and spline metadata, as ``term_inference`` does."""
+
+    def __init__(self, *, spline, x, log_relativity, centering_shift):
+        self._reading = SimpleNamespace(
+            spline=spline,
+            x=x,
+            log_relativity=log_relativity,
+            centering_shift=centering_shift,
+        )
+
+    def term_inference(self, name, **kwargs):
+        return self._reading
+
+
+def _stub_reading(*, degree=3, curve=lambda x: x**3 - x, spline="metadata"):
+    x = np.linspace(0.0, 1.0, 200)
+    metadata = SimpleNamespace(
+        degree=degree,
+        interior_knots=np.array([0.5]),
+        boundary=(0.0, 1.0),
+        extrapolation="clip",
+    )
+    return _TermInferenceStub(
+        spline=metadata if spline == "metadata" else None,
+        x=x,
+        log_relativity=curve(x),
+        centering_shift=0.0,
+    )
+
+
+def test_a_cubic_curve_on_the_reported_knots_converts_before_any_fault_is_injected():
+    segments = extract_ppform(_stub_reading(), "age")
+
+    assert segments.residual < 1e-12
+    assert segments.coefficients.shape[1] == 4
+
+
+@pytest.mark.parametrize(
+    ("reading", "message"),
+    [
+        (
+            _stub_reading(spline=None),
+            "Term 'age' reports no spline metadata, so its knots are unknown",
+        ),
+        (
+            _stub_reading(degree=4),
+            "Term 'age' is degree 4, above the cubic form's 4 coefficients",
+        ),
+        (
+            # Not a piecewise polynomial of the reported knots: a fast oscillation.
+            _stub_reading(curve=lambda x: np.sin(40.0 * x)),
+            "Term 'age' is not the piecewise polynomial its 1 reported knots imply",
+        ),
+    ],
+    ids=["no_metadata", "quartic", "not_the_reported_polynomial"],
+)
+def test_ppform_refuses_a_term_it_cannot_reproduce_exactly(reading, message):
+    with pytest.raises(PpformNotExactError, match=message):
+        extract_ppform(reading, "age")

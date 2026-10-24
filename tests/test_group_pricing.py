@@ -126,6 +126,8 @@ class TestRankPricingDefault:
 
         rank = _fit(X, y, family="gaussian", penalty=penalty())
         spanned = _fit(X, y, family="gaussian", penalty=penalty(), group_pricing="spanned")
+        # Exact: the pricing arm only changes how degrees of freedom are reported, so the two
+        # fits run the same solver arithmetic and must agree bit for bit.
         np.testing.assert_allclose(rank.predict(X), spanned.predict(X), rtol=0, atol=0)
         assert rank._group_edf["c1:c2"] == pytest.approx(float(EMITTED))
         assert spanned._group_edf["c1:c2"] == pytest.approx(float(SPANNED))

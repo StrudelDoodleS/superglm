@@ -444,7 +444,12 @@ def test_gamma_prior_term_pickles_to_a_plain_eager_term() -> None:
 
 
 def test_gamma_prior_sorted_dispatch_matches_masked_dispatch_bitwise() -> None:
-    """Slice selectors on sorted arguments reproduce the mask path exactly."""
+    """Slice selectors on sorted arguments reproduce the mask path exactly.
+
+    Bitwise on purpose: both selectors hand each branch the same values in the same order,
+    so every kernel (``np.log``, ``digamma``) sees identical contiguous input in one process
+    and the claim is that no arithmetic differs between the two dispatches, not accuracy.
+    """
     from superglm.reml.scale import (
         _gamma_saturated_normalizer_array,
         _scaled_trigamma_minus_inverse_array,

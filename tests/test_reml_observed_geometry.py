@@ -3987,23 +3987,26 @@ def _table_cases():
 def test_link_fourth_derivatives_reproduce_the_removed_observed_geometry_table(name):
     """The order-2 observed weights read ``link.deriv4_inverse``; their values are the old table's.
 
-    Bit for bit on every built-in link but one: cauchit beyond ``|eta| = 1``
-    takes the ``1/eta`` form its third derivative already uses, which agrees
-    to within ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 +
-    eta^2)^4)`` (the symbolic oracle's tolerance for every link).
+    Each value agrees to ``64 u`` relative, the symbolic oracle's tolerance for every link
+    (``tests/test_family_derivatives_symbolic.py``). The two evaluate the same expression, but
+    a library call (``exp``, ``expit``, the normal density) may round differently between
+    SIMD and libm builds, and bit equality would then fail on a stack that computes
+    correctly; the identity and square-root links have no arithmetic and are held exactly
+    zero. Cauchit beyond ``|eta| = 1`` takes the ``1/eta`` form its third derivative already
+    uses, whose cancellation makes the relative error of a small value meaningless, so it is
+    held to ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 + eta^2)^4)``.
     """
     from superglm.reml.observed_geometry import _deriv4_inverse
 
+    u = 2.0**-53
     link, eta = _table_cases()[name]
     computed = _deriv4_inverse(link, eta)
     reference = _removed_table_deriv4(link, eta)
     if name != "cauchit":
-        np.testing.assert_array_equal(computed.view(np.uint64), reference.view(np.uint64))
+        np.testing.assert_allclose(computed, reference, rtol=64 * u, atol=0.0)
         return
-    inner = np.abs(eta) <= 1.0
-    np.testing.assert_array_equal(computed[inner].view(np.uint64), reference[inner].view(np.uint64))
     scale = 24.0 * np.abs(eta) * (1.0 + eta**2) / (np.pi * (1.0 + eta**2) ** 4)
-    assert np.all(np.abs(computed - reference) <= 64 * 2.0**-53 * scale)
+    assert np.all(np.abs(computed - reference) <= 64 * u * scale)
 
 
 def test_an_inherited_fourth_inverse_derivative_below_a_new_inverse_is_refused():
@@ -4052,3 +4055,345 @@ def test_an_inherited_fourth_inverse_derivative_below_a_new_inverse_is_refused()
         _deriv4_inverse(PlainLogit(), eta), LogitLink().deriv4_inverse(eta)
     )
     validate_observed_derivative_capability(Binomial(), CompleteShiftedLogit(), 2)
+
+
+# -- refusals of the observed geometry build, injected at the seam that produces them ----
+
+
+def _dense_gamma_geometry_inputs():
+    rng = np.random.default_rng(20261024)
+    X = rng.normal(size=(30, 2))
+    y = rng.gamma(shape=5.0, scale=np.exp(0.2 * X[:, 0]) / 5.0)
+    return {
+        "dm": DesignMatrix([DenseGroupMatrix(X)], n=30, p=2),
+        "distribution": Gamma(),
+        "link": LogLink(),
+        "y": y,
+        "sample_weight": np.ones(30),
+        "offset_arr": np.zeros(30),
+        "result": _result(np.array([0.1, -0.1]), 0.0),
+        "penalty": np.eye(2),
+    }
+
+
+def test_dense_geometry_build_succeeds_before_any_fault_is_injected():
+    """Positive control for the injected refusals below."""
+    geometry = build_observed_reml_geometry(**_dense_gamma_geometry_inputs())
+
+    assert np.isfinite(geometry.log_det_H)
+    assert geometry.hessian_rank == 3
+
+
+def test_dense_geometry_retypes_a_centered_system_refusal(monkeypatch):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    def refuse(**kwargs):
+        raise ValueError("synthetic non-finite working weights")
+
+    monkeypatch.setattr(observed_geometry, "build_centered_system", refuse)
+
+    with pytest.raises(
+        ObservedGeometryInfeasibleError,
+        match="observed working weights do not define a centered system at these coefficients",
+    ) as excinfo:
+        build_observed_reml_geometry(**_dense_gamma_geometry_inputs())
+
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_dense_geometry_retypes_an_uncertifiable_terminal_factor(monkeypatch):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    inputs = _dense_gamma_geometry_inputs()
+    monkeypatch.setattr(
+        observed_geometry, "needs_factor_certification", lambda _decomposition: True
+    )
+    # With certification demanded and the real factor available, the build is fine.
+    assert np.isfinite(build_observed_reml_geometry(**inputs).log_det_H)
+
+    def refuse(_factor):
+        raise ValueError("synthetic retained basis that will not resolve")
+
+    monkeypatch.setattr(observed_geometry, "decompose_factor", refuse)
+
+    with pytest.raises(
+        ObservedGeometryInfeasibleError,
+        match="terminal observed REML coefficient factor could not be certified",
+    ):
+        build_observed_reml_geometry(**inputs)
+
+
+@pytest.fixture(scope="module")
+def _structured_random_effect_build():
+    """A fitted structured random-effect model and a closure that rebuilds its geometry."""
+    import warnings
+
+    import pandas as pd
+
+    from superglm import ConvergenceWarning, Numeric, RandomEffect, SuperGLM
+    from superglm.group_matrix import RandomEffectGroupMatrix
+
+    rng = np.random.default_rng(2029)
+    n, n_levels = 240, 5
+    z = rng.normal(size=n)
+    codes = rng.integers(0, n_levels, size=n)
+    deviation = rng.normal(scale=0.3, size=n_levels)
+    y = rng.gamma(shape=6.0, scale=np.exp(0.4 + 0.25 * z + deviation[codes]) / 6.0)
+    frame = pd.DataFrame({"z": z, "lvl": [f"L{c}" for c in codes]})
+    with warnings.catch_warnings():
+        # Two REML iterations are enough for a fitted state; convergence is not the subject.
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        model = SuperGLM(
+            family="gamma",
+            link="log",
+            selection_penalty=0.0,
+            features={
+                "z": Numeric(),
+                "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
+            },
+            direct_solve="structured",
+        ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+    structured_index = next(
+        i
+        for i, matrix in enumerate(model._dm.group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    )
+
+    def build():
+        return build_observed_reml_geometry(
+            dm=model._dm,
+            distribution=Gamma(),
+            link=LogLink(),
+            y=y,
+            sample_weight=np.ones(n),
+            offset_arr=np.zeros(n),
+            result=model.result,
+            penalty=None,
+            derivative_order=0,
+            groups=model._groups,
+            lambdas=model._reml_lambdas,
+            reml_penalties=model._reml_penalties,
+            structured_group_index=structured_index,
+            structured_chain_group_indices=(structured_index,),
+            compute_inverse=False,
+        )
+
+    return build
+
+
+def test_structured_geometry_build_succeeds_before_any_fault_is_injected(
+    _structured_random_effect_build,
+):
+    """Positive control for the injected refusals below."""
+    geometry = _structured_random_effect_build()
+
+    assert np.isfinite(geometry.log_det_H)
+    assert geometry.hessian_rank > 1
+
+
+def _refuse_with(error):
+    def refusing(*args, **kwargs):
+        raise error
+
+    return refusing
+
+
+@pytest.mark.parametrize(
+    ("seam", "message"),
+    [
+        (
+            "build_structured_system",
+            "structured observed geometry has no usable blocks at the fitted coefficients",
+        ),
+        (
+            "build_penalized_structured_operator",
+            "penalized structured observed geometry has no usable blocks",
+        ),
+    ],
+)
+def test_structured_geometry_retypes_a_block_refusal_as_infeasible(
+    monkeypatch, _structured_random_effect_build, seam, message
+):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    monkeypatch.setattr(
+        observed_geometry, seam, _refuse_with(np.linalg.LinAlgError("non-finite block"))
+    )
+
+    with pytest.raises(ObservedGeometryInfeasibleError, match=message) as excinfo:
+        _structured_random_effect_build()
+
+    assert isinstance(excinfo.value.__cause__, np.linalg.LinAlgError)
+
+
+def test_structured_geometry_refuses_a_nonpositive_intercept_curvature_sum(
+    monkeypatch, _structured_random_effect_build
+):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    real_build = observed_geometry.build_structured_system
+
+    def build_with_collapsed_sum(*args, **kwargs):
+        # The structured moments carry their own sum of the observed rows.
+        return replace(real_build(*args, **kwargs), sum_w=0.0)
+
+    monkeypatch.setattr(observed_geometry, "build_structured_system", build_with_collapsed_sum)
+
+    with pytest.raises(
+        ObservedGeometryInfeasibleError,
+        match="structured observed intercept curvature must have a positive finite sum",
+    ):
+        _structured_random_effect_build()
+
+
+def test_structured_geometry_scores_an_unresolvable_schur_complement_infeasible(
+    monkeypatch, _structured_random_effect_build
+):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    factor_type = type(
+        observed_geometry.build_augmented_structured_factor(
+            *_structured_system_and_penalized(monkeypatch, _structured_random_effect_build)
+        )[0]
+    )
+    monkeypatch.setattr(
+        factor_type,
+        "scaled_schur_eigenvalues",
+        _refuse_with(np.linalg.LinAlgError("eigensolver did not converge")),
+    )
+
+    with pytest.raises(
+        ObservedGeometryInfeasibleError,
+        match="observed REML Schur complement has no usable eigendecomposition",
+    ) as excinfo:
+        _structured_random_effect_build()
+
+    assert isinstance(excinfo.value.__cause__, np.linalg.LinAlgError)
+
+
+def _structured_system_and_penalized(monkeypatch, build):
+    """The (system, penalized operator) pair the structured build hands the factor builder."""
+    import superglm.reml.observed_geometry as observed_geometry
+
+    seen = []
+    real_factor = observed_geometry.build_augmented_structured_factor
+
+    def record(system, penalized):
+        seen.append((system, penalized))
+        return real_factor(system, penalized)
+
+    with monkeypatch.context() as scope:
+        scope.setattr(observed_geometry, "build_augmented_structured_factor", record)
+        build()
+    return seen[0]
+
+
+def test_structured_geometry_refuses_curvature_the_schur_gate_calls_negative(
+    monkeypatch, _structured_random_effect_build
+):
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    monkeypatch.setattr(observed_geometry, "schur_curvature_is_negative", lambda *_args: True)
+
+    with pytest.raises(
+        ObservedGeometryInfeasibleError,
+        match="observed REML coefficient Hessian is indefinite",
+    ):
+        _structured_random_effect_build()
+
+
+# -- terminal observed refit: the refusals leave a fitted model exactly as it was ----------
+
+
+def _tweedie_model_with_a_previous_fit():
+    from tests._fit_state_oracles import snapshot_model_behavior
+
+    X, y, weights = TestModeCertificationRecovery._tweedie_fixture()
+    model = TestModeCertificationRecovery._model()
+    model.fit_reml(X, y, sample_weight=weights)
+    return model, X, y, weights, snapshot_model_behavior(model, X)
+
+
+def test_terminal_refit_that_does_not_converge_is_refused_and_nothing_is_published(monkeypatch):
+    import superglm.model.reml_finalize as finalize_module
+    from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+    from tests._fit_state_oracles import assert_model_behavior_unchanged
+
+    model, X, y, weights, before = _tweedie_model_with_a_previous_fit()
+    real_fit = finalize_module.fit_irls_direct
+    terminal_refits = []
+
+    def terminal_refit_without_a_mode(*args, **kwargs):
+        output = real_fit(*args, **kwargs)
+        if kwargs.get("trace_purpose") != "reml_final":
+            return output
+        terminal_refits.append(1)
+        # A structural stop (not the iteration budget), so the refit has no mode to certify.
+        stopped = replace(output[0], converged=False, termination_reason="non_finite_deviance")
+        return (stopped, *output[1:])
+
+    monkeypatch.setattr(finalize_module, "fit_irls_direct", terminal_refit_without_a_mode)
+
+    with pytest.raises(
+        ObservedModeNotConvergedError,
+        match="terminal observed REML refit did not converge to a penalized coefficient mode",
+    ):
+        model.fit_reml(X, y, sample_weight=weights)
+
+    assert terminal_refits
+    assert_model_behavior_unchanged(model, X, before)
+
+
+@pytest.mark.parametrize("stop", ["max_iter", "step_rejected", "score_stagnated"])
+def test_terminal_refit_that_ran_out_of_budget_is_published_not_refused(monkeypatch, stop):
+    """Positive control: the same hook with a budget stop is disclosed, never refused."""
+    import superglm.model.reml_finalize as finalize_module
+    from superglm import ConvergenceWarning
+
+    X, y, weights = TestModeCertificationRecovery._tweedie_fixture()
+    model = TestModeCertificationRecovery._model()
+    real_fit = finalize_module.fit_irls_direct
+
+    def terminal_refit_short_of_the_bar(*args, **kwargs):
+        output = real_fit(*args, **kwargs)
+        if kwargs.get("trace_purpose") != "reml_final":
+            return output
+        return (replace(output[0], converged=False, termination_reason=stop), *output[1:])
+
+    monkeypatch.setattr(finalize_module, "fit_irls_direct", terminal_refit_short_of_the_bar)
+
+    with pytest.warns(ConvergenceWarning, match=stop):
+        model.fit_reml(X, y, sample_weight=weights)
+
+    assert model.reml_diagnostics()["converged"] is False
+
+
+def test_terminal_mode_that_cannot_be_scored_is_refused_and_nothing_is_published(monkeypatch):
+    import superglm.model.reml_finalize as finalize_module
+    from superglm.reml.observed_geometry import (
+        ObservedGeometryInfeasibleError,
+        ObservedModeNotConvergedError,
+    )
+    from tests._fit_state_oracles import assert_model_behavior_unchanged
+
+    model, X, y, weights, before = _tweedie_model_with_a_previous_fit()
+
+    def unscorable(**kwargs):
+        raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
+
+    monkeypatch.setattr(finalize_module, "observed_penalized_mode_score", unscorable)
+
+    with pytest.raises(
+        ObservedModeNotConvergedError,
+        match="terminal observed REML refit could not score its penalized coefficient mode",
+    ) as excinfo:
+        model.fit_reml(X, y, sample_weight=weights)
+
+    assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+    assert_model_behavior_unchanged(model, X, before)

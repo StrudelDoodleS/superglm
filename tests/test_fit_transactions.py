@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import pickle
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -902,3 +903,162 @@ def test_fit_workspace_preserves_bounded_reml_runtime_hooks():
 
     assert workspace.model._max_analytical_per_w == 2
     assert workspace.model._select_snap is False
+
+
+def _poison_coefficients(work_model):
+    work_model._result.beta[0] = np.nan
+    work_model._solver_result.beta[0] = np.nan
+
+
+def _poison_deviance(work_model):
+    work_model._result.deviance = float("nan")
+
+
+def _drop_solver_result(work_model):
+    work_model._solver_result = None
+
+
+def _drop_a_fitted_group(work_model):
+    work_model._groups = work_model._groups[:-1]
+
+
+def _shorten_the_solver_coefficients(work_model):
+    work_model._solver_result.beta = work_model._solver_result.beta[:-1].copy()
+
+
+def _shorten_both_coefficient_vectors(work_model):
+    work_model._result.beta = work_model._result.beta[:-1].copy()
+    work_model._solver_result.beta = work_model._solver_result.beta[:-1].copy()
+
+
+def _drop_the_resolved_selection_penalty(work_model):
+    work_model._fit_state = None
+    work_model._resolved_penalty = SimpleNamespace(lambda1=None)
+
+
+def _change_public_iteration_count(work_model):
+    work_model._result.n_iter += 1
+
+
+def _flip_public_convergence_flag(work_model):
+    work_model._result.converged = not work_model._result.converged
+
+
+def _drop_distribution(work_model):
+    work_model._distribution = None
+
+
+def _drop_canonical_state(work_model):
+    work_model._runtime_canonical_state = None
+
+
+def _drop_intercept_shift(work_model):
+    work_model._runtime_canonical_state = {
+        **work_model._runtime_canonical_state,
+        "intercept_shift": None,
+    }
+
+
+def _poison_intercept_shift(work_model):
+    work_model._runtime_canonical_state = {
+        **work_model._runtime_canonical_state,
+        "intercept_shift": float("nan"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    [
+        (_drop_solver_result, "fit candidate is missing a finalized solver result"),
+        (_drop_a_fitted_group, "fit candidate coefficients do not match its fitted groups"),
+        (_shorten_the_solver_coefficients, "fit candidate coefficient dimensions are inconsistent"),
+        (
+            _shorten_both_coefficient_vectors,
+            "fit candidate coefficients do not match its design matrix",
+        ),
+        (
+            _drop_the_resolved_selection_penalty,
+            "fit candidate is missing its resolved selection penalty",
+        ),
+        (_poison_coefficients, "fit candidate coefficients must be finite"),
+        (_poison_deviance, "fit candidate scalar results must be finite"),
+        (
+            _change_public_iteration_count,
+            "fit candidate public and solver scalar results are inconsistent",
+        ),
+        (
+            _flip_public_convergence_flag,
+            "fit candidate public and solver scalar results are inconsistent",
+        ),
+        (_drop_distribution, "fit candidate is missing its resolved distribution or link"),
+        (_drop_canonical_state, "fit candidate was not canonically finalized"),
+        (_drop_intercept_shift, "fit candidate is missing its canonical intercept shift"),
+        (_poison_intercept_shift, "fit candidate is missing its canonical intercept shift"),
+    ],
+)
+def test_fit_candidate_with_a_corrupt_field_is_refused_and_nothing_is_published(
+    two_fit_datasets, corrupt, message
+):
+    (X, y, weights), _ = two_fit_datasets
+    model = _model().fit(X, y, sample_weight=weights)
+    before = snapshot_model_behavior(model, X)
+    revision = FittedStateRevision.start(model)
+    corrupt(revision.model)
+
+    with pytest.raises(RuntimeError, match=message):
+        revision.commit()
+
+    assert_model_behavior_unchanged(model, X, before)
+
+
+def _unfinished_canonicalization(monkeypatch, how):
+    """Make canonicalization stop short: do nothing, or finish all but one of its two products."""
+    real = runtime_canonicalize.canonicalize_fitted_model
+
+    def without_the_plan(model, **kwargs):
+        real(model, **kwargs)
+        model._prediction_plan = None
+
+    def without_the_state(model, **kwargs):
+        real(model, **kwargs)
+        model._runtime_canonical_state = None
+
+    stopped_short = {
+        "nothing": lambda *args, **kwargs: None,
+        "no_prediction_plan": without_the_plan,
+        "no_canonical_state": without_the_state,
+    }[how]
+    monkeypatch.setattr(runtime_canonicalize, "canonicalize_fitted_model", stopped_short)
+
+
+@pytest.mark.parametrize("how", ["nothing", "no_prediction_plan", "no_canonical_state"])
+def test_fit_whose_canonicalization_stopped_short_is_refused_and_unfitted(
+    two_fit_datasets, monkeypatch, how
+):
+    (X, y, weights), _ = two_fit_datasets
+    model = _model()
+    original_dict = model.__dict__
+    _unfinished_canonicalization(monkeypatch, how)
+
+    with pytest.raises(RuntimeError, match="fit candidate was not canonically finalized"):
+        model.fit(X, y, sample_weight=weights)
+
+    assert model.__dict__ is original_dict
+    assert model._fit_state is None
+    assert model._fit_revision == 0
+    assert model._result is None
+
+
+@pytest.mark.parametrize("how", ["nothing", "no_prediction_plan", "no_canonical_state"])
+def test_refit_whose_canonicalization_stopped_short_preserves_the_previous_revision(
+    two_fit_datasets, monkeypatch, how
+):
+    (X_a, y_a, weights_a), (X_b, y_b, weights_b) = two_fit_datasets
+    model = _model().fit(X_a, y_a, sample_weight=weights_a)
+    before = snapshot_model_behavior(model, X_a)
+    _unfinished_canonicalization(monkeypatch, how)
+
+    with pytest.raises(RuntimeError, match="fit candidate was not canonically finalized"):
+        model.fit(X_b, y_b, sample_weight=weights_b)
+
+    assert_model_behavior_unchanged(model, X_a, before)

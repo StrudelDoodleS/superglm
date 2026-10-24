@@ -180,3 +180,42 @@ def test_failed_polars_guard_verification_does_not_change_published_revision() -
     assert model._fit_state is state_before
     assert model.result is result_before
     assert model._fit_revision == revision_before
+
+
+@pytest.mark.parametrize("vector", ["response", "weights", "offset"])
+def test_geometry_guard_refuses_a_vector_that_does_not_match_the_frame(vector):
+    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
+    vectors = {"response": np.ones(12), "weights": np.ones(12), "offset": np.zeros(12)}
+    vectors[vector] = vectors[vector][:-1]
+
+    with pytest.raises(ValueError, match="fit geometry vectors must match the fitted frame"):
+        FitGeometryGuard.capture(X, vectors["response"], vectors["weights"], vectors["offset"])
+
+
+def test_geometry_guard_refuses_a_two_dimensional_vector():
+    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
+
+    with pytest.raises(ValueError, match="fit geometry vectors must be one-dimensional"):
+        FitGeometryGuard.capture(X, np.ones((12, 1)), np.ones(12), np.zeros(12))
+
+
+def test_refit_whose_geometry_guard_is_refused_publishes_nothing(monkeypatch):
+    from tests._fit_state_oracles import assert_model_behavior_unchanged, snapshot_model_behavior
+
+    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 40)})
+    y = 0.5 + 0.2 * X["x"].to_numpy()
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": Numeric()})
+    model.fit(X, y)
+    before = snapshot_model_behavior(model, X)
+    capture = FitGeometryGuard.capture
+
+    def capture_with_short_weights(cls, frame, response, weights, offset, **kwargs):
+        # The producer hands the guard a weight vector one row short of the frame.
+        return capture(frame, response, weights[:-1], offset, **kwargs)
+
+    monkeypatch.setattr(FitGeometryGuard, "capture", classmethod(capture_with_short_weights))
+
+    with pytest.raises(ValueError, match="fit geometry vectors must match the fitted frame"):
+        model.fit(X, 2.0 * y)
+
+    assert_model_behavior_unchanged(model, X, before)

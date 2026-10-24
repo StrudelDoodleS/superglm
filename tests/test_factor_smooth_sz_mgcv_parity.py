@@ -299,6 +299,8 @@ def test_sz_unseen_population_matches_mgcv_term_exclusion(
     conditional = model.predict(frame, offset=offset, random_effects="conditional")
     population = model.predict(frame, offset=offset, random_effects="population")
 
+    # Exact: an unseen level contributes exactly zero to the conditional prediction, and
+    # adding zero changes no bit of the population prediction.
     np.testing.assert_allclose(conditional, population, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(
         population,

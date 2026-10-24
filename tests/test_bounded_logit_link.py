@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import FrozenInstanceError
 
 import numpy as np
 import pytest
@@ -71,7 +72,7 @@ def test_the_link_satisfies_the_link_protocol_and_is_frozen():
     link = BoundedLogitLink(0.0, 1.0)
     assert isinstance(link, Link)
     assert all(hasattr(link, name) for name in ("deriv2_inverse", "deriv3_inverse"))
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError, match="cannot assign to field 'lower'"):
         link.lower = 0.5  # type: ignore[misc]
     assert BoundedLogitLink(0.0, 1.0) == BoundedLogitLink(0.0, 1.0)
     assert BoundedLogitLink(0.0, 1.0) != BoundedLogitLink(0.0, 0.5)

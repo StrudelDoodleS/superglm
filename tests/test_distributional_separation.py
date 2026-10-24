@@ -262,12 +262,16 @@ def test_a_select_smooth_predictor_keeps_its_categorical_build_codes_for_the_sca
             Predictor("power", {}),
         ),
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", SeparationWarning)
+    with pytest.warns(SeparationWarning) as record:
         model.fit(
             frame,
             y,
             sample_weight=exposure,
             lambdas={"mean:x#null": 1.0, "mean:x#wiggle": 1.0},
         )
+    # The count alone cannot tell a scan that ran from one that never did: the two calls are
+    # the two predictor builds. The finding is the scan's own output, so it is asserted too.
+    message = str(record[0].message)
+    assert "'mean:region'" in message and "'dispersion:region'" in message
+    assert "'d'" in message
     assert calls == [len(y), len(y)]

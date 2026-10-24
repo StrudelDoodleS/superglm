@@ -60,6 +60,23 @@ class TestREMLSelectionPenaltyContract:
 
         assert build_called is False
 
+    def test_design_build_hook_is_the_one_fit_reml_calls(self, monkeypatch):
+        """Positive control: the name patched above is looked up when fit_reml does build."""
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        real_build = base.model_build_design_matrix
+        built = []
+
+        def recording_build(*args, **kwargs):
+            built.append(1)
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(base, "model_build_design_matrix", recording_build)
+
+        SuperGLM(family="poisson", selection_penalty=0.0, features={"x": Numeric()}).fit_reml(X, y)
+
+        assert built
+
     @pytest.mark.parametrize("selection_penalty", [1e-8, 0.01])
     def test_poisson_rejects_positive_selection_penalty(self, selection_penalty):
         X, y = _poisson_data()

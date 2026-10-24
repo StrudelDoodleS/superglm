@@ -262,7 +262,7 @@ def test_design_summary_reports_specialised_storage_without_materializing(case, 
 
 
 @pytest.mark.parametrize("discrete", [False, True])
-def test_design_summary_describes_factor_smooth_terms(discrete):
+def test_design_summary_describes_factor_smooth_terms(discrete, monkeypatch):
     from superglm import FactorSmooth
     from superglm.group_matrix import FactorSmoothGroupMatrix
 
@@ -274,6 +274,16 @@ def test_design_summary_describes_factor_smooth_terms(discrete):
         features={"x": Spline(n_knots=6, penalty="ssp")},
         interactions=[FactorSmooth("x", group="level", basis="fs", k=5)],
     ).fit_reml(X[["x", "level"]], y)
+    matrix_type = next(
+        type(group)
+        for group in model._dm.group_matrices
+        if isinstance(group, FactorSmoothGroupMatrix)
+    )
+    monkeypatch.setattr(
+        matrix_type,
+        "toarray",
+        lambda _self: pytest.fail("design_summary must not materialize matrix rows"),
+    )
 
     summary = model.design_summary()
 

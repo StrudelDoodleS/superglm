@@ -167,7 +167,7 @@ def _install_derivative_transform(
     def replay(*args, **kwargs) -> LamlDerivatives:
         return transform(real_laml_derivatives(*args, **kwargs))
 
-    monkeypatch.setattr(posterior_module, "laml_derivatives", replay, raising=False)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", replay)
 
 
 def _install_derivative_spy(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
@@ -177,7 +177,7 @@ def _install_derivative_spy(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         calls.append(bool(kwargs.get("want_hessian", True)))
         return real_laml_derivatives(*args, **kwargs)
 
-    monkeypatch.setattr(posterior_module, "laml_derivatives", spy, raising=False)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", spy)
     return calls
 
 
@@ -429,7 +429,7 @@ def test_a_substitute_replay_is_authenticated_against_the_stored_gradient(
         sources.append(kwargs["curvature"])
         return real_laml_derivatives(*args, **kwargs)
 
-    monkeypatch.setattr(posterior_module, "laml_derivatives", spy, raising=False)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", spy)
     _assert_conditional_disclosure(altered, "disagree with the stored terminal gradient")
 
     assert sources == ["terminal"]
@@ -765,7 +765,7 @@ def test_derivative_replay_failure_is_disclosed_with_its_root_cause(
     def fail(*args, **kwargs):
         raise LamlDerivativeError("adversarial derivative failure")
 
-    monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", fail)
     _assert_conditional_disclosure(
         fitted,
         r"smoothing derivative replay failed.*LamlDerivativeError: adversarial derivative failure",
@@ -805,7 +805,7 @@ def test_a_programming_error_in_the_replay_is_not_disclosed_as_unavailable(
     def fail(*args, **kwargs):
         raise defect("replay defect")
 
-    monkeypatch.setattr(posterior_module, "laml_derivatives", fail, raising=False)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", fail)
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
         with pytest.raises(defect, match="replay defect"):

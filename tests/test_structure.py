@@ -372,6 +372,19 @@ def test_a_structure_built_in_python_is_checked_like_a_file():
 
 _HUGE = 10**400
 
+
+def _ordered_band(**overrides):
+    fields = {
+        "kind": "ordered",
+        "levels": ["0", "1", "2", "3"],
+        "groups": {},
+        "reference": "0",
+        "unseen": "error",
+        "ranges": [],
+    }
+    return _categorical(**{**fields, **overrides})
+
+
 READ_REFUSALS = {
     "unknown format": (
         {"format": "superglm.structure.v2", "superglm_version": "0", "features": {}},
@@ -503,6 +516,61 @@ READ_REFUSALS = {
             )
         ),
         "The spline of 'band' refuses the Flat range -inf–1; change or remove that range.",
+    ),
+    "unknown top-level field": (
+        {**_payload(), "extra": 1},
+        "The structure's 'extra' field is malformed; export the structure again.",
+    ),
+    "version not text": (
+        {"format": FORMAT, "superglm_version": 7, "features": {}},
+        "The structure's 'superglm_version' field is malformed; export the structure again.",
+    ),
+    "entry not a mapping": (
+        _payload(area=["categorical"]),
+        "The structure entry for 'area' has a malformed 'entry'; export the structure again.",
+    ),
+    "groups not a mapping": (
+        _payload(area=_categorical(groups=["CD"])),
+        "The structure entry for 'area' has a malformed 'groups'; export the structure again.",
+    ),
+    "group members not a list": (
+        _payload(area=_categorical(groups={"CD": "CD"})),
+        "The structure entry for 'area' has a malformed 'groups'; export the structure again.",
+    ),
+    "group without members": (
+        _payload(area=_categorical(groups={"CD": []})),
+        "The structure entry for 'area' has a malformed 'groups'; export the structure again.",
+    ),
+    "specials not a list": (
+        _payload(band=_ordered_band(specials="0")),
+        "The structure entry for 'band' has a malformed 'specials'; export the structure again.",
+    ),
+    "specials repeat a level": (
+        _payload(band=_ordered_band(specials=["2", "2"])),
+        "The structure entry for 'band' has a malformed 'specials'; export the structure again.",
+    ),
+    "special that is not a level": (
+        _payload(band=_ordered_band(specials=["9"])),
+        "'9' of 'band' is listed as a special level but is not one of its levels; add it to "
+        "the levels or take it out of the specials.",
+    ),
+    "special inside a group": (
+        _payload(band=_ordered_band(specials=["2"], groups={"high": ["2", "3"]})),
+        "Special level '2' of 'band' is in group 'high'; a special level stands alone, so "
+        "take it out of the group.",
+    ),
+    "reference that is a special": (
+        _payload(band=_ordered_band(specials=["0"])),
+        "The reference '0' of 'band' is a special level, and the reference must lie on the "
+        "curve; choose a level on the curve.",
+    ),
+    "unseen policy not text": (
+        _payload(area=_categorical(unseen=5)),
+        "The structure entry for 'area' has a malformed 'unseen'; export the structure again.",
+    ),
+    "reference not a scalar": (
+        _payload(area=_categorical(reference=["A"])),
+        "The structure entry for 'area' has a malformed 'reference'; export the structure again.",
     ),
 }
 

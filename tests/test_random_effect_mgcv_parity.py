@@ -138,4 +138,6 @@ def test_unseen_random_effect_levels_score_at_mgcv_population_prediction(
     conditional = model.predict(X, offset=offset, random_effects="conditional")
 
     np.testing.assert_allclose(population, expected, rtol=3e-6, atol=3e-7)
+    # Exact: an unseen level contributes exactly zero to the conditional prediction, and
+    # adding zero changes no bit of the population prediction.
     np.testing.assert_allclose(conditional, population, rtol=0.0, atol=0.0)
