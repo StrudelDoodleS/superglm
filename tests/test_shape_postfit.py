@@ -2119,6 +2119,202 @@ def test_repair_without_retained_response_is_refused_and_nothing_is_published():
     _assert_nothing_published(model, X, snapshot)
 
 
+def _fault_unrepaired_coefficients(model):
+    """A repair that hands back the fitted coefficients, which break the declared convexity."""
+
+    def fault(result, spec, groups):
+        result.repaired_beta_reparam = model.result.beta.copy()
+
+    return fault
+
+
+def test_repair_that_leaves_the_curvature_infeasible_is_refused_and_nothing_is_published(
+    monkeypatch,
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _repairer_with_fault(monkeypatch, _fault_unrepaired_coefficients(model))
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*infeasible curvature"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _corrupt_validation_input(monkeypatch, **corrupt):
+    """Hand ``_validate_repair_for_publication`` an input the real producer would not."""
+    real = shape_ops._validate_repair_for_publication
+
+    def validate(*args, **kwargs):
+        kwargs.update({name: change(kwargs[name]) for name, change in corrupt.items()})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shape_ops, "_validate_repair_for_publication", validate)
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    [
+        ({"y": lambda y: y[:-1]}, "incoherent intercept geometry"),
+        ({"scoring_weights": np.zeros_like}, "invalid scoring weights"),
+        (
+            {"scoring_weights": lambda w: np.where(np.arange(w.size) == 0, np.nan, w)},
+            "invalid scoring weights",
+        ),
+        (
+            {"current_eta": lambda eta: np.where(np.arange(eta.size) == 0, np.inf, eta)},
+            "invalid profiled intercept",
+        ),
+    ],
+    ids=[
+        "response_of_the_wrong_length",
+        "weights_that_sum_to_zero",
+        "non_finite_weight",
+        "predictor_that_overflows_the_gaussian_shift",
+    ],
+)
+def test_incoherent_scoring_inputs_are_refused_and_nothing_is_published(
+    monkeypatch, corrupt, message
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _corrupt_validation_input(monkeypatch, **corrupt)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _profiled_eta_with_fault(monkeypatch, mutate):
+    """Route the real intercept profile through ``mutate(eta)`` on the way out."""
+    real = shape_ops._profile_repaired_intercept
+
+    def profiled(*args, **kwargs):
+        eta, shift = real(*args, **kwargs)
+        return mutate(eta), shift
+
+    monkeypatch.setattr(shape_ops, "_profile_repaired_intercept", profiled)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda eta: eta[:-1], "invalid predictor"),
+        (
+            lambda eta: np.where(np.arange(eta.size) == 3, np.nan, eta),
+            "non-finite linear predictor",
+        ),
+    ],
+    ids=["predictor_of_the_wrong_length", "non_finite_predictor"],
+)
+def test_faulty_repaired_predictor_is_refused_and_nothing_is_published(
+    monkeypatch, mutate, message
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    _profiled_eta_with_fault(monkeypatch, mutate)
+
+    with pytest.raises(RuntimeError, match=f"Unsafe shape repair rejected.*{message}"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_deviance_that_is_not_finite_on_the_link_scale_is_refused_and_nothing_is_published(
+    monkeypatch,
+):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            model._distribution,
+            "deviance_unit",
+            lambda y, mu: np.full(np.shape(mu), np.nan),
+        )
+        with pytest.raises(
+            RuntimeError, match="Unsafe shape repair rejected.*invalid link-domain predictions"
+        ):
+            model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_fitted_objective_is_refused_and_nothing_is_published(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    monkeypatch.setattr(shape_ops, "_smooth_penalty_value", lambda beta, terms: np.nan)
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*non-finite fitted objective"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_non_finite_term_predictor_is_refused_and_nothing_is_published():
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    index = next(i for i, group in enumerate(model._groups) if group.feature_name == "x")
+    group_type = type(model._dm.group_matrices[index])
+    real_matvec = group_type.matvec
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            group_type,
+            "matvec",
+            lambda self, beta: np.full_like(real_matvec(self, beta), np.nan),
+        )
+        with pytest.raises(
+            RuntimeError, match="Unsafe shape repair rejected.*non-finite term predictor"
+        ):
+            model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_basis_that_does_not_match_the_repaired_coefficients_is_refused(monkeypatch):
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    spec = model._specs["x"]
+    real_transform = spec.transform
+    short_grid = 7
+
+    def shorten_grid(result, _spec, _groups):
+        result.grid = np.linspace(_spec._lo, _spec._hi, short_grid)
+
+    def transform_missing_a_column(values, *args, **kwargs):
+        basis = real_transform(values, *args, **kwargs)
+        return basis[:, :-1] if np.shape(values) == (short_grid,) else basis
+
+    _repairer_with_fault(monkeypatch, shorten_grid)
+    monkeypatch.setattr(spec, "transform", transform_missing_a_column)
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*incoherent fitted-basis geometry"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_intercept_profile_without_a_finite_score_is_refused(monkeypatch):
+    model, X = _fitted_for_publication_refusal(family="poisson")
+    snapshot = _publication_snapshot(model, X)
+    monkeypatch.setattr(
+        shape_ops,
+        "fisher_working_weights",
+        lambda **kwargs: np.full(np.shape(kwargs["mu"]), np.nan),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Unsafe shape repair rejected.*invalid profiled intercept"
+    ):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
 def _scaled_solution(x, spec):
     return 1e3 * x
 

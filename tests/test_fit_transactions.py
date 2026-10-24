@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import pickle
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -921,6 +922,20 @@ def _drop_a_fitted_group(work_model):
     work_model._groups = work_model._groups[:-1]
 
 
+def _shorten_the_solver_coefficients(work_model):
+    work_model._solver_result.beta = work_model._solver_result.beta[:-1].copy()
+
+
+def _shorten_both_coefficient_vectors(work_model):
+    work_model._result.beta = work_model._result.beta[:-1].copy()
+    work_model._solver_result.beta = work_model._solver_result.beta[:-1].copy()
+
+
+def _drop_the_resolved_selection_penalty(work_model):
+    work_model._fit_state = None
+    work_model._resolved_penalty = SimpleNamespace(lambda1=None)
+
+
 def _change_public_iteration_count(work_model):
     work_model._result.n_iter += 1
 
@@ -956,6 +971,15 @@ def _poison_intercept_shift(work_model):
     [
         (_drop_solver_result, "fit candidate is missing a finalized solver result"),
         (_drop_a_fitted_group, "fit candidate coefficients do not match its fitted groups"),
+        (_shorten_the_solver_coefficients, "fit candidate coefficient dimensions are inconsistent"),
+        (
+            _shorten_both_coefficient_vectors,
+            "fit candidate coefficients do not match its design matrix",
+        ),
+        (
+            _drop_the_resolved_selection_penalty,
+            "fit candidate is missing its resolved selection penalty",
+        ),
         (_poison_coefficients, "fit candidate coefficients must be finite"),
         (_poison_deviance, "fit candidate scalar results must be finite"),
         (
