@@ -1,8 +1,14 @@
 """SCOP admission uses represented quadratic actions, not absolute units."""
 
+import math
+import warnings
+
 import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import Constraint, Spline, SuperGLM
+from superglm._lambda_box import LAMBDA_CEILING, latent_lambda_ceiling
 from superglm.distributions import Gaussian
 from superglm.links import IdentityLink
 from superglm.solvers.irls_state import _irls_objective_relative_change
@@ -168,3 +174,58 @@ def test_objective_change_ratio_has_explicit_zero_action_semantics():
     assert np.isinf(
         _irls_objective_relative_change(objective=1.0, previous=0.0, objective_scale=0.0)
     )
+
+
+@pytest.mark.parametrize("units", [1e-3, 1.0, 1e5, 1e100])
+def test_latent_lambda_ceiling_scales_with_the_squared_increments(units):
+    """The ceiling grows as the squared increments once they exceed one."""
+    latent = np.log(np.array([0.5, 2.0, 3.0]))
+    shifted = latent_lambda_ceiling(latent + math.log(units))
+    mean_square = units**2 * float(np.mean(np.exp(2.0 * latent)))
+    expected = LAMBDA_CEILING * max(mean_square, 1.0)
+    # exp of a log-domain sum of a few terms: its error is u times their magnitude.
+    terms = math.log(LAMBDA_CEILING) + 2.0 * abs(math.log(units)) + 2.0
+    assert shifted == pytest.approx(expected, rel=8 * np.finfo(float).eps * terms, abs=0.0)
+    assert latent_lambda_ceiling(np.full(3, -1.0)) == LAMBDA_CEILING
+    assert latent_lambda_ceiling(np.full(3, 400.0)) == np.finfo(np.float64).max
+
+
+def _gaussian_identity_scop_fit(units):
+    rng = np.random.default_rng(20261024)
+    n = 3000
+    frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
+    y = np.sin(2 * np.pi * frame["x1"].to_numpy()) + 0.8 * frame["x2"].to_numpy()
+    y = y + 0.3 * rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x1": Spline(kind="ps", k=10),
+            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, units * y)
+    return model, frame
+
+
+def test_scop_reml_fit_does_not_depend_on_the_response_units():
+    """Rescaling y rescales the fit; the SCOP smoothing parameter scales with it.
+
+    The monotone term's truth is linear, so its smoothing parameter runs to
+    the top of the search box, which grows as the squared response units.
+    At y * 1e5 the unit box's 1e10 ceiling held it at 1e-3 of its optimum:
+    EDF 12.07 against 9.71 and predictions 12.7 standard errors away.
+    """
+    units = 1e5
+    reference, frame = _gaussian_identity_scop_fit(1.0)
+    scaled, _ = _gaussian_identity_scop_fit(units)
+    assert scaled.reml_diagnostics()["lambdas"]["x2"] > LAMBDA_CEILING
+    assert scaled.result.effective_df == pytest.approx(reference.result.effective_df, abs=0.05)
+    standard_error = float(np.min(reference.term_inference("x2").se_log_relativity))
+    shift = np.asarray(scaled.predict(frame), dtype=float) / units - np.asarray(
+        reference.predict(frame), dtype=float
+    )
+    # A change of units moves the fit by a small fraction of its own uncertainty.
+    assert float(np.max(np.abs(shift))) < 0.1 * standard_error

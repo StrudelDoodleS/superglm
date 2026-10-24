@@ -39,6 +39,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm.types import LambdaPolicy
 
 EFSProposalKind = Literal[
@@ -256,8 +257,8 @@ def wood_fasiolo_update(
     *,
     inverse_scale: float = 1.0,
     max_log_step: float | None = 5.0,
-    minimum_lambda: float = 1.0e-6,
-    maximum_lambda: float = 1.0e10,
+    minimum_lambda: float = LAMBDA_FLOOR,
+    maximum_lambda: float = LAMBDA_CEILING,
 ) -> EFSUpdateResult:
     """Return bounded generalized Fellner--Schall proposals."""
     component_tuple = tuple(components)

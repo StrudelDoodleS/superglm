@@ -1,5 +1,7 @@
 """Penalty-coordinate oracles for SCOP REML."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -27,6 +29,7 @@ def test_efs_matches_scop_component_by_parent_group_not_lambda_name():
             "group_name": "mono",
             "group_sl": slice(0, 2),
             "beta_eff": beta_eff,
+            "reparam": SimpleNamespace(free_dim=0),
         }
     }
     updated, _, _ = _joint_efs_lambda_step(
@@ -126,6 +129,7 @@ def test_penalty_quadratic_uses_every_named_component_in_latent_coordinates():
             "group_name": "mono",
             "group_sl": slice(0, 2),
             "beta_eff": beta_eff,
+            "reparam": SimpleNamespace(free_dim=0),
         }
     }
 

@@ -11,6 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import norm
 
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm._reporting_state import ReportingSupportState
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.group_matrix import FactorSmoothGroupMatrix
@@ -26,8 +27,8 @@ from superglm.solvers.structured import (
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
-_LAMBDA_LOWER_BOUND = 1.0e-6
-_LAMBDA_UPPER_BOUND = 1.0e10
+_LAMBDA_LOWER_BOUND = LAMBDA_FLOOR
+_LAMBDA_UPPER_BOUND = LAMBDA_CEILING
 
 
 @dataclass(frozen=True)

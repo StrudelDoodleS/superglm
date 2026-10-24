@@ -21,6 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm import _held_warnings as held_warnings
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR, latent_lambda_ceiling
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
@@ -1723,6 +1724,7 @@ def _backoff_scop_candidate_step(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
+    ceilings = _lambda_ceilings(origin)
     for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
         alpha = 0.5**attempt
         # Seeded from the proposal, not the origin: the adopted dict must
@@ -1731,7 +1733,9 @@ def _backoff_scop_candidate_step(
         trial_lambdas = proposed_lambdas.copy()
         for name in changed_names:
             log_trial = np.log(origin.lambdas[name]) + alpha * log_directions[name]
-            trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+            trial_lambdas[name] = float(
+                np.clip(np.exp(log_trial), LAMBDA_FLOOR, ceilings.get(name, LAMBDA_CEILING))
+            )
         mode = _fit_scop_reml_mode(
             context,
             trial_lambdas,
@@ -1794,6 +1798,7 @@ def _backtrack_scop_efs_candidate(
             raise ValueError("SCOP EFS lambda trials must be positive and finite")
         log_directions[name] = float(np.log(proposed) - np.log(old))
 
+    ceilings = _lambda_ceilings(current)
     trial_number = 0
     for direction_sign in (1.0, -1.0) if reflect else (1.0,):
         direction_attempts = (
@@ -1806,7 +1811,9 @@ def _backtrack_scop_efs_candidate(
             trial_lambdas = current.lambdas.copy()
             for name in changed_names:
                 log_trial = np.log(current.lambdas[name]) + alpha * log_directions[name]
-                trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+                trial_lambdas[name] = float(
+                    np.clip(np.exp(log_trial), LAMBDA_FLOOR, ceilings.get(name, LAMBDA_CEILING))
+                )
 
             trial_number += 1
             candidate = _fit_scop_reml_mode(
@@ -1843,6 +1850,24 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
     if state["group_name"] != pc.group_name or state["group_sl"] != pc.group_sl:
         return None
     return state
+
+
+def _scop_lambda_ceiling(state: dict) -> float:
+    """A SCOP block's smoothing-parameter ceiling at its state (``latent_lambda_ceiling``)."""
+    latent = np.asarray(state["beta_eff"], dtype=np.float64)[state["reparam"].free_dim :]
+    return latent_lambda_ceiling(latent)
+
+
+def _lambda_ceilings(mode) -> dict[str, float]:
+    """The ceiling of each SCOP component at ``mode``, by name; any other has ``LAMBDA_CEILING``."""
+    if not mode.scop_states:
+        return {}
+    ceilings: dict[str, float] = {}
+    for pc in mode.penalty_components:
+        state = _is_scop_component(pc, mode.scop_states)
+        if state is not None:
+            ceilings[pc.name] = _scop_lambda_ceiling(state)
+    return ceilings
 
 
 def fit_fixed_scop_reml(
@@ -2093,7 +2118,8 @@ def _joint_efs_lambda_step(
 
         # Apply step
         log_lam_new = np.log(max(lambdas[pc.name], 1e-10)) + scaled_step
-        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), 1e-6, 1e10))
+        ceiling = LAMBDA_CEILING if scop_st is None else _scop_lambda_ceiling(scop_st)
+        lambdas_new[pc.name] = float(np.clip(np.exp(log_lam_new), LAMBDA_FLOOR, ceiling))
         dlsp_out[pc.name] = dlsp
 
     return lambdas_new, alpha, dlsp_out
@@ -2545,7 +2571,8 @@ def _hessian_scaled_bootstrap_lambdas(
     added to the offset moves no value.  ``lambda_j = sum A_ii / sum S_j,ii``
     over the coefficients ``S_j`` penalizes puts the typical one at 1/2.  A
     SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
-    Jacobian one).  Only ``names`` move, clipped to [1e-6, 1e10]; a
+    Jacobian one).  Only ``names`` move, clipped to the unit-increment box
+    [``LAMBDA_FLOOR``, ``LAMBDA_CEILING``]; a
     component whose ratio is not a positive finite number keeps its value.
 
     ``A_ii`` is formed from raw moments, ``diag(X' W X) - sum_w * mean**2``,
@@ -2597,7 +2624,7 @@ def _hessian_scaled_bootstrap_lambdas(
         support = diag > 0.0
         ratio = float(np.sum(gram_diag[support]) / np.sum(diag[support])) if support.any() else 0.0
         if np.isfinite(ratio) and ratio > 0.0:
-            scaled[name] = float(np.clip(ratio, 1e-6, 1e10))
+            scaled[name] = float(np.clip(ratio, LAMBDA_FLOOR, LAMBDA_CEILING))
     return scaled
 
 
@@ -2913,7 +2940,7 @@ def optimize_scop_efs_reml(
     }
     boot_lambdas = {
         name: (
-            float(np.clip(warm_lambdas[name], 1e-6, 1e10))
+            float(np.clip(warm_lambdas[name], LAMBDA_FLOOR, LAMBDA_CEILING))
             if name in warm_names
             else (1e-4 if name in estimated_names else val)
         )
@@ -3244,11 +3271,18 @@ def optimize_scop_efs_reml(
                     retained_mode, candidate_accepted = current_mode, True
                 else:
                     proposal = lambdas.copy()
+                    ceilings = _lambda_ceilings(current_mode)
                     for name, log_lambda, delta in zip(
                         system.names, system.log_lambdas, newton_step, strict=True
                     ):
                         if delta != 0.0:
-                            proposal[name] = float(np.clip(np.exp(log_lambda + delta), 1e-6, 1e10))
+                            proposal[name] = float(
+                                np.clip(
+                                    np.exp(log_lambda + delta),
+                                    LAMBDA_FLOOR,
+                                    ceilings.get(name, LAMBDA_CEILING),
+                                )
+                            )
                     retained_mode, candidate_accepted = _backtrack_scop_efs_candidate(
                         fit_context,
                         current_mode,

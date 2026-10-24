@@ -10,6 +10,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm.distributional.results.endpoint_evidence import (
     EFSAccelerationOutcome,
     EndpointAssessmentFailureReason,
@@ -55,8 +56,8 @@ class DistributionalEFSConfig:
     max_iterations: int = 50
     tolerance: float = 1.0e-6
     max_log_step: float = 5.0
-    minimum_lambda: float = 1.0e-6
-    maximum_lambda: float = 1.0e10
+    minimum_lambda: float = LAMBDA_FLOOR
+    maximum_lambda: float = LAMBDA_CEILING
     max_backtracks: int = 8
     backtrack_factor: float = 0.5
     objective_tolerance: float = 1.0e-9

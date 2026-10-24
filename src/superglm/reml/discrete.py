@@ -21,6 +21,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
@@ -444,7 +445,7 @@ def bootstrap_seed_lambdas(
         return seeds
     for index, pc in enumerate(penalties):
         if pc.name in warm_lambdas and estimated_mask[index]:
-            seeds[pc.name] = float(np.clip(warm_lambdas[pc.name], 1e-6, 1e10))
+            seeds[pc.name] = float(np.clip(warm_lambdas[pc.name], LAMBDA_FLOOR, LAMBDA_CEILING))
         elif not estimated_mask[index]:
             seeds[pc.name] = float(lambdas[pc.name])
     return seeds
@@ -588,7 +589,7 @@ def optimize_discrete_reml_cached_w(
         estimated_mask = np.array([pc.name in estimated_names for pc in penalties])
     else:
         estimated_mask = np.ones(m, dtype=bool)
-    log_lo, log_hi = np.log(1e-6), np.log(1e10)
+    log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
     p = dm.p
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): decided once, from the design and prior weights.
@@ -810,7 +811,7 @@ def optimize_discrete_reml_cached_w(
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
-            rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
+            rho[i] = np.clip(np.log(max(fixed_val, LAMBDA_FLOOR)), log_lo, log_hi)
             continue
         if warm_lambdas and pc.name in warm_lambdas:
             # The warm start is the iterate; no Fellner-Schall step from it.
@@ -823,7 +824,7 @@ def optimize_discrete_reml_cached_w(
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
-        lam_fp_clipped = float(np.clip(lam_fp, 1e-6, 1e10))
+        lam_fp_clipped = float(np.clip(lam_fp, LAMBDA_FLOOR, LAMBDA_CEILING))
         _bootstrap_component_stats.append(
             {
                 "name": pc.name,
@@ -852,9 +853,9 @@ def optimize_discrete_reml_cached_w(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), 1e-6)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), LAMBDA_FLOOR)
         log_prev = np.log(lam_prev)
-        log_target = np.log(max(lam_fp, 1e-6))
+        log_target = np.log(max(lam_fp, LAMBDA_FLOOR))
         if ":" in pc.group_name:
             log_target = np.clip(
                 log_target,
@@ -889,7 +890,7 @@ def optimize_discrete_reml_cached_w(
         shoulder_step = base_cap if use_tensor_linesearch else max_newton_step
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            cand_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            cand_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
         cand_lambdas.update(fixed_lambdas)
 
         # --- Step 1: One PIRLS step (W update) ---
@@ -1500,7 +1501,7 @@ def optimize_discrete_reml_cached_w(
             had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
-                trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+                trial_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_evals += 1
@@ -1816,7 +1817,7 @@ def optimize_discrete_reml_cached_w(
 
         current_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(np.clip(rho, log_lo, log_hi)), strict=False):
-            current_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+            current_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
         current_lambdas.update(fixed_lambdas)
 
         old_gms = dm.group_matrices
@@ -1868,7 +1869,7 @@ def optimize_discrete_reml_cached_w(
     rho_clipped = np.clip(rho, log_lo, log_hi)
     final_lambdas = lambdas.copy()
     for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-        final_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
+        final_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
     final_lambdas.update(fixed_lambdas)
     if start_out is not None:
         # A start, not a result: the caller's own engine refits and certifies.
@@ -2045,7 +2046,10 @@ def optimize_discrete_reml_cached_w(
                     max(row["lam_fp_clipped"] for row in _bootstrap_component_stats)
                 ),
                 "n_components_at_lower_bound": int(
-                    sum(row["lam_fp_clipped"] <= 1.0000001e-6 for row in _bootstrap_component_stats)
+                    sum(
+                        row["lam_fp_clipped"] <= LAMBDA_FLOOR * (1.0 + 1e-7)
+                        for row in _bootstrap_component_stats
+                    )
                 ),
             }
             profile["reml_bootstrap_components"] = _bootstrap_component_stats
