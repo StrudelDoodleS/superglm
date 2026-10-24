@@ -84,24 +84,51 @@ def test_separated_level_warns_before_fitting_and_names_both_predictors() -> Non
 def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them() -> None:
     """The compiled predictors outlive the scan, and a pickled model carries them.
 
-    The scan takes each term's build codes, so the record the model keeps holds
-    none of them. Mutation: a scan that only reads them leaves an integer per
-    row per term in the model, and in its pickle.
+    The scan pops each term's build codes, and a compiled design never pickles
+    them, so a saved model holds neither the integers nor a class for them.
+    Mutation: a scan that only reads them leaves an integer per row per term on
+    the model.
     """
+    from superglm.distributional.serialization import pickle_state
+
     frame, y, exposure = _separated_tweedie_fixture()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SeparationWarning)
         model = _tweedie_model().fit(
             frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0}
         )
-    held = [
-        record[4]
-        for predictor in model._model.compiled_predictors
-        for record in predictor.compiled.separation_records
-        if record[0] == "cat"
-    ]
-    assert len(held) == 2
-    assert [codes.take() for codes in held] == [None, None]
+    designs = [predictor.compiled for predictor in model._model.compiled_predictors]
+    assert [design.scan_codes for design in designs] == [{}, {}, {}]
+    designs[0].scan_codes["region"] = np.zeros(len(y), dtype=np.intp)
+    assert pickle.loads(pickle_state(designs[0])).scan_codes == {}
+    assert b"BuildCodes" not in pickle.dumps(model)
+
+
+def test_the_codes_held_until_the_scan_take_a_byte_a_row() -> None:
+    """Every scanned term's codes are held across the other builds, so they are stored narrow."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.predictor import compile_predictors
+    from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+
+    frame, y, exposure = _separated_tweedie_fixture()
+    family = TweedieLSS()
+    templates = (
+        Predictor("mean", {"region": Categorical()}),
+        Predictor("dispersion", {}),
+        Predictor("power", {}),
+    )
+    weights = resolve_likelihood_weights(
+        exposure, n_observations=len(y), contract=WeightContract(semantics="prior")
+    )
+    (mean, *_) = compile_predictors(
+        as_eager_frame(frame),
+        weights,
+        family.parameters,
+        templates,
+        separation_boundaries=(("zero",), ("zero",), ()),
+        separation_response=y,
+    )
+    assert {k: v.dtype for k, v in mean.compiled.scan_codes.items()} == {"region": np.uint8}
 
 
 def test_separated_tweedie_fit_finishes_on_the_nearest_semidefinite_curvature() -> None:

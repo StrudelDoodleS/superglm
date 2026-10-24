@@ -102,25 +102,6 @@ def response_boundaries(distribution: Any, link: Any) -> tuple[str, ...]:
     return ()
 
 
-class BuildCodes:
-    """A categorical term's build codes, held until its separation scan takes them.
-
-    The compiled design that records a term outlives its scan (a fitted
-    SuperLSS keeps it, and so pickles it), and the codes are an integer for
-    every row of the term. ``take`` hands them to the scan and leaves the
-    record holding nothing.
-    """
-
-    __slots__ = ("_codes",)
-
-    def __init__(self, codes: NDArray) -> None:
-        self._codes: NDArray | None = codes
-
-    def take(self) -> NDArray | None:
-        codes, self._codes = self._codes, None
-        return codes
-
-
 def _level_codes(
     x: NDArray, spec: Any, *, context: str, codes: NDArray | None = None
 ) -> tuple[NDArray, list[Any]]:
@@ -132,12 +113,14 @@ def _level_codes(
     response anchor the cell they actually train in.
 
     ``codes``, when given, are the codes the term's own build already made
-    for these rows (``Categorical.build_with_codes``): the same labels
+    for these rows (``Categorical._build_with_codes``): the same labels
     against the same universe, so coding the column again would only repeat
     them.
     """
     levels = list(spec._levels)
-    if codes is None:
+    if codes is not None:
+        codes = codes.astype(np.intp, copy=False)
+    else:
         from superglm.features.categorical import _codes_against
         from superglm.features.interaction import _categorical_build_labels
 
@@ -178,7 +161,7 @@ def scan_categorical_term(
     y: NDArray,
     sample_weight: NDArray,
     boundaries: tuple[str, ...],
-    build_codes: BuildCodes | None = None,
+    build_codes: NDArray | None = None,
 ) -> list[SeparatedTerm]:
     """Scan one main-effect Categorical term for separated levels.
 
@@ -186,11 +169,9 @@ def scan_categorical_term(
     own indicator the recession direction is that coordinate; for the base
     level it is the intercept walking against every non-base indicator.
     ``build_codes`` are the term's build codes, when the caller holds them;
-    the scan takes them.
+    the scan reads them instead of coding the column again.
     """
-    codes, levels = _level_codes(
-        x, spec, context=name, codes=None if build_codes is None else build_codes.take()
-    )
+    codes, levels = _level_codes(x, spec, context=name, codes=build_codes)
     findings: list[SeparatedTerm] = []
     for boundary in boundaries:
         flags, n_occupied = _separated_flags(codes, len(levels), y, sample_weight, boundary)

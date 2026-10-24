@@ -15,7 +15,7 @@ from __future__ import annotations
 import copy
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -60,6 +60,19 @@ class CompiledPredictorDesign:
     # one; this module only records what it saw while the specs learned their
     # levels.
     separation_records: tuple[tuple, ...] = ()
+    # Each scanned Categorical's row codes from its build, by term name, until
+    # that term's scan pops them.  They are scan scratch, not model state: a
+    # fitted SuperLSS keeps its compiled predictors, so pickling leaves them out.
+    scan_codes: dict[str, NDArray] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {k: v for k, v in self.__dict__.items() if k != "scan_codes"}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        object.__setattr__(self, "scan_codes", {})
 
 
 def _clone_specification_graph(
@@ -250,6 +263,7 @@ def compile_predictor_design(
     col_offset = 0
     groups: list[GroupSlice] = []
     separation_records: list[tuple] = []
+    scan_codes: dict[str, NDArray] = {}
 
     for name in feature_order:
         spec = specs[name]
@@ -263,7 +277,6 @@ def compile_predictor_design(
             spec._inner_geometry_physical_rows = physical_rows
         x_col = X.column_array(name)
         scan_levels = bool(separation_boundaries) and isinstance(spec, Categorical)
-        level_codes: NDArray | None = None
         # Supply level universes the feature cannot discover from its observed
         # rows. A column's declared categorical dtype takes precedence over a
         # caller's full-frame binding. Both hooks decline when the feature
@@ -478,10 +491,17 @@ def compile_predictor_design(
                             reporting_weight=ordered_reporting_weight,
                             geometry_weight=feature_build_weight,
                         )
-                    elif scan_levels:
-                        result, level_codes = cast(Categorical, spec).build_with_codes(
+                    elif scan_levels and getattr(spec.build, "__func__", None) is Categorical.build:
+                        # The scan reads the build's codes. A subclass that
+                        # overrides build() keeps its override, and the scan
+                        # codes its column itself.
+                        result, row_codes = cast(Categorical, spec)._build_with_codes(
                             x_col, sample_weight=feature_build_weight
                         )
+                        # Held until the scan, across every other term's build:
+                        # one byte a row for the usual few levels, not eight.
+                        scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
+                        del row_codes
                     else:
                         result = spec.build(x_col, sample_weight=feature_build_weight)
             except ValueError as err:
@@ -499,13 +519,8 @@ def compile_predictor_design(
             infos = result if isinstance(result, list) else [result]
         if scan_levels:
             # Scanned after the loops, once the spec has learned its levels
-            # and the GroupSlices exist for the penalty exemption. The scan
-            # takes the build's codes rather than coding the column again.
-            from superglm.diagnostics.separation import BuildCodes
-
-            separation_records.append(
-                ("cat", name, spec, x_col, None if level_codes is None else BuildCodes(level_codes))
-            )
+            # and the GroupSlices exist for the penalty exemption.
+            separation_records.append(("cat", name, spec, x_col))
 
         # Resolve lambda_policies from the spec onto each GroupInfo.
         # build() does this internally, but the discrete path constructs
@@ -864,7 +879,7 @@ def compile_predictor_design(
     validate_term_name_namespace(specs, interaction_specs)
     validate_fitted_group_names(groups)
     dm = DesignMatrix(group_matrices, n, col_offset)
-    return CompiledPredictorDesign(
+    compiled = CompiledPredictorDesign(
         design=dm,
         groups=tuple(groups),
         specs=MappingProxyType(specs),
@@ -873,3 +888,5 @@ def compile_predictor_design(
         interaction_order=tuple(interaction_order),
         separation_records=tuple(separation_records),
     )
+    compiled.scan_codes.update(scan_codes)
+    return compiled
