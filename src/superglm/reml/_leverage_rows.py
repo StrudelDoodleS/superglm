@@ -141,9 +141,9 @@ def _support_plan(
 ) -> _SupportPlan | None:
     """The support route's tables, else ``None`` (another group type, or too large)."""
     from superglm._group_matrix._group_matrix_centered import _reads_as_float64
+    from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
     from superglm._parallel import resolve_max_memory
     from superglm.group_matrix import (
-        CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
@@ -163,7 +163,7 @@ def _support_plan(
             rows += int(gm.B_scop_unique.shape[0])
         elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
             rows += int(gm.n_bins) + 1
-        elif isinstance(gm, CategoricalGroupMatrix):
+        elif type(gm) in ONE_HOT_CODE_TYPES:
             rows += int(gm.n_levels) + 1
         else:
             return None
@@ -197,7 +197,7 @@ def _support_plan(
             values, transform, codes = gm.B_unique, gm.R_inv, gm.bin_idx
         elif isinstance(gm, DiscretizedSCOPGroupMatrix):
             values, transform, codes = gm.B_scop_unique, None, gm.bin_idx
-        elif isinstance(gm, CategoricalGroupMatrix):
+        elif type(gm) in ONE_HOT_CODE_TYPES:
             values, transform, codes = None, None, gm.codes
         else:  # pragma: no cover - sized above
             return None

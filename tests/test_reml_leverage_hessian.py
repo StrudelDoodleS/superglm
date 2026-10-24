@@ -443,6 +443,30 @@ def test_a_fit_whose_grams_are_cheap_keeps_them():
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
+def _grouped_poisson_frame(n: int = 400) -> tuple[pd.DataFrame, np.ndarray]:
+    """A Poisson response on ``x`` and ``z`` beside groupings of 6, 4 and 5 levels it ignores."""
+    rng = np.random.default_rng(947)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1.0, 1.0, n),
+            "z": rng.normal(size=n),
+            "segment": [f"s{code}" for code in rng.integers(0, 6, n)],
+            "region": [f"r{code}" for code in rng.integers(0, 4, n)],
+            "branch": [f"b{code}" for code in rng.integers(0, 5, n)],
+        }
+    )
+    eta = -0.2 + 0.3 * np.sin(2.0 * frame.x) + 0.1 * frame.z
+    return frame, rng.poisson(np.exp(eta)).astype(np.float64)
+
+
+def _random_effect_features() -> dict[str, Any]:
+    return {
+        "x": Spline(n_knots=5),
+        "z": Numeric(),
+        **{name: RandomEffect() for name in ("segment", "region", "branch")},
+    }
+
+
 @pytest.mark.parametrize("direct_solve", ["gram", "structured"])
 @pytest.mark.parametrize("term", ["factor_smooth", "random_effect"])
 def test_a_model_the_structured_solver_can_fit_takes_the_leverage_route(
@@ -458,28 +482,12 @@ def test_a_model_the_structured_solver_can_fit_takes_the_leverage_route(
     terms every iteration (``leverage_hessian``).
     """
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
-    rng = np.random.default_rng(947)
-    n = 400
-    frame = pd.DataFrame(
-        {
-            "x": rng.uniform(-1.0, 1.0, n),
-            "z": rng.normal(size=n),
-            "segment": [f"s{code}" for code in rng.integers(0, 6, n)],
-            "region": [f"r{code}" for code in rng.integers(0, 4, n)],
-            "branch": [f"b{code}" for code in rng.integers(0, 5, n)],
-        }
-    )
-    eta = -0.2 + 0.3 * np.sin(2.0 * frame.x) + 0.1 * frame.z
-    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    frame, y = _grouped_poisson_frame()
     if term == "factor_smooth":
         features: dict[str, Any] = {"x": Spline(n_knots=5), "z": Numeric()}
         interactions = [FactorSmooth("x", group="segment", k=6)]
     else:
-        features = {
-            "x": Spline(n_knots=5),
-            "z": Numeric(),
-            **{name: RandomEffect() for name in ("segment", "region", "branch")},
-        }
+        features = _random_effect_features()
         interactions = []
     model = SuperGLM(
         family="poisson",
@@ -610,6 +618,78 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
                 bar *= DECREMENT_GRADIENT_CEILING
         assert stop_norm(own[0]) < bar
         assert stop_norm(other[0]) < bar
+
+
+def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch):
+    """A ``1e200`` row with zero weight: the structured leverage route never forms it.
+
+    The row's quadratic form overflows (the event, checked at the first call),
+    and ``0 * inf`` made the gradient NaN and the fit raise.  The route skips
+    rows without a weight derivative, the dense routes' rule
+    (``test_leverage_route_never_forms_a_row_without_weight``), so every
+    gradient is finite and the fit stops at the derivative-Gram fit's
+    objective: within the stopping rule's ``tau (1 + |V|)``, plus the freeze
+    bar per unit of log lambda along any direction either fit froze or clipped
+    (``reml.convergence``, as ``tests/test_nested_structured_fit.py`` bounds a
+    variance at its boundary).  Mutation: with every row formed the fit raises
+    ``StructuredSolverError``.
+    """
+    from superglm.reml.convergence import _freeze_gradient_bar, _score_scale
+    from superglm.solvers.centered_system import grouped_augmented_row_quadratic_forms
+
+    frame, y = _grouped_poisson_frame()
+    frame.loc[0, "z"] = 1.0e200
+    weights = np.ones(len(y))
+    weights[0] = 0.0
+    correction = direct.reml_w_correction
+    gradients: list[np.ndarray] = []
+    overflows: list[bool] = []
+
+    def recorded_correction(*args, **kwargs):
+        result = correction(*args, **kwargs)
+        dm, factor = args[0], args[4]
+        if kwargs.get("leverage_hessian") and isinstance(factor, w_derivatives._ROW_FORM_FACTORS):
+            if not overflows:
+                with np.errstate(over="ignore", invalid="ignore"):
+                    forms = grouped_augmented_row_quadratic_forms(
+                        dm, factor.augmented_factor.row_quadratic_forms
+                    )
+                overflows.append(not np.isfinite(forms[0]))
+            gradients.append(result[0])
+        return result
+
+    def fit() -> SuperGLM:
+        return SuperGLM(
+            family="poisson",
+            features=_random_effect_features(),
+            selection_penalty=0.0,
+            direct_solve="structured",
+        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL, runtime_validation="skip")
+
+    gram = fit()
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
+    leverage = fit()
+
+    assert overflows == [True]
+    assert gradients and all(np.all(np.isfinite(gradient)) for gradient in gradients)
+    names = [pc.name for pc in gram._reml_penalties]
+    flat = np.zeros(len(names), dtype=bool)
+    rho = []
+    for model, mode in ((gram, "derivative_grams"), (leverage, "leverage_tables")):
+        profile = model._reml_profile
+        assert profile["direct_backend"] == "structured"
+        assert profile["reml_w_correction_mode"] == mode
+        assert model._reml_result.converged
+        rho.append(np.log([model._reml_lambdas[name] for name in names]))
+        flat |= np.asarray(profile["reml_freeze_decision"]["frozen"], dtype=bool)
+        flat |= (rho[-1] <= np.log(1e-6) + 1e-12) | (rho[-1] >= np.log(1e10) - 1e-12)
+    objective = gram._reml_result.objective
+    flat_change = float(np.sum(np.abs(rho[1] - rho[0])[flat]))
+    bound = _REML_TOL * _score_scale(objective) + _freeze_gradient_bar(objective, _REML_TOL) * (
+        flat_change
+    )
+    assert abs(leverage._reml_result.objective - objective) <= bound
 
 
 def _binary_response(rng: np.random.Generator, eta: np.ndarray) -> np.ndarray:

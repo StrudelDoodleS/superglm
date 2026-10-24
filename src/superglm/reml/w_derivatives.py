@@ -956,11 +956,12 @@ def reml_w_correction(
     # diagonal of Bates et al. (2015, eqs. 63-65), so the row channel
     # ``w'(h + 1/sum_w) / 2`` forms the exact gradient with no derivative
     # operator.  ``lookup_tables=False`` forms the cross terms instead, from the
-    # derivative operators below and the factor's cross traces.
+    # derivative operators below and the factor's cross traces.  As on the dense
+    # routes, a row without a weight derivative is never formed.
     structured_leverage = leverage_route and isinstance(factor, _ROW_FORM_FACTORS)
     if structured_leverage and lookup_tables:
         leverage = grouped_augmented_row_quadratic_forms(
-            dm, factor.augmented_factor.row_quadratic_forms
+            dm, factor.augmented_factor.row_quadratic_forms, active=dW_deta != 0.0
         )
         penalty_rhs = _penalty_rhs(penalties, lambdas, pirls_result.beta, gms, p)
         grad_correction[:] = centered_rmatvec(0.5 * dW_deta * leverage) @ -factor.solve(penalty_rhs)

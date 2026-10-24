@@ -188,8 +188,8 @@ class LookupPlan:
 
 def _lookup_parts(gm):
     """``(values, transform, codes, level)`` for a lookup group, else ``None``."""
+    from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
     from superglm.group_matrix import (
-        CategoricalGroupMatrix,
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
@@ -201,7 +201,7 @@ def _lookup_parts(gm):
         return gm.B_unique, gm.R_inv, gm.bin_idx, None
     if isinstance(gm, DiscretizedSCOPGroupMatrix):
         return gm.B_scop_unique, None, gm.bin_idx, None
-    if isinstance(gm, CategoricalGroupMatrix):
+    if type(gm) in ONE_HOT_CODE_TYPES:
         return None, None, gm.codes, None
     return None
 

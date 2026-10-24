@@ -31,9 +31,11 @@ from tests.test_reml_leverage_hessian import (
     _correction_inputs,
     _count_row_passes,
     _gamma,
+    _penalty_operands,
     _poisson_frame,
     _poisson_model,
     _rounding_bounds,
+    _term_scales,
 )
 
 
@@ -590,6 +592,110 @@ def test_a_random_effect_is_a_lookup_on_both_leverage_routes():
             solved[rows] = values
     support_bound = _gamma(2 * dm.p + len(dm.group_matrices) + 2) * eta
     assert np.all(np.abs(solved - reference) <= support_bound)
+
+
+class _DoubledCategorical(CategoricalGroupMatrix):
+    """A categorical whose design is twice its codes' one-hot rows, in every operation."""
+
+    __slots__ = ()
+
+    def matvec(self, v):
+        return 2.0 * super().matvec(v)
+
+    def rmatvec(self, w):
+        return 2.0 * super().rmatvec(w)
+
+    def gram(self, W):
+        return 4.0 * super().gram(W)
+
+    def toarray(self):
+        return 2.0 * super().toarray()
+
+    def row_subset(self, idx):
+        return _DoubledCategorical(self.codes[idx], self.n_levels)
+
+
+def test_a_categorical_subclass_keeps_the_routes_that_read_its_own_algebra():
+    """A categorical subclass may change the algebra its codes imply, so no route reads its codes.
+
+    Only the exact types of ``ONE_HOT_CODE_TYPES`` read codes: neither the
+    table plan nor the solved-row support route takes the subclass, and both
+    leverage routes fall back to chunked solved rows of its own ``toarray``.
+    Their gradient is the exact ``sum_r w'_r (x_r' d) (h_r + 1/sum_w) / 2``, ``d
+    = -H^-1 S beta``, of the materialised design within ``2 gamma_K E``
+    (``_rounding_bounds``' ``E`` and ``K``).  Mutation: ``isinstance`` in place
+    of the exact types sends the subclass to both tables, and the gradient
+    changes sign.
+    """
+    import superglm.reml._leverage_rows as leverage_rows
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DesignMatrix
+    from superglm.links import LogLink
+    from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
+    from superglm.types import GroupSlice, PenaltyComponent
+
+    n = 120
+    level = _DoubledCategorical(np.tile([-1, 0, 1], n // 3), 2)
+    dm = DesignMatrix([level], n=n, p=2)
+    beta, intercept, link = np.array([0.2, -0.3]), -0.4, LogLink()
+    design = level.toarray()
+    eta = design @ beta + intercept
+    mu = link.inverse(eta)  # the Poisson/log working weights
+    sum_w = float(np.sum(mu))
+    mean_x = mu @ design / sum_w
+    centred = design - mean_x
+    inverse = np.linalg.inv(centred.T @ (mu[:, None] * centred) + 2.0 * np.eye(2))
+    group = GroupSlice(name="level", start=0, end=2)
+    penalty = PenaltyComponent(
+        name="level",
+        group_name="level",
+        group_index=0,
+        group_sl=group.sl,
+        omega_raw=None,
+        penalty_kind="identity",
+    )
+    lambdas = {"level": 2.0}
+    result = PIRLSResult(
+        beta=beta,
+        intercept=intercept,
+        n_iter=1,
+        deviance=0.0,
+        converged=True,
+        phi=1.0,
+        effective_df=2.0,
+        reml_geometry=REMLGeometrySummary(mean_x=mean_x, sum_w=sum_w, column_scale=np.ones(2)),
+    )
+    case = {
+        "dm": dm,
+        "link": link,
+        "groups": [group],
+        "pirls_result": result,
+        "XtWX_S_inv": inverse,
+        "lambdas": lambdas,
+        "sample_weight": np.ones(n),
+        "offset_arr": np.zeros(n),
+        "distribution": Poisson(),
+        "reml_penalties": [penalty],
+    }
+    weight_derivative = w_derivatives.compute_dW_deta(link, Poisson(), mu, eta, np.ones(n))
+    smoothing, penalty_rhs = _penalty_operands(dm, [penalty], lambdas, beta)
+    direction = -inverse @ penalty_rhs[:, 0]
+    leverage = np.einsum("ij,jk,ik->i", centred, inverse, centred)
+    reference = 0.5 * np.sum(weight_derivative * (centred @ direction) * (leverage + 1.0 / sum_w))
+    magnitude = np.abs(centred) + np.abs(mean_x)
+    gradient_scale, _ = _term_scales(
+        magnitude, inverse, weight_derivative, penalty_rhs, smoothing, sum_w
+    )
+    bound = 2.0 * _gamma(n + 4 * dm.p + 16) * gradient_scale
+
+    for lookup_tables in (True, False):
+        gradient, _, cross = w_derivatives.reml_w_correction(
+            **case, leverage_hessian=True, lookup_tables=lookup_tables
+        )
+        assert np.all(np.abs(gradient - reference) <= bound)
+        assert cross is not None  # solved rows, never the tables
+    assert leverage_tables.lookup_plan(dm) is None
+    assert leverage_rows._support_plan(dm, inverse, mean_x, None) is None
 
 
 def test_an_empty_categorical_adds_nothing_to_the_tables():

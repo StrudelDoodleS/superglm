@@ -199,6 +199,14 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
         )
 
 
+# The exact types whose rows are the one-hot rows of their codes (the sink code
+# ``n_levels`` an empty row).  A route that reads ``codes`` in place of the
+# group's own products admits these types only, never a subclass, whose algebra
+# may differ.  A random effect adds metadata, not algebra; its codes run ``0 ..
+# n_levels - 1``, so a table's sink row is simply never read.
+ONE_HOT_CODE_TYPES = (CategoricalGroupMatrix, RandomEffectGroupMatrix)
+
+
 class FactorSmoothGroupMatrix:
     """Compact all-level factor-by-spline matrix.
 
