@@ -891,16 +891,25 @@ def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(m
     curvature. The second pass leaves it at 4e-4 of the bound on every step.
     """
     from superglm import Numeric, PSpline
+    from superglm.solvers import scop_newton
     from superglm.solvers.rank import _gamma_up
 
-    captured = []
-    rows_of = SCOPJointNewton._schur_rows
+    captured, roots = [], []
+    rows_of, resolved_of = SCOPJointNewton._schur_rows, scop_newton._resolved_root
 
     def capture(self, *args):
         captured.append(rows_of(self, *args))
         return captured[-1]
 
+    def resolve(*args, own):
+        calls = len(captured)
+        root, score = resolved_of(*args, own=own)
+        if len(captured) > calls:  # this decision was the rows'
+            roots.append((root, own))
+        return root, score
+
     monkeypatch.setattr(SCOPJointNewton, "_schur_rows", capture)
+    monkeypatch.setattr(scop_newton, "_resolved_root", resolve)
     rng = np.random.default_rng(3)
     n = 150
     x = rng.uniform(0, 1, n)
@@ -920,11 +929,16 @@ def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(m
 
     aliased = fit({"x": Numeric(), "a": Numeric(), "b": Numeric(), "s": convex})
     assert aliased.result.converged
-    assert captured
-    for factor, scale, count in captured:
+    assert captured and len(roots) == len(captured)
+    for (factor, rounding, count), (root, own) in zip(captured, roots, strict=True):
         q = factor.shape[1]
-        singular = np.linalg.svd(factor / scale[None, :], compute_uv=False)
-        assert np.sum(singular > _gamma_up(count) * np.sqrt(q)) == q - 1
+        norms = np.where(own > 0.0, own, 1.0)
+        singular = np.linalg.svd(factor / norms[None, :], compute_uv=False)
+        # the step keeps the q - 1 directions above the rows' cut and holds the alias,
+        # which is within the rows' own rounding in the columns' scale
+        assert root.shape[0] == q - 1
+        assert np.sum(singular > scop_newton._row_cut(rounding / norms, count)) == q - 1
+        assert singular[-1] <= _gamma_up(count) * np.linalg.norm(rounding / norms)
 
     alone = fit({"a": Numeric(), "b": Numeric(), "s": convex})
     # two certified modes of one model (the certificate's bar, sqrt(r eps), each)
