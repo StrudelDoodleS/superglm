@@ -1237,6 +1237,113 @@ def _certify_centered_factor(
     return cached
 
 
+def _retained_rank_info(
+    centered_final: CenteredSystem,
+    W: NDArray,
+    augmented_rank: RankDecomposition,
+    feature_edf: NDArray,
+    *,
+    dm: DesignMatrix,
+    groups: list[GroupSlice],
+    p: int,
+    _use_qr: bool,
+    _X_full: NDArray | None,
+    _return_working_system: bool,
+    certify_centered_factor: Callable[..., _CenteredFactorCertification],
+) -> RankInfo:
+    """The data-subspace metadata only retained-fit inference reads.
+
+    A pure function of this fit's final centred system and
+    weights, so it is the same whether it runs here or, for a
+    caller that does not yet know whether this fit is the one it
+    publishes (``_defer_rank_info``), after the solve returns.
+
+    Owner and lifetime: the caller's model, from the solve until
+    ``fit_ops._install_deferred_rank_info`` runs it or the next
+    REML attempt drops it. The centred system, weights, augmented
+    decomposition and EDF are bound by ``partial`` with the design
+    (``dm``, read by the data-rank factor route), which is read when it
+    runs, so the invariant is that nothing mutates the design's group
+    matrices in place in between (``update_reml_r_inv`` writes the
+    specs; ``release_leaf_memo`` drops a memo only). The QR backend
+    never defers (``_final_geometry``), so ``_X_full`` is not kept.  It
+    is never a method of the fit object, which it would keep alive (#492).
+    """
+    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
+        centered_final.mean_x, centered_final.mean_x
+    )
+    coefficient_rank = decompose_gram_if_authoritative(M_beta)
+    if coefficient_rank is None:
+        certification = certify_centered_factor(centered_final, W)
+        raw_factor = np.vstack(
+            (
+                certification.factor,
+                np.sqrt(centered_final.sum_w) * centered_final.mean_x,
+            )
+        )
+        coefficient_rank = decompose_factor(raw_factor)
+    if _use_qr:
+        sqrtW = np.sqrt(W)
+        A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
+        data_rank = decompose_factor(A_data_final)
+    else:
+        # The export rows are Fisher (``prefer_observed=False``), whose
+        # weights are nonnegative: the data Gram is PSD by construction,
+        # so a negative eigenvalue at its null is formation rounding and
+        # sends the rank to the factor below instead of raising.
+        final_centre, final_centre_lo = centered_final.centre_pair()
+
+        def data_factor_rank() -> RankDecomposition:
+            if not np.any(centered_final.penalty):
+                return certify_centered_factor(centered_final, W).decomposition
+            return decompose_factor(
+                grouped_weighted_factor(
+                    dm,
+                    W,
+                    center=final_centre,
+                    center_lo=final_centre_lo,
+                )
+            )
+
+        # Unpenalized, the data Gram is the Hessian, whose factor
+        # certificate the fit already holds for its standard
+        # errors (``reml_slope_rank``); reading it costs nothing.
+        data_rank = decide_data_rank(
+            centered_final.data_gram,
+            data_factor_rank,
+            project=lambda basis: grouped_projected_factor(
+                dm, W, basis, center=final_centre, center_lo=final_centre_lo
+            ),
+            structural=lambda: grouped_structural_nulls(
+                dm, W, center=final_centre, center_lo=final_centre_lo
+            ),
+            rows=dm.n,
+            psd_by_construction=not _return_working_system,
+            certify=not np.any(centered_final.penalty),
+        )
+    group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
+    selected_columns = np.arange(p, dtype=int)
+    selected_columns.setflags(write=False)
+    feature_edf.setflags(write=False)
+    return RankInfo(
+        policy_version=SHARED_RANK_POLICY.version,
+        coordinate_space="solver",
+        selected_columns=selected_columns,
+        selected_group_names=tuple(g.name for g in groups),
+        sum_w=centered_final.sum_w,
+        mean_x=centered_final.mean_x,
+        intercept_edf=1.0,
+        data=data_rank,
+        augmented=augmented_rank,
+        coefficient=coefficient_rank,
+        feature_edf=feature_edf,
+        group_edf=group_edf,
+        objective_loss=None,
+        data_gram=centered_final.data_gram,
+        data_gram_weights=weights_fingerprint(W),
+    )
+
+
 def _fit_irls_direct_once(**kwargs):
     """Run one ``_IRLSDirectFit``: the module-level name callers and tests wrap."""
     return _IRLSDirectFit(**kwargs).run()
@@ -1475,846 +1582,12 @@ class _IRLSDirectFit:
                 if retained.penalized_deviance is None
                 else retained.penalized_deviance
             )
-        A_all, S, S_override, W = self.A_all, self.S, self.S_override, self.W
-        XtWX_beta = self.XtWX_beta
-        _compensate_centred_intercept = self._compensate_centred_intercept
-        _compute_fit_statistics = self._compute_fit_statistics
-        _compute_reml_geometry = self._compute_reml_geometry
-        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
-        _defer_rank_info = self._defer_rank_info
-        _direct_fallback_reason = self._direct_fallback_reason
-        _expose_exact_support_state = self._expose_exact_support_state
-        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
-        _judged_truncated, _last_mode_residual = self._judged_truncated, self._last_mode_residual
-        _last_true_residual, _last_truncated = self._last_true_residual, self._last_truncated
-        _last_working_centered = self._last_working_centered
-        _last_working_offset_mean = self._last_working_offset_mean
-        _last_working_structured = self._last_working_structured
-        _mean_space_invalid = self._mean_space_invalid
-        _retain_reml_decomposition = self._retain_reml_decomposition
-        _return_working_system, _scop_curvature = self._return_working_system, self._scop_curvature
-        _scop_state, _state_center = self._scop_state, self._state_center
-        _structured_group_index = self._structured_group_index
-        _structured_layout, _t_deviance = self._structured_layout, self._t_deviance
-        _t_deviance_eval, _t_eta, _t_gram = self._t_deviance_eval, self._t_eta, self._t_gram
-        _t_solve, _t_working, _true_confirmed = self._t_solve, self._t_working, self._true_confirmed
-        _true_stop, _true_stop_ratio, _use_qr = self._true_stop, self._true_stop_ratio, self._use_qr
-        _use_structured, abs_A_all, b_all = self._use_structured, self.abs_A_all, self.b_all
-        beta, cache_out = self.beta, self.cache_out
-        certify_centered_factor = self.certify_centered_factor
-        compute_rank_info, converged, dev = self.compute_rank_info, self.converged, self.dev
-        deviance_relative_change, direct_solve = self.deviance_relative_change, self.direct_solve
-        dm, eta, eta_unclipped, family = self.dm, self.eta, self.eta_unclipped, self.family
-        get_centered_system, gms, groups = self.get_centered_system, self.gms, self.groups
-        has_constraints, intercept = self.has_constraints, self.intercept
-        iteration_log, lambda2, link = self.iteration_log, self.lambda2, self.link
-        max_iter, mode_bar, mu, offset = self.max_iter, self.mode_bar, self.mu, self.offset
-        p, profile, record_diagnostics = self.p, self.profile, self.record_diagnostics
-        reml_penalties, retained = self.reml_penalties, self.retained
-        retained_qp_converged = self.retained_qp_converged
-        return_scop_state, return_xtwx = self.return_scop_state, self.return_xtwx
-        separation, step_rejected = self.separation, self.step_rejected
-        structured_decision, t_start = self.structured_decision, self.t_start
-        termination_reason, w_ratio = self.termination_reason, self.w_ratio
-        weight_semantics, weights = self.weight_semantics, self.weights
-        working_eta, working_mu, working_rows = self.working_eta, self.working_mu, self.working_rows
-        y, z = self.y, self.z
-        if self._use_qr:
-            _X_full = self._X_full
-        if self._has_scop:
-            _scop_newton, _scop_order = self._scop_newton, self._scop_order
-        t_elapsed = time.perf_counter() - t_start
-        logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
-
-        # A published Gaussian identity fit carries its centred intercept as the
-        # compensated pair (alpha, alpha_lo): alpha's weighted mean rounds by a
-        # kernel-dependent ulp or more, and alpha + (x - c) beta ties at every row
-        # when alpha* is the midpoint of two adjacent floats, so a one-ulp signal
-        # between two levels collapsed on some BLAS kernels.  The deviance and
-        # scale published below are the compensated predictor's, the eta every
-        # consumer reads (``mode_score.linear_predictor``).
-        centred_intercept_lo: float | None = None
-        if (
-            _compensate_centred_intercept
-            and _compute_fit_statistics
-            and retained.centred_intercept is not None
-            and _state_center is not None
-            and type(family) is Gaussian
-            and type(link) is IdentityLink
-        ):
-            contribution = centred_matvec(dm, beta, _state_center)
-            centred_intercept_lo = centred_intercept_remainder(
-                y, weights, offset, retained.centred_intercept, contribution
-            )
-            if centred_intercept_lo is not None:
-                contribution += centred_intercept_lo
-                eta_unclipped = (retained.centred_intercept + contribution) + offset
-                eta = stabilize_eta(eta_unclipped, link)
-                mu = clip_mu(link.inverse(eta), family)
-                dev = weighted_row_sum(weights, family.deviance_unit, y, mu)
-
-        # Runtime separation backstop (issue #341).  Two terminal signatures mark
-        # a coefficient that walked toward +/-infinity instead of converging:
-        #
-        # * the retained linear predictor is pinned at the link's overflow guard
-        #   on rows that carry weight -- the guard, not the likelihood, stopped
-        #   the walk, and it also manufactures "convergence" by freezing the
-        #   coefficient once eta saturates;
-        # * the budget ran out with a frozen deviance while the coefficient
-        #   criterion still failed -- the field trace of issue #340/#341.
-        #
-        # Both require the extreme working-weight range that a drifting cell
-        # produces.  The build-time scan names cell separation before fitting
-        # starts; this catches what the design scan cannot see (non-categorical
-        # indicator structure), promoting a debug-level log line to a named
-        # warning or, in strict mode, an error.
-        if separation != "ignore" and np.isfinite(dev):
-            from superglm.diagnostics.separation import (
-                EXTREME_WEIGHT_RATIO,
-                STAGNANT_DEVIANCE_DELTA,
-                SeparationError,
-                SeparationWarning,
-                drifting_groups,
-                format_runtime_message,
-            )
-
-            separation_ratio = _separation_weight_ratio(
-                working_rows.curvature_source,
-                w_ratio,
-                family=family,
-                link=link,
-                mu=working_mu,
-                eta=working_eta,
-                weights=weights,
-            )
-            if separation_ratio > EXTREME_WEIGHT_RATIO:
-                pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
-                exhausted_stagnant = (
-                    not converged
-                    # A warm-started micro-budget solve (REML performance
-                    # iterations run max_iter=1) exhausts its budget by
-                    # construction; only a real budget makes exhaustion-with-
-                    # stagnation evidence of a drift (the field trace ran 100).
-                    and max_iter >= 10
-                    and it + 1 >= max_iter
-                    and not step_rejected
-                    and deviance_relative_change < STAGNANT_DEVIANCE_DELTA
-                )
-                if pinned or exhausted_stagnant:
-                    drifting = drifting_groups(dm, groups, beta, eta, eta_unclipped, weights)
-                    message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
-                    if separation == "error":
-                        raise SeparationError(message)
-                    held_warnings.warn(message, SeparationWarning, stacklevel=2)
-
-        if has_constraints:
-            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
-                raise RuntimeError("constrained fit omitted its aggregate constraint system")
-            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=abs_A_all):
-                minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
-                converged = False
-                termination_reason = "constraint_infeasible"
-                logger.warning(
-                    "fit_irls_direct: retained coefficient mode violates hard constraints "
-                    "(minimum scaled slack %.3e, tolerance %.1e); fit is not converged.",
-                    minimum_scaled_slack,
-                    _QP_FEASIBILITY_TOL,
-                )
-            elif not retained_qp_converged:
-                converged = False
-                termination_reason = "constraint_kkt_incomplete"
-                logger.warning(
-                    "fit_irls_direct: retained coefficient mode has no complete "
-                    "constrained-QP KKT certificate; fit is not converged."
-                )
-
-        # A returned state with rows at the mean-space boundary is not a mode of
-        # the model: their capped mean makes the deviance flat there, and the
-        # maximum it approaches is constrained, not stationary.  It is never
-        # converged, whatever stopped the loop (``mean_space_boundary_rows``).
-        _boundary_rows = (
-            0
-            if _mean_space_invalid is None
-            else mean_space_boundary_rows(family, link, eta_unclipped, weights)
-        )
-        if _boundary_rows:
-            converged = False
-            termination_reason = "mean_space_boundary"
-            logger.info(
-                "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
-                "the penalized maximum is constrained, fit is not converged.",
-                _boundary_rows,
-            )
-        # The truncated directions published.  A judgement of the returned state
-        # (the certificate read its eta) is the fit's own: published as it is, and
-        # the only one that may decide the verdict.  The returned state of a
-        # rejected step is the committed one, so its judgement counts.  When the
-        # returned state was never judged, a fit that is not converged publishes
-        # the latest judgement that found any as history (``earlier``), so a
-        # refusal stays disclosed, and it decides nothing.
-        _judged_eta, _judged = _judged_truncated[0]
-        if _judged_eta is not None and _judged_eta is eta_unclipped:
-            _published_truncated = _judged
-        elif converged:
-            _published_truncated = ()
-        else:
-            _published_truncated = tuple(
-                replace(record, earlier=True) for record in _last_truncated[0][1]
-            )
-        _boundary_sets = [
-            record for record in _published_truncated if record.boundary and not record.earlier
-        ]
-        # rows rising to the boundary along a direction the factorization
-        # truncates relabel only an exit the loop ran out on, never a
-        # non-finite deviance or a constraint's verdict
-        _truncated_boundary = bool(
-            not converged
-            and not _boundary_rows
-            and _boundary_sets
-            and termination_reason in ("max_iter", "score_stagnated", "step_rejected")
-        )
-        if _truncated_boundary:
-            # rows whose supremum along a direction the factorization truncates
-            # is the boundary (``TruncatedDirection.boundary``): the same verdict
-            # as rows held at it, though float64 cannot carry them there
-            termination_reason = "mean_space_boundary"
-            _boundary_rows = sum(record.row_count for record in _boundary_sets)
-            logger.info(
-                "fit_irls_direct: %d row(s) rise towards the boundary of the family's mean "
-                "space along a direction float64 cannot resolve; fit is not converged.",
-                _boundary_rows,
-            )
-
-        if _has_scop:
-            # Final Gram and SCOP Hessian caches must describe the retained model,
-            # not the working state or a discarded full proposal.
-            final_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu,
-                eta=eta,
-                sample_weight=weights,
-                prefer_observed=False,
-            )
-            W = final_rows.weights
-            z = final_rows.response
-
-            # ``block_curvature`` takes no step, so however the loop exited (a
-            # rejected last step included) the curvature, fallback flag and
-            # discarded directions are the retained model's. The working residual
-            # is read off the exact committed predictor; rebuilding X beta +
-            # intercept would lose score digits for a translated ordinary column.
-            terminal = _scop_newton.block_curvature(
-                [_scop_state[gi]["beta_scop"] for gi in _scop_order],
-                W=W,
-                z=z,
-                eta=eta_unclipped,
-            )
-            for gi, refresh in terminal.items():
-                _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
-                _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
-                _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
-
-        # Every public/exported matrix and rank claim is evaluated at the retained
-        # model. Private fREML performance iterations deliberately reuse the
-        # working system used for their one coefficient update.
-        if not _return_working_system:
-            export_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu,
-                eta=eta,
-                sample_weight=weights,
-                prefer_observed=False,
-            )
-            W = export_rows.weights
-            z = export_rows.response
-
-        # Accumulate phase timing into the profile dict if provided
-        if profile is not None:
-            profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + _t_working
-            profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + _t_gram
-            profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + _t_solve
-            profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + _t_deviance
-            profile["irls_eta_s"] = profile.get("irls_eta_s", 0.0) + _t_eta
-            profile["irls_deviance_eval_s"] = (
-                profile.get("irls_deviance_eval_s", 0.0) + _t_deviance_eval
-            )
-            profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
-            profile["irls_calls"] = profile.get("irls_calls", 0) + 1
-            profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
-            if _boundary_rows:
-                profile["irls_mean_space_boundary_calls"] = (
-                    profile.get("irls_mean_space_boundary_calls", 0) + 1
-                )
-            if _true_stop and _last_true_residual[0] is not None:
-                # the true-score certificate decided the last iteration (Newton
-                # steps): its score, floors and exclusions are the stop rule's
-                true_residual = _last_true_residual[0]
-                profile["irls_mode_rule"] = "mean_space_mode_score"
-                profile["irls_mode_score"] = mode_bar * _true_stop_ratio
-                profile["irls_mode_bar"] = mode_bar
-                profile["irls_mode_floor_binding"] = true_residual.floor_binding
-                profile["irls_mode_weakly_identified"] = tuple(
-                    int(index) for index in np.flatnonzero(true_residual.excluded)
-                )
-            elif _last_mode_residual is not None:
-                # §3.8, §3.9: the stop rule's last score, whether a derived floor
-                # bound it, and the slopes it flagged weakly identified and kept.
-                profile["irls_mode_score"] = mode_bar * _last_mode_residual.ratio()
-                profile["irls_mode_bar"] = mode_bar
-                profile["irls_mode_floor_binding"] = _last_mode_residual.floor_binding
-                profile["irls_mode_weakly_identified"] = tuple(
-                    int(index) for index in np.flatnonzero(_last_mode_residual.excluded)
-                )
-
-        # Preserve the raw coefficient-space payload used by REML separately from
-        # the centered inference system. The structured path retains the same
-        # moments in block form and never materializes the dominant K x K block.
-        centered_final: CenteredSystem | None = None
-        structured_final: (
-            FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
-        ) = None
-        if _use_structured:
-            if _return_working_system:
-                if _last_working_structured is None:
-                    raise RuntimeError("working structured system was not computed")
-                structured_final = _last_working_structured
-            else:
-                if _structured_group_index is None:  # pragma: no cover - selection invariant
-                    raise RuntimeError("Structured backend has no dominant group.")
-                z_off = z - offset
-                structured_final = build_structured_system(
-                    gms,
-                    groups,
-                    W,
-                    W * z_off,
-                    signed=export_rows.curvature_source == "observed",
-                    dominant_group_index=_structured_group_index,
-                    layout=_structured_layout,
-                    prior_weights=weights,
-                )
-            _final_penalized_operator = build_penalized_structured_operator(
-                structured_final,
-                gms,
-                groups,
-                lambda2,
-                reml_penalties=reml_penalties,
-                S_override=S_override,
-            )
-            XtW1 = np.empty(p, dtype=np.float64)
-            XtW1[structured_final.operator.small_indices] = structured_final.xtw_small
-            XtW1[structured_final.operator.structured_indices] = structured_final.xtw_structured
-            XtWz = np.empty(p, dtype=np.float64)
-            XtWz[structured_final.operator.small_indices] = structured_final.xtwz_small
-            XtWz[structured_final.operator.structured_indices] = structured_final.xtwz_structured
-            sum_W = structured_final.sum_w
-            sum_Wz = structured_final.sum_wz
-            mean_x = XtW1 / sum_W
-            mean_z = sum_Wz / sum_W
-            centered_rhs = XtWz - XtW1 * mean_z
-            XtWX = None
-            offset_mean_final = None
-        else:
-            if _return_working_system:
-                if _last_working_centered is None:
-                    raise RuntimeError("working centered system was not computed")
-                centered_final = _last_working_centered
-                offset_mean_final = _last_working_offset_mean
-            else:
-                z_off = z - offset
-                centered_final = get_centered_system(W, z_off)
-                offset_mean_final = (
-                    None
-                    if _state_center is None or cache_out is None
-                    else _system_offset_mean(dm, W, centered_final, _state_center)
-                )
-            XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
-            sum_W = centered_final.sum_w
-            mean_x = centered_final.mean_x
-            mean_z = centered_final.mean_z
-            centered_rhs = centered_final.rhs
-
-        # Cache final-iteration raw and stable centered quantities for the cached-W
-        # fREML optimizer. These allow re-solving the profiled-intercept system with
-        # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
-        if cache_out is not None:
-            if _use_structured:
-                if structured_final is None:  # pragma: no cover - branch invariant
-                    raise RuntimeError(
-                        "Structured fit did not produce final sufficient statistics."
-                    )
-                cache_out["structured_system"] = structured_final
-                cache_out["structured_operator"] = structured_final.operator
-                cache_out["penalized_operator"] = _final_penalized_operator
-                cache_out["xtwz_small"] = structured_final.xtwz_small
-                cache_out["xtwz_structured"] = structured_final.xtwz_structured
-                if not _return_working_system and isinstance(
-                    structured_final, FactorSmoothLeafSystem
-                ):
-                    # The retained estimability rule reads these (a nested chain
-                    # certifies its border on its own leaf-shifted moments).
-                    cache_out["structured_row_column_norm"] = cancelled_column_row_norms(
-                        centred_data_operator(structured_final), dm, W
-                    )
-            else:
-                if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
-                    raise RuntimeError("Dense fit did not produce a centered system.")
-                cache_out["XtWX"] = XtWX
-                cache_out["centered_XtWX"] = centered_final.data_gram
-                # the pair the Gram was centred about (``(mean_x, None)`` without a dense column)
-                cache_out["centre_pair"] = centered_final.centre_pair()
-                # mean_x less the state's centre, formed on centred rows: a cached
-                # trial's centred intercept (``reml.discrete``) reads it
-                cache_out["centre_offset_mean"] = offset_mean_final
-                # the matrix the slope decomposition was taken of (the identified
-                # part of the Laplace approximation restricts it, ``reml.identified``)
-                cache_out["centered_hessian"] = centered_final.hessian
-                # the rows its Gram summed: its formation bound's length
-                # (``reml.discrete._profiled_formation_error``)
-                cache_out["n_rows"] = int(dm.n)
-            cache_out["XtWz"] = XtWz
-            cache_out["XtW1"] = XtW1
-            cache_out["sum_W"] = sum_W
-            cache_out["sum_Wz"] = sum_Wz
-            cache_out["centered_rhs"] = centered_rhs
-            cache_out["mean_x"] = mean_x
-            cache_out["mean_z"] = mean_z
-            if _has_scop:
-                # The SCOP LAML mode certificate must evaluate the exact retained
-                # predictor. Reconstructing a huge translated column plus its
-                # compensating intercept can otherwise manufacture a false KKT
-                # residual several orders above tolerance.
-                cache_out["eta_unclipped"] = eta_unclipped
-
-        # REML works in the full (intercept, slopes) coefficient space.  Profiling
-        # the unpenalized intercept yields the centered Schur complement H_c.  Its
-        # inverse is the slope block of H_aug^{-1}, while the unit-determinant
-        # centering transform gives log|H_aug| = log(sum(W)) + log|H_c| at full
-        # rank. With aliases, the same expression is the retained centered-space
-        # determinant measure, not the raw augmented pseudo-determinant.
-        _t0 = time.perf_counter()
-        structured_factor: (
-            ProfiledFactorSmoothLeafFactor
-            | ProfiledSumToZeroTreeFactor
-            | ProfiledNestedSchurFactor
-            | None
-        ) = None
-        reml_geometry_summary: REMLGeometrySummary | None = None
-        if _use_structured:
-            if structured_final is None or _final_penalized_operator is None:
-                raise RuntimeError("Structured fit did not produce final coefficient blocks.")
-            with _structured_solver_errors():
-                augmented_factor, _ = build_augmented_structured_factor(
-                    structured_final, _final_penalized_operator
-                )
-            if isinstance(augmented_factor, SumToZeroTreeFactor):
-                structured_factor = ProfiledSumToZeroTreeFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=structured_final.sum_w,
-                    xtw=XtW1,
-                )
-            elif isinstance(augmented_factor, FactorSmoothLeafFactor):
-                structured_factor = ProfiledFactorSmoothLeafFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=structured_final.sum_w,
-                    xtw=XtW1,
-                )
-            elif isinstance(augmented_factor, NestedSchurFactor) and isinstance(
-                structured_final, NestedStructuredSystem
-            ):
-                structured_factor = ProfiledNestedSchurFactor(
-                    augmented_factor=augmented_factor,
-                    sum_w=structured_final.sum_w,
-                    xtw=XtW1,
-                    data_operator=structured_final.operator,
-                )
-            else:  # pragma: no cover - structured dispatch invariant
-                raise TypeError("Unsupported structured factor geometry.")
-            XtWX_beta = structured_final.operator
-            if _compute_reml_geometry:
-                XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
-                with _structured_solver_errors():
-                    log_det_H: float | None = augmented_factor.logdet()
-                reml_hessian_rank: int | None = augmented_factor.rank
-            else:
-                XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
-                log_det_H = None
-                reml_hessian_rank = None
-            # Structured Schur factors have their own retained-factor protocol;
-            # the dense-decomposition seam does not apply here.
-            retained_reml_decomposition: RankDecomposition | None = None
-            if _compute_fit_statistics:
-                edf_operator = (
-                    CenteredBlockOperator(
-                        raw=XtWX_beta,
-                        cross=XtW1,
-                        total=sum_W,
-                        center=mean_x,
-                    )
-                    if isinstance(
-                        XtWX_beta,
-                        BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator,
-                    )
-                    else XtWX_beta
-                )
-                with _structured_solver_errors():
-                    p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
-            else:
-                p_eff = 0.0
-            # Structured retained-fit inference consumes the factor directly. A
-            # dense RankInfo would defeat the backend's O(K q + q²) memory bound.
-            rank_info = None
-        else:
-            if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
-                raise RuntimeError("Dense fit did not produce a centered system.")
-            XtWX_beta = XtWX
-            reml_slope_rank: RankDecomposition | None
-            if _compute_reml_geometry:
-                reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
-                if reml_slope_rank is None:
-                    certification = certify_centered_factor(
-                        centered_final,
-                        W,
-                    )
-                    reml_slope_rank = certification.decomposition
-                XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
-                log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
-                reml_hessian_rank = 1 + reml_slope_rank.rank
-                # O(p) summary of the centered system for the REML gradient and
-                # objective, so the loop can run without per-fit rank metadata.
-                # column_scale matches decompose_gram's definition bit-for-bit.
-                reml_geometry_summary = REMLGeometrySummary(
-                    mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
-                    sum_w=float(centered_final.sum_w),
-                    column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
-                    mean_hi=centered_final.mean_hi,
-                    mean_lo=centered_final.mean_lo,
-                )
-            else:
-                reml_slope_rank = None
-                XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
-                log_det_H = None
-                reml_hessian_rank = None
-            retained_reml_decomposition = reml_slope_rank if _retain_reml_decomposition else None
-
-            if _compute_fit_statistics:
-                if reml_slope_rank is None:  # pragma: no cover - validated above
-                    raise RuntimeError("fit statistics require generic REML geometry")
-                augmented_rank = reml_slope_rank
-                final_system = centered_final
-                feature_edf = _feature_edf(
-                    centered_final,
-                    augmented_rank,
-                    lambda exponent: grouped_augmented_factor(
-                        dm,
-                        np.ldexp(W, -exponent),
-                        np.ldexp(final_system.penalty, -exponent),
-                        center=final_system.mean_x,
-                    ),
-                )
-                feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
-                p_eff = 1.0 + float(np.sum(feature_edf))
-
-                def retained_rank_info(
-                    centered_final=centered_final,
-                    W=W,
-                    augmented_rank=augmented_rank,
-                    feature_edf=feature_edf,
-                ) -> RankInfo:
-                    """The data-subspace metadata only retained-fit inference reads.
-
-                    A pure function of this fit's final centred system and
-                    weights, so it is the same whether it runs here or, for a
-                    caller that does not yet know whether this fit is the one it
-                    publishes (``_defer_rank_info``), after the solve returns.
-
-                    Owner and lifetime: the caller's model, from the solve until
-                    ``fit_ops._install_deferred_rank_info`` runs it or the next
-                    REML attempt drops it. The centred system, weights, augmented
-                    decomposition and EDF are bound here; the design (``dm``,
-                    read by the data-rank factor route) is read when it runs, so
-                    the invariant is that nothing mutates the design's group
-                    matrices in place in between (``update_reml_r_inv`` writes
-                    the specs; ``release_leaf_memo`` drops a memo only). The QR
-                    backend never defers (below), so ``_X_full`` is not kept.
-                    """
-                    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
-                        centered_final.mean_x, centered_final.mean_x
-                    )
-                    coefficient_rank = decompose_gram_if_authoritative(M_beta)
-                    if coefficient_rank is None:
-                        certification = certify_centered_factor(centered_final, W)
-                        raw_factor = np.vstack(
-                            (
-                                certification.factor,
-                                np.sqrt(centered_final.sum_w) * centered_final.mean_x,
-                            )
-                        )
-                        coefficient_rank = decompose_factor(raw_factor)
-                    if _use_qr:
-                        sqrtW = np.sqrt(W)
-                        A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
-                        data_rank = decompose_factor(A_data_final)
-                    else:
-                        # The export rows are Fisher (``prefer_observed=False``), whose
-                        # weights are nonnegative: the data Gram is PSD by construction,
-                        # so a negative eigenvalue at its null is formation rounding and
-                        # sends the rank to the factor below instead of raising.
-                        final_centre, final_centre_lo = centered_final.centre_pair()
-
-                        def data_factor_rank() -> RankDecomposition:
-                            if not np.any(centered_final.penalty):
-                                return certify_centered_factor(centered_final, W).decomposition
-                            return decompose_factor(
-                                grouped_weighted_factor(
-                                    dm,
-                                    W,
-                                    center=final_centre,
-                                    center_lo=final_centre_lo,
-                                )
-                            )
-
-                        # Unpenalized, the data Gram is the Hessian, whose factor
-                        # certificate the fit already holds for its standard
-                        # errors (``reml_slope_rank``); reading it costs nothing.
-                        data_rank = decide_data_rank(
-                            centered_final.data_gram,
-                            data_factor_rank,
-                            project=lambda basis: grouped_projected_factor(
-                                dm, W, basis, center=final_centre, center_lo=final_centre_lo
-                            ),
-                            structural=lambda: grouped_structural_nulls(
-                                dm, W, center=final_centre, center_lo=final_centre_lo
-                            ),
-                            rows=dm.n,
-                            psd_by_construction=not _return_working_system,
-                            certify=not np.any(centered_final.penalty),
-                        )
-                    group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
-                    selected_columns = np.arange(p, dtype=int)
-                    selected_columns.setflags(write=False)
-                    feature_edf.setflags(write=False)
-                    return RankInfo(
-                        policy_version=SHARED_RANK_POLICY.version,
-                        coordinate_space="solver",
-                        selected_columns=selected_columns,
-                        selected_group_names=tuple(g.name for g in groups),
-                        sum_w=centered_final.sum_w,
-                        mean_x=centered_final.mean_x,
-                        intercept_edf=1.0,
-                        data=data_rank,
-                        augmented=augmented_rank,
-                        coefficient=coefficient_rank,
-                        feature_edf=feature_edf,
-                        group_edf=group_edf,
-                        objective_loss=None,
-                        data_gram=centered_final.data_gram,
-                        data_gram_weights=weights_fingerprint(W),
-                    )
-
-                if compute_rank_info or (_defer_rank_info is not None and _use_qr):
-                    # A deferred QR-backend computation would keep the dense
-                    # (n, p) design alive until install; it is computed here.
-                    rank_info = retained_rank_info()
-                else:
-                    rank_info = None
-                    if _defer_rank_info is not None:
-                        _defer_rank_info.append(retained_rank_info)
-            else:
-                p_eff = 0.0
-                rank_info = None
-        if profile is not None:
-            _t_finalize = time.perf_counter() - _t0
-            profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
-
-        _resolved_direct_backend = (
-            "structured" if _use_structured else ("qr" if _use_qr else "gram")
-        )
-        if profile is not None:
-            profile["direct_backend"] = _resolved_direct_backend
-            profile["direct_fallback_reason"] = _direct_fallback_reason
-            # Repeated inner solves stay quiet; the REML drivers own the INFO line.
-            record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
-            if structured_factor is not None:
-                profile["structured_dominant_group"] = structured_factor.dominant_group_name
-                profile["structured_chain"] = tuple(
-                    groups[index].name for index in structured_decision.chain_group_indices
-                )
-                profile["structured_nested_fallback_reason"] = (
-                    structured_decision.nested_fallback_reason
-                )
-                border_certificate = getattr(structured_factor, "border_certificate", None)
-                if border_certificate is not None:
-                    # §3.6 step 5: every null direction the border factorization
-                    # truncated, disclosed with its certificate.
-                    profile["structured_border_rank"] = border_certificate.rank
-                    profile["structured_border_tau"] = border_certificate.tau
-                    profile["structured_border_verification_decrements"] = (
-                        border_certificate.decrements
-                    )
-                    profile["structured_border_trailing_bound"] = border_certificate.trailing_bound
-                    profile["structured_border_deflated"] = border_certificate.deflated
-                    profile["structured_weakly_identified"] = tuple(
-                        getattr(structured_factor, "weakly_identified_slopes", ())
-                    )
-                profile["structured_minimum_local_diagonal"] = (
-                    structured_factor.minimum_local_diagonal
-                )
-                profile["structured_schur_condition"] = structured_factor.schur_condition_estimate
-
-        # Pearson-based phi for estimated-scale families.  The numerator is the
-        # same under either weight contract; only the denominator's likelihood
-        # size distinguishes them.
-        if _compute_fit_statistics and not getattr(family, "scale_known", True):
-            pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
-            df_resid = pearson_residual_degrees_of_freedom(
-                weights,
-                p_eff,
-                weight_semantics=weight_semantics,
-            )
-            phi = pearson_sum / df_resid
-        else:
-            phi = 1.0
-        if not _compute_reml_geometry or not _compute_fit_statistics:
-            # Private SCOP candidates and stats-skipping in-loop REML fits have no
-            # retained-fit statistics. NaN makes accidental publication fail
-            # visibly instead of presenting 0 EDF or unit dispersion as if either
-            # had been evaluated; published statistics come from the terminal
-            # refit, which always computes them.
-            p_eff = float("nan")
-            phi = float("nan")
-
-        result = PIRLSResult(
-            beta=beta,
-            intercept=intercept,
-            n_iter=it + 1,
-            deviance=dev,
-            converged=converged,
-            phi=phi,
-            effective_df=p_eff,
-            iteration_log=iteration_log if record_diagnostics else None,
-            log_det_H=log_det_H,
-            reml_hessian_rank=reml_hessian_rank,
-            reml_geometry=reml_geometry_summary,
-            reml_slope_decomposition=retained_reml_decomposition,
-            rank_info=rank_info,
-            state_id=retained.state_id,
-            evaluation_id=retained.evaluation_id,
-            state_space=retained.state_space,
-            basis_id=retained.basis_id,
-            termination_reason=termination_reason,
-            direct_backend=_resolved_direct_backend,
-            direct_fallback_reason=_direct_fallback_reason,
-            centred_intercept=retained.centred_intercept,
-            state_center=None if retained.centred_intercept is None else _state_center,
-            centred_intercept_lo=centred_intercept_lo,
-            mean_space_boundary_rows=_boundary_rows,
-            mean_space_true_mode=bool(converged and _true_confirmed),
-            truncated_directions=_published_truncated,
-            mean_space_boundary_unresolved=_truncated_boundary,
-        )
-
-        # Collect converged SCOP state for EFS outer loop and fit results.
-        if _has_scop:
-            scop_converged = {}
-            for gi, st in _scop_state.items():
-                scop_converged[gi] = {
-                    "beta_eff": st["beta_scop"].copy(),
-                    "H_scop_penalized": st.get("H_scop_penalized"),
-                    "S_scop": st["S_scop"],
-                    "B_scop": st["B_scop"],
-                    "reparam": st["reparam"],
-                    "gamma_eff": st.get("gamma_eff"),
-                    "bin_idx": st.get("bin_idx"),
-                    "group_sl": groups[gi].sl,
-                    "group_name": groups[gi].name,
-                    "last_step_norm": st.get("last_step_norm", 0.0),
-                    "last_fisher_fallback": st.get("last_fisher_fallback", False),
-                    "discarded_directions": st.get("discarded_directions"),
-                    "penalty_rank": st.get("penalty_rank"),
-                    "penalty_log_det_omega_plus": st.get("penalty_log_det_omega_plus"),
-                    "penalty_eigvals_omega": st.get("penalty_eigvals_omega"),
-                }
-        else:
-            scop_converged = None
-
-        if (
-            _has_scop
-            and scop_converged is not None
-            and _compute_fit_statistics
-            and _compute_scop_postfit_inference
-        ):
-            import superglm.reml.scop_geometry as scop_geometry
-
-            if _scop_curvature == "observed":
-                joint_geometry = scop_geometry.build_observed_scop_joint_geometry(
-                    dm=dm,
-                    distribution=family,
-                    link=link,
-                    y=y,
-                    sample_weight=weights,
-                    offset_arr=offset,
-                    result=result,
-                    penalty=S,
-                    scop_states=scop_converged,
-                    fisher_XtWX=XtWX,
-                    fisher_XtW1=XtW1,
-                    fisher_sum_W=sum_W,
-                    centered_fisher_gram=centered_final.data_gram,
-                    fisher_mean_x=centered_final.mean_x,
-                    eta_unclipped=eta_unclipped,
-                )
-            else:
-                joint_geometry = scop_geometry.build_cached_scop_joint_geometry(
-                    raw_fisher_gram=XtWX,
-                    fisher_xtw=XtW1,
-                    fisher_sum_w=sum_W,
-                    latent_penalty=S,
-                    scop_states=scop_converged,
-                    centered_fisher_gram=centered_final.data_gram,
-                    fisher_mean_x=centered_final.mean_x,
-                    dm=dm,
-                    fisher_weights=W,
-                )
-            inference = scop_geometry.install_scop_postfit_inference(
-                result,
-                raw_fisher_gram=XtWX,
-                centered_fisher_gram=centered_final.data_gram,
-                fisher_xtw=XtW1,
-                fisher_mean_x=centered_final.mean_x,
-                fisher_sum_w=sum_W,
-                latent_penalty=S,
-                scop_states=scop_converged,
-                groups=groups,
-                observed_geometry=joint_geometry,
-                dm=dm,
-                fisher_weights=W,
-            )
-
-            # Estimated dispersion must use the same terminal EDF that downstream
-            # covariance and summaries expose.  Known-scale likelihoods retain
-            # their defining phi=1 rather than profiling a Pearson scale.
-            if not getattr(family, "scale_known", True):
-                pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
-                result.phi = pearson_sum / pearson_residual_degrees_of_freedom(
-                    weights,
-                    inference.total_edf,
-                    weight_semantics=weight_semantics,
-                )
-        if _expose_exact_support_state:
-            result.scop_states = scop_converged
-
-        if return_xtwx:
-            if return_scop_state and scop_converged is not None:
-                return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
-            return result, XtWX_S_inv_beta, XtWX_beta
-
-        if return_scop_state and scop_converged is not None:
-            return result, XtWX_S_inv_beta, scop_converged
-        return result, XtWX_S_inv_beta
+        self._finish(it)
+        self._terminal_rows()
+        self._profile_fit(it)
+        self._final_system()
+        self._final_geometry()
+        return self._publish(it)
 
     def _setup_design(self) -> None:
         X, y, family, link, groups = self.X, self.y, self.family, self.link, self.groups
@@ -5620,3 +4893,807 @@ class _IRLSDirectFit:
                 ),
             },
         )
+
+    def _finish(self, it: int) -> None:
+        t_start, _compensate_centred_intercept = self.t_start, self._compensate_centred_intercept
+        _compute_fit_statistics, retained = self._compute_fit_statistics, self.retained
+        _state_center, family, link, dm = self._state_center, self.family, self.link, self.dm
+        beta, y, weights, offset = self.beta, self.y, self.weights, self.offset
+        eta_unclipped, eta, mu, dev = self.eta_unclipped, self.eta, self.mu, self.dev
+        separation, working_rows, w_ratio = self.separation, self.working_rows, self.w_ratio
+        working_mu, working_eta, converged = self.working_mu, self.working_eta, self.converged
+        max_iter, step_rejected = self.max_iter, self.step_rejected
+        deviance_relative_change, groups = self.deviance_relative_change, self.groups
+        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
+        abs_A_all, retained_qp_converged = self.abs_A_all, self.retained_qp_converged
+        termination_reason, _mean_space_invalid = self.termination_reason, self._mean_space_invalid
+        _judged_truncated, _last_truncated = self._judged_truncated, self._last_truncated
+        t_elapsed = time.perf_counter() - t_start
+        logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+        # A published Gaussian identity fit carries its centred intercept as the
+        # compensated pair (alpha, alpha_lo): alpha's weighted mean rounds by a
+        # kernel-dependent ulp or more, and alpha + (x - c) beta ties at every row
+        # when alpha* is the midpoint of two adjacent floats, so a one-ulp signal
+        # between two levels collapsed on some BLAS kernels.  The deviance and
+        # scale published below are the compensated predictor's, the eta every
+        # consumer reads (``mode_score.linear_predictor``).
+        centred_intercept_lo: float | None = None
+        if (
+            _compensate_centred_intercept
+            and _compute_fit_statistics
+            and retained.centred_intercept is not None
+            and _state_center is not None
+            and type(family) is Gaussian
+            and type(link) is IdentityLink
+        ):
+            contribution = centred_matvec(dm, beta, _state_center)
+            centred_intercept_lo = centred_intercept_remainder(
+                y, weights, offset, retained.centred_intercept, contribution
+            )
+            if centred_intercept_lo is not None:
+                contribution += centred_intercept_lo
+                eta_unclipped = (retained.centred_intercept + contribution) + offset
+                eta = stabilize_eta(eta_unclipped, link)
+                mu = clip_mu(link.inverse(eta), family)
+                dev = weighted_row_sum(weights, family.deviance_unit, y, mu)
+
+        # Runtime separation backstop (issue #341).  Two terminal signatures mark
+        # a coefficient that walked toward +/-infinity instead of converging:
+        #
+        # * the retained linear predictor is pinned at the link's overflow guard
+        #   on rows that carry weight -- the guard, not the likelihood, stopped
+        #   the walk, and it also manufactures "convergence" by freezing the
+        #   coefficient once eta saturates;
+        # * the budget ran out with a frozen deviance while the coefficient
+        #   criterion still failed -- the field trace of issue #340/#341.
+        #
+        # Both require the extreme working-weight range that a drifting cell
+        # produces.  The build-time scan names cell separation before fitting
+        # starts; this catches what the design scan cannot see (non-categorical
+        # indicator structure), promoting a debug-level log line to a named
+        # warning or, in strict mode, an error.
+        if separation != "ignore" and np.isfinite(dev):
+            from superglm.diagnostics.separation import (
+                EXTREME_WEIGHT_RATIO,
+                STAGNANT_DEVIANCE_DELTA,
+                SeparationError,
+                SeparationWarning,
+                drifting_groups,
+                format_runtime_message,
+            )
+
+            separation_ratio = _separation_weight_ratio(
+                working_rows.curvature_source,
+                w_ratio,
+                family=family,
+                link=link,
+                mu=working_mu,
+                eta=working_eta,
+                weights=weights,
+            )
+            if separation_ratio > EXTREME_WEIGHT_RATIO:
+                pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
+                exhausted_stagnant = (
+                    not converged
+                    # A warm-started micro-budget solve (REML performance
+                    # iterations run max_iter=1) exhausts its budget by
+                    # construction; only a real budget makes exhaustion-with-
+                    # stagnation evidence of a drift (the field trace ran 100).
+                    and max_iter >= 10
+                    and it + 1 >= max_iter
+                    and not step_rejected
+                    and deviance_relative_change < STAGNANT_DEVIANCE_DELTA
+                )
+                if pinned or exhausted_stagnant:
+                    drifting = drifting_groups(dm, groups, beta, eta, eta_unclipped, weights)
+                    message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
+                    if separation == "error":
+                        raise SeparationError(message)
+                    # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
+                    held_warnings.warn(message, SeparationWarning, stacklevel=4)
+
+        if has_constraints:
+            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=abs_A_all):
+                minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
+                converged = False
+                termination_reason = "constraint_infeasible"
+                logger.warning(
+                    "fit_irls_direct: retained coefficient mode violates hard constraints "
+                    "(minimum scaled slack %.3e, tolerance %.1e); fit is not converged.",
+                    minimum_scaled_slack,
+                    _QP_FEASIBILITY_TOL,
+                )
+            elif not retained_qp_converged:
+                converged = False
+                termination_reason = "constraint_kkt_incomplete"
+                logger.warning(
+                    "fit_irls_direct: retained coefficient mode has no complete "
+                    "constrained-QP KKT certificate; fit is not converged."
+                )
+
+        # A returned state with rows at the mean-space boundary is not a mode of
+        # the model: their capped mean makes the deviance flat there, and the
+        # maximum it approaches is constrained, not stationary.  It is never
+        # converged, whatever stopped the loop (``mean_space_boundary_rows``).
+        _boundary_rows = (
+            0
+            if _mean_space_invalid is None
+            else mean_space_boundary_rows(family, link, eta_unclipped, weights)
+        )
+        if _boundary_rows:
+            converged = False
+            termination_reason = "mean_space_boundary"
+            logger.info(
+                "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
+                "the penalized maximum is constrained, fit is not converged.",
+                _boundary_rows,
+            )
+        # The truncated directions published.  A judgement of the returned state
+        # (the certificate read its eta) is the fit's own: published as it is, and
+        # the only one that may decide the verdict.  The returned state of a
+        # rejected step is the committed one, so its judgement counts.  When the
+        # returned state was never judged, a fit that is not converged publishes
+        # the latest judgement that found any as history (``earlier``), so a
+        # refusal stays disclosed, and it decides nothing.
+        _judged_eta, _judged = _judged_truncated[0]
+        if _judged_eta is not None and _judged_eta is eta_unclipped:
+            _published_truncated = _judged
+        elif converged:
+            _published_truncated = ()
+        else:
+            _published_truncated = tuple(
+                replace(record, earlier=True) for record in _last_truncated[0][1]
+            )
+        _boundary_sets = [
+            record for record in _published_truncated if record.boundary and not record.earlier
+        ]
+        # rows rising to the boundary along a direction the factorization
+        # truncates relabel only an exit the loop ran out on, never a
+        # non-finite deviance or a constraint's verdict
+        _truncated_boundary = bool(
+            not converged
+            and not _boundary_rows
+            and _boundary_sets
+            and termination_reason in ("max_iter", "score_stagnated", "step_rejected")
+        )
+        if _truncated_boundary:
+            # rows whose supremum along a direction the factorization truncates
+            # is the boundary (``TruncatedDirection.boundary``): the same verdict
+            # as rows held at it, though float64 cannot carry them there
+            termination_reason = "mean_space_boundary"
+            _boundary_rows = sum(record.row_count for record in _boundary_sets)
+            logger.info(
+                "fit_irls_direct: %d row(s) rise towards the boundary of the family's mean "
+                "space along a direction float64 cannot resolve; fit is not converged.",
+                _boundary_rows,
+            )
+        self.t_elapsed, self.centred_intercept_lo = t_elapsed, centred_intercept_lo
+        self.eta_unclipped, self.eta, self.mu, self.dev = eta_unclipped, eta, mu, dev
+        self.converged, self.termination_reason = converged, termination_reason
+        self._boundary_rows, self._published_truncated = _boundary_rows, _published_truncated
+        self._truncated_boundary = _truncated_boundary
+
+    def _terminal_rows(self) -> None:
+        _has_scop, _return_working_system = self._has_scop, self._return_working_system
+        family, link, y, mu, eta = self.family, self.link, self.y, self.mu, self.eta
+        eta_unclipped, weights, W, z = self.eta_unclipped, self.weights, self.W, self.z
+        _scop_state = self._scop_state
+        if _has_scop:
+            # Final Gram and SCOP Hessian caches must describe the retained model,
+            # not the working state or a discarded full proposal.
+            final_rows = coefficient_working_rows(
+                distribution=family,
+                link=link,
+                y=y,
+                mu=mu,
+                eta=eta,
+                sample_weight=weights,
+                prefer_observed=False,
+            )
+            W = final_rows.weights
+            z = final_rows.response
+
+            # ``block_curvature`` takes no step, so however the loop exited (a
+            # rejected last step included) the curvature, fallback flag and
+            # discarded directions are the retained model's. The working residual
+            # is read off the exact committed predictor; rebuilding X beta +
+            # intercept would lose score digits for a translated ordinary column.
+            terminal = self._scop_newton.block_curvature(
+                [_scop_state[gi]["beta_scop"] for gi in self._scop_order],
+                W=W,
+                z=z,
+                eta=eta_unclipped,
+            )
+            for gi, refresh in terminal.items():
+                _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
+                _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
+                _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
+
+        # Every public/exported matrix and rank claim is evaluated at the retained
+        # model. Private fREML performance iterations deliberately reuse the
+        # working system used for their one coefficient update.
+        if not _return_working_system:
+            export_rows = coefficient_working_rows(
+                distribution=family,
+                link=link,
+                y=y,
+                mu=mu,
+                eta=eta,
+                sample_weight=weights,
+                prefer_observed=False,
+            )
+            W = export_rows.weights
+            z = export_rows.response
+            self.export_rows = export_rows
+        self.W, self.z = W, z
+
+    def _profile_fit(self, it: int) -> None:
+        profile, _t_working, _t_gram = self.profile, self._t_working, self._t_gram
+        _t_solve, _t_deviance, _t_eta = self._t_solve, self._t_deviance, self._t_eta
+        _t_deviance_eval, t_elapsed = self._t_deviance_eval, self.t_elapsed
+        _boundary_rows, _true_stop = self._boundary_rows, self._true_stop
+        _last_true_residual, mode_bar = self._last_true_residual, self.mode_bar
+        _true_stop_ratio, _last_mode_residual = self._true_stop_ratio, self._last_mode_residual
+        # Accumulate phase timing into the profile dict if provided
+        if profile is not None:
+            profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + _t_working
+            profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + _t_gram
+            profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + _t_solve
+            profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + _t_deviance
+            profile["irls_eta_s"] = profile.get("irls_eta_s", 0.0) + _t_eta
+            profile["irls_deviance_eval_s"] = (
+                profile.get("irls_deviance_eval_s", 0.0) + _t_deviance_eval
+            )
+            profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
+            profile["irls_calls"] = profile.get("irls_calls", 0) + 1
+            profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
+            if _boundary_rows:
+                profile["irls_mean_space_boundary_calls"] = (
+                    profile.get("irls_mean_space_boundary_calls", 0) + 1
+                )
+            if _true_stop and _last_true_residual[0] is not None:
+                # the true-score certificate decided the last iteration (Newton
+                # steps): its score, floors and exclusions are the stop rule's
+                true_residual = _last_true_residual[0]
+                profile["irls_mode_rule"] = "mean_space_mode_score"
+                profile["irls_mode_score"] = mode_bar * _true_stop_ratio
+                profile["irls_mode_bar"] = mode_bar
+                profile["irls_mode_floor_binding"] = true_residual.floor_binding
+                profile["irls_mode_weakly_identified"] = tuple(
+                    int(index) for index in np.flatnonzero(true_residual.excluded)
+                )
+            elif _last_mode_residual is not None:
+                # §3.8, §3.9: the stop rule's last score, whether a derived floor
+                # bound it, and the slopes it flagged weakly identified and kept.
+                profile["irls_mode_score"] = mode_bar * _last_mode_residual.ratio()
+                profile["irls_mode_bar"] = mode_bar
+                profile["irls_mode_floor_binding"] = _last_mode_residual.floor_binding
+                profile["irls_mode_weakly_identified"] = tuple(
+                    int(index) for index in np.flatnonzero(_last_mode_residual.excluded)
+                )
+
+    def _final_system(self) -> None:
+        _use_structured, _return_working_system = self._use_structured, self._return_working_system
+        _last_working_structured = self._last_working_structured
+        _structured_group_index, z, offset = self._structured_group_index, self.z, self.offset
+        gms, groups, W, weights = self.gms, self.groups, self.W, self.weights
+        _structured_layout, lambda2 = self._structured_layout, self.lambda2
+        reml_penalties, S_override, p = self.reml_penalties, self.S_override, self.p
+        _last_working_centered = self._last_working_centered
+        _last_working_offset_mean = self._last_working_offset_mean
+        _state_center, cache_out, dm = self._state_center, self.cache_out, self.dm
+        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
+        eta_unclipped = self.eta_unclipped
+        # Preserve the raw coefficient-space payload used by REML separately from
+        # the centered inference system. The structured path retains the same
+        # moments in block form and never materializes the dominant K x K block.
+        centered_final: CenteredSystem | None = None
+        structured_final: (
+            FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
+        ) = None
+        if _use_structured:
+            if _return_working_system:
+                if _last_working_structured is None:
+                    raise RuntimeError("working structured system was not computed")
+                structured_final = _last_working_structured
+            else:
+                if _structured_group_index is None:  # pragma: no cover - selection invariant
+                    raise RuntimeError("Structured backend has no dominant group.")
+                z_off = z - offset
+                structured_final = build_structured_system(
+                    gms,
+                    groups,
+                    W,
+                    W * z_off,
+                    signed=self.export_rows.curvature_source == "observed",
+                    dominant_group_index=_structured_group_index,
+                    layout=_structured_layout,
+                    prior_weights=weights,
+                )
+            _final_penalized_operator = build_penalized_structured_operator(
+                structured_final,
+                gms,
+                groups,
+                lambda2,
+                reml_penalties=reml_penalties,
+                S_override=S_override,
+            )
+            XtW1 = np.empty(p, dtype=np.float64)
+            XtW1[structured_final.operator.small_indices] = structured_final.xtw_small
+            XtW1[structured_final.operator.structured_indices] = structured_final.xtw_structured
+            XtWz = np.empty(p, dtype=np.float64)
+            XtWz[structured_final.operator.small_indices] = structured_final.xtwz_small
+            XtWz[structured_final.operator.structured_indices] = structured_final.xtwz_structured
+            sum_W = structured_final.sum_w
+            sum_Wz = structured_final.sum_wz
+            mean_x = XtW1 / sum_W
+            mean_z = sum_Wz / sum_W
+            centered_rhs = XtWz - XtW1 * mean_z
+            XtWX = None
+            offset_mean_final = None
+        else:
+            if _return_working_system:
+                if _last_working_centered is None:
+                    raise RuntimeError("working centered system was not computed")
+                centered_final = _last_working_centered
+                offset_mean_final = _last_working_offset_mean
+            else:
+                z_off = z - offset
+                centered_final = self.get_centered_system(W, z_off)
+                offset_mean_final = (
+                    None
+                    if _state_center is None or cache_out is None
+                    else _system_offset_mean(dm, W, centered_final, _state_center)
+                )
+            XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
+            sum_W = centered_final.sum_w
+            mean_x = centered_final.mean_x
+            mean_z = centered_final.mean_z
+            centered_rhs = centered_final.rhs
+
+        # Cache final-iteration raw and stable centered quantities for the cached-W
+        # fREML optimizer. These allow re-solving the profiled-intercept system with
+        # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
+        if cache_out is not None:
+            if _use_structured:
+                if structured_final is None:  # pragma: no cover - branch invariant
+                    raise RuntimeError(
+                        "Structured fit did not produce final sufficient statistics."
+                    )
+                cache_out["structured_system"] = structured_final
+                cache_out["structured_operator"] = structured_final.operator
+                cache_out["penalized_operator"] = _final_penalized_operator
+                cache_out["xtwz_small"] = structured_final.xtwz_small
+                cache_out["xtwz_structured"] = structured_final.xtwz_structured
+                if not _return_working_system and isinstance(
+                    structured_final, FactorSmoothLeafSystem
+                ):
+                    # The retained estimability rule reads these (a nested chain
+                    # certifies its border on its own leaf-shifted moments).
+                    cache_out["structured_row_column_norm"] = cancelled_column_row_norms(
+                        centred_data_operator(structured_final), dm, W
+                    )
+            else:
+                if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
+                    raise RuntimeError("Dense fit did not produce a centered system.")
+                cache_out["XtWX"] = XtWX
+                cache_out["centered_XtWX"] = centered_final.data_gram
+                # the pair the Gram was centred about (``(mean_x, None)`` without a dense column)
+                cache_out["centre_pair"] = centered_final.centre_pair()
+                # mean_x less the state's centre, formed on centred rows: a cached
+                # trial's centred intercept (``reml.discrete``) reads it
+                cache_out["centre_offset_mean"] = offset_mean_final
+                # the matrix the slope decomposition was taken of (the identified
+                # part of the Laplace approximation restricts it, ``reml.identified``)
+                cache_out["centered_hessian"] = centered_final.hessian
+                # the rows its Gram summed: its formation bound's length
+                # (``reml.discrete._profiled_formation_error``)
+                cache_out["n_rows"] = int(dm.n)
+            cache_out["XtWz"] = XtWz
+            cache_out["XtW1"] = XtW1
+            cache_out["sum_W"] = sum_W
+            cache_out["sum_Wz"] = sum_Wz
+            cache_out["centered_rhs"] = centered_rhs
+            cache_out["mean_x"] = mean_x
+            cache_out["mean_z"] = mean_z
+            if _has_scop:
+                # The SCOP LAML mode certificate must evaluate the exact retained
+                # predictor. Reconstructing a huge translated column plus its
+                # compensating intercept can otherwise manufacture a false KKT
+                # residual several orders above tolerance.
+                cache_out["eta_unclipped"] = eta_unclipped
+        self.centered_final, self.structured_final = centered_final, structured_final
+        self._final_penalized_operator, self.XtWX, self.XtW1 = _final_penalized_operator, XtWX, XtW1
+        self.sum_W, self.mean_x = sum_W, mean_x
+
+    def _final_geometry(self) -> None:
+        _use_structured, structured_final = self._use_structured, self.structured_final
+        _final_penalized_operator, XtW1 = self._final_penalized_operator, self.XtW1
+        sum_W, mean_x, _compute_reml_geometry = self.sum_W, self.mean_x, self._compute_reml_geometry
+        _compute_fit_statistics, centered_final = self._compute_fit_statistics, self.centered_final
+        XtWX, W, dm, groups, p = self.XtWX, self.W, self.dm, self.groups, self.p
+        _use_qr, _return_working_system = self._use_qr, self._return_working_system
+        _retain_reml_decomposition = self._retain_reml_decomposition
+        compute_rank_info, _defer_rank_info = self.compute_rank_info, self._defer_rank_info
+        profile, certify_centered_factor = self.profile, self.certify_centered_factor
+        # REML works in the full (intercept, slopes) coefficient space.  Profiling
+        # the unpenalized intercept yields the centered Schur complement H_c.  Its
+        # inverse is the slope block of H_aug^{-1}, while the unit-determinant
+        # centering transform gives log|H_aug| = log(sum(W)) + log|H_c| at full
+        # rank. With aliases, the same expression is the retained centered-space
+        # determinant measure, not the raw augmented pseudo-determinant.
+        _t0 = time.perf_counter()
+        structured_factor: (
+            ProfiledFactorSmoothLeafFactor
+            | ProfiledSumToZeroTreeFactor
+            | ProfiledNestedSchurFactor
+            | None
+        ) = None
+        reml_geometry_summary: REMLGeometrySummary | None = None
+        if _use_structured:
+            if structured_final is None or _final_penalized_operator is None:
+                raise RuntimeError("Structured fit did not produce final coefficient blocks.")
+            with _structured_solver_errors():
+                augmented_factor, _ = build_augmented_structured_factor(
+                    structured_final, _final_penalized_operator
+                )
+            if isinstance(augmented_factor, SumToZeroTreeFactor):
+                structured_factor = ProfiledSumToZeroTreeFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=structured_final.sum_w,
+                    xtw=XtW1,
+                )
+            elif isinstance(augmented_factor, FactorSmoothLeafFactor):
+                structured_factor = ProfiledFactorSmoothLeafFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=structured_final.sum_w,
+                    xtw=XtW1,
+                )
+            elif isinstance(augmented_factor, NestedSchurFactor) and isinstance(
+                structured_final, NestedStructuredSystem
+            ):
+                structured_factor = ProfiledNestedSchurFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=structured_final.sum_w,
+                    xtw=XtW1,
+                    data_operator=structured_final.operator,
+                )
+            else:  # pragma: no cover - structured dispatch invariant
+                raise TypeError("Unsupported structured factor geometry.")
+            XtWX_beta = structured_final.operator
+            if _compute_reml_geometry:
+                XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
+                with _structured_solver_errors():
+                    log_det_H: float | None = augmented_factor.logdet()
+                reml_hessian_rank: int | None = augmented_factor.rank
+            else:
+                XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
+                log_det_H = None
+                reml_hessian_rank = None
+            # Structured Schur factors have their own retained-factor protocol;
+            # the dense-decomposition seam does not apply here.
+            retained_reml_decomposition: RankDecomposition | None = None
+            if _compute_fit_statistics:
+                edf_operator = (
+                    CenteredBlockOperator(
+                        raw=XtWX_beta,
+                        cross=XtW1,
+                        total=sum_W,
+                        center=mean_x,
+                    )
+                    if isinstance(
+                        XtWX_beta,
+                        BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator,
+                    )
+                    else XtWX_beta
+                )
+                with _structured_solver_errors():
+                    p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
+            else:
+                p_eff = 0.0
+            # Structured retained-fit inference consumes the factor directly. A
+            # dense RankInfo would defeat the backend's O(K q + q²) memory bound.
+            rank_info = None
+        else:
+            if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
+                raise RuntimeError("Dense fit did not produce a centered system.")
+            XtWX_beta = XtWX
+            reml_slope_rank: RankDecomposition | None
+            if _compute_reml_geometry:
+                reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+                if reml_slope_rank is None:
+                    certification = certify_centered_factor(
+                        centered_final,
+                        W,
+                    )
+                    reml_slope_rank = certification.decomposition
+                XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
+                log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
+                reml_hessian_rank = 1 + reml_slope_rank.rank
+                # O(p) summary of the centered system for the REML gradient and
+                # objective, so the loop can run without per-fit rank metadata.
+                # column_scale matches decompose_gram's definition bit-for-bit.
+                reml_geometry_summary = REMLGeometrySummary(
+                    mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
+                    sum_w=float(centered_final.sum_w),
+                    column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+                    mean_hi=centered_final.mean_hi,
+                    mean_lo=centered_final.mean_lo,
+                )
+            else:
+                reml_slope_rank = None
+                XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
+                log_det_H = None
+                reml_hessian_rank = None
+            retained_reml_decomposition = reml_slope_rank if _retain_reml_decomposition else None
+
+            if _compute_fit_statistics:
+                if reml_slope_rank is None:  # pragma: no cover - validated above
+                    raise RuntimeError("fit statistics require generic REML geometry")
+                augmented_rank = reml_slope_rank
+                final_system = centered_final
+                feature_edf = _feature_edf(
+                    centered_final,
+                    augmented_rank,
+                    lambda exponent: grouped_augmented_factor(
+                        dm,
+                        np.ldexp(W, -exponent),
+                        np.ldexp(final_system.penalty, -exponent),
+                        center=final_system.mean_x,
+                    ),
+                )
+                feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
+                p_eff = 1.0 + float(np.sum(feature_edf))
+
+                retained_rank_info = partial(
+                    _retained_rank_info,
+                    centered_final,
+                    W,
+                    augmented_rank,
+                    feature_edf,
+                    dm=dm,
+                    groups=groups,
+                    p=p,
+                    _use_qr=_use_qr,
+                    _X_full=self._X_full if _use_qr else None,
+                    _return_working_system=_return_working_system,
+                    certify_centered_factor=certify_centered_factor,
+                )
+
+                if compute_rank_info or (_defer_rank_info is not None and _use_qr):
+                    # A deferred QR-backend computation would keep the dense
+                    # (n, p) design alive until install; it is computed here.
+                    rank_info = retained_rank_info()
+                else:
+                    rank_info = None
+                    if _defer_rank_info is not None:
+                        _defer_rank_info.append(retained_rank_info)
+            else:
+                p_eff = 0.0
+                rank_info = None
+        if profile is not None:
+            _t_finalize = time.perf_counter() - _t0
+            profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
+        self.structured_factor = structured_factor
+        self.reml_geometry_summary, self.XtWX_beta = reml_geometry_summary, XtWX_beta
+        self.XtWX_S_inv_beta, self.log_det_H = XtWX_S_inv_beta, log_det_H
+        self.reml_hessian_rank = reml_hessian_rank
+        self.retained_reml_decomposition, self.p_eff = retained_reml_decomposition, p_eff
+        self.rank_info = rank_info
+
+    def _publish(
+        self, it: int
+    ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
+        _use_structured, _use_qr, profile = self._use_structured, self._use_qr, self.profile
+        _direct_fallback_reason, direct_solve = self._direct_fallback_reason, self.direct_solve
+        structured_decision, structured_factor = self.structured_decision, self.structured_factor
+        groups, _compute_fit_statistics = self.groups, self._compute_fit_statistics
+        _compute_reml_geometry, family, y = self._compute_reml_geometry, self.family, self.y
+        mu, weights, weight_semantics = self.mu, self.weights, self.weight_semantics
+        p_eff, beta, intercept, dev = self.p_eff, self.beta, self.intercept, self.dev
+        converged, record_diagnostics = self.converged, self.record_diagnostics
+        iteration_log, log_det_H = self.iteration_log, self.log_det_H
+        reml_hessian_rank = self.reml_hessian_rank
+        reml_geometry_summary = self.reml_geometry_summary
+        retained_reml_decomposition, rank_info = self.retained_reml_decomposition, self.rank_info
+        retained, termination_reason = self.retained, self.termination_reason
+        _state_center, centred_intercept_lo = self._state_center, self.centred_intercept_lo
+        _boundary_rows, _true_confirmed = self._boundary_rows, self._true_confirmed
+        _published_truncated = self._published_truncated
+        _truncated_boundary, _has_scop = self._truncated_boundary, self._has_scop
+        _scop_state = self._scop_state
+        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
+        _scop_curvature, dm, link, offset = self._scop_curvature, self.dm, self.link, self.offset
+        S, XtWX, XtW1, sum_W = self.S, self.XtWX, self.XtW1, self.sum_W
+        centered_final, eta_unclipped, W = self.centered_final, self.eta_unclipped, self.W
+        _expose_exact_support_state = self._expose_exact_support_state
+        return_xtwx, return_scop_state = self.return_xtwx, self.return_scop_state
+        XtWX_S_inv_beta, XtWX_beta = self.XtWX_S_inv_beta, self.XtWX_beta
+        _resolved_direct_backend = (
+            "structured" if _use_structured else ("qr" if _use_qr else "gram")
+        )
+        if profile is not None:
+            profile["direct_backend"] = _resolved_direct_backend
+            profile["direct_fallback_reason"] = _direct_fallback_reason
+            # Repeated inner solves stay quiet; the REML drivers own the INFO line.
+            record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
+            if structured_factor is not None:
+                profile["structured_dominant_group"] = structured_factor.dominant_group_name
+                profile["structured_chain"] = tuple(
+                    groups[index].name for index in structured_decision.chain_group_indices
+                )
+                profile["structured_nested_fallback_reason"] = (
+                    structured_decision.nested_fallback_reason
+                )
+                border_certificate = getattr(structured_factor, "border_certificate", None)
+                if border_certificate is not None:
+                    # §3.6 step 5: every null direction the border factorization
+                    # truncated, disclosed with its certificate.
+                    profile["structured_border_rank"] = border_certificate.rank
+                    profile["structured_border_tau"] = border_certificate.tau
+                    profile["structured_border_verification_decrements"] = (
+                        border_certificate.decrements
+                    )
+                    profile["structured_border_trailing_bound"] = border_certificate.trailing_bound
+                    profile["structured_border_deflated"] = border_certificate.deflated
+                    profile["structured_weakly_identified"] = tuple(
+                        getattr(structured_factor, "weakly_identified_slopes", ())
+                    )
+                profile["structured_minimum_local_diagonal"] = (
+                    structured_factor.minimum_local_diagonal
+                )
+                profile["structured_schur_condition"] = structured_factor.schur_condition_estimate
+
+        # Pearson-based phi for estimated-scale families.  The numerator is the
+        # same under either weight contract; only the denominator's likelihood
+        # size distinguishes them.
+        if _compute_fit_statistics and not getattr(family, "scale_known", True):
+            pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
+            df_resid = pearson_residual_degrees_of_freedom(
+                weights,
+                p_eff,
+                weight_semantics=weight_semantics,
+            )
+            phi = pearson_sum / df_resid
+        else:
+            phi = 1.0
+        if not _compute_reml_geometry or not _compute_fit_statistics:
+            # Private SCOP candidates and stats-skipping in-loop REML fits have no
+            # retained-fit statistics. NaN makes accidental publication fail
+            # visibly instead of presenting 0 EDF or unit dispersion as if either
+            # had been evaluated; published statistics come from the terminal
+            # refit, which always computes them.
+            p_eff = float("nan")
+            phi = float("nan")
+
+        result = PIRLSResult(
+            beta=beta,
+            intercept=intercept,
+            n_iter=it + 1,
+            deviance=dev,
+            converged=converged,
+            phi=phi,
+            effective_df=p_eff,
+            iteration_log=iteration_log if record_diagnostics else None,
+            log_det_H=log_det_H,
+            reml_hessian_rank=reml_hessian_rank,
+            reml_geometry=reml_geometry_summary,
+            reml_slope_decomposition=retained_reml_decomposition,
+            rank_info=rank_info,
+            state_id=retained.state_id,
+            evaluation_id=retained.evaluation_id,
+            state_space=retained.state_space,
+            basis_id=retained.basis_id,
+            termination_reason=termination_reason,
+            direct_backend=_resolved_direct_backend,
+            direct_fallback_reason=_direct_fallback_reason,
+            centred_intercept=retained.centred_intercept,
+            state_center=None if retained.centred_intercept is None else _state_center,
+            centred_intercept_lo=centred_intercept_lo,
+            mean_space_boundary_rows=_boundary_rows,
+            mean_space_true_mode=bool(converged and _true_confirmed),
+            truncated_directions=_published_truncated,
+            mean_space_boundary_unresolved=_truncated_boundary,
+        )
+
+        # Collect converged SCOP state for EFS outer loop and fit results.
+        if _has_scop:
+            scop_converged = {}
+            for gi, st in _scop_state.items():
+                scop_converged[gi] = {
+                    "beta_eff": st["beta_scop"].copy(),
+                    "H_scop_penalized": st.get("H_scop_penalized"),
+                    "S_scop": st["S_scop"],
+                    "B_scop": st["B_scop"],
+                    "reparam": st["reparam"],
+                    "gamma_eff": st.get("gamma_eff"),
+                    "bin_idx": st.get("bin_idx"),
+                    "group_sl": groups[gi].sl,
+                    "group_name": groups[gi].name,
+                    "last_step_norm": st.get("last_step_norm", 0.0),
+                    "last_fisher_fallback": st.get("last_fisher_fallback", False),
+                    "discarded_directions": st.get("discarded_directions"),
+                    "penalty_rank": st.get("penalty_rank"),
+                    "penalty_log_det_omega_plus": st.get("penalty_log_det_omega_plus"),
+                    "penalty_eigvals_omega": st.get("penalty_eigvals_omega"),
+                }
+        else:
+            scop_converged = None
+
+        if (
+            _has_scop
+            and scop_converged is not None
+            and _compute_fit_statistics
+            and _compute_scop_postfit_inference
+        ):
+            import superglm.reml.scop_geometry as scop_geometry
+
+            if _scop_curvature == "observed":
+                joint_geometry = scop_geometry.build_observed_scop_joint_geometry(
+                    dm=dm,
+                    distribution=family,
+                    link=link,
+                    y=y,
+                    sample_weight=weights,
+                    offset_arr=offset,
+                    result=result,
+                    penalty=S,
+                    scop_states=scop_converged,
+                    fisher_XtWX=XtWX,
+                    fisher_XtW1=XtW1,
+                    fisher_sum_W=sum_W,
+                    centered_fisher_gram=centered_final.data_gram,
+                    fisher_mean_x=centered_final.mean_x,
+                    eta_unclipped=eta_unclipped,
+                )
+            else:
+                joint_geometry = scop_geometry.build_cached_scop_joint_geometry(
+                    raw_fisher_gram=XtWX,
+                    fisher_xtw=XtW1,
+                    fisher_sum_w=sum_W,
+                    latent_penalty=S,
+                    scop_states=scop_converged,
+                    centered_fisher_gram=centered_final.data_gram,
+                    fisher_mean_x=centered_final.mean_x,
+                    dm=dm,
+                    fisher_weights=W,
+                )
+            inference = scop_geometry.install_scop_postfit_inference(
+                result,
+                raw_fisher_gram=XtWX,
+                centered_fisher_gram=centered_final.data_gram,
+                fisher_xtw=XtW1,
+                fisher_mean_x=centered_final.mean_x,
+                fisher_sum_w=sum_W,
+                latent_penalty=S,
+                scop_states=scop_converged,
+                groups=groups,
+                observed_geometry=joint_geometry,
+                dm=dm,
+                fisher_weights=W,
+            )
+
+            # Estimated dispersion must use the same terminal EDF that downstream
+            # covariance and summaries expose.  Known-scale likelihoods retain
+            # their defining phi=1 rather than profiling a Pearson scale.
+            if not getattr(family, "scale_known", True):
+                pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
+                result.phi = pearson_sum / pearson_residual_degrees_of_freedom(
+                    weights,
+                    inference.total_edf,
+                    weight_semantics=weight_semantics,
+                )
+        if _expose_exact_support_state:
+            result.scop_states = scop_converged
+
+        if return_xtwx:
+            if return_scop_state and scop_converged is not None:
+                return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
+            return result, XtWX_S_inv_beta, XtWX_beta
+
+        if return_scop_state and scop_converged is not None:
+            return result, XtWX_S_inv_beta, scop_converged
+        return result, XtWX_S_inv_beta
