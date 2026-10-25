@@ -1170,6 +1170,73 @@ def fit_irls_direct(
             _fisher_data_reuse.clear()
 
 
+def _certify_centered_factor(
+    dm: DesignMatrix,
+    _fisher_data_reuse: _FisherDataReuse | None,
+    cache: list[_CenteredFactorCertification | None],
+    system: CenteredSystem,
+    W_current: NDArray,
+    *,
+    response: NDArray | None = None,
+) -> _CenteredFactorCertification:
+    """Return a factor certificate for one immutable centered geometry."""
+    if _fisher_data_reuse is not None:
+        _fisher_data_reuse.clear()
+    cached = cache[0]
+    same_geometry = bool(
+        cached is not None
+        and cached.system.data_gram is system.data_gram
+        and cached.system.penalty is system.penalty
+        and cached.system.hessian is system.hessian
+        and cached.system.mean_x is system.mean_x
+        and cached.system.sum_w == system.sum_w
+    )
+    # A refreshed RHS can share the exact weighted Gram while differing in
+    # a factor-resolvable direction that normal equations round away. The
+    # immutable CenteredSystem instance identifies one RHS generation, so
+    # transformed RHS reuse needs only identity—not an O(n) response copy
+    # and comparison. Geometry-only terminal consumers may reuse the same
+    # compact factor across refreshed constant-weight systems.
+    if (
+        same_geometry
+        and cached is not None
+        and (response is None or (cached.system is system and cached.transformed_rhs is not None))
+    ):
+        return cached
+
+    centre, centre_lo = system.centre_pair()
+    if response is None:
+        factor = grouped_augmented_factor(
+            dm,
+            W_current,
+            system.penalty,
+            center=centre,
+            center_lo=centre_lo,
+        )
+        transformed_rhs = None
+    else:
+        factor, transformed_rhs = grouped_augmented_factor_rhs(
+            dm,
+            W_current,
+            system.penalty,
+            response=response,
+            center=centre,
+            center_lo=centre_lo,
+        )
+    factor_decomposition = decompose_factor(
+        factor,
+        retain_factor_solve=transformed_rhs is not None,
+    )
+    cached = _CenteredFactorCertification(
+        system=system,
+        factor=factor,
+        decomposition=factor_decomposition,
+        transformed_rhs=transformed_rhs,
+    )
+    cache[0] = cached
+    return cached
+
+
 def _fit_irls_direct_once(**kwargs):
     """Run one ``_IRLSDirectFit``: the module-level name callers and tests wrap."""
     return _IRLSDirectFit(**kwargs).run()
@@ -1355,1760 +1422,80 @@ class _IRLSDirectFit:
     _defer_rank_info: list[Callable[[], RankInfo]] | None = None
 
     def run(self) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
-        (
-            X,
-            y,
-            weights,
-            family,
-            link,
-            groups,
-            lambda2,
-            offset,
-            beta_init,
-            intercept_init,
-            max_iter,
-            tol,
-            return_xtwx,
-            profile,
-            cache_out,
-            record_diagnostics,
-            direct_solve,
-            convergence,
-            S_override,
-            reml_penalties,
-            return_scop_state,
-            scop_state_init,
-            debug_recorder,
-            debug_context,
-            compute_rank_info,
-            _return_working_system,
-            _compute_fit_statistics,
-            _compute_reml_geometry,
-            _retain_reml_decomposition,
-            _use_observed_newton,
-            _working_newton,
-            _newton_latch,
-            _deviance_init,
-            trace_run,
-            trace_purpose,
-            _compute_scop_postfit_inference,
-            separation,
-            weight_semantics,
-            _initial_data_reuse,
-            _raw_moment_policy,
-            _fisher_data_reuse,
-            _scop_run_centring,
-            _laplace_excluded,
-            _mode_bar,
-            _compensate_centred_intercept,
-            _centred_init,
-            _defer_rank_info,
-        ) = (
-            self.X,
-            self.y,
-            self.weights,
-            self.family,
-            self.link,
-            self.groups,
-            self.lambda2,
-            self.offset,
-            self.beta_init,
-            self.intercept_init,
-            self.max_iter,
-            self.tol,
-            self.return_xtwx,
-            self.profile,
-            self.cache_out,
-            self.record_diagnostics,
-            self.direct_solve,
-            self.convergence,
-            self.S_override,
-            self.reml_penalties,
-            self.return_scop_state,
-            self.scop_state_init,
-            self.debug_recorder,
-            self.debug_context,
-            self.compute_rank_info,
-            self._return_working_system,
-            self._compute_fit_statistics,
-            self._compute_reml_geometry,
-            self._retain_reml_decomposition,
-            self._use_observed_newton,
-            self._working_newton,
-            self._newton_latch,
-            self._deviance_init,
-            self.trace_run,
-            self.trace_purpose,
-            self._compute_scop_postfit_inference,
-            self.separation,
-            self.weight_semantics,
-            self._initial_data_reuse,
-            self._raw_moment_policy,
-            self._fisher_data_reuse,
-            self._scop_run_centring,
-            self._laplace_excluded,
-            self._mode_bar,
-            self._compensate_centred_intercept,
-            self._centred_init,
-            self._defer_rank_info,
-        )
-        if isinstance(X, DesignMatrix):
-            dm = X
-        else:
-            from superglm.solvers.pirls import _wrap_dense_X
-
-            dm = _wrap_dense_X(X, groups)
-
-        n = dm.n
-        p = dm.p
-        gms = dm.group_matrices
-
-        weights = np.asarray(weights, dtype=np.float64)
-        if weights.shape != (n,):
-            raise ValueError("weights must match the design row count")
-        if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
-            raise ValueError("weights must be finite and non-negative")
-        if not np.any(weights > 0.0):
-            raise ValueError("weights must contain at least one positive value")
-        objective_merit_scale = _irls_objective_scale(
-            y=y,
-            weights=weights,
-            family=family,
-            link=link,
-        )
-
-        structured_decision = resolve_structured_backend(
-            gms,
-            groups,
-            direct_solve=direct_solve,
-            coefficient_width=p,
-            lambda2=lambda2,
-            S_override=S_override,
-            nesting_cache=getattr(dm, "_structured_layout_cache", None),
-        )
-        if structured_decision.use_structured and S_override is None and reml_penalties is None:
-            reason = (
-                "the structured candidate requires compact reml_penalties "
-                "when S_override is not supplied"
-            )
-            if direct_solve == "structured":
-                raise ValueError(f"direct_solve='structured' is ineligible: {reason}.")
-            structured_decision = replace(
-                structured_decision,
-                use_structured=False,
-                fallback_reason=reason,
-            )
-        _use_structured = structured_decision.use_structured
-        _structured_group_index = structured_decision.group_index
-        _direct_fallback_reason = structured_decision.fallback_reason
-        _structured_layout = (
-            get_structured_layout(
-                dm,
-                groups,
-                dominant_group_index=_structured_group_index,
-                chain_group_indices=structured_decision.chain_group_indices,
-            )
-            if _use_structured and _structured_group_index is not None
-            else None
-        )
-        if isinstance(_structured_layout, FactorSmoothLeafLayout):
-            # every dense kernel of the fs leaf route acts on its border (perf F7);
-            # a nested chain's parent blocks are not border-wide and keep the release
-            keep_narrow_cap(len(_structured_layout.small_indices) + 1)
-        # One-engine design §3.8: a nested chain's PIRLS state is (alpha, beta)
-        # about the fixed prior-weighted border centre c0 of its factor (0 on the
-        # tree), so no eta is ever formed by cancelling X beta against a raw
-        # intercept that absorbs a column's offset.
-        _state_center: NDArray | None = None
-        if isinstance(_structured_layout, NestedStructuredLayout):
-            border_center, _ = nested_prior_statistics(_structured_layout, weights)
-            _state_center = np.zeros(p)
-            _state_center[_structured_layout.small_indices] = border_center
-        elif isinstance(_structured_layout, FactorSmoothLeafLayout):
-            # The same state for an fs term (design §3.4): (alpha, beta) about its c0.
-            border_center, _ = factor_smooth_prior_statistics(_structured_layout, weights)
-            _state_center = np.zeros(p)
-            _state_center[_structured_layout.small_indices] = border_center
-
-        if offset is None:
-            offset = np.zeros(n)
-
-        beta = beta_init.copy() if beta_init is not None else np.zeros(p)
-
-        if intercept_init is not None:
-            intercept = intercept_init
-        else:
-            intercept = coefficient_initial_intercept(
-                distribution=family,
-                link=link,
-                y=y,
-                sample_weight=weights,
-            )
-        # Whether the default start below was lowered into the family's mean space
-        # (binomial/log; a start raised into an inverse link's domain is not).
-        _start_lowered = False
-        if intercept_init is None and (
-            mean_space_violation(family, link) is not None
-            or link_domain_violation(link) is not None
-        ):
-            # The domain guards below keep every accepted state inside the mean
-            # space and the link's domain only from a start inside them, and the
-            # default intercept is chosen before the offset: move it until the
-            # start is inside (``irls_state.interior_start_intercept``).  A
-            # caller's warm start is left as it is.
-            start_intercept = interior_start_intercept(
-                family,
-                link,
-                (dm.matvec(beta) if np.any(beta) else 0.0) + intercept + offset,
-                weights,
-                intercept,
-                level=intercept,
-            )
-            if start_intercept != intercept:
-                intercept = start_intercept
-                _deviance_init = None
-                _start_lowered = mean_space_violation(family, link) is not None
-
-        # Dense paths retain the existing p x p penalty oracle. Structured paths
-        # add each penalty directly to A or d, unless a caller already supplied a
-        # dense override (which remains authoritative).
-        S: NDArray | None
-        if _use_structured:
-            S = None if S_override is None else np.asarray(S_override, dtype=np.float64)
-        elif S_override is not None:
-            S = S_override
-        else:
-            S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
-
-        def penalty_matvec(beta_values: NDArray, *, magnitude: bool = False) -> NDArray:
-            """Apply the fitted penalty without expanding an identity random-effect block.
-
-            With ``magnitude``, return ``|S| |beta|``, the magnitude this product
-            sums, which bounds its rounding componentwise.
-            """
-            values = np.asarray(beta_values, dtype=np.float64)
-            if magnitude:
-                values = np.abs(values)
-            if S is not None:
-                return (np.abs(S) if magnitude else S) @ values
-            if reml_penalties is None:  # pragma: no cover - validated above
-                raise RuntimeError("Structured penalty components are unavailable.")
-            from superglm.reml.penalty_algebra import (
-                penalty_component_magnitude_matvec,
-                penalty_component_matvec,
-            )
-
-            apply = penalty_component_magnitude_matvec if magnitude else penalty_component_matvec
-            product = np.zeros_like(values)
-            for component in reml_penalties:
-                lam = (
-                    float(lambda2[component.name]) if isinstance(lambda2, dict) else float(lambda2)
-                )
-                if lam == 0.0:
-                    continue
-                product[component.group_sl] += lam * apply(
-                    component,
-                    values[component.group_sl],
-                    gms[component.group_index],
-                )
-            return product
-
-        def penalty_rounding() -> int:
-            """``k`` with ``fl(S v)`` within ``gamma_k fl(|S| |v|)`` (``penalty_product_rounding``)."""
-            from superglm.reml.penalty_algebra import penalty_product_rounding
-
-            return penalty_product_rounding(p, None if S is not None else reml_penalties)
-
-        def penalty_curvature() -> NDArray:
-            """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
-            if S is not None:
-                return np.diag(S).astype(np.float64, copy=True)
-            from superglm.reml.identified import penalty_diagonal
-
-            lambdas = (
-                lambda2
-                if isinstance(lambda2, dict)
-                else {component.name: float(lambda2) for component in reml_penalties or ()}
-            )
-            return penalty_diagonal(p, lambdas, reml_penalties)
-
-        # diag(S), formed once per call on first use by the mode score (S is fixed)
-        _penalty_curvature: list[NDArray] = []
-        # d'Sd along each one-hot reference and joint-cell direction
-        # (``mode_score.row_set_quadratics``): one penalty product each, formed
-        # once per call on first use (S and the design are fixed within a call)
-        _row_set_curvature: list[NDArray] = []
-
-        def penalty_quadratic(beta_values: NDArray) -> float:
-            values = np.asarray(beta_values, dtype=np.float64)
-            return float(values @ penalty_matvec(values))
-
-        def mode_residual(
-            beta_values: NDArray,
-            intercept_value: float,
-            mu_values: NDArray,
-            eta_values: NDArray,
-            centred_intercept: float | None = None,
-            resolve_cap: float = MODE_RESOLVE_CAP,
-        ) -> ModeResidual:
-            """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
-
-            The row score from Fisher rows (the score itself does not depend on
-            the curvature the rows carry), centred on the system the last solve
-            linearised about (``_score_centre``), its floors and weak tests
-            resolved once every relative score is within ``MODE_RESOLVE_CAP``
-            (``solvers.mode_score``).  The floors read the iterate's intercept
-            about ``mean_x``; a centred state reads it from its own ``alpha`` and
-            the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
-            from the raw intercept, which cancels ``c' beta`` at a column's offset.
-            """
-            assert _score_centre is not None
-            mean_x, sum_w, diagonal, excluded_indices, offset_mean = _score_centre
-            rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu_values,
-                eta=eta_values,
-                sample_weight=weights,
-                prefer_observed=False,
-            )
-            with np.errstate(invalid="ignore", divide="ignore"):
-                scale = np.sqrt(np.abs(diagonal) / sum_w)
-            excluded = np.zeros(p, dtype=bool)
-            excluded[list(excluded_indices)] = True
-            # the slopes the REML fit's Laplace approximation leaves out
-            # (``reml.identified``, design §3.9): flagged and kept, never gated
-            excluded[list(_laplace_excluded)] = True
-            if centred_intercept is None or offset_mean is None:
-                shift = float(mean_x @ beta_values)
-                alpha = float(intercept_value) + shift
-                eta_tilde = eta_values - offset - float(intercept_value) - shift
-            else:
-                shift = float(offset_mean @ beta_values)
-                alpha = float(centred_intercept) + shift
-                eta_tilde = eta_values - offset - float(centred_intercept) - shift
-            if not _penalty_curvature:
-                _penalty_curvature.append(penalty_curvature())
-            return penalized_mode_residual(
-                dm=dm,
-                row_score=rows.weights * (rows.response - eta_values),
-                fisher_weights=rows.weights,
-                positive_prior=weights > 0.0,
-                mean_x=mean_x,
-                centered_scale=np.where(np.isfinite(scale), scale, 0.0),
-                alpha=alpha,
-                eta_tilde=eta_tilde,
-                penalty_score=penalty_matvec(beta_values),
-                penalty_magnitude=penalty_matvec(beta_values, magnitude=True),
-                penalty_curvature=_penalty_curvature[0],
-                sum_w=sum_w,
-                bar=mode_bar,
-                excluded=excluded,
-                resolve_cap=resolve_cap,
-                penalty_rounding=penalty_rounding(),
-            )
-
-        def true_mode_residual(
-            beta_values: NDArray,
-            intercept_value: float,
-            eta_values: NDArray,
-            active_rows: NDArray | None,
-            scop_groups: tuple[_SCOPGroupState, ...] | None,
-        ) -> tuple[float, bool]:
-            """The mode certificate on the binomial/log score itself, for a stop the clip can fool.
-
-            ``(ratio, resolved)``: the largest relative score over its bar
-            (``ModeResidual.ratio``), ``inf`` when the arithmetic cannot resolve
-            it, and whether every relative score is within ``MODE_RESOLVE_CAP``
-            (near the mode).  ``mode_residual``'s relative penalized score, bar,
-            floors and weak tests, evaluated on the score and Fisher weights of
-            the unclipped ``eta_values`` (``irls_state.mean_space_score_rows``)
-            and centred on those weights (``mode_score.weighted_column_centring``),
-            not on the clipped solve's system.
-
-            **Units.** Each relative score is a ratio of quantities of degree one
-            in the weights and the penalty taken together, so it does not depend
-            on their units; the arithmetic that forms it does.
-            - The prior weights are first brought by an even power of two to a
-              largest entry in ``[1/4, 1)``, before any row product, so no row
-              product underflows that would not at unit scale.
-            - Each coordinate then takes its own even power of two: the shift
-              that keeps its penalty terms, in the weights' new units, below
-              ``2^1000``, applied to its data terms too (``penalized_mode_residual``'s
-              ``column_shift``).  A data term that underflows there lies more
-              than ``2^-2000`` below the penalty beside it.
-            - Powers of two are exact on normal and subnormal values, and an even
-              one keeps ``zeta``'s square root exact.
-            - Gradual underflow adds at most half the subnormal spacing
-              ``2^-1074`` of absolute error to each operation (Higham 2002,
-              section 2.1), so a sum over ``n`` rows carries at most ``(n + 2)
-              2^-1074`` beyond its ``gamma_n`` relative error
-              (``_underflow_allowance``, the whole spacing per operation since
-              half of it is not representable).  Where that is not below the
-              bar's allowance, ``bar`` times an identified coordinate's scale,
-              the certificate cannot resolve the score and refuses: ``inf``,
-              never a pass.
-            - Slopes the weak test finds at rounding-level curvature are left out
-              of the ratio only while the iterate is at the mode along them: half
-              their block Newton decrement, over their penalised curvature block
-              (``weak_penalty_block`` for the penalty's part), within the
-              log-likelihood's own rounding over the rows the block touches,
-              ``gamma_{|S| + 4} sum_{i in S} |l_i|`` (``penalized_mode_residual``'s
-              ``decrement_noise``).  The penalty's rounding is left out of that
-              noise, which can only refuse.
-
-            **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
-            b`` active at the iterate.  A constrained mode is stationary when ``G
-            + A' m = 0`` with ``m >= 0``, so the residual tested is ``G + A' m``
-            at the non-negative least-squares ``m`` of its Jacobi-scaled form.
-            Each row is put in the coordinates' units, brought to a largest entry
-            in ``[1/2, 1)`` by a power of two and then to unit length: this leaves
-            the cone it spans unchanged, and its own units can neither overflow
-            nor vanish in the norm.
-
-            **SCOP.** A shape-constrained group's coefficients are its latent
-            ``theta``, with ``gamma = forward(theta)``.  Its stationarity is the
-            latent score ``J' B' s - lambda S theta`` (``J = d gamma / d theta``,
-            diagonal).  The groups' latent scores are projected together off the
-            joint directions their Newton step could not resolve, and tested in
-            the same relative form, bar and floor, in the weights' units (a latent
-            penalty that overflows there is refused).
-            """
-            _last_true_residual[0] = None
-            # this state is judged: no truncated direction unless one is found below
-            _judged_truncated[0] = (eta_values, ())
-            positive = weights > 0.0
-            largest_weight = (
-                float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
-            )
-            weight_exponent = _even_exponent(largest_weight)
-            score, fisher = mean_space_score_rows(
-                y, np.ldexp(weights, -weight_exponent), eta_values
-            )
-            if not (np.all(np.isfinite(score)) and np.all(np.isfinite(fisher))):
-                return math.inf, False
-            if not _penalty_curvature:
-                _penalty_curvature.append(penalty_curvature())
-            penalty_score = penalty_matvec(beta_values)
-            penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
-            curvature = np.asarray(_penalty_curvature[0], dtype=np.float64)
-            if not (
-                np.all(np.isfinite(penalty_score))
-                and np.all(np.isfinite(penalty_magnitude))
-                and np.all(np.isfinite(curvature))
-            ):
-                return math.inf, False
-            shift = _column_shift(
-                np.maximum(np.abs(penalty_magnitude), np.abs(curvature)), weight_exponent
-            )
-            penalty_score = np.ldexp(penalty_score, -weight_exponent - shift)
-            penalty_magnitude = np.ldexp(penalty_magnitude, -weight_exponent - shift)
-            curvature = np.ldexp(curvature, -weight_exponent - shift)
-            mean_x, sum_w, diagonal = weighted_column_centring(dm, fisher, positive)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
-            excluded = np.zeros(p, dtype=bool)
-            excluded[list(_laplace_excluded)] = True
-            if _scop_columns is not None:
-                excluded |= _scop_columns
-            tiny = float(np.finfo(np.float64).tiny)
-            zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
-            if active_rows is not None and active_rows.size:
-                rows = np.ldexp(np.asarray(active_rows, dtype=np.float64), -shift[None, :])
-                largest_entry = np.max(np.abs(rows), axis=1)
-                rows = rows[largest_entry > 0.0]
-                exponents = np.frexp(largest_entry[largest_entry > 0.0])[1]
-                rows = np.ldexp(rows, -exponents[:, None])
-                rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
-                gradient = np.ldexp(centred_data_score(dm, score, mean_x), -shift) - penalty_score
-                jacobi = np.ldexp(np.full(p, zeta), -(shift // 2)) * np.sqrt(
-                    np.ldexp(np.maximum(diagonal, 0.0), -shift) + np.maximum(curvature, 0.0)
-                )
-                jacobi = jacobi + np.abs(penalty_score)
-                # any positive diagonal gives a valid m >= 0; keeping it within
-                # eps of its largest entry keeps the scaled rows finite
-                jacobi = np.maximum(
-                    jacobi, _EPS_FLOAT * max(float(np.max(jacobi, initial=0.0)), 1.0)
-                )
-                if rows.size and np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
-                    from scipy.optimize import nnls
-
-                    try:
-                        multipliers = nnls(rows.T / jacobi[:, None], -gradient / jacobi)[0]
-                    except RuntimeError:  # the active-set iteration's own limit
-                        multipliers = np.zeros(rows.shape[0])
-                    penalty_score = penalty_score - rows.T @ multipliers
-                    penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
-            centre_shift = float(mean_x @ beta_values)
-
-            likelihood_rows: list = []
-
-            def likelihood_noise(support: NDArray) -> float:
-                # the log-likelihood's rounding over the rows a weak block touches
-                # (``penalized_mode_residual``): gamma for the terms summed there,
-                # plus each row's own few roundings
-                if not likelihood_rows:
-                    likelihood_rows.append(
-                        np.abs(
-                            mean_space_log_likelihood_rows(
-                                y, np.ldexp(weights, -weight_exponent), eta_values
-                            )
-                        )
-                    )
-                touched = np.asarray(support, dtype=bool) & positive
-                noise = _gamma(int(np.count_nonzero(touched)) + 4) * float(
-                    np.sum(likelihood_rows[0][touched])
-                )
-                return noise if math.isfinite(noise) else 0.0
-
-            def weak_penalty_block(columns: NDArray) -> NDArray:
-                # the penalty's block on a few weakly identified slopes, in the
-                # weights' units: one penalty product per slope
-                block = np.empty((len(columns), len(columns)))
-                for position, column in enumerate(columns):
-                    unit = np.zeros(p)
-                    unit[column] = 1.0
-                    block[:, position] = penalty_matvec(unit)[columns]
-                with np.errstate(over="ignore"):
-                    return np.ldexp(0.5 * (block + block.T), -weight_exponent)
-
-            residual = penalized_mode_residual(
-                dm=dm,
-                row_score=score,
-                fisher_weights=fisher,
-                positive_prior=positive,
-                mean_x=mean_x,
-                centered_scale=np.where(np.isfinite(scale), scale, 0.0),
-                alpha=float(intercept_value) + centre_shift,
-                eta_tilde=eta_values - offset - float(intercept_value) - centre_shift,
-                penalty_score=penalty_score,
-                penalty_magnitude=penalty_magnitude,
-                penalty_curvature=curvature,
-                sum_w=sum_w,
-                bar=mode_bar,
-                excluded=excluded,
-                resolve_cap=MODE_RESOLVE_CAP,
-                column_shift=shift,
-                decrement_noise=likelihood_noise,
-                penalty_block=weak_penalty_block,
-                penalty_rounding=penalty_rounding(),
-            )
-            _last_true_residual[0] = residual
-            rows_n = int(np.count_nonzero(positive))
-            underflow = _underflow_allowance(rows_n)
-            assert residual.scale is not None
-            identified = np.concatenate(([True], ~residual.excluded))
-            if np.any(mode_bar * residual.scale[identified] <= underflow):
-                return math.inf, False
-            ratio = residual.ratio()
-            # every set of rows the one-hot blocks move on their own, certified on
-            # its own rows (``mode_score.row_set_residual``); the sets are the
-            # design's, formed once per design (``mode_score.row_sets``)
-            sets = row_sets(dm)
-            if not _row_set_curvature:
-                _row_set_curvature.append(
-                    row_set_quadratics(sets, p, penalty_matvec, penalty_rounding())
-                )
-            with np.errstate(over="ignore", invalid="ignore"):
-                column_penalty = np.ldexp(penalty_score, shift)
-                column_penalty_size = np.ldexp(penalty_magnitude, shift)
-                column_curvature = np.ldexp(curvature, shift)
-                set_curvature = np.ldexp(_row_set_curvature[0], -weight_exponent)
-            ratio = max(
-                ratio,
-                row_set_residual(
-                    sets=sets,
-                    row_score=score,
-                    response=y,
-                    fisher_weights=fisher,
-                    positive_prior=positive,
-                    eta=eta_values,
-                    column_penalty=column_penalty,
-                    column_penalty_size=column_penalty_size,
-                    column_curvature=column_curvature,
-                    set_curvature=set_curvature,
-                    bar=mode_bar,
-                    underflow=underflow,
-                    penalty_rounding=penalty_rounding(),
-                ),
-            )
-            # the directions the factorization this iteration holds truncates,
-            # judged on the rows they move (``mode_score.truncated_direction_ratio``):
-            # a light row set the relative score sums beside the heavy rows'
-            # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
-            held_rank = _held_rank[0]
-            if (
-                held_rank is not None
-                and held_rank.parameter_null_basis is not None
-                and (active_rows is None or not active_rows.size)
-                and not scop_groups
-            ):
-                with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-                    truncated_ratio, truncated = truncated_direction_ratio(
-                        dm=dm,
-                        null_basis=held_rank.parameter_null_basis,
-                        angle=null_basis_angle(held_rank, n),
-                        mean_x=mean_x,
-                        row_score=score,
-                        fisher_weights=fisher,
-                        response=y,
-                        positive_prior=positive,
-                        penalty_gradient=np.ldexp(penalty_matvec(beta_values), -weight_exponent),
-                        penalty_size=np.ldexp(
-                            penalty_matvec(beta_values, magnitude=True), -weight_exponent
-                        ),
-                        penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
-                        bar=mode_bar,
-                        underflow=underflow,
-                        column_scale=held_rank.column_scale,
-                        eta=eta_values,
-                        penalty_size_apply=lambda v: np.ldexp(
-                            penalty_matvec(v, magnitude=True), -weight_exponent
-                        ),
-                        penalty_rounding=penalty_rounding(),
-                    )
-                ratio = max(ratio, truncated_ratio)
-                _judged_truncated[0] = (eta_values, truncated)
-                if truncated:
-                    _last_truncated[0] = (eta_values, truncated)
-                if truncated_ratio == math.inf and profile is not None:
-                    # refused because the basis or the arithmetic cannot resolve
-                    # the truncated rows (an ``unresolved_basis`` record)
-                    profile["irls_truncated_unresolved"] = (
-                        profile.get("irls_truncated_unresolved", 0) + 1
-                    )
-            resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
-            latent_parts = []
-            for group_state in scop_groups or ():
-                state = _scop_state[group_state.group_index]
-                group = groups[group_state.group_index]
-                lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
-                theta = np.asarray(group_state.beta_eff, dtype=np.float64)
-                penalty_matrix = np.asarray(state["S_scop"], dtype=np.float64)
-                with np.errstate(over="ignore", invalid="ignore"):
-                    pull = np.ldexp(lam * (penalty_matrix @ theta), -weight_exponent)
-                    pull_size = np.ldexp(
-                        lam * (np.abs(penalty_matrix) @ np.abs(theta)), -weight_exponent
-                    )
-                    pull_diagonal = np.ldexp(lam * np.diag(penalty_matrix), -weight_exponent)
-                # a latent penalty past float64 beside the data's units: refused
-                # (the shape-constrained groups are tested in the weights' units)
-                if not (
-                    np.all(np.isfinite(pull))
-                    and np.all(np.isfinite(pull_size))
-                    and np.all(np.isfinite(pull_diagonal))
-                ):
-                    return math.inf, False
-                bins = state["bin_idx"]
-                basis = np.asarray(state["B_scop"], dtype=np.float64)
-
-                def by_bin(values: NDArray, bins=bins, basis=basis) -> NDArray:
-                    if bins is None:
-                        return values
-                    return np.bincount(bins, weights=values, minlength=basis.shape[0])
-
-                jacobian = state["reparam"].jacobian_diagonal(theta)
-                latent_parts.append(
-                    (
-                        group_state,
-                        theta,
-                        jacobian * (basis.T @ by_bin(score)) - pull,
-                        jacobian**2 * ((basis**2).T @ by_bin(fisher)) + pull_diagonal,
-                        np.abs(pull),
-                        pull_size,
-                        np.abs(jacobian) * (np.abs(basis).T @ by_bin(np.abs(score))),
-                    )
-                )
-            if latent_parts:
-                # The joint step truncates one factor across every SCOP group and
-                # hands each group its own columns of each discarded direction, so
-                # the groups' blocks reassemble row by row into the joint
-                # directions (a group absent here holds zeros in them).  The
-                # concatenated latent score is projected once off their span,
-                # which an SVD finds with its rank (a QR would invent a direction
-                # for a zero block).
-                widths = [part[1].size for part in latent_parts]
-                offsets = np.concatenate(([0], np.cumsum(widths)))
-                blocks = [
-                    (k, np.asarray(part[0].discarded_directions, dtype=np.float64))
-                    for k, part in enumerate(latent_parts)
-                    if part[0].discarded_directions is not None
-                    and np.asarray(part[0].discarded_directions).ndim == 2
-                    and np.asarray(part[0].discarded_directions).shape[0] > 0
-                ]
-                gradient = np.concatenate([part[2] for part in latent_parts])
-                if blocks:
-                    counts = {rows.shape[0] for _, rows in blocks}
-                    if len(counts) != 1:  # pragma: no cover - joint-step invariant
-                        raise RuntimeError(
-                            "the joint SCOP step handed its groups different discarded directions"
-                        )
-                    directions = np.zeros((counts.pop(), int(offsets[-1])))
-                    for k, rows in blocks:
-                        directions[:, offsets[k] : offsets[k + 1]] = rows
-                    left, singular, _ = np.linalg.svd(directions.T, full_matrices=False)
-                    cutoff = float(np.max(singular, initial=0.0)) * directions.shape[1] * _EPS_FLOAT
-                    frozen = left[:, singular > cutoff]
-                    gradient = gradient - frozen @ (frozen.T @ gradient)
-                curvature_all = np.concatenate([part[3] for part in latent_parts])
-                pull_all = np.concatenate([part[4] for part in latent_parts])
-                size_all = np.concatenate([part[5] for part in latent_parts])
-                evaluation = np.concatenate([part[6] for part in latent_parts])
-                latent_scale = np.maximum(
-                    tiny, zeta * np.sqrt(np.maximum(curvature_all, 0.0)) + pull_all
-                )
-                if np.any(mode_bar * latent_scale <= underflow):
-                    return math.inf, False
-                relative = np.abs(gradient) / latent_scale
-                floor = (
-                    _gamma(rows_n) * evaluation
-                    + _gamma(int(offsets[-1]) + 2) * size_all
-                    + _UNIT_ROUNDOFF_FLOAT * size_all
-                ) / latent_scale
-                ratio = max(
-                    ratio, float(np.max(relative / np.maximum(mode_bar, floor), initial=0.0))
-                )
-                resolved = resolved and bool(np.max(relative, initial=0.0) <= MODE_RESOLVE_CAP)
-            return ratio, resolved
-
-        trace_enabled = trace_run is not None and trace_run.enabled
-        trace_basis_id = (
-            trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
-        )
-        if not trace_enabled:
-            resolved_lambdas: tuple[tuple[str, object], ...] = ()
-        elif isinstance(lambda2, dict):
-            resolved_lambdas = tuple(
-                (f"smooth:{name}", float(value)) for name, value in sorted(lambda2.items())
-            )
-        else:
-            resolved_lambdas = (("smooth", float(lambda2)),)
-
-        def emit_evaluation(
-            state: _IRLSState,
-            *,
-            phase: str,
-            iteration: int,
-            alpha: float | None = None,
-            enclosing_proposal_state_id: int | None = None,
-            deviance_reused: bool = False,
-        ) -> None:
-            if not trace_enabled:
-                return
-            assert trace_run is not None
-            trace_run.emit_lazy(
-                "evaluation",
-                lambda: {
-                    "state_id": state.state_id,
-                    "evaluation_id": state.evaluation_id,
-                    "solver": "irls_direct",
-                    "phase": phase,
-                    "outer_iteration": iteration,
-                    "trial_alpha": alpha,
-                    "enclosing_proposal_state_id": enclosing_proposal_state_id,
-                    "state_space": state.state_space,
-                    "basis_id": state.basis_id,
-                    "lambdas": state.lambdas,
-                    "dispersion": state.dispersion,
-                    "intercept": state.intercept,
-                    "deviance": state.deviance,
-                    "penalized_deviance": state.penalized_deviance,
-                    "deviance_source": "provided" if deviance_reused else "evaluated",
-                },
-                channel="pirls",
-                purpose=trace_purpose,
-                authoritative=False,
-            )
-
-        def evaluate_state(
-            beta_values: NDArray,
-            intercept_value: float,
-            *,
-            phase: str,
-            iteration: int,
-            alpha: float | None = None,
-            deviance: float | None = None,
-            eta_unclipped: NDArray | None = None,
-            enclosing_proposal_state_id: int | None = None,
-            emit_trace: bool = True,
-            centred_intercept: float | None = None,
-        ) -> _IRLSState:
-            if trace_enabled:
-                assert trace_run is not None
-                state_id = trace_run.next_state_id()
-                evaluation_id = trace_run.next_evaluation_id()
-            else:
-                state_id = None
-                evaluation_id = None
-            if _state_center is not None:
-                # One-engine design §3.8: the state is (alpha, beta) about the fixed
-                # prior-weighted centre, eta = alpha + X~ beta + offset, and the raw
-                # intercept is only its reading; a state entering from raw
-                # coordinates (the start, a warm start) is centred once.
-                shift = math.fsum(_state_center * np.asarray(beta_values, dtype=np.float64))
-                if centred_intercept is None:
-                    centred_intercept = float(intercept_value) + shift
-                if eta_unclipped is None:
-                    eta_unclipped = (
-                        centred_intercept + centred_matvec(dm, beta_values, _state_center) + offset
-                    )
-                intercept_value = centred_intercept - shift
-            state = _evaluate_irls_state(
-                dm,
-                y,
-                weights,
-                family,
-                link,
-                offset,
-                beta_values,
-                intercept_value,
-                deviance=deviance,
-                eta_unclipped=eta_unclipped,
-                state_id=state_id,
-                evaluation_id=evaluation_id,
-                basis_id=trace_basis_id,
-                lambdas=resolved_lambdas,
-            )
-            if not _has_scop:
-                state = replace(
-                    state,
-                    penalized_deviance=float(state.deviance + penalty_quadratic(state.beta)),
-                )
-            if centred_intercept is not None:
-                state = replace(state, centred_intercept=float(centred_intercept))
-            if emit_trace:
-                emit_evaluation(
-                    state,
-                    phase=phase,
-                    iteration=iteration,
-                    alpha=alpha,
-                    enclosing_proposal_state_id=enclosing_proposal_state_id,
-                    deviance_reused=deviance is not None,
-                )
-            return state
-
-        def emit_state_commit(
-            state: _IRLSState,
-            *,
-            iteration: int,
-            fit_converged: bool,
-            convergence_value: float | None,
-            termination_reason: TerminationReason | None,
-            convergence_label: str | None = None,
-            convergence_tolerance: float | None = None,
-        ) -> None:
-            if not trace_enabled:
-                return
-            assert trace_run is not None
-            trace_run.emit_lazy(
-                "state_commit",
-                lambda: {
-                    "state_id": state.state_id,
-                    "evaluation_id": state.evaluation_id,
-                    "solver": "irls_direct",
-                    "phase": "initial" if iteration == 0 else "outer",
-                    "outer_iteration": iteration,
-                    "state_space": state.state_space,
-                    "basis_id": state.basis_id,
-                    "lambdas": state.lambdas,
-                    "dispersion": state.dispersion,
-                    "intercept": state.intercept,
-                    "deviance": state.deviance,
-                    "penalized_deviance": state.penalized_deviance,
-                    "fit_converged": fit_converged,
-                    "convergence_criterion": convergence
-                    if convergence_label is None
-                    else convergence_label,
-                    "convergence_value": convergence_value,
-                    "convergence_tolerance": tol
-                    if convergence_tolerance is None
-                    else convergence_tolerance,
-                    "termination_reason": termination_reason,
-                },
-                channel="pirls",
-                purpose=trace_purpose,
-            )
-
-        # ── Constrained QP support (monotone splines) ──
-        has_constraints = any(g.constraints is not None for g in groups)
-        prev_active_set: list[int] | None = None
-        A_all: NDArray | None = None
-        b_all: NDArray | None = None
-        # The feasibility scale needs ``|A_all|`` on every test, and the aggregate
-        # system is fixed for the whole fit -- so it is built once here rather than
-        # rebuilt two to three times per IRLS iteration plus once per line-search
-        # halving.  See ``constrained_qp._feasibility_slack``.
-        abs_A_all: NDArray | None = None
-        if has_constraints:
-            A_blocks: list[np.ndarray] = []
-            b_blocks: list[np.ndarray] = []
-            for g in groups:
-                if g.constraints is not None:
-                    A_model = np.zeros((g.constraints.n_constraints, p))
-                    A_model[:, g.sl] = g.constraints.A
-                    A_blocks.append(A_model)
-                    b_blocks.append(g.constraints.b)
-            A_all = np.vstack(A_blocks)
-            b_all = np.concatenate(b_blocks)
-            abs_A_all = np.abs(A_all)
-
-        # ── SCOP monotone engine support ──
-        _has_scop = any(g.monotone_engine == "scop" for g in groups)
-        _scop_run: SCOPRunCentring | None = None
-        # the columns the binomial/log certificate tests in SCOP's latent
-        # coordinates instead (``true_mode_residual``)
-        _scop_columns: NDArray | None = None
-        if _has_scop:
-            _scop_columns = np.zeros(p, dtype=bool)
-            for g in groups:
-                if g.monotone_engine == "scop":
-                    _scop_columns[g.sl] = True
-        if (
-            _state_center is None
-            and not _use_structured
-            and not has_constraints
-            and not _has_scop
-            and hasattr(dm, "group_matrices")
-        ):
-            # The nested chain's centred state on gram's centred system too: eta
-            # about the fixed prior-weighted centre, so a column at 1e8
-            # contributes rows of its spread, not of its offset, and the
-            # objective the line search compares keeps its digits (stage-1
-            # verifier: a raw-1e8 column left the penalized deviance noisy at
-            # 1e-11 relative, so no Newton step near the mode was accepted and
-            # the score stalled at 1e-6).
-            _state_center = prior_weighted_centre(dm, weights)
-        _scop_curvature = "fisher"
-        if _has_scop:
-            from superglm.reml.observed_geometry import classify_scop_reml_curvature
-
-            _scop_curvature = classify_scop_reml_curvature(family, link)
-        if compute_rank_info and _defer_rank_info is not None:
-            raise ValueError("deferred rank metadata requires compute_rank_info=False")
-        if (not _compute_fit_statistics and compute_rank_info) or (
-            _return_working_system and (compute_rank_info or has_constraints or _has_scop)
-        ):
-            raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
-        if not _compute_reml_geometry and (compute_rank_info or _compute_fit_statistics):
-            raise ValueError(
-                "omitting generic REML geometry requires rank metadata and fit statistics "
-                "to be disabled"
-            )
-        # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
-        # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
-        # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
-        # converges only linearly under a non-canonical link. Newton starts only
-        # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
-        # cache exists for it to invalidate. Gamma/log keeps Fisher: its constant
-        # Fisher weights reuse one weighted Gram that Newton would rebuild every
-        # iteration; the mode certificate's bar is set by the REML tolerance
-        # (``mode_score.mode_certification_bar``), which Fisher's linear rate
-        # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
-        # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
-        # information ``w y / mu`` exceeds twice the Fisher information ``w``
-        # along a direction, as heavy-tailed severities give, and there the score
-        # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
-        # it in the budget.  Such a solve switches to Newton once its resolved
-        # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
-        # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
-        # reaches the bar in time never switches.
-        # The exported geometry is Fisher either way (``export_rows``), and the
-        # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
-        # is decided here, once, from the family, the link and the route
-        # (one-engine design §3.11).
-        # An observed iterate whose Hessian the structured factor refuses as not
-        # positive definite takes a Levenberg shift inside the same curvature
-        # (``_levenberg_shifted_operator``), and a trial whose observed rows are
-        # not finite is rejected by the line search.
-        # The fREML performance iteration (``_return_working_system``) takes
-        # Newton rows when its optimizer asks (``_working_newton``): the discrete
-        # route's working model then carries the observed curvature its REML
-        # criterion is (``reml.discrete``).
-        # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
-        # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
-        # information, and the REML geometry it hands on reads Fisher rows at the
-        # retained model either way.
-        _observed_newton_active = bool(
-            _use_observed_newton
-            and not has_constraints
-            and (
-                (_working_newton and concave_observed_rows(family, link))
-                if _return_working_system
-                else supports_observed_newton(family, link)
-                and not _has_constant_irls_weights(family, link)
-            )
-        )
-        # A declared Newton pair kept on Fisher rows for its constant weights
-        # (Gamma/log), which switches to Newton if its Fisher score stagnates,
-        # and starts on Newton when an earlier solve of the same REML fit
-        # switched (``_newton_latch``).
-        _stagnation_newton_available = bool(
-            _use_observed_newton
-            and not has_constraints
-            and not _has_scop
-            and not _return_working_system
-            and supports_observed_newton(family, link)
-            and not _observed_newton_active
-        )
-        if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
-            _observed_newton_active = True
-
-        def observed_rows_invalid(candidate: _IRLSState) -> bool:
-            """Whether a trial's observed rows are not finite, which rejects it.
-
-            One-engine design §3.11: finiteness is the one condition the declared
-            observed rows keep; a trial without finite rows is not a state the
-            next Newton step can start from. Every line search of an observed fit
-            reads it, the SCOP one included.
-            """
-            rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=candidate.mu,
-                eta=candidate.eta,
-                sample_weight=weights,
-                prefer_observed=True,
-            )
-            return rows.rejection_reason is not None
-
-        _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
-        _expose_exact_support_state = False
-        # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
-        _scop_state: dict[int, dict] = {}
-        # A REML run's fits share one reduced design, their rung refusals and
-        # their exact supports (``SCOPRunCentring``); a traced or debugged fit
-        # stays fresh, as the Newton engine's carried policy does.
-        if (
-            _has_scop
-            and _scop_run_centring is not None
-            and debug_recorder is None
-            and trace_run is None
-        ):
-            _scop_run = _scop_run_centring
-            _scop_run.bind((dm, family, link, *gms, *groups))
-        if _has_scop:
-            for gi, g in enumerate(groups):
-                if g.monotone_engine == "scop":
-                    cached_scop_state = (
-                        scop_state_init.get(gi) if scop_state_init is not None else None
-                    )
-                    reparam = g.scop_reparameterization
-                    cached_S_scop = (
-                        None if cached_scop_state is None else cached_scop_state.get("S_scop")
-                    )
-                    if isinstance(cached_S_scop, np.ndarray) and cached_S_scop.shape == (
-                        g.size,
-                        g.size,
-                    ):
-                        S_scop = cached_S_scop
-                    else:
-                        S_scop = reparam.penalty_matrix()
-                    _gm = gms[gi]
-
-                    # Warm-start beta_scop from previous outer EFS iteration if available
-                    warm_beta_scop = None
-                    if cached_scop_state is not None:
-                        prev = cached_scop_state["beta_eff"]
-                        q_eff = S_scop.shape[0]
-                        if prev.shape == (q_eff,):
-                            warm_beta_scop = prev.copy()
-
-                    if isinstance(_gm, DiscretizedSCOPGroupMatrix):
-                        state = {
-                            "reparam": reparam,
-                            "B_scop": _gm.B_scop_unique,
-                            "S_scop": S_scop,
-                            "bin_idx": _gm.bin_idx,
-                            "beta_scop": warm_beta_scop,
-                            "beta_scop_prev": None,
-                        }
-                    else:
-                        compressed = (
-                            _lone_scop_support(
-                                _gm, gi, None if _scop_run is None else _scop_run.exact_supports
-                            )
-                            if _n_scop_groups == 1
-                            else None
-                        )
-                        if compressed is not None:
-                            _expose_exact_support_state = True
-                            state = {
-                                "reparam": reparam,
-                                "B_scop": compressed[0],
-                                "S_scop": S_scop,
-                                "bin_idx": compressed[1],
-                                "beta_scop": warm_beta_scop,
-                                "beta_scop_prev": None,
-                            }
-                        else:
-                            state = {
-                                "reparam": reparam,
-                                "B_scop": _gm.toarray(),
-                                "S_scop": S_scop,
-                                "bin_idx": None,
-                                "beta_scop": warm_beta_scop,
-                                "beta_scop_prev": None,
-                            }
-                    if cached_scop_state is not None:
-                        for key in (
-                            "H_scop_penalized",
-                            "last_step_norm",
-                            "last_fisher_fallback",
-                            "discarded_directions",
-                            "penalty_rank",
-                            "penalty_log_det_omega_plus",
-                            "penalty_eigvals_omega",
-                        ):
-                            if key in cached_scop_state:
-                                state[key] = cached_scop_state[key]
-                    _scop_state[gi] = state
-            # Build mask of non-SCOP column indices for the reduced system
-            _non_scop_cols = []
-            _non_scop_groups_idx = []
-            for gi, g in enumerate(groups):
-                if gi not in _scop_state:
-                    _non_scop_cols.extend(range(g.start, g.end))
-                    _non_scop_groups_idx.append(gi)
-            _non_scop_cols = np.array(_non_scop_cols, dtype=int)
-            _p_reduced = len(_non_scop_cols)
-            # Build reduced penalty matrix for non-SCOP groups
-            _S_reduced = S[np.ix_(_non_scop_cols, _non_scop_cols)]
-            # Build mapping from reduced beta index to full beta index
-            _reduced_to_full = _non_scop_cols
-            _reduced_gms = []
-            for gi in _non_scop_groups_idx:
-                _reduced_gms.append(gms[gi])
-            if _scop_run is not None:
-                _reduced_dm = _scop_run.reduced_design(
-                    tuple(_non_scop_groups_idx), _reduced_gms, n, _p_reduced
-                )
-            else:
-                _reduced_dm = DesignMatrix(_reduced_gms, n=n, p=_p_reduced)
-            _reduced_tabmat_state = TabmatCenteringState()
-            if _scop_run is not None:
-                _seed_refusals(_reduced_tabmat_state, _scop_run.reduced_refusals)
-
-            _scop_specs = {
-                gi: SCOPGroupSpec(
-                    group_index=gi,
-                    group=groups[gi],
-                    reparam=st["reparam"],
-                    B_scop=st["B_scop"],
-                    S_scop=st["S_scop"],
-                    bin_idx=st["bin_idx"],
-                )
-                for gi, st in _scop_state.items()
-            }
-            _scop_order = sorted(_scop_specs)
-            _scop_newton = SCOPJointNewton(
-                [_scop_specs[gi] for gi in _scop_order],
-                lambda2,
-                _reduced_dm,
-                n,
-                supports=None if _scop_run is None else _scop_run.exact_supports,
-            )
-
-            # QP/warm initialization is part of the first committed state, not the
-            # first proposal. This gives iteration one a coherent latent baseline.
-            provisional = evaluate_state(
-                beta,
-                intercept,
-                phase="scop_initialization",
-                iteration=0,
-            )
-            initial_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=provisional.mu,
-                eta=provisional.eta,
-                sample_weight=weights,
-                prefer_observed=False,
-            )
-            W_init = initial_rows.weights
-            z_init = initial_rows.response
-            z_off_init = z_init - offset
-            for gi, st in _scop_state.items():
-                if st["beta_scop"] is None:
-                    g_i = groups[gi]
-                    lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                    bin_idx = st["bin_idx"]
-                    if bin_idx is not None:
-                        n_bins = st["B_scop"].shape[0]
-                        W_agg = np.bincount(bin_idx, weights=W_init, minlength=n_bins)
-                        Wz_agg = np.bincount(
-                            bin_idx,
-                            weights=W_init * z_off_init,
-                            minlength=n_bins,
-                        )
-                        with np.errstate(divide="ignore", invalid="ignore"):
-                            z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
-                        st["beta_scop"] = st["reparam"].qp_initialize(
-                            st["B_scop"],
-                            z_bin,
-                            lambda_penalty=lam_scop,
-                            weights=W_agg,
-                        )
-                    else:
-                        st["beta_scop"] = st["reparam"].qp_initialize(
-                            st["B_scop"],
-                            z_off_init,
-                            lambda_penalty=lam_scop,
-                            weights=W_init,
-                        )
-                gamma_eff = st["reparam"].forward(st["beta_scop"])
-                st["gamma_eff"] = gamma_eff.copy()
-                beta[groups[gi].sl] = gamma_eff
-
-        # QR pre-computation: materialise full design matrix once
-        # Constrained QP / SCOP requires Gram path — force it if constraints present
-        _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
-        _mean_space_newton_available = bool(
-            mean_space_violation(family, link) is not None
-            and not _use_qr
-            and not _has_scop
-            and not _return_working_system
-        )
-        if _use_qr:
-            has_disc = any(
-                isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
-                for gm in gms
-            )
-            if has_disc:
-                logger.warning(
-                    "direct_solve='qr' with discretized groups materialises the full "
-                    "(n, p) design matrix, defeating the O(n_bins) discretization "
-                    "benefit.  Consider direct_solve='auto' for large-n discrete fits."
-                )
-            _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
-            _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
-
-        # Tabmat acceleration: the structured layout owns a pruned small-block
-        # plan, so it must not construct a split containing the dominant factor.
-        # Other non-discrete paths retain the shared full-design split behavior.
-        if _use_structured:
-            _tabmat_split = None
-        elif _use_qr:
-            _tabmat_split = None
-        elif has_constraints:
-            # Constrained QP uses the shared stable centered-system builder, while
-            # retaining the execution-plan route instead of materializing a
-            # separate tabmat copy of the design.
-            _tabmat_split = None
-        else:
-            # Ordinary intercept profiling currently benefits only when the split
-            # contains a native high-cardinality categorical component. Avoid
-            # materializing an unused dense duplicate for numeric and low-cardinality fits.
-            _tabmat_split = dm.tabmat_centering_split
-        _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
-        # Observed rows are not the constant Fisher weights this cache assumes.
-        _can_reuse_weighted_gram = (
-            _can_reuse_weighted_gram and not _use_structured and not _observed_newton_active
-        )
-        dm.execution_plan.validate_group_spans(groups)
-        _defer_raw_spline = (
-            not dm.raw_spline_tabmat_plan_built
-            and _is_raw_spline_tabmat_centering_candidate(gms, n=n)
-            and (
-                _defer_raw_spline_tabmat_plan(
-                    n=n,
-                    raw_width=sum(int(group.B.shape[1]) for group in gms if group.shape[1] > 0),
-                    constant_weights=_can_reuse_weighted_gram,
-                    repeated_fit=trace_purpose
-                    in {"reml_bootstrap", "reml_candidate", "reml_line_search"},
-                )
-            )
-        )
-        _tabmat_centering_state = TabmatCenteringState(
-            raw_spline_eligible=False if _defer_raw_spline else None
-        )
-        if _scop_run is not None:
-            _seed_refusals(_tabmat_centering_state, _scop_run.full_refusals)
-        fixed_owners = ()
-        if _raw_moment_policy is not None or _fisher_data_reuse is not None:
-            # A negative route choice is safe for changed W; no accepted preflight,
-            # weighted system or penalty survives. Fixed-coordinate QP is eligible.
-            fixed_owners = (
-                (dm, dm.execution_plan, family, link, *gms, *groups)
-                if type(dm) is DesignMatrix
-                and type(family) in (Poisson, Gaussian, Gamma, Binomial, NegativeBinomial, Tweedie)
-                and type(link) in (LogLink, IdentityLink, LogitLink)
-                and all(
-                    type(gm)
-                    in (
-                        CategoricalGroupMatrix,
-                        DenseGroupMatrix,
-                        SparseSSPGroupMatrix,
-                        SupportCompressedSSPGroupMatrix,
-                    )
-                    for gm in gms
-                )
-                and all(
-                    type(group) is GroupSlice
-                    and (
-                        group.constraints is None or type(group.constraints) is LinearConstraintSet
-                    )
-                    for group in groups
-                )
-                and not (_use_qr or _use_structured or _has_scop)
-                and debug_recorder is None
-                and trace_run is None
-                else ()
-            )
-            if _raw_moment_policy is not None:
-                _tabmat_centering_state.raw_moment_eligible = _raw_moment_policy.seed_raw_rejection(
-                    fixed_owners
-                )
-                if not fixed_owners:
-                    _raw_moment_policy = None
-        if _fisher_data_reuse is not None and not (
-            fixed_owners and type(family) is Gamma and type(link) is LogLink and not has_constraints
-        ):
-            _fisher_data_reuse.clear()
-            _fisher_data_reuse = None
-        if profile is not None and _defer_raw_spline:
-            profile["centered_spline_tabmat_cold_policy_rejections"] = (
-                profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
-            )
-        _constant_centered_cache: CenteredSystem | None = None
-        _constant_centered_z: NDArray | None = None
-        _centered_factor_certification: _CenteredFactorCertification | None = None
-        _initial_data_pending = (
-            _initial_data_reuse is not None
-            and type(family) is Poisson
-            and type(link) is LogLink
-            and type(dm) is DesignMatrix
-            and all(
-                type(gm)
-                in (
-                    CategoricalGroupMatrix,
-                    DenseGroupMatrix,
-                    SparseSSPGroupMatrix,
-                    SupportCompressedSSPGroupMatrix,
-                )
-                for gm in gms
-            )
-            and not (_use_qr or _use_structured or has_constraints or _has_scop)
-            and debug_recorder is None
-            and trace_run is None
-        )
-        # These objects stay live throughout the owner line search. A new design
-        # or warm state cannot consume an entry from the previous coordinates.
-        _initial_data_key = (
-            (
-                id(dm),
-                id(dm.execution_plan),
-                id(family),
-                id(link),
-                beta.tobytes(),
-                np.float64(intercept).tobytes(),
-            )
-            if _initial_data_pending
-            else None
-        )
-
-        def get_centered_system(W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
-            nonlocal _constant_centered_cache, _constant_centered_z
-            nonlocal _initial_data_pending
-            reuse = _initial_data_reuse if _initial_data_pending else None
-            _initial_data_pending = False
-            before = replace(_tabmat_centering_state) if reuse is not None else None
-            if reuse is not None:
-                reused = reuse.take(
-                    _initial_data_key,
-                    W_current,
-                    z_off_current,
-                    _tabmat_centering_state,
-                    np.asarray(S),
-                )
-                if reused is not None:
-                    return reused
-            if (
-                _can_reuse_weighted_gram
-                and _constant_centered_cache is not None
-                and _constant_centered_z is not None
-            ):
-                if np.array_equal(z_off_current, _constant_centered_z):
-                    return _constant_centered_cache
-                _constant_centered_cache = refresh_centered_rhs(
-                    system=_constant_centered_cache,
-                    dm=dm,
-                    W=W_current,
-                    z_off=z_off_current,
-                )
-                _constant_centered_z = z_off_current.copy()
-                return _constant_centered_cache
-            fisher = (
-                _fisher_data_reuse
-                if _can_reuse_weighted_gram and not _observed_newton_active
-                else None
-            )
-            data = (
-                fisher.take((*fixed_owners, weight_semantics), W_current)
-                if fisher is not None
-                else None
-            )
-            system = build_centered_system(
-                dm=dm,
-                W=W_current,
-                z_off=z_off_current,
-                penalty=np.asarray(S),
-                tabmat_split=_tabmat_split,
-                tabmat_state=_tabmat_centering_state,
-                profile=profile,
-                _data=data,
-            )
-            if fisher is not None and fisher.data is None:
-                fisher.remember(W_current, system)
-            if _scop_run is not None:
-                _carry_refusals(_scop_run.full_refusals, _tabmat_centering_state)
-            if (
-                _raw_moment_policy is not None
-                and _tabmat_centering_state.raw_moment_eligible is False
-            ):
-                _raw_moment_policy.raw_moment_eligible = False
-            if reuse is not None:
-                reuse.remember(
-                    _initial_data_key,
-                    W_current,
-                    z_off_current,
-                    before,
-                    _tabmat_centering_state,
-                    system,
-                )
-            if _can_reuse_weighted_gram:
-                _constant_centered_cache = system
-                _constant_centered_z = z_off_current.copy()
-            return system
-
-        def certify_centered_factor(
-            system: CenteredSystem,
-            W_current: NDArray,
-            *,
-            response: NDArray | None = None,
-        ) -> _CenteredFactorCertification:
-            """Return a factor certificate for one immutable centered geometry."""
-            nonlocal _centered_factor_certification
-            if _fisher_data_reuse is not None:
-                _fisher_data_reuse.clear()
-            cached = _centered_factor_certification
-            same_geometry = bool(
-                cached is not None
-                and cached.system.data_gram is system.data_gram
-                and cached.system.penalty is system.penalty
-                and cached.system.hessian is system.hessian
-                and cached.system.mean_x is system.mean_x
-                and cached.system.sum_w == system.sum_w
-            )
-            # A refreshed RHS can share the exact weighted Gram while differing in
-            # a factor-resolvable direction that normal equations round away. The
-            # immutable CenteredSystem instance identifies one RHS generation, so
-            # transformed RHS reuse needs only identity—not an O(n) response copy
-            # and comparison. Geometry-only terminal consumers may reuse the same
-            # compact factor across refreshed constant-weight systems.
-            if (
-                same_geometry
-                and cached is not None
-                and (
-                    response is None
-                    or (cached.system is system and cached.transformed_rhs is not None)
-                )
-            ):
-                return cached
-
-            centre, centre_lo = system.centre_pair()
-            if response is None:
-                factor = grouped_augmented_factor(
-                    dm,
-                    W_current,
-                    system.penalty,
-                    center=centre,
-                    center_lo=centre_lo,
-                )
-                transformed_rhs = None
-            else:
-                factor, transformed_rhs = grouped_augmented_factor_rhs(
-                    dm,
-                    W_current,
-                    system.penalty,
-                    response=response,
-                    center=centre,
-                    center_lo=centre_lo,
-                )
-            factor_decomposition = decompose_factor(
-                factor,
-                retain_factor_solve=transformed_rhs is not None,
-            )
-            cached = _CenteredFactorCertification(
-                system=system,
-                factor=factor,
-                decomposition=factor_decomposition,
-                transformed_rhs=transformed_rhs,
-            )
-            _centered_factor_certification = cached
-            return cached
-
-        t_start = time.perf_counter()
-        converged = False
-        XtWX_beta: (
-            NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator | None
-        ) = None
-        _final_penalized_operator: (
-            FactorSmoothPenalizedOperator
-            | SumToZeroPenalizedOperator
-            | NestedPenalizedOperator
-            | None
-        ) = None
-
-        # Phase timing accumulators
-        _t_working = 0.0
-        _t_gram = 0.0
-        _t_solve = 0.0
-        _t_deviance = 0.0
-        _t_eta = 0.0
-        _t_deviance_eval = 0.0
-        _last_working_centered: CenteredSystem | None = None
-        # its mean_x less the state's centre (``_system_offset_mean``), None without one
-        _last_working_offset_mean: NDArray | None = None
-        _last_working_structured: (
-            FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
-        ) = None
-        # convergence="mode_score": the centring of the certificate's score at the
-        # iterate each solve linearised about -- (mean_x, sum_w, centred diagonal,
-        # coefficients the factor truncated as weakly identified, mean_x less the
-        # state's centre or None without one) -- or None on a
-        # route that forms no centred system (SCOP, linear constraints), which
-        # keeps the coefficient-step test.
-        _score_centre: tuple | None = None
-        _last_mode_residual: ModeResidual | None = None
-        # the certificate ratio at every iterate of a mode_score solve, for the
-        # stagnation stop
-        _mode_ratios: list[float] = []
-        # the certificate's bar (``mode_score.mode_certification_bar``): the REML
-        # fit passes the one its stopping tolerance needs
-        mode_bar = MODE_CERTIFICATION_BAR if _mode_bar is None else float(_mode_bar)
-        _stagnation_window = stagnation_window(max_iter, mode_bar)
-        score_stagnated = False
-        # the binomial/log score's certificate ratio at every stop it refused
-        # (``true_mode_residual``), for the same stagnation stop
-        _true_ratios: list[float] = []
-        # Newton steps on the observed information once the certificate refused
-        # a stop near the mode or its refused score stalled (below); never on the
-        # QR route (whose least squares cannot carry a zero-curvature row's
-        # score) or the SCOP route (which takes its own Newton steps)
-        _mean_space_newton = False
-        # Whether the true-score certificate decided the last iteration under
-        # Newton steps, its ratio there, and its last residual: the diagnostics
-        # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
-        # tells a criterion read at the state that it is the model's own mode.
-        _true_stop = False
-        _true_confirmed = False
-        _true_stop_ratio = math.inf
-        _last_true_residual: list[ModeResidual | None] = [None]
-        # the decomposition this iteration's solve holds (gram and qr routes); the
-        # latest certificate's judgement of the truncated directions
-        # (``truncated_direction_ratio``) with the state it judged (its eta), and
-        # the latest judgement that found any.  Only a judgement of the returned
-        # state decides the fit's verdict; an earlier one is published as history
-        # (below)
-        _held_rank: list = [None]
-        _judged_truncated: list[tuple] = [(None, ())]
-        _last_truncated: list[tuple] = [(None, ())]
-
-        # The family's mean space, when the link's inverse can leave it (declared
-        # by the family and link, ``irls_state.mean_space_violation``).
-        _mean_space_invalid = mean_space_violation(family, link)
-        # The link inverse's own domain (``irls_state.link_domain_violation``).
-        _link_domain_invalid = link_domain_violation(link)
-        # A warm start's centred state carried to this fit's centre (one-engine
-        # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
-        # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
-        # the two centres share.  Taken back from the raw intercept instead it
-        # errs by u |c' beta| in every row's eta, ~0.25 at a 1e16 offset.
-        centred_start: float | None = None
-        if (
-            _centred_init is not None
-            and _state_center is not None
-            and beta_init is not None
-            and intercept_init is not None
-            and intercept == intercept_init
-        ):
-            warm_alpha, warm_centre = _centred_init
-            warm_centre = np.asarray(warm_centre, dtype=np.float64)
-            if warm_centre.shape == _state_center.shape:
-                centred_start = float(warm_alpha) + math.fsum((_state_center - warm_centre) * beta)
-        # Freeze the fit-entry state so iteration-one trial safety has a baseline.
-        committed = evaluate_state(
-            beta,
-            intercept,
-            phase="initial",
-            iteration=0,
-            deviance=_deviance_init,
-            emit_trace=not _has_scop,
-            centred_intercept=centred_start,
-        )
-        if _has_scop:
-            scop_committed = _SCOPTrialState(
-                irls=committed,
-                groups=tuple(
-                    _SCOPGroupState(
-                        group_index=gi,
-                        beta_eff=_immutable_array(st["beta_scop"]),
-                        gamma_eff=_immutable_array(st["gamma_eff"]),
-                        H_scop_penalized=(
-                            None
-                            if st.get("H_scop_penalized") is None
-                            else _immutable_array(st["H_scop_penalized"])
-                        ),
-                        last_step_norm=float(st.get("last_step_norm", 0.0)),
-                        last_fisher_fallback=bool(st.get("last_fisher_fallback", False)),
-                        discarded_directions=_immutable_or_none(st.get("discarded_directions")),
-                    )
-                    for gi, st in sorted(_scop_state.items())
-                ),
-            )
-
-            # Remove mapped diagonal SCOP penalties before evaluating the merit.
-            # Subtracting them after a full quadratic introduces avoidable
-            # cancellation; cross-group override entries keep their existing role.
-            scop_outer_penalty = S.copy()
-            for spec in _scop_specs.values():
-                scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
-            scop_outer_penalty_abs = np.abs(scop_outer_penalty)
-            scop_merit_errors: dict[int, float] = {}
-            merit_gamma = _gamma(len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16)
-            # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
-            # This encloses residual formation without an observation-level
-            # calculation on every trial. Other families supply deviance-unit
-            # values; the guard covers their weighted accumulation and penalty.
-            # Include gamma before squaring. The response action itself may be
-            # outside binary64 even when its roundoff allowance is finite.
-            with np.errstate(over="ignore", invalid="ignore"):
-                gaussian_response_roundoff = (
-                    np.sum((np.sqrt(merit_gamma) * np.sqrt(weights) * y) ** 2)
-                    if type(family) is Gaussian
-                    else 0.0
-                )
-            # NB2's unit deviance errs by u (y + theta) whatever its size: it
-            # takes the log of (y + theta) / (mu + theta), or of (mu + theta) /
-            # theta where y = 0, a ratio within gamma_3 of its own, and multiplies
-            # it back by y + theta. That puts at most 2 gamma_4 (2y + theta) on
-            # each row (8.9e-8 at theta = 1e8), beside the rounding of the two
-            # terms Poisson's unit deviance also has, which the deviance's own
-            # allowance covers. A backtracking search finds a step only when its
-            # allowance bounds the merit's noise (Berahas, Byrd & Nocedal 2019,
-            # Theorem 4.2).
-            nb2_unit_roundoff = (
-                2.0 * _gamma(4) * float(np.sum(np.abs(weights) * (2.0 * y + family.theta)))
-                if type(family) is NegativeBinomial
-                else 0.0
-            )
-
-            def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
-                """Attach deviance plus the latent-coordinate quadratic penalty."""
-                # A trial whose mapped coefficients carry its ordinary block past
-                # binary64's range has a merit that is not finite, which the line
-                # search refuses, without a warning (as ``_evaluate_scop_trial``).
-                with np.errstate(over="ignore", invalid="ignore"):
-                    penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
-                magnitude = np.abs(trial.irls.beta)
-                penalty_roundoff = _positive_quadratic_roundoff(
-                    magnitude, scop_outer_penalty_abs, merit_gamma
-                )
-                for group_state in trial.groups:
-                    group = groups[group_state.group_index]
-                    lam_scop = (
-                        lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                    )
-                    latent_penalty = _scop_specs[group_state.group_index].S_scop
-                    penalty_quad += float(
-                        lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
-                    )
-                    magnitude = np.abs(group_state.beta_eff)
-                    penalty_roundoff += _positive_quadratic_roundoff(
-                        magnitude, latent_penalty, merit_gamma, abs(lam_scop)
-                    )
-                retained = replace(
-                    trial,
-                    irls=replace(
-                        trial.irls,
-                        penalized_deviance=float(trial.irls.deviance + penalty_quad),
-                    ),
-                )
-                deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + nb2_unit_roundoff
-                if type(family) is Gaussian:
-                    deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
-                with np.errstate(over="ignore", invalid="ignore"):
-                    allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
-                scop_merit_errors[id(retained.irls)] = allowance
-                return retained
-
-            scop_committed = with_scop_merit(scop_committed)
-            committed = scop_committed.irls
-            # Relative change uses the current objective alone. An initial-merit
-            # reference would weaken late convergence after a poor starting fit.
-            objective_merit_scale = 0.0
-            emit_evaluation(
-                committed,
-                phase="initial",
-                iteration=0,
-                deviance_reused=_deviance_init is not None,
-            )
-        emit_state_commit(
-            committed,
-            iteration=0,
-            fit_converged=False,
-            convergence_value=None,
-            termination_reason=None,
-        )
-        objective_prev = (
-            committed.deviance
-            if committed.penalized_deviance is None
-            else committed.penalized_deviance
-        )
-        dev_prev = committed.deviance
-        eta_unclipped = committed.eta_unclipped
-        eta = committed.eta
-        mu = committed.mu
-        # Always an empty list; only ``record_diagnostics`` decides whether rows are
-        # appended and whether it is published on the result.
-        iteration_log: list[IterationDiagnostics] = []
-        base_debug_context = dict(debug_context or {})
-        # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
-        record_debug_rows = (
-            debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
-        )
-        # Strictly wider than ``record_diagnostics``, so the per-iteration extrema
-        # this gates are always bound by the time a diagnostics row is built.
-        capture_extrema = record_diagnostics or record_debug_rows
-
-        max_halving = 20  # max step-halving attempts per iteration
-        _consecutive_svd = 0  # for auto-mode warning
-        _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
-        _degeneracy_retry_failed = (
-            False  # the #472 retry is off after a failure, until a solve certifies
-        )
-        # A constrained fit-entry state has not been certified by the inner QP.
-        retained_qp_converged = not has_constraints
-        # Declared, not bound: the chain below is the whole set of reasons this
-        # solver can end an iteration on, and declaring it against the shared
-        # vocabulary is what ties the two together. A tenth reason invented here is
-        # a type error on its own assignment until ``TerminationReason`` carries
-        # it, so the consumers that switch on the field cannot be handed a string
-        # they have never been shown.
-        termination_reason: TerminationReason
-
-        # Captured inside the loop, BEFORE ``dev_prev`` advances, because the
-        # post-loop separation backstop needs the final iteration's movement.
-        # Reading ``abs(dev - dev_prev)`` after the loop cannot work: ``dev_prev``
-        # is assigned ``dev`` as the loop's last statement, so budget exhaustion
-        # makes that difference identically zero and any stagnation test on it
-        # vacuous.  ``inf`` until an iteration completes, so a fit that never
-        # finishes one is never called stagnant.
-        deviance_relative_change = float("inf")
-
+        self._setup_design()
+        self._setup_trace()
+        self._setup_routes()
+        self._setup_scop()
+        self._setup_systems()
+        self._setup_loop()
+        A_all, S, S_override, XtWX_beta = self.A_all, self.S, self.S_override, self.XtWX_beta
+        _compensate_centred_intercept = self._compensate_centred_intercept
+        _compute_fit_statistics = self._compute_fit_statistics
+        _compute_reml_geometry = self._compute_reml_geometry
+        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
+        _consecutive_svd, _defer_rank_info = self._consecutive_svd, self._defer_rank_info
+        _degeneracy_retry_failed = self._degeneracy_retry_failed
+        _direct_fallback_reason = self._direct_fallback_reason
+        _expose_exact_support_state = self._expose_exact_support_state
+        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
+        _held_rank, _judged_truncated = self._held_rank, self._judged_truncated
+        _last_mode_residual = self._last_mode_residual
+        _last_true_residual, _last_truncated = self._last_true_residual, self._last_truncated
+        _last_working_centered = self._last_working_centered
+        _last_working_offset_mean = self._last_working_offset_mean
+        _last_working_structured = self._last_working_structured
+        _link_domain_invalid = self._link_domain_invalid
+        _mean_space_invalid, _mean_space_newton = self._mean_space_invalid, self._mean_space_newton
+        _mean_space_newton_available = self._mean_space_newton_available
+        _mode_ratios, _newton_latch = self._mode_ratios, self._newton_latch
+        _reported_qp_nonconvergence = self._reported_qp_nonconvergence
+        _retain_reml_decomposition = self._retain_reml_decomposition
+        _return_working_system, _scop_curvature = self._return_working_system, self._scop_curvature
+        _scop_run, _scop_state = self._scop_run, self._scop_state
+        _stagnation_newton_available = self._stagnation_newton_available
+        _stagnation_window, _start_lowered = self._stagnation_window, self._start_lowered
+        _state_center, _structured_group_index = self._state_center, self._structured_group_index
+        _structured_layout, _t_deviance = self._structured_layout, self._t_deviance
+        _t_deviance_eval, _t_eta, _t_gram = self._t_deviance_eval, self._t_eta, self._t_gram
+        _t_solve, _t_working, _true_confirmed = self._t_solve, self._t_working, self._true_confirmed
+        _true_ratios, _true_stop = self._true_ratios, self._true_stop
+        _true_stop_ratio, _use_qr = self._true_stop_ratio, self._use_qr
+        _use_structured, abs_A_all, b_all = self._use_structured, self.abs_A_all, self.b_all
+        base_debug_context, beta, cache_out = self.base_debug_context, self.beta, self.cache_out
+        capture_extrema = self.capture_extrema
+        certify_centered_factor, committed = self.certify_centered_factor, self.committed
+        compute_rank_info, converged = self.compute_rank_info, self.converged
+        convergence, debug_recorder, dev_prev = self.convergence, self.debug_recorder, self.dev_prev
+        deviance_relative_change, direct_solve = self.deviance_relative_change, self.direct_solve
+        dm, emit_evaluation = self.dm, self.emit_evaluation
+        emit_state_commit, eta, eta_unclipped = self.emit_state_commit, self.eta, self.eta_unclipped
+        evaluate_state, family = self.evaluate_state, self.family
+        get_centered_system, gms, groups = self.get_centered_system, self.gms, self.groups
+        has_constraints, intercept = self.has_constraints, self.intercept
+        iteration_log, lambda2, link = self.iteration_log, self.lambda2, self.link
+        max_halving, max_iter, mode_bar = self.max_halving, self.max_iter, self.mode_bar
+        mode_residual, mu = self.mode_residual, self.mu
+        objective_merit_scale, objective_prev = self.objective_merit_scale, self.objective_prev
+        observed_rows_invalid, offset, p = self.observed_rows_invalid, self.offset, self.p
+        penalty_matvec, prev_active_set = self.penalty_matvec, self.prev_active_set
+        profile, record_debug_rows = self.profile, self.record_debug_rows
+        record_diagnostics, reml_penalties = self.record_diagnostics, self.reml_penalties
+        resolved_lambdas, retained_qp_converged = self.resolved_lambdas, self.retained_qp_converged
+        return_scop_state, return_xtwx = self.return_scop_state, self.return_xtwx
+        score_stagnated, separation = self.score_stagnated, self.separation
+        structured_decision, t_start, tol = self.structured_decision, self.t_start, self.tol
+        trace_basis_id, trace_enabled = self.trace_basis_id, self.trace_enabled
+        trace_purpose, trace_run = self.trace_purpose, self.trace_run
+        true_mode_residual, weight_semantics = self.true_mode_residual, self.weight_semantics
+        weights, with_scop_merit, y = self.weights, self.with_scop_merit, self.y
+        if self._use_qr:
+            _X_full, _L_aug = self._X_full, self._L_aug
+        if self._has_scop:
+            _S_reduced, _reduced_dm = self._S_reduced, self._reduced_dm
+            _reduced_tabmat_state = self._reduced_tabmat_state
+            _reduced_to_full, _scop_newton = self._reduced_to_full, self._scop_newton
+            _scop_order, _scop_specs = self._scop_order, self._scop_specs
+            scop_committed, scop_merit_errors = self.scop_committed, self.scop_merit_errors
         for it in range(max_iter):
             _held_rank[0] = None
             beta_prev = committed.beta
@@ -3137,7 +1524,7 @@ class _IRLSDirectFit:
                 mu=mu,
                 eta=eta,
                 sample_weight=weights,
-                prefer_observed=_observed_newton_active,
+                prefer_observed=self._observed_newton_active,
             )
             W = working_rows.weights
             z = working_rows.response
@@ -3219,7 +1606,7 @@ class _IRLSDirectFit:
                 _used_svd = iteration_rank.used_svd_fallback
                 rank_truncated = iteration_rank.rank_truncated
                 if convergence == "mode_score":
-                    _score_centre = (
+                    self._score_centre = (
                         centered.mean_x,
                         centered.sum_w,
                         np.diag(centered.data_gram),
@@ -3507,7 +1894,7 @@ class _IRLSDirectFit:
                     _cond_est = augmented_factor.schur_condition_estimate
                     rank_truncated = augmented_factor.rank_truncated
                     if convergence == "mode_score":
-                        _score_centre = _structured_score_centre(
+                        self._score_centre = _structured_score_centre(
                             structured_system, augmented_factor, dm, W, _state_center
                         )
                     _t_solve += time.perf_counter() - _t0
@@ -3577,7 +1964,7 @@ class _IRLSDirectFit:
                     _used_svd = iteration_rank.used_svd_fallback
                     rank_truncated = iteration_rank.rank_truncated
                     if convergence == "mode_score":
-                        _score_centre = (
+                        self._score_centre = (
                             centered.mean_x,
                             centered.sum_w,
                             np.diag(centered.data_gram),
@@ -3753,7 +2140,7 @@ class _IRLSDirectFit:
                     committed=scop_committed.irls,
                     proposal=search_proposal,
                     evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
-                    invalid_state=observed_rows_invalid if _observed_newton_active else None,
+                    invalid_state=observed_rows_invalid if self._observed_newton_active else None,
                     max_halving=max_halving,
                     extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                         committed=scop_committed.irls,
@@ -3874,7 +2261,7 @@ class _IRLSDirectFit:
                 committed_constraints_feasible = True
                 proposal_constraints_feasible = True
                 constraint_trial_is_invalid = (
-                    observed_rows_invalid if _observed_newton_active else None
+                    observed_rows_invalid if self._observed_newton_active else None
                 )
                 if has_constraints:
                     if A_all is None or b_all is None:  # pragma: no cover - construction invariant
@@ -4078,7 +2465,7 @@ class _IRLSDirectFit:
             convergence_label: str = convergence
             convergence_tolerance = tol
             if np.isfinite(dev):
-                if convergence == "mode_score" and _score_centre is not None:
+                if convergence == "mode_score" and self._score_centre is not None:
                     # One-engine design §3.8: stop on the certificate's own score,
                     # in centred coordinates over the identified coefficients,
                     # once it meets the bar the certificate reads (no margin: the
@@ -4109,7 +2496,7 @@ class _IRLSDirectFit:
                     switched_curvature = False
                     if (
                         _stagnation_newton_available
-                        and not _observed_newton_active
+                        and not self._observed_newton_active
                         and not converged_this_iter
                         and (
                             score_stagnated
@@ -4127,8 +2514,8 @@ class _IRLSDirectFit:
                         # take Newton steps on the observed information, positive
                         # for Gamma/log (``w y / mu``), so the penalized Hessian
                         # stays positive definite.
-                        _observed_newton_active = True
-                        _can_reuse_weighted_gram = False
+                        self._observed_newton_active = True
+                        self._can_reuse_weighted_gram = False
                         score_stagnated = False
                         switched_curvature = True
                         _mode_ratios.clear()
@@ -5351,3 +3738,1730 @@ class _IRLSDirectFit:
         if return_scop_state and scop_converged is not None:
             return result, XtWX_S_inv_beta, scop_converged
         return result, XtWX_S_inv_beta
+
+    def _setup_design(self) -> None:
+        X, y, family, link, groups = self.X, self.y, self.family, self.link, self.groups
+        weights, offset, lambda2 = self.weights, self.offset, self.lambda2
+        direct_solve, S_override = self.direct_solve, self.S_override
+        reml_penalties, beta_init = self.reml_penalties, self.beta_init
+        intercept_init = self.intercept_init
+        if isinstance(X, DesignMatrix):
+            dm = X
+        else:
+            from superglm.solvers.pirls import _wrap_dense_X
+
+            dm = _wrap_dense_X(X, groups)
+
+        n = dm.n
+        p = dm.p
+        gms = dm.group_matrices
+
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (n,):
+            raise ValueError("weights must match the design row count")
+        if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("weights must be finite and non-negative")
+        if not np.any(weights > 0.0):
+            raise ValueError("weights must contain at least one positive value")
+        objective_merit_scale = _irls_objective_scale(
+            y=y,
+            weights=weights,
+            family=family,
+            link=link,
+        )
+
+        structured_decision = resolve_structured_backend(
+            gms,
+            groups,
+            direct_solve=direct_solve,
+            coefficient_width=p,
+            lambda2=lambda2,
+            S_override=S_override,
+            nesting_cache=getattr(dm, "_structured_layout_cache", None),
+        )
+        if structured_decision.use_structured and S_override is None and reml_penalties is None:
+            reason = (
+                "the structured candidate requires compact reml_penalties "
+                "when S_override is not supplied"
+            )
+            if direct_solve == "structured":
+                raise ValueError(f"direct_solve='structured' is ineligible: {reason}.")
+            structured_decision = replace(
+                structured_decision,
+                use_structured=False,
+                fallback_reason=reason,
+            )
+        _use_structured = structured_decision.use_structured
+        _structured_group_index = structured_decision.group_index
+        _direct_fallback_reason = structured_decision.fallback_reason
+        _structured_layout = (
+            get_structured_layout(
+                dm,
+                groups,
+                dominant_group_index=_structured_group_index,
+                chain_group_indices=structured_decision.chain_group_indices,
+            )
+            if _use_structured and _structured_group_index is not None
+            else None
+        )
+        if isinstance(_structured_layout, FactorSmoothLeafLayout):
+            # every dense kernel of the fs leaf route acts on its border (perf F7);
+            # a nested chain's parent blocks are not border-wide and keep the release
+            keep_narrow_cap(len(_structured_layout.small_indices) + 1)
+        # One-engine design §3.8: a nested chain's PIRLS state is (alpha, beta)
+        # about the fixed prior-weighted border centre c0 of its factor (0 on the
+        # tree), so no eta is ever formed by cancelling X beta against a raw
+        # intercept that absorbs a column's offset.
+        _state_center: NDArray | None = None
+        if isinstance(_structured_layout, NestedStructuredLayout):
+            border_center, _ = nested_prior_statistics(_structured_layout, weights)
+            _state_center = np.zeros(p)
+            _state_center[_structured_layout.small_indices] = border_center
+        elif isinstance(_structured_layout, FactorSmoothLeafLayout):
+            # The same state for an fs term (design §3.4): (alpha, beta) about its c0.
+            border_center, _ = factor_smooth_prior_statistics(_structured_layout, weights)
+            _state_center = np.zeros(p)
+            _state_center[_structured_layout.small_indices] = border_center
+
+        if offset is None:
+            offset = np.zeros(n)
+
+        beta = beta_init.copy() if beta_init is not None else np.zeros(p)
+
+        if intercept_init is not None:
+            intercept = intercept_init
+        else:
+            intercept = coefficient_initial_intercept(
+                distribution=family,
+                link=link,
+                y=y,
+                sample_weight=weights,
+            )
+        # Whether the default start below was lowered into the family's mean space
+        # (binomial/log; a start raised into an inverse link's domain is not).
+        _start_lowered = False
+        if intercept_init is None and (
+            mean_space_violation(family, link) is not None
+            or link_domain_violation(link) is not None
+        ):
+            # The domain guards below keep every accepted state inside the mean
+            # space and the link's domain only from a start inside them, and the
+            # default intercept is chosen before the offset: move it until the
+            # start is inside (``irls_state.interior_start_intercept``).  A
+            # caller's warm start is left as it is.
+            start_intercept = interior_start_intercept(
+                family,
+                link,
+                (dm.matvec(beta) if np.any(beta) else 0.0) + intercept + offset,
+                weights,
+                intercept,
+                level=intercept,
+            )
+            if start_intercept != intercept:
+                intercept = start_intercept
+                self._deviance_init = None
+                _start_lowered = mean_space_violation(family, link) is not None
+
+        # Dense paths retain the existing p x p penalty oracle. Structured paths
+        # add each penalty directly to A or d, unless a caller already supplied a
+        # dense override (which remains authoritative).
+        S: NDArray | None
+        if _use_structured:
+            S = None if S_override is None else np.asarray(S_override, dtype=np.float64)
+        elif S_override is not None:
+            S = S_override
+        else:
+            S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
+        self.dm, self.n, self.p, self.gms, self.weights = dm, n, p, gms, weights
+        self.offset, self.objective_merit_scale = offset, objective_merit_scale
+        self.structured_decision, self._use_structured = structured_decision, _use_structured
+        self._structured_group_index = _structured_group_index
+        self._structured_layout = _structured_layout
+        self._direct_fallback_reason, self._state_center = _direct_fallback_reason, _state_center
+        self.beta, self.intercept, self._start_lowered, self.S = beta, intercept, _start_lowered, S
+        # diag(S), formed once per call on first use by the mode score (S is fixed)
+        self._penalty_curvature: list[NDArray] = []
+        # d'Sd along each one-hot reference and joint-cell direction
+        # (``mode_score.row_set_quadratics``): one penalty product each, formed
+        # once per call on first use (S and the design are fixed within a call)
+        self._row_set_curvature: list[NDArray] = []
+
+    def penalty_matvec(self, beta_values: NDArray, *, magnitude: bool = False) -> NDArray:
+        """Apply the fitted penalty without expanding an identity random-effect block.
+
+        With ``magnitude``, return ``|S| |beta|``, the magnitude this product
+        sums, which bounds its rounding componentwise.
+        """
+        S, reml_penalties, lambda2, gms = self.S, self.reml_penalties, self.lambda2, self.gms
+        values = np.asarray(beta_values, dtype=np.float64)
+        if magnitude:
+            values = np.abs(values)
+        if S is not None:
+            return (np.abs(S) if magnitude else S) @ values
+        if reml_penalties is None:  # pragma: no cover - validated above
+            raise RuntimeError("Structured penalty components are unavailable.")
+        from superglm.reml.penalty_algebra import (
+            penalty_component_magnitude_matvec,
+            penalty_component_matvec,
+        )
+
+        apply = penalty_component_magnitude_matvec if magnitude else penalty_component_matvec
+        product = np.zeros_like(values)
+        for component in reml_penalties:
+            lam = float(lambda2[component.name]) if isinstance(lambda2, dict) else float(lambda2)
+            if lam == 0.0:
+                continue
+            product[component.group_sl] += lam * apply(
+                component,
+                values[component.group_sl],
+                gms[component.group_index],
+            )
+        return product
+
+    def penalty_rounding(self) -> int:
+        """``k`` with ``fl(S v)`` within ``gamma_k fl(|S| |v|)`` (``penalty_product_rounding``)."""
+        p, S, reml_penalties = self.p, self.S, self.reml_penalties
+        from superglm.reml.penalty_algebra import penalty_product_rounding
+
+        return penalty_product_rounding(p, None if S is not None else reml_penalties)
+
+    def penalty_curvature(self) -> NDArray:
+        """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
+        S, lambda2, p, reml_penalties = self.S, self.lambda2, self.p, self.reml_penalties
+        if S is not None:
+            return np.diag(S).astype(np.float64, copy=True)
+        from superglm.reml.identified import penalty_diagonal
+
+        lambdas = (
+            lambda2
+            if isinstance(lambda2, dict)
+            else {component.name: float(lambda2) for component in reml_penalties or ()}
+        )
+        return penalty_diagonal(p, lambdas, reml_penalties)
+
+    def penalty_quadratic(self, beta_values: NDArray) -> float:
+        values = np.asarray(beta_values, dtype=np.float64)
+        return float(values @ self.penalty_matvec(values))
+
+    def mode_residual(
+        self,
+        beta_values: NDArray,
+        intercept_value: float,
+        mu_values: NDArray,
+        eta_values: NDArray,
+        centred_intercept: float | None = None,
+        resolve_cap: float = MODE_RESOLVE_CAP,
+    ) -> ModeResidual:
+        """The observed-REML certificate's score at an iterate (``convergence="mode_score"``).
+
+        The row score from Fisher rows (the score itself does not depend on
+        the curvature the rows carry), centred on the system the last solve
+        linearised about (``_score_centre``), its floors and weak tests
+        resolved once every relative score is within ``MODE_RESOLVE_CAP``
+        (``solvers.mode_score``).  The floors read the iterate's intercept
+        about ``mean_x``; a centred state reads it from its own ``alpha`` and
+        the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
+        from the raw intercept, which cancels ``c' beta`` at a column's offset.
+        """
+        _score_centre, mode_bar = self._score_centre, self.mode_bar
+        _penalty_curvature, dm, family = self._penalty_curvature, self.dm, self.family
+        link, y, weights, offset, p = self.link, self.y, self.weights, self.offset, self.p
+        _laplace_excluded, penalty_matvec = self._laplace_excluded, self.penalty_matvec
+        assert _score_centre is not None
+        mean_x, sum_w, diagonal, excluded_indices, offset_mean = _score_centre
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu_values,
+            eta=eta_values,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        with np.errstate(invalid="ignore", divide="ignore"):
+            scale = np.sqrt(np.abs(diagonal) / sum_w)
+        excluded = np.zeros(p, dtype=bool)
+        excluded[list(excluded_indices)] = True
+        # the slopes the REML fit's Laplace approximation leaves out
+        # (``reml.identified``, design §3.9): flagged and kept, never gated
+        excluded[list(_laplace_excluded)] = True
+        if centred_intercept is None or offset_mean is None:
+            shift = float(mean_x @ beta_values)
+            alpha = float(intercept_value) + shift
+            eta_tilde = eta_values - offset - float(intercept_value) - shift
+        else:
+            shift = float(offset_mean @ beta_values)
+            alpha = float(centred_intercept) + shift
+            eta_tilde = eta_values - offset - float(centred_intercept) - shift
+        if not _penalty_curvature:
+            _penalty_curvature.append(self.penalty_curvature())
+        return penalized_mode_residual(
+            dm=dm,
+            row_score=rows.weights * (rows.response - eta_values),
+            fisher_weights=rows.weights,
+            positive_prior=weights > 0.0,
+            mean_x=mean_x,
+            centered_scale=np.where(np.isfinite(scale), scale, 0.0),
+            alpha=alpha,
+            eta_tilde=eta_tilde,
+            penalty_score=penalty_matvec(beta_values),
+            penalty_magnitude=penalty_matvec(beta_values, magnitude=True),
+            penalty_curvature=_penalty_curvature[0],
+            sum_w=sum_w,
+            bar=mode_bar,
+            excluded=excluded,
+            resolve_cap=resolve_cap,
+            penalty_rounding=self.penalty_rounding(),
+        )
+
+    def true_mode_residual(
+        self,
+        beta_values: NDArray,
+        intercept_value: float,
+        eta_values: NDArray,
+        active_rows: NDArray | None,
+        scop_groups: tuple[_SCOPGroupState, ...] | None,
+    ) -> tuple[float, bool]:
+        """The mode certificate on the binomial/log score itself, for a stop the clip can fool.
+
+        ``(ratio, resolved)``: the largest relative score over its bar
+        (``ModeResidual.ratio``), ``inf`` when the arithmetic cannot resolve
+        it, and whether every relative score is within ``MODE_RESOLVE_CAP``
+        (near the mode).  ``mode_residual``'s relative penalized score, bar,
+        floors and weak tests, evaluated on the score and Fisher weights of
+        the unclipped ``eta_values`` (``irls_state.mean_space_score_rows``)
+        and centred on those weights (``mode_score.weighted_column_centring``),
+        not on the clipped solve's system.
+
+        **Units.** Each relative score is a ratio of quantities of degree one
+        in the weights and the penalty taken together, so it does not depend
+        on their units; the arithmetic that forms it does.
+        - The prior weights are first brought by an even power of two to a
+          largest entry in ``[1/4, 1)``, before any row product, so no row
+          product underflows that would not at unit scale.
+        - Each coordinate then takes its own even power of two: the shift
+          that keeps its penalty terms, in the weights' new units, below
+          ``2^1000``, applied to its data terms too (``penalized_mode_residual``'s
+          ``column_shift``).  A data term that underflows there lies more
+          than ``2^-2000`` below the penalty beside it.
+        - Powers of two are exact on normal and subnormal values, and an even
+          one keeps ``zeta``'s square root exact.
+        - Gradual underflow adds at most half the subnormal spacing
+          ``2^-1074`` of absolute error to each operation (Higham 2002,
+          section 2.1), so a sum over ``n`` rows carries at most ``(n + 2)
+          2^-1074`` beyond its ``gamma_n`` relative error
+          (``_underflow_allowance``, the whole spacing per operation since
+          half of it is not representable).  Where that is not below the
+          bar's allowance, ``bar`` times an identified coordinate's scale,
+          the certificate cannot resolve the score and refuses: ``inf``,
+          never a pass.
+        - Slopes the weak test finds at rounding-level curvature are left out
+          of the ratio only while the iterate is at the mode along them: half
+          their block Newton decrement, over their penalised curvature block
+          (``weak_penalty_block`` for the penalty's part), within the
+          log-likelihood's own rounding over the rows the block touches,
+          ``gamma_{|S| + 4} sum_{i in S} |l_i|`` (``penalized_mode_residual``'s
+          ``decrement_noise``).  The penalty's rounding is left out of that
+          noise, which can only refuse.
+
+        **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
+        b`` active at the iterate.  A constrained mode is stationary when ``G
+        + A' m = 0`` with ``m >= 0``, so the residual tested is ``G + A' m``
+        at the non-negative least-squares ``m`` of its Jacobi-scaled form.
+        Each row is put in the coordinates' units, brought to a largest entry
+        in ``[1/2, 1)`` by a power of two and then to unit length: this leaves
+        the cone it spans unchanged, and its own units can neither overflow
+        nor vanish in the norm.
+
+        **SCOP.** A shape-constrained group's coefficients are its latent
+        ``theta``, with ``gamma = forward(theta)``.  Its stationarity is the
+        latent score ``J' B' s - lambda S theta`` (``J = d gamma / d theta``,
+        diagonal).  The groups' latent scores are projected together off the
+        joint directions their Newton step could not resolve, and tested in
+        the same relative form, bar and floor, in the weights' units (a latent
+        penalty that overflows there is refused).
+        """
+        dm, groups, lambda2, n, p, y = self.dm, self.groups, self.lambda2, self.n, self.p, self.y
+        weights, offset, mode_bar, profile = self.weights, self.offset, self.mode_bar, self.profile
+        _laplace_excluded, _scop_columns = self._laplace_excluded, self._scop_columns
+        _scop_state, _held_rank = self._scop_state, self._held_rank
+        _judged_truncated, _last_truncated = self._judged_truncated, self._last_truncated
+        _last_true_residual, _penalty_curvature = self._last_true_residual, self._penalty_curvature
+        _row_set_curvature, penalty_matvec = self._row_set_curvature, self.penalty_matvec
+        penalty_rounding = self.penalty_rounding
+        _last_true_residual[0] = None
+        # this state is judged: no truncated direction unless one is found below
+        _judged_truncated[0] = (eta_values, ())
+        positive = weights > 0.0
+        largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
+        weight_exponent = _even_exponent(largest_weight)
+        score, fisher = mean_space_score_rows(y, np.ldexp(weights, -weight_exponent), eta_values)
+        if not (np.all(np.isfinite(score)) and np.all(np.isfinite(fisher))):
+            return math.inf, False
+        if not _penalty_curvature:
+            _penalty_curvature.append(self.penalty_curvature())
+        penalty_score = penalty_matvec(beta_values)
+        penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
+        curvature = np.asarray(_penalty_curvature[0], dtype=np.float64)
+        if not (
+            np.all(np.isfinite(penalty_score))
+            and np.all(np.isfinite(penalty_magnitude))
+            and np.all(np.isfinite(curvature))
+        ):
+            return math.inf, False
+        shift = _column_shift(
+            np.maximum(np.abs(penalty_magnitude), np.abs(curvature)), weight_exponent
+        )
+        penalty_score = np.ldexp(penalty_score, -weight_exponent - shift)
+        penalty_magnitude = np.ldexp(penalty_magnitude, -weight_exponent - shift)
+        curvature = np.ldexp(curvature, -weight_exponent - shift)
+        mean_x, sum_w, diagonal = weighted_column_centring(dm, fisher, positive)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
+        excluded = np.zeros(p, dtype=bool)
+        excluded[list(_laplace_excluded)] = True
+        if _scop_columns is not None:
+            excluded |= _scop_columns
+        tiny = float(np.finfo(np.float64).tiny)
+        zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
+        if active_rows is not None and active_rows.size:
+            rows = np.ldexp(np.asarray(active_rows, dtype=np.float64), -shift[None, :])
+            largest_entry = np.max(np.abs(rows), axis=1)
+            rows = rows[largest_entry > 0.0]
+            exponents = np.frexp(largest_entry[largest_entry > 0.0])[1]
+            rows = np.ldexp(rows, -exponents[:, None])
+            rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
+            gradient = np.ldexp(centred_data_score(dm, score, mean_x), -shift) - penalty_score
+            jacobi = np.ldexp(np.full(p, zeta), -(shift // 2)) * np.sqrt(
+                np.ldexp(np.maximum(diagonal, 0.0), -shift) + np.maximum(curvature, 0.0)
+            )
+            jacobi = jacobi + np.abs(penalty_score)
+            # any positive diagonal gives a valid m >= 0; keeping it within
+            # eps of its largest entry keeps the scaled rows finite
+            jacobi = np.maximum(jacobi, _EPS_FLOAT * max(float(np.max(jacobi, initial=0.0)), 1.0))
+            if rows.size and np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
+                from scipy.optimize import nnls
+
+                try:
+                    multipliers = nnls(rows.T / jacobi[:, None], -gradient / jacobi)[0]
+                except RuntimeError:  # the active-set iteration's own limit
+                    multipliers = np.zeros(rows.shape[0])
+                penalty_score = penalty_score - rows.T @ multipliers
+                penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
+        centre_shift = float(mean_x @ beta_values)
+
+        likelihood_rows: list = []
+
+        def likelihood_noise(support: NDArray) -> float:
+            # the log-likelihood's rounding over the rows a weak block touches
+            # (``penalized_mode_residual``): gamma for the terms summed there,
+            # plus each row's own few roundings
+            if not likelihood_rows:
+                likelihood_rows.append(
+                    np.abs(
+                        mean_space_log_likelihood_rows(
+                            y, np.ldexp(weights, -weight_exponent), eta_values
+                        )
+                    )
+                )
+            touched = np.asarray(support, dtype=bool) & positive
+            noise = _gamma(int(np.count_nonzero(touched)) + 4) * float(
+                np.sum(likelihood_rows[0][touched])
+            )
+            return noise if math.isfinite(noise) else 0.0
+
+        def weak_penalty_block(columns: NDArray) -> NDArray:
+            # the penalty's block on a few weakly identified slopes, in the
+            # weights' units: one penalty product per slope
+            block = np.empty((len(columns), len(columns)))
+            for position, column in enumerate(columns):
+                unit = np.zeros(p)
+                unit[column] = 1.0
+                block[:, position] = penalty_matvec(unit)[columns]
+            with np.errstate(over="ignore"):
+                return np.ldexp(0.5 * (block + block.T), -weight_exponent)
+
+        residual = penalized_mode_residual(
+            dm=dm,
+            row_score=score,
+            fisher_weights=fisher,
+            positive_prior=positive,
+            mean_x=mean_x,
+            centered_scale=np.where(np.isfinite(scale), scale, 0.0),
+            alpha=float(intercept_value) + centre_shift,
+            eta_tilde=eta_values - offset - float(intercept_value) - centre_shift,
+            penalty_score=penalty_score,
+            penalty_magnitude=penalty_magnitude,
+            penalty_curvature=curvature,
+            sum_w=sum_w,
+            bar=mode_bar,
+            excluded=excluded,
+            resolve_cap=MODE_RESOLVE_CAP,
+            column_shift=shift,
+            decrement_noise=likelihood_noise,
+            penalty_block=weak_penalty_block,
+            penalty_rounding=penalty_rounding(),
+        )
+        _last_true_residual[0] = residual
+        rows_n = int(np.count_nonzero(positive))
+        underflow = _underflow_allowance(rows_n)
+        assert residual.scale is not None
+        identified = np.concatenate(([True], ~residual.excluded))
+        if np.any(mode_bar * residual.scale[identified] <= underflow):
+            return math.inf, False
+        ratio = residual.ratio()
+        # every set of rows the one-hot blocks move on their own, certified on
+        # its own rows (``mode_score.row_set_residual``); the sets are the
+        # design's, formed once per design (``mode_score.row_sets``)
+        sets = row_sets(dm)
+        if not _row_set_curvature:
+            _row_set_curvature.append(
+                row_set_quadratics(sets, p, penalty_matvec, penalty_rounding())
+            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            column_penalty = np.ldexp(penalty_score, shift)
+            column_penalty_size = np.ldexp(penalty_magnitude, shift)
+            column_curvature = np.ldexp(curvature, shift)
+            set_curvature = np.ldexp(_row_set_curvature[0], -weight_exponent)
+        ratio = max(
+            ratio,
+            row_set_residual(
+                sets=sets,
+                row_score=score,
+                response=y,
+                fisher_weights=fisher,
+                positive_prior=positive,
+                eta=eta_values,
+                column_penalty=column_penalty,
+                column_penalty_size=column_penalty_size,
+                column_curvature=column_curvature,
+                set_curvature=set_curvature,
+                bar=mode_bar,
+                underflow=underflow,
+                penalty_rounding=penalty_rounding(),
+            ),
+        )
+        # the directions the factorization this iteration holds truncates,
+        # judged on the rows they move (``mode_score.truncated_direction_ratio``):
+        # a light row set the relative score sums beside the heavy rows'
+        # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
+        held_rank = _held_rank[0]
+        if (
+            held_rank is not None
+            and held_rank.parameter_null_basis is not None
+            and (active_rows is None or not active_rows.size)
+            and not scop_groups
+        ):
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                truncated_ratio, truncated = truncated_direction_ratio(
+                    dm=dm,
+                    null_basis=held_rank.parameter_null_basis,
+                    angle=null_basis_angle(held_rank, n),
+                    mean_x=mean_x,
+                    row_score=score,
+                    fisher_weights=fisher,
+                    response=y,
+                    positive_prior=positive,
+                    penalty_gradient=np.ldexp(penalty_matvec(beta_values), -weight_exponent),
+                    penalty_size=np.ldexp(
+                        penalty_matvec(beta_values, magnitude=True), -weight_exponent
+                    ),
+                    penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
+                    bar=mode_bar,
+                    underflow=underflow,
+                    column_scale=held_rank.column_scale,
+                    eta=eta_values,
+                    penalty_size_apply=lambda v: np.ldexp(
+                        penalty_matvec(v, magnitude=True), -weight_exponent
+                    ),
+                    penalty_rounding=penalty_rounding(),
+                )
+            ratio = max(ratio, truncated_ratio)
+            _judged_truncated[0] = (eta_values, truncated)
+            if truncated:
+                _last_truncated[0] = (eta_values, truncated)
+            if truncated_ratio == math.inf and profile is not None:
+                # refused because the basis or the arithmetic cannot resolve
+                # the truncated rows (an ``unresolved_basis`` record)
+                profile["irls_truncated_unresolved"] = (
+                    profile.get("irls_truncated_unresolved", 0) + 1
+                )
+        resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
+        latent_parts = []
+        for group_state in scop_groups or ():
+            state = _scop_state[group_state.group_index]
+            group = groups[group_state.group_index]
+            lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
+            theta = np.asarray(group_state.beta_eff, dtype=np.float64)
+            penalty_matrix = np.asarray(state["S_scop"], dtype=np.float64)
+            with np.errstate(over="ignore", invalid="ignore"):
+                pull = np.ldexp(lam * (penalty_matrix @ theta), -weight_exponent)
+                pull_size = np.ldexp(
+                    lam * (np.abs(penalty_matrix) @ np.abs(theta)), -weight_exponent
+                )
+                pull_diagonal = np.ldexp(lam * np.diag(penalty_matrix), -weight_exponent)
+            # a latent penalty past float64 beside the data's units: refused
+            # (the shape-constrained groups are tested in the weights' units)
+            if not (
+                np.all(np.isfinite(pull))
+                and np.all(np.isfinite(pull_size))
+                and np.all(np.isfinite(pull_diagonal))
+            ):
+                return math.inf, False
+            bins = state["bin_idx"]
+            basis = np.asarray(state["B_scop"], dtype=np.float64)
+
+            def by_bin(values: NDArray, bins=bins, basis=basis) -> NDArray:
+                if bins is None:
+                    return values
+                return np.bincount(bins, weights=values, minlength=basis.shape[0])
+
+            jacobian = state["reparam"].jacobian_diagonal(theta)
+            latent_parts.append(
+                (
+                    group_state,
+                    theta,
+                    jacobian * (basis.T @ by_bin(score)) - pull,
+                    jacobian**2 * ((basis**2).T @ by_bin(fisher)) + pull_diagonal,
+                    np.abs(pull),
+                    pull_size,
+                    np.abs(jacobian) * (np.abs(basis).T @ by_bin(np.abs(score))),
+                )
+            )
+        if latent_parts:
+            # The joint step truncates one factor across every SCOP group and
+            # hands each group its own columns of each discarded direction, so
+            # the groups' blocks reassemble row by row into the joint
+            # directions (a group absent here holds zeros in them).  The
+            # concatenated latent score is projected once off their span,
+            # which an SVD finds with its rank (a QR would invent a direction
+            # for a zero block).
+            widths = [part[1].size for part in latent_parts]
+            offsets = np.concatenate(([0], np.cumsum(widths)))
+            blocks = [
+                (k, np.asarray(part[0].discarded_directions, dtype=np.float64))
+                for k, part in enumerate(latent_parts)
+                if part[0].discarded_directions is not None
+                and np.asarray(part[0].discarded_directions).ndim == 2
+                and np.asarray(part[0].discarded_directions).shape[0] > 0
+            ]
+            gradient = np.concatenate([part[2] for part in latent_parts])
+            if blocks:
+                counts = {rows.shape[0] for _, rows in blocks}
+                if len(counts) != 1:  # pragma: no cover - joint-step invariant
+                    raise RuntimeError(
+                        "the joint SCOP step handed its groups different discarded directions"
+                    )
+                directions = np.zeros((counts.pop(), int(offsets[-1])))
+                for k, rows in blocks:
+                    directions[:, offsets[k] : offsets[k + 1]] = rows
+                left, singular, _ = np.linalg.svd(directions.T, full_matrices=False)
+                cutoff = float(np.max(singular, initial=0.0)) * directions.shape[1] * _EPS_FLOAT
+                frozen = left[:, singular > cutoff]
+                gradient = gradient - frozen @ (frozen.T @ gradient)
+            curvature_all = np.concatenate([part[3] for part in latent_parts])
+            pull_all = np.concatenate([part[4] for part in latent_parts])
+            size_all = np.concatenate([part[5] for part in latent_parts])
+            evaluation = np.concatenate([part[6] for part in latent_parts])
+            latent_scale = np.maximum(
+                tiny, zeta * np.sqrt(np.maximum(curvature_all, 0.0)) + pull_all
+            )
+            if np.any(mode_bar * latent_scale <= underflow):
+                return math.inf, False
+            relative = np.abs(gradient) / latent_scale
+            floor = (
+                _gamma(rows_n) * evaluation
+                + _gamma(int(offsets[-1]) + 2) * size_all
+                + _UNIT_ROUNDOFF_FLOAT * size_all
+            ) / latent_scale
+            ratio = max(ratio, float(np.max(relative / np.maximum(mode_bar, floor), initial=0.0)))
+            resolved = resolved and bool(np.max(relative, initial=0.0) <= MODE_RESOLVE_CAP)
+        return ratio, resolved
+
+    def _setup_trace(self) -> None:
+        trace_run, lambda2 = self.trace_run, self.lambda2
+        trace_enabled = trace_run is not None and trace_run.enabled
+        trace_basis_id = (
+            trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
+        )
+        if not trace_enabled:
+            resolved_lambdas: tuple[tuple[str, object], ...] = ()
+        elif isinstance(lambda2, dict):
+            resolved_lambdas = tuple(
+                (f"smooth:{name}", float(value)) for name, value in sorted(lambda2.items())
+            )
+        else:
+            resolved_lambdas = (("smooth", float(lambda2)),)
+        self.trace_enabled, self.trace_basis_id = trace_enabled, trace_basis_id
+        self.resolved_lambdas = resolved_lambdas
+
+    def emit_evaluation(
+        self,
+        state: _IRLSState,
+        *,
+        phase: str,
+        iteration: int,
+        alpha: float | None = None,
+        enclosing_proposal_state_id: int | None = None,
+        deviance_reused: bool = False,
+    ) -> None:
+        trace_enabled, trace_run = self.trace_enabled, self.trace_run
+        trace_purpose = self.trace_purpose
+        if not trace_enabled:
+            return
+        assert trace_run is not None
+        trace_run.emit_lazy(
+            "evaluation",
+            lambda: {
+                "state_id": state.state_id,
+                "evaluation_id": state.evaluation_id,
+                "solver": "irls_direct",
+                "phase": phase,
+                "outer_iteration": iteration,
+                "trial_alpha": alpha,
+                "enclosing_proposal_state_id": enclosing_proposal_state_id,
+                "state_space": state.state_space,
+                "basis_id": state.basis_id,
+                "lambdas": state.lambdas,
+                "dispersion": state.dispersion,
+                "intercept": state.intercept,
+                "deviance": state.deviance,
+                "penalized_deviance": state.penalized_deviance,
+                "deviance_source": "provided" if deviance_reused else "evaluated",
+            },
+            channel="pirls",
+            purpose=trace_purpose,
+            authoritative=False,
+        )
+
+    def evaluate_state(
+        self,
+        beta_values: NDArray,
+        intercept_value: float,
+        *,
+        phase: str,
+        iteration: int,
+        alpha: float | None = None,
+        deviance: float | None = None,
+        eta_unclipped: NDArray | None = None,
+        enclosing_proposal_state_id: int | None = None,
+        emit_trace: bool = True,
+        centred_intercept: float | None = None,
+    ) -> _IRLSState:
+        trace_enabled, trace_run = self.trace_enabled, self.trace_run
+        _state_center, dm, y, weights = self._state_center, self.dm, self.y, self.weights
+        family, link, offset = self.family, self.link, self.offset
+        if trace_enabled:
+            assert trace_run is not None
+            state_id = trace_run.next_state_id()
+            evaluation_id = trace_run.next_evaluation_id()
+        else:
+            state_id = None
+            evaluation_id = None
+        if _state_center is not None:
+            # One-engine design §3.8: the state is (alpha, beta) about the fixed
+            # prior-weighted centre, eta = alpha + X~ beta + offset, and the raw
+            # intercept is only its reading; a state entering from raw
+            # coordinates (the start, a warm start) is centred once.
+            shift = math.fsum(_state_center * np.asarray(beta_values, dtype=np.float64))
+            if centred_intercept is None:
+                centred_intercept = float(intercept_value) + shift
+            if eta_unclipped is None:
+                eta_unclipped = (
+                    centred_intercept + centred_matvec(dm, beta_values, _state_center) + offset
+                )
+            intercept_value = centred_intercept - shift
+        state = _evaluate_irls_state(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            offset,
+            beta_values,
+            intercept_value,
+            deviance=deviance,
+            eta_unclipped=eta_unclipped,
+            state_id=state_id,
+            evaluation_id=evaluation_id,
+            basis_id=self.trace_basis_id,
+            lambdas=self.resolved_lambdas,
+        )
+        if not self._has_scop:
+            state = replace(
+                state,
+                penalized_deviance=float(state.deviance + self.penalty_quadratic(state.beta)),
+            )
+        if centred_intercept is not None:
+            state = replace(state, centred_intercept=float(centred_intercept))
+        if emit_trace:
+            self.emit_evaluation(
+                state,
+                phase=phase,
+                iteration=iteration,
+                alpha=alpha,
+                enclosing_proposal_state_id=enclosing_proposal_state_id,
+                deviance_reused=deviance is not None,
+            )
+        return state
+
+    def emit_state_commit(
+        self,
+        state: _IRLSState,
+        *,
+        iteration: int,
+        fit_converged: bool,
+        convergence_value: float | None,
+        termination_reason: TerminationReason | None,
+        convergence_label: str | None = None,
+        convergence_tolerance: float | None = None,
+    ) -> None:
+        trace_enabled, trace_run = self.trace_enabled, self.trace_run
+        trace_purpose, convergence, tol = self.trace_purpose, self.convergence, self.tol
+        if not trace_enabled:
+            return
+        assert trace_run is not None
+        trace_run.emit_lazy(
+            "state_commit",
+            lambda: {
+                "state_id": state.state_id,
+                "evaluation_id": state.evaluation_id,
+                "solver": "irls_direct",
+                "phase": "initial" if iteration == 0 else "outer",
+                "outer_iteration": iteration,
+                "state_space": state.state_space,
+                "basis_id": state.basis_id,
+                "lambdas": state.lambdas,
+                "dispersion": state.dispersion,
+                "intercept": state.intercept,
+                "deviance": state.deviance,
+                "penalized_deviance": state.penalized_deviance,
+                "fit_converged": fit_converged,
+                "convergence_criterion": convergence
+                if convergence_label is None
+                else convergence_label,
+                "convergence_value": convergence_value,
+                "convergence_tolerance": tol
+                if convergence_tolerance is None
+                else convergence_tolerance,
+                "termination_reason": termination_reason,
+            },
+            channel="pirls",
+            purpose=trace_purpose,
+        )
+
+    def _setup_routes(self) -> None:
+        dm, family, link, groups, p = self.dm, self.family, self.link, self.groups, self.p
+        weights, _use_structured = self.weights, self._use_structured
+        _state_center, compute_rank_info = self._state_center, self.compute_rank_info
+        _defer_rank_info = self._defer_rank_info
+        _compute_fit_statistics = self._compute_fit_statistics
+        _compute_reml_geometry = self._compute_reml_geometry
+        _return_working_system = self._return_working_system
+        _use_observed_newton, _working_newton = self._use_observed_newton, self._working_newton
+        _newton_latch = self._newton_latch
+        # ── Constrained QP support (monotone splines) ──
+        has_constraints = any(g.constraints is not None for g in groups)
+        prev_active_set: list[int] | None = None
+        A_all: NDArray | None = None
+        b_all: NDArray | None = None
+        # The feasibility scale needs ``|A_all|`` on every test, and the aggregate
+        # system is fixed for the whole fit -- so it is built once here rather than
+        # rebuilt two to three times per IRLS iteration plus once per line-search
+        # halving.  See ``constrained_qp._feasibility_slack``.
+        abs_A_all: NDArray | None = None
+        if has_constraints:
+            A_blocks: list[np.ndarray] = []
+            b_blocks: list[np.ndarray] = []
+            for g in groups:
+                if g.constraints is not None:
+                    A_model = np.zeros((g.constraints.n_constraints, p))
+                    A_model[:, g.sl] = g.constraints.A
+                    A_blocks.append(A_model)
+                    b_blocks.append(g.constraints.b)
+            A_all = np.vstack(A_blocks)
+            b_all = np.concatenate(b_blocks)
+            abs_A_all = np.abs(A_all)
+
+        # ── SCOP monotone engine support ──
+        _has_scop = any(g.monotone_engine == "scop" for g in groups)
+        _scop_run: SCOPRunCentring | None = None
+        # the columns the binomial/log certificate tests in SCOP's latent
+        # coordinates instead (``true_mode_residual``)
+        _scop_columns: NDArray | None = None
+        if _has_scop:
+            _scop_columns = np.zeros(p, dtype=bool)
+            for g in groups:
+                if g.monotone_engine == "scop":
+                    _scop_columns[g.sl] = True
+        if (
+            _state_center is None
+            and not _use_structured
+            and not has_constraints
+            and not _has_scop
+            and hasattr(dm, "group_matrices")
+        ):
+            # The nested chain's centred state on gram's centred system too: eta
+            # about the fixed prior-weighted centre, so a column at 1e8
+            # contributes rows of its spread, not of its offset, and the
+            # objective the line search compares keeps its digits (stage-1
+            # verifier: a raw-1e8 column left the penalized deviance noisy at
+            # 1e-11 relative, so no Newton step near the mode was accepted and
+            # the score stalled at 1e-6).
+            _state_center = prior_weighted_centre(dm, weights)
+        _scop_curvature = "fisher"
+        if _has_scop:
+            from superglm.reml.observed_geometry import classify_scop_reml_curvature
+
+            _scop_curvature = classify_scop_reml_curvature(family, link)
+        if compute_rank_info and _defer_rank_info is not None:
+            raise ValueError("deferred rank metadata requires compute_rank_info=False")
+        if (not _compute_fit_statistics and compute_rank_info) or (
+            _return_working_system and (compute_rank_info or has_constraints or _has_scop)
+        ):
+            raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
+        if not _compute_reml_geometry and (compute_rank_info or _compute_fit_statistics):
+            raise ValueError(
+                "omitting generic REML geometry requires rank metadata and fit statistics "
+                "to be disabled"
+            )
+        # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
+        # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
+        # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
+        # converges only linearly under a non-canonical link. Newton starts only
+        # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
+        # cache exists for it to invalidate. Gamma/log keeps Fisher: its constant
+        # Fisher weights reuse one weighted Gram that Newton would rebuild every
+        # iteration; the mode certificate's bar is set by the REML tolerance
+        # (``mode_score.mode_certification_bar``), which Fisher's linear rate
+        # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
+        # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
+        # information ``w y / mu`` exceeds twice the Fisher information ``w``
+        # along a direction, as heavy-tailed severities give, and there the score
+        # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
+        # it in the budget.  Such a solve switches to Newton once its resolved
+        # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
+        # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
+        # reaches the bar in time never switches.
+        # The exported geometry is Fisher either way (``export_rows``), and the
+        # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
+        # is decided here, once, from the family, the link and the route
+        # (one-engine design §3.11).
+        # An observed iterate whose Hessian the structured factor refuses as not
+        # positive definite takes a Levenberg shift inside the same curvature
+        # (``_levenberg_shifted_operator``), and a trial whose observed rows are
+        # not finite is rejected by the line search.
+        # The fREML performance iteration (``_return_working_system``) takes
+        # Newton rows when its optimizer asks (``_working_newton``): the discrete
+        # route's working model then carries the observed curvature its REML
+        # criterion is (``reml.discrete``).
+        # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
+        # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
+        # information, and the REML geometry it hands on reads Fisher rows at the
+        # retained model either way.
+        _observed_newton_active = bool(
+            _use_observed_newton
+            and not has_constraints
+            and (
+                (_working_newton and concave_observed_rows(family, link))
+                if _return_working_system
+                else supports_observed_newton(family, link)
+                and not _has_constant_irls_weights(family, link)
+            )
+        )
+        # A declared Newton pair kept on Fisher rows for its constant weights
+        # (Gamma/log), which switches to Newton if its Fisher score stagnates,
+        # and starts on Newton when an earlier solve of the same REML fit
+        # switched (``_newton_latch``).
+        _stagnation_newton_available = bool(
+            _use_observed_newton
+            and not has_constraints
+            and not _has_scop
+            and not _return_working_system
+            and supports_observed_newton(family, link)
+            and not _observed_newton_active
+        )
+        if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
+            _observed_newton_active = True
+        self.has_constraints, self.prev_active_set = has_constraints, prev_active_set
+        self.A_all, self.b_all, self.abs_A_all, self._has_scop = A_all, b_all, abs_A_all, _has_scop
+        self._scop_run, self._scop_columns = _scop_run, _scop_columns
+        self._state_center, self._scop_curvature = _state_center, _scop_curvature
+        self._observed_newton_active = _observed_newton_active
+        self._stagnation_newton_available = _stagnation_newton_available
+
+    def observed_rows_invalid(self, candidate: _IRLSState) -> bool:
+        """Whether a trial's observed rows are not finite, which rejects it.
+
+        One-engine design §3.11: finiteness is the one condition the declared
+        observed rows keep; a trial without finite rows is not a state the
+        next Newton step can start from. Every line search of an observed fit
+        reads it, the SCOP one included.
+        """
+        family, link, y, weights = self.family, self.link, self.y, self.weights
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=candidate.mu,
+            eta=candidate.eta,
+            sample_weight=weights,
+            prefer_observed=True,
+        )
+        return rows.rejection_reason is not None
+
+    def _setup_scop(self) -> None:
+        dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
+        n, S, lambda2, y, weights = self.n, self.S, self.lambda2, self.y, self.weights
+        offset, beta, intercept, _has_scop = self.offset, self.beta, self.intercept, self._has_scop
+        _scop_run, _scop_run_centring = self._scop_run, self._scop_run_centring
+        scop_state_init, debug_recorder = self.scop_state_init, self.debug_recorder
+        trace_run, evaluate_state = self.trace_run, self.evaluate_state
+        _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
+        _expose_exact_support_state = False
+        # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
+        _scop_state: dict[int, dict] = {}
+        # A REML run's fits share one reduced design, their rung refusals and
+        # their exact supports (``SCOPRunCentring``); a traced or debugged fit
+        # stays fresh, as the Newton engine's carried policy does.
+        if (
+            _has_scop
+            and _scop_run_centring is not None
+            and debug_recorder is None
+            and trace_run is None
+        ):
+            _scop_run = _scop_run_centring
+            _scop_run.bind((dm, family, link, *gms, *groups))
+        if _has_scop:
+            for gi, g in enumerate(groups):
+                if g.monotone_engine == "scop":
+                    cached_scop_state = (
+                        scop_state_init.get(gi) if scop_state_init is not None else None
+                    )
+                    reparam = g.scop_reparameterization
+                    cached_S_scop = (
+                        None if cached_scop_state is None else cached_scop_state.get("S_scop")
+                    )
+                    if isinstance(cached_S_scop, np.ndarray) and cached_S_scop.shape == (
+                        g.size,
+                        g.size,
+                    ):
+                        S_scop = cached_S_scop
+                    else:
+                        S_scop = reparam.penalty_matrix()
+                    _gm = gms[gi]
+
+                    # Warm-start beta_scop from previous outer EFS iteration if available
+                    warm_beta_scop = None
+                    if cached_scop_state is not None:
+                        prev = cached_scop_state["beta_eff"]
+                        q_eff = S_scop.shape[0]
+                        if prev.shape == (q_eff,):
+                            warm_beta_scop = prev.copy()
+
+                    if isinstance(_gm, DiscretizedSCOPGroupMatrix):
+                        state = {
+                            "reparam": reparam,
+                            "B_scop": _gm.B_scop_unique,
+                            "S_scop": S_scop,
+                            "bin_idx": _gm.bin_idx,
+                            "beta_scop": warm_beta_scop,
+                            "beta_scop_prev": None,
+                        }
+                    else:
+                        compressed = (
+                            _lone_scop_support(
+                                _gm, gi, None if _scop_run is None else _scop_run.exact_supports
+                            )
+                            if _n_scop_groups == 1
+                            else None
+                        )
+                        if compressed is not None:
+                            _expose_exact_support_state = True
+                            state = {
+                                "reparam": reparam,
+                                "B_scop": compressed[0],
+                                "S_scop": S_scop,
+                                "bin_idx": compressed[1],
+                                "beta_scop": warm_beta_scop,
+                                "beta_scop_prev": None,
+                            }
+                        else:
+                            state = {
+                                "reparam": reparam,
+                                "B_scop": _gm.toarray(),
+                                "S_scop": S_scop,
+                                "bin_idx": None,
+                                "beta_scop": warm_beta_scop,
+                                "beta_scop_prev": None,
+                            }
+                    if cached_scop_state is not None:
+                        for key in (
+                            "H_scop_penalized",
+                            "last_step_norm",
+                            "last_fisher_fallback",
+                            "discarded_directions",
+                            "penalty_rank",
+                            "penalty_log_det_omega_plus",
+                            "penalty_eigvals_omega",
+                        ):
+                            if key in cached_scop_state:
+                                state[key] = cached_scop_state[key]
+                    _scop_state[gi] = state
+            # Build mask of non-SCOP column indices for the reduced system
+            _non_scop_cols = []
+            _non_scop_groups_idx = []
+            for gi, g in enumerate(groups):
+                if gi not in _scop_state:
+                    _non_scop_cols.extend(range(g.start, g.end))
+                    _non_scop_groups_idx.append(gi)
+            _non_scop_cols = np.array(_non_scop_cols, dtype=int)
+            _p_reduced = len(_non_scop_cols)
+            # Build reduced penalty matrix for non-SCOP groups
+            _S_reduced = S[np.ix_(_non_scop_cols, _non_scop_cols)]
+            # Build mapping from reduced beta index to full beta index
+            _reduced_to_full = _non_scop_cols
+            _reduced_gms = []
+            for gi in _non_scop_groups_idx:
+                _reduced_gms.append(gms[gi])
+            if _scop_run is not None:
+                _reduced_dm = _scop_run.reduced_design(
+                    tuple(_non_scop_groups_idx), _reduced_gms, n, _p_reduced
+                )
+            else:
+                _reduced_dm = DesignMatrix(_reduced_gms, n=n, p=_p_reduced)
+            _reduced_tabmat_state = TabmatCenteringState()
+            if _scop_run is not None:
+                _seed_refusals(_reduced_tabmat_state, _scop_run.reduced_refusals)
+
+            _scop_specs = {
+                gi: SCOPGroupSpec(
+                    group_index=gi,
+                    group=groups[gi],
+                    reparam=st["reparam"],
+                    B_scop=st["B_scop"],
+                    S_scop=st["S_scop"],
+                    bin_idx=st["bin_idx"],
+                )
+                for gi, st in _scop_state.items()
+            }
+            _scop_order = sorted(_scop_specs)
+            _scop_newton = SCOPJointNewton(
+                [_scop_specs[gi] for gi in _scop_order],
+                lambda2,
+                _reduced_dm,
+                n,
+                supports=None if _scop_run is None else _scop_run.exact_supports,
+            )
+
+            # QP/warm initialization is part of the first committed state, not the
+            # first proposal. This gives iteration one a coherent latent baseline.
+            provisional = evaluate_state(
+                beta,
+                intercept,
+                phase="scop_initialization",
+                iteration=0,
+            )
+            initial_rows = coefficient_working_rows(
+                distribution=family,
+                link=link,
+                y=y,
+                mu=provisional.mu,
+                eta=provisional.eta,
+                sample_weight=weights,
+                prefer_observed=False,
+            )
+            W_init = initial_rows.weights
+            z_init = initial_rows.response
+            z_off_init = z_init - offset
+            for gi, st in _scop_state.items():
+                if st["beta_scop"] is None:
+                    g_i = groups[gi]
+                    lam_scop = lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                    bin_idx = st["bin_idx"]
+                    if bin_idx is not None:
+                        n_bins = st["B_scop"].shape[0]
+                        W_agg = np.bincount(bin_idx, weights=W_init, minlength=n_bins)
+                        Wz_agg = np.bincount(
+                            bin_idx,
+                            weights=W_init * z_off_init,
+                            minlength=n_bins,
+                        )
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            z_bin = np.where(W_agg > 0, Wz_agg / W_agg, 0.0)
+                        st["beta_scop"] = st["reparam"].qp_initialize(
+                            st["B_scop"],
+                            z_bin,
+                            lambda_penalty=lam_scop,
+                            weights=W_agg,
+                        )
+                    else:
+                        st["beta_scop"] = st["reparam"].qp_initialize(
+                            st["B_scop"],
+                            z_off_init,
+                            lambda_penalty=lam_scop,
+                            weights=W_init,
+                        )
+                gamma_eff = st["reparam"].forward(st["beta_scop"])
+                st["gamma_eff"] = gamma_eff.copy()
+                beta[groups[gi].sl] = gamma_eff
+            self._S_reduced, self._reduced_to_full = _S_reduced, _reduced_to_full
+            self._reduced_dm, self._reduced_tabmat_state = _reduced_dm, _reduced_tabmat_state
+            self._scop_specs, self._scop_order = _scop_specs, _scop_order
+            self._scop_newton = _scop_newton
+        self._expose_exact_support_state = _expose_exact_support_state
+        self._scop_state, self._scop_run = _scop_state, _scop_run
+
+    def _setup_systems(self) -> None:
+        dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
+        n, p, S, beta, intercept = self.n, self.p, self.S, self.beta, self.intercept
+        has_constraints, _has_scop = self.has_constraints, self._has_scop
+        _use_structured = self._use_structured
+        _observed_newton_active = self._observed_newton_active
+        _return_working_system, direct_solve = self._return_working_system, self.direct_solve
+        _scop_run, _raw_moment_policy = self._scop_run, self._raw_moment_policy
+        _fisher_data_reuse, _initial_data_reuse = self._fisher_data_reuse, self._initial_data_reuse
+        profile, trace_purpose = self.profile, self.trace_purpose
+        debug_recorder, trace_run = self.debug_recorder, self.trace_run
+        # QR pre-computation: materialise full design matrix once
+        # Constrained QP / SCOP requires Gram path — force it if constraints present
+        _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
+        _mean_space_newton_available = bool(
+            mean_space_violation(family, link) is not None
+            and not _use_qr
+            and not _has_scop
+            and not _return_working_system
+        )
+        if _use_qr:
+            has_disc = any(
+                isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
+                for gm in gms
+            )
+            if has_disc:
+                logger.warning(
+                    "direct_solve='qr' with discretized groups materialises the full "
+                    "(n, p) design matrix, defeating the O(n_bins) discretization "
+                    "benefit.  Consider direct_solve='auto' for large-n discrete fits."
+                )
+            _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
+            _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
+            self._X_full, self._L_aug = _X_full, _L_aug
+
+        # Tabmat acceleration: the structured layout owns a pruned small-block
+        # plan, so it must not construct a split containing the dominant factor.
+        # Other non-discrete paths retain the shared full-design split behavior.
+        if _use_structured:
+            _tabmat_split = None
+        elif _use_qr:
+            _tabmat_split = None
+        elif has_constraints:
+            # Constrained QP uses the shared stable centered-system builder, while
+            # retaining the execution-plan route instead of materializing a
+            # separate tabmat copy of the design.
+            _tabmat_split = None
+        else:
+            # Ordinary intercept profiling currently benefits only when the split
+            # contains a native high-cardinality categorical component. Avoid
+            # materializing an unused dense duplicate for numeric and low-cardinality fits.
+            _tabmat_split = dm.tabmat_centering_split
+        _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
+        # Observed rows are not the constant Fisher weights this cache assumes.
+        _can_reuse_weighted_gram = (
+            _can_reuse_weighted_gram and not _use_structured and not _observed_newton_active
+        )
+        dm.execution_plan.validate_group_spans(groups)
+        _defer_raw_spline = (
+            not dm.raw_spline_tabmat_plan_built
+            and _is_raw_spline_tabmat_centering_candidate(gms, n=n)
+            and (
+                _defer_raw_spline_tabmat_plan(
+                    n=n,
+                    raw_width=sum(int(group.B.shape[1]) for group in gms if group.shape[1] > 0),
+                    constant_weights=_can_reuse_weighted_gram,
+                    repeated_fit=trace_purpose
+                    in {"reml_bootstrap", "reml_candidate", "reml_line_search"},
+                )
+            )
+        )
+        _tabmat_centering_state = TabmatCenteringState(
+            raw_spline_eligible=False if _defer_raw_spline else None
+        )
+        if _scop_run is not None:
+            _seed_refusals(_tabmat_centering_state, _scop_run.full_refusals)
+        fixed_owners = ()
+        if _raw_moment_policy is not None or _fisher_data_reuse is not None:
+            # A negative route choice is safe for changed W; no accepted preflight,
+            # weighted system or penalty survives. Fixed-coordinate QP is eligible.
+            fixed_owners = (
+                (dm, dm.execution_plan, family, link, *gms, *groups)
+                if type(dm) is DesignMatrix
+                and type(family) in (Poisson, Gaussian, Gamma, Binomial, NegativeBinomial, Tweedie)
+                and type(link) in (LogLink, IdentityLink, LogitLink)
+                and all(
+                    type(gm)
+                    in (
+                        CategoricalGroupMatrix,
+                        DenseGroupMatrix,
+                        SparseSSPGroupMatrix,
+                        SupportCompressedSSPGroupMatrix,
+                    )
+                    for gm in gms
+                )
+                and all(
+                    type(group) is GroupSlice
+                    and (
+                        group.constraints is None or type(group.constraints) is LinearConstraintSet
+                    )
+                    for group in groups
+                )
+                and not (_use_qr or _use_structured or _has_scop)
+                and debug_recorder is None
+                and trace_run is None
+                else ()
+            )
+            if _raw_moment_policy is not None:
+                _tabmat_centering_state.raw_moment_eligible = _raw_moment_policy.seed_raw_rejection(
+                    fixed_owners
+                )
+                if not fixed_owners:
+                    _raw_moment_policy = None
+        if _fisher_data_reuse is not None and not (
+            fixed_owners and type(family) is Gamma and type(link) is LogLink and not has_constraints
+        ):
+            _fisher_data_reuse.clear()
+            _fisher_data_reuse = None
+        if profile is not None and _defer_raw_spline:
+            profile["centered_spline_tabmat_cold_policy_rejections"] = (
+                profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
+            )
+        _constant_centered_cache: CenteredSystem | None = None
+        _constant_centered_z: NDArray | None = None
+        # the factor certificate and its one-entry cache (``_certify_centered_factor``)
+        certify_centered_factor = partial(_certify_centered_factor, dm, _fisher_data_reuse, [None])
+        _initial_data_pending = (
+            _initial_data_reuse is not None
+            and type(family) is Poisson
+            and type(link) is LogLink
+            and type(dm) is DesignMatrix
+            and all(
+                type(gm)
+                in (
+                    CategoricalGroupMatrix,
+                    DenseGroupMatrix,
+                    SparseSSPGroupMatrix,
+                    SupportCompressedSSPGroupMatrix,
+                )
+                for gm in gms
+            )
+            and not (_use_qr or _use_structured or has_constraints or _has_scop)
+            and debug_recorder is None
+            and trace_run is None
+        )
+        # These objects stay live throughout the owner line search. A new design
+        # or warm state cannot consume an entry from the previous coordinates.
+        _initial_data_key = (
+            (
+                id(dm),
+                id(dm.execution_plan),
+                id(family),
+                id(link),
+                beta.tobytes(),
+                np.float64(intercept).tobytes(),
+            )
+            if _initial_data_pending
+            else None
+        )
+        self._use_qr, self._mean_space_newton_available = _use_qr, _mean_space_newton_available
+        self._tabmat_split, self._tabmat_centering_state = _tabmat_split, _tabmat_centering_state
+        self._can_reuse_weighted_gram, self.fixed_owners = _can_reuse_weighted_gram, fixed_owners
+        self._raw_moment_policy, self._fisher_data_reuse = _raw_moment_policy, _fisher_data_reuse
+        self._constant_centered_cache = _constant_centered_cache
+        self._constant_centered_z = _constant_centered_z
+        self.certify_centered_factor = certify_centered_factor
+        self._initial_data_pending = _initial_data_pending
+        self._initial_data_key = _initial_data_key
+
+    def get_centered_system(self, W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
+        dm, S, profile, fixed_owners = self.dm, self.S, self.profile, self.fixed_owners
+        _initial_data_reuse, _initial_data_key = self._initial_data_reuse, self._initial_data_key
+        _tabmat_centering_state, _tabmat_split = self._tabmat_centering_state, self._tabmat_split
+        _fisher_data_reuse, _raw_moment_policy = self._fisher_data_reuse, self._raw_moment_policy
+        _scop_run, weight_semantics = self._scop_run, self.weight_semantics
+        # read at call time: the Gamma/log switch turns both off mid-fit
+        _can_reuse_weighted_gram = self._can_reuse_weighted_gram
+        _observed_newton_active = self._observed_newton_active
+        _constant_centered_cache = self._constant_centered_cache
+        _constant_centered_z = self._constant_centered_z
+        reuse = _initial_data_reuse if self._initial_data_pending else None
+        self._initial_data_pending = False
+        before = replace(_tabmat_centering_state) if reuse is not None else None
+        if reuse is not None:
+            reused = reuse.take(
+                _initial_data_key,
+                W_current,
+                z_off_current,
+                _tabmat_centering_state,
+                np.asarray(S),
+            )
+            if reused is not None:
+                return reused
+        if (
+            _can_reuse_weighted_gram
+            and _constant_centered_cache is not None
+            and _constant_centered_z is not None
+        ):
+            if np.array_equal(z_off_current, _constant_centered_z):
+                return _constant_centered_cache
+            self._constant_centered_cache = refresh_centered_rhs(
+                system=_constant_centered_cache,
+                dm=dm,
+                W=W_current,
+                z_off=z_off_current,
+            )
+            self._constant_centered_z = z_off_current.copy()
+            return self._constant_centered_cache
+        fisher = (
+            _fisher_data_reuse if _can_reuse_weighted_gram and not _observed_newton_active else None
+        )
+        data = (
+            fisher.take((*fixed_owners, weight_semantics), W_current)
+            if fisher is not None
+            else None
+        )
+        system = build_centered_system(
+            dm=dm,
+            W=W_current,
+            z_off=z_off_current,
+            penalty=np.asarray(S),
+            tabmat_split=_tabmat_split,
+            tabmat_state=_tabmat_centering_state,
+            profile=profile,
+            _data=data,
+        )
+        if fisher is not None and fisher.data is None:
+            fisher.remember(W_current, system)
+        if _scop_run is not None:
+            _carry_refusals(_scop_run.full_refusals, _tabmat_centering_state)
+        if _raw_moment_policy is not None and _tabmat_centering_state.raw_moment_eligible is False:
+            _raw_moment_policy.raw_moment_eligible = False
+        if reuse is not None:
+            reuse.remember(
+                _initial_data_key,
+                W_current,
+                z_off_current,
+                before,
+                _tabmat_centering_state,
+                system,
+            )
+        if _can_reuse_weighted_gram:
+            self._constant_centered_cache = system
+            self._constant_centered_z = z_off_current.copy()
+        return system
+
+    def _setup_loop(self) -> None:
+        family, link, beta, intercept = self.family, self.link, self.beta, self.intercept
+        beta_init, intercept_init = self.beta_init, self.intercept_init
+        _state_center, _has_scop = self._state_center, self._has_scop
+        has_constraints, max_iter, _mode_bar = self.has_constraints, self.max_iter, self._mode_bar
+        _centred_init, _deviance_init = self._centred_init, self._deviance_init
+        debug_context, debug_recorder = self.debug_context, self.debug_recorder
+        record_diagnostics = self.record_diagnostics
+        t_start = time.perf_counter()
+        converged = False
+        XtWX_beta: (
+            NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator | None
+        ) = None
+        _final_penalized_operator: (
+            FactorSmoothPenalizedOperator
+            | SumToZeroPenalizedOperator
+            | NestedPenalizedOperator
+            | None
+        ) = None
+
+        # Phase timing accumulators
+        _t_working = 0.0
+        _t_gram = 0.0
+        _t_solve = 0.0
+        _t_deviance = 0.0
+        _t_eta = 0.0
+        _t_deviance_eval = 0.0
+        _last_working_centered: CenteredSystem | None = None
+        # its mean_x less the state's centre (``_system_offset_mean``), None without one
+        _last_working_offset_mean: NDArray | None = None
+        _last_working_structured: (
+            FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
+        ) = None
+        # convergence="mode_score": the centring of the certificate's score at the
+        # iterate each solve linearised about -- (mean_x, sum_w, centred diagonal,
+        # coefficients the factor truncated as weakly identified, mean_x less the
+        # state's centre or None without one) -- or None on a
+        # route that forms no centred system (SCOP, linear constraints), which
+        # keeps the coefficient-step test.
+        _score_centre: tuple | None = None
+        _last_mode_residual: ModeResidual | None = None
+        # the certificate ratio at every iterate of a mode_score solve, for the
+        # stagnation stop
+        _mode_ratios: list[float] = []
+        # the certificate's bar (``mode_score.mode_certification_bar``): the REML
+        # fit passes the one its stopping tolerance needs
+        mode_bar = MODE_CERTIFICATION_BAR if _mode_bar is None else float(_mode_bar)
+        _stagnation_window = stagnation_window(max_iter, mode_bar)
+        score_stagnated = False
+        # the binomial/log score's certificate ratio at every stop it refused
+        # (``true_mode_residual``), for the same stagnation stop
+        _true_ratios: list[float] = []
+        # Newton steps on the observed information once the certificate refused
+        # a stop near the mode or its refused score stalled (below); never on the
+        # QR route (whose least squares cannot carry a zero-curvature row's
+        # score) or the SCOP route (which takes its own Newton steps)
+        _mean_space_newton = False
+        # Whether the true-score certificate decided the last iteration under
+        # Newton steps, its ratio there, and its last residual: the diagnostics
+        # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
+        # tells a criterion read at the state that it is the model's own mode.
+        _true_stop = False
+        _true_confirmed = False
+        _true_stop_ratio = math.inf
+        _last_true_residual: list[ModeResidual | None] = [None]
+        # the decomposition this iteration's solve holds (gram and qr routes); the
+        # latest certificate's judgement of the truncated directions
+        # (``truncated_direction_ratio``) with the state it judged (its eta), and
+        # the latest judgement that found any.  Only a judgement of the returned
+        # state decides the fit's verdict; an earlier one is published as history
+        # (below)
+        _held_rank: list = [None]
+        _judged_truncated: list[tuple] = [(None, ())]
+        _last_truncated: list[tuple] = [(None, ())]
+
+        # The family's mean space, when the link's inverse can leave it (declared
+        # by the family and link, ``irls_state.mean_space_violation``).
+        _mean_space_invalid = mean_space_violation(family, link)
+        # The link inverse's own domain (``irls_state.link_domain_violation``).
+        _link_domain_invalid = link_domain_violation(link)
+        # A warm start's centred state carried to this fit's centre (one-engine
+        # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
+        # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
+        # the two centres share.  Taken back from the raw intercept instead it
+        # errs by u |c' beta| in every row's eta, ~0.25 at a 1e16 offset.
+        centred_start: float | None = None
+        if (
+            _centred_init is not None
+            and _state_center is not None
+            and beta_init is not None
+            and intercept_init is not None
+            and intercept == intercept_init
+        ):
+            warm_alpha, warm_centre = _centred_init
+            warm_centre = np.asarray(warm_centre, dtype=np.float64)
+            if warm_centre.shape == _state_center.shape:
+                centred_start = float(warm_alpha) + math.fsum((_state_center - warm_centre) * beta)
+        # Freeze the fit-entry state so iteration-one trial safety has a baseline.
+        committed = self.evaluate_state(
+            beta,
+            intercept,
+            phase="initial",
+            iteration=0,
+            deviance=_deviance_init,
+            emit_trace=not _has_scop,
+            centred_intercept=centred_start,
+        )
+        if _has_scop:
+            committed = self._scop_initial_state(committed)
+        self.emit_state_commit(
+            committed,
+            iteration=0,
+            fit_converged=False,
+            convergence_value=None,
+            termination_reason=None,
+        )
+        objective_prev = (
+            committed.deviance
+            if committed.penalized_deviance is None
+            else committed.penalized_deviance
+        )
+        dev_prev = committed.deviance
+        eta_unclipped = committed.eta_unclipped
+        eta = committed.eta
+        mu = committed.mu
+        # Always an empty list; only ``record_diagnostics`` decides whether rows are
+        # appended and whether it is published on the result.
+        iteration_log: list[IterationDiagnostics] = []
+        base_debug_context = dict(debug_context or {})
+        # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
+        record_debug_rows = (
+            debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
+        )
+        # Strictly wider than ``record_diagnostics``, so the per-iteration extrema
+        # this gates are always bound by the time a diagnostics row is built.
+        capture_extrema = record_diagnostics or record_debug_rows
+
+        max_halving = 20  # max step-halving attempts per iteration
+        _consecutive_svd = 0  # for auto-mode warning
+        _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
+        _degeneracy_retry_failed = (
+            False  # the #472 retry is off after a failure, until a solve certifies
+        )
+        # A constrained fit-entry state has not been certified by the inner QP.
+        retained_qp_converged = not has_constraints
+        # Declared, not bound: the chain below is the whole set of reasons this
+        # solver can end an iteration on, and declaring it against the shared
+        # vocabulary is what ties the two together. A tenth reason invented here is
+        # a type error on its own assignment until ``TerminationReason`` carries
+        # it, so the consumers that switch on the field cannot be handed a string
+        # they have never been shown.
+        self.termination_reason: TerminationReason
+
+        # Captured inside the loop, BEFORE ``dev_prev`` advances, because the
+        # post-loop separation backstop needs the final iteration's movement.
+        # Reading ``abs(dev - dev_prev)`` after the loop cannot work: ``dev_prev``
+        # is assigned ``dev`` as the loop's last statement, so budget exhaustion
+        # makes that difference identically zero and any stagnation test on it
+        # vacuous.  ``inf`` until an iteration completes, so a fit that never
+        # finishes one is never called stagnant.
+        deviance_relative_change = float("inf")
+        self.t_start, self.converged, self.XtWX_beta = t_start, converged, XtWX_beta
+        self._final_penalized_operator, self._t_working = _final_penalized_operator, _t_working
+        self._t_gram, self._t_solve, self._t_deviance = _t_gram, _t_solve, _t_deviance
+        self._t_eta, self._t_deviance_eval = _t_eta, _t_deviance_eval
+        self._last_working_centered = _last_working_centered
+        self._last_working_offset_mean = _last_working_offset_mean
+        self._last_working_structured, self._score_centre = _last_working_structured, _score_centre
+        self._last_mode_residual, self._mode_ratios = _last_mode_residual, _mode_ratios
+        self.mode_bar, self._stagnation_window = mode_bar, _stagnation_window
+        self.score_stagnated, self._true_ratios = score_stagnated, _true_ratios
+        self._mean_space_newton, self._true_stop = _mean_space_newton, _true_stop
+        self._true_confirmed, self._true_stop_ratio = _true_confirmed, _true_stop_ratio
+        self._last_true_residual, self._held_rank = _last_true_residual, _held_rank
+        self._judged_truncated, self._last_truncated = _judged_truncated, _last_truncated
+        self._mean_space_invalid = _mean_space_invalid
+        self._link_domain_invalid, self.committed = _link_domain_invalid, committed
+        self.objective_prev, self.dev_prev = objective_prev, dev_prev
+        self.eta_unclipped, self.eta, self.mu = eta_unclipped, eta, mu
+        self.iteration_log, self.base_debug_context = iteration_log, base_debug_context
+        self.record_debug_rows, self.capture_extrema = record_debug_rows, capture_extrema
+        self.max_halving, self._consecutive_svd = max_halving, _consecutive_svd
+        self._reported_qp_nonconvergence = _reported_qp_nonconvergence
+        self._degeneracy_retry_failed = _degeneracy_retry_failed
+        self.retained_qp_converged = retained_qp_converged
+        self.deviance_relative_change = deviance_relative_change
+
+    def _scop_initial_state(self, committed: _IRLSState) -> _IRLSState:
+        family, y, weights, S, beta = self.family, self.y, self.weights, self.S, self.beta
+        _scop_state, _scop_specs = self._scop_state, self._scop_specs
+        scop_committed = _SCOPTrialState(
+            irls=committed,
+            groups=tuple(
+                _SCOPGroupState(
+                    group_index=gi,
+                    beta_eff=_immutable_array(st["beta_scop"]),
+                    gamma_eff=_immutable_array(st["gamma_eff"]),
+                    H_scop_penalized=(
+                        None
+                        if st.get("H_scop_penalized") is None
+                        else _immutable_array(st["H_scop_penalized"])
+                    ),
+                    last_step_norm=float(st.get("last_step_norm", 0.0)),
+                    last_fisher_fallback=bool(st.get("last_fisher_fallback", False)),
+                    discarded_directions=_immutable_or_none(st.get("discarded_directions")),
+                )
+                for gi, st in sorted(_scop_state.items())
+            ),
+        )
+
+        # Remove mapped diagonal SCOP penalties before evaluating the merit.
+        # Subtracting them after a full quadratic introduces avoidable
+        # cancellation; cross-group override entries keep their existing role.
+        scop_outer_penalty = S.copy()
+        for spec in _scop_specs.values():
+            scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
+        scop_outer_penalty_abs = np.abs(scop_outer_penalty)
+        scop_merit_errors: dict[int, float] = {}
+        merit_gamma = _gamma(len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16)
+        # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
+        # This encloses residual formation without an observation-level
+        # calculation on every trial. Other families supply deviance-unit
+        # values; the guard covers their weighted accumulation and penalty.
+        # Include gamma before squaring. The response action itself may be
+        # outside binary64 even when its roundoff allowance is finite.
+        with np.errstate(over="ignore", invalid="ignore"):
+            gaussian_response_roundoff = (
+                np.sum((np.sqrt(merit_gamma) * np.sqrt(weights) * y) ** 2)
+                if type(family) is Gaussian
+                else 0.0
+            )
+        # NB2's unit deviance errs by u (y + theta) whatever its size: it
+        # takes the log of (y + theta) / (mu + theta), or of (mu + theta) /
+        # theta where y = 0, a ratio within gamma_3 of its own, and multiplies
+        # it back by y + theta. That puts at most 2 gamma_4 (2y + theta) on
+        # each row (8.9e-8 at theta = 1e8), beside the rounding of the two
+        # terms Poisson's unit deviance also has, which the deviance's own
+        # allowance covers. A backtracking search finds a step only when its
+        # allowance bounds the merit's noise (Berahas, Byrd & Nocedal 2019,
+        # Theorem 4.2).
+        nb2_unit_roundoff = (
+            2.0 * _gamma(4) * float(np.sum(np.abs(weights) * (2.0 * y + family.theta)))
+            if type(family) is NegativeBinomial
+            else 0.0
+        )
+        self.scop_outer_penalty = scop_outer_penalty
+        self.scop_outer_penalty_abs = scop_outer_penalty_abs
+        self.scop_merit_errors, self.merit_gamma = scop_merit_errors, merit_gamma
+        self.gaussian_response_roundoff = gaussian_response_roundoff
+        self.nb2_unit_roundoff = nb2_unit_roundoff
+
+        scop_committed = self.with_scop_merit(scop_committed)
+        committed = scop_committed.irls
+        # Relative change uses the current objective alone. An initial-merit
+        # reference would weaken late convergence after a poor starting fit.
+        self.objective_merit_scale = 0.0
+        self.emit_evaluation(
+            committed,
+            phase="initial",
+            iteration=0,
+            deviance_reused=self._deviance_init is not None,
+        )
+        self.scop_committed = scop_committed
+        return committed
+
+    def with_scop_merit(self, trial: _SCOPTrialState) -> _SCOPTrialState:
+        """Attach deviance plus the latent-coordinate quadratic penalty."""
+        scop_outer_penalty = self.scop_outer_penalty
+        scop_outer_penalty_abs, merit_gamma = self.scop_outer_penalty_abs, self.merit_gamma
+        nb2_unit_roundoff = self.nb2_unit_roundoff
+        gaussian_response_roundoff = self.gaussian_response_roundoff
+        scop_merit_errors, family, groups = self.scop_merit_errors, self.family, self.groups
+        lambda2, _scop_specs = self.lambda2, self._scop_specs
+        # A trial whose mapped coefficients carry its ordinary block past
+        # binary64's range has a merit that is not finite, which the line
+        # search refuses, without a warning (as ``_evaluate_scop_trial``).
+        with np.errstate(over="ignore", invalid="ignore"):
+            penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
+        magnitude = np.abs(trial.irls.beta)
+        penalty_roundoff = _positive_quadratic_roundoff(
+            magnitude, scop_outer_penalty_abs, merit_gamma
+        )
+        for group_state in trial.groups:
+            group = groups[group_state.group_index]
+            lam_scop = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            latent_penalty = _scop_specs[group_state.group_index].S_scop
+            penalty_quad += float(
+                lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
+            )
+            magnitude = np.abs(group_state.beta_eff)
+            penalty_roundoff += _positive_quadratic_roundoff(
+                magnitude, latent_penalty, merit_gamma, abs(lam_scop)
+            )
+        retained = replace(
+            trial,
+            irls=replace(
+                trial.irls,
+                penalized_deviance=float(trial.irls.deviance + penalty_quad),
+            ),
+        )
+        deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + nb2_unit_roundoff
+        if type(family) is Gaussian:
+            deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
+        with np.errstate(over="ignore", invalid="ignore"):
+            allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
+        scop_merit_errors[id(retained.irls)] = allowance
+        return retained
