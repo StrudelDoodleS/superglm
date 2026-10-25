@@ -1028,6 +1028,28 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
     return decomposition.pseudo_inverse(), decomposition.log_pdet, cholesky_ok
 
 
+def _refuse_scop_with_linear_constraints(groups: list[GroupSlice]) -> None:
+    """Refuse a fit with both shape-constrained (SCOP) and linearly constrained groups.
+
+    The SCOP step takes one Newton step on every coefficient and has no
+    constrained QP, so a linear constraint beside it would be checked at the
+    end but never enforced by a step.  Every fit entry point refuses the mix;
+    the solver refuses it as well, so each fit has exactly one step method.
+    """
+    shaped = [group.name for group in groups if group.monotone_engine == "scop"]
+    bounded = [group.name for group in groups if group.constraints is not None]
+    if shaped and bounded:
+        raise NotImplementedError(
+            "fit_irls_direct cannot fit shape-constrained (SCOP) groups and linearly "
+            f"constrained groups together: {', '.join(map(repr, shaped))} "
+            f"{'is' if len(shaped) == 1 else 'are'} shape-constrained and "
+            f"{', '.join(map(repr, bounded))} {'has' if len(bounded) == 1 else 'have'} "
+            "linear constraints. Use one constraint method for every constrained term "
+            "(all of them PSplines, which use SCOP, or none of them), or drop one of the "
+            "constraints."
+        )
+
+
 def fit_irls_direct(
     X: NDArray | DesignMatrix,
     y: NDArray,
@@ -1083,12 +1105,15 @@ def fit_irls_direct(
     A structured factor that cannot proceed raises ``StructuredSolverError``
     under every ``direct_solve`` (one-engine design §6, decision 6): no fit is
     rerun on another solver.  A Fisher-data reuse cache is cleared when the
-    fit fails or ends unconverged.
+    fit fails or ends unconverged.  Shape-constrained (SCOP) groups and
+    linearly constrained groups are refused together
+    (``_refuse_scop_with_linear_constraints``).
     """
     result = None
     try:
         if max_iter < 1:
             raise ValueError(f"max_iter must be at least 1, got {max_iter}")
+        _refuse_scop_with_linear_constraints(groups)
         result = _fit_irls_direct_once(
             X=X,
             y=y,

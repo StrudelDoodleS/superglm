@@ -684,3 +684,55 @@ def test_scop_reml_run_builds_its_reduced_plan_once_and_carries_refusals(monkeyp
     np.testing.assert_array_equal(predictions, fresh_predictions)
     assert model.result.deviance == fresh_model.result.deviance
     assert model.reml_diagnostics()["lambdas"] == fresh_model.reml_diagnostics()["lambdas"]
+
+
+def test_the_solver_refuses_scop_beside_linear_constraints() -> None:
+    """``fit_irls_direct`` refuses a SCOP group beside a linearly constrained group.
+
+    Every model entry point refuses the mix (``test_monotone_fit.py::
+    test_scop_plus_qp_raises``).  The solver's SCOP step has no constrained QP,
+    so it would check the linear constraint after each step and never enforce
+    it; refusing at the solver's entry leaves each fit one step method.
+    Mutation: without ``_refuse_scop_with_linear_constraints`` this fit runs.
+    """
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import LinearConstraintSet
+
+    rng = np.random.default_rng(3)
+    n = 40
+    bounded = rng.uniform(-1.0, 1.0, n)
+    shaped = rng.uniform(0.0, 1.0, n)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(bounded[:, None]), DenseGroupMatrix(shaped[:, None])], n=n, p=2
+    )
+    groups = [
+        GroupSlice(
+            name="bounded",
+            start=0,
+            end=1,
+            constraints=LinearConstraintSet(A=np.eye(1), b=np.zeros(1)),
+            monotone_engine="qp",
+        ),
+        GroupSlice(
+            name="shape",
+            start=1,
+            end=2,
+            monotone_engine="scop",
+            scop_reparameterization=build_scop_solver_reparam(q_raw=2, kind="increasing"),
+        ),
+    ]
+    y = 1.0 + bounded + shaped + rng.normal(0.0, 0.1, n)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"'shape' is shape-constrained and 'bounded' has linear constraints",
+    ):
+        fit_irls_direct(
+            dm,
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=1.0,
+            weight_semantics="frequency",
+        )
