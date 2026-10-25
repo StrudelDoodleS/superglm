@@ -15,7 +15,6 @@ from superglm.links import IdentityLink
 from superglm.model.base import model_build_design_matrix
 from superglm.solvers.irls_direct import (
     _evaluate_scop_trial,
-    _SCOPGroupSpec,
     _SCOPGroupState,
     _SCOPTrialState,
 )
@@ -25,7 +24,7 @@ from superglm.solvers.irls_state import (
     _IRLSStepDecision,
 )
 from superglm.solvers.scop import build_scop_solver_reparam
-from superglm.solvers.scop_newton import scop_joint_newton_step
+from superglm.solvers.scop_newton import SCOPGroupSpec, SCOPJointNewton
 from superglm.types import GroupSlice
 
 
@@ -45,7 +44,7 @@ def test_scop_half_step_interpolates_latent_not_mapped_coefficients() -> None:
     offset = np.zeros(n)
     group = GroupSlice(name="shape", start=1, end=2, monotone_engine="scop")
     reparam = build_scop_solver_reparam(q_raw=2, kind="increasing")
-    spec = _SCOPGroupSpec(
+    spec = SCOPGroupSpec(
         group_index=1,
         group=group,
         reparam=reparam,
@@ -319,23 +318,17 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
     assert commits[-1].payload["state_id"] == trial.payload["state_id"]
     assert result.state_id == trial.payload["state_id"]
 
-    expected_input = {
-        gi: {
-            "beta_scop": state["beta_eff"],
-            "reparam": state["reparam"],
-            "B_scop": state["B_scop"],
-            "S_scop": state["S_scop"],
-            "bin_idx": state["bin_idx"],
-        }
-    }
-    z_scop = y - offset_arr - result.intercept
-    expected = scop_joint_newton_step(
-        expected_input,
-        weights,
-        z_scop,
-        {"x": 1.0},
-        model._groups,
-    )[gi].H_penalized
+    # The retained block is the SCOP block's own Newton Hessian at the retained
+    # state: J B'WB J + lambda S + E, with E = -gamma''(theta) B'W r.
+    reparam, theta = state["reparam"], state["beta_eff"]
+    rows = state["B_scop"] if state["bin_idx"] is None else state["B_scop"][state["bin_idx"]]
+    jacobian = reparam.jacobian_diagonal(theta)
+    expected = jacobian[:, None] * (rows.T @ (weights[:, None] * rows)) * jacobian[None, :]
+    expected += 1.0 * state["S_scop"]
+    assert not state["last_fisher_fallback"]
+    assert state["discarded_directions"].shape[0] == 0
+    score = rows.T @ (weights * (y - mu))
+    expected += np.diag(-reparam.second_derivative_diagonal(theta) * score)
     np.testing.assert_allclose(state["H_scop_penalized"], expected)
 
 
@@ -386,17 +379,13 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
     import superglm.solvers.irls_direct as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
-    original = irls_direct.scop_joint_newton_step
+    original = SCOPJointNewton.block_curvature
 
-    def mark_terminal_refresh(*args, **kwargs):
-        results = original(*args, **kwargs)
-        if "debug_context" not in kwargs:
-            return {
-                gi: replace(result, used_fisher_fallback=True) for gi, result in results.items()
-            }
-        return results
+    def mark_terminal_refresh(self, *args, **kwargs):
+        results = original(self, *args, **kwargs)
+        return {gi: replace(result, used_fisher_fallback=True) for gi, result in results.items()}
 
-    monkeypatch.setattr(irls_direct, "scop_joint_newton_step", mark_terminal_refresh)
+    monkeypatch.setattr(SCOPJointNewton, "block_curvature", mark_terminal_refresh)
     _, _, states = irls_direct.fit_irls_direct(
         model._dm,
         y,

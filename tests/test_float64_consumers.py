@@ -35,32 +35,6 @@ def test_weighted_mean_retains_representable_extreme_contribution(monkeypatch):
     )
 
 
-def test_scop_roundoff_scales_before_squaring_large_actions(monkeypatch):
-    from decimal import Decimal
-
-    from superglm.solvers.scop_newton import _objective_delta_roundoff
-
-    def bound(scale):
-        return _objective_delta_roundoff(
-            gammas=[np.array([scale])],
-            trial_gammas=[np.array([2 * scale])],
-            betas=[np.zeros(1)],
-            trial_betas=[np.zeros(1)],
-            grams=[np.eye(1)],
-            penalties=[np.zeros((1, 1))],
-            lambdas=[0.0],
-            response_norm=scale,
-            n_rows=2,
-        )
-
-    ordinary = bound(1.0)
-    monkeypatch.setattr(np, "longdouble", np.float64)
-    actual = bound(1e160)
-    expected = float(Decimal.from_float(ordinary) * Decimal.from_float(1e160) ** 2)
-    assert np.isfinite(actual)
-    assert actual == pytest.approx(expected, rel=32 * np.finfo(float).eps)
-
-
 def test_penalty_roundoff_retains_balanced_extreme_coordinate_products():
     from superglm.solvers.scop_newton import _positive_quadratic_roundoff
 
@@ -70,26 +44,6 @@ def test_penalty_roundoff_retains_balanced_extreme_coordinate_products():
         1e-14,
     )
     assert actual == pytest.approx(2e-14, rel=16 * np.finfo(float).eps, abs=0)
-
-
-def test_scop_roundoff_retains_small_action_times_large_response():
-    from superglm.solvers.scop_newton import _objective_delta_roundoff
-
-    actual = _objective_delta_roundoff(
-        gammas=[np.array([1e-300])],
-        trial_gammas=[np.array([2e-300])],
-        betas=[np.zeros(1)],
-        trial_betas=[np.zeros(1)],
-        grams=[np.eye(1)],
-        penalties=[np.zeros((1, 1))],
-        lambdas=[0.0],
-        response_norm=1e300,
-        n_rows=2,
-    )
-    unit = np.finfo(float).eps / 2
-    gamma = (50 * unit) / (1 - 50 * unit)
-    expected = 4 * gamma / (1 - gamma) ** 2.5
-    assert actual == pytest.approx(expected, rel=32 * np.finfo(float).eps, abs=0)
 
 
 def test_roundoff_gamma_is_infinite_once_count_u_reaches_one_on_an_array():

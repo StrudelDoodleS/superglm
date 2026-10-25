@@ -265,7 +265,6 @@ class _SCOPREMLFitContext:
     max_pirls_iter: int
     reml_penalties: list[PenaltyComponent] | None
     convergence: str
-    scop_joint: bool
     debug_recorder: Any
     likelihood_size: float
     weight_semantics: str
@@ -1140,13 +1139,10 @@ def _newton_polished_warm_start(
 ) -> tuple[NDArray, float, dict[int, dict]] | None:
     """Warm start for a certification retry: the failed mode plus its Newton step.
 
-    The inner SCOP solve alternates an ordinary-block solve with a SCOP Newton
-    step, a block-coordinate iteration that converges only linearly: from a
-    mode that met its coefficient-step test but not the certificate, the
-    retry took about ten more inner iterations, each a full Gram build. The
-    certificate has already computed the joint Newton step over every
-    coefficient (Pya & Wood fit SCAM coefficients by full Newton), so the
-    retry starts from that step instead. The retry is still an ordinary
+    A mode that met its coefficient-step test but not the certificate is one
+    Newton step from a mode the certificate accepts, and the certificate has
+    already computed that joint Newton step over every coefficient, so the
+    retry starts from it. The retry is still an ordinary
     converged inner fit at the tightened tolerance, and its mode is certified
     afresh: this changes only where it starts, never what it must satisfy.
     Returns None when the step is not finite, so the caller keeps the plain
@@ -1398,7 +1394,6 @@ def _fit_scop_reml_mode(
         # fit where the penalty deliberately trades a tiny deviance increase
         # for a much smaller quadratic.
         convergence="coefficients",
-        _scop_joint=context.scop_joint,
         scop_state_init=scop_state_init,
         debug_recorder=context.debug_recorder,
         debug_context=debug_context,
@@ -1914,7 +1909,6 @@ def fit_fixed_scop_reml(
     max_pirls_iter: int = 100,
     reml_penalties: list[PenaltyComponent] | None = None,
     convergence: str = "deviance",
-    _scop_joint: bool = True,
     debug_recorder=None,
 ) -> REMLResult:
     """Evaluate and publish one fixed-lambda SCOP coefficient mode."""
@@ -1950,7 +1944,6 @@ def fit_fixed_scop_reml(
         max_pirls_iter=max_pirls_iter,
         reml_penalties=reml_penalties,
         convergence=convergence,
-        scop_joint=_scop_joint,
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
         saturated_log_weight=saturated_log_weight,
@@ -2806,7 +2799,6 @@ def optimize_scop_efs_reml(
     verbose: bool = False,
     reml_penalties: list[PenaltyComponent] | None = None,
     convergence: str = "deviance",
-    _scop_joint: bool = True,
     debug_recorder=None,
     warm_lambdas: Mapping[str, float] | None = None,
     _aitken: bool = True,
@@ -2953,7 +2945,6 @@ def optimize_scop_efs_reml(
         max_pirls_iter=max_pirls_iter,
         reml_penalties=reml_penalties,
         convergence=convergence,
-        scop_joint=_scop_joint,
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
         saturated_log_weight=saturated_log_weight,
@@ -3670,7 +3661,6 @@ def optimize_scop_efs_reml(
             verbose=verbose,
             reml_penalties=reml_penalties,
             convergence=convergence,
-            _scop_joint=_scop_joint,
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
             _aitken=_aitken,
@@ -3748,7 +3738,6 @@ def optimize_scop_efs_reml(
             verbose=verbose,
             reml_penalties=reml_penalties,
             convergence=convergence,
-            _scop_joint=_scop_joint,
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
             _aitken=_aitken,

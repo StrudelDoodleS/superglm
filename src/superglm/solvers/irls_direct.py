@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 import numpy as np
 from numpy.typing import NDArray
@@ -145,11 +146,10 @@ from superglm.solvers.rank import (
     decompose_symmetric,
     weights_fingerprint,
 )
-from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import (
+    SCOPGroupSpec,
+    SCOPJointNewton,
     _positive_quadratic_roundoff,
-    scop_joint_newton_step,
-    scop_newton_step,
 )
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
@@ -208,9 +208,14 @@ class SCOPRunCentring:
     ``_SCOPREMLFitContext``), shared by the certification-retry contexts
     derived from it.  **Lifetime:** the run; it dies with the context.  It holds
 
-    - the block-coordinate step's reduced design (the non-SCOP groups), which
+    - the SCOP step's reduced design (the non-SCOP groups), which
       owns its compact-support caches (pattern plan, solver supports,
       execution plan).  These depend on the basis only;
+    - each row-level SCOP group's exact support: its distinct rows and row
+      index, or ``None`` where compressing does not pay
+      (``scop_newton._exact_support``) or, for a fit's only SCOP group,
+      where every row is distinct (``_lone_scop_support``).  It depends on
+      the group's rows only, so it is found once per run, not once per fit;
     - the refusals (``_CARRIED_REFUSALS``) of the raw-moment and tensor raw
       rungs, on the full design and on the reduced one.
 
@@ -240,6 +245,7 @@ class SCOPRunCentring:
     owners: tuple = ()
     reduced_key: tuple = ()
     reduced_dm: DesignMatrix | None = None
+    exact_supports: dict = field(default_factory=dict)
     full_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
     reduced_refusals: TabmatCenteringState = field(default_factory=TabmatCenteringState)
 
@@ -252,6 +258,7 @@ class SCOPRunCentring:
         self.owners = owners
         self.reduced_key = ()
         self.reduced_dm = None
+        self.exact_supports = {}
         self.full_refusals = TabmatCenteringState()
         self.reduced_refusals = TabmatCenteringState()
 
@@ -342,16 +349,21 @@ def _solve_constrained_qp_with_cold_retry(
     return result
 
 
-@dataclass(frozen=True)
-class _SCOPGroupSpec:
-    """Static definition of one SCOP group, separate from trial state."""
+def _lone_scop_support(gm, index: int, supports: dict | None) -> tuple[NDArray, NDArray] | None:
+    """A fit's only row-level SCOP group as its distinct rows and row index; ``None`` if every row is distinct.
 
-    group_index: int
-    group: GroupSlice
-    reparam: SCOPSolverReparam
-    B_scop: NDArray
-    S_scop: NDArray
-    bin_idx: NDArray | None
+    With one SCOP group there are no pair tables, so it compresses whenever
+    any row repeats. ``supports`` is the run's record by group
+    (``SCOPRunCentring.exact_supports``): the rows never change within a
+    run, so they are read and sorted once per run, not once per fit.
+    """
+    if supports is not None and index in supports:
+        return supports[index]
+    support = scop_exact_support.build_exact_scop_support(gm.toarray())
+    compressed = None if support is None else (support.B_unique, support.row_to_support)
+    if supports is not None:
+        supports[index] = compressed
+    return compressed
 
 
 def _immutable_or_none(values: NDArray | None) -> NDArray | None:
@@ -380,6 +392,45 @@ class _SCOPTrialState:
 
     irls: _IRLSState
     groups: tuple[_SCOPGroupState, ...]
+    level: float | None = None
+    """The intercept about ``centre``, where the joint step formed it: the
+    raw ``irls.intercept`` reads it at ``u |m' beta|``."""
+    centre: tuple[NDArray, NDArray | None] | None = None
+    """The ordinary system's centre pair ``(hi, lo)`` that ``level`` is about."""
+
+
+@dataclass(frozen=True)
+class _SCOPOrdinarySolve:
+    """The ordinary block's solve at one iterate, which a damped trial re-solves at its latent coordinates.
+
+    Given the latent coordinates the ordinary block is linear, so its
+    working-model solve at a trial's mapped coefficients ``gamma`` is
+    ``fixed - coupled (gamma - gamma_k)``, with centred level ``level -
+    mean' (gamma - gamma_k)``: the linear block eliminated exactly at every
+    value of the nonlinear one (variable projection, Golub & Pereyra 1973),
+    not along the joint step's linearisation of ``gamma``. The part a
+    trial does not owe to its latent change, ``fixed`` less the committed
+    coefficients, is a scoring step and is damped along ``alpha`` with it.
+    """
+
+    columns: NDArray
+    """The ordinary coefficients' positions in ``beta``."""
+    committed: NDArray
+    committed_level: float
+    """The committed intercept profiled about ``mean_x``."""
+    fixed: NDArray
+    """The solve with the latent coordinates held."""
+    level: float
+    """Its profiled intercept about ``mean_x``."""
+    coupled: NDArray
+    mean: NDArray
+    mean_x: NDArray
+    centre: tuple[NDArray, NDArray | None]
+    """The system's centre pair ``(hi, lo)``, which the levels are about."""
+    centred_rows: Callable[[NDArray], NDArray] | None = None
+    """``(X - 1 m') b`` about ``centre`` where the proposal formed its
+    predictor so (``_raw_centering_well_scaled`` refused the raw one); a trial
+    then forms its own the same way, never through its raw intercept."""
 
 
 @dataclass(frozen=True)
@@ -397,7 +448,7 @@ def _evaluate_scop_trial(
     committed: _SCOPTrialState,
     proposed: _SCOPTrialState,
     alpha: float,
-    specs: dict[int, _SCOPGroupSpec],
+    specs: dict[int, SCOPGroupSpec],
     dm: DesignMatrix,
     y: NDArray,
     weights: NDArray,
@@ -408,13 +459,21 @@ def _evaluate_scop_trial(
     evaluation_id: int | None = None,
     basis_id: int | None = None,
     lambdas: tuple[tuple[str, object], ...] = (),
+    ordinary: _SCOPOrdinarySolve | None = None,
 ) -> _SCOPTrialState:
-    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state."""
+    """Evaluate a fixed-endpoint SCOP trial by interpolating latent state.
+
+    With ``ordinary``, the trial's ordinary coefficients and intercept are
+    that block's solve at the trial's mapped coefficients
+    (``_SCOPOrdinarySolve``); otherwise they are interpolated as the latent
+    coordinates are. The groups are in the joint step's latent order.
+    """
     beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
     intercept_trial = committed.irls.intercept + alpha * (
         proposed.irls.intercept - committed.irls.intercept
     )
     trial_groups: list[_SCOPGroupState] = []
+    mapped_changes: list[NDArray] = []
     for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
         if committed_group.group_index != proposed_group.group_index:
             raise ValueError("SCOP trial group ordering does not match")
@@ -424,6 +483,7 @@ def _evaluate_scop_trial(
         )
         gamma_eff = spec.reparam.forward(beta_eff)
         beta_trial[spec.group.sl] = gamma_eff
+        mapped_changes.append(gamma_eff - spec.reparam.forward(committed_group.beta_eff))
         trial_groups.append(
             _SCOPGroupState(
                 group_index=committed_group.group_index,
@@ -436,21 +496,109 @@ def _evaluate_scop_trial(
             )
         )
 
-    irls = _evaluate_irls_state(
-        dm,
-        y,
-        weights,
-        family,
-        link,
-        offset,
-        beta_trial,
-        intercept_trial,
-        state_id=state_id,
-        evaluation_id=evaluation_id,
-        basis_id=basis_id,
-        lambdas=lambdas,
+    # A latent step can map past the floating-point range (``exp`` of a
+    # coordinate the Newton model sent far out); such a trial's objective is
+    # not finite and the line search rejects it, without a warning.
+    level, eta_unclipped = None, None
+    with np.errstate(over="ignore", invalid="ignore"):
+        if ordinary is not None:
+            change = np.concatenate(mapped_changes)
+            solved = (
+                ordinary.committed
+                + alpha * (ordinary.fixed - ordinary.committed)
+                - ordinary.coupled @ change
+            )
+            level = (
+                ordinary.committed_level
+                + alpha * (ordinary.level - ordinary.committed_level)
+                - float(ordinary.mean @ change)
+            )
+            beta_trial[ordinary.columns] = solved
+            intercept_trial = level - float(ordinary.mean_x @ solved)
+            if ordinary.centred_rows is not None:
+                latent_columns = beta_trial.copy()
+                latent_columns[ordinary.columns] = 0.0
+                eta_unclipped = (
+                    level + ordinary.centred_rows(solved) + dm.matvec(latent_columns) + offset
+                )
+        irls = _evaluate_irls_state(
+            dm,
+            y,
+            weights,
+            family,
+            link,
+            offset,
+            beta_trial,
+            intercept_trial,
+            eta_unclipped=eta_unclipped,
+            state_id=state_id,
+            evaluation_id=evaluation_id,
+            basis_id=basis_id,
+            lambdas=lambdas,
+        )
+    return _SCOPTrialState(
+        irls=irls,
+        groups=tuple(trial_groups),
+        level=level,
+        centre=None if ordinary is None else ordinary.centre,
     )
-    return _SCOPTrialState(irls=irls, groups=tuple(trial_groups))
+
+
+def _level_about(
+    level: float,
+    centre: tuple[NDArray, NDArray | None],
+    new_centre: tuple[NDArray, NDArray | None],
+    beta: NDArray,
+) -> float:
+    """``level`` about ``new_centre``: the same predictor, ``level + (m_new - m)' beta``.
+
+    Each centre is a pair ``(hi, lo)``; ``new_hi - hi`` is exact where the two
+    lie within a factor two (Sterbenz), as successive working means of one
+    column do, so the shift rounds at ``|m_new - m| |beta|``, not at ``|m' beta|``.
+    """
+    (hi, lo), (new_hi, new_lo) = centre, new_centre
+    shift = np.asarray(new_hi, dtype=np.float64) - hi
+    if lo is not None:
+        shift = shift - lo
+    if new_lo is not None:
+        shift = shift + new_lo
+    return float(level) + math.fsum(shift * beta)
+
+
+_LATENT_MAX_STEP = 1000.0
+"""The longest step a SCOP line search tries on any exponentiated latent coordinate.
+
+Dennis & Schnabel's maximum step (1983, sec. 6.3): a step that would overflow
+the objective or leave the region of interest is shortened to it before the
+line search, which then backtracks from there with its usual budget. Here it
+is the width of ``[-500, 500]``, the domain outside which
+``SCOPSolverReparam.forward`` clips a coordinate: a longer step carries a
+coordinate past the clip from anywhere inside it, where its mapped
+coefficient no longer moves with the step, and halving through such trials
+spends the budget on the clip's one value. The free coordinates, mapped by
+the identity on the data's own scale, are not bounded.
+"""
+
+
+def _latent_step_depth(
+    committed: _SCOPTrialState, proposed: _SCOPTrialState, specs: dict[int, SCOPGroupSpec]
+) -> int:
+    """The first halving depth whose step is within ``_LATENT_MAX_STEP`` on every exponentiated coordinate.
+
+    ``0`` for a step within it already, and for a step that is not finite,
+    which no halving can bring back and the line search refuses as it is.
+    """
+    largest = 0.0
+    for committed_group, proposed_group in zip(committed.groups, proposed.groups, strict=True):
+        free = specs[committed_group.group_index].reparam.free_dim
+        change = proposed_group.beta_eff[free:] - committed_group.beta_eff[free:]
+        largest = max(largest, float(np.max(np.abs(change), initial=0.0)))
+    if not math.isfinite(largest):
+        return 0
+    depth = 0
+    while math.ldexp(largest, -depth) > _LATENT_MAX_STEP:
+        depth += 1
+    return depth
 
 
 def _feature_edf(
@@ -902,7 +1050,6 @@ def fit_irls_direct(
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     return_scop_state: bool = False,
-    _scop_joint: bool = True,
     scop_state_init: dict[int, dict] | None = None,
     debug_recorder=None,
     debug_context: dict[str, object] | None = None,
@@ -964,7 +1111,6 @@ def fit_irls_direct(
             S_override=S_override,
             reml_penalties=reml_penalties,
             return_scop_state=return_scop_state,
-            _scop_joint=_scop_joint,
             scop_state_init=scop_state_init,
             debug_recorder=debug_recorder,
             debug_context=debug_context,
@@ -1020,7 +1166,6 @@ def _fit_irls_direct_once(
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     return_scop_state: bool = False,
-    _scop_joint: bool = True,
     scop_state_init: dict[int, dict] | None = None,
     debug_recorder=None,
     debug_context: dict[str, object] | None = None,
@@ -1736,13 +1881,13 @@ def _fit_irls_direct_once(
                 )
             )
         if latent_parts:
-            # The joint step (``_scop_joint``) truncates one factor across every
-            # SCOP group and hands each group its own columns of each discarded
-            # direction, so the groups' blocks reassemble row by row into the
-            # joint directions; groups solved one at a time carry directions
-            # confined to themselves, block by block.  The concatenated latent
-            # score is projected once off their span, which an SVD finds with
-            # its rank (a QR would invent a direction for a zero block).
+            # The joint step truncates one factor across every SCOP group and
+            # hands each group its own columns of each discarded direction, so
+            # the groups' blocks reassemble row by row into the joint
+            # directions (a group absent here holds zeros in them).  The
+            # concatenated latent score is projected once off their span,
+            # which an SVD finds with its rank (a QR would invent a direction
+            # for a zero block).
             widths = [part[1].size for part in latent_parts]
             offsets = np.concatenate(([0], np.cumsum(widths)))
             blocks = [
@@ -1754,26 +1899,14 @@ def _fit_irls_direct_once(
             ]
             gradient = np.concatenate([part[2] for part in latent_parts])
             if blocks:
-                if _scop_joint:
-                    # one joint factor: every group holds its own columns of
-                    # the same discarded directions (a group absent here holds
-                    # zeros in them)
-                    counts = {rows.shape[0] for _, rows in blocks}
-                    if len(counts) != 1:  # pragma: no cover - joint-step invariant
-                        raise RuntimeError(
-                            "the joint SCOP step handed its groups different discarded directions"
-                        )
-                    directions = np.zeros((counts.pop(), int(offsets[-1])))
-                    for k, rows in blocks:
-                        directions[:, offsets[k] : offsets[k + 1]] = rows
-                else:
-                    directions = np.zeros(
-                        (sum(rows.shape[0] for _, rows in blocks), int(offsets[-1]))
+                counts = {rows.shape[0] for _, rows in blocks}
+                if len(counts) != 1:  # pragma: no cover - joint-step invariant
+                    raise RuntimeError(
+                        "the joint SCOP step handed its groups different discarded directions"
                     )
-                    row = 0
-                    for k, rows in blocks:
-                        directions[row : row + rows.shape[0], offsets[k] : offsets[k + 1]] = rows
-                        row += rows.shape[0]
+                directions = np.zeros((counts.pop(), int(offsets[-1])))
+                for k, rows in blocks:
+                    directions[:, offsets[k] : offsets[k + 1]] = rows
                 left, singular, _ = np.linalg.svd(directions.T, full_matrices=False)
                 cutoff = float(np.max(singular, initial=0.0)) * directions.shape[1] * _EPS_FLOAT
                 frozen = left[:, singular > cutoff]
@@ -2048,10 +2181,13 @@ def _fit_irls_direct_once(
     # Newton rows when its optimizer asks (``_working_newton``): the discrete
     # route's working model then carries the observed curvature its REML
     # criterion is (``reml.discrete``).
+    # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
+    # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
+    # information, and the REML geometry it hands on reads Fisher rows at the
+    # retained model either way.
     _observed_newton_active = bool(
         _use_observed_newton
         and not has_constraints
-        and not _has_scop
         and (
             (_working_newton and concave_observed_rows(family, link))
             if _return_working_system
@@ -2073,10 +2209,41 @@ def _fit_irls_direct_once(
     )
     if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
         _observed_newton_active = True
+
+    def observed_rows_invalid(candidate: _IRLSState) -> bool:
+        """Whether a trial's observed rows are not finite, which rejects it.
+
+        One-engine design §3.11: finiteness is the one condition the declared
+        observed rows keep; a trial without finite rows is not a state the
+        next Newton step can start from. Every line search of an observed fit
+        reads it, the SCOP one included.
+        """
+        rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=candidate.mu,
+            eta=candidate.eta,
+            sample_weight=weights,
+            prefer_observed=True,
+        )
+        return rows.rejection_reason is not None
+
     _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
     _expose_exact_support_state = False
     # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
     _scop_state: dict[int, dict] = {}
+    # A REML run's fits share one reduced design, their rung refusals and
+    # their exact supports (``SCOPRunCentring``); a traced or debugged fit
+    # stays fresh, as the Newton engine's carried policy does.
+    if (
+        _has_scop
+        and _scop_run_centring is not None
+        and debug_recorder is None
+        and trace_run is None
+    ):
+        _scop_run = _scop_run_centring
+        _scop_run.bind((dm, family, link, *gms, *groups))
     if _has_scop:
         for gi, g in enumerate(groups):
             if g.monotone_engine == "scop":
@@ -2112,25 +2279,27 @@ def _fit_irls_direct_once(
                         "beta_scop_prev": None,
                     }
                 else:
-                    B_scop = _gm.toarray()
-                    support = None
-                    if _n_scop_groups == 1:
-                        support = scop_exact_support.build_exact_scop_support(B_scop)
-
-                    if support is not None:
+                    compressed = (
+                        _lone_scop_support(
+                            _gm, gi, None if _scop_run is None else _scop_run.exact_supports
+                        )
+                        if _n_scop_groups == 1
+                        else None
+                    )
+                    if compressed is not None:
                         _expose_exact_support_state = True
                         state = {
                             "reparam": reparam,
-                            "B_scop": support.B_unique,
+                            "B_scop": compressed[0],
                             "S_scop": S_scop,
-                            "bin_idx": support.row_to_support,
+                            "bin_idx": compressed[1],
                             "beta_scop": warm_beta_scop,
                             "beta_scop_prev": None,
                         }
                     else:
                         state = {
                             "reparam": reparam,
-                            "B_scop": B_scop,
+                            "B_scop": _gm.toarray(),
                             "S_scop": S_scop,
                             "bin_idx": None,
                             "beta_scop": warm_beta_scop,
@@ -2165,12 +2334,7 @@ def _fit_irls_direct_once(
         _reduced_gms = []
         for gi in _non_scop_groups_idx:
             _reduced_gms.append(gms[gi])
-        # A REML run's fits share one reduced design and their rung refusals
-        # (``SCOPRunCentring``); a traced or debugged fit stays fresh, as the
-        # Newton engine's carried policy does.
-        if _scop_run_centring is not None and debug_recorder is None and trace_run is None:
-            _scop_run = _scop_run_centring
-            _scop_run.bind((dm, family, link, *gms, *groups))
+        if _scop_run is not None:
             _reduced_dm = _scop_run.reduced_design(
                 tuple(_non_scop_groups_idx), _reduced_gms, n, _p_reduced
             )
@@ -2181,7 +2345,7 @@ def _fit_irls_direct_once(
             _seed_refusals(_reduced_tabmat_state, _scop_run.reduced_refusals)
 
         _scop_specs = {
-            gi: _SCOPGroupSpec(
+            gi: SCOPGroupSpec(
                 group_index=gi,
                 group=groups[gi],
                 reparam=st["reparam"],
@@ -2191,6 +2355,14 @@ def _fit_irls_direct_once(
             )
             for gi, st in _scop_state.items()
         }
+        _scop_order = sorted(_scop_specs)
+        _scop_newton = SCOPJointNewton(
+            [_scop_specs[gi] for gi in _scop_order],
+            lambda2,
+            _reduced_dm,
+            n,
+            supports=None if _scop_run is None else _scop_run.exact_supports,
+        )
 
         # QP/warm initialization is part of the first committed state, not the
         # first proposal. This gives iteration one a coherent latent baseline.
@@ -2653,10 +2825,28 @@ def _fit_irls_direct_once(
                 if type(family) is Gaussian
                 else 0.0
             )
+        # NB2's unit deviance errs by u (y + theta) whatever its size: it
+        # takes the log of (y + theta) / (mu + theta), or of (mu + theta) /
+        # theta where y = 0, a ratio within gamma_3 of its own, and multiplies
+        # it back by y + theta. That puts at most 2 gamma_4 (2y + theta) on
+        # each row (8.9e-8 at theta = 1e8), beside the rounding of the two
+        # terms Poisson's unit deviance also has, which the deviance's own
+        # allowance covers. A backtracking search finds a step only when its
+        # allowance bounds the merit's noise (Berahas, Byrd & Nocedal 2019,
+        # Theorem 4.2).
+        nb2_unit_roundoff = (
+            2.0 * _gamma(4) * float(np.sum(np.abs(weights) * (2.0 * y + family.theta)))
+            if type(family) is NegativeBinomial
+            else 0.0
+        )
 
         def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
             """Attach deviance plus the latent-coordinate quadratic penalty."""
-            penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
+            # A trial whose mapped coefficients carry its ordinary block past
+            # binary64's range has a merit that is not finite, which the line
+            # search refuses, without a warning (as ``_evaluate_scop_trial``).
+            with np.errstate(over="ignore", invalid="ignore"):
+                penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
             magnitude = np.abs(trial.irls.beta)
             penalty_roundoff = _positive_quadratic_roundoff(
                 magnitude, scop_outer_penalty_abs, merit_gamma
@@ -2679,7 +2869,7 @@ def _fit_irls_direct_once(
                     penalized_deviance=float(trial.irls.deviance + penalty_quad),
                 ),
             )
-            deviance_roundoff = merit_gamma * abs(trial.irls.deviance)
+            deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + nb2_unit_roundoff
             if type(family) is Gaussian:
                 deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
             with np.errstate(over="ignore", invalid="ignore"):
@@ -2871,20 +3061,15 @@ def _fit_irls_direct_once(
             z_off = z - offset
 
             if _has_scop:
-                # ── SCOP block-coordinate path ──────────────────────────
-                # Step 1: Compute SCOP contribution to eta from current state
-                eta_scop = np.zeros(n)
-                for gi, st in _scop_state.items():
-                    gamma_eff = st["reparam"].forward(st["beta_scop"])
-                    _eta_g = st["B_scop"] @ gamma_eff
-                    if st["bin_idx"] is not None:
-                        _eta_g = _eta_g[st["bin_idx"]]
-                    eta_scop += _eta_g
+                # ── SCOP: one Newton step on every coefficient jointly ──
+                # The ordinary block is solved with the latent SCOP
+                # coordinates held fixed, then ``SCOPJointNewton.step``
+                # couples the two blocks through the Schur complement and
+                # corrects that solve (Pya & Wood 2015, Appendix 1).
+                scop_thetas = [_scop_state[gi]["beta_scop"] for gi in _scop_order]
+                z_adj = z_off - _scop_newton.predictor(scop_thetas)
 
-                # Step 2: Adjust working response by removing SCOP contribution
-                z_adj = z_off - eta_scop
-
-                # Step 3: Profile the intercept in stable centered
+                # Profile the intercept in stable centered
                 # coordinates.  The raw augmented Gram loses the ordinary
                 # slope entirely after a large column translation, so the
                 # system comes from ``build_centered_system``, the authority
@@ -2905,7 +3090,7 @@ def _fit_irls_direct_once(
                 if _scop_run is not None:
                     _carry_refusals(_scop_run.reduced_refusals, _reduced_tabmat_state)
                 # The certificate, read on the system's own location and
-                # spread, chooses only how Step 5 forms eta.  It no longer
+                # spread, chooses only how the proposal's predictor is formed.  It no longer
                 # rebuilds the system: a rejection here can only fall on a
                 # column the builder centred first (a raw rung's columns
                 # passed this same test on these same numbers), so the rebuild
@@ -2922,7 +3107,7 @@ def _fit_irls_direct_once(
                 )
                 _t_gram += time.perf_counter() - _t0
 
-                # Step 4: Solve for unconstrained coefficients
+                # The ordinary block's solve, the latent coordinates held fixed
                 _t0 = time.perf_counter()
                 reduced_rank = decompose_gram_if_authoritative(reduced_centered.hessian)
                 reduced_factor_rhs = None
@@ -2946,89 +3131,67 @@ def _fit_irls_direct_once(
                     if reduced_factor_rhs is None
                     else reduced_rank.solve_factor_rhs(reduced_factor_rhs)
                 )
-                intercept = reduced_centered.mean_z - float(reduced_centered.mean_x @ beta_reduced)
                 _cond_est = reduced_rank.pre_truncation_condition
                 _used_svd = reduced_rank.used_svd_fallback
                 rank_truncated = reduced_rank.rank_truncated
-
-                # Scatter reduced beta back into full beta vector
+                joint = _scop_newton.step(
+                    scop_thetas,
+                    W=W,
+                    z=z,
+                    eta=committed.eta_unclipped,
+                    reduced=reduced_centered,
+                    solve=reduced_rank.solve,
+                    ordinary_change=beta_reduced - committed.beta[_reduced_to_full],
+                    debug_recorder=debug_recorder,
+                    debug_context={**base_debug_context, "pirls_iteration": it + 1},
+                )
+                scop_results = joint.results
+                committed_reduced = committed.beta[_reduced_to_full]
+                centre = reduced_centered.centre_pair()
+                committed_level = committed.intercept + float(
+                    reduced_centered.mean_x @ committed_reduced
+                )
+                if centred_prediction and scop_committed.level is not None:
+                    # The committed level carried to this centre: its raw
+                    # intercept reads it at u |m' b|, and the trials start there.
+                    committed_level = _level_about(
+                        scop_committed.level, scop_committed.centre, centre, committed_reduced
+                    )
+                scop_ordinary = _SCOPOrdinarySolve(
+                    columns=_reduced_to_full,
+                    committed=committed_reduced,
+                    committed_level=committed_level,
+                    fixed=beta_reduced,
+                    level=reduced_centered.mean_z,
+                    coupled=joint.coupled,
+                    mean=joint.mean,
+                    mean_x=reduced_centered.mean_x,
+                    centre=centre,
+                    centred_rows=(
+                        partial(_centred_system_matvec, _reduced_dm, system=reduced_centered)
+                        if centred_prediction
+                        else None
+                    ),
+                )
+                beta_reduced = beta_reduced + joint.ordinary_correction
+                centred_level = reduced_centered.mean_z - joint.intercept_shift
+                intercept = centred_level - float(reduced_centered.mean_x @ beta_reduced)
+                proposal_thetas = [scop_results[gi].beta_new for gi in _scop_order]
                 beta = np.zeros(p)
                 beta[_reduced_to_full] = beta_reduced
+                for gi, theta in zip(_scop_order, proposal_thetas, strict=True):
+                    beta[groups[gi].sl] = _scop_specs[gi].reparam.forward(theta)
                 _t_solve += time.perf_counter() - _t0
 
-                # Step 5: Compute residual for SCOP Newton step
                 if centred_prediction:
-                    eta_unconstrained = reduced_centered.mean_z + _centred_system_matvec(
+                    eta_unconstrained = centred_level + _centred_system_matvec(
                         _reduced_dm, beta_reduced, reduced_centered
                     )
                 else:
                     eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
-
-                # Step 6: Apply SCOP Newton step
-                if _scop_joint:
-                    # Joint Newton step for all SCOP groups simultaneously
-                    _z_scop = z_off - eta_unconstrained
-                    scop_results = scop_joint_newton_step(
-                        _scop_state,
-                        W,
-                        _z_scop,
-                        lambda2,
-                        groups,
-                        max_halving=10,
-                        debug_recorder=debug_recorder,
-                        debug_context={
-                            **base_debug_context,
-                            "pirls_iteration": it + 1,
-                        },
-                    )
-                else:
-                    # Sequential (existing code) — for parity comparison
-                    scop_results = {}
-                    for gi, st in _scop_state.items():
-                        z_scop = z_off - eta_unconstrained
-                        # Remove contributions from other SCOP groups
-                        for gi2, st2 in _scop_state.items():
-                            if gi2 != gi:
-                                gamma2 = st2["reparam"].forward(st2["beta_scop"])
-                                eta2 = st2["B_scop"] @ gamma2
-                                if st2["bin_idx"] is not None:
-                                    eta2 = eta2[st2["bin_idx"]]
-                                z_scop = z_scop - eta2
-
-                        g_i = groups[gi]
-                        _lam_scop = (
-                            lambda2.get(g_i.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                        )
-                        result = scop_newton_step(
-                            B_scop=st["B_scop"],
-                            W=W,
-                            z=z_scop,
-                            beta_scop=st["beta_scop"],
-                            reparam=st["reparam"],
-                            S_scop=st["S_scop"],
-                            lambda2=_lam_scop,
-                            bin_idx=st["bin_idx"],
-                            debug_recorder=debug_recorder,
-                            debug_context={
-                                **base_debug_context,
-                                "pirls_iteration": it + 1,
-                                "group_name": g_i.name,
-                            },
-                        )
-                        scop_results[gi] = result
-
-                # Step 7: Write gamma_eff (mapped coefficients) into full beta
-                for gi, st in _scop_state.items():
-                    g = groups[gi]
-                    gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
-                    beta[g.sl] = gamma_eff
-                scop_proposal_eta_unclipped = eta_unconstrained + offset
-                for gi, st in _scop_state.items():
-                    gamma_eff = st["reparam"].forward(scop_results[gi].beta_new)
-                    eta_group = st["B_scop"] @ gamma_eff
-                    if st["bin_idx"] is not None:
-                        eta_group = eta_group[st["bin_idx"]]
-                    scop_proposal_eta_unclipped += eta_group
+                scop_proposal_eta_unclipped = (
+                    eta_unconstrained + offset + _scop_newton.predictor(proposal_thetas)
+                )
 
             elif _use_structured:
                 if _structured_group_index is None:  # pragma: no cover - selection invariant
@@ -3311,15 +3474,18 @@ def _fit_irls_direct_once(
 
         if _has_scop:
             _t0 = time.perf_counter()
-            proposal_irls = evaluate_state(
-                beta,
-                intercept,
-                phase="scop_proposal",
-                iteration=it + 1,
-                alpha=1.0,
-                eta_unclipped=scop_proposal_eta_unclipped,
-                emit_trace=False,
-            )
+            # as ``_evaluate_scop_trial``: a proposal past the floating-point
+            # range is rejected by the line search, without a warning
+            with np.errstate(over="ignore", invalid="ignore"):
+                proposal_irls = evaluate_state(
+                    beta,
+                    intercept,
+                    phase="scop_proposal",
+                    iteration=it + 1,
+                    alpha=1.0,
+                    eta_unclipped=scop_proposal_eta_unclipped,
+                    emit_trace=False,
+                )
             proposal_scop = _SCOPTrialState(
                 irls=proposal_irls,
                 groups=tuple(
@@ -3342,6 +3508,8 @@ def _fit_irls_direct_once(
                     )
                     for gi in sorted(_scop_specs)
                 ),
+                level=centred_level,
+                centre=scop_ordinary.centre,
             )
             proposal_scop = with_scop_merit(proposal_scop)
             proposal_irls = proposal_scop.irls
@@ -3376,6 +3544,7 @@ def _fit_irls_direct_once(
                     evaluation_id=evaluation_id,
                     basis_id=trace_basis_id,
                     lambdas=resolved_lambdas,
+                    ordinary=scop_ordinary,
                 )
                 candidate = with_scop_merit(candidate)
                 emit_evaluation(
@@ -3388,14 +3557,21 @@ def _fit_irls_direct_once(
                 scop_trial_cache[alpha] = candidate
                 return candidate.irls
 
+            # A step past ``_LATENT_MAX_STEP`` is searched from its first
+            # halving within it, on the same halving grid, with the full
+            # budget from there; the full step is not tried.
+            latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
+            shortened = math.ldexp(1.0, -latent_depth)
+            search_proposal = evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
             decision = _select_irls_trial(
                 committed=scop_committed.irls,
-                proposal=proposal_scop.irls,
-                evaluate_state=evaluate_scop_trial,
+                proposal=search_proposal,
+                evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
+                invalid_state=observed_rows_invalid if _observed_newton_active else None,
                 max_halving=max_halving,
                 extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=scop_committed.irls,
-                    proposal=proposal_scop.irls,
+                    proposal=search_proposal,
                     y=y,
                     weights=weights,
                     family=family,
@@ -3407,6 +3583,20 @@ def _fit_irls_direct_once(
                     scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
                 ),
             )
+            if latent_depth:
+                # in fractions of the full step, which was evaluated but not tried
+                decision = replace(
+                    decision,
+                    trials_attempted=decision.trials_attempted + 1,
+                    **(
+                        {}
+                        if decision.step_rejected
+                        else {
+                            "alpha": decision.alpha * shortened,
+                            "step_halvings": decision.step_halvings + latent_depth,
+                        }
+                    ),
+                )
             retained_scop = (
                 scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
             )
@@ -3497,24 +3687,7 @@ def _fit_irls_direct_once(
 
             committed_constraints_feasible = True
             proposal_constraints_feasible = True
-            constraint_trial_is_invalid = None
-            if _observed_newton_active:
-                # one-engine design §3.11: finiteness is the one condition the
-                # declared observed rows keep; a trial without finite rows is
-                # not a state the next Newton step can start from
-
-                def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
-                    rows = coefficient_working_rows(
-                        distribution=family,
-                        link=link,
-                        y=y,
-                        mu=candidate.mu,
-                        eta=candidate.eta,
-                        sample_weight=weights,
-                        prefer_observed=True,
-                    )
-                    return rows.rejection_reason is not None
-
+            constraint_trial_is_invalid = observed_rows_invalid if _observed_newton_active else None
             if has_constraints:
                 if A_all is None or b_all is None:  # pragma: no cover - construction invariant
                     raise RuntimeError("constrained fit omitted its aggregate constraint system")
@@ -3837,6 +4010,10 @@ def _fit_irls_direct_once(
                     coef_change = max(coef_change, latent_change)
                 convergence_value = coef_change
                 converged_this_iter = coef_change < tol
+                if _has_scop and n_halvings:
+                    # a damped step's change is a fraction of the full
+                    # step's and bounds nothing either (below)
+                    converged_this_iter = False
             else:
                 objective = (
                     retained.deviance
@@ -3850,6 +4027,13 @@ def _fit_irls_direct_once(
                         objective_scale=objective_merit_scale,
                     )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+                if _has_scop and n_halvings:
+                    # The decrease of a full joint Newton step is its Newton
+                    # decrement, which bounds the distance to the mode (Boyd &
+                    # Vandenberghe 2004, sec. 9.5.1); a damped step's is a
+                    # fraction of it and bounds nothing, so it never stops the
+                    # fit: the next full step's does.
+                    converged_this_iter = False
                 convergence_value = dev_rel_change
         else:
             converged_this_iter = False
@@ -4354,70 +4538,21 @@ def _fit_irls_direct_once(
         W = final_rows.weights
         z = final_rows.response
 
-        needs_initial_hessian = any(
-            state.get("H_scop_penalized") is None for state in _scop_state.values()
+        # ``block_curvature`` takes no step, so however the loop exited (a
+        # rejected last step included) the curvature, fallback flag and
+        # discarded directions are the retained model's. The working residual
+        # is read off the exact committed predictor; rebuilding X beta +
+        # intercept would lose score digits for a translated ordinary column.
+        terminal = _scop_newton.block_curvature(
+            [_scop_state[gi]["beta_scop"] for gi in _scop_order],
+            W=W,
+            z=z,
+            eta=eta_unclipped,
         )
-        if not step_rejected or needs_initial_hessian:
-            # Recover the retained non-SCOP contribution from the exact
-            # committed predictor. Rebuilding X beta + intercept would lose
-            # several score digits for a translated ordinary column.
-            eta_unconstrained = eta_unclipped - offset
-            for st in _scop_state.values():
-                eta_group = st["B_scop"] @ st["gamma_eff"]
-                if st["bin_idx"] is not None:
-                    eta_group = eta_group[st["bin_idx"]]
-                eta_unconstrained = eta_unconstrained - eta_group
-            z_scop_final = z - offset - eta_unconstrained
-            if _scop_joint:
-                refresh_results = scop_joint_newton_step(
-                    _scop_state,
-                    W,
-                    z_scop_final,
-                    lambda2,
-                    groups,
-                    max_halving=10,
-                )
-                for gi, refresh in refresh_results.items():
-                    _scop_state[gi]["H_scop_penalized"] = (
-                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
-                    )
-                    _scop_state[gi]["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
-                    _scop_state[gi]["discarded_directions"] = (
-                        None
-                        if refresh.discarded_directions is None
-                        else refresh.discarded_directions.copy()
-                    )
-            else:
-                for gi, st in _scop_state.items():
-                    z_scop_group = z_scop_final.copy()
-                    for gi_other, st_other in _scop_state.items():
-                        if gi_other == gi:
-                            continue
-                        eta_other = st_other["B_scop"] @ st_other["gamma_eff"]
-                        if st_other["bin_idx"] is not None:
-                            eta_other = eta_other[st_other["bin_idx"]]
-                        z_scop_group -= eta_other
-                    g = groups[gi]
-                    lam_scop = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
-                    refresh = scop_newton_step(
-                        B_scop=st["B_scop"],
-                        W=W,
-                        z=z_scop_group,
-                        beta_scop=st["beta_scop"],
-                        reparam=st["reparam"],
-                        S_scop=st["S_scop"],
-                        lambda2=lam_scop,
-                        bin_idx=st["bin_idx"],
-                    )
-                    st["H_scop_penalized"] = (
-                        None if refresh.H_penalized is None else refresh.H_penalized.copy()
-                    )
-                    st["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
-                    st["discarded_directions"] = (
-                        None
-                        if refresh.discarded_directions is None
-                        else refresh.discarded_directions.copy()
-                    )
+        for gi, refresh in terminal.items():
+            _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
+            _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
+            _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
 
     # Every public/exported matrix and rank claim is evaluated at the retained
     # model. Private fREML performance iterations deliberately reuse the
