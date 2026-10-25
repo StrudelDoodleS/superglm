@@ -1428,1445 +1428,20 @@ class _IRLSDirectFit:
         self._setup_scop()
         self._setup_systems()
         self._setup_loop()
-        A_all, S, S_override, XtWX_beta = self.A_all, self.S, self.S_override, self.XtWX_beta
-        _compensate_centred_intercept = self._compensate_centred_intercept
-        _compute_fit_statistics = self._compute_fit_statistics
-        _compute_reml_geometry = self._compute_reml_geometry
-        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
-        _consecutive_svd, _defer_rank_info = self._consecutive_svd, self._defer_rank_info
-        _degeneracy_retry_failed = self._degeneracy_retry_failed
-        _direct_fallback_reason = self._direct_fallback_reason
-        _expose_exact_support_state = self._expose_exact_support_state
-        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
-        _held_rank, _judged_truncated = self._held_rank, self._judged_truncated
-        _last_mode_residual = self._last_mode_residual
-        _last_true_residual, _last_truncated = self._last_true_residual, self._last_truncated
-        _last_working_centered = self._last_working_centered
-        _last_working_offset_mean = self._last_working_offset_mean
-        _last_working_structured = self._last_working_structured
-        _link_domain_invalid = self._link_domain_invalid
-        _mean_space_invalid, _mean_space_newton = self._mean_space_invalid, self._mean_space_newton
-        _mean_space_newton_available = self._mean_space_newton_available
-        _mode_ratios, _newton_latch = self._mode_ratios, self._newton_latch
-        _reported_qp_nonconvergence = self._reported_qp_nonconvergence
-        _retain_reml_decomposition = self._retain_reml_decomposition
-        _return_working_system, _scop_curvature = self._return_working_system, self._scop_curvature
-        _scop_run, _scop_state = self._scop_run, self._scop_state
-        _stagnation_newton_available = self._stagnation_newton_available
-        _stagnation_window, _start_lowered = self._stagnation_window, self._start_lowered
-        _state_center, _structured_group_index = self._state_center, self._structured_group_index
-        _structured_layout, _t_deviance = self._structured_layout, self._t_deviance
-        _t_deviance_eval, _t_eta, _t_gram = self._t_deviance_eval, self._t_eta, self._t_gram
-        _t_solve, _t_working, _true_confirmed = self._t_solve, self._t_working, self._true_confirmed
-        _true_ratios, _true_stop = self._true_ratios, self._true_stop
-        _true_stop_ratio, _use_qr = self._true_stop_ratio, self._use_qr
-        _use_structured, abs_A_all, b_all = self._use_structured, self.abs_A_all, self.b_all
-        base_debug_context, beta, cache_out = self.base_debug_context, self.beta, self.cache_out
-        capture_extrema = self.capture_extrema
-        certify_centered_factor, committed = self.certify_centered_factor, self.committed
-        compute_rank_info, converged = self.compute_rank_info, self.converged
-        convergence, debug_recorder, dev_prev = self.convergence, self.debug_recorder, self.dev_prev
-        deviance_relative_change, direct_solve = self.deviance_relative_change, self.direct_solve
-        dm, emit_evaluation = self.dm, self.emit_evaluation
-        emit_state_commit, eta, eta_unclipped = self.emit_state_commit, self.eta, self.eta_unclipped
-        evaluate_state, family = self.evaluate_state, self.family
-        get_centered_system, gms, groups = self.get_centered_system, self.gms, self.groups
-        has_constraints, intercept = self.has_constraints, self.intercept
-        iteration_log, lambda2, link = self.iteration_log, self.lambda2, self.link
-        max_halving, max_iter, mode_bar = self.max_halving, self.max_iter, self.mode_bar
-        mode_residual, mu = self.mode_residual, self.mu
-        objective_merit_scale, objective_prev = self.objective_merit_scale, self.objective_prev
-        observed_rows_invalid, offset, p = self.observed_rows_invalid, self.offset, self.p
-        penalty_matvec, prev_active_set = self.penalty_matvec, self.prev_active_set
-        profile, record_debug_rows = self.profile, self.record_debug_rows
-        record_diagnostics, reml_penalties = self.record_diagnostics, self.reml_penalties
-        resolved_lambdas, retained_qp_converged = self.resolved_lambdas, self.retained_qp_converged
-        return_scop_state, return_xtwx = self.return_scop_state, self.return_xtwx
-        score_stagnated, separation = self.score_stagnated, self.separation
-        structured_decision, t_start, tol = self.structured_decision, self.t_start, self.tol
-        trace_basis_id, trace_enabled = self.trace_basis_id, self.trace_enabled
-        trace_purpose, trace_run = self.trace_purpose, self.trace_run
-        true_mode_residual, weight_semantics = self.true_mode_residual, self.weight_semantics
-        weights, with_scop_merit, y = self.weights, self.with_scop_merit, self.y
-        if self._use_qr:
-            _X_full, _L_aug = self._X_full, self._L_aug
-        if self._has_scop:
-            _S_reduced, _reduced_dm = self._S_reduced, self._reduced_dm
-            _reduced_tabmat_state = self._reduced_tabmat_state
-            _reduced_to_full, _scop_newton = self._reduced_to_full, self._scop_newton
-            _scop_order, _scop_specs = self._scop_order, self._scop_specs
-            scop_committed, scop_merit_errors = self.scop_committed, self.scop_merit_errors
-        for it in range(max_iter):
-            _held_rank[0] = None
-            beta_prev = committed.beta
-            intercept_prev = committed.intercept
-            beta = committed.beta.copy()
-            intercept = committed.intercept
-            committed_active_set = None if prev_active_set is None else list(prev_active_set)
-            proposal_qp_converged = not has_constraints
-            # W/z are rebuilt below from the committed coefficients.  Any
-            # constrained-QP certificate retained from the preceding iteration
-            # therefore belongs to different working weights and response, not to
-            # this iteration's H/g.  Only a certified full proposal from the
-            # current working problem can restore the flag.
-            retained_qp_converged = not has_constraints
-            rank_truncated: bool | None = None
-            used_rank_certification = False
-            scop_proposal_eta_unclipped: NDArray | None = None
-            proposal_centred_intercept: float | None = None
-
-            # Working quantities from current eta/mu (already computed)
-            _t0 = time.perf_counter()
-            working_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu,
-                eta=eta,
-                sample_weight=weights,
-                prefer_observed=self._observed_newton_active,
-            )
-            W = working_rows.weights
-            z = working_rows.response
-            # binomial/log Newton rows once engaged (refusal block below): the
-            # observed curvature and the score of the unclipped eta, the step in
-            # score form.  ``z`` is then the predictor itself, so ``W (z - eta)``
-            # adds nothing and the score enters on its own; a state holding rows
-            # at the boundary keeps Fisher's rows.
-            newton_score: NDArray | None = None
-            newton_committed_rows: NDArray | None = None
-            if _mean_space_newton and not mean_space_boundary_rows(
-                family, link, committed.eta_unclipped, weights
-            ):
-                newton_rows = mean_space_newton_rows(y, weights, committed.eta_unclipped)
-                if newton_rows is not None:
-                    W, newton_score = newton_rows
-                    z = np.array(committed.eta_unclipped, dtype=np.float64)
-                    newton_committed_rows = mean_space_log_likelihood_rows(
-                        y, weights, committed.eta_unclipped
-                    )
-                    if profile is not None:
-                        profile["irls_mean_space_newton_iters"] = (
-                            profile.get("irls_mean_space_newton_iters", 0) + 1
-                        )
-            if working_rows.rejection_reason is not None:
-                # Every accepted trial of an observed fit had finite rows (the
-                # line search rejects the others), so only the entry state can
-                # get here: the declared curvature has no step to take.
-                raise ValueError(
-                    "IRLS direct cannot start: the observed-Newton rows of "
-                    f"{type(family).__name__} with a {type(link).__name__} are not finite at "
-                    "the starting coefficients."
-                )
-            if working_rows.curvature_source == "observed" and profile is not None:
-                profile["irls_observed_newton_iters"] = (
-                    profile.get("irls_observed_newton_iters", 0) + 1
-                )
-            working_eta_unclipped = eta_unclipped
-            working_eta = eta
-            working_mu = mu
-            # the separation backstop and the diagnostics read Fisher's weights,
-            # the curvature their bars were set on, on a Newton iteration too
-            positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(
-                working_rows.weights
-            )
-            _t_working += time.perf_counter() - _t0
-
-            if w_ratio > 1e12:
-                logger.debug(
-                    "IRLS direct iter=%d: extreme W ratio %.1e (positive W range [%.2e, %.2e])",
-                    it + 1,
-                    w_ratio,
-                    positive_w_min,
-                    positive_w_max,
-                )
-
-            if _use_qr:
-                # Profile the intercept, then apply the shared factor-space rule.
-                _t0 = time.perf_counter()
-                sqrtW = np.sqrt(W)
-                z_off = z - offset
-                centered = get_centered_system(W, z_off)
-                _last_working_centered = centered
-                A_data = sqrtW[:, None] * _centred_rows(_X_full, centered)
-                A = np.vstack([A_data, _L_aug[1:, 1:]])
-                rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
-                iteration_rank = decompose_factor(A, retain_factor_solve=True)
-                beta = iteration_rank.solve_factor_rhs(rhs_qr)
-                intercept = centered.mean_z - float(centered.mean_x @ beta)
-                _last_working_offset_mean = None
-                if _state_center is not None:
-                    _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
-                    proposal_centred_intercept = centered.mean_z - math.fsum(
-                        _last_working_offset_mean * beta
-                    )
-                    intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-                _cond_est = iteration_rank.pre_truncation_condition
-                _held_rank[0] = iteration_rank
-                _used_svd = iteration_rank.used_svd_fallback
-                rank_truncated = iteration_rank.rank_truncated
-                if convergence == "mode_score":
-                    self._score_centre = (
-                        centered.mean_x,
-                        centered.sum_w,
-                        np.diag(centered.data_gram),
-                        (),
-                        _last_working_offset_mean,
-                    )
-                _t_solve += time.perf_counter() - _t0
+        for it in range(self.max_iter):
+            self._working(it)
+            self._step(it)
+            if self._has_scop:
+                self._search_scop(it)
             else:
-                # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
-                _t0 = time.perf_counter()
-                z_off = z - offset
-
-                if _has_scop:
-                    # ── SCOP: one Newton step on every coefficient jointly ──
-                    # The ordinary block is solved with the latent SCOP
-                    # coordinates held fixed, then ``SCOPJointNewton.step``
-                    # couples the two blocks through the Schur complement and
-                    # corrects that solve (Pya & Wood 2015, Appendix 1).
-                    scop_thetas = [_scop_state[gi]["beta_scop"] for gi in _scop_order]
-                    z_adj = z_off - _scop_newton.predictor(scop_thetas)
-
-                    # Profile the intercept in stable centered
-                    # coordinates.  The raw augmented Gram loses the ordinary
-                    # slope entirely after a large column translation, so the
-                    # system comes from ``build_centered_system``, the authority
-                    # every other route of this solver uses as it stands: it
-                    # subtracts raw moments only under ``_raw_centering_well_scaled``
-                    # and otherwise centres before it multiplies (anchor-centred
-                    # compact supports, centred row chunks, a dense column's
-                    # corrected two-pass pair).
-                    reduced_centered = build_centered_system(
-                        dm=_reduced_dm,
-                        W=W,
-                        z_off=z_adj,
-                        penalty=_S_reduced,
-                        tabmat_split=_reduced_dm.tabmat_centering_split,
-                        tabmat_state=_reduced_tabmat_state,
-                        profile=profile,
-                    )
-                    if _scop_run is not None:
-                        _carry_refusals(_scop_run.reduced_refusals, _reduced_tabmat_state)
-                    # The certificate, read on the system's own location and
-                    # spread, chooses only how the proposal's predictor is formed.  It no longer
-                    # rebuilds the system: a rejection here can only fall on a
-                    # column the builder centred first (a raw rung's columns
-                    # passed this same test on these same numbers), so the rebuild
-                    # recomputed a centred Gram by materialising the whole design
-                    # twice per iteration.  A bounded column trips it whenever its
-                    # weighted mean exceeds its centred RMS, e.g. a 0/1 indicator
-                    # of weighted frequency above 1/2.
-                    reduced_scale = np.sqrt(
-                        np.maximum(np.diag(reduced_centered.data_gram), 0.0)
-                        / reduced_centered.sum_w
-                    )
-                    centred_prediction = not _raw_centering_well_scaled(
-                        reduced_centered.mean_x,
-                        reduced_scale,
-                    )
-                    _t_gram += time.perf_counter() - _t0
-
-                    # The ordinary block's solve, the latent coordinates held fixed
-                    _t0 = time.perf_counter()
-                    reduced_rank = decompose_gram_if_authoritative(reduced_centered.hessian)
-                    reduced_factor_rhs = None
-                    if reduced_rank is None:
-                        reduced_factor, certified_rhs = grouped_augmented_factor_rhs(
-                            _reduced_dm,
-                            W,
-                            reduced_centered.penalty,
-                            response=z_adj - reduced_centered.mean_z,
-                            center=reduced_centered.mean_x,
-                        )
-                        certified = decompose_factor(
-                            reduced_factor,
-                            retain_factor_solve=True,
-                        )
-                        reduced_rank = certified
-                        reduced_factor_rhs = certified_rhs
-                        used_rank_certification = True
-                    beta_reduced = (
-                        reduced_rank.solve(reduced_centered.rhs)
-                        if reduced_factor_rhs is None
-                        else reduced_rank.solve_factor_rhs(reduced_factor_rhs)
-                    )
-                    _cond_est = reduced_rank.pre_truncation_condition
-                    _used_svd = reduced_rank.used_svd_fallback
-                    rank_truncated = reduced_rank.rank_truncated
-                    joint = _scop_newton.step(
-                        scop_thetas,
-                        W=W,
-                        z=z,
-                        eta=committed.eta_unclipped,
-                        reduced=reduced_centered,
-                        solve=reduced_rank.solve,
-                        ordinary_change=beta_reduced - committed.beta[_reduced_to_full],
-                        debug_recorder=debug_recorder,
-                        debug_context={**base_debug_context, "pirls_iteration": it + 1},
-                    )
-                    scop_results = joint.results
-                    committed_reduced = committed.beta[_reduced_to_full]
-                    centre = reduced_centered.centre_pair()
-                    committed_level = committed.intercept + float(
-                        reduced_centered.mean_x @ committed_reduced
-                    )
-                    if centred_prediction and scop_committed.level is not None:
-                        # The committed level carried to this centre: its raw
-                        # intercept reads it at u |m' b|, and the trials start there.
-                        committed_level = _level_about(
-                            scop_committed.level, scop_committed.centre, centre, committed_reduced
-                        )
-                    scop_ordinary = _SCOPOrdinarySolve(
-                        columns=_reduced_to_full,
-                        committed=committed_reduced,
-                        committed_level=committed_level,
-                        fixed=beta_reduced,
-                        level=reduced_centered.mean_z,
-                        coupled=joint.coupled,
-                        mean=joint.mean,
-                        mean_x=reduced_centered.mean_x,
-                        centre=centre,
-                        centred_rows=(
-                            partial(_centred_system_matvec, _reduced_dm, system=reduced_centered)
-                            if centred_prediction
-                            else None
-                        ),
-                    )
-                    beta_reduced = beta_reduced + joint.ordinary_correction
-                    centred_level = reduced_centered.mean_z - joint.intercept_shift
-                    intercept = centred_level - float(reduced_centered.mean_x @ beta_reduced)
-                    proposal_thetas = [scop_results[gi].beta_new for gi in _scop_order]
-                    beta = np.zeros(p)
-                    beta[_reduced_to_full] = beta_reduced
-                    for gi, theta in zip(_scop_order, proposal_thetas, strict=True):
-                        beta[groups[gi].sl] = _scop_specs[gi].reparam.forward(theta)
-                    _t_solve += time.perf_counter() - _t0
-
-                    if centred_prediction:
-                        eta_unconstrained = centred_level + _centred_system_matvec(
-                            _reduced_dm, beta_reduced, reduced_centered
-                        )
-                    else:
-                        eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
-                    scop_proposal_eta_unclipped = (
-                        eta_unconstrained + offset + _scop_newton.predictor(proposal_thetas)
-                    )
-
-                elif _use_structured:
-                    if _structured_group_index is None:  # pragma: no cover - selection invariant
-                        raise RuntimeError("Structured backend has no dominant group.")
-                    Wz = W * z_off if newton_score is None else W * z_off + newton_score
-                    structured_system = build_structured_system(
-                        gms,
-                        groups,
-                        W,
-                        Wz,
-                        signed=working_rows.curvature_source == "observed",
-                        dominant_group_index=_structured_group_index,
-                        layout=_structured_layout,
-                        prior_weights=weights,
-                    )
-                    penalized_operator = build_penalized_structured_operator(
-                        structured_system,
-                        gms,
-                        groups,
-                        lambda2,
-                        reml_penalties=reml_penalties,
-                        S_override=S_override,
-                    )
-                    _last_working_structured = structured_system
-                    _final_penalized_operator = penalized_operator
-                    _t_gram += time.perf_counter() - _t0
-
-                    _t0 = time.perf_counter()
-                    with _structured_solver_errors():
-                        augmented_factor, rhs, levenberg_shift, shift_diagonal = (
-                            _build_iterate_factor(
-                                structured_system,
-                                penalized_operator,
-                                observed=working_rows.curvature_source == "observed",
-                            )
-                        )
-                        beta_aug = solve_augmented_normal_equations(
-                            structured_system,
-                            augmented_factor,
-                            rhs,
-                            centred=_state_center is not None,
-                            extra=(
-                                None
-                                if shift_diagonal is None
-                                else np.concatenate(
-                                    (
-                                        [0.0],
-                                        shift_diagonal(committed.beta)
-                                        if callable(shift_diagonal)
-                                        else shift_diagonal * committed.beta,
-                                    )
-                                )
-                            ),
-                        )
-                    if levenberg_shift and profile is not None:
-                        profile["irls_levenberg_shifts"] = (
-                            profile.get("irls_levenberg_shifts", 0) + 1
-                        )
-                        profile["irls_levenberg_max_shift"] = max(
-                            float(profile.get("irls_levenberg_max_shift", 0.0)), levenberg_shift
-                        )
-                    beta = beta_aug[1:]
-                    if _state_center is not None:
-                        # the solve's intercept is the centred alpha about the same c0
-                        proposal_centred_intercept = float(beta_aug[0])
-                        intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-                    else:
-                        intercept = float(beta_aug[0])
-                    if augmented_factor.rank_truncated and (
-                        isinstance(augmented_factor, SumToZeroTreeFactor)
-                        or newton_score is not None
-                    ):
-                        # A truncated factor is a generalized inverse, and its
-                        # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
-                        # representative: it resets the iterate's component along every
-                        # truncated direction on each step.  Along an ``sz`` level whose
-                        # rows the likelihood drives to the link's boundary (a one-row
-                        # level with a response below a log link's range: no finite
-                        # mode, Geyer 2009, Theorem 4) the direction is truncated once
-                        # its rows' working weight falls to its rounding, and the reset
-                        # moves those rows' eta arbitrarily far (+2844 from -20.7 on
-                        # the stage-4 fixture); step halving then stalls every other
-                        # coefficient and PIRLS ends uncertified.  The Gauss-Newton
-                        # step of a rank-deficient problem is the minimum-norm
-                        # *increment* (Pes & Rodriguez 2021, arXiv 2101.07560, eqs.
-                        # 1.2-1.4; the Newton step of Wood, Pya & Safken 2016, section
-                        # 3.1.2): ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S
-                        # beta]``, the shifted factor's under a Levenberg shift, which
-                        # leaves the iterate where it is along the truncated directions.
-                        # Projecting the iterate onto the null space on every step (the
-                        # minimal-norm variant, ibid. section 2, and in effect the
-                        # solve above) is safe only along exact nulls; along a direction
-                        # truncated as rank but carrying data it raises the residual,
-                        # the failure they analyse.  Along an exact null (data and
-                        # penalty both leave it free) the iterate keeps its component:
-                        # no fitted value or penalty moves along it.  In exact
-                        # arithmetic the same step as the solve above whenever nothing
-                        # is truncated.
-                        if newton_score is not None and profile is not None:
-                            # a mean-space Newton step taken as the increment on a
-                            # truncated structured factor
-                            profile["irls_truncated_newton_increments"] = (
-                                profile.get("irls_truncated_newton_increments", 0) + 1
-                            )
-                        residual_rows = W * (z - eta) if newton_score is None else newton_score
-                        gradient = np.empty(p + 1, dtype=np.float64)
-                        gradient[0] = float(np.sum(residual_rows))
-                        # the increment's intercept entry in the state's own coordinate:
-                        # alpha about the centre when the state is centred (round 1's
-                        # centred state; the raw intercept would cancel at a large
-                        # column offset), else the raw intercept.  A centred state
-                        # takes the score about the same centre, ``(X - 1 c')' r``
-                        # formed on centred rows, so the border's ``X' r`` is never
-                        # cancelled against ``c`` times the intercept's (a 1e16
-                        # offset left no digit of it and the step was rejected)
-                        if _state_center is not None:
-                            gradient[1:] = centred_data_score(
-                                dm, residual_rows, _state_center
-                            ) - penalty_matvec(committed.beta)
-                            increment = augmented_factor.solve(
-                                gradient,
-                                centred=True,
-                                border_centred=gradient[augmented_factor.small_indices[1:]],
-                            )
-                        else:
-                            gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(
-                                committed.beta
-                            )
-                            increment = augmented_factor.solve(gradient)
-                        beta = committed.beta + increment[1:]
-                        if _state_center is not None:
-                            assert committed.centred_intercept is not None
-                            proposal_centred_intercept = float(committed.centred_intercept) + float(
-                                increment[0]
-                            )
-                            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-                        else:
-                            intercept = float(committed.intercept) + float(increment[0])
-                    _used_svd = False  # one path: the engine has no SVD fallback
-                    _cond_est = augmented_factor.schur_condition_estimate
-                    rank_truncated = augmented_factor.rank_truncated
-                    if convergence == "mode_score":
-                        self._score_centre = _structured_score_centre(
-                            structured_system, augmented_factor, dm, W, _state_center
-                        )
-                    _t_solve += time.perf_counter() - _t0
-                elif not has_constraints:
-                    centered = get_centered_system(W, z_off)
-                    if newton_score is not None:
-                        # the working mean of ``z_off`` is the centred intercept;
-                        # the score moves it by sum(u) / sum(W) and the slopes'
-                        # right-hand side by X~' u (the step itself is the increment
-                        # below; the stored system is the one it solved)
-                        centered = replace(
-                            centered,
-                            mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                            rhs=centered.rhs
-                            + centred_data_score(dm, newton_score, centered.mean_x),
-                        )
-                    _last_working_centered = centered
-                    _t_gram += time.perf_counter() - _t0
-                    _t0 = time.perf_counter()
-                    iteration_rank = decompose_gram_if_authoritative(centered.hessian)
-                    iteration_factor_rhs = None
-                    if iteration_rank is None:
-                        certification = certify_centered_factor(
-                            centered,
-                            W,
-                            response=None if newton_score is not None else z_off - centered.mean_z,
-                        )
-                        certified = certification.decomposition
-                        if certification.transformed_rhs is None and newton_score is None:
-                            raise RuntimeError(  # pragma: no cover - invariant
-                                "factor certification omitted its transformed RHS"
-                            )
-                        iteration_rank = certified
-                        iteration_factor_rhs = certification.transformed_rhs
-                        used_rank_certification = True
-                    if newton_score is not None:
-                        # the increment, not the iterate: a direction the factor
-                        # truncates keeps the iterate's component instead of the
-                        # minimum-norm reset of solving for it (Pes & Rodriguez
-                        # 2021, eqs. 1.2-1.4)
-                        beta = committed.beta + iteration_rank.solve(
-                            centred_data_score(dm, newton_score, centered.mean_x)
-                            - penalty_matvec(committed.beta)
-                        )
-                    else:
-                        beta = (
-                            iteration_rank.solve(centered.rhs)
-                            if iteration_factor_rhs is None
-                            else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
-                        )
-                    intercept = centered.mean_z - float(centered.mean_x @ beta)
-                    _last_working_offset_mean = None
-                    if _state_center is not None:
-                        # the intercept about the state's centre, from the offset
-                        # of the working mean to it, formed on centred rows (the
-                        # system's pair, else ``centre_offset_mean``): no
-                        # raw-scale cancellation
-                        _last_working_offset_mean = _system_offset_mean(
-                            dm, W, centered, _state_center
-                        )
-                        proposal_centred_intercept = centered.mean_z - math.fsum(
-                            _last_working_offset_mean * beta
-                        )
-                        intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-                    _cond_est = iteration_rank.pre_truncation_condition
-                    _held_rank[0] = iteration_rank
-                    _used_svd = iteration_rank.used_svd_fallback
-                    rank_truncated = iteration_rank.rank_truncated
-                    if convergence == "mode_score":
-                        self._score_centre = (
-                            centered.mean_x,
-                            centered.sum_w,
-                            np.diag(centered.data_gram),
-                            (),
-                            _last_working_offset_mean,
-                        )
-                    _t_solve += time.perf_counter() - _t0
-                else:
-                    centered = get_centered_system(W, z_off)
-                    if newton_score is not None:
-                        centered = replace(
-                            centered,
-                            mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                            rhs=centered.rhs
-                            + centred_data_score(dm, newton_score, centered.mean_x),
-                        )
-                    _last_working_centered = centered
-                    _t_gram += time.perf_counter() - _t0
-
-                    # Solve the constrained system in its existing coordinate space.
-                    _t0 = time.perf_counter()
-                    qp_result = _solve_constrained_qp_with_cold_retry(
-                        centered.hessian,
-                        centered.rhs,
-                        A_all,
-                        b_all,
-                        prev_active_set,
-                        degeneracy_retry=not _degeneracy_retry_failed,
-                    )
-                    beta = qp_result.beta
-                    intercept = centered.mean_z - float(centered.mean_x @ beta)
-                    proposal_qp_converged = bool(qp_result.converged)
-                    prev_active_set = qp_result.active_set
-                    # An uncertified result means the degenerate-vertex retry ran
-                    # and failed (or was already latched off). It costs up to a
-                    # full active-set solve, so it is not repeated while the QP
-                    # keeps failing. A certified result re-arms it: while latched,
-                    # that can only be an ordinary solve, so the failure was
-                    # transient and a later #472 vertex keeps its rescue.
-                    _degeneracy_retry_failed = not qp_result.converged
-                    # Non-convergence usually persists for the rest of the fit, so
-                    # latch the report to the first occurrence rather than emitting
-                    # one identical line per IRLS iteration. A later solve may
-                    # recover; the retained state's terminal authority is checked
-                    # independently below.
-                    if not qp_result.converged and not _reported_qp_nonconvergence:
-                        _reported_qp_nonconvergence = True
-                        logger.info(
-                            "fit_irls_direct: constrained QP did not converge at "
-                            "iteration %d; its KKT certificate is incomplete. "
-                            "A later IRLS iteration may recover; subsequent inner "
-                            "failures in this fit are not reported here.",
-                            it + 1,
-                        )
-                    # Report what the QP actually inverted.  These were hardcoded
-                    # to False/0.0, so the constrained branch published "perfectly
-                    # conditioned" to the consumers below while the unconstrained
-                    # branch above read the real numbers off its decomposition.
-                    _used_svd = qp_result.used_svd_fallback
-                    _cond_est = qp_result.condition
-                    _t_solve += time.perf_counter() - _t0
-
-                # A bounded factor pass can intentionally replace an uncertain Gram
-                # rank.  Preserve that in iteration diagnostics, but do not report it
-                # as a failed solve or recommend switching the whole fit to dense QR.
-                warnable_svd_fallback = _used_svd and not used_rank_certification
-                if warnable_svd_fallback:
-                    _consecutive_svd += 1
-                else:
-                    _consecutive_svd = 0
-                if direct_solve == "auto" and _consecutive_svd == 3:
-                    logger.warning(
-                        "fit_irls_direct: %d consecutive SVD fallbacks (cond ~%.1e). "
-                        "Consider direct_solve='qr' for near-collinear data.",
-                        _consecutive_svd,
-                        _cond_est,
-                    )
-
-            if _has_scop:
-                _t0 = time.perf_counter()
-                # as ``_evaluate_scop_trial``: a proposal past the floating-point
-                # range is rejected by the line search, without a warning
-                with np.errstate(over="ignore", invalid="ignore"):
-                    proposal_irls = evaluate_state(
-                        beta,
-                        intercept,
-                        phase="scop_proposal",
-                        iteration=it + 1,
-                        alpha=1.0,
-                        eta_unclipped=scop_proposal_eta_unclipped,
-                        emit_trace=False,
-                    )
-                proposal_scop = _SCOPTrialState(
-                    irls=proposal_irls,
-                    groups=tuple(
-                        _SCOPGroupState(
-                            group_index=gi,
-                            beta_eff=_immutable_array(scop_results[gi].beta_new),
-                            gamma_eff=_immutable_array(
-                                _scop_specs[gi].reparam.forward(scop_results[gi].beta_new)
-                            ),
-                            H_scop_penalized=(
-                                None
-                                if scop_results[gi].H_penalized is None
-                                else _immutable_array(scop_results[gi].H_penalized)
-                            ),
-                            last_step_norm=float(scop_results[gi].step_norm),
-                            last_fisher_fallback=bool(scop_results[gi].used_fisher_fallback),
-                            discarded_directions=_immutable_or_none(
-                                scop_results[gi].discarded_directions
-                            ),
-                        )
-                        for gi in sorted(_scop_specs)
-                    ),
-                    level=centred_level,
-                    centre=scop_ordinary.centre,
-                )
-                proposal_scop = with_scop_merit(proposal_scop)
-                proposal_irls = proposal_scop.irls
-                emit_evaluation(
-                    proposal_irls,
-                    phase="scop_proposal",
-                    iteration=it + 1,
-                    alpha=1.0,
-                )
-                scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
-
-                def evaluate_scop_trial(alpha: float) -> _IRLSState:
-                    if trace_enabled:
-                        assert trace_run is not None
-                        state_id = trace_run.next_state_id()
-                        evaluation_id = trace_run.next_evaluation_id()
-                    else:
-                        state_id = None
-                        evaluation_id = None
-                    candidate = _evaluate_scop_trial(
-                        committed=scop_committed,
-                        proposed=proposal_scop,
-                        alpha=alpha,
-                        specs=_scop_specs,
-                        dm=dm,
-                        y=y,
-                        weights=weights,
-                        family=family,
-                        link=link,
-                        offset=offset,
-                        state_id=state_id,
-                        evaluation_id=evaluation_id,
-                        basis_id=trace_basis_id,
-                        lambdas=resolved_lambdas,
-                        ordinary=scop_ordinary,
-                    )
-                    candidate = with_scop_merit(candidate)
-                    emit_evaluation(
-                        candidate.irls,
-                        phase="scop_line_search_trial",
-                        iteration=it + 1,
-                        alpha=alpha,
-                        enclosing_proposal_state_id=proposal_scop.irls.state_id,
-                    )
-                    scop_trial_cache[alpha] = candidate
-                    return candidate.irls
-
-                # A step past ``_LATENT_MAX_STEP`` is searched from its first
-                # halving within it, on the same halving grid, with the full
-                # budget from there; the full step is not tried.
-                latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
-                shortened = math.ldexp(1.0, -latent_depth)
-                search_proposal = (
-                    evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
-                )
-                decision = _select_irls_trial(
-                    committed=scop_committed.irls,
-                    proposal=search_proposal,
-                    evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
-                    invalid_state=observed_rows_invalid if self._observed_newton_active else None,
-                    max_halving=max_halving,
-                    extended_max_halving=lambda: _poisson_sqrt_halving_budget(
-                        committed=scop_committed.irls,
-                        proposal=search_proposal,
-                        y=y,
-                        weights=weights,
-                        family=family,
-                        link=link,
-                        default=max_halving,
-                    ),
-                    merit_scale=0.0,
-                    merit_roundoff=lambda candidate, current: (
-                        scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
-                    ),
-                )
-                if latent_depth:
-                    # in fractions of the full step, which was evaluated but not tried
-                    decision = replace(
-                        decision,
-                        trials_attempted=decision.trials_attempted + 1,
-                        **(
-                            {}
-                            if decision.step_rejected
-                            else {
-                                "alpha": decision.alpha * shortened,
-                                "step_halvings": decision.step_halvings + latent_depth,
-                            }
-                        ),
-                    )
-                retained_scop = (
-                    scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
-                )
-                retained = retained_scop.irls
-                evaluation_elapsed = time.perf_counter() - _t0
-                _t_deviance += evaluation_elapsed
-                _t_deviance_eval += evaluation_elapsed
-                beta = retained.beta.copy()
-                intercept = retained.intercept
-                eta_unclipped = retained.eta_unclipped
-                eta = retained.eta
-                mu = retained.mu
-                dev = retained.deviance
-                n_halvings = decision.step_halvings
-                step_rejected = decision.step_rejected
-                committed_groups = {group.group_index: group for group in scop_committed.groups}
-                for group_state in retained_scop.groups:
-                    st = _scop_state[group_state.group_index]
-                    st["beta_scop_prev"] = committed_groups[group_state.group_index].beta_eff.copy()
-                    st["beta_scop"] = group_state.beta_eff.copy()
-                    st["gamma_eff"] = group_state.gamma_eff.copy()
-                    st["H_scop_penalized"] = (
-                        None
-                        if group_state.H_scop_penalized is None
-                        else group_state.H_scop_penalized.copy()
-                    )
-                    st["last_step_norm"] = group_state.last_step_norm
-                    st["last_fisher_fallback"] = group_state.last_fisher_fallback
-                    st["discarded_directions"] = (
-                        None
-                        if group_state.discarded_directions is None
-                        else group_state.discarded_directions.copy()
-                    )
-                if n_halvings:
-                    logger.info(
-                        "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
-                        "%d halvings, dev=%.2e",
-                        it + 1,
-                        decision.alpha,
-                        n_halvings,
-                        dev,
-                    )
-            else:
-                _t0 = time.perf_counter()
-                proposal = evaluate_state(
-                    beta,
-                    intercept,
-                    phase="proposal",
-                    iteration=it + 1,
-                    alpha=1.0,
-                    centred_intercept=proposal_centred_intercept,
-                )
-                trial_cache: dict[float, _IRLSState] = {1.0: proposal}
-                trial_directions: tuple[NDArray, float, NDArray] | None = None
-
-                def evaluate_trial(alpha: float) -> _IRLSState:
-                    nonlocal trial_directions
-                    if trial_directions is None:
-                        trial_directions = (
-                            proposal.beta - committed.beta,
-                            proposal.intercept - committed.intercept,
-                            proposal.eta_unclipped - committed.eta_unclipped,
-                        )
-                    beta_direction, intercept_direction, eta_direction = trial_directions
-                    beta_trial = committed.beta + alpha * beta_direction
-                    intercept_trial = committed.intercept + alpha * intercept_direction
-                    eta_trial = committed.eta_unclipped + alpha * eta_direction
-                    centred_trial = None
-                    if (
-                        committed.centred_intercept is not None
-                        and proposal.centred_intercept is not None
-                    ):
-                        centred_trial = committed.centred_intercept + alpha * (
-                            proposal.centred_intercept - committed.centred_intercept
-                        )
-                    candidate = evaluate_state(
-                        beta_trial,
-                        intercept_trial,
-                        phase="line_search_trial",
-                        iteration=it + 1,
-                        alpha=alpha,
-                        eta_unclipped=eta_trial,
-                        enclosing_proposal_state_id=proposal.state_id,
-                        centred_intercept=centred_trial,
-                    )
-                    trial_cache[alpha] = candidate
-                    return candidate
-
-                committed_constraints_feasible = True
-                proposal_constraints_feasible = True
-                constraint_trial_is_invalid = (
-                    observed_rows_invalid if self._observed_newton_active else None
-                )
-                if has_constraints:
-                    if A_all is None or b_all is None:  # pragma: no cover - construction invariant
-                        raise RuntimeError(
-                            "constrained fit omitted its aggregate constraint system"
-                        )
-                    committed_constraints_feasible = _is_feasible(
-                        A_all,
-                        committed.beta,
-                        b_all,
-                        _QP_FEASIBILITY_TOL,
-                        abs_A=abs_A_all,
-                    )
-                    proposal_constraints_feasible = _is_feasible(
-                        A_all,
-                        proposal.beta,
-                        b_all,
-                        _QP_FEASIBILITY_TOL,
-                        abs_A=abs_A_all,
-                    )
-
-                    def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
-                        return not _is_feasible(
-                            A_all,
-                            candidate.beta,
-                            b_all,
-                            _QP_FEASIBILITY_TOL,
-                            abs_A=abs_A_all,
-                        )
-
-                # the last trial's rows, read by both the decrease and its
-                # round-off allowance: one log1mexp pass per trial
-                _trial_rows: list = [None, None]
-
-                def _newton_rows_at(state: _IRLSState) -> NDArray:
-                    if state is committed and newton_committed_rows is not None:
-                        return newton_committed_rows
-                    if _trial_rows[0] is not state:
-                        _trial_rows[0] = state
-                        _trial_rows[1] = mean_space_log_likelihood_rows(
-                            y, weights, state.eta_unclipped
-                        )
-                    return _trial_rows[1]
-
-                def _newton_deviance_delta(candidate: _IRLSState, base: _IRLSState) -> float:
-                    # each row's change first, then numpy's pairwise sum
-                    return float(-2.0 * np.sum(_newton_rows_at(candidate) - _newton_rows_at(base)))
-
-                def _newton_merit_roundoff(candidate: _IRLSState, base: _IRLSState) -> float:
-                    # The true deviance's own magnitudes: the rows' sizes (the
-                    # log1mexp and product roundings, and the pairwise sum's
-                    # gamma_{log2 n + 8}, are within 64 eps of them for any n
-                    # below 2^50), plus each state's penalty part.
-                    size = float(np.sum(np.abs(_newton_rows_at(candidate))))
-                    size += float(np.sum(np.abs(_newton_rows_at(base))))
-                    for state in (candidate, base):
-                        if state.penalized_deviance is not None:
-                            size += abs(float(state.penalized_deviance) - float(state.deviance))
-                    return 64.0 * _EPS_FLOAT * 2.0 * size
-
-                trial_is_invalid = constraint_trial_is_invalid
-                if _mean_space_invalid is not None and not _mean_space_invalid(
-                    committed.eta_unclipped, weights
-                ):
-                    # A feasible committed state keeps every accepted trial in the
-                    # family's mean space (``mean_space_violation``).
-                    def trial_is_invalid(
-                        candidate: _IRLSState, other=constraint_trial_is_invalid
-                    ) -> bool:
-                        assert _mean_space_invalid is not None
-                        if _mean_space_invalid(candidate.eta_unclipped, weights):
-                            return True
-                        return other is not None and other(candidate)
-
-                if _link_domain_invalid is not None and not _link_domain_invalid(
-                    committed.eta_unclipped, weights
-                ):
-                    # A committed state inside the link's domain keeps every
-                    # accepted trial inside it (``link_domain_violation``).
-                    def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
-                        assert _link_domain_invalid is not None
-                        if _link_domain_invalid(candidate.eta_unclipped, weights):
-                            return True
-                        return other is not None and other(candidate)
-
-                decision = _select_irls_trial(
-                    committed=committed,
-                    proposal=proposal,
-                    evaluate_state=evaluate_trial,
-                    invalid_state=trial_is_invalid,
-                    max_halving=max_halving,
-                    extended_max_halving=lambda: max(
-                        _poisson_sqrt_halving_budget(
-                            committed=committed,
-                            proposal=proposal,
-                            y=y,
-                            weights=weights,
-                            family=family,
-                            link=link,
-                            default=max_halving,
-                        ),
-                        # a lowered start can sit far inside the space with a
-                        # proposal far outside it, past the ordinary budget
-                        _mean_space_halving_budget(
-                            committed=committed,
-                            proposal=proposal,
-                            weights=weights,
-                            family=family,
-                            link=link,
-                            default=max_halving,
-                        )
-                        if _start_lowered
-                        else max_halving,
-                    ),
-                    merit_scale=objective_merit_scale,
-                    # a Newton step is judged on the model's own deviance, which
-                    # still sees the rows clip_mu holds; Fisher's on the clipped one
-                    merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
-                        candidate,
-                        base,
-                        penalty_matvec,
-                        deviance_delta=None
-                        if newton_score is None
-                        else _newton_deviance_delta(candidate, base),
-                    ),
-                    merit_roundoff=None if newton_score is None else _newton_merit_roundoff,
-                    # a proposal that leaves the space: the halvings above the
-                    # boundary are refused without a deviance pass each
-                    first_halving=lambda: mean_space_first_halving(
-                        committed=committed,
-                        proposal=proposal,
-                        weights=weights,
-                        family=family,
-                        link=link,
-                    ),
-                )
-                if decision.skipped and profile is not None:
-                    profile["irls_halvings_skipped"] = (
-                        profile.get("irls_halvings_skipped", 0) + decision.skipped
-                    )
-                if (
-                    has_constraints
-                    and decision.step_rejected
-                    and not committed_constraints_feasible
-                    and proposal_constraints_feasible
-                    and _state_is_finite(proposal)
-                ):
-                    # The objective comparison is not allowed to prefer an
-                    # inadmissible state over a finite feasible QP proposal. Once
-                    # this proposal is committed, convexity of A beta >= b and the
-                    # invalid-state predicate above preserve feasibility on every
-                    # subsequent accepted line-search segment.
-                    decision = _IRLSStepDecision(
-                        alpha=1.0,
-                        step_halvings=0,
-                        step_rejected=False,
-                        trials_attempted=decision.trials_attempted,
-                    )
-                    logger.info(
-                        "  irls_direct iter=%d: accepted finite feasible constrained "
-                        "proposal after objective line search found no admissible trial",
-                        it + 1,
-                    )
-                retained = committed if decision.step_rejected else trial_cache[decision.alpha]
-                if has_constraints:
-                    # Rejection retains coefficients from the preceding working
-                    # problem, while damping retains an interpolation.  Neither
-                    # state is the current H/g solution whose stationarity and
-                    # dual feasibility the inner QP certified.
-                    retained_qp_converged = bool(
-                        not decision.step_rejected
-                        and decision.alpha == 1.0
-                        and proposal_qp_converged
-                    )
-                evaluation_elapsed = time.perf_counter() - _t0
-                _t_deviance += evaluation_elapsed
-                _t_deviance_eval += evaluation_elapsed
-                beta = retained.beta.copy()
-                intercept = retained.intercept
-                eta_unclipped = retained.eta_unclipped
-                eta = retained.eta
-                mu = retained.mu
-                dev = retained.deviance
-                n_halvings = decision.step_halvings
-                step_rejected = decision.step_rejected
-                if step_rejected:
-                    prev_active_set = committed_active_set
-                elif n_halvings:
-                    logger.info(
-                        "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, "
-                        "dev=%.2e",
-                        it + 1,
-                        decision.alpha,
-                        n_halvings,
-                        dev,
-                    )
-
-            proposal_state = proposal_scop.irls if _has_scop else proposal
-            dev_rel_change = None
-            coef_change = None
-            convergence_label: str = convergence
-            convergence_tolerance = tol
-            if np.isfinite(dev):
-                if convergence == "mode_score" and self._score_centre is not None:
-                    # One-engine design §3.8: stop on the certificate's own score,
-                    # in centred coordinates over the identified coefficients,
-                    # once it meets the bar the certificate reads (no margin: the
-                    # certificate is this residual, ``mode_score``).  The step
-                    # length, with its raw intercept, is only reported.
-                    coef_change = float(
-                        np.max(
-                            np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0
-                        )
-                    )
-                    residual = mode_residual(
-                        beta, intercept, mu, eta, centred_intercept=retained.centred_intercept
-                    )
-                    convergence_value = mode_bar * residual.ratio()
-                    converged_this_iter = residual.ratio() <= 1.0
-                    _last_mode_residual = residual
-                    _mode_ratios.append(residual.ratio())
-                    # The score stopped contracting (``stagnation_window``):
-                    # the iterate is at its limiting accuracy, so the solve ends
-                    # uncertified and the caller discloses it.
-                    score_stagnated = (
-                        not converged_this_iter
-                        and residual.resolved
-                        and len(_mode_ratios) > _stagnation_window
-                        and min(_mode_ratios[-_stagnation_window:])
-                        > 0.5 * min(_mode_ratios[:-_stagnation_window])
-                    )
-                    switched_curvature = False
-                    if (
-                        _stagnation_newton_available
-                        and not self._observed_newton_active
-                        and not converged_this_iter
-                        and (
-                            score_stagnated
-                            or (
-                                residual.resolved
-                                and rate_exhausts_budget(
-                                    _mode_ratios, _stagnation_window, it + 1, max_iter
-                                )
-                            )
-                        )
-                    ):
-                        # Fisher scoring near the mode contracts too slowly to
-                        # meet the bar in the budget, or not at all (the comment
-                        # at ``_observed_newton_active``): the iterations left
-                        # take Newton steps on the observed information, positive
-                        # for Gamma/log (``w y / mu``), so the penalized Hessian
-                        # stays positive definite.
-                        self._observed_newton_active = True
-                        self._can_reuse_weighted_gram = False
-                        score_stagnated = False
-                        switched_curvature = True
-                        _mode_ratios.clear()
-                        if _newton_latch is not None:
-                            _newton_latch[0] = True
-                        if profile is not None:
-                            profile["irls_fisher_newton_switches"] = (
-                                profile.get("irls_fisher_newton_switches", 0) + 1
-                            )
-                    if (
-                        not converged_this_iter
-                        and not switched_curvature
-                        and not step_rejected
-                        and not _has_scop
-                        and not has_constraints
-                        and intercept == intercept_prev
-                        and retained.centred_intercept == committed.centred_intercept
-                        and np.array_equal(beta, beta_prev)
-                    ):
-                        # The full step left the state bitwise where it was: the
-                        # iteration is a deterministic map at a float64 fixed
-                        # point, and every further iteration repeats this one
-                        # (the step-tolerance stop of Dennis & Schnabel 1996,
-                        # section 7.2, at its strictest).  A centred state is
-                        # ``(alpha, beta)``, and the raw intercept only its
-                        # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
-                        # and can hold still while ``alpha`` moves, so ``alpha``
-                        # is compared too (``None`` on both sides otherwise).  An
-                        # iteration that has just changed the map (the Newton
-                        # switch above) is not one: the next iteration takes the
-                        # other step.  A fixed point ends the solve, with the
-                        # floors resolved whatever the relative score: where
-                        # the residuals are at the rounding of the fitted values
-                        # (a model that fits its response exactly, as a linear
-                        # model can) the score's own scale ``sum |s|`` is
-                        # rounding too, the relative score sits near 1 and the
-                        # resolve cap would never let the floor be read.  A score
-                        # within its floor is certified; one above it is the
-                        # limiting accuracy, published as not converged.
-                        residual = mode_residual(
-                            beta,
-                            intercept,
-                            mu,
-                            eta,
-                            centred_intercept=retained.centred_intercept,
-                            resolve_cap=math.inf,
-                        )
-                        convergence_value = mode_bar * residual.ratio()
-                        converged_this_iter = residual.ratio() <= 1.0
-                        score_stagnated = not converged_this_iter
-                        _last_mode_residual = residual
-                        _mode_ratios[-1] = residual.ratio()
-                elif convergence in ("coefficients", "mode_score"):
-                    coef_change = float(
-                        np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
-                    )
-                    coef_change = max(
-                        coef_change,
-                        abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
-                    )
-                    if _has_scop:
-                        latent_change = max(
-                            float(
-                                np.max(
-                                    np.abs(retained_group.beta_eff - committed_group.beta_eff)
-                                    / np.maximum(1.0, np.abs(retained_group.beta_eff))
-                                )
-                            )
-                            for retained_group, committed_group in zip(
-                                retained_scop.groups,
-                                scop_committed.groups,
-                                strict=True,
-                            )
-                        )
-                        coef_change = max(coef_change, latent_change)
-                    convergence_value = coef_change
-                    converged_this_iter = coef_change < tol
-                    if _has_scop and n_halvings:
-                        # a damped step's change is a fraction of the full
-                        # step's and bounds nothing either (below)
-                        converged_this_iter = False
-                else:
-                    objective = (
-                        retained.deviance
-                        if retained.penalized_deviance is None
-                        else retained.penalized_deviance
-                    )
-                    if np.isfinite(objective_prev):
-                        dev_rel_change = _irls_objective_relative_change(
-                            objective=objective,
-                            previous=objective_prev,
-                            objective_scale=objective_merit_scale,
-                        )
-                    converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
-                    if _has_scop and n_halvings:
-                        # The decrease of a full joint Newton step is its Newton
-                        # decrement, which bounds the distance to the mode (Boyd &
-                        # Vandenberghe 2004, sec. 9.5.1); a damped step's is a
-                        # fraction of it and bounds nothing, so it never stops the
-                        # fit: the next full step's does.
-                        converged_this_iter = False
-                    convergence_value = dev_rel_change
-            else:
-                converged_this_iter = False
-                convergence_value = None
-            if step_rejected:
-                converged_this_iter = False
-            # Once Newton steps are engaged the model's own certificate is the
-            # stop, every iteration: the clipped rule a mode_score fit stops on
-            # cannot pass at a mode it does not see (below).
-            newton_stop = bool(_mean_space_newton and np.isfinite(dev) and not step_rejected)
-            # A state holding rows at the boundary is never published as converged
-            # (``mean_space_boundary`` below), so its stop stands as on master.
-            at_boundary = bool(
-                (converged_this_iter or newton_stop)
-                and _mean_space_invalid is not None
-                and mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
-            )
-            # rows clip_mu holds, at the step's base or where it landed
-            clipped_rows = (
-                mean_space_clipped_rows(family, link, committed.eta_unclipped, weights)
-                + mean_space_clipped_rows(family, link, retained.eta_unclipped, weights)
-                if converged_this_iter and _mean_space_invalid is not None and not at_boundary
-                else 0
-            )
-            _true_confirmed = False
-            if not at_boundary and (
-                newton_stop or (converged_this_iter and (clipped_rows or _start_lowered))
-            ):
-                # On a row whose mean leaves clip_mu's band the clipped deviance
-                # is flat and the step's score is not the binomial/log score, and
-                # a lowered start can sit far below that band: a stop read off
-                # the clipped objective, or off a step taken from it, is accepted
-                # only where the model's own penalized score certifies it
-                # (``true_mode_residual``).  A refused stop goes on.  Each refused
-                # stop sits where the iteration's own rule passed, so a score that
-                # has stopped contracting across them (``stagnation_window``) will
-                # not reach the bar: the fit ends uncertified, as under
-                # ``mode_score``.  Under Newton steps the certificate alone
-                # decides, at every iteration, and its own ratios alone stagnate.
-                true_ratio, true_resolved = true_mode_residual(
-                    retained.beta,
-                    retained.intercept,
-                    retained.eta_unclipped,
-                    (
-                        A_all[list(prev_active_set)]
-                        if has_constraints and A_all is not None and prev_active_set
-                        else None
-                    ),
-                    retained_scop.groups if _has_scop else None,
-                )
-                # the state is certified on the model's own score, Newton or not,
-                # where the clip holds a row (or Newton decided): a criterion read
-                # at it reads the model's own likelihood and curvature
-                _true_confirmed = bool(true_ratio <= 1.0 and (newton_stop or clipped_rows))
-                if newton_stop:
-                    converged_this_iter = bool(true_ratio <= 1.0)
-                    score_stagnated = False
-                    # this rule decided: its numbers are the ones published
-                    convergence_label = "mean_space_mode_score"
-                    convergence_value = mode_bar * true_ratio
-                    convergence_tolerance = mode_bar
-                    _true_stop_ratio = true_ratio
-                if not true_ratio <= 1.0:
-                    converged_this_iter = False
-                    _true_ratios.append(true_ratio)
-                    score_stagnated = len(_true_ratios) > _stagnation_window and not (
-                        min(_true_ratios[-_stagnation_window:])
-                        < 0.5 * min(_true_ratios[:-_stagnation_window])
-                    )
-                    if (
-                        _mean_space_newton_available
-                        and not _mean_space_newton
-                        and (true_resolved or score_stagnated)
-                    ):
-                        # Fisher scoring has carried the fit to where its own
-                        # stop passes but the model's score does not: near the
-                        # mode (resolved), or where scoring has stalled.  The
-                        # iterations left take Newton steps on the observed
-                        # information (``irls_state.mean_space_newton_rows``),
-                        # which converge quadratically where scoring is linear;
-                        # far from the mode Fisher's steps stay the safer ones
-                        # (Green 1984, section 2.3 and its discussion).
-                        _mean_space_newton = True
-                        _true_ratios.clear()
-                        score_stagnated = False
-
-            _true_stop = bool(newton_stop and not at_boundary)
-
-            constraints_feasible_this_iter = True
-            if has_constraints:
-                if A_all is None or b_all is None:  # pragma: no cover - construction invariant
-                    raise RuntimeError("constrained fit omitted its aggregate constraint system")
-                constraints_feasible_this_iter = _is_feasible(
-                    A_all,
-                    beta,
-                    b_all,
-                    _QP_FEASIBILITY_TOL,
-                    abs_A=abs_A_all,
-                )
-                # Objective or coefficient stagnation cannot certify a constrained
-                # mode whose retained coefficients are outside the feasible set.
-                # Keep iterating while budget remains: a later QP/line-search step
-                # may still repair an infeasible warm start.
-                if not constraints_feasible_this_iter:
-                    converged_this_iter = False
-                # Outer coefficient/deviance stagnation cannot replace the inner
-                # QP's stationarity and dual-feasibility certificate. Keep a
-                # finite feasible iterate and continue: a later full QP proposal
-                # may still obtain the missing certificate.
-                if not retained_qp_converged:
-                    converged_this_iter = False
-
-            terminal_constraint_infeasible = bool(
-                not constraints_feasible_this_iter
-                and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
-            )
-            terminal_constraint_kkt_incomplete = bool(
-                has_constraints
-                and not retained_qp_converged
-                and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
-            )
-
-            if terminal_constraint_infeasible:
-                termination_reason = "constraint_infeasible"
-            elif terminal_constraint_kkt_incomplete:
-                termination_reason = "constraint_kkt_incomplete"
-            elif step_rejected:
-                termination_reason = "step_rejected"
-            elif not np.isfinite(dev):
-                termination_reason = "nonfinite_deviance"
-            elif converged_this_iter:
-                termination_reason = "converged"
-            elif score_stagnated:
-                termination_reason = "score_stagnated"
-            elif it + 1 == max_iter:
-                termination_reason = "max_iter"
-            else:
-                termination_reason = "continue"
-
-            if trace_enabled:
-                assert trace_run is not None
-                trace_run.emit_lazy(
-                    "step_decision",
-                    lambda: {
-                        "solver": "irls_direct",
-                        "outer_iteration": it + 1,
-                        "base_state_id": committed.state_id,
-                        "proposal_state_id": proposal_state.state_id,
-                        "committed_state_id": retained.state_id,
-                        "accepted_alpha": decision.alpha,
-                        "step_halvings": decision.step_halvings,
-                        "trials_attempted": decision.trials_attempted,
-                        "step_rejected": decision.step_rejected,
-                        "fit_converged": converged_this_iter,
-                        "convergence_criterion": convergence_label,
-                        "convergence_value": convergence_value,
-                        "convergence_tolerance": convergence_tolerance,
-                        "termination_reason": termination_reason,
-                        "working_curvature": (
-                            working_rows.curvature_source if newton_score is None else "observed"
-                        ),
-                    },
-                    channel="pirls",
-                    purpose=trace_purpose,
-                )
-            if np.isfinite(dev):
-                emit_state_commit(
-                    retained,
-                    iteration=it + 1,
-                    fit_converged=converged_this_iter,
-                    convergence_value=convergence_value,
-                    termination_reason=termination_reason,
-                    convergence_label=convergence_label,
-                    convergence_tolerance=convergence_tolerance,
-                )
-
-            working_eta_clipped = False
-            eta_clipped = False
-            if capture_extrema:
-                # Each of these is read again by the diagnostics row below, which
-                # only runs when ``capture_extrema`` is true (see its definition).
-                # Bind once: they are O(n) passes over arrays nothing mutates
-                # between here and the append.
-                working_eta_min = float(np.min(working_eta))
-                working_eta_max = float(np.max(working_eta))
-                working_eta_min_unclipped = float(np.min(working_eta_unclipped))
-                working_eta_max_unclipped = float(np.max(working_eta_unclipped))
-                eta_min = float(np.min(eta))
-                eta_max = float(np.max(eta))
-                eta_min_unclipped = float(np.min(eta_unclipped))
-                eta_max_unclipped = float(np.max(eta_unclipped))
-                working_eta_clipped = bool(
-                    working_eta_min_unclipped < working_eta_min
-                    or working_eta_max_unclipped > working_eta_max
-                )
-                eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
-
-            # Record per-iteration diagnostics
-            if record_diagnostics:
-                top_idx, bot_idx = _extreme_weight_indices(W)
-                w_min = float(W.min())
-                w_max = float(W.max())
-                iteration_log.append(
-                    IterationDiagnostics(
-                        iteration=it + 1,
-                        deviance=dev,
-                        w_min=w_min,
-                        w_max=w_max,
-                        w_ratio=w_ratio,
-                        mu_min=float(mu.min()),
-                        mu_max=float(mu.max()),
-                        eta_min=eta_min,
-                        eta_max=eta_max,
-                        intercept=intercept,
-                        step_halvings=n_halvings,
-                        top_w_indices=top_idx,
-                        bottom_w_indices=bot_idx,
-                        cond_estimate=_cond_est,
-                        used_svd_fallback=_used_svd,
-                        raw_w_min=w_min,
-                        raw_w_max=w_max,
-                        raw_w_ratio=w_ratio,
-                        eta_min_unclipped=eta_min_unclipped,
-                        eta_max_unclipped=eta_max_unclipped,
-                        eta_clipped=eta_clipped,
-                        working_mu_min=float(working_mu.min()),
-                        working_mu_max=float(working_mu.max()),
-                        working_eta_min=working_eta_min,
-                        working_eta_max=working_eta_max,
-                        working_eta_min_unclipped=working_eta_min_unclipped,
-                        working_eta_max_unclipped=working_eta_max_unclipped,
-                        working_eta_clipped=working_eta_clipped,
-                        step_rejected=step_rejected,
-                        rank_truncated=rank_truncated,
-                        trials_attempted=decision.trials_attempted,
-                        accepted_alpha=decision.alpha,
-                        base_state_id=committed.state_id,
-                        proposal_state_id=proposal_state.state_id,
-                        committed_state_id=retained.state_id,
-                        evaluation_id=retained.evaluation_id,
-                        state_space=retained.state_space,
-                        basis_id=retained.basis_id,
-                        convergence_criterion=convergence_label,
-                        convergence_value=convergence_value,
-                        convergence_tolerance=convergence_tolerance,
-                        termination_reason=termination_reason,
-                    )
-                )
-
+                self._search(it)
+            self._converge(it)
+            self._judge_mean_space()
+            self._terminate(it)
+            self._record(it)
+            dev, dev_prev = self.dev, self.dev_prev
             deviance_relative_change = abs(dev - dev_prev) / (abs(dev_prev) + 1)
+            self.deviance_relative_change = deviance_relative_change
             logger.info(
                 f"  irls_direct iter={it + 1:3d}  "
                 f"dev={dev:12.1f}  delta={deviance_relative_change:10.2e}"
@@ -2875,77 +1450,79 @@ class _IRLSDirectFit:
             if not np.isfinite(dev):
                 logger.warning(f"IRLS direct non-finite deviance at iter={it + 1}: dev={dev:.2e}")
                 break
+            if self.record_debug_rows:
+                self._record_debug_row(it)
 
-            if record_debug_rows:
-                debug_recorder.append_jsonl(
-                    "pirls",
-                    {
-                        **base_debug_context,
-                        "iteration": it + 1,
-                        "deviance": float(dev),
-                        "deviance_relative_change": (
-                            float(dev_rel_change) if dev_rel_change is not None else None
-                        ),
-                        "coefficient_change": float(coef_change)
-                        if coef_change is not None
-                        else None,
-                        "convergence": convergence,
-                        "converged": bool(converged_this_iter),
-                        "w_min": float(W.min()),
-                        "w_max": float(W.max()),
-                        "w_ratio": float(w_ratio),
-                        "mu_min": float(mu.min()),
-                        "mu_max": float(mu.max()),
-                        "eta_min_unclipped": float(np.min(eta_unclipped)),
-                        "eta_max_unclipped": float(np.max(eta_unclipped)),
-                        "eta_clipped": bool(eta_clipped),
-                        "eta_min": float(eta.min()),
-                        "eta_max": float(eta.max()),
-                        "working_mu_min": float(working_mu.min()),
-                        "working_mu_max": float(working_mu.max()),
-                        "working_eta_min_unclipped": float(np.min(working_eta_unclipped)),
-                        "working_eta_max_unclipped": float(np.max(working_eta_unclipped)),
-                        "working_eta_clipped": bool(working_eta_clipped),
-                        "working_eta_min": float(working_eta.min()),
-                        "working_eta_max": float(working_eta.max()),
-                        "step_halvings": int(n_halvings),
-                        "trials_attempted": int(decision.trials_attempted),
-                        "step_rejected": bool(step_rejected),
-                        "base_state_id": committed.state_id,
-                        "proposal_state_id": proposal_state.state_id,
-                        "committed_state_id": retained.state_id,
-                        "rank_truncated": rank_truncated,
-                        "cond_estimate": float(_cond_est),
-                        "used_svd_fallback": bool(_used_svd),
-                        "has_scop": bool(_has_scop),
-                        "working_curvature": (
-                            working_rows.curvature_source if newton_score is None else "observed"
-                        ),
-                    },
-                )
-
-            if step_rejected:
+            if self.step_rejected:
                 logger.warning(
                     "IRLS direct rejected all trial steps at iter=%d; restored committed state",
                     it + 1,
                 )
                 break
 
-            committed = retained
-            if _has_scop:
-                scop_committed = retained_scop
-            if converged_this_iter:
-                converged = True
+            retained = self.retained
+            self.committed = retained
+            if self._has_scop:
+                self.scop_committed = self.retained_scop
+            if self.converged_this_iter:
+                self.converged = True
                 break
-            if score_stagnated:
+            if self.score_stagnated:
                 break
-            dev_prev = dev
-            objective_prev = (
+            self.dev_prev = dev
+            self.objective_prev = (
                 retained.deviance
                 if retained.penalized_deviance is None
                 else retained.penalized_deviance
             )
-
+        A_all, S, S_override, W = self.A_all, self.S, self.S_override, self.W
+        XtWX_beta = self.XtWX_beta
+        _compensate_centred_intercept = self._compensate_centred_intercept
+        _compute_fit_statistics = self._compute_fit_statistics
+        _compute_reml_geometry = self._compute_reml_geometry
+        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
+        _defer_rank_info = self._defer_rank_info
+        _direct_fallback_reason = self._direct_fallback_reason
+        _expose_exact_support_state = self._expose_exact_support_state
+        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
+        _judged_truncated, _last_mode_residual = self._judged_truncated, self._last_mode_residual
+        _last_true_residual, _last_truncated = self._last_true_residual, self._last_truncated
+        _last_working_centered = self._last_working_centered
+        _last_working_offset_mean = self._last_working_offset_mean
+        _last_working_structured = self._last_working_structured
+        _mean_space_invalid = self._mean_space_invalid
+        _retain_reml_decomposition = self._retain_reml_decomposition
+        _return_working_system, _scop_curvature = self._return_working_system, self._scop_curvature
+        _scop_state, _state_center = self._scop_state, self._state_center
+        _structured_group_index = self._structured_group_index
+        _structured_layout, _t_deviance = self._structured_layout, self._t_deviance
+        _t_deviance_eval, _t_eta, _t_gram = self._t_deviance_eval, self._t_eta, self._t_gram
+        _t_solve, _t_working, _true_confirmed = self._t_solve, self._t_working, self._true_confirmed
+        _true_stop, _true_stop_ratio, _use_qr = self._true_stop, self._true_stop_ratio, self._use_qr
+        _use_structured, abs_A_all, b_all = self._use_structured, self.abs_A_all, self.b_all
+        beta, cache_out = self.beta, self.cache_out
+        certify_centered_factor = self.certify_centered_factor
+        compute_rank_info, converged, dev = self.compute_rank_info, self.converged, self.dev
+        deviance_relative_change, direct_solve = self.deviance_relative_change, self.direct_solve
+        dm, eta, eta_unclipped, family = self.dm, self.eta, self.eta_unclipped, self.family
+        get_centered_system, gms, groups = self.get_centered_system, self.gms, self.groups
+        has_constraints, intercept = self.has_constraints, self.intercept
+        iteration_log, lambda2, link = self.iteration_log, self.lambda2, self.link
+        max_iter, mode_bar, mu, offset = self.max_iter, self.mode_bar, self.mu, self.offset
+        p, profile, record_diagnostics = self.p, self.profile, self.record_diagnostics
+        reml_penalties, retained = self.reml_penalties, self.retained
+        retained_qp_converged = self.retained_qp_converged
+        return_scop_state, return_xtwx = self.return_scop_state, self.return_xtwx
+        separation, step_rejected = self.separation, self.step_rejected
+        structured_decision, t_start = self.structured_decision, self.t_start
+        termination_reason, w_ratio = self.termination_reason, self.w_ratio
+        weight_semantics, weights = self.weight_semantics, self.weights
+        working_eta, working_mu, working_rows = self.working_eta, self.working_mu, self.working_rows
+        y, z = self.y, self.z
+        if self._use_qr:
+            _X_full = self._X_full
+        if self._has_scop:
+            _scop_newton, _scop_order = self._scop_newton, self._scop_order
         t_elapsed = time.perf_counter() - t_start
         logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
 
@@ -5465,3 +4042,1581 @@ class _IRLSDirectFit:
             allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
         scop_merit_errors[id(retained.irls)] = allowance
         return retained
+
+    def _working(self, it: int) -> None:
+        _held_rank, committed = self._held_rank, self.committed
+        prev_active_set, has_constraints = self.prev_active_set, self.has_constraints
+        family, link, y, mu, eta = self.family, self.link, self.y, self.mu, self.eta
+        weights, _mean_space_newton, profile = self.weights, self._mean_space_newton, self.profile
+        eta_unclipped, _t_working = self.eta_unclipped, self._t_working
+        _held_rank[0] = None
+        beta_prev = committed.beta
+        intercept_prev = committed.intercept
+        beta = committed.beta.copy()
+        intercept = committed.intercept
+        committed_active_set = None if prev_active_set is None else list(prev_active_set)
+        proposal_qp_converged = not has_constraints
+        # W/z are rebuilt below from the committed coefficients.  Any
+        # constrained-QP certificate retained from the preceding iteration
+        # therefore belongs to different working weights and response, not to
+        # this iteration's H/g.  Only a certified full proposal from the
+        # current working problem can restore the flag.
+        retained_qp_converged = not has_constraints
+        rank_truncated: bool | None = None
+        used_rank_certification = False
+        scop_proposal_eta_unclipped: NDArray | None = None
+        proposal_centred_intercept: float | None = None
+
+        # Working quantities from current eta/mu (already computed)
+        _t0 = time.perf_counter()
+        working_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=weights,
+            prefer_observed=self._observed_newton_active,
+        )
+        W = working_rows.weights
+        z = working_rows.response
+        # binomial/log Newton rows once engaged (refusal block below): the
+        # observed curvature and the score of the unclipped eta, the step in
+        # score form.  ``z`` is then the predictor itself, so ``W (z - eta)``
+        # adds nothing and the score enters on its own; a state holding rows
+        # at the boundary keeps Fisher's rows.
+        newton_score: NDArray | None = None
+        newton_committed_rows: NDArray | None = None
+        if _mean_space_newton and not mean_space_boundary_rows(
+            family, link, committed.eta_unclipped, weights
+        ):
+            newton_rows = mean_space_newton_rows(y, weights, committed.eta_unclipped)
+            if newton_rows is not None:
+                W, newton_score = newton_rows
+                z = np.array(committed.eta_unclipped, dtype=np.float64)
+                newton_committed_rows = mean_space_log_likelihood_rows(
+                    y, weights, committed.eta_unclipped
+                )
+                if profile is not None:
+                    profile["irls_mean_space_newton_iters"] = (
+                        profile.get("irls_mean_space_newton_iters", 0) + 1
+                    )
+        if working_rows.rejection_reason is not None:
+            # Every accepted trial of an observed fit had finite rows (the
+            # line search rejects the others), so only the entry state can
+            # get here: the declared curvature has no step to take.
+            raise ValueError(
+                "IRLS direct cannot start: the observed-Newton rows of "
+                f"{type(family).__name__} with a {type(link).__name__} are not finite at "
+                "the starting coefficients."
+            )
+        if working_rows.curvature_source == "observed" and profile is not None:
+            profile["irls_observed_newton_iters"] = profile.get("irls_observed_newton_iters", 0) + 1
+        working_eta_unclipped = eta_unclipped
+        working_eta = eta
+        working_mu = mu
+        # the separation backstop and the diagnostics read Fisher's weights,
+        # the curvature their bars were set on, on a Newton iteration too
+        positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(
+            working_rows.weights
+        )
+        _t_working += time.perf_counter() - _t0
+
+        if w_ratio > 1e12:
+            logger.debug(
+                "IRLS direct iter=%d: extreme W ratio %.1e (positive W range [%.2e, %.2e])",
+                it + 1,
+                w_ratio,
+                positive_w_min,
+                positive_w_max,
+            )
+        self.beta_prev, self.intercept_prev, self.beta = beta_prev, intercept_prev, beta
+        self.intercept, self.committed_active_set = intercept, committed_active_set
+        self.proposal_qp_converged = proposal_qp_converged
+        self.retained_qp_converged, self.rank_truncated = retained_qp_converged, rank_truncated
+        self.used_rank_certification = used_rank_certification
+        self.scop_proposal_eta_unclipped = scop_proposal_eta_unclipped
+        self.proposal_centred_intercept = proposal_centred_intercept
+        self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
+        self.newton_committed_rows = newton_committed_rows
+        self.working_eta_unclipped, self.working_eta = working_eta_unclipped, working_eta
+        self.working_mu, self.w_ratio, self._t_working = working_mu, w_ratio, _t_working
+
+    def _step(self, it: int) -> None:
+        if self._use_qr:
+            self._step_qr()
+        else:
+            # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
+            _t0 = time.perf_counter()
+            z_off = self.z - self.offset
+            if self._has_scop:
+                self._step_scop(it, z_off, _t0)
+            elif self._use_structured:
+                self._step_structured(z_off, _t0)
+            elif not self.has_constraints:
+                self._step_dense(z_off, _t0)
+            else:
+                self._step_qp(it, z_off, _t0)
+            # A bounded factor pass can intentionally replace an uncertain Gram
+            # rank.  Preserve that in iteration diagnostics, but do not report it
+            # as a failed solve or recommend switching the whole fit to dense QR.
+            _used_svd, used_rank_certification = self._used_svd, self.used_rank_certification
+            _consecutive_svd = self._consecutive_svd
+            warnable_svd_fallback = _used_svd and not used_rank_certification
+            if warnable_svd_fallback:
+                _consecutive_svd += 1
+            else:
+                _consecutive_svd = 0
+            self._consecutive_svd = _consecutive_svd
+            if self.direct_solve == "auto" and _consecutive_svd == 3:
+                logger.warning(
+                    "fit_irls_direct: %d consecutive SVD fallbacks (cond ~%.1e). "
+                    "Consider direct_solve='qr' for near-collinear data.",
+                    _consecutive_svd,
+                    self._cond_est,
+                )
+
+    def _step_qr(self) -> None:
+        W, z, offset, p, dm, _X_full = self.W, self.z, self.offset, self.p, self.dm, self._X_full
+        _L_aug, _state_center, _held_rank = self._L_aug, self._state_center, self._held_rank
+        convergence, _t_solve = self.convergence, self._t_solve
+        proposal_centred_intercept = self.proposal_centred_intercept
+        # Profile the intercept, then apply the shared factor-space rule.
+        _t0 = time.perf_counter()
+        sqrtW = np.sqrt(W)
+        z_off = z - offset
+        centered = self.get_centered_system(W, z_off)
+        _last_working_centered = centered
+        A_data = sqrtW[:, None] * _centred_rows(_X_full, centered)
+        A = np.vstack([A_data, _L_aug[1:, 1:]])
+        rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
+        iteration_rank = decompose_factor(A, retain_factor_solve=True)
+        beta = iteration_rank.solve_factor_rhs(rhs_qr)
+        intercept = centered.mean_z - float(centered.mean_x @ beta)
+        _last_working_offset_mean = None
+        if _state_center is not None:
+            _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
+            proposal_centred_intercept = centered.mean_z - math.fsum(
+                _last_working_offset_mean * beta
+            )
+            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+        _cond_est = iteration_rank.pre_truncation_condition
+        _held_rank[0] = iteration_rank
+        _used_svd = iteration_rank.used_svd_fallback
+        rank_truncated = iteration_rank.rank_truncated
+        if convergence == "mode_score":
+            self._score_centre = (
+                centered.mean_x,
+                centered.sum_w,
+                np.diag(centered.data_gram),
+                (),
+                _last_working_offset_mean,
+            )
+        _t_solve += time.perf_counter() - _t0
+        self._last_working_centered, self.beta = _last_working_centered, beta
+        self.intercept, self._last_working_offset_mean = intercept, _last_working_offset_mean
+        self.proposal_centred_intercept, self._cond_est = proposal_centred_intercept, _cond_est
+        self._used_svd, self.rank_truncated, self._t_solve = _used_svd, rank_truncated, _t_solve
+
+    def _step_scop(self, it: int, z_off: NDArray, _t0: float) -> None:
+        W, z, offset, p, groups = self.W, self.z, self.offset, self.p, self.groups
+        committed, scop_committed = self.committed, self.scop_committed
+        _scop_state, _scop_order = self._scop_state, self._scop_order
+        _scop_newton, _scop_specs = self._scop_newton, self._scop_specs
+        _reduced_dm, _S_reduced = self._reduced_dm, self._S_reduced
+        _reduced_tabmat_state, _reduced_to_full = self._reduced_tabmat_state, self._reduced_to_full
+        _scop_run, profile, debug_recorder = self._scop_run, self.profile, self.debug_recorder
+        base_debug_context, _t_gram, _t_solve = self.base_debug_context, self._t_gram, self._t_solve
+        used_rank_certification = self.used_rank_certification
+        # ── SCOP: one Newton step on every coefficient jointly ──
+        # The ordinary block is solved with the latent SCOP
+        # coordinates held fixed, then ``SCOPJointNewton.step``
+        # couples the two blocks through the Schur complement and
+        # corrects that solve (Pya & Wood 2015, Appendix 1).
+        scop_thetas = [_scop_state[gi]["beta_scop"] for gi in _scop_order]
+        z_adj = z_off - _scop_newton.predictor(scop_thetas)
+
+        # Profile the intercept in stable centered
+        # coordinates.  The raw augmented Gram loses the ordinary
+        # slope entirely after a large column translation, so the
+        # system comes from ``build_centered_system``, the authority
+        # every other route of this solver uses as it stands: it
+        # subtracts raw moments only under ``_raw_centering_well_scaled``
+        # and otherwise centres before it multiplies (anchor-centred
+        # compact supports, centred row chunks, a dense column's
+        # corrected two-pass pair).
+        reduced_centered = build_centered_system(
+            dm=_reduced_dm,
+            W=W,
+            z_off=z_adj,
+            penalty=_S_reduced,
+            tabmat_split=_reduced_dm.tabmat_centering_split,
+            tabmat_state=_reduced_tabmat_state,
+            profile=profile,
+        )
+        if _scop_run is not None:
+            _carry_refusals(_scop_run.reduced_refusals, _reduced_tabmat_state)
+        # The certificate, read on the system's own location and
+        # spread, chooses only how the proposal's predictor is formed.  It no longer
+        # rebuilds the system: a rejection here can only fall on a
+        # column the builder centred first (a raw rung's columns
+        # passed this same test on these same numbers), so the rebuild
+        # recomputed a centred Gram by materialising the whole design
+        # twice per iteration.  A bounded column trips it whenever its
+        # weighted mean exceeds its centred RMS, e.g. a 0/1 indicator
+        # of weighted frequency above 1/2.
+        reduced_scale = np.sqrt(
+            np.maximum(np.diag(reduced_centered.data_gram), 0.0) / reduced_centered.sum_w
+        )
+        centred_prediction = not _raw_centering_well_scaled(
+            reduced_centered.mean_x,
+            reduced_scale,
+        )
+        _t_gram += time.perf_counter() - _t0
+
+        # The ordinary block's solve, the latent coordinates held fixed
+        _t0 = time.perf_counter()
+        reduced_rank = decompose_gram_if_authoritative(reduced_centered.hessian)
+        reduced_factor_rhs = None
+        if reduced_rank is None:
+            reduced_factor, certified_rhs = grouped_augmented_factor_rhs(
+                _reduced_dm,
+                W,
+                reduced_centered.penalty,
+                response=z_adj - reduced_centered.mean_z,
+                center=reduced_centered.mean_x,
+            )
+            certified = decompose_factor(
+                reduced_factor,
+                retain_factor_solve=True,
+            )
+            reduced_rank = certified
+            reduced_factor_rhs = certified_rhs
+            used_rank_certification = True
+        beta_reduced = (
+            reduced_rank.solve(reduced_centered.rhs)
+            if reduced_factor_rhs is None
+            else reduced_rank.solve_factor_rhs(reduced_factor_rhs)
+        )
+        _cond_est = reduced_rank.pre_truncation_condition
+        _used_svd = reduced_rank.used_svd_fallback
+        rank_truncated = reduced_rank.rank_truncated
+        joint = _scop_newton.step(
+            scop_thetas,
+            W=W,
+            z=z,
+            eta=committed.eta_unclipped,
+            reduced=reduced_centered,
+            solve=reduced_rank.solve,
+            ordinary_change=beta_reduced - committed.beta[_reduced_to_full],
+            debug_recorder=debug_recorder,
+            debug_context={**base_debug_context, "pirls_iteration": it + 1},
+        )
+        scop_results = joint.results
+        committed_reduced = committed.beta[_reduced_to_full]
+        centre = reduced_centered.centre_pair()
+        committed_level = committed.intercept + float(reduced_centered.mean_x @ committed_reduced)
+        if centred_prediction and scop_committed.level is not None:
+            # The committed level carried to this centre: its raw
+            # intercept reads it at u |m' b|, and the trials start there.
+            committed_level = _level_about(
+                scop_committed.level, scop_committed.centre, centre, committed_reduced
+            )
+        scop_ordinary = _SCOPOrdinarySolve(
+            columns=_reduced_to_full,
+            committed=committed_reduced,
+            committed_level=committed_level,
+            fixed=beta_reduced,
+            level=reduced_centered.mean_z,
+            coupled=joint.coupled,
+            mean=joint.mean,
+            mean_x=reduced_centered.mean_x,
+            centre=centre,
+            centred_rows=(
+                partial(_centred_system_matvec, _reduced_dm, system=reduced_centered)
+                if centred_prediction
+                else None
+            ),
+        )
+        beta_reduced = beta_reduced + joint.ordinary_correction
+        centred_level = reduced_centered.mean_z - joint.intercept_shift
+        intercept = centred_level - float(reduced_centered.mean_x @ beta_reduced)
+        proposal_thetas = [scop_results[gi].beta_new for gi in _scop_order]
+        beta = np.zeros(p)
+        beta[_reduced_to_full] = beta_reduced
+        for gi, theta in zip(_scop_order, proposal_thetas, strict=True):
+            beta[groups[gi].sl] = _scop_specs[gi].reparam.forward(theta)
+        _t_solve += time.perf_counter() - _t0
+
+        if centred_prediction:
+            eta_unconstrained = centred_level + _centred_system_matvec(
+                _reduced_dm, beta_reduced, reduced_centered
+            )
+        else:
+            eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
+        scop_proposal_eta_unclipped = (
+            eta_unconstrained + offset + _scop_newton.predictor(proposal_thetas)
+        )
+        self._t_gram, self._t_solve, self._cond_est = _t_gram, _t_solve, _cond_est
+        self._used_svd, self.rank_truncated = _used_svd, rank_truncated
+        self.used_rank_certification, self.beta = used_rank_certification, beta
+        self.intercept, self.centred_level = intercept, centred_level
+        self.scop_ordinary = scop_ordinary
+        self.scop_proposal_eta_unclipped = scop_proposal_eta_unclipped
+        self.scop_results = scop_results
+
+    def _step_structured(self, z_off: NDArray, _t0: float) -> None:
+        W, z, eta, weights, p, dm = self.W, self.z, self.eta, self.weights, self.p, self.dm
+        gms, groups, lambda2 = self.gms, self.groups, self.lambda2
+        reml_penalties, S_override, committed = self.reml_penalties, self.S_override, self.committed
+        newton_score, working_rows = self.newton_score, self.working_rows
+        _state_center, _structured_group_index = self._state_center, self._structured_group_index
+        _structured_layout, convergence = self._structured_layout, self.convergence
+        profile, penalty_matvec, _t_gram = self.profile, self.penalty_matvec, self._t_gram
+        _t_solve, proposal_centred_intercept = self._t_solve, self.proposal_centred_intercept
+        if _structured_group_index is None:  # pragma: no cover - selection invariant
+            raise RuntimeError("Structured backend has no dominant group.")
+        Wz = W * z_off if newton_score is None else W * z_off + newton_score
+        structured_system = build_structured_system(
+            gms,
+            groups,
+            W,
+            Wz,
+            signed=working_rows.curvature_source == "observed",
+            dominant_group_index=_structured_group_index,
+            layout=_structured_layout,
+            prior_weights=weights,
+        )
+        penalized_operator = build_penalized_structured_operator(
+            structured_system,
+            gms,
+            groups,
+            lambda2,
+            reml_penalties=reml_penalties,
+            S_override=S_override,
+        )
+        _last_working_structured = structured_system
+        _final_penalized_operator = penalized_operator
+        _t_gram += time.perf_counter() - _t0
+
+        _t0 = time.perf_counter()
+        with _structured_solver_errors():
+            augmented_factor, rhs, levenberg_shift, shift_diagonal = _build_iterate_factor(
+                structured_system,
+                penalized_operator,
+                observed=working_rows.curvature_source == "observed",
+            )
+            beta_aug = solve_augmented_normal_equations(
+                structured_system,
+                augmented_factor,
+                rhs,
+                centred=_state_center is not None,
+                extra=(
+                    None
+                    if shift_diagonal is None
+                    else np.concatenate(
+                        (
+                            [0.0],
+                            shift_diagonal(committed.beta)
+                            if callable(shift_diagonal)
+                            else shift_diagonal * committed.beta,
+                        )
+                    )
+                ),
+            )
+        if levenberg_shift and profile is not None:
+            profile["irls_levenberg_shifts"] = profile.get("irls_levenberg_shifts", 0) + 1
+            profile["irls_levenberg_max_shift"] = max(
+                float(profile.get("irls_levenberg_max_shift", 0.0)), levenberg_shift
+            )
+        beta = beta_aug[1:]
+        if _state_center is not None:
+            # the solve's intercept is the centred alpha about the same c0
+            proposal_centred_intercept = float(beta_aug[0])
+            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+        else:
+            intercept = float(beta_aug[0])
+        if augmented_factor.rank_truncated and (
+            isinstance(augmented_factor, SumToZeroTreeFactor) or newton_score is not None
+        ):
+            # A truncated factor is a generalized inverse, and its
+            # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
+            # representative: it resets the iterate's component along every
+            # truncated direction on each step.  Along an ``sz`` level whose
+            # rows the likelihood drives to the link's boundary (a one-row
+            # level with a response below a log link's range: no finite
+            # mode, Geyer 2009, Theorem 4) the direction is truncated once
+            # its rows' working weight falls to its rounding, and the reset
+            # moves those rows' eta arbitrarily far (+2844 from -20.7 on
+            # the stage-4 fixture); step halving then stalls every other
+            # coefficient and PIRLS ends uncertified.  The Gauss-Newton
+            # step of a rank-deficient problem is the minimum-norm
+            # *increment* (Pes & Rodriguez 2021, arXiv 2101.07560, eqs.
+            # 1.2-1.4; the Newton step of Wood, Pya & Safken 2016, section
+            # 3.1.2): ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S
+            # beta]``, the shifted factor's under a Levenberg shift, which
+            # leaves the iterate where it is along the truncated directions.
+            # Projecting the iterate onto the null space on every step (the
+            # minimal-norm variant, ibid. section 2, and in effect the
+            # solve above) is safe only along exact nulls; along a direction
+            # truncated as rank but carrying data it raises the residual,
+            # the failure they analyse.  Along an exact null (data and
+            # penalty both leave it free) the iterate keeps its component:
+            # no fitted value or penalty moves along it.  In exact
+            # arithmetic the same step as the solve above whenever nothing
+            # is truncated.
+            if newton_score is not None and profile is not None:
+                # a mean-space Newton step taken as the increment on a
+                # truncated structured factor
+                profile["irls_truncated_newton_increments"] = (
+                    profile.get("irls_truncated_newton_increments", 0) + 1
+                )
+            residual_rows = W * (z - eta) if newton_score is None else newton_score
+            gradient = np.empty(p + 1, dtype=np.float64)
+            gradient[0] = float(np.sum(residual_rows))
+            # the increment's intercept entry in the state's own coordinate:
+            # alpha about the centre when the state is centred (round 1's
+            # centred state; the raw intercept would cancel at a large
+            # column offset), else the raw intercept.  A centred state
+            # takes the score about the same centre, ``(X - 1 c')' r``
+            # formed on centred rows, so the border's ``X' r`` is never
+            # cancelled against ``c`` times the intercept's (a 1e16
+            # offset left no digit of it and the step was rejected)
+            if _state_center is not None:
+                gradient[1:] = centred_data_score(
+                    dm, residual_rows, _state_center
+                ) - penalty_matvec(committed.beta)
+                increment = augmented_factor.solve(
+                    gradient,
+                    centred=True,
+                    border_centred=gradient[augmented_factor.small_indices[1:]],
+                )
+            else:
+                gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                increment = augmented_factor.solve(gradient)
+            beta = committed.beta + increment[1:]
+            if _state_center is not None:
+                assert committed.centred_intercept is not None
+                proposal_centred_intercept = float(committed.centred_intercept) + float(
+                    increment[0]
+                )
+                intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+            else:
+                intercept = float(committed.intercept) + float(increment[0])
+        _used_svd = False  # one path: the engine has no SVD fallback
+        _cond_est = augmented_factor.schur_condition_estimate
+        rank_truncated = augmented_factor.rank_truncated
+        if convergence == "mode_score":
+            self._score_centre = _structured_score_centre(
+                structured_system, augmented_factor, dm, W, _state_center
+            )
+        _t_solve += time.perf_counter() - _t0
+        self._last_working_structured = _last_working_structured
+        self._final_penalized_operator, self._t_gram = _final_penalized_operator, _t_gram
+        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
+        self.proposal_centred_intercept, self._used_svd = proposal_centred_intercept, _used_svd
+        self._cond_est, self.rank_truncated = _cond_est, rank_truncated
+
+    def _step_dense(self, z_off: NDArray, _t0: float) -> None:
+        W, dm, committed, newton_score = self.W, self.dm, self.committed, self.newton_score
+        _state_center, _held_rank = self._state_center, self._held_rank
+        convergence, penalty_matvec, _t_gram = self.convergence, self.penalty_matvec, self._t_gram
+        _t_solve, proposal_centred_intercept = self._t_solve, self.proposal_centred_intercept
+        used_rank_certification = self.used_rank_certification
+        centered = self.get_centered_system(W, z_off)
+        if newton_score is not None:
+            # the working mean of ``z_off`` is the centred intercept;
+            # the score moves it by sum(u) / sum(W) and the slopes'
+            # right-hand side by X~' u (the step itself is the increment
+            # below; the stored system is the one it solved)
+            centered = replace(
+                centered,
+                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
+                rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
+            )
+        _last_working_centered = centered
+        _t_gram += time.perf_counter() - _t0
+        _t0 = time.perf_counter()
+        iteration_rank = decompose_gram_if_authoritative(centered.hessian)
+        iteration_factor_rhs = None
+        if iteration_rank is None:
+            certification = self.certify_centered_factor(
+                centered,
+                W,
+                response=None if newton_score is not None else z_off - centered.mean_z,
+            )
+            certified = certification.decomposition
+            if certification.transformed_rhs is None and newton_score is None:
+                raise RuntimeError(  # pragma: no cover - invariant
+                    "factor certification omitted its transformed RHS"
+                )
+            iteration_rank = certified
+            iteration_factor_rhs = certification.transformed_rhs
+            used_rank_certification = True
+        if newton_score is not None:
+            # the increment, not the iterate: a direction the factor
+            # truncates keeps the iterate's component instead of the
+            # minimum-norm reset of solving for it (Pes & Rodriguez
+            # 2021, eqs. 1.2-1.4)
+            beta = committed.beta + iteration_rank.solve(
+                centred_data_score(dm, newton_score, centered.mean_x)
+                - penalty_matvec(committed.beta)
+            )
+        else:
+            beta = (
+                iteration_rank.solve(centered.rhs)
+                if iteration_factor_rhs is None
+                else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
+            )
+        intercept = centered.mean_z - float(centered.mean_x @ beta)
+        _last_working_offset_mean = None
+        if _state_center is not None:
+            # the intercept about the state's centre, from the offset
+            # of the working mean to it, formed on centred rows (the
+            # system's pair, else ``centre_offset_mean``): no
+            # raw-scale cancellation
+            _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
+            proposal_centred_intercept = centered.mean_z - math.fsum(
+                _last_working_offset_mean * beta
+            )
+            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+        _cond_est = iteration_rank.pre_truncation_condition
+        _held_rank[0] = iteration_rank
+        _used_svd = iteration_rank.used_svd_fallback
+        rank_truncated = iteration_rank.rank_truncated
+        if convergence == "mode_score":
+            self._score_centre = (
+                centered.mean_x,
+                centered.sum_w,
+                np.diag(centered.data_gram),
+                (),
+                _last_working_offset_mean,
+            )
+        _t_solve += time.perf_counter() - _t0
+        self._last_working_centered, self._t_gram = _last_working_centered, _t_gram
+        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
+        self._last_working_offset_mean = _last_working_offset_mean
+        self.proposal_centred_intercept, self._cond_est = proposal_centred_intercept, _cond_est
+        self._used_svd, self.rank_truncated = _used_svd, rank_truncated
+        self.used_rank_certification = used_rank_certification
+
+    def _step_qp(self, it: int, z_off: NDArray, _t0: float) -> None:
+        W, dm, newton_score, A_all = self.W, self.dm, self.newton_score, self.A_all
+        b_all, prev_active_set = self.b_all, self.prev_active_set
+        _degeneracy_retry_failed = self._degeneracy_retry_failed
+        _reported_qp_nonconvergence, _t_gram = self._reported_qp_nonconvergence, self._t_gram
+        _t_solve = self._t_solve
+        centered = self.get_centered_system(W, z_off)
+        if newton_score is not None:
+            centered = replace(
+                centered,
+                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
+                rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
+            )
+        _last_working_centered = centered
+        _t_gram += time.perf_counter() - _t0
+
+        # Solve the constrained system in its existing coordinate space.
+        _t0 = time.perf_counter()
+        qp_result = _solve_constrained_qp_with_cold_retry(
+            centered.hessian,
+            centered.rhs,
+            A_all,
+            b_all,
+            prev_active_set,
+            degeneracy_retry=not _degeneracy_retry_failed,
+        )
+        beta = qp_result.beta
+        intercept = centered.mean_z - float(centered.mean_x @ beta)
+        proposal_qp_converged = bool(qp_result.converged)
+        prev_active_set = qp_result.active_set
+        # An uncertified result means the degenerate-vertex retry ran
+        # and failed (or was already latched off). It costs up to a
+        # full active-set solve, so it is not repeated while the QP
+        # keeps failing. A certified result re-arms it: while latched,
+        # that can only be an ordinary solve, so the failure was
+        # transient and a later #472 vertex keeps its rescue.
+        _degeneracy_retry_failed = not qp_result.converged
+        # Non-convergence usually persists for the rest of the fit, so
+        # latch the report to the first occurrence rather than emitting
+        # one identical line per IRLS iteration. A later solve may
+        # recover; the retained state's terminal authority is checked
+        # independently below.
+        if not qp_result.converged and not _reported_qp_nonconvergence:
+            _reported_qp_nonconvergence = True
+            logger.info(
+                "fit_irls_direct: constrained QP did not converge at "
+                "iteration %d; its KKT certificate is incomplete. "
+                "A later IRLS iteration may recover; subsequent inner "
+                "failures in this fit are not reported here.",
+                it + 1,
+            )
+        # Report what the QP actually inverted.  These were hardcoded
+        # to False/0.0, so the constrained branch published "perfectly
+        # conditioned" to the consumers below while the unconstrained
+        # branch above read the real numbers off its decomposition.
+        _used_svd = qp_result.used_svd_fallback
+        _cond_est = qp_result.condition
+        _t_solve += time.perf_counter() - _t0
+        self._last_working_centered, self._t_gram = _last_working_centered, _t_gram
+        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
+        self.proposal_qp_converged, self.prev_active_set = proposal_qp_converged, prev_active_set
+        self._degeneracy_retry_failed = _degeneracy_retry_failed
+        self._reported_qp_nonconvergence, self._used_svd = _reported_qp_nonconvergence, _used_svd
+        self._cond_est = _cond_est
+
+    def _search_scop(self, it: int) -> None:
+        beta, intercept = self.beta, self.intercept
+        scop_proposal_eta_unclipped = self.scop_proposal_eta_unclipped
+        scop_results, _scop_specs = self.scop_results, self._scop_specs
+        centred_level, scop_ordinary = self.centred_level, self.scop_ordinary
+        scop_committed, _scop_state, dm, y = self.scop_committed, self._scop_state, self.dm, self.y
+        weights, family, link, offset = self.weights, self.family, self.link, self.offset
+        trace_enabled, trace_run = self.trace_enabled, self.trace_run
+        trace_basis_id, resolved_lambdas = self.trace_basis_id, self.resolved_lambdas
+        max_halving, scop_merit_errors = self.max_halving, self.scop_merit_errors
+        _t_deviance, _t_deviance_eval = self._t_deviance, self._t_deviance_eval
+        emit_evaluation, with_scop_merit = self.emit_evaluation, self.with_scop_merit
+        _t0 = time.perf_counter()
+        # as ``_evaluate_scop_trial``: a proposal past the floating-point
+        # range is rejected by the line search, without a warning
+        with np.errstate(over="ignore", invalid="ignore"):
+            proposal_irls = self.evaluate_state(
+                beta,
+                intercept,
+                phase="scop_proposal",
+                iteration=it + 1,
+                alpha=1.0,
+                eta_unclipped=scop_proposal_eta_unclipped,
+                emit_trace=False,
+            )
+        proposal_scop = _SCOPTrialState(
+            irls=proposal_irls,
+            groups=tuple(
+                _SCOPGroupState(
+                    group_index=gi,
+                    beta_eff=_immutable_array(scop_results[gi].beta_new),
+                    gamma_eff=_immutable_array(
+                        _scop_specs[gi].reparam.forward(scop_results[gi].beta_new)
+                    ),
+                    H_scop_penalized=(
+                        None
+                        if scop_results[gi].H_penalized is None
+                        else _immutable_array(scop_results[gi].H_penalized)
+                    ),
+                    last_step_norm=float(scop_results[gi].step_norm),
+                    last_fisher_fallback=bool(scop_results[gi].used_fisher_fallback),
+                    discarded_directions=_immutable_or_none(scop_results[gi].discarded_directions),
+                )
+                for gi in sorted(_scop_specs)
+            ),
+            level=centred_level,
+            centre=scop_ordinary.centre,
+        )
+        proposal_scop = with_scop_merit(proposal_scop)
+        proposal_irls = proposal_scop.irls
+        emit_evaluation(
+            proposal_irls,
+            phase="scop_proposal",
+            iteration=it + 1,
+            alpha=1.0,
+        )
+        scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
+
+        def evaluate_scop_trial(alpha: float) -> _IRLSState:
+            if trace_enabled:
+                assert trace_run is not None
+                state_id = trace_run.next_state_id()
+                evaluation_id = trace_run.next_evaluation_id()
+            else:
+                state_id = None
+                evaluation_id = None
+            candidate = _evaluate_scop_trial(
+                committed=scop_committed,
+                proposed=proposal_scop,
+                alpha=alpha,
+                specs=_scop_specs,
+                dm=dm,
+                y=y,
+                weights=weights,
+                family=family,
+                link=link,
+                offset=offset,
+                state_id=state_id,
+                evaluation_id=evaluation_id,
+                basis_id=trace_basis_id,
+                lambdas=resolved_lambdas,
+                ordinary=scop_ordinary,
+            )
+            candidate = with_scop_merit(candidate)
+            emit_evaluation(
+                candidate.irls,
+                phase="scop_line_search_trial",
+                iteration=it + 1,
+                alpha=alpha,
+                enclosing_proposal_state_id=proposal_scop.irls.state_id,
+            )
+            scop_trial_cache[alpha] = candidate
+            return candidate.irls
+
+        # A step past ``_LATENT_MAX_STEP`` is searched from its first
+        # halving within it, on the same halving grid, with the full
+        # budget from there; the full step is not tried.
+        latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
+        shortened = math.ldexp(1.0, -latent_depth)
+        search_proposal = evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
+        decision = _select_irls_trial(
+            committed=scop_committed.irls,
+            proposal=search_proposal,
+            evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
+            invalid_state=self.observed_rows_invalid if self._observed_newton_active else None,
+            max_halving=max_halving,
+            extended_max_halving=lambda: _poisson_sqrt_halving_budget(
+                committed=scop_committed.irls,
+                proposal=search_proposal,
+                y=y,
+                weights=weights,
+                family=family,
+                link=link,
+                default=max_halving,
+            ),
+            merit_scale=0.0,
+            merit_roundoff=lambda candidate, current: (
+                scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
+            ),
+        )
+        if latent_depth:
+            # in fractions of the full step, which was evaluated but not tried
+            decision = replace(
+                decision,
+                trials_attempted=decision.trials_attempted + 1,
+                **(
+                    {}
+                    if decision.step_rejected
+                    else {
+                        "alpha": decision.alpha * shortened,
+                        "step_halvings": decision.step_halvings + latent_depth,
+                    }
+                ),
+            )
+        retained_scop = (
+            scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
+        )
+        retained = retained_scop.irls
+        evaluation_elapsed = time.perf_counter() - _t0
+        _t_deviance += evaluation_elapsed
+        _t_deviance_eval += evaluation_elapsed
+        beta = retained.beta.copy()
+        intercept = retained.intercept
+        eta_unclipped = retained.eta_unclipped
+        eta = retained.eta
+        mu = retained.mu
+        dev = retained.deviance
+        n_halvings = decision.step_halvings
+        step_rejected = decision.step_rejected
+        committed_groups = {group.group_index: group for group in scop_committed.groups}
+        for group_state in retained_scop.groups:
+            st = _scop_state[group_state.group_index]
+            st["beta_scop_prev"] = committed_groups[group_state.group_index].beta_eff.copy()
+            st["beta_scop"] = group_state.beta_eff.copy()
+            st["gamma_eff"] = group_state.gamma_eff.copy()
+            st["H_scop_penalized"] = (
+                None
+                if group_state.H_scop_penalized is None
+                else group_state.H_scop_penalized.copy()
+            )
+            st["last_step_norm"] = group_state.last_step_norm
+            st["last_fisher_fallback"] = group_state.last_fisher_fallback
+            st["discarded_directions"] = (
+                None
+                if group_state.discarded_directions is None
+                else group_state.discarded_directions.copy()
+            )
+        if n_halvings:
+            logger.info(
+                "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
+                "%d halvings, dev=%.2e",
+                it + 1,
+                decision.alpha,
+                n_halvings,
+                dev,
+            )
+        self._t_deviance, self._t_deviance_eval, self.beta = _t_deviance, _t_deviance_eval, beta
+        self.intercept, self.eta_unclipped, self.eta, self.mu = intercept, eta_unclipped, eta, mu
+        self.dev, self.n_halvings, self.step_rejected = dev, n_halvings, step_rejected
+        self.decision, self.proposal_scop, self.retained = decision, proposal_scop, retained
+        self.retained_scop = retained_scop
+
+    def _search(self, it: int) -> None:
+        beta, intercept = self.beta, self.intercept
+        proposal_centred_intercept, committed = self.proposal_centred_intercept, self.committed
+        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
+        abs_A_all, newton_score = self.abs_A_all, self.newton_score
+        newton_committed_rows, y, weights = self.newton_committed_rows, self.y, self.weights
+        family, link, _mean_space_invalid = self.family, self.link, self._mean_space_invalid
+        _link_domain_invalid, _start_lowered = self._link_domain_invalid, self._start_lowered
+        max_halving, objective_merit_scale = self.max_halving, self.objective_merit_scale
+        penalty_matvec, profile = self.penalty_matvec, self.profile
+        proposal_qp_converged = self.proposal_qp_converged
+        committed_active_set, prev_active_set = self.committed_active_set, self.prev_active_set
+        retained_qp_converged, _t_deviance = self.retained_qp_converged, self._t_deviance
+        _t_deviance_eval, evaluate_state = self._t_deviance_eval, self.evaluate_state
+        _t0 = time.perf_counter()
+        proposal = evaluate_state(
+            beta,
+            intercept,
+            phase="proposal",
+            iteration=it + 1,
+            alpha=1.0,
+            centred_intercept=proposal_centred_intercept,
+        )
+        trial_cache: dict[float, _IRLSState] = {1.0: proposal}
+        trial_directions: tuple[NDArray, float, NDArray] | None = None
+
+        def evaluate_trial(alpha: float) -> _IRLSState:
+            nonlocal trial_directions
+            if trial_directions is None:
+                trial_directions = (
+                    proposal.beta - committed.beta,
+                    proposal.intercept - committed.intercept,
+                    proposal.eta_unclipped - committed.eta_unclipped,
+                )
+            beta_direction, intercept_direction, eta_direction = trial_directions
+            beta_trial = committed.beta + alpha * beta_direction
+            intercept_trial = committed.intercept + alpha * intercept_direction
+            eta_trial = committed.eta_unclipped + alpha * eta_direction
+            centred_trial = None
+            if committed.centred_intercept is not None and proposal.centred_intercept is not None:
+                centred_trial = committed.centred_intercept + alpha * (
+                    proposal.centred_intercept - committed.centred_intercept
+                )
+            candidate = evaluate_state(
+                beta_trial,
+                intercept_trial,
+                phase="line_search_trial",
+                iteration=it + 1,
+                alpha=alpha,
+                eta_unclipped=eta_trial,
+                enclosing_proposal_state_id=proposal.state_id,
+                centred_intercept=centred_trial,
+            )
+            trial_cache[alpha] = candidate
+            return candidate
+
+        committed_constraints_feasible = True
+        proposal_constraints_feasible = True
+        constraint_trial_is_invalid = (
+            self.observed_rows_invalid if self._observed_newton_active else None
+        )
+        if has_constraints:
+            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+            committed_constraints_feasible = _is_feasible(
+                A_all,
+                committed.beta,
+                b_all,
+                _QP_FEASIBILITY_TOL,
+                abs_A=abs_A_all,
+            )
+            proposal_constraints_feasible = _is_feasible(
+                A_all,
+                proposal.beta,
+                b_all,
+                _QP_FEASIBILITY_TOL,
+                abs_A=abs_A_all,
+            )
+
+            def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
+                return not _is_feasible(
+                    A_all,
+                    candidate.beta,
+                    b_all,
+                    _QP_FEASIBILITY_TOL,
+                    abs_A=abs_A_all,
+                )
+
+        # the last trial's rows, read by both the decrease and its
+        # round-off allowance: one log1mexp pass per trial
+        _trial_rows: list = [None, None]
+
+        def _newton_rows_at(state: _IRLSState) -> NDArray:
+            if state is committed and newton_committed_rows is not None:
+                return newton_committed_rows
+            if _trial_rows[0] is not state:
+                _trial_rows[0] = state
+                _trial_rows[1] = mean_space_log_likelihood_rows(y, weights, state.eta_unclipped)
+            return _trial_rows[1]
+
+        def _newton_deviance_delta(candidate: _IRLSState, base: _IRLSState) -> float:
+            # each row's change first, then numpy's pairwise sum
+            return float(-2.0 * np.sum(_newton_rows_at(candidate) - _newton_rows_at(base)))
+
+        def _newton_merit_roundoff(candidate: _IRLSState, base: _IRLSState) -> float:
+            # The true deviance's own magnitudes: the rows' sizes (the
+            # log1mexp and product roundings, and the pairwise sum's
+            # gamma_{log2 n + 8}, are within 64 eps of them for any n
+            # below 2^50), plus each state's penalty part.
+            size = float(np.sum(np.abs(_newton_rows_at(candidate))))
+            size += float(np.sum(np.abs(_newton_rows_at(base))))
+            for state in (candidate, base):
+                if state.penalized_deviance is not None:
+                    size += abs(float(state.penalized_deviance) - float(state.deviance))
+            return 64.0 * _EPS_FLOAT * 2.0 * size
+
+        trial_is_invalid = constraint_trial_is_invalid
+        if _mean_space_invalid is not None and not _mean_space_invalid(
+            committed.eta_unclipped, weights
+        ):
+            # A feasible committed state keeps every accepted trial in the
+            # family's mean space (``mean_space_violation``).
+            def trial_is_invalid(candidate: _IRLSState, other=constraint_trial_is_invalid) -> bool:
+                assert _mean_space_invalid is not None
+                if _mean_space_invalid(candidate.eta_unclipped, weights):
+                    return True
+                return other is not None and other(candidate)
+
+        if _link_domain_invalid is not None and not _link_domain_invalid(
+            committed.eta_unclipped, weights
+        ):
+            # A committed state inside the link's domain keeps every
+            # accepted trial inside it (``link_domain_violation``).
+            def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
+                assert _link_domain_invalid is not None
+                if _link_domain_invalid(candidate.eta_unclipped, weights):
+                    return True
+                return other is not None and other(candidate)
+
+        decision = _select_irls_trial(
+            committed=committed,
+            proposal=proposal,
+            evaluate_state=evaluate_trial,
+            invalid_state=trial_is_invalid,
+            max_halving=max_halving,
+            extended_max_halving=lambda: max(
+                _poisson_sqrt_halving_budget(
+                    committed=committed,
+                    proposal=proposal,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                ),
+                # a lowered start can sit far inside the space with a
+                # proposal far outside it, past the ordinary budget
+                _mean_space_halving_budget(
+                    committed=committed,
+                    proposal=proposal,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                )
+                if _start_lowered
+                else max_halving,
+            ),
+            merit_scale=objective_merit_scale,
+            # a Newton step is judged on the model's own deviance, which
+            # still sees the rows clip_mu holds; Fisher's on the clipped one
+            merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
+                candidate,
+                base,
+                penalty_matvec,
+                deviance_delta=None
+                if newton_score is None
+                else _newton_deviance_delta(candidate, base),
+            ),
+            merit_roundoff=None if newton_score is None else _newton_merit_roundoff,
+            # a proposal that leaves the space: the halvings above the
+            # boundary are refused without a deviance pass each
+            first_halving=lambda: mean_space_first_halving(
+                committed=committed,
+                proposal=proposal,
+                weights=weights,
+                family=family,
+                link=link,
+            ),
+        )
+        if decision.skipped and profile is not None:
+            profile["irls_halvings_skipped"] = (
+                profile.get("irls_halvings_skipped", 0) + decision.skipped
+            )
+        if (
+            has_constraints
+            and decision.step_rejected
+            and not committed_constraints_feasible
+            and proposal_constraints_feasible
+            and _state_is_finite(proposal)
+        ):
+            # The objective comparison is not allowed to prefer an
+            # inadmissible state over a finite feasible QP proposal. Once
+            # this proposal is committed, convexity of A beta >= b and the
+            # invalid-state predicate above preserve feasibility on every
+            # subsequent accepted line-search segment.
+            decision = _IRLSStepDecision(
+                alpha=1.0,
+                step_halvings=0,
+                step_rejected=False,
+                trials_attempted=decision.trials_attempted,
+            )
+            logger.info(
+                "  irls_direct iter=%d: accepted finite feasible constrained "
+                "proposal after objective line search found no admissible trial",
+                it + 1,
+            )
+        retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+        if has_constraints:
+            # Rejection retains coefficients from the preceding working
+            # problem, while damping retains an interpolation.  Neither
+            # state is the current H/g solution whose stationarity and
+            # dual feasibility the inner QP certified.
+            retained_qp_converged = bool(
+                not decision.step_rejected and decision.alpha == 1.0 and proposal_qp_converged
+            )
+        evaluation_elapsed = time.perf_counter() - _t0
+        _t_deviance += evaluation_elapsed
+        _t_deviance_eval += evaluation_elapsed
+        beta = retained.beta.copy()
+        intercept = retained.intercept
+        eta_unclipped = retained.eta_unclipped
+        eta = retained.eta
+        mu = retained.mu
+        dev = retained.deviance
+        n_halvings = decision.step_halvings
+        step_rejected = decision.step_rejected
+        if step_rejected:
+            prev_active_set = committed_active_set
+        elif n_halvings:
+            logger.info(
+                "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
+                it + 1,
+                decision.alpha,
+                n_halvings,
+                dev,
+            )
+        self._t_deviance, self._t_deviance_eval = _t_deviance, _t_deviance_eval
+        self.proposal, self.decision, self.retained = proposal, decision, retained
+        self.retained_qp_converged, self.beta = retained_qp_converged, beta
+        self.intercept, self.eta_unclipped, self.eta, self.mu = intercept, eta_unclipped, eta, mu
+        self.dev, self.n_halvings, self.step_rejected = dev, n_halvings, step_rejected
+        self.prev_active_set = prev_active_set
+
+    def _converge(self, it: int) -> None:
+        _has_scop, convergence, tol, dev = self._has_scop, self.convergence, self.tol, self.dev
+        beta, beta_prev, intercept = self.beta, self.beta_prev, self.intercept
+        intercept_prev, mu, eta, retained = self.intercept_prev, self.mu, self.eta, self.retained
+        committed, _mode_ratios, mode_bar = self.committed, self._mode_ratios, self.mode_bar
+        _stagnation_window = self._stagnation_window
+        _stagnation_newton_available, max_iter = self._stagnation_newton_available, self.max_iter
+        _newton_latch, profile, step_rejected = self._newton_latch, self.profile, self.step_rejected
+        has_constraints, n_halvings = self.has_constraints, self.n_halvings
+        objective_prev, objective_merit_scale = self.objective_prev, self.objective_merit_scale
+        _last_mode_residual, score_stagnated = self._last_mode_residual, self.score_stagnated
+        mode_residual = self.mode_residual
+        proposal_state = self.proposal_scop.irls if _has_scop else self.proposal
+        dev_rel_change = None
+        coef_change = None
+        convergence_label: str = convergence
+        convergence_tolerance = tol
+        if np.isfinite(dev):
+            if convergence == "mode_score" and self._score_centre is not None:
+                # One-engine design §3.8: stop on the certificate's own score,
+                # in centred coordinates over the identified coefficients,
+                # once it meets the bar the certificate reads (no margin: the
+                # certificate is this residual, ``mode_score``).  The step
+                # length, with its raw intercept, is only reported.
+                coef_change = float(
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
+                )
+                residual = mode_residual(
+                    beta, intercept, mu, eta, centred_intercept=retained.centred_intercept
+                )
+                convergence_value = mode_bar * residual.ratio()
+                converged_this_iter = residual.ratio() <= 1.0
+                _last_mode_residual = residual
+                _mode_ratios.append(residual.ratio())
+                # The score stopped contracting (``stagnation_window``):
+                # the iterate is at its limiting accuracy, so the solve ends
+                # uncertified and the caller discloses it.
+                score_stagnated = (
+                    not converged_this_iter
+                    and residual.resolved
+                    and len(_mode_ratios) > _stagnation_window
+                    and min(_mode_ratios[-_stagnation_window:])
+                    > 0.5 * min(_mode_ratios[:-_stagnation_window])
+                )
+                switched_curvature = False
+                if (
+                    _stagnation_newton_available
+                    and not self._observed_newton_active
+                    and not converged_this_iter
+                    and (
+                        score_stagnated
+                        or (
+                            residual.resolved
+                            and rate_exhausts_budget(
+                                _mode_ratios, _stagnation_window, it + 1, max_iter
+                            )
+                        )
+                    )
+                ):
+                    # Fisher scoring near the mode contracts too slowly to
+                    # meet the bar in the budget, or not at all (the comment
+                    # at ``_observed_newton_active``): the iterations left
+                    # take Newton steps on the observed information, positive
+                    # for Gamma/log (``w y / mu``), so the penalized Hessian
+                    # stays positive definite.
+                    self._observed_newton_active = True
+                    self._can_reuse_weighted_gram = False
+                    score_stagnated = False
+                    switched_curvature = True
+                    _mode_ratios.clear()
+                    if _newton_latch is not None:
+                        _newton_latch[0] = True
+                    if profile is not None:
+                        profile["irls_fisher_newton_switches"] = (
+                            profile.get("irls_fisher_newton_switches", 0) + 1
+                        )
+                if (
+                    not converged_this_iter
+                    and not switched_curvature
+                    and not step_rejected
+                    and not _has_scop
+                    and not has_constraints
+                    and intercept == intercept_prev
+                    and retained.centred_intercept == committed.centred_intercept
+                    and np.array_equal(beta, beta_prev)
+                ):
+                    # The full step left the state bitwise where it was: the
+                    # iteration is a deterministic map at a float64 fixed
+                    # point, and every further iteration repeats this one
+                    # (the step-tolerance stop of Dennis & Schnabel 1996,
+                    # section 7.2, at its strictest).  A centred state is
+                    # ``(alpha, beta)``, and the raw intercept only its
+                    # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
+                    # and can hold still while ``alpha`` moves, so ``alpha``
+                    # is compared too (``None`` on both sides otherwise).  An
+                    # iteration that has just changed the map (the Newton
+                    # switch above) is not one: the next iteration takes the
+                    # other step.  A fixed point ends the solve, with the
+                    # floors resolved whatever the relative score: where
+                    # the residuals are at the rounding of the fitted values
+                    # (a model that fits its response exactly, as a linear
+                    # model can) the score's own scale ``sum |s|`` is
+                    # rounding too, the relative score sits near 1 and the
+                    # resolve cap would never let the floor be read.  A score
+                    # within its floor is certified; one above it is the
+                    # limiting accuracy, published as not converged.
+                    residual = mode_residual(
+                        beta,
+                        intercept,
+                        mu,
+                        eta,
+                        centred_intercept=retained.centred_intercept,
+                        resolve_cap=math.inf,
+                    )
+                    convergence_value = mode_bar * residual.ratio()
+                    converged_this_iter = residual.ratio() <= 1.0
+                    score_stagnated = not converged_this_iter
+                    _last_mode_residual = residual
+                    _mode_ratios[-1] = residual.ratio()
+            elif convergence in ("coefficients", "mode_score"):
+                coef_change = float(
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
+                )
+                coef_change = max(
+                    coef_change,
+                    abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
+                )
+                if _has_scop:
+                    latent_change = max(
+                        float(
+                            np.max(
+                                np.abs(retained_group.beta_eff - committed_group.beta_eff)
+                                / np.maximum(1.0, np.abs(retained_group.beta_eff))
+                            )
+                        )
+                        for retained_group, committed_group in zip(
+                            self.retained_scop.groups,
+                            self.scop_committed.groups,
+                            strict=True,
+                        )
+                    )
+                    coef_change = max(coef_change, latent_change)
+                convergence_value = coef_change
+                converged_this_iter = coef_change < tol
+                if _has_scop and n_halvings:
+                    # a damped step's change is a fraction of the full
+                    # step's and bounds nothing either (below)
+                    converged_this_iter = False
+            else:
+                objective = (
+                    retained.deviance
+                    if retained.penalized_deviance is None
+                    else retained.penalized_deviance
+                )
+                if np.isfinite(objective_prev):
+                    dev_rel_change = _irls_objective_relative_change(
+                        objective=objective,
+                        previous=objective_prev,
+                        objective_scale=objective_merit_scale,
+                    )
+                converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
+                if _has_scop and n_halvings:
+                    # The decrease of a full joint Newton step is its Newton
+                    # decrement, which bounds the distance to the mode (Boyd &
+                    # Vandenberghe 2004, sec. 9.5.1); a damped step's is a
+                    # fraction of it and bounds nothing, so it never stops the
+                    # fit: the next full step's does.
+                    converged_this_iter = False
+                convergence_value = dev_rel_change
+        else:
+            converged_this_iter = False
+            convergence_value = None
+        if step_rejected:
+            converged_this_iter = False
+        self.proposal_state, self.dev_rel_change = proposal_state, dev_rel_change
+        self.coef_change, self.convergence_label = coef_change, convergence_label
+        self.convergence_tolerance = convergence_tolerance
+        self.convergence_value, self.converged_this_iter = convergence_value, converged_this_iter
+        self.score_stagnated, self._last_mode_residual = score_stagnated, _last_mode_residual
+
+    def _judge_mean_space(self) -> None:
+        A_all, _has_scop, _mean_space_invalid = self.A_all, self._has_scop, self._mean_space_invalid
+        _mean_space_newton = self._mean_space_newton
+        _mean_space_newton_available = self._mean_space_newton_available
+        _stagnation_window, _start_lowered = self._stagnation_window, self._start_lowered
+        _true_ratios, committed = self._true_ratios, self.committed
+        converged_this_iter, dev, family = self.converged_this_iter, self.dev, self.family
+        has_constraints, link, mode_bar = self.has_constraints, self.link, self.mode_bar
+        prev_active_set, retained = self.prev_active_set, self.retained
+        step_rejected, weights = self.step_rejected, self.weights
+        convergence_label, convergence_value = self.convergence_label, self.convergence_value
+        convergence_tolerance, score_stagnated = self.convergence_tolerance, self.score_stagnated
+        _true_stop_ratio = self._true_stop_ratio
+        # Once Newton steps are engaged the model's own certificate is the
+        # stop, every iteration: the clipped rule a mode_score fit stops on
+        # cannot pass at a mode it does not see (below).
+        newton_stop = bool(_mean_space_newton and np.isfinite(dev) and not step_rejected)
+        # A state holding rows at the boundary is never published as converged
+        # (``mean_space_boundary`` below), so its stop stands as on master.
+        at_boundary = bool(
+            (converged_this_iter or newton_stop)
+            and _mean_space_invalid is not None
+            and mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
+        )
+        # rows clip_mu holds, at the step's base or where it landed
+        clipped_rows = (
+            mean_space_clipped_rows(family, link, committed.eta_unclipped, weights)
+            + mean_space_clipped_rows(family, link, retained.eta_unclipped, weights)
+            if converged_this_iter and _mean_space_invalid is not None and not at_boundary
+            else 0
+        )
+        _true_confirmed = False
+        if not at_boundary and (
+            newton_stop or (converged_this_iter and (clipped_rows or _start_lowered))
+        ):
+            # On a row whose mean leaves clip_mu's band the clipped deviance
+            # is flat and the step's score is not the binomial/log score, and
+            # a lowered start can sit far below that band: a stop read off
+            # the clipped objective, or off a step taken from it, is accepted
+            # only where the model's own penalized score certifies it
+            # (``true_mode_residual``).  A refused stop goes on.  Each refused
+            # stop sits where the iteration's own rule passed, so a score that
+            # has stopped contracting across them (``stagnation_window``) will
+            # not reach the bar: the fit ends uncertified, as under
+            # ``mode_score``.  Under Newton steps the certificate alone
+            # decides, at every iteration, and its own ratios alone stagnate.
+            true_ratio, true_resolved = self.true_mode_residual(
+                retained.beta,
+                retained.intercept,
+                retained.eta_unclipped,
+                (
+                    A_all[list(prev_active_set)]
+                    if has_constraints and A_all is not None and prev_active_set
+                    else None
+                ),
+                self.retained_scop.groups if _has_scop else None,
+            )
+            # the state is certified on the model's own score, Newton or not,
+            # where the clip holds a row (or Newton decided): a criterion read
+            # at it reads the model's own likelihood and curvature
+            _true_confirmed = bool(true_ratio <= 1.0 and (newton_stop or clipped_rows))
+            if newton_stop:
+                converged_this_iter = bool(true_ratio <= 1.0)
+                score_stagnated = False
+                # this rule decided: its numbers are the ones published
+                convergence_label = "mean_space_mode_score"
+                convergence_value = mode_bar * true_ratio
+                convergence_tolerance = mode_bar
+                _true_stop_ratio = true_ratio
+            if not true_ratio <= 1.0:
+                converged_this_iter = False
+                _true_ratios.append(true_ratio)
+                score_stagnated = len(_true_ratios) > _stagnation_window and not (
+                    min(_true_ratios[-_stagnation_window:])
+                    < 0.5 * min(_true_ratios[:-_stagnation_window])
+                )
+                if (
+                    _mean_space_newton_available
+                    and not _mean_space_newton
+                    and (true_resolved or score_stagnated)
+                ):
+                    # Fisher scoring has carried the fit to where its own
+                    # stop passes but the model's score does not: near the
+                    # mode (resolved), or where scoring has stalled.  The
+                    # iterations left take Newton steps on the observed
+                    # information (``irls_state.mean_space_newton_rows``),
+                    # which converge quadratically where scoring is linear;
+                    # far from the mode Fisher's steps stay the safer ones
+                    # (Green 1984, section 2.3 and its discussion).
+                    _mean_space_newton = True
+                    _true_ratios.clear()
+                    score_stagnated = False
+
+        _true_stop = bool(newton_stop and not at_boundary)
+        self.converged_this_iter, self.score_stagnated = converged_this_iter, score_stagnated
+        self.convergence_label, self.convergence_value = convergence_label, convergence_value
+        self.convergence_tolerance, self._true_confirmed = convergence_tolerance, _true_confirmed
+        self._true_stop, self._true_stop_ratio = _true_stop, _true_stop_ratio
+        self._mean_space_newton = _mean_space_newton
+
+    def _terminate(self, it: int) -> None:
+        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
+        abs_A_all, beta, converged_this_iter = self.abs_A_all, self.beta, self.converged_this_iter
+        retained_qp_converged, step_rejected = self.retained_qp_converged, self.step_rejected
+        dev, max_iter, score_stagnated = self.dev, self.max_iter, self.score_stagnated
+        constraints_feasible_this_iter = True
+        if has_constraints:
+            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+            constraints_feasible_this_iter = _is_feasible(
+                A_all,
+                beta,
+                b_all,
+                _QP_FEASIBILITY_TOL,
+                abs_A=abs_A_all,
+            )
+            # Objective or coefficient stagnation cannot certify a constrained
+            # mode whose retained coefficients are outside the feasible set.
+            # Keep iterating while budget remains: a later QP/line-search step
+            # may still repair an infeasible warm start.
+            if not constraints_feasible_this_iter:
+                converged_this_iter = False
+            # Outer coefficient/deviance stagnation cannot replace the inner
+            # QP's stationarity and dual-feasibility certificate. Keep a
+            # finite feasible iterate and continue: a later full QP proposal
+            # may still obtain the missing certificate.
+            if not retained_qp_converged:
+                converged_this_iter = False
+
+        terminal_constraint_infeasible = bool(
+            not constraints_feasible_this_iter
+            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
+        )
+        terminal_constraint_kkt_incomplete = bool(
+            has_constraints
+            and not retained_qp_converged
+            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
+        )
+
+        if terminal_constraint_infeasible:
+            termination_reason = "constraint_infeasible"
+        elif terminal_constraint_kkt_incomplete:
+            termination_reason = "constraint_kkt_incomplete"
+        elif step_rejected:
+            termination_reason = "step_rejected"
+        elif not np.isfinite(dev):
+            termination_reason = "nonfinite_deviance"
+        elif converged_this_iter:
+            termination_reason = "converged"
+        elif score_stagnated:
+            termination_reason = "score_stagnated"
+        elif it + 1 == max_iter:
+            termination_reason = "max_iter"
+        else:
+            termination_reason = "continue"
+        self.converged_this_iter, self.termination_reason = converged_this_iter, termination_reason
+
+    def _record(self, it: int) -> None:
+        trace_enabled, trace_run = self.trace_enabled, self.trace_run
+        trace_purpose, committed = self.trace_purpose, self.committed
+        proposal_state, retained, decision = self.proposal_state, self.retained, self.decision
+        converged_this_iter, convergence_label = self.converged_this_iter, self.convergence_label
+        convergence_value = self.convergence_value
+        convergence_tolerance = self.convergence_tolerance
+        termination_reason, working_rows = self.termination_reason, self.working_rows
+        newton_score, dev, capture_extrema = self.newton_score, self.dev, self.capture_extrema
+        working_eta, working_eta_unclipped = self.working_eta, self.working_eta_unclipped
+        eta, eta_unclipped = self.eta, self.eta_unclipped
+        record_diagnostics, W, w_ratio, mu = self.record_diagnostics, self.W, self.w_ratio, self.mu
+        intercept, n_halvings, _cond_est = self.intercept, self.n_halvings, self._cond_est
+        _used_svd, working_mu, step_rejected = self._used_svd, self.working_mu, self.step_rejected
+        rank_truncated, iteration_log = self.rank_truncated, self.iteration_log
+        if trace_enabled:
+            assert trace_run is not None
+            trace_run.emit_lazy(
+                "step_decision",
+                lambda: {
+                    "solver": "irls_direct",
+                    "outer_iteration": it + 1,
+                    "base_state_id": committed.state_id,
+                    "proposal_state_id": proposal_state.state_id,
+                    "committed_state_id": retained.state_id,
+                    "accepted_alpha": decision.alpha,
+                    "step_halvings": decision.step_halvings,
+                    "trials_attempted": decision.trials_attempted,
+                    "step_rejected": decision.step_rejected,
+                    "fit_converged": converged_this_iter,
+                    "convergence_criterion": convergence_label,
+                    "convergence_value": convergence_value,
+                    "convergence_tolerance": convergence_tolerance,
+                    "termination_reason": termination_reason,
+                    "working_curvature": (
+                        working_rows.curvature_source if newton_score is None else "observed"
+                    ),
+                },
+                channel="pirls",
+                purpose=trace_purpose,
+            )
+        if np.isfinite(dev):
+            self.emit_state_commit(
+                retained,
+                iteration=it + 1,
+                fit_converged=converged_this_iter,
+                convergence_value=convergence_value,
+                termination_reason=termination_reason,
+                convergence_label=convergence_label,
+                convergence_tolerance=convergence_tolerance,
+            )
+
+        working_eta_clipped = False
+        eta_clipped = False
+        if capture_extrema:
+            # Each of these is read again by the diagnostics row below, which
+            # only runs when ``capture_extrema`` is true (see its definition).
+            # Bind once: they are O(n) passes over arrays nothing mutates
+            # between here and the append.
+            working_eta_min = float(np.min(working_eta))
+            working_eta_max = float(np.max(working_eta))
+            working_eta_min_unclipped = float(np.min(working_eta_unclipped))
+            working_eta_max_unclipped = float(np.max(working_eta_unclipped))
+            eta_min = float(np.min(eta))
+            eta_max = float(np.max(eta))
+            eta_min_unclipped = float(np.min(eta_unclipped))
+            eta_max_unclipped = float(np.max(eta_unclipped))
+            working_eta_clipped = bool(
+                working_eta_min_unclipped < working_eta_min
+                or working_eta_max_unclipped > working_eta_max
+            )
+            eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
+
+        # Record per-iteration diagnostics
+        if record_diagnostics:
+            top_idx, bot_idx = _extreme_weight_indices(W)
+            w_min = float(W.min())
+            w_max = float(W.max())
+            iteration_log.append(
+                IterationDiagnostics(
+                    iteration=it + 1,
+                    deviance=dev,
+                    w_min=w_min,
+                    w_max=w_max,
+                    w_ratio=w_ratio,
+                    mu_min=float(mu.min()),
+                    mu_max=float(mu.max()),
+                    eta_min=eta_min,
+                    eta_max=eta_max,
+                    intercept=intercept,
+                    step_halvings=n_halvings,
+                    top_w_indices=top_idx,
+                    bottom_w_indices=bot_idx,
+                    cond_estimate=_cond_est,
+                    used_svd_fallback=_used_svd,
+                    raw_w_min=w_min,
+                    raw_w_max=w_max,
+                    raw_w_ratio=w_ratio,
+                    eta_min_unclipped=eta_min_unclipped,
+                    eta_max_unclipped=eta_max_unclipped,
+                    eta_clipped=eta_clipped,
+                    working_mu_min=float(working_mu.min()),
+                    working_mu_max=float(working_mu.max()),
+                    working_eta_min=working_eta_min,
+                    working_eta_max=working_eta_max,
+                    working_eta_min_unclipped=working_eta_min_unclipped,
+                    working_eta_max_unclipped=working_eta_max_unclipped,
+                    working_eta_clipped=working_eta_clipped,
+                    step_rejected=step_rejected,
+                    rank_truncated=rank_truncated,
+                    trials_attempted=decision.trials_attempted,
+                    accepted_alpha=decision.alpha,
+                    base_state_id=committed.state_id,
+                    proposal_state_id=proposal_state.state_id,
+                    committed_state_id=retained.state_id,
+                    evaluation_id=retained.evaluation_id,
+                    state_space=retained.state_space,
+                    basis_id=retained.basis_id,
+                    convergence_criterion=convergence_label,
+                    convergence_value=convergence_value,
+                    convergence_tolerance=convergence_tolerance,
+                    termination_reason=termination_reason,
+                )
+            )
+        self.eta_clipped, self.working_eta_clipped = eta_clipped, working_eta_clipped
+
+    def _record_debug_row(self, it: int) -> None:
+        debug_recorder, base_debug_context = self.debug_recorder, self.base_debug_context
+        dev, dev_rel_change, coef_change = self.dev, self.dev_rel_change, self.coef_change
+        convergence, converged_this_iter, W = self.convergence, self.converged_this_iter, self.W
+        w_ratio, mu, eta_unclipped = self.w_ratio, self.mu, self.eta_unclipped
+        eta_clipped, eta, working_mu = self.eta_clipped, self.eta, self.working_mu
+        working_eta_unclipped = self.working_eta_unclipped
+        working_eta_clipped, working_eta = self.working_eta_clipped, self.working_eta
+        n_halvings, decision, step_rejected = self.n_halvings, self.decision, self.step_rejected
+        committed, proposal_state, retained = self.committed, self.proposal_state, self.retained
+        rank_truncated, _cond_est, _used_svd = self.rank_truncated, self._cond_est, self._used_svd
+        _has_scop, working_rows, newton_score = self._has_scop, self.working_rows, self.newton_score
+        debug_recorder.append_jsonl(
+            "pirls",
+            {
+                **base_debug_context,
+                "iteration": it + 1,
+                "deviance": float(dev),
+                "deviance_relative_change": (
+                    float(dev_rel_change) if dev_rel_change is not None else None
+                ),
+                "coefficient_change": float(coef_change) if coef_change is not None else None,
+                "convergence": convergence,
+                "converged": bool(converged_this_iter),
+                "w_min": float(W.min()),
+                "w_max": float(W.max()),
+                "w_ratio": float(w_ratio),
+                "mu_min": float(mu.min()),
+                "mu_max": float(mu.max()),
+                "eta_min_unclipped": float(np.min(eta_unclipped)),
+                "eta_max_unclipped": float(np.max(eta_unclipped)),
+                "eta_clipped": bool(eta_clipped),
+                "eta_min": float(eta.min()),
+                "eta_max": float(eta.max()),
+                "working_mu_min": float(working_mu.min()),
+                "working_mu_max": float(working_mu.max()),
+                "working_eta_min_unclipped": float(np.min(working_eta_unclipped)),
+                "working_eta_max_unclipped": float(np.max(working_eta_unclipped)),
+                "working_eta_clipped": bool(working_eta_clipped),
+                "working_eta_min": float(working_eta.min()),
+                "working_eta_max": float(working_eta.max()),
+                "step_halvings": int(n_halvings),
+                "trials_attempted": int(decision.trials_attempted),
+                "step_rejected": bool(step_rejected),
+                "base_state_id": committed.state_id,
+                "proposal_state_id": proposal_state.state_id,
+                "committed_state_id": retained.state_id,
+                "rank_truncated": rank_truncated,
+                "cond_estimate": float(_cond_est),
+                "used_svd_fallback": bool(_used_svd),
+                "has_scop": bool(_has_scop),
+                "working_curvature": (
+                    working_rows.curvature_source if newton_score is None else "observed"
+                ),
+            },
+        )
