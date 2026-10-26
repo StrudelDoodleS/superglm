@@ -589,7 +589,9 @@ def _build_pattern_plan(dm) -> _PatternPlan | None:
         if size <= 0 or radix_product > max_uint64 // size:
             return None
         np.multiply(mixed_key, np.uint64(size), out=mixed_key)
-        np.add(mixed_key, codes, out=mixed_key, casting="unsafe")
+        # Codes are nonnegative, so they add as uint64: NumPy adds uint64 and
+        # int64 in float64, exact only below 2**53, while the key runs to 2**64.
+        np.add(mixed_key, np.asarray(codes).astype(np.uint64, copy=False), out=mixed_key)
         radix_product *= size
     unique_keys, row_patterns = np.unique(mixed_key, return_inverse=True)
     if unique_keys.size > np.iinfo(np.int32).max:
