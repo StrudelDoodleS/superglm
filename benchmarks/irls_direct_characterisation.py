@@ -1375,10 +1375,9 @@ def _run(args) -> int:
     env = {**os.environ, **PINNED_ENV}
     command = [sys.executable]
     if args.coverage:
-        command += ["-m", "coverage", "run", "--parallel-mode",
-                    f"--data-file={out / 'coverage' / '.coverage'}",
-                    "--include=*/superglm/solvers/irls_direct*"]  # fmt: skip
         (out / "coverage").mkdir(exist_ok=True)
+        command += ["-m", "coverage", "run", "--parallel-mode", f"--rcfile={_coverage_rc(out)}",
+                    f"--data-file={out / 'coverage' / '.coverage'}"]  # fmt: skip
     command += [str(Path(__file__).resolve()), "_case"]
     started = time.perf_counter()
 
@@ -1435,43 +1434,80 @@ def _run(args) -> int:
     return 0
 
 
+# What ``--coverage`` reports: the solver's entry point, and the fit it runs, which
+# is a wrapper, a method-object class, its fields and recorder, and the module
+# functions it binds with ``partial``.  Its total (``the fit``) is everything but
+# the entry point.
+_COVERAGE_FUNCTIONS = (
+    "fit_irls_direct",
+    "_fit_irls_direct_once",
+    "_certify_centered_factor",
+    "_retained_rank_info",
+)
+_COVERAGE_CLASS_PREFIX = "_IRLSDirect"
+
+
+def _line_ranges(lines: list[int]) -> str:
+    ranges, start, previous = [], None, None
+    for line in lines:
+        if previous is None or line != previous + 1:
+            if start is not None:
+                ranges.append((start, previous))
+            start = line
+        previous = line
+    if start is not None:
+        ranges.append((start, previous))
+    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in ranges)
+
+
+def _coverage_rc(out: Path) -> Path:
+    """The run's own coverage settings, measuring and reporting the solver module only.
+
+    Without them coverage reads the working directory's configuration, and a
+    ``source`` there (this repository's ``pyproject.toml``) replaces the include.
+    """
+    rc = out / "coverage" / "coveragerc"
+    include = "include = */superglm/solvers/irls_direct*\n"
+    rc.write_text(f"[run]\n{include}[report]\n{include}", encoding="utf-8")
+    return rc
+
+
 def _coverage_report(out: Path) -> None:
     import ast
 
-    data = out / "coverage" / ".coverage"
-    subprocess.run([sys.executable, "-m", "coverage", "combine", f"--data-file={data}"],
+    data, rc = out / "coverage" / ".coverage", f"--rcfile={_coverage_rc(out)}"
+    subprocess.run([sys.executable, "-m", "coverage", "combine", rc, f"--data-file={data}"],
                    cwd=out / "coverage", capture_output=True, check=False)  # fmt: skip
     report = out / "coverage" / "coverage.json"
-    subprocess.run([sys.executable, "-m", "coverage", "json", f"--data-file={data}", "-o",
+    subprocess.run([sys.executable, "-m", "coverage", "json", rc, f"--data-file={data}", "-o",
                     str(report)], capture_output=True, check=False)  # fmt: skip
     if not report.exists():
         print("coverage: no data")
         return
     files = json.loads(report.read_text())["files"]
-    for path, entry in files.items():
+    fit_hit = fit_statements = 0
+    for path, entry in sorted(files.items()):
         executed = set(entry["executed_lines"])
         missing = set(entry["missing_lines"])
         tree = ast.parse(Path(path).read_text())
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef) and node.name in (
-                "_fit_irls_direct_once",
-                "fit_irls_direct",
-            ):
-                span = set(range(node.lineno, node.end_lineno + 1))
-                hit, miss = len(executed & span), sorted(missing & span)
-                ranges, start, previous = [], None, None
-                for line in miss:
-                    if previous is None or line != previous + 1:
-                        if start is not None:
-                            ranges.append((start, previous))
-                        start = line
-                    previous = line
-                if start is not None:
-                    ranges.append((start, previous))
-                share = hit / max(hit + len(miss), 1)
-                print(f"coverage {node.name}: {hit}/{hit + len(miss)} statements ({share:.1%})")
-                print("  missed: " + ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in ranges))
+            wanted = (isinstance(node, ast.FunctionDef) and node.name in _COVERAGE_FUNCTIONS) or (
+                isinstance(node, ast.ClassDef) and node.name.startswith(_COVERAGE_CLASS_PREFIX)
+            )
+            if not wanted:
+                continue
+            first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+            span = set(range(first, node.end_lineno + 1))
+            hit, miss = len(executed & span), sorted(missing & span)
+            if node.name != "fit_irls_direct":
+                fit_hit, fit_statements = fit_hit + hit, fit_statements + hit + len(miss)
+            share = hit / max(hit + len(miss), 1)
+            print(f"coverage {node.name}: {hit}/{hit + len(miss)} statements ({share:.1%})")
+            if miss:
+                print("  missed: " + _line_ranges(miss))
         print(f"coverage {Path(path).name}: {entry['summary']['percent_covered']:.1f}%")
+    share = fit_hit / max(fit_statements, 1)
+    print(f"coverage the fit: {fit_hit}/{fit_statements} statements ({share:.1%})")
 
 
 def _headers(directory: Path) -> dict[str, dict]:
