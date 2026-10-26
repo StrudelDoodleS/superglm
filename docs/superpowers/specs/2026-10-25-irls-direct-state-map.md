@@ -600,10 +600,11 @@ The package `superglm/solvers/irls_direct/`:
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` (SCOP, dense and the QP since S3b) |
 | `_recorder` | `_IRLSDirectRecorder` |
 | `_step` | `_IRLSDirectStep`, the interface (a `Protocol`) |
 | `_qr` | `_IRLSDirectQRStep`, `_sqrt_penalty_augmented`, `_centred_rows` |
+| `_structured` | (S3b) `_IRLSDirectStructuredStep`; `StructuredSolverError` (its `__module__` still the package) and `_structured_solver_errors`; the Levenberg shifts (`_LEVENBERG_SHIFTS`, `_levenberg_shifted_operator`, `_levenberg_shifted_leaf_operator`, `_build_iterate_factor`); `_structured_score_centre` |
 | `_centred` | `_system_offset_mean`, read by QR, the dense step and the final system |
 
 A strategy module never imports `_fit`; `_fit` imports the strategies. A helper that a
@@ -613,8 +614,11 @@ The interface as it stands:
 
 ```python
 class _IRLSDirectStep(Protocol):
-    backend: str                       # what the fit publishes ("qr", "gram")
+    backend: str                       # what the fit publishes ("qr", "gram", "structured")
     data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None
+                                       # read by the centred finaliser
+    finalise: Callable[[_IRLSDirectFit], None] | None
+                                       # (S3b) the step's own finaliser; None: the centred one
     def propose(self, fit, it: int) -> None
 ```
 
@@ -644,8 +648,43 @@ Where §6.3 changed, and why:
    discretized-design warning keeps its place. `_use_qr` remains a local there, for the
    centred builder's gates.
 
+Where S3b (the structured step) changed it:
+
+8. **`finalise` is the structured finaliser.** F08's and F10's structured branches and
+   F09's structured `cache_out` entries are one method of the step. It writes what
+   publication reads of the geometry: `XtWX_beta`, `XtWX_S_inv_beta`, `log_det_H`,
+   `reml_hessian_rank`, `p_eff` and `structured_factor`, and `None` for
+   `reml_geometry_summary`, `retained_reml_decomposition` and `rank_info`. A step with
+   `finalise = None` keeps the centred finaliser, the fit's `_final_system` and
+   `_final_geometry`, which now hold the centred route alone. The structured finaliser
+   builds no `RankInfo`, so `data_rank` is `None` there only to satisfy the interface.
+   Publication reads the centred moments (`XtWX`, `XtW1`, `sum_W`, `centered_final`) in
+   SCOP's post-fit inference alone, their one reader.
+9. **The structured step is chosen in `_setup_design`**, where `resolve_structured_backend`
+   chooses the route, because its layout fixes the state's centre before the first state
+   is evaluated. Its constructor applies the fs BLAS cap (`keep_narrow_cap`) where the fit
+   did; `state_centre` forms `c0`. QR and Gram are still chosen in `_setup_systems`.
+10. **The step keeps its own last system**, which the fREML performance iteration
+    publishes. The fit's `_structured_group_index`, `_structured_layout`,
+    `_last_working_structured`, `_final_penalized_operator`, `structured_final` and
+    `mean_x` are gone. The step's write of `_final_penalized_operator` was dead: the
+    finaliser always rebuilt the operator from the final system.
+11. **No search hook and no L08.** The structured route takes the shared search, which
+    never read the route. L08 is the Gram step's alone: on the structured route
+    `_used_svd` is always False, so it only ever reset the counter to 0.
+12. **`_use_structured` is a setup field now:** the gate of the Gram state centre
+    (`_setup_routes`) and the centred builder's four gates (`_setup_systems`) read it.
+    Every branch on it after setup is gone, `_publish`'s included (`step.backend`).
+13. **For the queued "reuse the last decomposition of the same Hessian" patches**
+    (centred route): the structured analogue fits inside the step. Under
+    `_return_working_system` the final system is the step's last system, and its
+    unshifted factor is the one the last iteration took; keeping that factor and its shift
+    on the step would let `finalise` reuse it.
+
 Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
-A name that a strategy module reads is patched in that module.
+A name that a strategy module reads is patched in that module: since S3b the structured
+factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
+`centre_offset_mean` are `_structured`'s, and tests read the two errors there.
 
 ## 7. Is the length lines-of-code abuse?
 
