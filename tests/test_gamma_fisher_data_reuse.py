@@ -19,6 +19,7 @@ from superglm.group_matrix import (
 from superglm.links import IdentityLink, LogLink
 from superglm.reml import direct, observed_geometry
 from superglm.solvers import centered_system
+from superglm.solvers.irls_direct import _dense as irls_direct_dense
 from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.irls_state import _IRLSStepDecision
 from superglm.solvers.scop import build_scop_solver_reparam
@@ -394,9 +395,8 @@ def test_gram_certificate_refusal_clears_payload(monkeypatch):
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
-    monkeypatch.setattr(
-        irls_direct, "decompose_gram_if_authoritative", lambda *args, **kwargs: None
-    )
+    for module in (irls_direct, irls_direct_dense):
+        monkeypatch.setattr(module, "decompose_gram_if_authoritative", lambda *args, **kwargs: None)
     result, inverse = _fit(problem, entry)
     assert result.converged
     np.testing.assert_allclose(inverse, np.diag([1 / 5, 1 / 2.5]), rtol=32 * np.finfo(float).eps)

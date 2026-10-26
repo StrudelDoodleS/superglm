@@ -184,10 +184,10 @@ def test_qp_curvature_constraints_reject_a_repeated_interior_knot(degree):
 
 @pytest.mark.parametrize("penalty", ["ssp", "none"])
 def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(penalty, monkeypatch):
-    from superglm.solvers.irls_direct import _fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.solvers.rank import decompose_gram
 
-    real_solve = irls_direct.solve_constrained_qp
+    real_solve = irls_direct_qp.solve_constrained_qp
     terminal_qp = {}
 
     def record_working_qp(H, g, A, b, **kwargs):
@@ -202,7 +202,7 @@ def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(pe
         )
         return result
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", record_working_qp)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", record_working_qp)
     _assert_first_interior_knot_is_on_the_boundary(CubicRegressionSpline)
     x, rng = _point_mass_at_minimum()
     y = 2.0 * x**2 + 0.5 * x + rng.normal(0.0, 0.05, x.size)

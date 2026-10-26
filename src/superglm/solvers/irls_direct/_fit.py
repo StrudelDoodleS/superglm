@@ -58,14 +58,11 @@ from superglm.solvers.centered_system import (
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
-from superglm.solvers.constrained_qp import (
-    QPResult,
-    _feasibility_slack,
-    _is_feasible,
-    solve_constrained_qp,
-)
+from superglm.solvers.constrained_qp import _feasibility_slack, _is_feasible
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._dense import _IRLSDirectDenseStep
+from superglm.solvers.irls_direct._qp import _IRLSDirectQPStep
 from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
 from superglm.solvers.irls_direct._recorder import _IRLSDirectRecorder
 from superglm.solvers.irls_direct._scop import (
@@ -74,7 +71,7 @@ from superglm.solvers.irls_direct._scop import (
     _IRLSDirectSCOPStep,
     _seed_refusals,
 )
-from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
+from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.irls_direct._structured import _IRLSDirectStructuredStep
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -155,70 +152,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__package__)
 
 _QP_FEASIBILITY_TOL = 1e-12
-
-
-def _solve_constrained_qp_with_cold_retry(
-    H: NDArray,
-    g: NDArray,
-    A: NDArray,
-    b: NDArray,
-    active_set_init: list[int] | None,
-    *,
-    degeneracy_retry: bool = True,
-) -> QPResult:
-    """Retry a failed warm active set without weakening the KKT contract.
-
-    A warm active set is an acceleration hint, not part of the mathematical
-    problem. Near an active boundary, platform-dependent roundoff can make the
-    warm solve project a stationary candidate and correctly withhold its KKT
-    certificate even though the identical problem converges from a cold active
-    set. Retry only that failed warm case, and replace its best iterate only
-    when the ordinary cold solve returns a complete certificate.
-
-    If the ordinary solves end uncertified, one more cold solve runs with the
-    degenerate-vertex safeguards (issue #472). That covers a failed warm
-    solve followed by a failed cold one. It also covers a single failed cold
-    solve, made when ``active_set_init`` is ``None`` or empty. The
-    safeguards are for a flat monotone term at zero with more active rows
-    than coefficients. The safeguarded result replaces the first one only if
-    it passes the same complete certificate, so a solve that certifies
-    without it is unchanged.
-
-    ``degeneracy_retry=False`` skips that attempt. ``fit_irls_direct`` passes
-    it while the previous solve in the fit was uncertified and re-arms it
-    after any certified solve: a QP that keeps failing pays for the attempt
-    once per run of failures, not once per IRLS iteration. With the default,
-    an uncertified result means the attempt ran and failed.
-    """
-    result = solve_constrained_qp(
-        H,
-        g,
-        A,
-        b,
-        active_set_init=active_set_init,
-    )
-    if active_set_init and not result.converged:
-        cold_result = solve_constrained_qp(
-            H,
-            g,
-            A,
-            b,
-            active_set_init=None,
-        )
-        if cold_result.converged:
-            return cold_result
-    if degeneracy_retry and not result.converged:
-        safeguarded = solve_constrained_qp(
-            H,
-            g,
-            A,
-            b,
-            active_set_init=None,
-            _degeneracy_safeguards=True,
-        )
-        if safeguarded.converged:
-            return safeguarded
-    return result
 
 
 @dataclass(frozen=True)
@@ -691,30 +624,6 @@ def _fit_irls_direct_once(**kwargs):
     return _IRLSDirectFit(**kwargs).run()
 
 
-class _IRLSDirectGramStep(_IRLSDirectStep):
-    """The fit's step on the Gram path: dense or the QP.
-
-    Each iteration forms the weighted Gram and solves it.  Which of the two
-    runs is still read from the fit's route flags, until each is a step of its
-    own as ``_IRLSDirectQRStep``, ``_IRLSDirectStructuredStep`` and
-    ``_IRLSDirectSCOPStep`` are.  It keeps nothing, and its rank metadata takes
-    the module route, which may be deferred.
-    """
-
-    __slots__ = ()
-    backend = "gram"
-
-    def propose(self, fit: _IRLSDirectFit, it: int) -> None:
-        # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
-        _t0 = time.perf_counter()
-        z_off = fit.z - fit.offset
-        if not fit.has_constraints:
-            fit._step_dense(z_off, _t0)
-        else:
-            fit._step_qp(it, z_off, _t0)
-        _note_svd_fallback(fit)
-
-
 class _IRLSDirectFitFields:
     """The fit's state beyond its parameters, by the method that first sets it.
 
@@ -730,8 +639,8 @@ class _IRLSDirectFitFields:
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
         " _penalty_curvature _row_set_curvature"
         # _setup_routes
-        " prev_active_set _scop_run has_constraints A_all b_all abs_A_all _has_scop"
-        " _scop_columns _observed_newton_active _stagnation_newton_available"
+        " qp _scop_run _has_scop _scop_columns _observed_newton_active"
+        " _stagnation_newton_available"
         # _setup_systems
         " _mean_space_newton_available _constant_centered_cache _constant_centered_z"
         " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
@@ -743,11 +652,10 @@ class _IRLSDirectFitFields:
         " _true_stop _true_confirmed _true_stop_ratio _last_true_residual _held_rank"
         " _judged_truncated _last_truncated _mean_space_invalid _link_domain_invalid"
         " objective_prev dev_prev eta_unclipped eta mu max_halving _consecutive_svd"
-        " _reported_qp_nonconvergence _degeneracy_retry_failed retained_qp_converged"
         " termination_reason deviance_relative_change mode_bar committed"
         # _working
-        " beta_prev intercept_prev committed_active_set proposal_qp_converged rank_truncated"
-        " used_rank_certification proposal_centred_intercept"
+        " beta_prev intercept_prev rank_truncated used_rank_certification"
+        " proposal_centred_intercept"
         " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
         " newton_committed_rows w_ratio"
         # the step (``step.propose``)
@@ -1699,27 +1607,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         _state_center, compute_rank_info = self._state_center, self.compute_rank_info
         _return_working_system = self._return_working_system
         # ── Constrained QP support (monotone splines) ──
+        # The step with linear constraints is chosen with its route: it builds
+        # the constraint system, fixed for the whole fit, which the feasibility
+        # contract reads whatever the step (``qp``; ``None`` without constraints).
         has_constraints = any(g.constraints is not None for g in groups)
-        self.prev_active_set: list[int] | None = None
-        A_all: NDArray | None = None
-        b_all: NDArray | None = None
-        # The feasibility scale needs ``|A_all|`` on every test, and the aggregate
-        # system is fixed for the whole fit -- so it is built once here rather than
-        # rebuilt two to three times per IRLS iteration plus once per line-search
-        # halving.  See ``constrained_qp._feasibility_slack``.
-        abs_A_all: NDArray | None = None
-        if has_constraints:
-            A_blocks: list[np.ndarray] = []
-            b_blocks: list[np.ndarray] = []
-            for g in groups:
-                if g.constraints is not None:
-                    A_model = np.zeros((g.constraints.n_constraints, self.p))
-                    A_model[:, g.sl] = g.constraints.A
-                    A_blocks.append(A_model)
-                    b_blocks.append(g.constraints.b)
-            A_all = np.vstack(A_blocks)
-            b_all = np.concatenate(b_blocks)
-            abs_A_all = np.abs(A_all)
+        qp = _IRLSDirectQPStep(groups, self.p) if has_constraints else None
+        self.qp = qp
+        if qp is not None:
+            self.step = qp
 
         # ── SCOP monotone engine support ──
         _has_scop = any(g.monotone_engine == "scop" for g in groups)
@@ -1825,8 +1720,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and self._newton_latch[0]
         ):
             _observed_newton_active = True
-        self.has_constraints, self.A_all, self.b_all = has_constraints, A_all, b_all
-        self.abs_A_all, self._has_scop, self._scop_columns = abs_A_all, _has_scop, _scop_columns
+        self._has_scop, self._scop_columns = _has_scop, _scop_columns
         self._state_center = _state_center
         self._observed_newton_active = _observed_newton_active
         self._stagnation_newton_available = _stagnation_newton_available
@@ -1856,11 +1750,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
     def _setup_systems(self) -> None:
         dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
-        has_constraints, _has_scop = self.has_constraints, self._has_scop
+        has_constraints, _has_scop = self.qp is not None, self._has_scop
         _use_structured, _raw_moment_policy = self._use_structured, self._raw_moment_policy
         _fisher_data_reuse = self._fisher_data_reuse
         # The fit's one step method, chosen here unless it is structured
-        # (``_setup_design``) or SCOP (``_setup_routes``): QR materialises the
+        # (``_setup_design``), QP or SCOP (``_setup_routes``): QR materialises the
         # full design once.
         # Constrained QP / SCOP requires Gram path — force it if constraints present
         _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
@@ -1870,9 +1764,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and not _has_scop
             and not self._return_working_system
         )
-        if not (_use_structured or _has_scop):
+        if not (_use_structured or has_constraints or _has_scop):
             self.step: _IRLSDirectStep = (
-                _IRLSDirectQRStep(gms, self.S, self.p) if _use_qr else _IRLSDirectGramStep()
+                _IRLSDirectQRStep(gms, self.S, self.p) if _use_qr else _IRLSDirectDenseStep()
             )
 
         # Tabmat acceleration: the structured layout owns a pruned small-block
@@ -2189,14 +2083,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         self.max_halving = 20  # max step-halving attempts per iteration
         self._consecutive_svd = 0  # for auto-mode warning
-        self._reported_qp_nonconvergence = (
-            False  # transient note once; terminal authority is separate
-        )
-        self._degeneracy_retry_failed = (
-            False  # the #472 retry is off after a failure, until a solve certifies
-        )
-        # A constrained fit-entry state has not been certified by the inner QP.
-        self.retained_qp_converged = not self.has_constraints
         # Declared, not bound: the chain below is the whole set of reasons this
         # solver can end an iteration on, and declaring it against the shared
         # vocabulary is what ties the two together. A tenth reason invented here is
@@ -2223,16 +2109,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.intercept_prev = committed.intercept
         self.beta = committed.beta.copy()
         self.intercept = committed.intercept
-        self.committed_active_set = (
-            None if self.prev_active_set is None else list(self.prev_active_set)
-        )
-        self.proposal_qp_converged = not self.has_constraints
-        # W/z are rebuilt below from the committed coefficients.  Any
-        # constrained-QP certificate retained from the preceding iteration
-        # therefore belongs to different working weights and response, not to
-        # this iteration's H/g.  Only a certified full proposal from the
-        # current working problem can restore the flag.
-        self.retained_qp_converged = not self.has_constraints
         self.rank_truncated: bool | None = None
         self.used_rank_certification = False
         self.proposal_centred_intercept: float | None = None
@@ -2300,147 +2176,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
         self.newton_committed_rows, self.w_ratio = newton_committed_rows, w_ratio
 
-    def _step_dense(self, z_off: NDArray, _t0: float) -> None:
-        W, dm, newton_score, _state_center = self.W, self.dm, self.newton_score, self._state_center
-        proposal_centred_intercept = self.proposal_centred_intercept
-        centered = self.get_centered_system(W, z_off)
-        if newton_score is not None:
-            # the working mean of ``z_off`` is the centred intercept;
-            # the score moves it by sum(u) / sum(W) and the slopes'
-            # right-hand side by X~' u (the step itself is the increment
-            # below; the stored system is the one it solved)
-            centered = replace(
-                centered,
-                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
-            )
-        self._last_working_centered = centered
-        self.recorder.t_gram += time.perf_counter() - _t0
-        _t0 = time.perf_counter()
-        iteration_rank = decompose_gram_if_authoritative(centered.hessian)
-        iteration_factor_rhs = None
-        if iteration_rank is None:
-            certification = self.certify_centered_factor(
-                centered,
-                W,
-                response=None if newton_score is not None else z_off - centered.mean_z,
-            )
-            certified = certification.decomposition
-            if certification.transformed_rhs is None and newton_score is None:
-                raise RuntimeError(  # pragma: no cover - invariant
-                    "factor certification omitted its transformed RHS"
-                )
-            iteration_rank = certified
-            iteration_factor_rhs = certification.transformed_rhs
-            self.used_rank_certification = True
-        if newton_score is not None:
-            # the increment, not the iterate: a direction the factor
-            # truncates keeps the iterate's component instead of the
-            # minimum-norm reset of solving for it (Pes & Rodriguez
-            # 2021, eqs. 1.2-1.4)
-            beta = self.committed.beta + iteration_rank.solve(
-                centred_data_score(dm, newton_score, centered.mean_x)
-                - self.penalty_matvec(self.committed.beta)
-            )
-        else:
-            beta = (
-                iteration_rank.solve(centered.rhs)
-                if iteration_factor_rhs is None
-                else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
-            )
-        intercept = centered.mean_z - float(centered.mean_x @ beta)
-        _last_working_offset_mean = None
-        if _state_center is not None:
-            # the intercept about the state's centre, from the offset
-            # of the working mean to it, formed on centred rows (the
-            # system's pair, else ``centre_offset_mean``): no
-            # raw-scale cancellation
-            _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
-            proposal_centred_intercept = centered.mean_z - math.fsum(
-                _last_working_offset_mean * beta
-            )
-            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-        self._cond_est = iteration_rank.pre_truncation_condition
-        self._held_rank[0] = iteration_rank
-        self._used_svd = iteration_rank.used_svd_fallback
-        self.rank_truncated = iteration_rank.rank_truncated
-        if self.convergence == "mode_score":
-            self._score_centre = (
-                centered.mean_x,
-                centered.sum_w,
-                np.diag(centered.data_gram),
-                (),
-                _last_working_offset_mean,
-            )
-        self.recorder.t_solve += time.perf_counter() - _t0
-        self.beta, self.intercept = beta, intercept
-        self._last_working_offset_mean = _last_working_offset_mean
-        self.proposal_centred_intercept = proposal_centred_intercept
-
-    def _step_qp(self, it: int, z_off: NDArray, _t0: float) -> None:
-        newton_score, prev_active_set = self.newton_score, self.prev_active_set
-        _degeneracy_retry_failed = self._degeneracy_retry_failed
-        _reported_qp_nonconvergence = self._reported_qp_nonconvergence
-        centered = self.get_centered_system(self.W, z_off)
-        if newton_score is not None:
-            centered = replace(
-                centered,
-                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                rhs=centered.rhs + centred_data_score(self.dm, newton_score, centered.mean_x),
-            )
-        self._last_working_centered = centered
-        self.recorder.t_gram += time.perf_counter() - _t0
-
-        # Solve the constrained system in its existing coordinate space.
-        _t0 = time.perf_counter()
-        qp_result = _solve_constrained_qp_with_cold_retry(
-            centered.hessian,
-            centered.rhs,
-            self.A_all,
-            self.b_all,
-            prev_active_set,
-            degeneracy_retry=not _degeneracy_retry_failed,
-        )
-        beta = qp_result.beta
-        self.intercept = centered.mean_z - float(centered.mean_x @ beta)
-        self.proposal_qp_converged = bool(qp_result.converged)
-        prev_active_set = qp_result.active_set
-        # An uncertified result means the degenerate-vertex retry ran
-        # and failed (or was already latched off). It costs up to a
-        # full active-set solve, so it is not repeated while the QP
-        # keeps failing. A certified result re-arms it: while latched,
-        # that can only be an ordinary solve, so the failure was
-        # transient and a later #472 vertex keeps its rescue.
-        _degeneracy_retry_failed = not qp_result.converged
-        # Non-convergence usually persists for the rest of the fit, so
-        # latch the report to the first occurrence rather than emitting
-        # one identical line per IRLS iteration. A later solve may
-        # recover; the retained state's terminal authority is checked
-        # independently below.
-        if not qp_result.converged and not _reported_qp_nonconvergence:
-            _reported_qp_nonconvergence = True
-            logger.info(
-                "fit_irls_direct: constrained QP did not converge at "
-                "iteration %d; its KKT certificate is incomplete. "
-                "A later IRLS iteration may recover; subsequent inner "
-                "failures in this fit are not reported here.",
-                it + 1,
-            )
-        # Report what the QP actually inverted.  These were hardcoded
-        # to False/0.0, so the constrained branch published "perfectly
-        # conditioned" to the consumers below while the unconstrained
-        # branch above read the real numbers off its decomposition.
-        self._used_svd = qp_result.used_svd_fallback
-        self._cond_est = qp_result.condition
-        self.recorder.t_solve += time.perf_counter() - _t0
-        self.beta, self.prev_active_set = beta, prev_active_set
-        self._degeneracy_retry_failed = _degeneracy_retry_failed
-        self._reported_qp_nonconvergence = _reported_qp_nonconvergence
-
     def _search(self, it: int) -> None:
         beta, intercept, committed = self.beta, self.intercept, self.committed
-        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
-        abs_A_all, newton_score = self.abs_A_all, self.newton_score
+        qp, newton_score = self.qp, self.newton_score
         newton_committed_rows, y, weights = self.newton_committed_rows, self.y, self.weights
         family, link, _mean_space_invalid = self.family, self.link, self._mean_space_invalid
         _link_domain_invalid, _start_lowered = self._link_domain_invalid, self._start_lowered
@@ -2493,9 +2231,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         constraint_trial_is_invalid = (
             self.observed_rows_invalid if self._observed_newton_active else None
         )
-        if has_constraints:
-            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
-                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+        if qp is not None:
+            # the feasibility contract, on the QP step's constraint system
+            A_all, b_all, abs_A_all = qp.A_all, qp.b_all, qp.abs_A_all
             committed_constraints_feasible = _is_feasible(
                 A_all,
                 committed.beta,
@@ -2625,7 +2363,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         if decision.skipped:
             recorder.count("irls_halvings_skipped", decision.skipped)
         if (
-            has_constraints
+            qp is not None
             and decision.step_rejected
             and not committed_constraints_feasible
             and proposal_constraints_feasible
@@ -2648,13 +2386,16 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 it + 1,
             )
         retained = committed if decision.step_rejected else trial_cache[decision.alpha]
-        if has_constraints:
+        if qp is not None:
             # Rejection retains coefficients from the preceding working
             # problem, while damping retains an interpolation.  Neither
             # state is the current H/g solution whose stationarity and
-            # dual feasibility the inner QP certified.
-            self.retained_qp_converged = bool(
-                not decision.step_rejected and decision.alpha == 1.0 and self.proposal_qp_converged
+            # dual feasibility the inner QP certified, and a certificate
+            # retained from the preceding iteration belongs to other
+            # working weights: only a certified full proposal of this
+            # iteration's working problem sets the flag.
+            qp.retained_converged = bool(
+                not decision.step_rejected and decision.alpha == 1.0 and qp.proposal_converged
             )
         evaluation_elapsed = time.perf_counter() - _t0
         recorder.t_deviance += evaluation_elapsed
@@ -2668,7 +2409,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         n_halvings = decision.step_halvings
         step_rejected = decision.step_rejected
         if step_rejected:
-            self.prev_active_set = self.committed_active_set
+            if qp is not None:
+                qp.active_set = qp.committed_active_set
         elif n_halvings:
             logger.info(
                 "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
@@ -2752,7 +2494,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     not converged_this_iter
                     and not switched_curvature
                     and not self.step_rejected
-                    and not self.has_constraints
                     and intercept == self.intercept_prev
                     and retained.centred_intercept == self.committed.centred_intercept
                     and np.array_equal(beta, beta_prev)
@@ -2874,16 +2615,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # not reach the bar: the fit ends uncertified, as under
             # ``mode_score``.  Under Newton steps the certificate alone
             # decides, at every iteration, and its own ratios alone stagnate.
-            latent_groups = self.step.latent_groups
+            latent_groups, qp = self.step.latent_groups, self.qp
             true_ratio, true_resolved = self.true_mode_residual(
                 retained.beta,
                 retained.intercept,
                 retained.eta_unclipped,
-                (
-                    self.A_all[list(self.prev_active_set)]
-                    if self.has_constraints and self.A_all is not None and self.prev_active_set
-                    else None
-                ),
+                qp.A_all[list(qp.active_set)] if qp is not None and qp.active_set else None,
                 None if latent_groups is None else latent_groups(),
             )
             # the state is certified on the model's own score, Newton or not,
@@ -2928,19 +2665,15 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
     def _terminate(self, it: int) -> None:
         converged_this_iter, step_rejected = self.converged_this_iter, self.step_rejected
-        dev, max_iter = self.dev, self.max_iter
+        dev, max_iter, qp = self.dev, self.max_iter, self.qp
         constraints_feasible_this_iter = True
-        if self.has_constraints:
-            if (
-                self.A_all is None or self.b_all is None
-            ):  # pragma: no cover - construction invariant
-                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+        if qp is not None:
             constraints_feasible_this_iter = _is_feasible(
-                self.A_all,
+                qp.A_all,
                 self.beta,
-                self.b_all,
+                qp.b_all,
                 _QP_FEASIBILITY_TOL,
-                abs_A=self.abs_A_all,
+                abs_A=qp.abs_A_all,
             )
             # Objective or coefficient stagnation cannot certify a constrained
             # mode whose retained coefficients are outside the feasible set.
@@ -2952,7 +2685,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # QP's stationarity and dual-feasibility certificate. Keep a
             # finite feasible iterate and continue: a later full QP proposal
             # may still obtain the missing certificate.
-            if not self.retained_qp_converged:
+            if not qp.retained_converged:
                 converged_this_iter = False
 
         terminal_constraint_infeasible = bool(
@@ -2960,8 +2693,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
         terminal_constraint_kkt_incomplete = bool(
-            self.has_constraints
-            and not self.retained_qp_converged
+            qp is not None
+            and not qp.retained_converged
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
 
@@ -2986,7 +2719,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     def _finish(self, it: int) -> None:
         retained, family, link, beta = self.retained, self.family, self.link, self.beta
         weights, eta_unclipped, eta, mu = self.weights, self.eta_unclipped, self.eta, self.mu
-        dev, converged, A_all, b_all = self.dev, self.converged, self.A_all, self.b_all
+        dev, converged, qp = self.dev, self.converged, self.qp
         termination_reason, _last_truncated = self.termination_reason, self._last_truncated
 
         # A published Gaussian identity fit carries its centred intercept as the
@@ -3073,10 +2806,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
                     held_warnings.warn(message, SeparationWarning, stacklevel=4)
 
-        if self.has_constraints:
-            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
-                raise RuntimeError("constrained fit omitted its aggregate constraint system")
-            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=self.abs_A_all):
+        if qp is not None:
+            A_all, b_all = qp.A_all, qp.b_all
+            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=qp.abs_A_all):
                 minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
                 converged = False
                 termination_reason = "constraint_infeasible"
@@ -3086,7 +2818,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     minimum_scaled_slack,
                     _QP_FEASIBILITY_TOL,
                 )
-            elif not self.retained_qp_converged:
+            elif not qp.retained_converged:
                 converged = False
                 termination_reason = "constraint_kkt_incomplete"
                 logger.warning(

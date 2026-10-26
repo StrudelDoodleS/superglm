@@ -22,16 +22,16 @@ logger = logging.getLogger(__package__)
 class _IRLSDirectStep(Protocol):
     """One fit's step method, chosen once at setup (``_IRLSDirectFit._setup_systems``,
     or ``_setup_design`` for the structured step, whose layout fixes the state's centre,
-    or ``_setup_routes`` for the SCOP step).
+    or ``_setup_routes`` for the QP and SCOP steps).
 
-    ``_IRLSDirectQRStep``, ``_IRLSDirectStructuredStep`` and ``_IRLSDirectSCOPStep``
-    are three; ``_IRLSDirectGramStep`` covers the routes that are not yet steps of
-    their own (dense and the QP).  Each subclasses this interface and takes ``None``
-    for the hooks it leaves out.  A step holds what it builds once per fit and no
-    reference to the fit: each method is handed the fit, so the two are freed by
-    reference counting, never by the collector.  The proposal and the working rows are the fit's own fields, not
-    objects passed between them, so a step allocates nothing per iteration that
-    the fit did not already.
+    ``_IRLSDirectQRStep``, ``_IRLSDirectDenseStep``, ``_IRLSDirectQPStep``,
+    ``_IRLSDirectStructuredStep`` and ``_IRLSDirectSCOPStep`` are the five.  Each
+    subclasses this interface and takes ``None`` for the hooks it leaves out.  A
+    step holds what it builds once per fit and no reference to the fit: each
+    method is handed the fit, so the two are freed by reference counting, never
+    by the collector.  The proposal and the working rows are the fit's own
+    fields, not objects passed between them, so a step allocates nothing per
+    iteration that the fit did not already.
 
     ``backend`` is the backend the fit publishes (``PIRLSResult.direct_backend``).
     ``finalise(fit)`` is the step's own finalisation of the retained model, or

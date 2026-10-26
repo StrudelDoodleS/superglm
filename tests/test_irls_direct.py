@@ -1696,6 +1696,7 @@ class TestDirectSolverBasic:
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """Large constrained fits dispatch raw moments through their cached plan."""
         import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._qp as irls_direct_qp
         from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
@@ -1718,7 +1719,7 @@ class TestDirectSolverBasic:
             )
         ]
 
-        original_qp = irls_direct.solve_constrained_qp
+        original_qp = irls_direct_qp.solve_constrained_qp
         original_moments = MatrixExecutionPlan._moments_prevalidated
         constraint_matrices = []
         moment_plan_ids = []
@@ -1731,7 +1732,7 @@ class TestDirectSolverBasic:
             moment_plan_ids.append(id(self))
             return original_moments(self, *args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", recording_qp)
         monkeypatch.setattr(
             MatrixExecutionPlan,
             "_moments_prevalidated",
@@ -1767,7 +1768,7 @@ class TestDirectSolverBasic:
             kwargs["_force_chunked"] = True
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", original_qp)
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", original_qp)
         monkeypatch.setattr(
             irls_direct,
             "build_centered_system",

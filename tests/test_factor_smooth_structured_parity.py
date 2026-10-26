@@ -13,6 +13,7 @@ import scipy.sparse as sp
 import superglm.reml.direct as direct_reml
 import superglm.reml.discrete as discrete_reml
 import superglm.solvers._structured.selection as structured_selection
+import superglm.solvers.irls_direct._dense as irls_direct_dense
 import superglm.solvers.irls_direct._fit as irls_direct
 import superglm.solvers.rank as rank
 from superglm import (
@@ -1774,6 +1775,8 @@ def test_an_exactly_singular_data_gram_rounded_negative_is_not_refused(monkeypat
         return original(matrix, *args, **kwargs)
 
     monkeypatch.setattr(irls_direct, "decompose_gram_if_authoritative", rounded_negative)
+    # The dense step's iteration Gram.
+    monkeypatch.setattr(irls_direct_dense, "decompose_gram_if_authoritative", rounded_negative)
     # The data rank's own Gram check (``rank.decide_data_rank``).
     monkeypatch.setattr(rank, "decompose_gram_if_authoritative", rounded_negative)
     gram, _ = _thin_level_fit("fs", "gram", True, None, 1.0)

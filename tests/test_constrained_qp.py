@@ -423,13 +423,13 @@ class TestCallSiteWarnings:
 
         import pandas as pd
 
+        import superglm.solvers.irls_direct._qp as irls_direct_qp
         from superglm import Constraint, SuperGLM
         from superglm.families import Gaussian
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers.irls_direct import _fit as irls_direct
 
         calls: list[int] = []
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", self._non_converging(calls))
 
         rng = np.random.default_rng(0)
         x = np.sort(rng.uniform(0, 1, 80))
@@ -480,13 +480,13 @@ class TestCallSiteWarnings:
 
         import pandas as pd
 
+        import superglm.solvers.irls_direct._qp as irls_direct_qp
         from superglm import Constraint, SuperGLM
         from superglm.families import Binomial
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers.irls_direct import _fit as irls_direct
 
         calls: list[int] = []
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", self._non_converging(calls))
 
         # Binomial needs several IRLS iterations, so the unlatched code would
         # report several times; Gaussian converges in ~2 and barely discriminates.
@@ -1666,11 +1666,11 @@ class TestRankDeficientKKT:
         """
         import pandas as pd
 
+        import superglm.solvers.irls_direct._qp as irls_direct_qp
         from superglm import Constraint, SuperGLM
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers.irls_direct import _fit as irls_direct
 
-        real_solve = irls_direct.solve_constrained_qp
+        real_solve = irls_direct_qp.solve_constrained_qp
         observed: list[dict] = []
 
         def recording_solve(H, g, A, b, **kwargs):
@@ -1703,10 +1703,10 @@ class TestRankDeficientKKT:
             features={"x": BSplineSmooth(n_knots=16, constraint=Constraint.fit.increasing)},
         )
         try:
-            irls_direct.solve_constrained_qp = recording_solve
+            irls_direct_qp.solve_constrained_qp = recording_solve
             model.fit(pd.DataFrame({"x": x}), y)
         finally:
-            irls_direct.solve_constrained_qp = real_solve
+            irls_direct_qp.solve_constrained_qp = real_solve
 
         assert observed, "the constrained QP never ran"
         singular = [row for row in observed if row["rank"] < row["width"]]
