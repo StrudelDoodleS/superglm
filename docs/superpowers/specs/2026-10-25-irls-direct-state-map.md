@@ -593,16 +593,18 @@ class Recorder:                        # S09/S11 emitters live in StateEvaluator
    `id()`-keyed merit allowance and no domain guard. Only dense, QP, QR and structured share
    `TrialSearch`. The design's single "line search" module is two.
 
-### 6.7 As built (S3a to S3d)
+### 6.7 As built (S3a to S4)
 
 The package `superglm/solvers/irls_direct/`:
 
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, the feasibility contract's tolerance `_QP_FEASIBILITY_TOL`, and (S3d) `_IRLSDirectCurvaturePolicy` |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and (S3d) `_IRLSDirectCurvaturePolicy` |
 | `_dense` | (S3d) `_IRLSDirectDenseStep` |
-| `_qp` | (S3d) `_IRLSDirectQPStep` and `_solve_constrained_qp_with_cold_retry` |
+| `_qp` | (S3d) `_IRLSDirectQPStep` and `_solve_constrained_qp_with_cold_retry`; (S4) the feasibility contract's tolerance `_QP_FEASIBILITY_TOL`, beside the step's `feasible` |
+| `_convergence` | (S4) `_IRLSDirectConvergence`, the stop rule |
+| `_search` | (S4) `_IRLSDirectTrialSearch`, the shared line search |
 | `_mean_space` | (S3d) `_IRLSDirectMeanSpaceOverlay`; the certificate's helpers `_SUBNORMAL_SPACING`, `_underflow_allowance`, `_PENALTY_HEADROOM_EXPONENT`, `_even_exponent` and `_column_shift` |
 | `_recorder` | `_IRLSDirectRecorder` |
 | `_step` | `_IRLSDirectStep`, the interface (a `Protocol`; since S3c its optional hooks default to `None` and every step subclasses it); (S3c) `_note_svd_fallback`, L08 |
@@ -920,6 +922,129 @@ Where S3d (dense, the QP, the mean-space overlay and the curvature policy) chang
       `partial`. A deferred callable reaches no fit, step or collaborator
       (`s3d_out/checks/cycle5.py`).
 
+Where S4 (the stop rule and the shared line search) changed it:
+
+30. **`_IRLSDirectConvergence`, in `_convergence` (the fit's `stop_rule`).** It is the
+    stop rule: L16's criteria, the step-rejected veto and L18's veto and reason chain.
+    - It is built in `_setup_loop`, from `max_iter` and the resolved `mode_bar`, where
+      S21 bound the window. It keeps no reference to the fit.
+    - **`judge(fit, it)` is the precedence, in one method:**
+      1. `_criterion`: the criterion `convergence` names, then the step-rejected veto;
+      2. `mean_space.judge(fit, stagnation_window)`, when the fit holds the overlay;
+      3. `_terminate`: the feasibility contract's veto (`qp.feasible(beta)`,
+         `qp.retained_converged`), then the reason chain.
+
+      `run()` calls `stop_rule.judge(self, it)` once, between the search and the
+      recorder. The judge's refused stops stagnate over the rule's window, which the
+      rule now hands it instead of the judge reading a fit field.
+    - **What it holds:** `stagnation_window`, `_mode_ratios` (its own), and
+      `last_mode_residual` (the recorder's `profile_fit` reads it).
+    - **The verdict stays in the fit's slots**, as the step's proposal does (point 2).
+      The judge, the recorder and the loop read it there, and the judge still writes
+      the rule's numbers after the rule when its certificate decides:
+
+      | Field | Written by | Read by |
+      |---|---|---|
+      | `convergence_label`, `convergence_tolerance`, `convergence_value` | `_criterion`; then the judge under Newton steps | the recorder (`iteration`) |
+      | `coef_change`, `dev_rel_change` | `_criterion` | the recorder (`debug_row`) |
+      | `converged_this_iter` | `_criterion`; the judge; `_terminate` | the judge, `_terminate`, the recorder, `run()` |
+      | `score_stagnated` | `_criterion`; the judge | `_terminate`, `run()` |
+      | `termination_reason` | `_terminate`; after the loop, `_finish` (F03, F04) | the recorder, `_finish`, `_publish` |
+
+    - **What `_criterion` reads:** `convergence`, `tol`, `max_iter`, `beta`,
+      `intercept`, `retained`, `committed`, `step_rejected`, `dev`, `mu`, `eta`,
+      `_score_centre`, `mode_bar`, `objective_merit_scale`, `curvature`, `recorder`,
+      the step's `latent_change()` and `damped(fit)`, and `mode_residual`.
+      **What `_terminate` reads:** `converged_this_iter`, `step_rejected`, `dev`,
+      `max_iter`, `qp`, `beta` and `score_stagnated`.
+    - **It is not pure (§6.6 point 4).** `_criterion` calls
+      `fit.curvature.switch_to_newton(fit.recorder)` (the Gamma/log switch and its
+      latch). The judge sets the overlay's `engaged`. The next iteration's `_working`
+      and step read both. Neither is a field the rule caches.
+    - **What stays the fit's:**
+      - `mode_residual` (S07). It reads `coefficient_working_rows` and
+        `penalized_mode_residual` from `_fit`, where tests patch them for the mode
+        score together with L02's and the export rows' calls. Moved, those patches
+        would silently stop reaching the mode score.
+      - `mode_bar`, the bar of both certificates. `certify`, the judge and
+        `profile_fit` read it with the fit's other settings.
+      - `_score_centre`, a step output like `W` and `z`. The steps write it and
+        `mode_residual` reads it.
+31. **The criterion reads the iteration's base off the committed state.**
+    - `beta_prev` and `intercept_prev` were `committed.beta` and `committed.intercept`,
+      bound in `_working` from the same `committed`. `objective_prev` and `dev_prev`
+      were the committed state's objective and deviance, advanced at L21 to the state
+      just committed. The four fields and L21's advance are gone. The criterion and
+      `deviance_relative_change` read `committed`, before L21 commits the retained
+      state.
+    - `score_stagnated` was read back from the last iteration's verdict. A stagnated
+      verdict ends the loop, so every iteration found it `False`. The criterion now
+      starts from `False`, and `_setup_loop` no longer sets it.
+    - At S3d's head an assertion probe checked each of these at every read, over the
+      harness and the focused test files: every read held by identity, 17,731 in the
+      harness and 43,939 in the tests (`s4_out/probe/invariants.py`).
+32. **`_IRLSDirectTrialSearch`, in `_search` (the fit's `trial_search`).** It is L10,
+    L11 and L13–L15.
+    - It is built in `_setup_loop`. It is `None` when the step has its own search: the
+      SCOP step's latent search (L09) stays the step's (§6.6 point 6).
+    - It holds L13's predicates `_mean_space_invalid` and `_link_domain_invalid`
+      (#425, #498), formerly fit fields, and no reference to the fit.
+    - `search(fit, it)` has the SCOP step's hook's signature. `run()` picks one of the
+      two once, so the loop calls `search(self, it)` without a branch.
+    - It reads `beta`, `intercept`, `committed`, `qp`, `newton_score`, `mean_space`,
+      `y`, `weights`, `family`, `link`, `max_halving`, `objective_merit_scale`,
+      `curvature`, `proposal_centred_intercept`, `evaluate_state`, `penalty_matvec`
+      and `recorder`. It writes `retained`, `eta_unclipped`, `eta`, `mu`, `dev`,
+      `beta`, `intercept`, `decision`, `n_halvings`, `step_rejected` and
+      `proposal_state`, and the QP step's `retained_converged`.
+    - It takes its mean-space hooks from the overlay's `line_search` and its
+      constraint data from `qp`, as before.
+33. **The feasibility contract's predicate is the QP step's `feasible(beta)`.**
+    - `_QP_FEASIBILITY_TOL` moved to `_qp`, beside it. The package re-exports it from
+      there for the editor.
+    - The callers are where they were: the line search (L11: the committed state, the
+      proposal and the trial predicate), the stop rule's veto (L18) and the final
+      refusal (F03, `_finish`). The checks stay in the shared code. Only the test of
+      `A beta >= b` is on the step's data.
+34. **A rejected step no longer restores the QP step's active set.**
+    - Every rejection ends the loop (`run()` breaks on `step_rejected`). On a rejected
+      iteration nothing after the search reads the active set: the judge certifies
+      only a stop, the veto reads `retained_converged`, and `_finish` reads the
+      constraint system.
+    - `committed_active_set`'s one reader was the restore, so its per-iteration copy
+      (`list(active_set)` at the start of `propose`) went with it.
+    - At S3d's head a probe set both fields, at the restore, to a value whose every use
+      raises, and made `_working` refuse to start an iteration after a restore
+      (`s4_out/probe/poison_restore.py`). The full harness ran 252 of 252 identical
+      with 1 restore, and the focused test files 3,652 passed with 2. Two of the three
+      restores would have changed the active set. Nothing read it.
+35. **Fields that left the fit (9).** It has 85 fields, down from 92.
+    - The stop rule's: `_mode_ratios`, `_stagnation_window`, `_last_mode_residual`.
+    - The search's: `_mean_space_invalid`, `_link_domain_invalid`.
+    - Copies of the committed state: `beta_prev`, `intercept_prev`,
+      `objective_prev`, `dev_prev`.
+    - Added (2): `stop_rule`, `trial_search`.
+36. **The loop now reads:**
+    1. `_working` (L02);
+    2. `step.propose`;
+    3. `search`, the step's or the shared one;
+    4. `stop_rule.judge`: the criterion and the step-rejected veto, the mean space's
+       judge, the feasibility contract's veto and the reason chain;
+    5. `recorder.iteration`;
+    6. `deviance_relative_change`, from `committed`;
+    7. L21: break on a non-finite deviance or a rejected step; commit; break on
+       convergence or stagnation.
+
+    After the loop nothing changed: F01, F02, F03, then `mean_space.final` (F04 with the
+    truncated relabel). F02 still reads `deviance_relative_change`.
+37. **The identity hazards hold.**
+    - `retained` is the trial cache's own state, and the judge hands `certify` its
+      `eta_unclipped`, which `final` compares by identity.
+    - No state is copied on the way into the stop rule.
+    - A deferred rank-info callable still reaches no fit, step or collaborator, and no
+      fit or unit outlives its return with the collector off; a unit that kept the fit
+      would (`s4_out/checks/cycle6.py`).
+
 Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
 A name that a strategy module reads is patched in that module: since S3b the structured
 factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
@@ -936,13 +1061,18 @@ read them there.  Since S3d:
   `null_basis_angle` are `_mean_space`'s, and the package re-exports `_SUBNORMAL_SPACING`
   and `_underflow_allowance` from there.
 
+Since S4 the shared search's `_select_irls_trial` is `_search`'s (eight sites), and the stop
+rule's `rate_exhausts_budget` and `_irls_objective_relative_change` are `_convergence`'s. The
+tests patch and read them there; `_fit` no longer imports them, so a stale patch at `_fit`
+raises.
+
 What stays at `_fit`:
 - `build_centered_system` (17 sites and `test_lookup_table_gram`'s string path), because
   the centred system did not move;
 - `coefficient_working_rows` and `_has_constant_irls_weights`, because the policy lives in
   `_fit`;
-- `penalized_mode_residual`, whose two patch sites target `mode_residual`;
-- `_select_irls_trial`, because the shared search did not move.
+- `penalized_mode_residual`, whose two patch sites target `mode_residual`, which stays a
+  method of the fit (point 30).
 
 ## 7. Is the length lines-of-code abuse?
 
