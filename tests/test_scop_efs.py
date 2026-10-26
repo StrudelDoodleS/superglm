@@ -3329,6 +3329,80 @@ class TestColdBootstrapStart:
         assert np.all(np.isfinite(model.predict(frame)))
 
 
+def _rare_top_level_fixture(n: int = 3000, seed: int = 1):
+    """Poisson counts on a skewed integer covariate whose rarest top levels hold one short-exposure claim each.
+
+    Most rows sit on the low levels; the five levels above the bulk carry one
+    row each, with exposure 0.002 and a claim, where the intercept-only fit
+    expects 2e-4 claims.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.minimum(rng.geometric(0.15, n) - 1, 60).astype(float)
+    z = rng.uniform(0.0, 1.0, n)
+    exposure = rng.uniform(0.05, 1.0, n)
+    y = rng.poisson(exposure * 0.1 * np.exp(0.02 * x + 0.3 * np.sin(6.0 * z))).astype(float)
+    x[:5], exposure[:5], y[:5] = 60.0 + np.arange(5.0), 0.002, 1.0
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "z": PSpline(n_knots=6),
+        },
+    )
+    return model, pd.DataFrame({"x": x, "z": z}), y, np.log(exposure)
+
+
+class TestColdLatentStart:
+    """A cold inner fit's SCOP start is halved while it raises the deviance (``_cold_scop_start``)."""
+
+    def test_a_rare_short_exposure_claim_leaves_the_first_bootstrap_start_certified(
+        self, monkeypatch
+    ):
+        """The bootstrap certifies at its first start, in a few dozen joint steps.
+
+        Linearised at the intercept-only fit, a level whose one row expects
+        2e-4 claims and has one moves its working response by ``(y - mu) / mu
+        ~ 5e3``, and the QP put the predictor thousands above the null fit on
+        the top levels; Poisson Newton walks such a start down by about one
+        a step. Mutation check: master at 7dcc85c1 (the start unhalved)
+        exhausted 100 inner iterations at the 1e-4 start, which was refused,
+        and certified only at the Hessian-scaled retry, 183 joint steps in
+        all; this tree certifies the first start in 21.
+        """
+        from superglm.solvers.scop_newton import SCOPJointNewton
+
+        model, frame, y, offset = _rare_top_level_fixture()
+        starts: list[tuple[int, bool]] = []
+        steps = {"bootstrap": 0}
+        phase: list[str | None] = [None]
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        real_step = SCOPJointNewton.step
+
+        def recording_fit(context, lambdas, **kwargs):
+            phase.append(kwargs.get("phase"))
+            try:
+                mode = real_fit(context, lambdas, **kwargs)
+            finally:
+                phase.pop()
+            if kwargs.get("phase") == "bootstrap" and kwargs.get("_certification_retry", 0) == 0:
+                starts.append((len(starts), mode is not None))
+            return mode
+
+        def counting_step(self, thetas, **kwargs):
+            if phase[-1] == "bootstrap":
+                steps["bootstrap"] += 1
+            return real_step(self, thetas, **kwargs)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording_fit)
+        monkeypatch.setattr(SCOPJointNewton, "step", counting_step)
+        model.fit_reml(frame, y, offset=offset, max_reml_iter=50)
+
+        assert starts == [(0, True)]
+        assert steps["bootstrap"] <= 50
+        assert model.reml_diagnostics()["converged"]
+
+
 class _ProbeWarning(UserWarning):
     """A warning only these tests raise."""
 

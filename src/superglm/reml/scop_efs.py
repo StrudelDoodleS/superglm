@@ -13,6 +13,7 @@ Biometrics 73(4), 1071-1081.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
@@ -23,8 +24,9 @@ from numpy.typing import NDArray
 from superglm import _held_warnings as held_warnings
 from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, scaled_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
-from superglm.group_matrix import DesignMatrix
+from superglm.group_matrix import DesignMatrix, DiscretizedSCOPGroupMatrix
 from superglm.links import IdentityLink, LogLink, stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -69,6 +71,7 @@ from superglm.solvers.dispersion import (
     pearson_residual_degrees_of_freedom,
 )
 from superglm.solvers.irls_direct import SCOPRunCentring, fit_irls_direct
+from superglm.solvers.irls_state import link_domain_violation, mean_space_violation
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
@@ -77,7 +80,11 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram_if_authoritative,
 )
-from superglm.solvers.working_rows import coefficient_initial_intercept, fisher_working_weights
+from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
+    coefficient_working_rows,
+    fisher_working_weights,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
@@ -1366,6 +1373,8 @@ def _fit_scop_reml_mode(
     }.get(phase, f"reml_{phase}")
     if context.cold_starts and _certification_retry == 0:
         beta_init = intercept_init = scop_state_init = None
+    if beta_init is None and scop_state_init is None:
+        scop_state_init = _cold_scop_start(context, lambdas) or None
     working_cache: dict[str, Any] = {}
     inner_tol = (
         min(context.pirls_tol, 1.0e-10)
@@ -2568,6 +2577,113 @@ def _null_fit_eta(context: _SCOPREMLFitContext) -> NDArray:
         distribution=context.distribution, link=context.link, y=y, sample_weight=weights
     )
     return stabilize_eta(intercept + shifted, context.link)
+
+
+_COLD_START_MAX_HALVING = 20
+"""Halvings a cold SCOP start may take, the inner fit's own budget per step.
+
+A start still raising the deviance after them is left at ``2**-20`` of its
+step: the starting state, but for a SCOP block too small to move a fit."""
+
+
+def _cold_scop_start(context: _SCOPREMLFitContext, lambdas: Mapping[str, float]) -> dict[int, dict]:
+    """Each SCOP group's latent start for a cold inner fit, halved while it raises the deviance.
+
+    A cold inner fit starts its SCOP block from a QP of the mapped
+    coefficients against the working response of its starting state, the
+    intercept alone (``qp_initialize``): one Fisher scoring step for that
+    block, the ordinary coefficients held at zero.  Under a log link a row
+    moves that response by ``(y - mu) / mu``, unbounded as ``mu`` falls; for
+    Poisson the step overshoots the level a bin's data support,
+    ``log(A/E)``, by ``A/E - 1 - log(A/E)``: next to nothing where a bin's
+    actual-to-expected ratio is moderate, and without bound where one
+    short-exposure claim sits on a rare level.  On the freMTPL2 frequency book that start put the linear
+    predictor at 35 on the rarest BonusMalus levels, and Poisson Newton walked
+    it down one unit per iteration, 27 of the bootstrap's 53 iterations.
+
+    The start is a step like any other, and is taken as the inner fit takes
+    each of its steps: halved toward the starting state (every mapped
+    coefficient halved, a latent shape coordinate lowered by ``log 2``)
+    until it does not raise the deviance, the step-halving R's ``glm.fit``
+    applies to a diverging deviance and ``glm2`` to any increase (Marschner
+    2011, R Journal 3(2)).  A start that does not raise the deviance is the
+    inner fit's own, unhalved.  The working rows, supports and QP are the
+    inner fit's (``fit_irls_direct``), a row-level group's over its rows.
+    A family whose start the inner fit moves into its mean space or link
+    domain first (``interior_start_intercept``) keeps the inner fit's own
+    start.
+    """
+    scop = [
+        (index, gm, group)
+        for index, (gm, group) in enumerate(
+            zip(context.dm.group_matrices, context.groups, strict=True)
+        )
+        if group.monotone_engine == "scop"
+    ]
+    distribution, link = context.distribution, context.link
+    if (
+        not scop
+        or mean_space_violation(distribution, link) is not None
+        or link_domain_violation(link) is not None
+    ):
+        return {}
+    y = np.asarray(context.y, dtype=np.float64)
+    weights = np.asarray(context.sample_weight, dtype=np.float64)
+    offset = np.asarray(context.offset_arr, dtype=np.float64)
+    intercept = coefficient_initial_intercept(
+        distribution=distribution, link=link, y=y, sample_weight=weights
+    )
+    eta = stabilize_eta(intercept + offset, link)
+    mu = clip_mu(link.inverse(eta), distribution)
+    rows = coefficient_working_rows(
+        distribution=distribution,
+        link=link,
+        y=y,
+        mu=mu,
+        eta=eta,
+        sample_weight=weights,
+        prefer_observed=False,
+    )
+    response = rows.response - offset
+    starts: list[tuple[int, Any, NDArray, NDArray, NDArray | None]] = []
+    for index, gm, group in scop:
+        reparam = group.scop_reparameterization
+        lam = float(lambdas.get(group.name, 0.0))
+        if isinstance(gm, DiscretizedSCOPGroupMatrix):
+            basis, bins = gm.B_scop_unique, gm.bin_idx
+            mass = np.bincount(bins, weights=rows.weights, minlength=basis.shape[0])
+            moment = np.bincount(bins, weights=rows.weights * response, minlength=basis.shape[0])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                target = np.where(mass > 0, moment / mass, 0.0)
+            theta = reparam.qp_initialize(basis, target, lambda_penalty=lam, weights=mass)
+        else:
+            basis, bins = gm.toarray(), None
+            theta = reparam.qp_initialize(basis, response, lambda_penalty=lam, weights=rows.weights)
+        starts.append((index, reparam, theta, basis, bins))
+    step = np.zeros_like(eta)
+    for _, reparam, theta, basis, bins in starts:
+        values = basis @ reparam.forward(theta)
+        step += values if bins is None else values[bins]
+    current = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
+    fraction = 1.0
+    for _ in range(_COLD_START_MAX_HALVING):
+        with np.errstate(over="ignore", invalid="ignore"):
+            trial_mu = clip_mu(
+                link.inverse(stabilize_eta(eta + fraction * step, link)), distribution
+            )
+            trial = weighted_row_sum(weights, distribution.deviance_unit, y, trial_mu)
+        if np.isfinite(trial) and trial <= current:
+            break
+        fraction *= 0.5
+    states: dict[int, dict] = {}
+    for index, reparam, theta, _, _ in starts:
+        theta = np.array(theta, dtype=np.float64, copy=True)
+        if fraction < 1.0:
+            free = reparam.free_dim
+            theta[:free] *= fraction
+            theta[free:] += math.log(fraction)
+        states[index] = {"beta_eff": theta}
+    return states
 
 
 def _hessian_scaled_bootstrap_lambdas(
