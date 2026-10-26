@@ -600,12 +600,13 @@ The package `superglm/solvers/irls_direct/`:
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` (SCOP, dense and the QP since S3b) |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` (dense and the QP since S3c; SCOP too in S3b) |
 | `_recorder` | `_IRLSDirectRecorder` |
-| `_step` | `_IRLSDirectStep`, the interface (a `Protocol`) |
+| `_step` | `_IRLSDirectStep`, the interface (a `Protocol`; since S3c its optional hooks default to `None` and every step subclasses it); (S3c) `_note_svd_fallback`, L08 |
 | `_qr` | `_IRLSDirectQRStep`, `_sqrt_penalty_augmented`, `_centred_rows` |
 | `_structured` | (S3b) `_IRLSDirectStructuredStep`; `StructuredSolverError` (its `__module__` still the package) and `_structured_solver_errors`; the Levenberg shifts (`_LEVENBERG_SHIFTS`, `_levenberg_shifted_operator`, `_levenberg_shifted_leaf_operator`, `_build_iterate_factor`); `_structured_score_centre` |
 | `_centred` | `_system_offset_mean`, read by QR, the dense step and the final system |
+| `_scop` | (S3c) `_IRLSDirectSCOPStep`; `SCOPRunCentring` with `_seed_refusals` and `_carry_refusals` (which `_fit`'s centred system also calls); the latent state and trial records (`_SCOPGroupState`, `_SCOPTrialState`, `_SCOPOrdinarySolve`), `_evaluate_scop_trial`, `_level_about`, `_LATENT_MAX_STEP`, `_latent_step_depth`, `_centred_system_matvec`, `_lone_scop_support` |
 
 A strategy module never imports `_fit`; `_fit` imports the strategies. A helper that a
 strategy and the fit both read goes to a leaf module such as `_centred`.
@@ -613,12 +614,20 @@ strategy and the fit both read goes to a leaf module such as `_centred`.
 The interface as it stands:
 
 ```python
-class _IRLSDirectStep(Protocol):
+class _IRLSDirectStep(Protocol):      # (S3c) every step subclasses it; each hook defaults to None
     backend: str                       # what the fit publishes ("qr", "gram", "structured")
     data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None
                                        # read by the centred finaliser
     finalise: Callable[[_IRLSDirectFit], None] | None
                                        # (S3b) the step's own finaliser; None: the centred one
+    # (S3c) the SCOP step's hooks; None on every other step
+    initial_state: Callable[[_IRLSDirectFit, _IRLSState], _IRLSState] | None   # S22
+    search: Callable[[_IRLSDirectFit, int], None] | None    # L09; None: the shared search
+    latent_change: Callable[[], float] | None               # L16, the coefficient criterion
+    damped: Callable[[_IRLSDirectFit], bool] | None         # L16, a damped step never stops
+    latent_groups: Callable[[], tuple] | None               # L17, (state, spec) pairs
+    terminal: Callable[[_IRLSDirectFit], None] | None       # F05
+    postfit: Callable[[_IRLSDirectFit, PIRLSResult], dict | None] | None   # F14, F09's eta
     def propose(self, fit, it: int) -> None
 ```
 
@@ -681,10 +690,81 @@ Where S3b (the structured step) changed it:
     unshifted factor is the one the last iteration took; keeping that factor and its shift
     on the step would let `finalise` reuse it.
 
+Where S3c (the SCOP step) changed it:
+
+14. **The SCOP step is chosen at the end of `_setup_routes`,** where `_has_scop` is
+    decided.  Its constructor is the old `_setup_scop`: it evaluates the start
+    (`scop_initialization`), so it follows every field `evaluate_state` reads.  It writes
+    two fit fields: the first latent coordinates' mapped coefficients into `beta`, and
+    `_scop_run`, whose full-design refusals the centred system seeds and carries.  The
+    REML curvature class (`classify_scop_reml_curvature`) is still computed where it was,
+    before the refusals, and handed to the constructor.
+15. **The hooks.**
+    - The interface (`_step`) gives each optional hook a `None` default, and every step
+      subclasses it.  The `data_rank = finalise = None` lines are gone from the steps.
+    - The hooks are `initial_state(fit, committed)` (S22), `search(fit, it)` (L09),
+      `latent_change()` and `damped(fit)` (L16), `latent_groups()` (L17's SCOP input),
+      `terminal(fit)` (F05) and `postfit(fit, result)` (F14).
+    - `postfit` also writes F09's `cache_out["eta_unclipped"]`.  Nothing writes
+      `cache_out` between there and `postfit`, so the dict's order is unchanged.
+    - `search` writes what the shared search writes: `retained` with its `eta`, `mu` and
+      deviance, `beta`, `intercept`, `decision`, `n_halvings`, `step_rejected` and
+      `proposal_state`.
+16. **No `commit` hook.**
+    - L21 commits the retained state or ends the loop.  So the step's committed latent
+      state at `propose` is the one its last search retained.
+    - `initial_state` seeds that state with the fit-entry bundle.
+    - `run()` reads no `_has_scop`, and the search choice is one local `None` test.
+17. **Convergence goes through hooks, not `_has_scop`.**  This keeps S4 simplest:
+    `_converge` reads no route flag.
+    - `latent_change` joins the coefficient criterion, and `damped` vetoes a stop under
+      either criterion.
+    - The fixed-point test's `not _has_scop` was dead, because SCOP never sets
+      `_score_centre`, and is deleted.
+    - Both searches write `proposal_state`, so the `proposal` field and `_converge`'s
+      choice between the two are gone.
+18. **The certificate reads `latent_groups()`.**
+    - It returns `(state, spec)` pairs.  `true_mode_residual` reads the spec's `group`,
+      `S_scop`, `B_scop`, `bin_idx` and `reparam`, the objects the step's latent-state
+      dict holds, in place of the fit's `_scop_state`.
+    - `_judge_mean_space` reads the hook only where the certificate runs.
+    - `_scop_columns` stays a fit field for S3d's `certificate_inputs`.
+19. **Fields that left the fit (25).**
+    - Setup: `_S_reduced`, `_reduced_to_full`, `_reduced_dm`, `_reduced_tabmat_state`,
+      `_scop_specs`, `_scop_order`, `_scop_newton`, `_expose_exact_support_state`,
+      `_scop_state` and `_scop_curvature`.
+    - The merit: `scop_outer_penalty`, `scop_outer_penalty_abs`, `scop_merit_errors`,
+      `merit_gamma`, `gaussian_response_roundoff` and `nb2_unit_roundoff`.
+    - The iteration: `scop_committed`, `scop_proposal_eta_unclipped` (and its reset in
+      `_working`), `scop_ordinary`, `centred_level`, `scop_results`, `proposal_scop`,
+      `retained_scop` and `proposal`.
+    - They are the step's slots now.  `_has_scop`, `_scop_columns` and `_scop_run` stay.
+20. **`_has_scop` after S3c** (18 mentions, from 33).  It is a setup field:
+    - `_setup_routes` reads it for the state centre's gate, the refusal, the stagnation
+      Newton's exclusion and the step choice;
+    - `_setup_systems` reads it for QR, the mean-space Newton's availability, the Gram
+      caches, `fixed_owners` and the initial-data reuse;
+    - `evaluate_state` reads it, because a SCOP state's merit is the step's;
+    - so does the debug row.
+    No branch after setup reads it.
+21. **L08 is `_note_svd_fallback(fit)`,** which the Gram step and the SCOP step call
+    after their solve, as each ran it before.
+22. **The identity hazards hold.**
+    - `_merit_errors` is still keyed by `id()` and still never pruned.
+    - The trial cache is still a local of `search`, keyed on `alpha * shortened`.
+    - `bind` gets the fit's own owners.
+    - `search` writes `retained.eta_unclipped` itself into the fit (F04).
+    - The proposal's state outlives the search through `proposal_state`, and the
+      committed and retained trial states through the step's slots.
+
 Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
 A name that a strategy module reads is patched in that module: since S3b the structured
 factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
-`centre_offset_mean` are `_structured`'s, and tests read the two errors there.
+`centre_offset_mean` are `_structured`'s, and tests read the two errors there.  Since S3c
+the SCOP step's are `_scop`'s: `_select_irls_trial` (SCOP's search; the shared search
+still reads `_fit`'s), `_evaluate_scop_trial`, `_latent_step_depth`,
+`_centred_system_matvec` and `_raw_centering_well_scaled`, and the SCOP tests patch and
+read them there.
 
 ## 7. Is the length lines-of-code abuse?
 
