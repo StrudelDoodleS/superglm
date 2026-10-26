@@ -1590,11 +1590,8 @@ class _IRLSDirectFit:
         return self._publish(it)
 
     def _setup_design(self) -> None:
-        X, y, family, link, groups = self.X, self.y, self.family, self.link, self.groups
-        weights, offset, lambda2 = self.weights, self.offset, self.lambda2
-        direct_solve, S_override = self.direct_solve, self.S_override
-        reml_penalties, beta_init = self.reml_penalties, self.beta_init
-        intercept_init = self.intercept_init
+        X, family, link, groups, weights = self.X, self.family, self.link, self.groups, self.weights
+        offset, S_override, intercept_init = self.offset, self.S_override, self.intercept_init
         if isinstance(X, DesignMatrix):
             dm = X
         else:
@@ -1614,7 +1611,7 @@ class _IRLSDirectFit:
         if not np.any(weights > 0.0):
             raise ValueError("weights must contain at least one positive value")
         objective_merit_scale = _irls_objective_scale(
-            y=y,
+            y=self.y,
             weights=weights,
             family=family,
             link=link,
@@ -1623,18 +1620,22 @@ class _IRLSDirectFit:
         structured_decision = resolve_structured_backend(
             gms,
             groups,
-            direct_solve=direct_solve,
+            direct_solve=self.direct_solve,
             coefficient_width=p,
-            lambda2=lambda2,
+            lambda2=self.lambda2,
             S_override=S_override,
             nesting_cache=getattr(dm, "_structured_layout_cache", None),
         )
-        if structured_decision.use_structured and S_override is None and reml_penalties is None:
+        if (
+            structured_decision.use_structured
+            and S_override is None
+            and self.reml_penalties is None
+        ):
             reason = (
                 "the structured candidate requires compact reml_penalties "
                 "when S_override is not supplied"
             )
-            if direct_solve == "structured":
+            if self.direct_solve == "structured":
                 raise ValueError(f"direct_solve='structured' is ineligible: {reason}.")
             structured_decision = replace(
                 structured_decision,
@@ -1676,7 +1677,7 @@ class _IRLSDirectFit:
         if offset is None:
             offset = np.zeros(n)
 
-        beta = beta_init.copy() if beta_init is not None else np.zeros(p)
+        beta = self.beta_init.copy() if self.beta_init is not None else np.zeros(p)
 
         if intercept_init is not None:
             intercept = intercept_init
@@ -1684,7 +1685,7 @@ class _IRLSDirectFit:
             intercept = coefficient_initial_intercept(
                 distribution=family,
                 link=link,
-                y=y,
+                y=self.y,
                 sample_weight=weights,
             )
         # Whether the default start below was lowered into the family's mean space
@@ -1721,7 +1722,9 @@ class _IRLSDirectFit:
         elif S_override is not None:
             S = S_override
         else:
-            S = _build_penalty_matrix(gms, groups, lambda2, p, reml_penalties=reml_penalties)
+            S = _build_penalty_matrix(
+                gms, groups, self.lambda2, p, reml_penalties=self.reml_penalties
+            )
         self.dm, self.n, self.p, self.gms, self.weights = dm, n, p, gms, weights
         self.offset, self.objective_merit_scale = offset, objective_merit_scale
         self.structured_decision, self._use_structured = structured_decision, _use_structured
@@ -1742,13 +1745,13 @@ class _IRLSDirectFit:
         With ``magnitude``, return ``|S| |beta|``, the magnitude this product
         sums, which bounds its rounding componentwise.
         """
-        S, reml_penalties, lambda2, gms = self.S, self.reml_penalties, self.lambda2, self.gms
+        S, lambda2 = self.S, self.lambda2
         values = np.asarray(beta_values, dtype=np.float64)
         if magnitude:
             values = np.abs(values)
         if S is not None:
             return (np.abs(S) if magnitude else S) @ values
-        if reml_penalties is None:  # pragma: no cover - validated above
+        if self.reml_penalties is None:  # pragma: no cover - validated above
             raise RuntimeError("Structured penalty components are unavailable.")
         from superglm.reml.penalty_algebra import (
             penalty_component_magnitude_matvec,
@@ -1757,29 +1760,28 @@ class _IRLSDirectFit:
 
         apply = penalty_component_magnitude_matvec if magnitude else penalty_component_matvec
         product = np.zeros_like(values)
-        for component in reml_penalties:
+        for component in self.reml_penalties:
             lam = float(lambda2[component.name]) if isinstance(lambda2, dict) else float(lambda2)
             if lam == 0.0:
                 continue
             product[component.group_sl] += lam * apply(
                 component,
                 values[component.group_sl],
-                gms[component.group_index],
+                self.gms[component.group_index],
             )
         return product
 
     def penalty_rounding(self) -> int:
         """``k`` with ``fl(S v)`` within ``gamma_k fl(|S| |v|)`` (``penalty_product_rounding``)."""
-        p, S, reml_penalties = self.p, self.S, self.reml_penalties
         from superglm.reml.penalty_algebra import penalty_product_rounding
 
-        return penalty_product_rounding(p, None if S is not None else reml_penalties)
+        return penalty_product_rounding(self.p, None if self.S is not None else self.reml_penalties)
 
     def penalty_curvature(self) -> NDArray:
         """``diag(S)``: the dense penalty's diagonal, or the components' without forming ``S``."""
-        S, lambda2, p, reml_penalties = self.S, self.lambda2, self.p, self.reml_penalties
-        if S is not None:
-            return np.diag(S).astype(np.float64, copy=True)
+        lambda2, reml_penalties = self.lambda2, self.reml_penalties
+        if self.S is not None:
+            return np.diag(self.S).astype(np.float64, copy=True)
         from superglm.reml.identified import penalty_diagonal
 
         lambdas = (
@@ -1787,7 +1789,7 @@ class _IRLSDirectFit:
             if isinstance(lambda2, dict)
             else {component.name: float(lambda2) for component in reml_penalties or ()}
         )
-        return penalty_diagonal(p, lambdas, reml_penalties)
+        return penalty_diagonal(self.p, lambdas, reml_penalties)
 
     def penalty_quadratic(self, beta_values: NDArray) -> float:
         values = np.asarray(beta_values, dtype=np.float64)
@@ -1813,52 +1815,49 @@ class _IRLSDirectFit:
         the offset of ``mean_x`` from the centre (``_system_offset_mean``), not
         from the raw intercept, which cancels ``c' beta`` at a column's offset.
         """
-        _score_centre, mode_bar = self._score_centre, self.mode_bar
-        _penalty_curvature, dm, family = self._penalty_curvature, self.dm, self.family
-        link, y, weights, offset, p = self.link, self.y, self.weights, self.offset, self.p
-        _laplace_excluded, penalty_matvec = self._laplace_excluded, self.penalty_matvec
-        assert _score_centre is not None
-        mean_x, sum_w, diagonal, excluded_indices, offset_mean = _score_centre
+        _penalty_curvature = self._penalty_curvature
+        assert self._score_centre is not None
+        mean_x, sum_w, diagonal, excluded_indices, offset_mean = self._score_centre
         rows = coefficient_working_rows(
-            distribution=family,
-            link=link,
-            y=y,
+            distribution=self.family,
+            link=self.link,
+            y=self.y,
             mu=mu_values,
             eta=eta_values,
-            sample_weight=weights,
+            sample_weight=self.weights,
             prefer_observed=False,
         )
         with np.errstate(invalid="ignore", divide="ignore"):
             scale = np.sqrt(np.abs(diagonal) / sum_w)
-        excluded = np.zeros(p, dtype=bool)
+        excluded = np.zeros(self.p, dtype=bool)
         excluded[list(excluded_indices)] = True
         # the slopes the REML fit's Laplace approximation leaves out
         # (``reml.identified``, design §3.9): flagged and kept, never gated
-        excluded[list(_laplace_excluded)] = True
+        excluded[list(self._laplace_excluded)] = True
         if centred_intercept is None or offset_mean is None:
             shift = float(mean_x @ beta_values)
             alpha = float(intercept_value) + shift
-            eta_tilde = eta_values - offset - float(intercept_value) - shift
+            eta_tilde = eta_values - self.offset - float(intercept_value) - shift
         else:
             shift = float(offset_mean @ beta_values)
             alpha = float(centred_intercept) + shift
-            eta_tilde = eta_values - offset - float(centred_intercept) - shift
+            eta_tilde = eta_values - self.offset - float(centred_intercept) - shift
         if not _penalty_curvature:
             _penalty_curvature.append(self.penalty_curvature())
         return penalized_mode_residual(
-            dm=dm,
+            dm=self.dm,
             row_score=rows.weights * (rows.response - eta_values),
             fisher_weights=rows.weights,
-            positive_prior=weights > 0.0,
+            positive_prior=self.weights > 0.0,
             mean_x=mean_x,
             centered_scale=np.where(np.isfinite(scale), scale, 0.0),
             alpha=alpha,
             eta_tilde=eta_tilde,
-            penalty_score=penalty_matvec(beta_values),
-            penalty_magnitude=penalty_matvec(beta_values, magnitude=True),
+            penalty_score=self.penalty_matvec(beta_values),
+            penalty_magnitude=self.penalty_matvec(beta_values, magnitude=True),
             penalty_curvature=_penalty_curvature[0],
             sum_w=sum_w,
-            bar=mode_bar,
+            bar=self.mode_bar,
             excluded=excluded,
             resolve_cap=resolve_cap,
             penalty_rounding=self.penalty_rounding(),
@@ -1931,17 +1930,13 @@ class _IRLSDirectFit:
         the same relative form, bar and floor, in the weights' units (a latent
         penalty that overflows there is refused).
         """
-        dm, groups, lambda2, n, p, y = self.dm, self.groups, self.lambda2, self.n, self.p, self.y
-        weights, offset, mode_bar, profile = self.weights, self.offset, self.mode_bar, self.profile
-        _laplace_excluded, _scop_columns = self._laplace_excluded, self._scop_columns
-        _scop_state, _held_rank = self._scop_state, self._held_rank
-        _judged_truncated, _last_truncated = self._judged_truncated, self._last_truncated
-        _last_true_residual, _penalty_curvature = self._last_true_residual, self._penalty_curvature
+        dm, lambda2, p, y, weights = self.dm, self.lambda2, self.p, self.y, self.weights
+        mode_bar, profile, _penalty_curvature = self.mode_bar, self.profile, self._penalty_curvature
         _row_set_curvature, penalty_matvec = self._row_set_curvature, self.penalty_matvec
         penalty_rounding = self.penalty_rounding
-        _last_true_residual[0] = None
+        self._last_true_residual[0] = None
         # this state is judged: no truncated direction unless one is found below
-        _judged_truncated[0] = (eta_values, ())
+        self._judged_truncated[0] = (eta_values, ())
         positive = weights > 0.0
         largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
         weight_exponent = _even_exponent(largest_weight)
@@ -1969,9 +1964,9 @@ class _IRLSDirectFit:
         with np.errstate(invalid="ignore", divide="ignore"):
             scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
         excluded = np.zeros(p, dtype=bool)
-        excluded[list(_laplace_excluded)] = True
-        if _scop_columns is not None:
-            excluded |= _scop_columns
+        excluded[list(self._laplace_excluded)] = True
+        if self._scop_columns is not None:
+            excluded |= self._scop_columns
         tiny = float(np.finfo(np.float64).tiny)
         zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
         if active_rows is not None and active_rows.size:
@@ -2039,7 +2034,7 @@ class _IRLSDirectFit:
             mean_x=mean_x,
             centered_scale=np.where(np.isfinite(scale), scale, 0.0),
             alpha=float(intercept_value) + centre_shift,
-            eta_tilde=eta_values - offset - float(intercept_value) - centre_shift,
+            eta_tilde=eta_values - self.offset - float(intercept_value) - centre_shift,
             penalty_score=penalty_score,
             penalty_magnitude=penalty_magnitude,
             penalty_curvature=curvature,
@@ -2052,7 +2047,7 @@ class _IRLSDirectFit:
             penalty_block=weak_penalty_block,
             penalty_rounding=penalty_rounding(),
         )
-        _last_true_residual[0] = residual
+        self._last_true_residual[0] = residual
         rows_n = int(np.count_nonzero(positive))
         underflow = _underflow_allowance(rows_n)
         assert residual.scale is not None
@@ -2095,7 +2090,7 @@ class _IRLSDirectFit:
         # judged on the rows they move (``mode_score.truncated_direction_ratio``):
         # a light row set the relative score sums beside the heavy rows'
         # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
-        held_rank = _held_rank[0]
+        held_rank = self._held_rank[0]
         if (
             held_rank is not None
             and held_rank.parameter_null_basis is not None
@@ -2106,7 +2101,7 @@ class _IRLSDirectFit:
                 truncated_ratio, truncated = truncated_direction_ratio(
                     dm=dm,
                     null_basis=held_rank.parameter_null_basis,
-                    angle=null_basis_angle(held_rank, n),
+                    angle=null_basis_angle(held_rank, self.n),
                     mean_x=mean_x,
                     row_score=score,
                     fisher_weights=fisher,
@@ -2127,9 +2122,9 @@ class _IRLSDirectFit:
                     penalty_rounding=penalty_rounding(),
                 )
             ratio = max(ratio, truncated_ratio)
-            _judged_truncated[0] = (eta_values, truncated)
+            self._judged_truncated[0] = (eta_values, truncated)
             if truncated:
-                _last_truncated[0] = (eta_values, truncated)
+                self._last_truncated[0] = (eta_values, truncated)
             if truncated_ratio == math.inf and profile is not None:
                 # refused because the basis or the arithmetic cannot resolve
                 # the truncated rows (an ``unresolved_basis`` record)
@@ -2139,8 +2134,8 @@ class _IRLSDirectFit:
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
         latent_parts = []
         for group_state in scop_groups or ():
-            state = _scop_state[group_state.group_index]
-            group = groups[group_state.group_index]
+            state = self._scop_state[group_state.group_index]
+            group = self.groups[group_state.group_index]
             lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
             theta = np.asarray(group_state.beta_eff, dtype=np.float64)
             penalty_matrix = np.asarray(state["S_scop"], dtype=np.float64)
@@ -2231,7 +2226,7 @@ class _IRLSDirectFit:
     def _setup_trace(self) -> None:
         trace_run, lambda2 = self.trace_run, self.lambda2
         trace_enabled = trace_run is not None and trace_run.enabled
-        trace_basis_id = (
+        self.trace_basis_id = (
             trace_run.next_basis_id() if trace_enabled and trace_run is not None else None
         )
         if not trace_enabled:
@@ -2242,8 +2237,7 @@ class _IRLSDirectFit:
             )
         else:
             resolved_lambdas = (("smooth", float(lambda2)),)
-        self.trace_enabled, self.trace_basis_id = trace_enabled, trace_basis_id
-        self.resolved_lambdas = resolved_lambdas
+        self.trace_enabled, self.resolved_lambdas = trace_enabled, resolved_lambdas
 
     def emit_evaluation(
         self,
@@ -2255,12 +2249,10 @@ class _IRLSDirectFit:
         enclosing_proposal_state_id: int | None = None,
         deviance_reused: bool = False,
     ) -> None:
-        trace_enabled, trace_run = self.trace_enabled, self.trace_run
-        trace_purpose = self.trace_purpose
-        if not trace_enabled:
+        if not self.trace_enabled:
             return
-        assert trace_run is not None
-        trace_run.emit_lazy(
+        assert self.trace_run is not None
+        self.trace_run.emit_lazy(
             "evaluation",
             lambda: {
                 "state_id": state.state_id,
@@ -2280,7 +2272,7 @@ class _IRLSDirectFit:
                 "deviance_source": "provided" if deviance_reused else "evaluated",
             },
             channel="pirls",
-            purpose=trace_purpose,
+            purpose=self.trace_purpose,
             authoritative=False,
         )
 
@@ -2298,10 +2290,8 @@ class _IRLSDirectFit:
         emit_trace: bool = True,
         centred_intercept: float | None = None,
     ) -> _IRLSState:
-        trace_enabled, trace_run = self.trace_enabled, self.trace_run
-        _state_center, dm, y, weights = self._state_center, self.dm, self.y, self.weights
-        family, link, offset = self.family, self.link, self.offset
-        if trace_enabled:
+        trace_run, _state_center = self.trace_run, self._state_center
+        if self.trace_enabled:
             assert trace_run is not None
             state_id = trace_run.next_state_id()
             evaluation_id = trace_run.next_evaluation_id()
@@ -2318,16 +2308,18 @@ class _IRLSDirectFit:
                 centred_intercept = float(intercept_value) + shift
             if eta_unclipped is None:
                 eta_unclipped = (
-                    centred_intercept + centred_matvec(dm, beta_values, _state_center) + offset
+                    centred_intercept
+                    + centred_matvec(self.dm, beta_values, _state_center)
+                    + self.offset
                 )
             intercept_value = centred_intercept - shift
         state = _evaluate_irls_state(
-            dm,
-            y,
-            weights,
-            family,
-            link,
-            offset,
+            self.dm,
+            self.y,
+            self.weights,
+            self.family,
+            self.link,
+            self.offset,
             beta_values,
             intercept_value,
             deviance=deviance,
@@ -2366,12 +2358,11 @@ class _IRLSDirectFit:
         convergence_label: str | None = None,
         convergence_tolerance: float | None = None,
     ) -> None:
-        trace_enabled, trace_run = self.trace_enabled, self.trace_run
-        trace_purpose, convergence, tol = self.trace_purpose, self.convergence, self.tol
-        if not trace_enabled:
+        convergence, tol = self.convergence, self.tol
+        if not self.trace_enabled:
             return
-        assert trace_run is not None
-        trace_run.emit_lazy(
+        assert self.trace_run is not None
+        self.trace_run.emit_lazy(
             "state_commit",
             lambda: {
                 "state_id": state.state_id,
@@ -2397,22 +2388,16 @@ class _IRLSDirectFit:
                 "termination_reason": termination_reason,
             },
             channel="pirls",
-            purpose=trace_purpose,
+            purpose=self.trace_purpose,
         )
 
     def _setup_routes(self) -> None:
-        dm, family, link, groups, p = self.dm, self.family, self.link, self.groups, self.p
-        weights, _use_structured = self.weights, self._use_structured
+        family, link, groups = self.family, self.link, self.groups
         _state_center, compute_rank_info = self._state_center, self.compute_rank_info
-        _defer_rank_info = self._defer_rank_info
-        _compute_fit_statistics = self._compute_fit_statistics
-        _compute_reml_geometry = self._compute_reml_geometry
         _return_working_system = self._return_working_system
-        _use_observed_newton, _working_newton = self._use_observed_newton, self._working_newton
-        _newton_latch = self._newton_latch
         # ── Constrained QP support (monotone splines) ──
         has_constraints = any(g.constraints is not None for g in groups)
-        prev_active_set: list[int] | None = None
+        self.prev_active_set: list[int] | None = None
         A_all: NDArray | None = None
         b_all: NDArray | None = None
         # The feasibility scale needs ``|A_all|`` on every test, and the aggregate
@@ -2425,7 +2410,7 @@ class _IRLSDirectFit:
             b_blocks: list[np.ndarray] = []
             for g in groups:
                 if g.constraints is not None:
-                    A_model = np.zeros((g.constraints.n_constraints, p))
+                    A_model = np.zeros((g.constraints.n_constraints, self.p))
                     A_model[:, g.sl] = g.constraints.A
                     A_blocks.append(A_model)
                     b_blocks.append(g.constraints.b)
@@ -2435,21 +2420,21 @@ class _IRLSDirectFit:
 
         # ── SCOP monotone engine support ──
         _has_scop = any(g.monotone_engine == "scop" for g in groups)
-        _scop_run: SCOPRunCentring | None = None
+        self._scop_run: SCOPRunCentring | None = None
         # the columns the binomial/log certificate tests in SCOP's latent
         # coordinates instead (``true_mode_residual``)
         _scop_columns: NDArray | None = None
         if _has_scop:
-            _scop_columns = np.zeros(p, dtype=bool)
+            _scop_columns = np.zeros(self.p, dtype=bool)
             for g in groups:
                 if g.monotone_engine == "scop":
                     _scop_columns[g.sl] = True
         if (
             _state_center is None
-            and not _use_structured
+            and not self._use_structured
             and not has_constraints
             and not _has_scop
-            and hasattr(dm, "group_matrices")
+            and hasattr(self.dm, "group_matrices")
         ):
             # The nested chain's centred state on gram's centred system too: eta
             # about the fixed prior-weighted centre, so a column at 1e8
@@ -2458,19 +2443,19 @@ class _IRLSDirectFit:
             # verifier: a raw-1e8 column left the penalized deviance noisy at
             # 1e-11 relative, so no Newton step near the mode was accepted and
             # the score stalled at 1e-6).
-            _state_center = prior_weighted_centre(dm, weights)
+            _state_center = prior_weighted_centre(self.dm, self.weights)
         _scop_curvature = "fisher"
         if _has_scop:
             from superglm.reml.observed_geometry import classify_scop_reml_curvature
 
             _scop_curvature = classify_scop_reml_curvature(family, link)
-        if compute_rank_info and _defer_rank_info is not None:
+        if compute_rank_info and self._defer_rank_info is not None:
             raise ValueError("deferred rank metadata requires compute_rank_info=False")
-        if (not _compute_fit_statistics and compute_rank_info) or (
+        if (not self._compute_fit_statistics and compute_rank_info) or (
             _return_working_system and (compute_rank_info or has_constraints or _has_scop)
         ):
             raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
-        if not _compute_reml_geometry and (compute_rank_info or _compute_fit_statistics):
+        if not self._compute_reml_geometry and (compute_rank_info or self._compute_fit_statistics):
             raise ValueError(
                 "omitting generic REML geometry requires rank metadata and fit statistics "
                 "to be disabled"
@@ -2510,10 +2495,10 @@ class _IRLSDirectFit:
         # information, and the REML geometry it hands on reads Fisher rows at the
         # retained model either way.
         _observed_newton_active = bool(
-            _use_observed_newton
+            self._use_observed_newton
             and not has_constraints
             and (
-                (_working_newton and concave_observed_rows(family, link))
+                (self._working_newton and concave_observed_rows(family, link))
                 if _return_working_system
                 else supports_observed_newton(family, link)
                 and not _has_constant_irls_weights(family, link)
@@ -2524,18 +2509,21 @@ class _IRLSDirectFit:
         # and starts on Newton when an earlier solve of the same REML fit
         # switched (``_newton_latch``).
         _stagnation_newton_available = bool(
-            _use_observed_newton
+            self._use_observed_newton
             and not has_constraints
             and not _has_scop
             and not _return_working_system
             and supports_observed_newton(family, link)
             and not _observed_newton_active
         )
-        if _stagnation_newton_available and _newton_latch is not None and _newton_latch[0]:
+        if (
+            _stagnation_newton_available
+            and self._newton_latch is not None
+            and self._newton_latch[0]
+        ):
             _observed_newton_active = True
-        self.has_constraints, self.prev_active_set = has_constraints, prev_active_set
-        self.A_all, self.b_all, self.abs_A_all, self._has_scop = A_all, b_all, abs_A_all, _has_scop
-        self._scop_run, self._scop_columns = _scop_run, _scop_columns
+        self.has_constraints, self.A_all, self.b_all = has_constraints, A_all, b_all
+        self.abs_A_all, self._has_scop, self._scop_columns = abs_A_all, _has_scop, _scop_columns
         self._state_center, self._scop_curvature = _state_center, _scop_curvature
         self._observed_newton_active = _observed_newton_active
         self._stagnation_newton_available = _stagnation_newton_available
@@ -2548,25 +2536,20 @@ class _IRLSDirectFit:
         next Newton step can start from. Every line search of an observed fit
         reads it, the SCOP one included.
         """
-        family, link, y, weights = self.family, self.link, self.y, self.weights
         rows = coefficient_working_rows(
-            distribution=family,
-            link=link,
-            y=y,
+            distribution=self.family,
+            link=self.link,
+            y=self.y,
             mu=candidate.mu,
             eta=candidate.eta,
-            sample_weight=weights,
+            sample_weight=self.weights,
             prefer_observed=True,
         )
         return rows.rejection_reason is not None
 
     def _setup_scop(self) -> None:
-        dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
-        n, S, lambda2, y, weights = self.n, self.S, self.lambda2, self.y, self.weights
-        offset, beta, intercept, _has_scop = self.offset, self.beta, self.intercept, self._has_scop
-        _scop_run, _scop_run_centring = self._scop_run, self._scop_run_centring
-        scop_state_init, debug_recorder = self.scop_state_init, self.debug_recorder
-        trace_run, evaluate_state = self.trace_run, self.evaluate_state
+        groups, gms, n, lambda2 = self.groups, self.gms, self.n, self.lambda2
+        _scop_run = self._scop_run
         _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
         _expose_exact_support_state = False
         # group_idx -> {beta_scop, beta_scop_prev, reparam, B_scop, S_scop}
@@ -2575,18 +2558,18 @@ class _IRLSDirectFit:
         # their exact supports (``SCOPRunCentring``); a traced or debugged fit
         # stays fresh, as the Newton engine's carried policy does.
         if (
-            _has_scop
-            and _scop_run_centring is not None
-            and debug_recorder is None
-            and trace_run is None
+            self._has_scop
+            and self._scop_run_centring is not None
+            and self.debug_recorder is None
+            and self.trace_run is None
         ):
-            _scop_run = _scop_run_centring
-            _scop_run.bind((dm, family, link, *gms, *groups))
-        if _has_scop:
+            _scop_run = self._scop_run_centring
+            _scop_run.bind((self.dm, self.family, self.link, *gms, *groups))
+        if self._has_scop:
             for gi, g in enumerate(groups):
                 if g.monotone_engine == "scop":
                     cached_scop_state = (
-                        scop_state_init.get(gi) if scop_state_init is not None else None
+                        self.scop_state_init.get(gi) if self.scop_state_init is not None else None
                     )
                     reparam = g.scop_reparameterization
                     cached_S_scop = (
@@ -2668,7 +2651,7 @@ class _IRLSDirectFit:
             _non_scop_cols = np.array(_non_scop_cols, dtype=int)
             _p_reduced = len(_non_scop_cols)
             # Build reduced penalty matrix for non-SCOP groups
-            _S_reduced = S[np.ix_(_non_scop_cols, _non_scop_cols)]
+            _S_reduced = self.S[np.ix_(_non_scop_cols, _non_scop_cols)]
             # Build mapping from reduced beta index to full beta index
             _reduced_to_full = _non_scop_cols
             _reduced_gms = []
@@ -2706,24 +2689,24 @@ class _IRLSDirectFit:
 
             # QP/warm initialization is part of the first committed state, not the
             # first proposal. This gives iteration one a coherent latent baseline.
-            provisional = evaluate_state(
-                beta,
-                intercept,
+            provisional = self.evaluate_state(
+                self.beta,
+                self.intercept,
                 phase="scop_initialization",
                 iteration=0,
             )
             initial_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
+                distribution=self.family,
+                link=self.link,
+                y=self.y,
                 mu=provisional.mu,
                 eta=provisional.eta,
-                sample_weight=weights,
+                sample_weight=self.weights,
                 prefer_observed=False,
             )
             W_init = initial_rows.weights
             z_init = initial_rows.response
-            z_off_init = z_init - offset
+            z_off_init = z_init - self.offset
             for gi, st in _scop_state.items():
                 if st["beta_scop"] is None:
                     g_i = groups[gi]
@@ -2754,7 +2737,7 @@ class _IRLSDirectFit:
                         )
                 gamma_eff = st["reparam"].forward(st["beta_scop"])
                 st["gamma_eff"] = gamma_eff.copy()
-                beta[groups[gi].sl] = gamma_eff
+                self.beta[groups[gi].sl] = gamma_eff
             self._S_reduced, self._reduced_to_full = _S_reduced, _reduced_to_full
             self._reduced_dm, self._reduced_tabmat_state = _reduced_dm, _reduced_tabmat_state
             self._scop_specs, self._scop_order = _scop_specs, _scop_order
@@ -2764,23 +2747,17 @@ class _IRLSDirectFit:
 
     def _setup_systems(self) -> None:
         dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
-        n, p, S, beta, intercept = self.n, self.p, self.S, self.beta, self.intercept
         has_constraints, _has_scop = self.has_constraints, self._has_scop
-        _use_structured = self._use_structured
-        _observed_newton_active = self._observed_newton_active
-        _return_working_system, direct_solve = self._return_working_system, self.direct_solve
-        _scop_run, _raw_moment_policy = self._scop_run, self._raw_moment_policy
-        _fisher_data_reuse, _initial_data_reuse = self._fisher_data_reuse, self._initial_data_reuse
-        profile, trace_purpose = self.profile, self.trace_purpose
-        debug_recorder, trace_run = self.debug_recorder, self.trace_run
+        _use_structured, _raw_moment_policy = self._use_structured, self._raw_moment_policy
+        _fisher_data_reuse, profile = self._fisher_data_reuse, self.profile
         # QR pre-computation: materialise full design matrix once
         # Constrained QP / SCOP requires Gram path — force it if constraints present
-        _use_qr = direct_solve == "qr" and not has_constraints and not _has_scop
-        _mean_space_newton_available = bool(
+        _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
+        self._mean_space_newton_available = bool(
             mean_space_violation(family, link) is not None
             and not _use_qr
             and not _has_scop
-            and not _return_working_system
+            and not self._return_working_system
         )
         if _use_qr:
             has_disc = any(
@@ -2794,7 +2771,7 @@ class _IRLSDirectFit:
                     "benefit.  Consider direct_solve='auto' for large-n discrete fits."
                 )
             _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
-            _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
+            _L_aug = _sqrt_penalty_augmented(self.S, self.p)  # (p+1, p+1)
             self._X_full, self._L_aug = _X_full, _L_aug
 
         # Tabmat acceleration: the structured layout owns a pruned small-block
@@ -2817,18 +2794,18 @@ class _IRLSDirectFit:
         _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
         # Observed rows are not the constant Fisher weights this cache assumes.
         _can_reuse_weighted_gram = (
-            _can_reuse_weighted_gram and not _use_structured and not _observed_newton_active
+            _can_reuse_weighted_gram and not _use_structured and not self._observed_newton_active
         )
         dm.execution_plan.validate_group_spans(groups)
         _defer_raw_spline = (
             not dm.raw_spline_tabmat_plan_built
-            and _is_raw_spline_tabmat_centering_candidate(gms, n=n)
+            and _is_raw_spline_tabmat_centering_candidate(gms, n=self.n)
             and (
                 _defer_raw_spline_tabmat_plan(
-                    n=n,
+                    n=self.n,
                     raw_width=sum(int(group.B.shape[1]) for group in gms if group.shape[1] > 0),
                     constant_weights=_can_reuse_weighted_gram,
-                    repeated_fit=trace_purpose
+                    repeated_fit=self.trace_purpose
                     in {"reml_bootstrap", "reml_candidate", "reml_line_search"},
                 )
             )
@@ -2836,8 +2813,8 @@ class _IRLSDirectFit:
         _tabmat_centering_state = TabmatCenteringState(
             raw_spline_eligible=False if _defer_raw_spline else None
         )
-        if _scop_run is not None:
-            _seed_refusals(_tabmat_centering_state, _scop_run.full_refusals)
+        if self._scop_run is not None:
+            _seed_refusals(_tabmat_centering_state, self._scop_run.full_refusals)
         fixed_owners = ()
         if _raw_moment_policy is not None or _fisher_data_reuse is not None:
             # A negative route choice is safe for changed W; no accepted preflight,
@@ -2865,8 +2842,8 @@ class _IRLSDirectFit:
                     for group in groups
                 )
                 and not (_use_qr or _use_structured or _has_scop)
-                and debug_recorder is None
-                and trace_run is None
+                and self.debug_recorder is None
+                and self.trace_run is None
                 else ()
             )
             if _raw_moment_policy is not None:
@@ -2884,12 +2861,14 @@ class _IRLSDirectFit:
             profile["centered_spline_tabmat_cold_policy_rejections"] = (
                 profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
             )
-        _constant_centered_cache: CenteredSystem | None = None
-        _constant_centered_z: NDArray | None = None
+        self._constant_centered_cache: CenteredSystem | None = None
+        self._constant_centered_z: NDArray | None = None
         # the factor certificate and its one-entry cache (``_certify_centered_factor``)
-        certify_centered_factor = partial(_certify_centered_factor, dm, _fisher_data_reuse, [None])
+        self.certify_centered_factor = partial(
+            _certify_centered_factor, dm, _fisher_data_reuse, [None]
+        )
         _initial_data_pending = (
-            _initial_data_reuse is not None
+            self._initial_data_reuse is not None
             and type(family) is Poisson
             and type(link) is LogLink
             and type(dm) is DesignMatrix
@@ -2904,99 +2883,94 @@ class _IRLSDirectFit:
                 for gm in gms
             )
             and not (_use_qr or _use_structured or has_constraints or _has_scop)
-            and debug_recorder is None
-            and trace_run is None
+            and self.debug_recorder is None
+            and self.trace_run is None
         )
         # These objects stay live throughout the owner line search. A new design
         # or warm state cannot consume an entry from the previous coordinates.
-        _initial_data_key = (
+        self._initial_data_key = (
             (
                 id(dm),
                 id(dm.execution_plan),
                 id(family),
                 id(link),
-                beta.tobytes(),
-                np.float64(intercept).tobytes(),
+                self.beta.tobytes(),
+                np.float64(self.intercept).tobytes(),
             )
             if _initial_data_pending
             else None
         )
-        self._use_qr, self._mean_space_newton_available = _use_qr, _mean_space_newton_available
-        self._tabmat_split, self._tabmat_centering_state = _tabmat_split, _tabmat_centering_state
+        self._use_qr, self._tabmat_split = _use_qr, _tabmat_split
+        self._tabmat_centering_state = _tabmat_centering_state
         self._can_reuse_weighted_gram, self.fixed_owners = _can_reuse_weighted_gram, fixed_owners
         self._raw_moment_policy, self._fisher_data_reuse = _raw_moment_policy, _fisher_data_reuse
-        self._constant_centered_cache = _constant_centered_cache
-        self._constant_centered_z = _constant_centered_z
-        self.certify_centered_factor = certify_centered_factor
         self._initial_data_pending = _initial_data_pending
-        self._initial_data_key = _initial_data_key
 
     def get_centered_system(self, W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
-        dm, S, profile, fixed_owners = self.dm, self.S, self.profile, self.fixed_owners
-        _initial_data_reuse, _initial_data_key = self._initial_data_reuse, self._initial_data_key
-        _tabmat_centering_state, _tabmat_split = self._tabmat_centering_state, self._tabmat_split
-        _fisher_data_reuse, _raw_moment_policy = self._fisher_data_reuse, self._raw_moment_policy
-        _scop_run, weight_semantics = self._scop_run, self.weight_semantics
-        # read at call time: the Gamma/log switch turns both off mid-fit
+        _tabmat_centering_state = self._tabmat_centering_state
+        # read on every call: the Gamma/log switch turns it off mid-fit
         _can_reuse_weighted_gram = self._can_reuse_weighted_gram
-        _observed_newton_active = self._observed_newton_active
         _constant_centered_cache = self._constant_centered_cache
-        _constant_centered_z = self._constant_centered_z
-        reuse = _initial_data_reuse if self._initial_data_pending else None
+        reuse = self._initial_data_reuse if self._initial_data_pending else None
         self._initial_data_pending = False
         before = replace(_tabmat_centering_state) if reuse is not None else None
         if reuse is not None:
             reused = reuse.take(
-                _initial_data_key,
+                self._initial_data_key,
                 W_current,
                 z_off_current,
                 _tabmat_centering_state,
-                np.asarray(S),
+                np.asarray(self.S),
             )
             if reused is not None:
                 return reused
         if (
             _can_reuse_weighted_gram
             and _constant_centered_cache is not None
-            and _constant_centered_z is not None
+            and self._constant_centered_z is not None
         ):
-            if np.array_equal(z_off_current, _constant_centered_z):
+            if np.array_equal(z_off_current, self._constant_centered_z):
                 return _constant_centered_cache
             self._constant_centered_cache = refresh_centered_rhs(
                 system=_constant_centered_cache,
-                dm=dm,
+                dm=self.dm,
                 W=W_current,
                 z_off=z_off_current,
             )
             self._constant_centered_z = z_off_current.copy()
             return self._constant_centered_cache
         fisher = (
-            _fisher_data_reuse if _can_reuse_weighted_gram and not _observed_newton_active else None
+            self._fisher_data_reuse
+            if _can_reuse_weighted_gram and not self._observed_newton_active
+            else None
         )
         data = (
-            fisher.take((*fixed_owners, weight_semantics), W_current)
+            fisher.take((*self.fixed_owners, self.weight_semantics), W_current)
             if fisher is not None
             else None
         )
         system = build_centered_system(
-            dm=dm,
+            dm=self.dm,
             W=W_current,
             z_off=z_off_current,
-            penalty=np.asarray(S),
-            tabmat_split=_tabmat_split,
+            penalty=np.asarray(self.S),
+            tabmat_split=self._tabmat_split,
             tabmat_state=_tabmat_centering_state,
-            profile=profile,
+            profile=self.profile,
             _data=data,
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)
-        if _scop_run is not None:
-            _carry_refusals(_scop_run.full_refusals, _tabmat_centering_state)
-        if _raw_moment_policy is not None and _tabmat_centering_state.raw_moment_eligible is False:
-            _raw_moment_policy.raw_moment_eligible = False
+        if self._scop_run is not None:
+            _carry_refusals(self._scop_run.full_refusals, _tabmat_centering_state)
+        if (
+            self._raw_moment_policy is not None
+            and _tabmat_centering_state.raw_moment_eligible is False
+        ):
+            self._raw_moment_policy.raw_moment_eligible = False
         if reuse is not None:
             reuse.remember(
-                _initial_data_key,
+                self._initial_data_key,
                 W_current,
                 z_off_current,
                 before,
@@ -3009,19 +2983,13 @@ class _IRLSDirectFit:
         return system
 
     def _setup_loop(self) -> None:
-        family, link, beta, intercept = self.family, self.link, self.beta, self.intercept
-        beta_init, intercept_init = self.beta_init, self.intercept_init
-        _state_center, _has_scop = self._state_center, self._has_scop
-        has_constraints, max_iter, _mode_bar = self.has_constraints, self.max_iter, self._mode_bar
-        _centred_init, _deviance_init = self._centred_init, self._deviance_init
-        debug_context, debug_recorder = self.debug_context, self.debug_recorder
-        record_diagnostics = self.record_diagnostics
-        t_start = time.perf_counter()
-        converged = False
-        XtWX_beta: (
+        _state_center = self._state_center
+        self.t_start = time.perf_counter()
+        self.converged = False
+        self.XtWX_beta: (
             NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator | None
         ) = None
-        _final_penalized_operator: (
+        self._final_penalized_operator: (
             FactorSmoothPenalizedOperator
             | SumToZeroPenalizedOperator
             | NestedPenalizedOperator
@@ -3029,16 +2997,16 @@ class _IRLSDirectFit:
         ) = None
 
         # Phase timing accumulators
-        _t_working = 0.0
-        _t_gram = 0.0
-        _t_solve = 0.0
-        _t_deviance = 0.0
-        _t_eta = 0.0
-        _t_deviance_eval = 0.0
-        _last_working_centered: CenteredSystem | None = None
+        self._t_working = 0.0
+        self._t_gram = 0.0
+        self._t_solve = 0.0
+        self._t_deviance = 0.0
+        self._t_eta = 0.0
+        self._t_deviance_eval = 0.0
+        self._last_working_centered: CenteredSystem | None = None
         # its mean_x less the state's centre (``_system_offset_mean``), None without one
-        _last_working_offset_mean: NDArray | None = None
-        _last_working_structured: (
+        self._last_working_offset_mean: NDArray | None = None
+        self._last_working_structured: (
             FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
         ) = None
         # convergence="mode_score": the centring of the certificate's score at the
@@ -3047,47 +3015,47 @@ class _IRLSDirectFit:
         # state's centre or None without one) -- or None on a
         # route that forms no centred system (SCOP, linear constraints), which
         # keeps the coefficient-step test.
-        _score_centre: tuple | None = None
-        _last_mode_residual: ModeResidual | None = None
+        self._score_centre: tuple | None = None
+        self._last_mode_residual: ModeResidual | None = None
         # the certificate ratio at every iterate of a mode_score solve, for the
         # stagnation stop
-        _mode_ratios: list[float] = []
+        self._mode_ratios: list[float] = []
         # the certificate's bar (``mode_score.mode_certification_bar``): the REML
         # fit passes the one its stopping tolerance needs
-        mode_bar = MODE_CERTIFICATION_BAR if _mode_bar is None else float(_mode_bar)
-        _stagnation_window = stagnation_window(max_iter, mode_bar)
-        score_stagnated = False
+        mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
+        self._stagnation_window = stagnation_window(self.max_iter, mode_bar)
+        self.score_stagnated = False
         # the binomial/log score's certificate ratio at every stop it refused
         # (``true_mode_residual``), for the same stagnation stop
-        _true_ratios: list[float] = []
+        self._true_ratios: list[float] = []
         # Newton steps on the observed information once the certificate refused
         # a stop near the mode or its refused score stalled (below); never on the
         # QR route (whose least squares cannot carry a zero-curvature row's
         # score) or the SCOP route (which takes its own Newton steps)
-        _mean_space_newton = False
+        self._mean_space_newton = False
         # Whether the true-score certificate decided the last iteration under
         # Newton steps, its ratio there, and its last residual: the diagnostics
         # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
         # tells a criterion read at the state that it is the model's own mode.
-        _true_stop = False
-        _true_confirmed = False
-        _true_stop_ratio = math.inf
-        _last_true_residual: list[ModeResidual | None] = [None]
+        self._true_stop = False
+        self._true_confirmed = False
+        self._true_stop_ratio = math.inf
+        self._last_true_residual: list[ModeResidual | None] = [None]
         # the decomposition this iteration's solve holds (gram and qr routes); the
         # latest certificate's judgement of the truncated directions
         # (``truncated_direction_ratio``) with the state it judged (its eta), and
         # the latest judgement that found any.  Only a judgement of the returned
         # state decides the fit's verdict; an earlier one is published as history
         # (below)
-        _held_rank: list = [None]
-        _judged_truncated: list[tuple] = [(None, ())]
-        _last_truncated: list[tuple] = [(None, ())]
+        self._held_rank: list = [None]
+        self._judged_truncated: list[tuple] = [(None, ())]
+        self._last_truncated: list[tuple] = [(None, ())]
 
         # The family's mean space, when the link's inverse can leave it (declared
         # by the family and link, ``irls_state.mean_space_violation``).
-        _mean_space_invalid = mean_space_violation(family, link)
+        self._mean_space_invalid = mean_space_violation(self.family, self.link)
         # The link inverse's own domain (``irls_state.link_domain_violation``).
-        _link_domain_invalid = link_domain_violation(link)
+        self._link_domain_invalid = link_domain_violation(self.link)
         # A warm start's centred state carried to this fit's centre (one-engine
         # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -3095,27 +3063,29 @@ class _IRLSDirectFit:
         # errs by u |c' beta| in every row's eta, ~0.25 at a 1e16 offset.
         centred_start: float | None = None
         if (
-            _centred_init is not None
+            self._centred_init is not None
             and _state_center is not None
-            and beta_init is not None
-            and intercept_init is not None
-            and intercept == intercept_init
+            and self.beta_init is not None
+            and self.intercept_init is not None
+            and self.intercept == self.intercept_init
         ):
-            warm_alpha, warm_centre = _centred_init
+            warm_alpha, warm_centre = self._centred_init
             warm_centre = np.asarray(warm_centre, dtype=np.float64)
             if warm_centre.shape == _state_center.shape:
-                centred_start = float(warm_alpha) + math.fsum((_state_center - warm_centre) * beta)
+                centred_start = float(warm_alpha) + math.fsum(
+                    (_state_center - warm_centre) * self.beta
+                )
         # Freeze the fit-entry state so iteration-one trial safety has a baseline.
         committed = self.evaluate_state(
-            beta,
-            intercept,
+            self.beta,
+            self.intercept,
             phase="initial",
             iteration=0,
-            deviance=_deviance_init,
-            emit_trace=not _has_scop,
+            deviance=self._deviance_init,
+            emit_trace=not self._has_scop,
             centred_intercept=centred_start,
         )
-        if _has_scop:
+        if self._has_scop:
             committed = self._scop_initial_state(committed)
         self.emit_state_commit(
             committed,
@@ -3124,35 +3094,38 @@ class _IRLSDirectFit:
             convergence_value=None,
             termination_reason=None,
         )
-        objective_prev = (
+        self.objective_prev = (
             committed.deviance
             if committed.penalized_deviance is None
             else committed.penalized_deviance
         )
-        dev_prev = committed.deviance
-        eta_unclipped = committed.eta_unclipped
-        eta = committed.eta
-        mu = committed.mu
+        self.dev_prev = committed.deviance
+        self.eta_unclipped = committed.eta_unclipped
+        self.eta = committed.eta
+        self.mu = committed.mu
         # Always an empty list; only ``record_diagnostics`` decides whether rows are
         # appended and whether it is published on the result.
-        iteration_log: list[IterationDiagnostics] = []
-        base_debug_context = dict(debug_context or {})
+        self.iteration_log: list[IterationDiagnostics] = []
+        self.base_debug_context = dict(self.debug_context or {})
         # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
         record_debug_rows = (
-            debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
+            self.debug_recorder is not None
+            and getattr(self.debug_recorder, "enabled_level", 0) >= 2
         )
         # Strictly wider than ``record_diagnostics``, so the per-iteration extrema
         # this gates are always bound by the time a diagnostics row is built.
-        capture_extrema = record_diagnostics or record_debug_rows
+        self.capture_extrema = self.record_diagnostics or record_debug_rows
 
-        max_halving = 20  # max step-halving attempts per iteration
-        _consecutive_svd = 0  # for auto-mode warning
-        _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
-        _degeneracy_retry_failed = (
+        self.max_halving = 20  # max step-halving attempts per iteration
+        self._consecutive_svd = 0  # for auto-mode warning
+        self._reported_qp_nonconvergence = (
+            False  # transient note once; terminal authority is separate
+        )
+        self._degeneracy_retry_failed = (
             False  # the #472 retry is off after a failure, until a solve certifies
         )
         # A constrained fit-entry state has not been certified by the inner QP.
-        retained_qp_converged = not has_constraints
+        self.retained_qp_converged = not self.has_constraints
         # Declared, not bound: the chain below is the whole set of reasons this
         # solver can end an iteration on, and declaring it against the shared
         # vocabulary is what ties the two together. A tenth reason invented here is
@@ -3168,36 +3141,12 @@ class _IRLSDirectFit:
         # makes that difference identically zero and any stagnation test on it
         # vacuous.  ``inf`` until an iteration completes, so a fit that never
         # finishes one is never called stagnant.
-        deviance_relative_change = float("inf")
-        self.t_start, self.converged, self.XtWX_beta = t_start, converged, XtWX_beta
-        self._final_penalized_operator, self._t_working = _final_penalized_operator, _t_working
-        self._t_gram, self._t_solve, self._t_deviance = _t_gram, _t_solve, _t_deviance
-        self._t_eta, self._t_deviance_eval = _t_eta, _t_deviance_eval
-        self._last_working_centered = _last_working_centered
-        self._last_working_offset_mean = _last_working_offset_mean
-        self._last_working_structured, self._score_centre = _last_working_structured, _score_centre
-        self._last_mode_residual, self._mode_ratios = _last_mode_residual, _mode_ratios
-        self.mode_bar, self._stagnation_window = mode_bar, _stagnation_window
-        self.score_stagnated, self._true_ratios = score_stagnated, _true_ratios
-        self._mean_space_newton, self._true_stop = _mean_space_newton, _true_stop
-        self._true_confirmed, self._true_stop_ratio = _true_confirmed, _true_stop_ratio
-        self._last_true_residual, self._held_rank = _last_true_residual, _held_rank
-        self._judged_truncated, self._last_truncated = _judged_truncated, _last_truncated
-        self._mean_space_invalid = _mean_space_invalid
-        self._link_domain_invalid, self.committed = _link_domain_invalid, committed
-        self.objective_prev, self.dev_prev = objective_prev, dev_prev
-        self.eta_unclipped, self.eta, self.mu = eta_unclipped, eta, mu
-        self.iteration_log, self.base_debug_context = iteration_log, base_debug_context
-        self.record_debug_rows, self.capture_extrema = record_debug_rows, capture_extrema
-        self.max_halving, self._consecutive_svd = max_halving, _consecutive_svd
-        self._reported_qp_nonconvergence = _reported_qp_nonconvergence
-        self._degeneracy_retry_failed = _degeneracy_retry_failed
-        self.retained_qp_converged = retained_qp_converged
-        self.deviance_relative_change = deviance_relative_change
+        self.deviance_relative_change = float("inf")
+        self.mode_bar, self.committed = mode_bar, committed
+        self.record_debug_rows = record_debug_rows
 
     def _scop_initial_state(self, committed: _IRLSState) -> _IRLSState:
-        family, y, weights, S, beta = self.family, self.y, self.weights, self.S, self.beta
-        _scop_state, _scop_specs = self._scop_state, self._scop_specs
+        family, y, _scop_state = self.family, self.y, self._scop_state
         scop_committed = _SCOPTrialState(
             irls=committed,
             groups=tuple(
@@ -3221,12 +3170,12 @@ class _IRLSDirectFit:
         # Remove mapped diagonal SCOP penalties before evaluating the merit.
         # Subtracting them after a full quadratic introduces avoidable
         # cancellation; cross-group override entries keep their existing role.
-        scop_outer_penalty = S.copy()
-        for spec in _scop_specs.values():
+        scop_outer_penalty = self.S.copy()
+        for spec in self._scop_specs.values():
             scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
         scop_outer_penalty_abs = np.abs(scop_outer_penalty)
         scop_merit_errors: dict[int, float] = {}
-        merit_gamma = _gamma(len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16)
+        merit_gamma = _gamma(len(y) + 3 * len(self.beta) + 4 * len(self._scop_specs) + 16)
         # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
         # This encloses residual formation without an observation-level
         # calculation on every trial. Other families supply deviance-unit
@@ -3235,7 +3184,7 @@ class _IRLSDirectFit:
         # outside binary64 even when its roundoff allowance is finite.
         with np.errstate(over="ignore", invalid="ignore"):
             gaussian_response_roundoff = (
-                np.sum((np.sqrt(merit_gamma) * np.sqrt(weights) * y) ** 2)
+                np.sum((np.sqrt(merit_gamma) * np.sqrt(self.weights) * y) ** 2)
                 if type(family) is Gaussian
                 else 0.0
             )
@@ -3249,7 +3198,7 @@ class _IRLSDirectFit:
         # allowance bounds the merit's noise (Berahas, Byrd & Nocedal 2019,
         # Theorem 4.2).
         nb2_unit_roundoff = (
-            2.0 * _gamma(4) * float(np.sum(np.abs(weights) * (2.0 * y + family.theta)))
+            2.0 * _gamma(4) * float(np.sum(np.abs(self.weights) * (2.0 * y + family.theta)))
             if type(family) is NegativeBinomial
             else 0.0
         )
@@ -3275,25 +3224,20 @@ class _IRLSDirectFit:
 
     def with_scop_merit(self, trial: _SCOPTrialState) -> _SCOPTrialState:
         """Attach deviance plus the latent-coordinate quadratic penalty."""
-        scop_outer_penalty = self.scop_outer_penalty
-        scop_outer_penalty_abs, merit_gamma = self.scop_outer_penalty_abs, self.merit_gamma
-        nb2_unit_roundoff = self.nb2_unit_roundoff
-        gaussian_response_roundoff = self.gaussian_response_roundoff
-        scop_merit_errors, family, groups = self.scop_merit_errors, self.family, self.groups
-        lambda2, _scop_specs = self.lambda2, self._scop_specs
+        merit_gamma, lambda2 = self.merit_gamma, self.lambda2
         # A trial whose mapped coefficients carry its ordinary block past
         # binary64's range has a merit that is not finite, which the line
         # search refuses, without a warning (as ``_evaluate_scop_trial``).
         with np.errstate(over="ignore", invalid="ignore"):
-            penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
+            penalty_quad = float(trial.irls.beta @ self.scop_outer_penalty @ trial.irls.beta)
         magnitude = np.abs(trial.irls.beta)
         penalty_roundoff = _positive_quadratic_roundoff(
-            magnitude, scop_outer_penalty_abs, merit_gamma
+            magnitude, self.scop_outer_penalty_abs, merit_gamma
         )
         for group_state in trial.groups:
-            group = groups[group_state.group_index]
+            group = self.groups[group_state.group_index]
             lam_scop = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-            latent_penalty = _scop_specs[group_state.group_index].S_scop
+            latent_penalty = self._scop_specs[group_state.group_index].S_scop
             penalty_quad += float(
                 lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
             )
@@ -3308,37 +3252,36 @@ class _IRLSDirectFit:
                 penalized_deviance=float(trial.irls.deviance + penalty_quad),
             ),
         )
-        deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + nb2_unit_roundoff
-        if type(family) is Gaussian:
-            deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
+        deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + self.nb2_unit_roundoff
+        if type(self.family) is Gaussian:
+            deviance_roundoff = 8.0 * self.gaussian_response_roundoff + 2.0 * deviance_roundoff
         with np.errstate(over="ignore", invalid="ignore"):
             allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
-        scop_merit_errors[id(retained.irls)] = allowance
+        self.scop_merit_errors[id(retained.irls)] = allowance
         return retained
 
     def _working(self, it: int) -> None:
-        _held_rank, committed = self._held_rank, self.committed
-        prev_active_set, has_constraints = self.prev_active_set, self.has_constraints
-        family, link, y, mu, eta = self.family, self.link, self.y, self.mu, self.eta
-        weights, _mean_space_newton, profile = self.weights, self._mean_space_newton, self.profile
-        eta_unclipped, _t_working = self.eta_unclipped, self._t_working
-        _held_rank[0] = None
-        beta_prev = committed.beta
-        intercept_prev = committed.intercept
-        beta = committed.beta.copy()
-        intercept = committed.intercept
-        committed_active_set = None if prev_active_set is None else list(prev_active_set)
-        proposal_qp_converged = not has_constraints
+        committed, family, link, y = self.committed, self.family, self.link, self.y
+        weights, profile = self.weights, self.profile
+        self._held_rank[0] = None
+        self.beta_prev = committed.beta
+        self.intercept_prev = committed.intercept
+        self.beta = committed.beta.copy()
+        self.intercept = committed.intercept
+        self.committed_active_set = (
+            None if self.prev_active_set is None else list(self.prev_active_set)
+        )
+        self.proposal_qp_converged = not self.has_constraints
         # W/z are rebuilt below from the committed coefficients.  Any
         # constrained-QP certificate retained from the preceding iteration
         # therefore belongs to different working weights and response, not to
         # this iteration's H/g.  Only a certified full proposal from the
         # current working problem can restore the flag.
-        retained_qp_converged = not has_constraints
-        rank_truncated: bool | None = None
-        used_rank_certification = False
-        scop_proposal_eta_unclipped: NDArray | None = None
-        proposal_centred_intercept: float | None = None
+        self.retained_qp_converged = not self.has_constraints
+        self.rank_truncated: bool | None = None
+        self.used_rank_certification = False
+        self.scop_proposal_eta_unclipped: NDArray | None = None
+        self.proposal_centred_intercept: float | None = None
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
@@ -3346,8 +3289,8 @@ class _IRLSDirectFit:
             distribution=family,
             link=link,
             y=y,
-            mu=mu,
-            eta=eta,
+            mu=self.mu,
+            eta=self.eta,
             sample_weight=weights,
             prefer_observed=self._observed_newton_active,
         )
@@ -3360,7 +3303,7 @@ class _IRLSDirectFit:
         # at the boundary keeps Fisher's rows.
         newton_score: NDArray | None = None
         newton_committed_rows: NDArray | None = None
-        if _mean_space_newton and not mean_space_boundary_rows(
+        if self._mean_space_newton and not mean_space_boundary_rows(
             family, link, committed.eta_unclipped, weights
         ):
             newton_rows = mean_space_newton_rows(y, weights, committed.eta_unclipped)
@@ -3385,15 +3328,15 @@ class _IRLSDirectFit:
             )
         if working_rows.curvature_source == "observed" and profile is not None:
             profile["irls_observed_newton_iters"] = profile.get("irls_observed_newton_iters", 0) + 1
-        working_eta_unclipped = eta_unclipped
-        working_eta = eta
-        working_mu = mu
+        self.working_eta_unclipped = self.eta_unclipped
+        self.working_eta = self.eta
+        self.working_mu = self.mu
         # the separation backstop and the diagnostics read Fisher's weights,
         # the curvature their bars were set on, on a Newton iteration too
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(
             working_rows.weights
         )
-        _t_working += time.perf_counter() - _t0
+        self._t_working += time.perf_counter() - _t0
 
         if w_ratio > 1e12:
             logger.debug(
@@ -3403,17 +3346,8 @@ class _IRLSDirectFit:
                 positive_w_min,
                 positive_w_max,
             )
-        self.beta_prev, self.intercept_prev, self.beta = beta_prev, intercept_prev, beta
-        self.intercept, self.committed_active_set = intercept, committed_active_set
-        self.proposal_qp_converged = proposal_qp_converged
-        self.retained_qp_converged, self.rank_truncated = retained_qp_converged, rank_truncated
-        self.used_rank_certification = used_rank_certification
-        self.scop_proposal_eta_unclipped = scop_proposal_eta_unclipped
-        self.proposal_centred_intercept = proposal_centred_intercept
         self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
-        self.newton_committed_rows = newton_committed_rows
-        self.working_eta_unclipped, self.working_eta = working_eta_unclipped, working_eta
-        self.working_mu, self.w_ratio, self._t_working = working_mu, w_ratio, _t_working
+        self.newton_committed_rows, self.w_ratio = newton_committed_rows, w_ratio
 
     def _step(self, it: int) -> None:
         if self._use_qr:
@@ -3450,34 +3384,32 @@ class _IRLSDirectFit:
                 )
 
     def _step_qr(self) -> None:
-        W, z, offset, p, dm, _X_full = self.W, self.z, self.offset, self.p, self.dm, self._X_full
-        _L_aug, _state_center, _held_rank = self._L_aug, self._state_center, self._held_rank
-        convergence, _t_solve = self.convergence, self._t_solve
+        W, _state_center = self.W, self._state_center
         proposal_centred_intercept = self.proposal_centred_intercept
         # Profile the intercept, then apply the shared factor-space rule.
         _t0 = time.perf_counter()
         sqrtW = np.sqrt(W)
-        z_off = z - offset
+        z_off = self.z - self.offset
         centered = self.get_centered_system(W, z_off)
-        _last_working_centered = centered
-        A_data = sqrtW[:, None] * _centred_rows(_X_full, centered)
-        A = np.vstack([A_data, _L_aug[1:, 1:]])
-        rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(p)])
+        self._last_working_centered = centered
+        A_data = sqrtW[:, None] * _centred_rows(self._X_full, centered)
+        A = np.vstack([A_data, self._L_aug[1:, 1:]])
+        rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(self.p)])
         iteration_rank = decompose_factor(A, retain_factor_solve=True)
         beta = iteration_rank.solve_factor_rhs(rhs_qr)
         intercept = centered.mean_z - float(centered.mean_x @ beta)
         _last_working_offset_mean = None
         if _state_center is not None:
-            _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
+            _last_working_offset_mean = _system_offset_mean(self.dm, W, centered, _state_center)
             proposal_centred_intercept = centered.mean_z - math.fsum(
                 _last_working_offset_mean * beta
             )
             intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-        _cond_est = iteration_rank.pre_truncation_condition
-        _held_rank[0] = iteration_rank
-        _used_svd = iteration_rank.used_svd_fallback
-        rank_truncated = iteration_rank.rank_truncated
-        if convergence == "mode_score":
+        self._cond_est = iteration_rank.pre_truncation_condition
+        self._held_rank[0] = iteration_rank
+        self._used_svd = iteration_rank.used_svd_fallback
+        self.rank_truncated = iteration_rank.rank_truncated
+        if self.convergence == "mode_score":
             self._score_centre = (
                 centered.mean_x,
                 centered.sum_w,
@@ -3485,22 +3417,16 @@ class _IRLSDirectFit:
                 (),
                 _last_working_offset_mean,
             )
-        _t_solve += time.perf_counter() - _t0
-        self._last_working_centered, self.beta = _last_working_centered, beta
-        self.intercept, self._last_working_offset_mean = intercept, _last_working_offset_mean
-        self.proposal_centred_intercept, self._cond_est = proposal_centred_intercept, _cond_est
-        self._used_svd, self.rank_truncated, self._t_solve = _used_svd, rank_truncated, _t_solve
+        self._t_solve += time.perf_counter() - _t0
+        self.beta, self.intercept = beta, intercept
+        self._last_working_offset_mean = _last_working_offset_mean
+        self.proposal_centred_intercept = proposal_centred_intercept
 
     def _step_scop(self, it: int, z_off: NDArray, _t0: float) -> None:
-        W, z, offset, p, groups = self.W, self.z, self.offset, self.p, self.groups
-        committed, scop_committed = self.committed, self.scop_committed
+        W, committed, scop_committed = self.W, self.committed, self.scop_committed
         _scop_state, _scop_order = self._scop_state, self._scop_order
-        _scop_newton, _scop_specs = self._scop_newton, self._scop_specs
-        _reduced_dm, _S_reduced = self._reduced_dm, self._S_reduced
-        _reduced_tabmat_state, _reduced_to_full = self._reduced_tabmat_state, self._reduced_to_full
-        _scop_run, profile, debug_recorder = self._scop_run, self.profile, self.debug_recorder
-        base_debug_context, _t_gram, _t_solve = self.base_debug_context, self._t_gram, self._t_solve
-        used_rank_certification = self.used_rank_certification
+        _scop_newton, _reduced_dm = self._scop_newton, self._reduced_dm
+        _reduced_to_full = self._reduced_to_full
         # ── SCOP: one Newton step on every coefficient jointly ──
         # The ordinary block is solved with the latent SCOP
         # coordinates held fixed, then ``SCOPJointNewton.step``
@@ -3522,13 +3448,13 @@ class _IRLSDirectFit:
             dm=_reduced_dm,
             W=W,
             z_off=z_adj,
-            penalty=_S_reduced,
+            penalty=self._S_reduced,
             tabmat_split=_reduced_dm.tabmat_centering_split,
-            tabmat_state=_reduced_tabmat_state,
-            profile=profile,
+            tabmat_state=self._reduced_tabmat_state,
+            profile=self.profile,
         )
-        if _scop_run is not None:
-            _carry_refusals(_scop_run.reduced_refusals, _reduced_tabmat_state)
+        if self._scop_run is not None:
+            _carry_refusals(self._scop_run.reduced_refusals, self._reduced_tabmat_state)
         # The certificate, read on the system's own location and
         # spread, chooses only how the proposal's predictor is formed.  It no longer
         # rebuilds the system: a rejection here can only fall on a
@@ -3545,7 +3471,7 @@ class _IRLSDirectFit:
             reduced_centered.mean_x,
             reduced_scale,
         )
-        _t_gram += time.perf_counter() - _t0
+        self._t_gram += time.perf_counter() - _t0
 
         # The ordinary block's solve, the latent coordinates held fixed
         _t0 = time.perf_counter()
@@ -3565,25 +3491,25 @@ class _IRLSDirectFit:
             )
             reduced_rank = certified
             reduced_factor_rhs = certified_rhs
-            used_rank_certification = True
+            self.used_rank_certification = True
         beta_reduced = (
             reduced_rank.solve(reduced_centered.rhs)
             if reduced_factor_rhs is None
             else reduced_rank.solve_factor_rhs(reduced_factor_rhs)
         )
-        _cond_est = reduced_rank.pre_truncation_condition
-        _used_svd = reduced_rank.used_svd_fallback
-        rank_truncated = reduced_rank.rank_truncated
+        self._cond_est = reduced_rank.pre_truncation_condition
+        self._used_svd = reduced_rank.used_svd_fallback
+        self.rank_truncated = reduced_rank.rank_truncated
         joint = _scop_newton.step(
             scop_thetas,
             W=W,
-            z=z,
+            z=self.z,
             eta=committed.eta_unclipped,
             reduced=reduced_centered,
             solve=reduced_rank.solve,
             ordinary_change=beta_reduced - committed.beta[_reduced_to_full],
-            debug_recorder=debug_recorder,
-            debug_context={**base_debug_context, "pirls_iteration": it + 1},
+            debug_recorder=self.debug_recorder,
+            debug_context={**self.base_debug_context, "pirls_iteration": it + 1},
         )
         scop_results = joint.results
         committed_reduced = committed.beta[_reduced_to_full]
@@ -3595,7 +3521,7 @@ class _IRLSDirectFit:
             committed_level = _level_about(
                 scop_committed.level, scop_committed.centre, centre, committed_reduced
             )
-        scop_ordinary = _SCOPOrdinarySolve(
+        self.scop_ordinary = _SCOPOrdinarySolve(
             columns=_reduced_to_full,
             committed=committed_reduced,
             committed_level=committed_level,
@@ -3615,11 +3541,11 @@ class _IRLSDirectFit:
         centred_level = reduced_centered.mean_z - joint.intercept_shift
         intercept = centred_level - float(reduced_centered.mean_x @ beta_reduced)
         proposal_thetas = [scop_results[gi].beta_new for gi in _scop_order]
-        beta = np.zeros(p)
+        beta = np.zeros(self.p)
         beta[_reduced_to_full] = beta_reduced
         for gi, theta in zip(_scop_order, proposal_thetas, strict=True):
-            beta[groups[gi].sl] = _scop_specs[gi].reparam.forward(theta)
-        _t_solve += time.perf_counter() - _t0
+            beta[self.groups[gi].sl] = self._scop_specs[gi].reparam.forward(theta)
+        self._t_solve += time.perf_counter() - _t0
 
         if centred_prediction:
             eta_unconstrained = centred_level + _centred_system_matvec(
@@ -3627,57 +3553,47 @@ class _IRLSDirectFit:
             )
         else:
             eta_unconstrained = intercept + _reduced_dm.matvec(beta_reduced)
-        scop_proposal_eta_unclipped = (
-            eta_unconstrained + offset + _scop_newton.predictor(proposal_thetas)
+        self.scop_proposal_eta_unclipped = (
+            eta_unconstrained + self.offset + _scop_newton.predictor(proposal_thetas)
         )
-        self._t_gram, self._t_solve, self._cond_est = _t_gram, _t_solve, _cond_est
-        self._used_svd, self.rank_truncated = _used_svd, rank_truncated
-        self.used_rank_certification, self.beta = used_rank_certification, beta
-        self.intercept, self.centred_level = intercept, centred_level
-        self.scop_ordinary = scop_ordinary
-        self.scop_proposal_eta_unclipped = scop_proposal_eta_unclipped
+        self.beta, self.intercept, self.centred_level = beta, intercept, centred_level
         self.scop_results = scop_results
 
     def _step_structured(self, z_off: NDArray, _t0: float) -> None:
-        W, z, eta, weights, p, dm = self.W, self.z, self.eta, self.weights, self.p, self.dm
-        gms, groups, lambda2 = self.gms, self.groups, self.lambda2
-        reml_penalties, S_override, committed = self.reml_penalties, self.S_override, self.committed
-        newton_score, working_rows = self.newton_score, self.working_rows
-        _state_center, _structured_group_index = self._state_center, self._structured_group_index
-        _structured_layout, convergence = self._structured_layout, self.convergence
-        profile, penalty_matvec, _t_gram = self.profile, self.penalty_matvec, self._t_gram
-        _t_solve, proposal_centred_intercept = self._t_solve, self.proposal_centred_intercept
-        if _structured_group_index is None:  # pragma: no cover - selection invariant
+        W, dm, committed, newton_score = self.W, self.dm, self.committed, self.newton_score
+        _state_center, profile = self._state_center, self.profile
+        proposal_centred_intercept = self.proposal_centred_intercept
+        if self._structured_group_index is None:  # pragma: no cover - selection invariant
             raise RuntimeError("Structured backend has no dominant group.")
         Wz = W * z_off if newton_score is None else W * z_off + newton_score
         structured_system = build_structured_system(
-            gms,
-            groups,
+            self.gms,
+            self.groups,
             W,
             Wz,
-            signed=working_rows.curvature_source == "observed",
-            dominant_group_index=_structured_group_index,
-            layout=_structured_layout,
-            prior_weights=weights,
+            signed=self.working_rows.curvature_source == "observed",
+            dominant_group_index=self._structured_group_index,
+            layout=self._structured_layout,
+            prior_weights=self.weights,
         )
         penalized_operator = build_penalized_structured_operator(
             structured_system,
-            gms,
-            groups,
-            lambda2,
-            reml_penalties=reml_penalties,
-            S_override=S_override,
+            self.gms,
+            self.groups,
+            self.lambda2,
+            reml_penalties=self.reml_penalties,
+            S_override=self.S_override,
         )
-        _last_working_structured = structured_system
-        _final_penalized_operator = penalized_operator
-        _t_gram += time.perf_counter() - _t0
+        self._last_working_structured = structured_system
+        self._final_penalized_operator = penalized_operator
+        self._t_gram += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
         with _structured_solver_errors():
             augmented_factor, rhs, levenberg_shift, shift_diagonal = _build_iterate_factor(
                 structured_system,
                 penalized_operator,
-                observed=working_rows.curvature_source == "observed",
+                observed=self.working_rows.curvature_source == "observed",
             )
             beta_aug = solve_augmented_normal_equations(
                 structured_system,
@@ -3744,8 +3660,8 @@ class _IRLSDirectFit:
                 profile["irls_truncated_newton_increments"] = (
                     profile.get("irls_truncated_newton_increments", 0) + 1
                 )
-            residual_rows = W * (z - eta) if newton_score is None else newton_score
-            gradient = np.empty(p + 1, dtype=np.float64)
+            residual_rows = W * (self.z - self.eta) if newton_score is None else newton_score
+            gradient = np.empty(self.p + 1, dtype=np.float64)
             gradient[0] = float(np.sum(residual_rows))
             # the increment's intercept entry in the state's own coordinate:
             # alpha about the centre when the state is centred (round 1's
@@ -3758,14 +3674,14 @@ class _IRLSDirectFit:
             if _state_center is not None:
                 gradient[1:] = centred_data_score(
                     dm, residual_rows, _state_center
-                ) - penalty_matvec(committed.beta)
+                ) - self.penalty_matvec(committed.beta)
                 increment = augmented_factor.solve(
                     gradient,
                     centred=True,
                     border_centred=gradient[augmented_factor.small_indices[1:]],
                 )
             else:
-                gradient[1:] = dm.rmatvec(residual_rows) - penalty_matvec(committed.beta)
+                gradient[1:] = dm.rmatvec(residual_rows) - self.penalty_matvec(committed.beta)
                 increment = augmented_factor.solve(gradient)
             beta = committed.beta + increment[1:]
             if _state_center is not None:
@@ -3776,26 +3692,20 @@ class _IRLSDirectFit:
                 intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
             else:
                 intercept = float(committed.intercept) + float(increment[0])
-        _used_svd = False  # one path: the engine has no SVD fallback
-        _cond_est = augmented_factor.schur_condition_estimate
-        rank_truncated = augmented_factor.rank_truncated
-        if convergence == "mode_score":
+        self._used_svd = False  # one path: the engine has no SVD fallback
+        self._cond_est = augmented_factor.schur_condition_estimate
+        self.rank_truncated = augmented_factor.rank_truncated
+        if self.convergence == "mode_score":
             self._score_centre = _structured_score_centre(
                 structured_system, augmented_factor, dm, W, _state_center
             )
-        _t_solve += time.perf_counter() - _t0
-        self._last_working_structured = _last_working_structured
-        self._final_penalized_operator, self._t_gram = _final_penalized_operator, _t_gram
-        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
-        self.proposal_centred_intercept, self._used_svd = proposal_centred_intercept, _used_svd
-        self._cond_est, self.rank_truncated = _cond_est, rank_truncated
+        self._t_solve += time.perf_counter() - _t0
+        self.beta, self.intercept = beta, intercept
+        self.proposal_centred_intercept = proposal_centred_intercept
 
     def _step_dense(self, z_off: NDArray, _t0: float) -> None:
-        W, dm, committed, newton_score = self.W, self.dm, self.committed, self.newton_score
-        _state_center, _held_rank = self._state_center, self._held_rank
-        convergence, penalty_matvec, _t_gram = self.convergence, self.penalty_matvec, self._t_gram
-        _t_solve, proposal_centred_intercept = self._t_solve, self.proposal_centred_intercept
-        used_rank_certification = self.used_rank_certification
+        W, dm, newton_score, _state_center = self.W, self.dm, self.newton_score, self._state_center
+        proposal_centred_intercept = self.proposal_centred_intercept
         centered = self.get_centered_system(W, z_off)
         if newton_score is not None:
             # the working mean of ``z_off`` is the centred intercept;
@@ -3807,8 +3717,8 @@ class _IRLSDirectFit:
                 mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
                 rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
             )
-        _last_working_centered = centered
-        _t_gram += time.perf_counter() - _t0
+        self._last_working_centered = centered
+        self._t_gram += time.perf_counter() - _t0
         _t0 = time.perf_counter()
         iteration_rank = decompose_gram_if_authoritative(centered.hessian)
         iteration_factor_rhs = None
@@ -3825,15 +3735,15 @@ class _IRLSDirectFit:
                 )
             iteration_rank = certified
             iteration_factor_rhs = certification.transformed_rhs
-            used_rank_certification = True
+            self.used_rank_certification = True
         if newton_score is not None:
             # the increment, not the iterate: a direction the factor
             # truncates keeps the iterate's component instead of the
             # minimum-norm reset of solving for it (Pes & Rodriguez
             # 2021, eqs. 1.2-1.4)
-            beta = committed.beta + iteration_rank.solve(
+            beta = self.committed.beta + iteration_rank.solve(
                 centred_data_score(dm, newton_score, centered.mean_x)
-                - penalty_matvec(committed.beta)
+                - self.penalty_matvec(self.committed.beta)
             )
         else:
             beta = (
@@ -3853,11 +3763,11 @@ class _IRLSDirectFit:
                 _last_working_offset_mean * beta
             )
             intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-        _cond_est = iteration_rank.pre_truncation_condition
-        _held_rank[0] = iteration_rank
-        _used_svd = iteration_rank.used_svd_fallback
-        rank_truncated = iteration_rank.rank_truncated
-        if convergence == "mode_score":
+        self._cond_est = iteration_rank.pre_truncation_condition
+        self._held_rank[0] = iteration_rank
+        self._used_svd = iteration_rank.used_svd_fallback
+        self.rank_truncated = iteration_rank.rank_truncated
+        if self.convergence == "mode_score":
             self._score_centre = (
                 centered.mean_x,
                 centered.sum_w,
@@ -3865,43 +3775,38 @@ class _IRLSDirectFit:
                 (),
                 _last_working_offset_mean,
             )
-        _t_solve += time.perf_counter() - _t0
-        self._last_working_centered, self._t_gram = _last_working_centered, _t_gram
-        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
+        self._t_solve += time.perf_counter() - _t0
+        self.beta, self.intercept = beta, intercept
         self._last_working_offset_mean = _last_working_offset_mean
-        self.proposal_centred_intercept, self._cond_est = proposal_centred_intercept, _cond_est
-        self._used_svd, self.rank_truncated = _used_svd, rank_truncated
-        self.used_rank_certification = used_rank_certification
+        self.proposal_centred_intercept = proposal_centred_intercept
 
     def _step_qp(self, it: int, z_off: NDArray, _t0: float) -> None:
-        W, dm, newton_score, A_all = self.W, self.dm, self.newton_score, self.A_all
-        b_all, prev_active_set = self.b_all, self.prev_active_set
+        newton_score, prev_active_set = self.newton_score, self.prev_active_set
         _degeneracy_retry_failed = self._degeneracy_retry_failed
-        _reported_qp_nonconvergence, _t_gram = self._reported_qp_nonconvergence, self._t_gram
-        _t_solve = self._t_solve
-        centered = self.get_centered_system(W, z_off)
+        _reported_qp_nonconvergence = self._reported_qp_nonconvergence
+        centered = self.get_centered_system(self.W, z_off)
         if newton_score is not None:
             centered = replace(
                 centered,
                 mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
+                rhs=centered.rhs + centred_data_score(self.dm, newton_score, centered.mean_x),
             )
-        _last_working_centered = centered
-        _t_gram += time.perf_counter() - _t0
+        self._last_working_centered = centered
+        self._t_gram += time.perf_counter() - _t0
 
         # Solve the constrained system in its existing coordinate space.
         _t0 = time.perf_counter()
         qp_result = _solve_constrained_qp_with_cold_retry(
             centered.hessian,
             centered.rhs,
-            A_all,
-            b_all,
+            self.A_all,
+            self.b_all,
             prev_active_set,
             degeneracy_retry=not _degeneracy_retry_failed,
         )
         beta = qp_result.beta
-        intercept = centered.mean_z - float(centered.mean_x @ beta)
-        proposal_qp_converged = bool(qp_result.converged)
+        self.intercept = centered.mean_z - float(centered.mean_x @ beta)
+        self.proposal_qp_converged = bool(qp_result.converged)
         prev_active_set = qp_result.active_set
         # An uncertified result means the degenerate-vertex retry ran
         # and failed (or was already latched off). It costs up to a
@@ -3928,27 +3833,21 @@ class _IRLSDirectFit:
         # to False/0.0, so the constrained branch published "perfectly
         # conditioned" to the consumers below while the unconstrained
         # branch above read the real numbers off its decomposition.
-        _used_svd = qp_result.used_svd_fallback
-        _cond_est = qp_result.condition
-        _t_solve += time.perf_counter() - _t0
-        self._last_working_centered, self._t_gram = _last_working_centered, _t_gram
-        self._t_solve, self.beta, self.intercept = _t_solve, beta, intercept
-        self.proposal_qp_converged, self.prev_active_set = proposal_qp_converged, prev_active_set
+        self._used_svd = qp_result.used_svd_fallback
+        self._cond_est = qp_result.condition
+        self._t_solve += time.perf_counter() - _t0
+        self.beta, self.prev_active_set = beta, prev_active_set
         self._degeneracy_retry_failed = _degeneracy_retry_failed
-        self._reported_qp_nonconvergence, self._used_svd = _reported_qp_nonconvergence, _used_svd
-        self._cond_est = _cond_est
+        self._reported_qp_nonconvergence = _reported_qp_nonconvergence
 
     def _search_scop(self, it: int) -> None:
-        beta, intercept = self.beta, self.intercept
-        scop_proposal_eta_unclipped = self.scop_proposal_eta_unclipped
-        scop_results, _scop_specs = self.scop_results, self._scop_specs
-        centred_level, scop_ordinary = self.centred_level, self.scop_ordinary
-        scop_committed, _scop_state, dm, y = self.scop_committed, self._scop_state, self.dm, self.y
-        weights, family, link, offset = self.weights, self.family, self.link, self.offset
+        beta, intercept, scop_results = self.beta, self.intercept, self.scop_results
+        _scop_specs, scop_ordinary = self._scop_specs, self.scop_ordinary
+        scop_committed, dm, y, weights = self.scop_committed, self.dm, self.y, self.weights
+        family, link, offset = self.family, self.link, self.offset
         trace_enabled, trace_run = self.trace_enabled, self.trace_run
         trace_basis_id, resolved_lambdas = self.trace_basis_id, self.resolved_lambdas
         max_halving, scop_merit_errors = self.max_halving, self.scop_merit_errors
-        _t_deviance, _t_deviance_eval = self._t_deviance, self._t_deviance_eval
         emit_evaluation, with_scop_merit = self.emit_evaluation, self.with_scop_merit
         _t0 = time.perf_counter()
         # as ``_evaluate_scop_trial``: a proposal past the floating-point
@@ -3960,7 +3859,7 @@ class _IRLSDirectFit:
                 phase="scop_proposal",
                 iteration=it + 1,
                 alpha=1.0,
-                eta_unclipped=scop_proposal_eta_unclipped,
+                eta_unclipped=self.scop_proposal_eta_unclipped,
                 emit_trace=False,
             )
         proposal_scop = _SCOPTrialState(
@@ -3983,7 +3882,7 @@ class _IRLSDirectFit:
                 )
                 for gi in sorted(_scop_specs)
             ),
-            level=centred_level,
+            level=self.centred_level,
             centre=scop_ordinary.centre,
         )
         proposal_scop = with_scop_merit(proposal_scop)
@@ -4077,19 +3976,19 @@ class _IRLSDirectFit:
         )
         retained = retained_scop.irls
         evaluation_elapsed = time.perf_counter() - _t0
-        _t_deviance += evaluation_elapsed
-        _t_deviance_eval += evaluation_elapsed
+        self._t_deviance += evaluation_elapsed
+        self._t_deviance_eval += evaluation_elapsed
         beta = retained.beta.copy()
         intercept = retained.intercept
-        eta_unclipped = retained.eta_unclipped
-        eta = retained.eta
-        mu = retained.mu
+        self.eta_unclipped = retained.eta_unclipped
+        self.eta = retained.eta
+        self.mu = retained.mu
         dev = retained.deviance
         n_halvings = decision.step_halvings
-        step_rejected = decision.step_rejected
+        self.step_rejected = decision.step_rejected
         committed_groups = {group.group_index: group for group in scop_committed.groups}
         for group_state in retained_scop.groups:
-            st = _scop_state[group_state.group_index]
+            st = self._scop_state[group_state.group_index]
             st["beta_scop_prev"] = committed_groups[group_state.group_index].beta_eff.copy()
             st["beta_scop"] = group_state.beta_eff.copy()
             st["gamma_eff"] = group_state.gamma_eff.copy()
@@ -4114,26 +4013,19 @@ class _IRLSDirectFit:
                 n_halvings,
                 dev,
             )
-        self._t_deviance, self._t_deviance_eval, self.beta = _t_deviance, _t_deviance_eval, beta
-        self.intercept, self.eta_unclipped, self.eta, self.mu = intercept, eta_unclipped, eta, mu
-        self.dev, self.n_halvings, self.step_rejected = dev, n_halvings, step_rejected
+        self.beta, self.intercept, self.dev, self.n_halvings = beta, intercept, dev, n_halvings
         self.decision, self.proposal_scop, self.retained = decision, proposal_scop, retained
         self.retained_scop = retained_scop
 
     def _search(self, it: int) -> None:
-        beta, intercept = self.beta, self.intercept
-        proposal_centred_intercept, committed = self.proposal_centred_intercept, self.committed
+        beta, intercept, committed = self.beta, self.intercept, self.committed
         has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
         abs_A_all, newton_score = self.abs_A_all, self.newton_score
         newton_committed_rows, y, weights = self.newton_committed_rows, self.y, self.weights
         family, link, _mean_space_invalid = self.family, self.link, self._mean_space_invalid
         _link_domain_invalid, _start_lowered = self._link_domain_invalid, self._start_lowered
-        max_halving, objective_merit_scale = self.max_halving, self.objective_merit_scale
-        penalty_matvec, profile = self.penalty_matvec, self.profile
-        proposal_qp_converged = self.proposal_qp_converged
-        committed_active_set, prev_active_set = self.committed_active_set, self.prev_active_set
-        retained_qp_converged, _t_deviance = self.retained_qp_converged, self._t_deviance
-        _t_deviance_eval, evaluate_state = self._t_deviance_eval, self.evaluate_state
+        max_halving, penalty_matvec, profile = self.max_halving, self.penalty_matvec, self.profile
+        evaluate_state = self.evaluate_state
         _t0 = time.perf_counter()
         proposal = evaluate_state(
             beta,
@@ -4141,7 +4033,7 @@ class _IRLSDirectFit:
             phase="proposal",
             iteration=it + 1,
             alpha=1.0,
-            centred_intercept=proposal_centred_intercept,
+            centred_intercept=self.proposal_centred_intercept,
         )
         trial_cache: dict[float, _IRLSState] = {1.0: proposal}
         trial_directions: tuple[NDArray, float, NDArray] | None = None
@@ -4288,7 +4180,7 @@ class _IRLSDirectFit:
                 if _start_lowered
                 else max_halving,
             ),
-            merit_scale=objective_merit_scale,
+            merit_scale=self.objective_merit_scale,
             # a Newton step is judged on the model's own deviance, which
             # still sees the rows clip_mu holds; Fisher's on the clipped one
             merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
@@ -4343,22 +4235,22 @@ class _IRLSDirectFit:
             # problem, while damping retains an interpolation.  Neither
             # state is the current H/g solution whose stationarity and
             # dual feasibility the inner QP certified.
-            retained_qp_converged = bool(
-                not decision.step_rejected and decision.alpha == 1.0 and proposal_qp_converged
+            self.retained_qp_converged = bool(
+                not decision.step_rejected and decision.alpha == 1.0 and self.proposal_qp_converged
             )
         evaluation_elapsed = time.perf_counter() - _t0
-        _t_deviance += evaluation_elapsed
-        _t_deviance_eval += evaluation_elapsed
+        self._t_deviance += evaluation_elapsed
+        self._t_deviance_eval += evaluation_elapsed
         beta = retained.beta.copy()
         intercept = retained.intercept
-        eta_unclipped = retained.eta_unclipped
-        eta = retained.eta
-        mu = retained.mu
+        self.eta_unclipped = retained.eta_unclipped
+        self.eta = retained.eta
+        self.mu = retained.mu
         dev = retained.deviance
         n_halvings = decision.step_halvings
         step_rejected = decision.step_rejected
         if step_rejected:
-            prev_active_set = committed_active_set
+            self.prev_active_set = self.committed_active_set
         elif n_halvings:
             logger.info(
                 "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
@@ -4367,31 +4259,22 @@ class _IRLSDirectFit:
                 n_halvings,
                 dev,
             )
-        self._t_deviance, self._t_deviance_eval = _t_deviance, _t_deviance_eval
-        self.proposal, self.decision, self.retained = proposal, decision, retained
-        self.retained_qp_converged, self.beta = retained_qp_converged, beta
-        self.intercept, self.eta_unclipped, self.eta, self.mu = intercept, eta_unclipped, eta, mu
-        self.dev, self.n_halvings, self.step_rejected = dev, n_halvings, step_rejected
-        self.prev_active_set = prev_active_set
+        self.proposal, self.decision, self.retained, self.beta = proposal, decision, retained, beta
+        self.intercept, self.dev, self.n_halvings = intercept, dev, n_halvings
+        self.step_rejected = step_rejected
 
     def _converge(self, it: int) -> None:
-        _has_scop, convergence, tol, dev = self._has_scop, self.convergence, self.tol, self.dev
-        beta, beta_prev, intercept = self.beta, self.beta_prev, self.intercept
-        intercept_prev, mu, eta, retained = self.intercept_prev, self.mu, self.eta, self.retained
-        committed, _mode_ratios, mode_bar = self.committed, self._mode_ratios, self.mode_bar
-        _stagnation_window = self._stagnation_window
-        _stagnation_newton_available, max_iter = self._stagnation_newton_available, self.max_iter
-        _newton_latch, profile, step_rejected = self._newton_latch, self.profile, self.step_rejected
-        has_constraints, n_halvings = self.has_constraints, self.n_halvings
-        objective_prev, objective_merit_scale = self.objective_prev, self.objective_merit_scale
-        _last_mode_residual, score_stagnated = self._last_mode_residual, self.score_stagnated
-        mode_residual = self.mode_residual
-        proposal_state = self.proposal_scop.irls if _has_scop else self.proposal
+        _has_scop, convergence, tol, beta = self._has_scop, self.convergence, self.tol, self.beta
+        beta_prev, intercept, retained = self.beta_prev, self.intercept, self.retained
+        _mode_ratios, _stagnation_window = self._mode_ratios, self._stagnation_window
+        profile, _last_mode_residual = self.profile, self._last_mode_residual
+        score_stagnated = self.score_stagnated
+        self.proposal_state = self.proposal_scop.irls if _has_scop else self.proposal
         dev_rel_change = None
         coef_change = None
-        convergence_label: str = convergence
-        convergence_tolerance = tol
-        if np.isfinite(dev):
+        self.convergence_label: str = convergence
+        self.convergence_tolerance = tol
+        if np.isfinite(self.dev):
             if convergence == "mode_score" and self._score_centre is not None:
                 # One-engine design §3.8: stop on the certificate's own score,
                 # in centred coordinates over the identified coefficients,
@@ -4401,10 +4284,10 @@ class _IRLSDirectFit:
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
                 )
-                residual = mode_residual(
-                    beta, intercept, mu, eta, centred_intercept=retained.centred_intercept
+                residual = self.mode_residual(
+                    beta, intercept, self.mu, self.eta, centred_intercept=retained.centred_intercept
                 )
-                convergence_value = mode_bar * residual.ratio()
+                convergence_value = self.mode_bar * residual.ratio()
                 converged_this_iter = residual.ratio() <= 1.0
                 _last_mode_residual = residual
                 _mode_ratios.append(residual.ratio())
@@ -4420,7 +4303,7 @@ class _IRLSDirectFit:
                 )
                 switched_curvature = False
                 if (
-                    _stagnation_newton_available
+                    self._stagnation_newton_available
                     and not self._observed_newton_active
                     and not converged_this_iter
                     and (
@@ -4428,7 +4311,7 @@ class _IRLSDirectFit:
                         or (
                             residual.resolved
                             and rate_exhausts_budget(
-                                _mode_ratios, _stagnation_window, it + 1, max_iter
+                                _mode_ratios, _stagnation_window, it + 1, self.max_iter
                             )
                         )
                     )
@@ -4444,8 +4327,8 @@ class _IRLSDirectFit:
                     score_stagnated = False
                     switched_curvature = True
                     _mode_ratios.clear()
-                    if _newton_latch is not None:
-                        _newton_latch[0] = True
+                    if self._newton_latch is not None:
+                        self._newton_latch[0] = True
                     if profile is not None:
                         profile["irls_fisher_newton_switches"] = (
                             profile.get("irls_fisher_newton_switches", 0) + 1
@@ -4453,11 +4336,11 @@ class _IRLSDirectFit:
                 if (
                     not converged_this_iter
                     and not switched_curvature
-                    and not step_rejected
+                    and not self.step_rejected
                     and not _has_scop
-                    and not has_constraints
-                    and intercept == intercept_prev
-                    and retained.centred_intercept == committed.centred_intercept
+                    and not self.has_constraints
+                    and intercept == self.intercept_prev
+                    and retained.centred_intercept == self.committed.centred_intercept
                     and np.array_equal(beta, beta_prev)
                 ):
                     # The full step left the state bitwise where it was: the
@@ -4480,15 +4363,15 @@ class _IRLSDirectFit:
                     # resolve cap would never let the floor be read.  A score
                     # within its floor is certified; one above it is the
                     # limiting accuracy, published as not converged.
-                    residual = mode_residual(
+                    residual = self.mode_residual(
                         beta,
                         intercept,
-                        mu,
-                        eta,
+                        self.mu,
+                        self.eta,
                         centred_intercept=retained.centred_intercept,
                         resolve_cap=math.inf,
                     )
-                    convergence_value = mode_bar * residual.ratio()
+                    convergence_value = self.mode_bar * residual.ratio()
                     converged_this_iter = residual.ratio() <= 1.0
                     score_stagnated = not converged_this_iter
                     _last_mode_residual = residual
@@ -4499,7 +4382,7 @@ class _IRLSDirectFit:
                 )
                 coef_change = max(
                     coef_change,
-                    abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
+                    abs(intercept - self.intercept_prev) / max(1.0, abs(intercept)),
                 )
                 if _has_scop:
                     latent_change = max(
@@ -4518,7 +4401,7 @@ class _IRLSDirectFit:
                     coef_change = max(coef_change, latent_change)
                 convergence_value = coef_change
                 converged_this_iter = coef_change < tol
-                if _has_scop and n_halvings:
+                if _has_scop and self.n_halvings:
                     # a damped step's change is a fraction of the full
                     # step's and bounds nothing either (below)
                     converged_this_iter = False
@@ -4528,14 +4411,14 @@ class _IRLSDirectFit:
                     if retained.penalized_deviance is None
                     else retained.penalized_deviance
                 )
-                if np.isfinite(objective_prev):
+                if np.isfinite(self.objective_prev):
                     dev_rel_change = _irls_objective_relative_change(
                         objective=objective,
-                        previous=objective_prev,
-                        objective_scale=objective_merit_scale,
+                        previous=self.objective_prev,
+                        objective_scale=self.objective_merit_scale,
                     )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
-                if _has_scop and n_halvings:
+                if _has_scop and self.n_halvings:
                     # The decrease of a full joint Newton step is its Newton
                     # decrement, which bounds the distance to the mode (Boyd &
                     # Vandenberghe 2004, sec. 9.5.1); a damped step's is a
@@ -4546,48 +4429,38 @@ class _IRLSDirectFit:
         else:
             converged_this_iter = False
             convergence_value = None
-        if step_rejected:
+        if self.step_rejected:
             converged_this_iter = False
-        self.proposal_state, self.dev_rel_change = proposal_state, dev_rel_change
-        self.coef_change, self.convergence_label = coef_change, convergence_label
-        self.convergence_tolerance = convergence_tolerance
+        self.dev_rel_change, self.coef_change = dev_rel_change, coef_change
         self.convergence_value, self.converged_this_iter = convergence_value, converged_this_iter
         self.score_stagnated, self._last_mode_residual = score_stagnated, _last_mode_residual
 
     def _judge_mean_space(self) -> None:
-        A_all, _has_scop, _mean_space_invalid = self.A_all, self._has_scop, self._mean_space_invalid
-        _mean_space_newton = self._mean_space_newton
-        _mean_space_newton_available = self._mean_space_newton_available
-        _stagnation_window, _start_lowered = self._stagnation_window, self._start_lowered
-        _true_ratios, committed = self._true_ratios, self.committed
-        converged_this_iter, dev, family = self.converged_this_iter, self.dev, self.family
-        has_constraints, link, mode_bar = self.has_constraints, self.link, self.mode_bar
-        prev_active_set, retained = self.prev_active_set, self.retained
-        step_rejected, weights = self.step_rejected, self.weights
-        convergence_label, convergence_value = self.convergence_label, self.convergence_value
-        convergence_tolerance, score_stagnated = self.convergence_tolerance, self.score_stagnated
-        _true_stop_ratio = self._true_stop_ratio
+        _mean_space_newton, _stagnation_window = self._mean_space_newton, self._stagnation_window
+        _true_ratios, converged_this_iter = self._true_ratios, self.converged_this_iter
+        family, link, retained, weights = self.family, self.link, self.retained, self.weights
+        score_stagnated = self.score_stagnated
         # Once Newton steps are engaged the model's own certificate is the
         # stop, every iteration: the clipped rule a mode_score fit stops on
         # cannot pass at a mode it does not see (below).
-        newton_stop = bool(_mean_space_newton and np.isfinite(dev) and not step_rejected)
+        newton_stop = bool(_mean_space_newton and np.isfinite(self.dev) and not self.step_rejected)
         # A state holding rows at the boundary is never published as converged
         # (``mean_space_boundary`` below), so its stop stands as on master.
         at_boundary = bool(
             (converged_this_iter or newton_stop)
-            and _mean_space_invalid is not None
+            and self._mean_space_invalid is not None
             and mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
         )
         # rows clip_mu holds, at the step's base or where it landed
         clipped_rows = (
-            mean_space_clipped_rows(family, link, committed.eta_unclipped, weights)
+            mean_space_clipped_rows(family, link, self.committed.eta_unclipped, weights)
             + mean_space_clipped_rows(family, link, retained.eta_unclipped, weights)
-            if converged_this_iter and _mean_space_invalid is not None and not at_boundary
+            if converged_this_iter and self._mean_space_invalid is not None and not at_boundary
             else 0
         )
         _true_confirmed = False
         if not at_boundary and (
-            newton_stop or (converged_this_iter and (clipped_rows or _start_lowered))
+            newton_stop or (converged_this_iter and (clipped_rows or self._start_lowered))
         ):
             # On a row whose mean leaves clip_mu's band the clipped deviance
             # is flat and the step's score is not the binomial/log score, and
@@ -4605,11 +4478,11 @@ class _IRLSDirectFit:
                 retained.intercept,
                 retained.eta_unclipped,
                 (
-                    A_all[list(prev_active_set)]
-                    if has_constraints and A_all is not None and prev_active_set
+                    self.A_all[list(self.prev_active_set)]
+                    if self.has_constraints and self.A_all is not None and self.prev_active_set
                     else None
                 ),
-                self.retained_scop.groups if _has_scop else None,
+                self.retained_scop.groups if self._has_scop else None,
             )
             # the state is certified on the model's own score, Newton or not,
             # where the clip holds a row (or Newton decided): a criterion read
@@ -4619,10 +4492,10 @@ class _IRLSDirectFit:
                 converged_this_iter = bool(true_ratio <= 1.0)
                 score_stagnated = False
                 # this rule decided: its numbers are the ones published
-                convergence_label = "mean_space_mode_score"
-                convergence_value = mode_bar * true_ratio
-                convergence_tolerance = mode_bar
-                _true_stop_ratio = true_ratio
+                self.convergence_label = "mean_space_mode_score"
+                self.convergence_value = self.mode_bar * true_ratio
+                self.convergence_tolerance = self.mode_bar
+                self._true_stop_ratio = true_ratio
             if not true_ratio <= 1.0:
                 converged_this_iter = False
                 _true_ratios.append(true_ratio)
@@ -4631,7 +4504,7 @@ class _IRLSDirectFit:
                     < 0.5 * min(_true_ratios[:-_stagnation_window])
                 )
                 if (
-                    _mean_space_newton_available
+                    self._mean_space_newton_available
                     and not _mean_space_newton
                     and (true_resolved or score_stagnated)
                 ):
@@ -4647,28 +4520,25 @@ class _IRLSDirectFit:
                     _true_ratios.clear()
                     score_stagnated = False
 
-        _true_stop = bool(newton_stop and not at_boundary)
+        self._true_stop = bool(newton_stop and not at_boundary)
         self.converged_this_iter, self.score_stagnated = converged_this_iter, score_stagnated
-        self.convergence_label, self.convergence_value = convergence_label, convergence_value
-        self.convergence_tolerance, self._true_confirmed = convergence_tolerance, _true_confirmed
-        self._true_stop, self._true_stop_ratio = _true_stop, _true_stop_ratio
-        self._mean_space_newton = _mean_space_newton
+        self._true_confirmed, self._mean_space_newton = _true_confirmed, _mean_space_newton
 
     def _terminate(self, it: int) -> None:
-        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
-        abs_A_all, beta, converged_this_iter = self.abs_A_all, self.beta, self.converged_this_iter
-        retained_qp_converged, step_rejected = self.retained_qp_converged, self.step_rejected
-        dev, max_iter, score_stagnated = self.dev, self.max_iter, self.score_stagnated
+        converged_this_iter, step_rejected = self.converged_this_iter, self.step_rejected
+        dev, max_iter = self.dev, self.max_iter
         constraints_feasible_this_iter = True
-        if has_constraints:
-            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+        if self.has_constraints:
+            if (
+                self.A_all is None or self.b_all is None
+            ):  # pragma: no cover - construction invariant
                 raise RuntimeError("constrained fit omitted its aggregate constraint system")
             constraints_feasible_this_iter = _is_feasible(
-                A_all,
-                beta,
-                b_all,
+                self.A_all,
+                self.beta,
+                self.b_all,
                 _QP_FEASIBILITY_TOL,
-                abs_A=abs_A_all,
+                abs_A=self.abs_A_all,
             )
             # Objective or coefficient stagnation cannot certify a constrained
             # mode whose retained coefficients are outside the feasible set.
@@ -4680,7 +4550,7 @@ class _IRLSDirectFit:
             # QP's stationarity and dual-feasibility certificate. Keep a
             # finite feasible iterate and continue: a later full QP proposal
             # may still obtain the missing certificate.
-            if not retained_qp_converged:
+            if not self.retained_qp_converged:
                 converged_this_iter = False
 
         terminal_constraint_infeasible = bool(
@@ -4688,8 +4558,8 @@ class _IRLSDirectFit:
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
         terminal_constraint_kkt_incomplete = bool(
-            has_constraints
-            and not retained_qp_converged
+            self.has_constraints
+            and not self.retained_qp_converged
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
 
@@ -4703,7 +4573,7 @@ class _IRLSDirectFit:
             termination_reason = "nonfinite_deviance"
         elif converged_this_iter:
             termination_reason = "converged"
-        elif score_stagnated:
+        elif self.score_stagnated:
             termination_reason = "score_stagnated"
         elif it + 1 == max_iter:
             termination_reason = "max_iter"
@@ -4712,23 +4582,15 @@ class _IRLSDirectFit:
         self.converged_this_iter, self.termination_reason = converged_this_iter, termination_reason
 
     def _record(self, it: int) -> None:
-        trace_enabled, trace_run = self.trace_enabled, self.trace_run
-        trace_purpose, committed = self.trace_purpose, self.committed
-        proposal_state, retained, decision = self.proposal_state, self.retained, self.decision
-        converged_this_iter, convergence_label = self.converged_this_iter, self.convergence_label
-        convergence_value = self.convergence_value
+        committed, proposal_state, retained = self.committed, self.proposal_state, self.retained
+        decision, converged_this_iter = self.decision, self.converged_this_iter
+        convergence_label, convergence_value = self.convergence_label, self.convergence_value
         convergence_tolerance = self.convergence_tolerance
         termination_reason, working_rows = self.termination_reason, self.working_rows
-        newton_score, dev, capture_extrema = self.newton_score, self.dev, self.capture_extrema
-        working_eta, working_eta_unclipped = self.working_eta, self.working_eta_unclipped
-        eta, eta_unclipped = self.eta, self.eta_unclipped
-        record_diagnostics, W, w_ratio, mu = self.record_diagnostics, self.W, self.w_ratio, self.mu
-        intercept, n_halvings, _cond_est = self.intercept, self.n_halvings, self._cond_est
-        _used_svd, working_mu, step_rejected = self._used_svd, self.working_mu, self.step_rejected
-        rank_truncated, iteration_log = self.rank_truncated, self.iteration_log
-        if trace_enabled:
-            assert trace_run is not None
-            trace_run.emit_lazy(
+        newton_score, W = self.newton_score, self.W
+        if self.trace_enabled:
+            assert self.trace_run is not None
+            self.trace_run.emit_lazy(
                 "step_decision",
                 lambda: {
                     "solver": "irls_direct",
@@ -4750,9 +4612,9 @@ class _IRLSDirectFit:
                     ),
                 },
                 channel="pirls",
-                purpose=trace_purpose,
+                purpose=self.trace_purpose,
             )
-        if np.isfinite(dev):
+        if np.isfinite(self.dev):
             self.emit_state_commit(
                 retained,
                 iteration=it + 1,
@@ -4765,19 +4627,19 @@ class _IRLSDirectFit:
 
         working_eta_clipped = False
         eta_clipped = False
-        if capture_extrema:
+        if self.capture_extrema:
             # Each of these is read again by the diagnostics row below, which
             # only runs when ``capture_extrema`` is true (see its definition).
             # Bind once: they are O(n) passes over arrays nothing mutates
             # between here and the append.
-            working_eta_min = float(np.min(working_eta))
-            working_eta_max = float(np.max(working_eta))
-            working_eta_min_unclipped = float(np.min(working_eta_unclipped))
-            working_eta_max_unclipped = float(np.max(working_eta_unclipped))
-            eta_min = float(np.min(eta))
-            eta_max = float(np.max(eta))
-            eta_min_unclipped = float(np.min(eta_unclipped))
-            eta_max_unclipped = float(np.max(eta_unclipped))
+            working_eta_min = float(np.min(self.working_eta))
+            working_eta_max = float(np.max(self.working_eta))
+            working_eta_min_unclipped = float(np.min(self.working_eta_unclipped))
+            working_eta_max_unclipped = float(np.max(self.working_eta_unclipped))
+            eta_min = float(np.min(self.eta))
+            eta_max = float(np.max(self.eta))
+            eta_min_unclipped = float(np.min(self.eta_unclipped))
+            eta_max_unclipped = float(np.max(self.eta_unclipped))
             working_eta_clipped = bool(
                 working_eta_min_unclipped < working_eta_min
                 or working_eta_max_unclipped > working_eta_max
@@ -4785,42 +4647,42 @@ class _IRLSDirectFit:
             eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
 
         # Record per-iteration diagnostics
-        if record_diagnostics:
+        if self.record_diagnostics:
             top_idx, bot_idx = _extreme_weight_indices(W)
             w_min = float(W.min())
             w_max = float(W.max())
-            iteration_log.append(
+            self.iteration_log.append(
                 IterationDiagnostics(
                     iteration=it + 1,
-                    deviance=dev,
+                    deviance=self.dev,
                     w_min=w_min,
                     w_max=w_max,
-                    w_ratio=w_ratio,
-                    mu_min=float(mu.min()),
-                    mu_max=float(mu.max()),
+                    w_ratio=self.w_ratio,
+                    mu_min=float(self.mu.min()),
+                    mu_max=float(self.mu.max()),
                     eta_min=eta_min,
                     eta_max=eta_max,
-                    intercept=intercept,
-                    step_halvings=n_halvings,
+                    intercept=self.intercept,
+                    step_halvings=self.n_halvings,
                     top_w_indices=top_idx,
                     bottom_w_indices=bot_idx,
-                    cond_estimate=_cond_est,
-                    used_svd_fallback=_used_svd,
+                    cond_estimate=self._cond_est,
+                    used_svd_fallback=self._used_svd,
                     raw_w_min=w_min,
                     raw_w_max=w_max,
-                    raw_w_ratio=w_ratio,
+                    raw_w_ratio=self.w_ratio,
                     eta_min_unclipped=eta_min_unclipped,
                     eta_max_unclipped=eta_max_unclipped,
                     eta_clipped=eta_clipped,
-                    working_mu_min=float(working_mu.min()),
-                    working_mu_max=float(working_mu.max()),
+                    working_mu_min=float(self.working_mu.min()),
+                    working_mu_max=float(self.working_mu.max()),
                     working_eta_min=working_eta_min,
                     working_eta_max=working_eta_max,
                     working_eta_min_unclipped=working_eta_min_unclipped,
                     working_eta_max_unclipped=working_eta_max_unclipped,
                     working_eta_clipped=working_eta_clipped,
-                    step_rejected=step_rejected,
-                    rank_truncated=rank_truncated,
+                    step_rejected=self.step_rejected,
+                    rank_truncated=self.rank_truncated,
                     trials_attempted=decision.trials_attempted,
                     accepted_alpha=decision.alpha,
                     base_state_id=committed.state_id,
@@ -4838,77 +4700,59 @@ class _IRLSDirectFit:
         self.eta_clipped, self.working_eta_clipped = eta_clipped, working_eta_clipped
 
     def _record_debug_row(self, it: int) -> None:
-        debug_recorder, base_debug_context = self.debug_recorder, self.base_debug_context
-        dev, dev_rel_change, coef_change = self.dev, self.dev_rel_change, self.coef_change
-        convergence, converged_this_iter, W = self.convergence, self.converged_this_iter, self.W
-        w_ratio, mu, eta_unclipped = self.w_ratio, self.mu, self.eta_unclipped
-        eta_clipped, eta, working_mu = self.eta_clipped, self.eta, self.working_mu
-        working_eta_unclipped = self.working_eta_unclipped
-        working_eta_clipped, working_eta = self.working_eta_clipped, self.working_eta
-        n_halvings, decision, step_rejected = self.n_halvings, self.decision, self.step_rejected
-        committed, proposal_state, retained = self.committed, self.proposal_state, self.retained
-        rank_truncated, _cond_est, _used_svd = self.rank_truncated, self._cond_est, self._used_svd
-        _has_scop, working_rows, newton_score = self._has_scop, self.working_rows, self.newton_score
-        debug_recorder.append_jsonl(
+        self.debug_recorder.append_jsonl(
             "pirls",
             {
-                **base_debug_context,
+                **self.base_debug_context,
                 "iteration": it + 1,
-                "deviance": float(dev),
+                "deviance": float(self.dev),
                 "deviance_relative_change": (
-                    float(dev_rel_change) if dev_rel_change is not None else None
+                    float(self.dev_rel_change) if self.dev_rel_change is not None else None
                 ),
-                "coefficient_change": float(coef_change) if coef_change is not None else None,
-                "convergence": convergence,
-                "converged": bool(converged_this_iter),
-                "w_min": float(W.min()),
-                "w_max": float(W.max()),
-                "w_ratio": float(w_ratio),
-                "mu_min": float(mu.min()),
-                "mu_max": float(mu.max()),
-                "eta_min_unclipped": float(np.min(eta_unclipped)),
-                "eta_max_unclipped": float(np.max(eta_unclipped)),
-                "eta_clipped": bool(eta_clipped),
-                "eta_min": float(eta.min()),
-                "eta_max": float(eta.max()),
-                "working_mu_min": float(working_mu.min()),
-                "working_mu_max": float(working_mu.max()),
-                "working_eta_min_unclipped": float(np.min(working_eta_unclipped)),
-                "working_eta_max_unclipped": float(np.max(working_eta_unclipped)),
-                "working_eta_clipped": bool(working_eta_clipped),
-                "working_eta_min": float(working_eta.min()),
-                "working_eta_max": float(working_eta.max()),
-                "step_halvings": int(n_halvings),
-                "trials_attempted": int(decision.trials_attempted),
-                "step_rejected": bool(step_rejected),
-                "base_state_id": committed.state_id,
-                "proposal_state_id": proposal_state.state_id,
-                "committed_state_id": retained.state_id,
-                "rank_truncated": rank_truncated,
-                "cond_estimate": float(_cond_est),
-                "used_svd_fallback": bool(_used_svd),
-                "has_scop": bool(_has_scop),
+                "coefficient_change": float(self.coef_change)
+                if self.coef_change is not None
+                else None,
+                "convergence": self.convergence,
+                "converged": bool(self.converged_this_iter),
+                "w_min": float(self.W.min()),
+                "w_max": float(self.W.max()),
+                "w_ratio": float(self.w_ratio),
+                "mu_min": float(self.mu.min()),
+                "mu_max": float(self.mu.max()),
+                "eta_min_unclipped": float(np.min(self.eta_unclipped)),
+                "eta_max_unclipped": float(np.max(self.eta_unclipped)),
+                "eta_clipped": bool(self.eta_clipped),
+                "eta_min": float(self.eta.min()),
+                "eta_max": float(self.eta.max()),
+                "working_mu_min": float(self.working_mu.min()),
+                "working_mu_max": float(self.working_mu.max()),
+                "working_eta_min_unclipped": float(np.min(self.working_eta_unclipped)),
+                "working_eta_max_unclipped": float(np.max(self.working_eta_unclipped)),
+                "working_eta_clipped": bool(self.working_eta_clipped),
+                "working_eta_min": float(self.working_eta.min()),
+                "working_eta_max": float(self.working_eta.max()),
+                "step_halvings": int(self.n_halvings),
+                "trials_attempted": int(self.decision.trials_attempted),
+                "step_rejected": bool(self.step_rejected),
+                "base_state_id": self.committed.state_id,
+                "proposal_state_id": self.proposal_state.state_id,
+                "committed_state_id": self.retained.state_id,
+                "rank_truncated": self.rank_truncated,
+                "cond_estimate": float(self._cond_est),
+                "used_svd_fallback": bool(self._used_svd),
+                "has_scop": bool(self._has_scop),
                 "working_curvature": (
-                    working_rows.curvature_source if newton_score is None else "observed"
+                    self.working_rows.curvature_source if self.newton_score is None else "observed"
                 ),
             },
         )
 
     def _finish(self, it: int) -> None:
-        t_start, _compensate_centred_intercept = self.t_start, self._compensate_centred_intercept
-        _compute_fit_statistics, retained = self._compute_fit_statistics, self.retained
-        _state_center, family, link, dm = self._state_center, self.family, self.link, self.dm
-        beta, y, weights, offset = self.beta, self.y, self.weights, self.offset
-        eta_unclipped, eta, mu, dev = self.eta_unclipped, self.eta, self.mu, self.dev
-        separation, working_rows, w_ratio = self.separation, self.working_rows, self.w_ratio
-        working_mu, working_eta, converged = self.working_mu, self.working_eta, self.converged
-        max_iter, step_rejected = self.max_iter, self.step_rejected
-        deviance_relative_change, groups = self.deviance_relative_change, self.groups
-        has_constraints, A_all, b_all = self.has_constraints, self.A_all, self.b_all
-        abs_A_all, retained_qp_converged = self.abs_A_all, self.retained_qp_converged
-        termination_reason, _mean_space_invalid = self.termination_reason, self._mean_space_invalid
-        _judged_truncated, _last_truncated = self._judged_truncated, self._last_truncated
-        t_elapsed = time.perf_counter() - t_start
+        retained, family, link, beta = self.retained, self.family, self.link, self.beta
+        weights, eta_unclipped, eta, mu = self.weights, self.eta_unclipped, self.eta, self.mu
+        dev, converged, A_all, b_all = self.dev, self.converged, self.A_all, self.b_all
+        termination_reason, _last_truncated = self.termination_reason, self._last_truncated
+        t_elapsed = time.perf_counter() - self.t_start
         logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
 
         # A published Gaussian identity fit carries its centred intercept as the
@@ -4920,23 +4764,23 @@ class _IRLSDirectFit:
         # consumer reads (``mode_score.linear_predictor``).
         centred_intercept_lo: float | None = None
         if (
-            _compensate_centred_intercept
-            and _compute_fit_statistics
+            self._compensate_centred_intercept
+            and self._compute_fit_statistics
             and retained.centred_intercept is not None
-            and _state_center is not None
+            and self._state_center is not None
             and type(family) is Gaussian
             and type(link) is IdentityLink
         ):
-            contribution = centred_matvec(dm, beta, _state_center)
+            contribution = centred_matvec(self.dm, beta, self._state_center)
             centred_intercept_lo = centred_intercept_remainder(
-                y, weights, offset, retained.centred_intercept, contribution
+                self.y, weights, self.offset, retained.centred_intercept, contribution
             )
             if centred_intercept_lo is not None:
                 contribution += centred_intercept_lo
-                eta_unclipped = (retained.centred_intercept + contribution) + offset
+                eta_unclipped = (retained.centred_intercept + contribution) + self.offset
                 eta = stabilize_eta(eta_unclipped, link)
                 mu = clip_mu(link.inverse(eta), family)
-                dev = weighted_row_sum(weights, family.deviance_unit, y, mu)
+                dev = weighted_row_sum(weights, family.deviance_unit, self.y, mu)
 
         # Runtime separation backstop (issue #341).  Two terminal signatures mark
         # a coefficient that walked toward +/-infinity instead of converging:
@@ -4953,7 +4797,7 @@ class _IRLSDirectFit:
         # starts; this catches what the design scan cannot see (non-categorical
         # indicator structure), promoting a debug-level log line to a named
         # warning or, in strict mode, an error.
-        if separation != "ignore" and np.isfinite(dev):
+        if self.separation != "ignore" and np.isfinite(dev):
             from superglm.diagnostics.separation import (
                 EXTREME_WEIGHT_RATIO,
                 STAGNANT_DEVIANCE_DELTA,
@@ -4964,12 +4808,12 @@ class _IRLSDirectFit:
             )
 
             separation_ratio = _separation_weight_ratio(
-                working_rows.curvature_source,
-                w_ratio,
+                self.working_rows.curvature_source,
+                self.w_ratio,
                 family=family,
                 link=link,
-                mu=working_mu,
-                eta=working_eta,
+                mu=self.working_mu,
+                eta=self.working_eta,
                 weights=weights,
             )
             if separation_ratio > EXTREME_WEIGHT_RATIO:
@@ -4980,23 +4824,25 @@ class _IRLSDirectFit:
                     # iterations run max_iter=1) exhausts its budget by
                     # construction; only a real budget makes exhaustion-with-
                     # stagnation evidence of a drift (the field trace ran 100).
-                    and max_iter >= 10
-                    and it + 1 >= max_iter
-                    and not step_rejected
-                    and deviance_relative_change < STAGNANT_DEVIANCE_DELTA
+                    and self.max_iter >= 10
+                    and it + 1 >= self.max_iter
+                    and not self.step_rejected
+                    and self.deviance_relative_change < STAGNANT_DEVIANCE_DELTA
                 )
                 if pinned or exhausted_stagnant:
-                    drifting = drifting_groups(dm, groups, beta, eta, eta_unclipped, weights)
+                    drifting = drifting_groups(
+                        self.dm, self.groups, beta, eta, eta_unclipped, weights
+                    )
                     message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
-                    if separation == "error":
+                    if self.separation == "error":
                         raise SeparationError(message)
                     # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
                     held_warnings.warn(message, SeparationWarning, stacklevel=4)
 
-        if has_constraints:
+        if self.has_constraints:
             if A_all is None or b_all is None:  # pragma: no cover - construction invariant
                 raise RuntimeError("constrained fit omitted its aggregate constraint system")
-            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=abs_A_all):
+            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=self.abs_A_all):
                 minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
                 converged = False
                 termination_reason = "constraint_infeasible"
@@ -5006,7 +4852,7 @@ class _IRLSDirectFit:
                     minimum_scaled_slack,
                     _QP_FEASIBILITY_TOL,
                 )
-            elif not retained_qp_converged:
+            elif not self.retained_qp_converged:
                 converged = False
                 termination_reason = "constraint_kkt_incomplete"
                 logger.warning(
@@ -5020,7 +4866,7 @@ class _IRLSDirectFit:
         # converged, whatever stopped the loop (``mean_space_boundary_rows``).
         _boundary_rows = (
             0
-            if _mean_space_invalid is None
+            if self._mean_space_invalid is None
             else mean_space_boundary_rows(family, link, eta_unclipped, weights)
         )
         if _boundary_rows:
@@ -5038,7 +4884,7 @@ class _IRLSDirectFit:
         # returned state was never judged, a fit that is not converged publishes
         # the latest judgement that found any as history (``earlier``), so a
         # refusal stays disclosed, and it decides nothing.
-        _judged_eta, _judged = _judged_truncated[0]
+        _judged_eta, _judged = self._judged_truncated[0]
         if _judged_eta is not None and _judged_eta is eta_unclipped:
             _published_truncated = _judged
         elif converged:
@@ -5077,20 +4923,17 @@ class _IRLSDirectFit:
         self._truncated_boundary = _truncated_boundary
 
     def _terminal_rows(self) -> None:
-        _has_scop, _return_working_system = self._has_scop, self._return_working_system
-        family, link, y, mu, eta = self.family, self.link, self.y, self.mu, self.eta
-        eta_unclipped, weights, W, z = self.eta_unclipped, self.weights, self.W, self.z
-        _scop_state = self._scop_state
-        if _has_scop:
+        W, z, _scop_state = self.W, self.z, self._scop_state
+        if self._has_scop:
             # Final Gram and SCOP Hessian caches must describe the retained model,
             # not the working state or a discarded full proposal.
             final_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu,
-                eta=eta,
-                sample_weight=weights,
+                distribution=self.family,
+                link=self.link,
+                y=self.y,
+                mu=self.mu,
+                eta=self.eta,
+                sample_weight=self.weights,
                 prefer_observed=False,
             )
             W = final_rows.weights
@@ -5105,7 +4948,7 @@ class _IRLSDirectFit:
                 [_scop_state[gi]["beta_scop"] for gi in self._scop_order],
                 W=W,
                 z=z,
-                eta=eta_unclipped,
+                eta=self.eta_unclipped,
             )
             for gi, refresh in terminal.items():
                 _scop_state[gi]["H_scop_penalized"] = refresh.H_penalized
@@ -5115,14 +4958,14 @@ class _IRLSDirectFit:
         # Every public/exported matrix and rank claim is evaluated at the retained
         # model. Private fREML performance iterations deliberately reuse the
         # working system used for their one coefficient update.
-        if not _return_working_system:
+        if not self._return_working_system:
             export_rows = coefficient_working_rows(
-                distribution=family,
-                link=link,
-                y=y,
-                mu=mu,
-                eta=eta,
-                sample_weight=weights,
+                distribution=self.family,
+                link=self.link,
+                y=self.y,
+                mu=self.mu,
+                eta=self.eta,
+                sample_weight=self.weights,
                 prefer_observed=False,
             )
             W = export_rows.weights
@@ -5131,35 +4974,31 @@ class _IRLSDirectFit:
         self.W, self.z = W, z
 
     def _profile_fit(self, it: int) -> None:
-        profile, _t_working, _t_gram = self.profile, self._t_working, self._t_gram
-        _t_solve, _t_deviance, _t_eta = self._t_solve, self._t_deviance, self._t_eta
-        _t_deviance_eval, t_elapsed = self._t_deviance_eval, self.t_elapsed
-        _boundary_rows, _true_stop = self._boundary_rows, self._true_stop
-        _last_true_residual, mode_bar = self._last_true_residual, self.mode_bar
-        _true_stop_ratio, _last_mode_residual = self._true_stop_ratio, self._last_mode_residual
+        profile, mode_bar = self.profile, self.mode_bar
+        _last_mode_residual = self._last_mode_residual
         # Accumulate phase timing into the profile dict if provided
         if profile is not None:
-            profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + _t_working
-            profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + _t_gram
-            profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + _t_solve
-            profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + _t_deviance
-            profile["irls_eta_s"] = profile.get("irls_eta_s", 0.0) + _t_eta
+            profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + self._t_working
+            profile["irls_gram_s"] = profile.get("irls_gram_s", 0.0) + self._t_gram
+            profile["irls_solve_s"] = profile.get("irls_solve_s", 0.0) + self._t_solve
+            profile["irls_deviance_s"] = profile.get("irls_deviance_s", 0.0) + self._t_deviance
+            profile["irls_eta_s"] = profile.get("irls_eta_s", 0.0) + self._t_eta
             profile["irls_deviance_eval_s"] = (
-                profile.get("irls_deviance_eval_s", 0.0) + _t_deviance_eval
+                profile.get("irls_deviance_eval_s", 0.0) + self._t_deviance_eval
             )
-            profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + t_elapsed
+            profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + self.t_elapsed
             profile["irls_calls"] = profile.get("irls_calls", 0) + 1
             profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
-            if _boundary_rows:
+            if self._boundary_rows:
                 profile["irls_mean_space_boundary_calls"] = (
                     profile.get("irls_mean_space_boundary_calls", 0) + 1
                 )
-            if _true_stop and _last_true_residual[0] is not None:
+            if self._true_stop and self._last_true_residual[0] is not None:
                 # the true-score certificate decided the last iteration (Newton
                 # steps): its score, floors and exclusions are the stop rule's
-                true_residual = _last_true_residual[0]
+                true_residual = self._last_true_residual[0]
                 profile["irls_mode_rule"] = "mean_space_mode_score"
-                profile["irls_mode_score"] = mode_bar * _true_stop_ratio
+                profile["irls_mode_score"] = mode_bar * self._true_stop_ratio
                 profile["irls_mode_bar"] = mode_bar
                 profile["irls_mode_floor_binding"] = true_residual.floor_binding
                 profile["irls_mode_weakly_identified"] = tuple(
@@ -5176,17 +5015,8 @@ class _IRLSDirectFit:
                 )
 
     def _final_system(self) -> None:
-        _use_structured, _return_working_system = self._use_structured, self._return_working_system
-        _last_working_structured = self._last_working_structured
-        _structured_group_index, z, offset = self._structured_group_index, self.z, self.offset
-        gms, groups, W, weights = self.gms, self.groups, self.W, self.weights
-        _structured_layout, lambda2 = self._structured_layout, self.lambda2
-        reml_penalties, S_override, p = self.reml_penalties, self.S_override, self.p
-        _last_working_centered = self._last_working_centered
-        _last_working_offset_mean = self._last_working_offset_mean
-        _state_center, cache_out, dm = self._state_center, self.cache_out, self.dm
-        _final_penalized_operator, _has_scop = self._final_penalized_operator, self._has_scop
-        eta_unclipped = self.eta_unclipped
+        _return_working_system, W, cache_out = self._return_working_system, self.W, self.cache_out
+        dm, _final_penalized_operator = self.dm, self._final_penalized_operator
         # Preserve the raw coefficient-space payload used by REML separately from
         # the centered inference system. The structured path retains the same
         # moments in block form and never materializes the dominant K x K block.
@@ -5194,37 +5024,37 @@ class _IRLSDirectFit:
         structured_final: (
             FactorSmoothLeafSystem | SumToZeroLeafSystem | NestedStructuredSystem | None
         ) = None
-        if _use_structured:
+        if self._use_structured:
             if _return_working_system:
-                if _last_working_structured is None:
+                if self._last_working_structured is None:
                     raise RuntimeError("working structured system was not computed")
-                structured_final = _last_working_structured
+                structured_final = self._last_working_structured
             else:
-                if _structured_group_index is None:  # pragma: no cover - selection invariant
+                if self._structured_group_index is None:  # pragma: no cover - selection invariant
                     raise RuntimeError("Structured backend has no dominant group.")
-                z_off = z - offset
+                z_off = self.z - self.offset
                 structured_final = build_structured_system(
-                    gms,
-                    groups,
+                    self.gms,
+                    self.groups,
                     W,
                     W * z_off,
                     signed=self.export_rows.curvature_source == "observed",
-                    dominant_group_index=_structured_group_index,
-                    layout=_structured_layout,
-                    prior_weights=weights,
+                    dominant_group_index=self._structured_group_index,
+                    layout=self._structured_layout,
+                    prior_weights=self.weights,
                 )
             _final_penalized_operator = build_penalized_structured_operator(
                 structured_final,
-                gms,
-                groups,
-                lambda2,
-                reml_penalties=reml_penalties,
-                S_override=S_override,
+                self.gms,
+                self.groups,
+                self.lambda2,
+                reml_penalties=self.reml_penalties,
+                S_override=self.S_override,
             )
-            XtW1 = np.empty(p, dtype=np.float64)
+            XtW1 = np.empty(self.p, dtype=np.float64)
             XtW1[structured_final.operator.small_indices] = structured_final.xtw_small
             XtW1[structured_final.operator.structured_indices] = structured_final.xtw_structured
-            XtWz = np.empty(p, dtype=np.float64)
+            XtWz = np.empty(self.p, dtype=np.float64)
             XtWz[structured_final.operator.small_indices] = structured_final.xtwz_small
             XtWz[structured_final.operator.structured_indices] = structured_final.xtwz_structured
             sum_W = structured_final.sum_w
@@ -5236,17 +5066,17 @@ class _IRLSDirectFit:
             offset_mean_final = None
         else:
             if _return_working_system:
-                if _last_working_centered is None:
+                if self._last_working_centered is None:
                     raise RuntimeError("working centered system was not computed")
-                centered_final = _last_working_centered
-                offset_mean_final = _last_working_offset_mean
+                centered_final = self._last_working_centered
+                offset_mean_final = self._last_working_offset_mean
             else:
-                z_off = z - offset
+                z_off = self.z - self.offset
                 centered_final = self.get_centered_system(W, z_off)
                 offset_mean_final = (
                     None
-                    if _state_center is None or cache_out is None
-                    else _system_offset_mean(dm, W, centered_final, _state_center)
+                    if self._state_center is None or cache_out is None
+                    else _system_offset_mean(dm, W, centered_final, self._state_center)
                 )
             XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
             sum_W = centered_final.sum_w
@@ -5258,7 +5088,7 @@ class _IRLSDirectFit:
         # fREML optimizer. These allow re-solving the profiled-intercept system with
         # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
         if cache_out is not None:
-            if _use_structured:
+            if self._use_structured:
                 if structured_final is None:  # pragma: no cover - branch invariant
                     raise RuntimeError(
                         "Structured fit did not produce final sufficient statistics."
@@ -5299,26 +5129,20 @@ class _IRLSDirectFit:
             cache_out["centered_rhs"] = centered_rhs
             cache_out["mean_x"] = mean_x
             cache_out["mean_z"] = mean_z
-            if _has_scop:
+            if self._has_scop:
                 # The SCOP LAML mode certificate must evaluate the exact retained
                 # predictor. Reconstructing a huge translated column plus its
                 # compensating intercept can otherwise manufacture a false KKT
                 # residual several orders above tolerance.
-                cache_out["eta_unclipped"] = eta_unclipped
+                cache_out["eta_unclipped"] = self.eta_unclipped
         self.centered_final, self.structured_final = centered_final, structured_final
         self._final_penalized_operator, self.XtWX, self.XtW1 = _final_penalized_operator, XtWX, XtW1
         self.sum_W, self.mean_x = sum_W, mean_x
 
     def _final_geometry(self) -> None:
-        _use_structured, structured_final = self._use_structured, self.structured_final
-        _final_penalized_operator, XtW1 = self._final_penalized_operator, self.XtW1
-        sum_W, mean_x, _compute_reml_geometry = self.sum_W, self.mean_x, self._compute_reml_geometry
-        _compute_fit_statistics, centered_final = self._compute_fit_statistics, self.centered_final
-        XtWX, W, dm, groups, p = self.XtWX, self.W, self.dm, self.groups, self.p
-        _use_qr, _return_working_system = self._use_qr, self._return_working_system
-        _retain_reml_decomposition = self._retain_reml_decomposition
-        compute_rank_info, _defer_rank_info = self.compute_rank_info, self._defer_rank_info
-        profile, certify_centered_factor = self.profile, self.certify_centered_factor
+        structured_final, XtW1 = self.structured_final, self.XtW1
+        centered_final, W, dm, _use_qr = self.centered_final, self.W, self.dm, self._use_qr
+        _defer_rank_info, profile = self._defer_rank_info, self.profile
         # REML works in the full (intercept, slopes) coefficient space.  Profiling
         # the unpenalized intercept yields the centered Schur complement H_c.  Its
         # inverse is the slope block of H_aug^{-1}, while the unit-determinant
@@ -5333,12 +5157,12 @@ class _IRLSDirectFit:
             | None
         ) = None
         reml_geometry_summary: REMLGeometrySummary | None = None
-        if _use_structured:
-            if structured_final is None or _final_penalized_operator is None:
+        if self._use_structured:
+            if structured_final is None or self._final_penalized_operator is None:
                 raise RuntimeError("Structured fit did not produce final coefficient blocks.")
             with _structured_solver_errors():
                 augmented_factor, _ = build_augmented_structured_factor(
-                    structured_final, _final_penalized_operator
+                    structured_final, self._final_penalized_operator
                 )
             if isinstance(augmented_factor, SumToZeroTreeFactor):
                 structured_factor = ProfiledSumToZeroTreeFactor(
@@ -5364,7 +5188,7 @@ class _IRLSDirectFit:
             else:  # pragma: no cover - structured dispatch invariant
                 raise TypeError("Unsupported structured factor geometry.")
             XtWX_beta = structured_final.operator
-            if _compute_reml_geometry:
+            if self._compute_reml_geometry:
                 XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
                 with _structured_solver_errors():
                     log_det_H: float | None = augmented_factor.logdet()
@@ -5376,13 +5200,13 @@ class _IRLSDirectFit:
             # Structured Schur factors have their own retained-factor protocol;
             # the dense-decomposition seam does not apply here.
             retained_reml_decomposition: RankDecomposition | None = None
-            if _compute_fit_statistics:
+            if self._compute_fit_statistics:
                 edf_operator = (
                     CenteredBlockOperator(
                         raw=XtWX_beta,
                         cross=XtW1,
-                        total=sum_W,
-                        center=mean_x,
+                        total=self.sum_W,
+                        center=self.mean_x,
                     )
                     if isinstance(
                         XtWX_beta,
@@ -5398,14 +5222,14 @@ class _IRLSDirectFit:
             # dense RankInfo would defeat the backend's O(K q + q²) memory bound.
             rank_info = None
         else:
-            if centered_final is None or XtWX is None:  # pragma: no cover - branch invariant
+            if centered_final is None or self.XtWX is None:  # pragma: no cover - branch invariant
                 raise RuntimeError("Dense fit did not produce a centered system.")
-            XtWX_beta = XtWX
+            XtWX_beta = self.XtWX
             reml_slope_rank: RankDecomposition | None
-            if _compute_reml_geometry:
+            if self._compute_reml_geometry:
                 reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
                 if reml_slope_rank is None:
-                    certification = certify_centered_factor(
+                    certification = self.certify_centered_factor(
                         centered_final,
                         W,
                     )
@@ -5428,9 +5252,11 @@ class _IRLSDirectFit:
                 XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
                 log_det_H = None
                 reml_hessian_rank = None
-            retained_reml_decomposition = reml_slope_rank if _retain_reml_decomposition else None
+            retained_reml_decomposition = (
+                reml_slope_rank if self._retain_reml_decomposition else None
+            )
 
-            if _compute_fit_statistics:
+            if self._compute_fit_statistics:
                 if reml_slope_rank is None:  # pragma: no cover - validated above
                     raise RuntimeError("fit statistics require generic REML geometry")
                 augmented_rank = reml_slope_rank
@@ -5455,15 +5281,15 @@ class _IRLSDirectFit:
                     augmented_rank,
                     feature_edf,
                     dm=dm,
-                    groups=groups,
-                    p=p,
+                    groups=self.groups,
+                    p=self.p,
                     _use_qr=_use_qr,
                     _X_full=self._X_full if _use_qr else None,
-                    _return_working_system=_return_working_system,
-                    certify_centered_factor=certify_centered_factor,
+                    _return_working_system=self._return_working_system,
+                    certify_centered_factor=self.certify_centered_factor,
                 )
 
-                if compute_rank_info or (_defer_rank_info is not None and _use_qr):
+                if self.compute_rank_info or (_defer_rank_info is not None and _use_qr):
                     # A deferred QR-backend computation would keep the dense
                     # (n, p) design alive until install; it is computed here.
                     rank_info = retained_rank_info()
@@ -5487,39 +5313,20 @@ class _IRLSDirectFit:
     def _publish(
         self, it: int
     ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
-        _use_structured, _use_qr, profile = self._use_structured, self._use_qr, self.profile
-        _direct_fallback_reason, direct_solve = self._direct_fallback_reason, self.direct_solve
-        structured_decision, structured_factor = self.structured_decision, self.structured_factor
-        groups, _compute_fit_statistics = self.groups, self._compute_fit_statistics
-        _compute_reml_geometry, family, y = self._compute_reml_geometry, self.family, self.y
-        mu, weights, weight_semantics = self.mu, self.weights, self.weight_semantics
-        p_eff, beta, intercept, dev = self.p_eff, self.beta, self.intercept, self.dev
-        converged, record_diagnostics = self.converged, self.record_diagnostics
-        iteration_log, log_det_H = self.iteration_log, self.log_det_H
-        reml_hessian_rank = self.reml_hessian_rank
-        reml_geometry_summary = self.reml_geometry_summary
-        retained_reml_decomposition, rank_info = self.retained_reml_decomposition, self.rank_info
-        retained, termination_reason = self.retained, self.termination_reason
-        _state_center, centred_intercept_lo = self._state_center, self.centred_intercept_lo
-        _boundary_rows, _true_confirmed = self._boundary_rows, self._true_confirmed
-        _published_truncated = self._published_truncated
-        _truncated_boundary, _has_scop = self._truncated_boundary, self._has_scop
-        _scop_state = self._scop_state
-        _compute_scop_postfit_inference = self._compute_scop_postfit_inference
-        _scop_curvature, dm, link, offset = self._scop_curvature, self.dm, self.link, self.offset
-        S, XtWX, XtW1, sum_W = self.S, self.XtWX, self.XtW1, self.sum_W
-        centered_final, eta_unclipped, W = self.centered_final, self.eta_unclipped, self.W
-        _expose_exact_support_state = self._expose_exact_support_state
-        return_xtwx, return_scop_state = self.return_xtwx, self.return_scop_state
-        XtWX_S_inv_beta, XtWX_beta = self.XtWX_S_inv_beta, self.XtWX_beta
+        profile, structured_decision = self.profile, self.structured_decision
+        structured_factor, groups = self.structured_factor, self.groups
+        _compute_fit_statistics, family, y = self._compute_fit_statistics, self.family, self.y
+        weights, p_eff, retained, dm, S = self.weights, self.p_eff, self.retained, self.dm, self.S
+        XtWX, XtW1, sum_W, centered_final = self.XtWX, self.XtW1, self.sum_W, self.centered_final
+        XtWX_S_inv_beta = self.XtWX_S_inv_beta
         _resolved_direct_backend = (
-            "structured" if _use_structured else ("qr" if _use_qr else "gram")
+            "structured" if self._use_structured else ("qr" if self._use_qr else "gram")
         )
         if profile is not None:
             profile["direct_backend"] = _resolved_direct_backend
-            profile["direct_fallback_reason"] = _direct_fallback_reason
+            profile["direct_fallback_reason"] = self._direct_fallback_reason
             # Repeated inner solves stay quiet; the REML drivers own the INFO line.
-            record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
+            record_auto_backend_decision(profile, self.direct_solve, structured_decision, log=False)
             if structured_factor is not None:
                 profile["structured_dominant_group"] = structured_factor.dominant_group_name
                 profile["structured_chain"] = tuple(
@@ -5551,16 +5358,16 @@ class _IRLSDirectFit:
         # same under either weight contract; only the denominator's likelihood
         # size distinguishes them.
         if _compute_fit_statistics and not getattr(family, "scale_known", True):
-            pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
+            pearson_sum = pearson_chi2(distribution=family, y=y, mu=self.mu, sample_weight=weights)
             df_resid = pearson_residual_degrees_of_freedom(
                 weights,
                 p_eff,
-                weight_semantics=weight_semantics,
+                weight_semantics=self.weight_semantics,
             )
             phi = pearson_sum / df_resid
         else:
             phi = 1.0
-        if not _compute_reml_geometry or not _compute_fit_statistics:
+        if not self._compute_reml_geometry or not _compute_fit_statistics:
             # Private SCOP candidates and stats-skipping in-loop REML fits have no
             # retained-fit statistics. NaN makes accidental publication fail
             # visibly instead of presenting 0 EDF or unit dispersion as if either
@@ -5570,39 +5377,39 @@ class _IRLSDirectFit:
             phi = float("nan")
 
         result = PIRLSResult(
-            beta=beta,
-            intercept=intercept,
+            beta=self.beta,
+            intercept=self.intercept,
             n_iter=it + 1,
-            deviance=dev,
-            converged=converged,
+            deviance=self.dev,
+            converged=self.converged,
             phi=phi,
             effective_df=p_eff,
-            iteration_log=iteration_log if record_diagnostics else None,
-            log_det_H=log_det_H,
-            reml_hessian_rank=reml_hessian_rank,
-            reml_geometry=reml_geometry_summary,
-            reml_slope_decomposition=retained_reml_decomposition,
-            rank_info=rank_info,
+            iteration_log=self.iteration_log if self.record_diagnostics else None,
+            log_det_H=self.log_det_H,
+            reml_hessian_rank=self.reml_hessian_rank,
+            reml_geometry=self.reml_geometry_summary,
+            reml_slope_decomposition=self.retained_reml_decomposition,
+            rank_info=self.rank_info,
             state_id=retained.state_id,
             evaluation_id=retained.evaluation_id,
             state_space=retained.state_space,
             basis_id=retained.basis_id,
-            termination_reason=termination_reason,
+            termination_reason=self.termination_reason,
             direct_backend=_resolved_direct_backend,
-            direct_fallback_reason=_direct_fallback_reason,
+            direct_fallback_reason=self._direct_fallback_reason,
             centred_intercept=retained.centred_intercept,
-            state_center=None if retained.centred_intercept is None else _state_center,
-            centred_intercept_lo=centred_intercept_lo,
-            mean_space_boundary_rows=_boundary_rows,
-            mean_space_true_mode=bool(converged and _true_confirmed),
-            truncated_directions=_published_truncated,
-            mean_space_boundary_unresolved=_truncated_boundary,
+            state_center=None if retained.centred_intercept is None else self._state_center,
+            centred_intercept_lo=self.centred_intercept_lo,
+            mean_space_boundary_rows=self._boundary_rows,
+            mean_space_true_mode=bool(self.converged and self._true_confirmed),
+            truncated_directions=self._published_truncated,
+            mean_space_boundary_unresolved=self._truncated_boundary,
         )
 
         # Collect converged SCOP state for EFS outer loop and fit results.
-        if _has_scop:
+        if self._has_scop:
             scop_converged = {}
-            for gi, st in _scop_state.items():
+            for gi, st in self._scop_state.items():
                 scop_converged[gi] = {
                     "beta_eff": st["beta_scop"].copy(),
                     "H_scop_penalized": st.get("H_scop_penalized"),
@@ -5624,21 +5431,21 @@ class _IRLSDirectFit:
             scop_converged = None
 
         if (
-            _has_scop
+            self._has_scop
             and scop_converged is not None
             and _compute_fit_statistics
-            and _compute_scop_postfit_inference
+            and self._compute_scop_postfit_inference
         ):
             import superglm.reml.scop_geometry as scop_geometry
 
-            if _scop_curvature == "observed":
+            if self._scop_curvature == "observed":
                 joint_geometry = scop_geometry.build_observed_scop_joint_geometry(
                     dm=dm,
                     distribution=family,
-                    link=link,
+                    link=self.link,
                     y=y,
                     sample_weight=weights,
-                    offset_arr=offset,
+                    offset_arr=self.offset,
                     result=result,
                     penalty=S,
                     scop_states=scop_converged,
@@ -5647,7 +5454,7 @@ class _IRLSDirectFit:
                     fisher_sum_W=sum_W,
                     centered_fisher_gram=centered_final.data_gram,
                     fisher_mean_x=centered_final.mean_x,
-                    eta_unclipped=eta_unclipped,
+                    eta_unclipped=self.eta_unclipped,
                 )
             else:
                 joint_geometry = scop_geometry.build_cached_scop_joint_geometry(
@@ -5659,7 +5466,7 @@ class _IRLSDirectFit:
                     centered_fisher_gram=centered_final.data_gram,
                     fisher_mean_x=centered_final.mean_x,
                     dm=dm,
-                    fisher_weights=W,
+                    fisher_weights=self.W,
                 )
             inference = scop_geometry.install_scop_postfit_inference(
                 result,
@@ -5673,27 +5480,29 @@ class _IRLSDirectFit:
                 groups=groups,
                 observed_geometry=joint_geometry,
                 dm=dm,
-                fisher_weights=W,
+                fisher_weights=self.W,
             )
 
             # Estimated dispersion must use the same terminal EDF that downstream
             # covariance and summaries expose.  Known-scale likelihoods retain
             # their defining phi=1 rather than profiling a Pearson scale.
             if not getattr(family, "scale_known", True):
-                pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
+                pearson_sum = pearson_chi2(
+                    distribution=family, y=y, mu=self.mu, sample_weight=weights
+                )
                 result.phi = pearson_sum / pearson_residual_degrees_of_freedom(
                     weights,
                     inference.total_edf,
-                    weight_semantics=weight_semantics,
+                    weight_semantics=self.weight_semantics,
                 )
-        if _expose_exact_support_state:
+        if self._expose_exact_support_state:
             result.scop_states = scop_converged
 
-        if return_xtwx:
-            if return_scop_state and scop_converged is not None:
-                return result, XtWX_S_inv_beta, XtWX_beta, scop_converged
-            return result, XtWX_S_inv_beta, XtWX_beta
+        if self.return_xtwx:
+            if self.return_scop_state and scop_converged is not None:
+                return result, XtWX_S_inv_beta, self.XtWX_beta, scop_converged
+            return result, XtWX_S_inv_beta, self.XtWX_beta
 
-        if return_scop_state and scop_converged is not None:
+        if self.return_scop_state and scop_converged is not None:
             return result, XtWX_S_inv_beta, scop_converged
         return result, XtWX_S_inv_beta
