@@ -593,14 +593,17 @@ class Recorder:                        # S09/S11 emitters live in StateEvaluator
    `id()`-keyed merit allowance and no domain guard. Only dense, QP, QR and structured share
    `TrialSearch`. The design's single "line search" module is two.
 
-### 6.7 As built in S3a (QR, the first strategy)
+### 6.7 As built (S3a to S3d)
 
 The package `superglm/solvers/irls_direct/`:
 
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` (dense and the QP since S3c; SCOP too in S3b) |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, the feasibility contract's tolerance `_QP_FEASIBILITY_TOL`, and (S3d) `_IRLSDirectCurvaturePolicy` |
+| `_dense` | (S3d) `_IRLSDirectDenseStep` |
+| `_qp` | (S3d) `_IRLSDirectQPStep` and `_solve_constrained_qp_with_cold_retry` |
+| `_mean_space` | (S3d) `_IRLSDirectMeanSpaceOverlay`; the certificate's helpers `_SUBNORMAL_SPACING`, `_underflow_allowance`, `_PENALTY_HEADROOM_EXPONENT`, `_even_exponent` and `_column_shift` |
 | `_recorder` | `_IRLSDirectRecorder` |
 | `_step` | `_IRLSDirectStep`, the interface (a `Protocol`; since S3c its optional hooks default to `None` and every step subclasses it); (S3c) `_note_svd_fallback`, L08 |
 | `_qr` | `_IRLSDirectQRStep`, `_sqrt_penalty_augmented`, `_centred_rows` |
@@ -625,10 +628,10 @@ class _IRLSDirectStep(Protocol):      # (S3c) every step subclasses it; each hoo
     search: Callable[[_IRLSDirectFit, int], None] | None    # L09; None: the shared search
     latent_change: Callable[[], float] | None               # L16, the coefficient criterion
     damped: Callable[[_IRLSDirectFit], bool] | None         # L16, a damped step never stops
-    latent_groups: Callable[[], tuple] | None               # L17, (state, spec) pairs
     terminal: Callable[[_IRLSDirectFit], None] | None       # F05
     postfit: Callable[[_IRLSDirectFit, PIRLSResult], dict | None] | None   # F14, F09's eta
     def propose(self, fit, it: int) -> None
+    def certificate_inputs(self) -> tuple   # (S3d) L17's inputs; default (None, None, None, None)
 ```
 
 Where §6.3 changed, and why:
@@ -757,6 +760,166 @@ Where S3c (the SCOP step) changed it:
     - The proposal's state outlives the search through `proposal_state`, and the
       committed and retained trial states through the step's slots.
 
+Where S3d (dense, the QP, the mean-space overlay and the curvature policy) changed it:
+
+23. **Dense and the QP are two steps, not one step with a QP part.**
+    - L06 and L07 share only the centred system and the overlay's right-hand side
+      (§3). Their writes are disjoint. L06 writes the held rank, the rank
+      certification, the score centre and the centred intercept. L07 writes the
+      active set, the QP certificate and the #472 retry and report latches.
+    - A constrained fit never has a state centre (S13), a score centre or
+      observed curvature (S15).
+    - One step with a QP part would keep a per-iteration branch on "constrained"
+      inside `propose`, which is the multiplexing the split removes. §6.3's "the QP
+      is a sub-mode of `DenseStep`" was written before S3a, where every route
+      became its own step class.
+    - **Where each is chosen.** The QP step is chosen in `_setup_routes`, where the
+      constraints are found, and it builds `A`, `b` and `|A|` once. The dense step
+      is chosen in `_setup_systems`, beside QR.
+    - **What the QP step holds:**
+      - `A_all`, `b_all`, `abs_A_all`;
+      - `active_set`, formerly the fit's `prev_active_set`;
+      - `committed_active_set`, L01's copy, now taken at the start of `propose`;
+      - `proposal_converged` and `retained_converged`;
+      - `_degeneracy_retry_failed` and `_reported_nonconvergence`.
+    - **The fit's `qp` field** is the QP step or `None`. After setup it replaces
+      every read of `has_constraints`, which is now a local of `_setup_routes`
+      and `_setup_systems`.
+    - **What each step reads.** The dense step reads `decompose_gram_if_authoritative`
+      in `_dense`. The QP step reads `solve_constrained_qp` in `_qp`, through
+      `_solve_constrained_qp_with_cold_retry`.
+24. **The feasibility contract stays in the fit and reads `qp`.**
+    - L11 (`_search`): the feasibility of the committed state and of the
+      proposal, and the trial predicate, on `qp.A_all`, `qp.b_all` and
+      `qp.abs_A_all`.
+    - L15: the infeasible-committed override. It also writes
+      `qp.retained_converged` and, on a rejected step, restores
+      `qp.active_set = qp.committed_active_set`.
+    - L18 (`_terminate`): the feasibility of the retained coefficients, and
+      `qp.retained_converged`.
+    - F03 (`_finish`): the final refusal, the same two tests.
+    - `_QP_FEASIBILITY_TOL` stays in `_fit` with the contract.
+    - **Dead code removed:**
+      - L01's per-iteration resets of both certificates. L15 always writes them
+        before L18 or F03 reads them.
+      - The three "construction invariant" checks on `A_all`.
+      - The fixed-point stop's `has_constraints` test. A QP fit never sets
+        `_score_centre`, so the mode-score branch never runs on it; this is
+        S3c's deletion of `not _has_scop`, made again.
+25. **`_IRLSDirectCurvaturePolicy`, in `_fit` (the fit's `curvature`).** It owns
+    Fisher versus observed curvature.
+    - It is constructed in `_setup_routes`, at S15's place. S15's comment moved
+      into its constructor.
+    - It holds `family`, `link`, `y`, `weights` and the latch list, and no
+      reference to the fit.
+    - It lives in `_fit`, beside the centred system that reads it. The two module
+      names it calls, `coefficient_working_rows` and `_has_constant_irls_weights`,
+      are what nine tests patch at `_fit`. Their intent covers L02 together with
+      the mode score's and the export rows' calls.
+    - `_has_constant_irls_weights` is now called once, not twice.
+
+    | Member | Set by | Read by |
+    |---|---|---|
+    | `observed` | constructor (S15, then the latch); `switch_to_newton` | `working_rows` (L02); `_search` (L11's trial predicate); the SCOP step's `search`; `get_centered_system` (the Fisher-data reuse) |
+    | `stagnation_newton_available` | constructor | `_converge` (the Gamma/log switch's condition) |
+    | `weighted_gram_reuse` (formerly the fit's `_can_reuse_weighted_gram`) | constructor (the S18 gate: constant weights, not SCOP, not structured, not observed); `switch_to_newton` | `_setup_systems` (the raw-spline deferral's `constant_weights`); `get_centered_system` (the constant-weight cache and the Fisher-data reuse) |
+    | `working_rows(mu, eta)` | — | `_working` (L02) |
+    | `observed_rows_invalid(candidate)` | — | `_search` and the SCOP `search`, which pass it while `observed` |
+    | `switch_to_newton(recorder)` | — | `_converge` (L16): sets `observed`, turns `weighted_gram_reuse` off, sets the latch and counts `irls_fisher_newton_switches` |
+
+    - Every reader reads the policy's field where it uses it. The policy object
+      itself is never rebound, so the late-binding hazard (§5, item 2) has no
+      name left to cache.
+    - `disable_weighted_gram_reuse()` (§6.2) is part of `switch_to_newton`. The
+      flag is the policy's own, and it changes only when the curvature does.
+      Two separate calls could leave one done without the other.
+26. **`_IRLSDirectMeanSpaceOverlay`, in `_mean_space` (the fit's `mean_space`).**
+    - It holds all of #437's Newton steps, and the true-score certificate of #437
+      and #454.
+    - The fit holds one when `mean_space_violation(family, link)` is not `None`
+      (binomial/log), else `None`, and every consult tests that.
+    - It is built in `_setup_systems`, at S17's place: `available = not (_use_qr
+      or _has_scop or _return_working_system)`, with `start_lowered` taken from
+      `_setup_design` (S04).
+    - It keeps no reference to the fit.
+    - **Its surface, every call site:**
+
+    | Method | Called from | Reads from the fit | Writes to the fit | Its own state |
+    |---|---|---|---|---|
+    | `newton_rows(fit, committed)` | `_working` (L02), while `engaged` | `family`, `link`, `y`, `weights`, `recorder` | none: returns `(W, newton_score, z)`, or `None` at the boundary or without rows, and `_working` stores them | writes `_committed_rows`; counts `irls_mean_space_newton_iters` |
+    | `centred_rhs(centered, newton_score, dm)` (static) | `_IRLSDirectDenseStep.propose` (L06), `_IRLSDirectQPStep.propose` (L07), when `newton_score` is set | none | none | none |
+    | `newton_iterate(fit, rank, centered, newton_score)` (static) | `_IRLSDirectDenseStep.propose` (L06) | `committed`, `dm`, `penalty_matvec` | none | none |
+    | `line_search(fit, committed, proposal, newton_score)` | `_search` (L12, L14), once per iteration | `weights`, `family`, `link`, `max_halving`, `y` | none: returns `(first_halving, lowered_budget, deviance_delta, merit_roundoff)` | reads `start_lowered` and `_committed_rows` |
+    | `judge(fit)` | `run()`, after `_converge` and before `_terminate` (L17) | `_stagnation_window`, `converged_this_iter`, `score_stagnated`, `family`, `link`, `retained`, `committed`, `weights`, `dev`, `step_rejected`, `mode_bar`, `step.certificate_inputs()` | `converged_this_iter`, `score_stagnated`; under Newton steps also `convergence_label`, `convergence_value` and `convergence_tolerance` | reads `available`, `start_lowered`, `engaged` and `_true_ratios`; writes `engaged`, `true_stop`, `true_confirmed`, `true_stop_ratio` and `_true_ratios` |
+    | `certify(fit, beta, intercept, eta, inputs)` | `judge` | `dm`, `lambda2`, `p`, `n`, `y`, `weights`, `offset`, `mode_bar`, `_penalty_curvature`, `penalty_matvec`, `penalty_rounding`, `penalty_curvature`, `_laplace_excluded`, `recorder` | `_penalty_curvature` (filled on first use) | writes `last_true_residual`, `_judged_truncated`, `_last_truncated` and `_row_set_curvature` |
+    | `final(fit, eta_unclipped, converged, termination_reason)` | `_finish`, after F03 (F04) | `family`, `link`, `weights` | none: returns `(converged, termination_reason)` | reads `_judged_truncated` (by identity against `eta_unclipped`) and `_last_truncated`; writes `boundary_rows`, `published_truncated` and `truncated_boundary` |
+
+    - **Other readers of its fields:**
+      - the recorder's `profile_fit` (F07): `boundary_rows`, `true_stop`,
+        `last_true_residual`, `true_stop_ratio`;
+      - `_publish` (F14): `boundary_rows`, `true_confirmed`,
+        `published_truncated`, `truncated_boundary`, with `0`, `False`, `()` and
+        `False` when the fit holds no overlay.
+    - **`newton_score` stays a fit field.** It is a working-row output, like `W`
+      and `z`: `_working` sets it from `newton_rows`. Its readers:
+      - the dense and QP steps, which call the overlay;
+      - `_search`, which passes it to `line_search`;
+      - the recorder's working-curvature label;
+      - the structured step, which consults the Newton half at four sites of
+        its own: `Wz = W z_off + newton_score`, the truncated-increment condition
+        `or newton_score is not None`, the `irls_truncated_newton_increments`
+        count, and `residual_rows = newton_score`. That increment is the
+        structured step's own: `sz` takes it too, Pes & Rodriguez.
+    - **What each step answers to `certificate_inputs()`:**
+      - QR and dense: their decomposition (`_held_rank`, now a slot of each
+        step);
+      - QP: `A_all[active_set]`;
+      - SCOP: its columns (`_columns`, formerly the fit's `_scop_columns`) and
+        the retained latent groups with their specs. This replaces S3c's
+        `latent_groups` hook.
+      - structured: the default, all `None`.
+    - **Not in the overlay:**
+      - L13's mean-space and link-domain trial predicates (#425's guard, #498),
+        which stay in `_search` on the fit's `_mean_space_invalid` and
+        `_link_domain_invalid`;
+      - S04's lowering of the default start (`interior_start_intercept`), whose
+        flag the overlay receives.
+    - **A behaviour-neutral saving.** A fit without a mean space passes
+      `first_halving=None` to the search, which reads that as depth 1, exactly
+      what `mean_space_first_halving` returned for it.
+27. **Fields that left the fit (29).** It has 92 fields, down from 118.
+    - The QP (10): `has_constraints`, `A_all`, `b_all`, `abs_A_all`,
+      `prev_active_set`, `committed_active_set`, `proposal_qp_converged`,
+      `retained_qp_converged`, `_reported_qp_nonconvergence`,
+      `_degeneracy_retry_failed`.
+    - The policy (3): `_observed_newton_active`, `_stagnation_newton_available`,
+      `_can_reuse_weighted_gram`.
+    - The overlay (16): `_mean_space_newton_available`, `_mean_space_newton`,
+      `_true_ratios`, `_true_stop`, `_true_confirmed`, `_true_stop_ratio`,
+      `_last_true_residual`, `_held_rank`, `_judged_truncated`, `_last_truncated`,
+      `newton_committed_rows`, `_boundary_rows`, `_published_truncated`,
+      `_truncated_boundary`, `_row_set_curvature`, `_scop_columns`.
+    - Added (3): `qp`, `curvature`, `mean_space`.
+    - The fit's `observed_rows_invalid`, `true_mode_residual` and
+      `_judge_mean_space` moved with their collaborators.
+28. **The loop's order is unchanged:**
+    1. `_converge`: the L16 criterion, then the step-rejected veto;
+    2. `mean_space.judge`;
+    3. `_terminate`: the QP feasibility and KKT veto, then the reason chain.
+
+    After the loop, `_finish` runs F01, F02, F03 and then `mean_space.final`,
+    which is F04 with the truncated relabel. `deviance_relative_change` stays in
+    `run()`.
+29. **The identity hazards hold.**
+    - `final` compares the certificate's judged eta to `_finish`'s
+      `eta_unclipped` by identity. That is still the retained state's own array,
+      which `judge` hands the certificate.
+    - `centred_rhs` keeps the system's arrays (`replace`), so the factor
+      certificate's identity cache still hits.
+    - `certify_centered_factor` and `retained_rank_info` are still bound by
+      `partial`. A deferred callable reaches no fit, step or collaborator
+      (`s3d_out/checks/cycle5.py`).
+
 Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
 A name that a strategy module reads is patched in that module: since S3b the structured
 factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
@@ -764,7 +927,22 @@ factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
 the SCOP step's are `_scop`'s: `_select_irls_trial` (SCOP's search; the shared search
 still reads `_fit`'s), `_evaluate_scop_trial`, `_latent_step_depth`,
 `_centred_system_matvec` and `_raw_centering_well_scaled`, and the SCOP tests patch and
-read them there.
+read them there.  Since S3d:
+- the QP step's `solve_constrained_qp` (and `_solve_constrained_qp_with_cold_retry`) are
+  `_qp`'s;
+- the dense step's `decompose_gram_if_authoritative` is `_dense`'s, and the three tests
+  that refuse the loop's Gram patch it there as well as in `_fit`, whose finaliser reads it;
+- the certificate's `truncated_direction_ratio`, `row_set_residual`, `row_sets` and
+  `null_basis_angle` are `_mean_space`'s, and the package re-exports `_SUBNORMAL_SPACING`
+  and `_underflow_allowance` from there.
+
+What stays at `_fit`:
+- `build_centered_system` (17 sites and `test_lookup_table_gram`'s string path), because
+  the centred system did not move;
+- `coefficient_working_rows` and `_has_constant_irls_weights`, because the policy lives in
+  `_fit`;
+- `penalized_mode_residual`, whose two patch sites target `mode_residual`;
+- `_select_irls_trial`, because the shared search did not move.
 
 ## 7. Is the length lines-of-code abuse?
 
