@@ -535,15 +535,16 @@ _REML_TOL = 1e-9  # NEWTON_REML_TOL_DEFAULT, passed explicitly so the bound belo
 
 @pytest.mark.parametrize("direct_solve", ["gram", "structured"])
 def test_the_leverage_route_does_not_read_the_machines_memory(monkeypatch, direct_solve):
-    """A ``max_memory`` too small for the support tables leaves a random effect's REML route unchanged.
+    """A ``max_memory`` below the support tables' size leaves a random effect's REML route unchanged.
 
-    The design alone decides the route (``reads_row_supports``); memory only
-    chooses whether the dense solver forms the support tables or solves rows
-    in chunks, and either way the Newton model is the gradient-only one.  So
-    the two fits take one path: the same route and iteration count, the
-    objectives within ``tau (1 + |V|)``.  The event, tables declined, is
-    checked on the constrained dense fit.  Mutation: the memory bar back in
-    ``reads_row_supports`` sends the constrained fit to the derivative Grams.
+    The design alone decides the route (``reads_row_supports``, within the
+    design's own table budget), and a design on the route forms its tables
+    within that budget whatever ``max_memory`` says, so the constrained dense
+    fit still reads them rather than solving rows in chunks.  The two fits take
+    one path: the same route and iteration count, the objectives within
+    ``tau (1 + |V|)``.  Mutations: the memory bar back in
+    ``reads_row_supports`` sends the constrained fit to the derivative Grams;
+    in ``_support_plan`` alone, it declines the tables.
     """
     from superglm.reml import _leverage_rows
     from superglm.reml.convergence import _score_scale
@@ -575,7 +576,8 @@ def test_the_leverage_route_does_not_read_the_machines_memory(monkeypatch, direc
     constrained = fit(4 * tables - 8)
 
     if direct_solve == "gram":
-        assert plans and all(plans)
+        assert 8 * _leverage_rows._support_table_rows(dm) * dm.p > (4 * tables - 8) // 4
+        assert plans and not any(plans)
     for model in (ample, constrained):
         assert reads_row_supports(model._dm)
         assert model._reml_profile["direct_backend"] == direct_solve

@@ -150,7 +150,8 @@ _PRESOLVE_MIN_REML_ITER = 10
 # Grams are block-sparse, a few columns a row, so a model the structured
 # solvers can fit (``structured_alternative``) takes the leverage route only
 # where its solved-row pass is sparse too (``reads_row_supports``: every group
-# a dense column or an indexed support); elsewhere that pass is the dense
+# a dense column or an indexed support, its tables within the design's own
+# budget, never the machine's memory); elsewhere that pass is the dense
 # ``n p^2`` product, dearer than its Grams.  Every other model, a random
 # effect beside a group the structured selection rejects included, is priced
 # as a dense design.

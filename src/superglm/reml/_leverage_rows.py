@@ -50,6 +50,9 @@ from superglm.group_matrix import DesignMatrix
 from superglm.solvers.centered_system import iter_grouped_design_chunks
 
 _BLOCK_BYTES = 32 * 1024 * 1024
+# Support tables a design may always form: twice the size of the ``p x p``
+# matrices its dense solve already holds, and at least this floor.
+_SUPPORT_TABLE_FLOOR_BYTES = 64 * 1024 * 1024
 
 
 @njit(cache=True, nogil=True)
@@ -170,15 +173,21 @@ def _support_table_rows(dm) -> int:
     return rows
 
 
-def reads_row_supports(dm) -> bool:
-    """Whether every group of ``dm`` reads row supports, within half the rows: the design alone decides.
+def _design_table_bytes(dm) -> int:
+    """The support-table bytes ``dm`` may always form: ``16 p^2``, or the floor."""
+    return max(16 * dm.p * dm.p, _SUPPORT_TABLE_FLOOR_BYTES)
 
-    The REML route a model takes reads this, so it never depends on the
-    machine; ``max_memory`` only chooses, in :func:`_support_plan`, whether the
-    dense solver forms the support tables or solves rows in chunks.
+
+def reads_row_supports(dm) -> bool:
+    """Whether every group of ``dm`` reads row supports, within the design's own table budget.
+
+    At most half the rows, and tables within :func:`_design_table_bytes`.  The
+    REML route a model takes reads this, so it never depends on the machine,
+    and :func:`_support_plan` forms the tables wherever it holds, so a model
+    on that route never solves rows in chunks.
     """
     rows = _support_table_rows(dm)
-    return 0 < rows and 2 * rows <= dm.n
+    return 0 < rows and 2 * rows <= dm.n and 8 * rows * dm.p <= _design_table_bytes(dm)
 
 
 def _support_plan(
@@ -187,7 +196,11 @@ def _support_plan(
     centre_hi: NDArray,
     centre_lo: NDArray | None,
 ) -> _SupportPlan | None:
-    """The support route's tables, else ``None`` (:func:`reads_row_supports`, or over a quarter of ``max_memory``)."""
+    """The support route's tables, else ``None``.
+
+    Formed within the design's own budget (:func:`reads_row_supports`), or
+    otherwise within a quarter of ``max_memory``.
+    """
     from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
     from superglm._parallel import resolve_max_memory
     from superglm.group_matrix import (
@@ -198,7 +211,10 @@ def _support_plan(
     )
 
     # Sized from metadata before any table is formed.
-    if not reads_row_supports(dm) or 8 * _support_table_rows(dm) * dm.p > resolve_max_memory() // 4:
+    rows = _support_table_rows(dm)
+    if not (0 < rows and 2 * rows <= dm.n):
+        return None
+    if 8 * rows * dm.p > max(_design_table_bytes(dm), resolve_max_memory() // 4):
         return None
 
     p = dm.p
