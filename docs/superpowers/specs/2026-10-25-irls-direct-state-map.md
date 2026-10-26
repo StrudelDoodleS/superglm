@@ -593,6 +593,60 @@ class Recorder:                        # S09/S11 emitters live in StateEvaluator
    `id()`-keyed merit allowance and no domain guard. Only dense, QP, QR and structured share
    `TrialSearch`. The design's single "line search" module is two.
 
+### 6.7 As built in S3a (QR, the first strategy)
+
+The package `superglm/solvers/irls_direct/`:
+
+| Module | Holds |
+|---|---|
+| `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and `_IRLSDirectGramStep` |
+| `_recorder` | `_IRLSDirectRecorder` |
+| `_step` | `_IRLSDirectStep`, the interface (a `Protocol`) |
+| `_qr` | `_IRLSDirectQRStep`, `_sqrt_penalty_augmented`, `_centred_rows` |
+| `_centred` | `_system_offset_mean`, read by QR, the dense step and the final system |
+
+A strategy module never imports `_fit`; `_fit` imports the strategies. A helper that a
+strategy and the fit both read goes to a leaf module such as `_centred`.
+
+The interface as it stands:
+
+```python
+class _IRLSDirectStep(Protocol):
+    backend: str                       # what the fit publishes ("qr", "gram")
+    data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None
+    def propose(self, fit, it: int) -> None
+```
+
+Where §6.3 changed, and why:
+
+1. **The fit is an argument, never a field.** A step that kept the fit would be a cycle
+   only the collector frees, the lifetime regression #492 removed.
+2. **No `WorkingRows`, `Proposal` or `SearchOutcome` objects.** The step reads `W`, `z`
+   and `newton_score` from the fit and writes the proposal to the fit's slots. An object
+   per iteration would be a new allocation and ten reference copies, and the slots
+   already are that record.
+3. **`finaliser` became `data_rank`.** QR's only finalisation of its own is the retained
+   fit's data rank, from its dense rows; the rest is the centred finaliser. A step's own
+   data rank holds the step, so the fit computes it at once and never defers it.
+4. **QR needs none of `search`, `latent_change`, `damped`, `certificate_inputs`,
+   `commit`, `terminal` or `postfit`.** It takes the shared search, and its held rank
+   reaches the certificate through the fit's `_held_rank` cell, as the dense step's does.
+   Each arrives with the strategy that needs it. The SCOP-or-shared search choice stays
+   in `run()` until SCOP is a strategy.
+5. **The Gram-path routes are one step for now.** `_IRLSDirectGramStep.propose` is the
+   old `_step`'s Gram branch, which dispatches to `_step_scop`, `_step_structured`,
+   `_step_dense` and `_step_qp` on the fit's flags. `_publish` still reads "structured"
+   from `_use_structured`.
+6. **L08, the consecutive-SVD warning, is not shared.** It is the Gram-path step's; QR
+   never ran it.
+7. **The step is chosen where S17 chose QR, in `_setup_systems`,** so the
+   discretized-design warning keeps its place. `_use_qr` remains a local there, for the
+   centred builder's gates.
+
+Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
+A name that a strategy module reads is patched in that module.
+
 ## 7. Is the length lines-of-code abuse?
 
 **No, in the sense Max means: little padding and little copy-paste.**
