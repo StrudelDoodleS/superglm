@@ -10,6 +10,12 @@ writes only the arrays it allocates or the scratch its caller owns, which is
 never shared between workers.  Kernels no pooled block reaches (the batched
 channel passes, the structured and centred-assembly kernels) keep numba's
 default and hold the GIL.
+
+The histogram passes of a discrete Gram (``_disc_disc_2d_hist``,
+``_fused_bincount_2``, ``_pattern_support_summaries``) read each code as
+unsigned.  numba wraps a negative signed index on every access; their codes
+lie in ``[0, size)``, so an unsigned read addresses the same cell, adds the
+same rows in the same order, and skips that test in the row loop.
 """
 
 from __future__ import annotations
@@ -757,11 +763,11 @@ def _level_tensor_channels(rows, idx1, idx2, bin_cat, W, B2, n_bins1, n_cat):  #
 
 @njit(cache=True, nogil=True)
 def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
-    """Fused 2D histogram for disc-disc cross-gram."""
+    """Fused 2D histogram for disc-disc cross-gram; codes lie in ``[0, n_bins)``."""
     n = len(W)
     result = np.zeros((n_bins_i, n_bins_j))
     for obs in range(n):
-        result[bin_idx_i[obs], bin_idx_j[obs]] += W[obs]
+        result[np.uint64(bin_idx_i[obs]), np.uint64(bin_idx_j[obs])] += W[obs]
     return result
 
 
@@ -908,12 +914,12 @@ def _cell_csr(idx1, idx2, n_bins1, n_bins2):
 
 @njit(cache=True, nogil=True)
 def _fused_bincount_2(bin_idx, W, Wz, n_bins):
-    """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass."""
+    """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass; codes lie in ``[0, n_bins)``."""
     n = len(bin_idx)
     W_agg = np.zeros(n_bins)
     Wz_agg = np.zeros(n_bins)
     for i in range(n):
-        b = bin_idx[i]
+        b = np.uint64(bin_idx[i])
         W_agg[b] += W[i]
         Wz_agg[b] += Wz[i]
     return W_agg, Wz_agg
@@ -1156,7 +1162,7 @@ def _pattern_support_summaries(
     pattern_w = np.zeros(unique_codes.shape[0], dtype=np.float64)
     pattern_wz = np.zeros(unique_codes.shape[0], dtype=np.float64)
     for obs in range(row_patterns.size):
-        pattern = row_patterns[obs]
+        pattern = np.uint64(row_patterns[obs])
         pattern_w[pattern] += W[obs]
         pattern_wz[pattern] += Wz[obs]
 
@@ -1167,13 +1173,13 @@ def _pattern_support_summaries(
         w = pattern_w[pattern]
         wz = pattern_wz[pattern]
         for group in range(unique_codes.shape[1]):
-            cell = marginal_offsets[group] + unique_codes[pattern, group]
+            cell = np.uint64(marginal_offsets[group] + unique_codes[pattern, group])
             marginal_w[cell] += w
             marginal_wz[cell] += wz
         for pair in range(pair_left.size):
             left = pair_left[pair]
             right = pair_right[pair]
-            cell = (
+            cell = np.uint64(
                 pair_offsets[pair]
                 + unique_codes[pattern, left] * pair_right_sizes[pair]
                 + unique_codes[pattern, right]

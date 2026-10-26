@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm._group_matrix import _group_matrix_kernels as kernels
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import DiscretizedSCOPGroupMatrix, DiscretizedSSPGroupMatrix
@@ -223,3 +224,63 @@ def test_noncontiguous_support_gather_does_not_copy_entire_support():
     # Allow indexing metadata, but not a contiguous copy of the 5.6 MB support.
     assert peak <= actual.nbytes + 64_000
     np.testing.assert_array_equal(actual, np.ones((96, 7)))
+
+
+def test_histogram_kernels_read_codes_past_the_narrow_unsigned_widths():
+    # The Gram's histogram kernels read codes as unsigned; cells past 2**8 and
+    # 2**16 must keep their full code.  Each sum adds its rows in row order,
+    # as np.bincount does, so the references are bitwise.
+    rng = np.random.default_rng(3)
+    wide = 65_537
+    n = 70_000
+    weights = rng.gamma(2.0, 0.5, n)
+    weighted = rng.normal(size=n)
+    long_codes = rng.permutation(np.arange(n, dtype=np.intp) % wide)  # every code, 0 to 65_536
+    short_codes = rng.integers(3, size=n, dtype=np.intp)
+
+    for left, right, n_left, n_right in (
+        (long_codes, short_codes, wide, 3),
+        (short_codes, long_codes, 3, wide),
+    ):
+        expected = np.bincount(left * n_right + right, weights=weights, minlength=n_left * n_right)
+        actual = kernels._disc_disc_2d_hist(left, right, weights, n_left, n_right)
+        np.testing.assert_array_equal(actual, expected.reshape(n_left, n_right))
+
+    mass, response = kernels._fused_bincount_2(long_codes, weights, weighted, wide)
+    np.testing.assert_array_equal(mass, np.bincount(long_codes, weights=weights, minlength=wide))
+    np.testing.assert_array_equal(
+        response, np.bincount(long_codes, weights=weighted, minlength=wide)
+    )
+
+    # More than 2**16 patterns of a short and a long group, one pair.
+    unique_codes, row_patterns = np.unique(
+        np.stack([short_codes, long_codes], axis=1), axis=0, return_inverse=True
+    )
+    assert unique_codes.shape[0] > 65_536
+    unique_codes = np.ascontiguousarray(unique_codes, dtype=np.int32)
+    row_patterns = np.ascontiguousarray(row_patterns.ravel(), dtype=np.int32)
+    marginal_offsets = np.array([0, 3, 3 + wide], dtype=np.intp)
+    pair = np.array([0], dtype=np.intp), np.array([1], dtype=np.intp)
+    marginal_w, marginal_wz, joint_w = kernels._pattern_support_summaries(
+        row_patterns,
+        unique_codes,
+        weights,
+        weighted,
+        marginal_offsets,
+        *pair,
+        np.array([0, 3 * wide], dtype=np.intp),
+        np.array([wide], dtype=np.intp),
+    )
+    pattern_w = np.bincount(row_patterns, weights=weights)
+    pattern_wz = np.bincount(row_patterns, weights=weighted)
+    cells = np.concatenate([unique_codes[:, 0], 3 + unique_codes[:, 1]])
+    np.testing.assert_array_equal(
+        marginal_w, np.bincount(cells, weights=np.tile(pattern_w, 2), minlength=3 + wide)
+    )
+    np.testing.assert_array_equal(
+        marginal_wz, np.bincount(cells, weights=np.tile(pattern_wz, 2), minlength=3 + wide)
+    )
+    joint = unique_codes[:, 0].astype(np.intp) * wide + unique_codes[:, 1]
+    np.testing.assert_array_equal(
+        joint_w, np.bincount(joint, weights=pattern_w, minlength=3 * wide)
+    )
