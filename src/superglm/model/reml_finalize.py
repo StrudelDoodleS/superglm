@@ -627,7 +627,7 @@ def finalize_reml_fit(
         )
         deferred_rank_info: list | None = (
             []
-            if not (shaped or qp_passthrough or discard_rank_info)
+            if not (shaped or discard_rank_info)
             and bool(getattr(model, "_defer_rank_info", False))
             else None
         )
