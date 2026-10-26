@@ -1,5 +1,6 @@
-"""The SCOP step's state and trials: shape-constrained groups in their latent coordinates.
+"""The SCOP step, its state and trials: shape-constrained groups in their latent coordinates.
 
+``_IRLSDirectSCOPStep`` is the fit's step method when it has a SCOP group.
 ``SCOPRunCentring`` is what a SCOP REML run carries across its coefficient fits.
 A trial (``_SCOPTrialState``) is an ordinary IRLS state with every SCOP group's
 latent coordinates (``_SCOPGroupState``); the line search interpolates them
