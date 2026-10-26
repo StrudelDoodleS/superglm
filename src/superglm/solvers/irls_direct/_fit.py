@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import KW_ONLY, dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -45,8 +45,6 @@ from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
-    DiscretizedSplineCategoricalGroupMatrix,
-    DiscretizedSSPGroupMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
@@ -74,6 +72,8 @@ from superglm.solvers.constrained_qp import (
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.hessian_factor import HessianFactor
+from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
 from superglm.solvers.irls_direct._recorder import _IRLSDirectRecorder
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -105,7 +105,6 @@ from superglm.solvers.mode_score import (
     centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
-    dense_columns,
     null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
@@ -177,6 +176,9 @@ from superglm.solvers.working_rows import (
     supports_observed_newton,
 )
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
+
+if TYPE_CHECKING:
+    from superglm.solvers.irls_direct._step import _IRLSDirectStep
 
 # the package's logger: its records keep the name they had when the solver was one module
 logger = logging.getLogger(__package__)
@@ -664,19 +666,6 @@ def _column_shift(penalty_size: NDArray, weight_exponent: int) -> NDArray:
     return (excess + excess % 2).astype(np.int64)
 
 
-def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
-    """``X`` centred about the system's exact centre pair, ``(X - hi) - lo``.
-
-    A dense column at an offset is centred about its anchor exactly and then
-    by the small remainder (``centered_system.weighted_mean_pair``); about the
-    rounded ``mean_x`` the QR's data block would carry ``sqrt(W) d`` per row,
-    ``d`` that rounding (issue #430).
-    """
-    centre, centre_lo = system.centre_pair()
-    rows = X - centre
-    return rows if centre_lo is None else rows - centre_lo
-
-
 def _centred_system_matvec(dm: DesignMatrix, beta: NDArray, system: CenteredSystem) -> NDArray:
     """``(X - 1 m') beta`` about the system's centre pair, through each block's own product.
 
@@ -694,27 +683,6 @@ def _centred_system_matvec(dm: DesignMatrix, beta: NDArray, system: CenteredSyst
         if correction != 0.0:
             values -= correction
     return values
-
-
-def _system_offset_mean(
-    dm: DesignMatrix, W: NDArray, system: CenteredSystem, state_center: NDArray
-) -> NDArray:
-    """``mean_x - c``, the working mean's offset from the state's centre, read from the system's pair.
-
-    A dense column's working mean is the system's exact pair ``(hi, lo)``
-    (``centered_system.dense_mean_pair``, ``_attach_dense_split``), so its
-    offset from ``c`` is ``(hi - c) + lo``: ``hi - c`` is exact where the two
-    lie within a factor two (Sterbenz), as they do at a column's offset, and
-    otherwise rounds at ``u |hi - c|``, inside ``centre_offset_mean``'s
-    ``gamma_n sum W |x - c| / sum W``.  No pass.  A system without a pair has
-    no dense column and reads ``mean_x - c``.
-    """
-    if system.mean_hi is None or system.mean_lo is None:
-        return centre_offset_mean(dm, W, float(system.sum_w), state_center, system.mean_x)
-    offset_mean = np.asarray(system.mean_x, dtype=np.float64) - state_center
-    dense = dense_columns(dm)
-    offset_mean[dense] = (system.mean_hi[dense] - state_center[dense]) + system.mean_lo[dense]
-    return offset_mean
 
 
 def _structured_score_centre(
@@ -999,19 +967,6 @@ def _build_iterate_factor(system, penalized_operator, *, observed: bool):
     raise refusal
 
 
-def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
-    """Build (p+1, p+1) augmented sqrt-penalty for QR solver.
-
-    Returns L_aug where L_aug.T @ L_aug has S in the [1:, 1:] block and
-    zeros in the intercept row/column.
-    """
-    eigvals, eigvecs = np.linalg.eigh(S)
-    eigvals = np.maximum(eigvals, 0.0)
-    L_aug = np.zeros((p + 1, p + 1))
-    L_aug[1:, 1:] = (eigvecs * np.sqrt(eigvals)) @ eigvecs.T
-    return L_aug
-
-
 def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, float, bool]:
     """Compatibility wrapper returning inverse, pseudo-logdet, and fast-path flag."""
     decomposition = decompose_symmetric(H, residual_tol=residual_tol)
@@ -1236,8 +1191,7 @@ def _retained_rank_info(
     dm: DesignMatrix,
     groups: list[GroupSlice],
     p: int,
-    _use_qr: bool,
-    _X_full: NDArray | None,
+    step_data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None,
     _return_working_system: bool,
     certify_centered_factor: Callable[..., _CenteredFactorCertification],
 ) -> RankInfo:
@@ -1255,9 +1209,10 @@ def _retained_rank_info(
     (``dm``, read by the data-rank factor route), which is read when it
     runs, so the invariant is that nothing mutates the design's group
     matrices in place in between (``update_reml_r_inv`` writes the
-    specs; ``release_leaf_memo`` drops a memo only). The QR backend
-    never defers (``_final_geometry``), so ``_X_full`` is not kept.  It
-    is never a method of the fit object, which it would keep alive (#492).
+    specs; ``release_leaf_memo`` drops a memo only). A step's own data
+    rank (``step_data_rank``, the QR step's on its dense design) is never
+    deferred (``_final_geometry``), so no step is kept.  It is never a
+    method of the fit object, which it would keep alive (#492).
     """
     M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
         centered_final.mean_x, centered_final.mean_x
@@ -1272,10 +1227,8 @@ def _retained_rank_info(
             )
         )
         coefficient_rank = decompose_factor(raw_factor)
-    if _use_qr:
-        sqrtW = np.sqrt(W)
-        A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
-        data_rank = decompose_factor(A_data_final)
+    if step_data_rank is not None:
+        data_rank = step_data_rank(centered_final, W)
     else:
         # The export rows are Fisher (``prefer_observed=False``), whose
         # weights are nonnegative: the data Gram is PSD by construction,
@@ -1339,6 +1292,51 @@ def _fit_irls_direct_once(**kwargs):
     return _IRLSDirectFit(**kwargs).run()
 
 
+class _IRLSDirectGramStep:
+    """The fit's step on the Gram path: SCOP, structured, dense or the QP.
+
+    Each iteration forms the weighted Gram (the structured system on that route)
+    and solves it.  Which of the four runs is still read from the fit's route
+    flags, until each is a step of its own as ``_IRLSDirectQRStep`` is.  It keeps
+    nothing, and its rank metadata takes the module route, which may be deferred.
+    """
+
+    __slots__ = ()
+    backend = "gram"
+    data_rank = None
+
+    def propose(self, fit: _IRLSDirectFit, it: int) -> None:
+        # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
+        _t0 = time.perf_counter()
+        z_off = fit.z - fit.offset
+        if fit._has_scop:
+            fit._step_scop(it, z_off, _t0)
+        elif fit._use_structured:
+            fit._step_structured(z_off, _t0)
+        elif not fit.has_constraints:
+            fit._step_dense(z_off, _t0)
+        else:
+            fit._step_qp(it, z_off, _t0)
+        # A bounded factor pass can intentionally replace an uncertain Gram
+        # rank.  Preserve that in iteration diagnostics, but do not report it
+        # as a failed solve or recommend switching the whole fit to dense QR.
+        _used_svd, used_rank_certification = fit._used_svd, fit.used_rank_certification
+        _consecutive_svd = fit._consecutive_svd
+        warnable_svd_fallback = _used_svd and not used_rank_certification
+        if warnable_svd_fallback:
+            _consecutive_svd += 1
+        else:
+            _consecutive_svd = 0
+        fit._consecutive_svd = _consecutive_svd
+        if fit.direct_solve == "auto" and _consecutive_svd == 3:
+            logger.warning(
+                "fit_irls_direct: %d consecutive SVD fallbacks (cond ~%.1e). "
+                "Consider direct_solve='qr' for near-collinear data.",
+                _consecutive_svd,
+                fit._cond_est,
+            )
+
+
 class _IRLSDirectFitFields:
     """The fit's state beyond its parameters, by the method that first sets it.
 
@@ -1360,9 +1358,9 @@ class _IRLSDirectFitFields:
         " _S_reduced _reduced_to_full _reduced_dm _reduced_tabmat_state _scop_specs _scop_order"
         " _scop_newton _expose_exact_support_state _scop_state"
         # _setup_systems
-        " _mean_space_newton_available _X_full _L_aug _constant_centered_cache"
-        " _constant_centered_z certify_centered_factor _initial_data_key _use_qr _tabmat_split"
-        " _tabmat_centering_state _can_reuse_weighted_gram fixed_owners _initial_data_pending"
+        " _mean_space_newton_available step _constant_centered_cache _constant_centered_z"
+        " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
+        " _can_reuse_weighted_gram fixed_owners _initial_data_pending"
         # _setup_loop
         " converged XtWX_beta _final_penalized_operator _last_working_centered"
         " _last_working_offset_mean _last_working_structured _score_centre _last_mode_residual"
@@ -1380,7 +1378,7 @@ class _IRLSDirectFitFields:
         " used_rank_certification scop_proposal_eta_unclipped proposal_centred_intercept"
         " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
         " newton_committed_rows w_ratio"
-        # _step_qr
+        # the step (``step.propose``)
         " _cond_est _used_svd"
         # _step_scop
         " scop_ordinary centred_level scop_results"
@@ -1590,9 +1588,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._setup_systems()
         recorder.start()
         self._setup_loop()
+        step = self.step
         for it in range(self.max_iter):
             self._working(it)
-            self._step(it)
+            step.propose(self, it)
             if self._has_scop:
                 self._search_scop(it)
             else:
@@ -2708,7 +2707,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         has_constraints, _has_scop = self.has_constraints, self._has_scop
         _use_structured, _raw_moment_policy = self._use_structured, self._raw_moment_policy
         _fisher_data_reuse = self._fisher_data_reuse
-        # QR pre-computation: materialise full design matrix once
+        # The fit's one step method, chosen here: QR materialises the full design once.
         # Constrained QP / SCOP requires Gram path — force it if constraints present
         _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
         self._mean_space_newton_available = bool(
@@ -2717,20 +2716,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and not _has_scop
             and not self._return_working_system
         )
-        if _use_qr:
-            has_disc = any(
-                isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
-                for gm in gms
-            )
-            if has_disc:
-                logger.warning(
-                    "direct_solve='qr' with discretized groups materialises the full "
-                    "(n, p) design matrix, defeating the O(n_bins) discretization "
-                    "benefit.  Consider direct_solve='auto' for large-n discrete fits."
-                )
-            _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
-            _L_aug = _sqrt_penalty_augmented(self.S, self.p)  # (p+1, p+1)
-            self._X_full, self._L_aug = _X_full, _L_aug
+        self.step: _IRLSDirectStep = (
+            _IRLSDirectQRStep(gms, self.S, self.p) if _use_qr else _IRLSDirectGramStep()
+        )
 
         # Tabmat acceleration: the structured layout owns a pruned small-block
         # plan, so it must not construct a split containing the dominant factor.
@@ -2856,7 +2844,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             if _initial_data_pending
             else None
         )
-        self._use_qr, self._tabmat_split = _use_qr, _tabmat_split
+        self._tabmat_split = _tabmat_split
         self._tabmat_centering_state = _tabmat_centering_state
         self._can_reuse_weighted_gram, self.fixed_owners = _can_reuse_weighted_gram, fixed_owners
         self._raw_moment_policy, self._fisher_data_reuse = _raw_moment_policy, _fisher_data_reuse
@@ -3279,79 +3267,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             )
         self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
         self.newton_committed_rows, self.w_ratio = newton_committed_rows, w_ratio
-
-    def _step(self, it: int) -> None:
-        if self._use_qr:
-            self._step_qr()
-        else:
-            # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
-            _t0 = time.perf_counter()
-            z_off = self.z - self.offset
-            if self._has_scop:
-                self._step_scop(it, z_off, _t0)
-            elif self._use_structured:
-                self._step_structured(z_off, _t0)
-            elif not self.has_constraints:
-                self._step_dense(z_off, _t0)
-            else:
-                self._step_qp(it, z_off, _t0)
-            # A bounded factor pass can intentionally replace an uncertain Gram
-            # rank.  Preserve that in iteration diagnostics, but do not report it
-            # as a failed solve or recommend switching the whole fit to dense QR.
-            _used_svd, used_rank_certification = self._used_svd, self.used_rank_certification
-            _consecutive_svd = self._consecutive_svd
-            warnable_svd_fallback = _used_svd and not used_rank_certification
-            if warnable_svd_fallback:
-                _consecutive_svd += 1
-            else:
-                _consecutive_svd = 0
-            self._consecutive_svd = _consecutive_svd
-            if self.direct_solve == "auto" and _consecutive_svd == 3:
-                logger.warning(
-                    "fit_irls_direct: %d consecutive SVD fallbacks (cond ~%.1e). "
-                    "Consider direct_solve='qr' for near-collinear data.",
-                    _consecutive_svd,
-                    self._cond_est,
-                )
-
-    def _step_qr(self) -> None:
-        W, _state_center = self.W, self._state_center
-        proposal_centred_intercept = self.proposal_centred_intercept
-        # Profile the intercept, then apply the shared factor-space rule.
-        _t0 = time.perf_counter()
-        sqrtW = np.sqrt(W)
-        z_off = self.z - self.offset
-        centered = self.get_centered_system(W, z_off)
-        self._last_working_centered = centered
-        A_data = sqrtW[:, None] * _centred_rows(self._X_full, centered)
-        A = np.vstack([A_data, self._L_aug[1:, 1:]])
-        rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(self.p)])
-        iteration_rank = decompose_factor(A, retain_factor_solve=True)
-        beta = iteration_rank.solve_factor_rhs(rhs_qr)
-        intercept = centered.mean_z - float(centered.mean_x @ beta)
-        _last_working_offset_mean = None
-        if _state_center is not None:
-            _last_working_offset_mean = _system_offset_mean(self.dm, W, centered, _state_center)
-            proposal_centred_intercept = centered.mean_z - math.fsum(
-                _last_working_offset_mean * beta
-            )
-            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-        self._cond_est = iteration_rank.pre_truncation_condition
-        self._held_rank[0] = iteration_rank
-        self._used_svd = iteration_rank.used_svd_fallback
-        self.rank_truncated = iteration_rank.rank_truncated
-        if self.convergence == "mode_score":
-            self._score_centre = (
-                centered.mean_x,
-                centered.sum_w,
-                np.diag(centered.data_gram),
-                (),
-                _last_working_offset_mean,
-            )
-        self.recorder.t_solve += time.perf_counter() - _t0
-        self.beta, self.intercept = beta, intercept
-        self._last_working_offset_mean = _last_working_offset_mean
-        self.proposal_centred_intercept = proposal_centred_intercept
 
     def _step_scop(self, it: int, z_off: NDArray, _t0: float) -> None:
         W, committed, scop_committed = self.W, self.committed, self.scop_committed
@@ -4855,7 +4770,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
     def _final_geometry(self) -> None:
         structured_final, XtW1 = self.structured_final, self.XtW1
-        centered_final, W, dm, _use_qr = self.centered_final, self.W, self.dm, self._use_qr
+        centered_final, W, dm, step = self.centered_final, self.W, self.dm, self.step
         _defer_rank_info = self._defer_rank_info
         # REML works in the full (intercept, slopes) coefficient space.  Profiling
         # the unpenalized intercept yields the centered Schur complement H_c.  Its
@@ -4988,6 +4903,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
                 p_eff = 1.0 + float(np.sum(feature_edf))
 
+                step_data_rank = step.data_rank
                 retained_rank_info = partial(
                     _retained_rank_info,
                     centered_final,
@@ -4997,15 +4913,17 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     dm=dm,
                     groups=self.groups,
                     p=self.p,
-                    _use_qr=_use_qr,
-                    _X_full=self._X_full if _use_qr else None,
+                    step_data_rank=step_data_rank,
                     _return_working_system=self._return_working_system,
                     certify_centered_factor=self.certify_centered_factor,
                 )
 
-                if self.compute_rank_info or (_defer_rank_info is not None and _use_qr):
-                    # A deferred QR-backend computation would keep the dense
-                    # (n, p) design alive until install; it is computed here.
+                if self.compute_rank_info or (
+                    _defer_rank_info is not None and step_data_rank is not None
+                ):
+                    # A deferred step's own data rank would keep the step, and the
+                    # QR step's dense (n, p) design, alive until install; it is
+                    # computed here.
                     rank_info = retained_rank_info()
                 else:
                     rank_info = None
@@ -5030,9 +4948,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         weights, p_eff, retained, dm, S = self.weights, self.p_eff, self.retained, self.dm, self.S
         XtWX, XtW1, sum_W, centered_final = self.XtWX, self.XtW1, self.sum_W, self.centered_final
         XtWX_S_inv_beta = self.XtWX_S_inv_beta
-        _resolved_direct_backend = (
-            "structured" if self._use_structured else ("qr" if self._use_qr else "gram")
-        )
+        _resolved_direct_backend = "structured" if self._use_structured else self.step.backend
         self.recorder.disclose_backend(self, _resolved_direct_backend)
 
         # Pearson-based phi for estimated-scale families.  The numerator is the

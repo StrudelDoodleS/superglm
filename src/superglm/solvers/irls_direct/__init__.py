@@ -15,10 +15,13 @@ the standard REML workflow where smoothing and optional term selection
 are handled through the penalty structure. Without BCD, the 33-iteration aliasing from
 shared B matrices between select=True subgroups vanishes entirely.
 
-The fit lives in ``_fit`` (``fit_irls_direct`` and its method object) and its
-recorder in ``_recorder``.  This module re-exports the names other modules
-import.  A name the fit reads is patched where the fit reads it, in the
-submodule: patching it here would change nothing the fit sees.
+The fit lives in ``_fit`` (``fit_irls_direct`` and its method object), its
+recorder in ``_recorder``, and its step methods behind the interface in
+``_step``: the QR step in ``_qr``; the Gram-path routes are still one step in
+``_fit``.  ``_centred`` holds what more than one step reads of the centred
+system.  This module re-exports the names other modules import.  A name the
+fit reads is patched where the fit reads it, in the submodule: patching it
+here would change nothing the fit sees.
 """
 
 from superglm.solvers.irls_direct._fit import (
