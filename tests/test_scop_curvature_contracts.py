@@ -184,7 +184,7 @@ def test_qp_curvature_constraints_reject_a_repeated_interior_knot(degree):
 
 @pytest.mark.parametrize("penalty", ["ssp", "none"])
 def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(penalty, monkeypatch):
-    from superglm.solvers import irls_direct
+    from superglm.solvers.irls_direct import _fit as irls_direct
     from superglm.solvers.rank import decompose_gram
 
     real_solve = irls_direct.solve_constrained_qp

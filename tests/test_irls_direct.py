@@ -65,7 +65,7 @@ def _force_constant_working_rows(monkeypatch, response, weights=None):
     """
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     real = irls_direct.coefficient_working_rows
 
@@ -88,7 +88,7 @@ def _force_unresolved_score(monkeypatch, *, resolved=False):
     import math
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     real = irls_direct.penalized_mode_residual
     floor_verdicts: list[float] = []
@@ -284,7 +284,7 @@ class TestDirectSolverBasic:
         assert result.reml_hessian_rank == 2  # intercept plus one identifiable slope
 
     def test_reml_working_system_avoids_rebuilding_one_step_crossproducts(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 
@@ -345,7 +345,7 @@ class TestDirectSolverBasic:
 
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -415,7 +415,8 @@ class TestDirectSolverBasic:
         assert np.all(np.isfinite(candidate_gram))
 
     def test_skips_extrema_scans_when_diagnostics_disabled(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._recorder as irls_recorder
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -452,7 +453,9 @@ class TestDirectSolverBasic:
 
         extrema_spy = NumpyExtremaSpy(np)
         monkeypatch.setattr(irls_direct, "_positive_working_weight_stats", counting_stats)
+        # the fit and its recorder, which takes the extrema
         monkeypatch.setattr(irls_direct, "np", extrema_spy)
+        monkeypatch.setattr(irls_recorder, "np", extrema_spy)
 
         irls_direct.fit_irls_direct(
             X=dm,
@@ -472,7 +475,7 @@ class TestDirectSolverBasic:
         assert extrema_spy.max_calls == 0
 
     def test_level_two_recorder_keeps_extrema_without_iteration_diagnostics(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -506,7 +509,7 @@ class TestDirectSolverBasic:
         } <= recorder.rows[0].keys()
 
     def test_level_two_recorder_decision_is_frozen_before_iterations(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -548,7 +551,7 @@ class TestDirectSolverBasic:
 
     def test_one_step_return_xtwx_returns_h_inverse_and_gram(self):
         """A one-step fit with ``return_xtwx`` returns the final H inverse and weighted Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 
@@ -579,7 +582,7 @@ class TestDirectSolverBasic:
         assert XtWX.shape == (2, 2)
 
     def test_safe_decompose_h_uses_unpivoted_cholesky_for_spd(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
 
         rng = np.random.default_rng(11)
         A = rng.standard_normal((6, 6))
@@ -597,7 +600,7 @@ class TestDirectSolverBasic:
         assert cholesky_ok
 
     def test_gram_decomposition_uses_cholesky_for_spd(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.solvers.rank import decompose_gram
 
         rng = np.random.default_rng(13)
@@ -620,7 +623,7 @@ class TestDirectSolverBasic:
 
     def test_constant_weight_fit_reuses_weighted_gram(self, monkeypatch):
         """Gaussian identity fits reuse X'WX across IRLS iterations."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -665,7 +668,7 @@ class TestDirectSolverBasic:
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -716,7 +719,7 @@ class TestDirectSolverBasic:
 
     def test_poisson_sqrt_reuses_constant_weighted_gram(self, monkeypatch):
         """Exact Poisson/sqrt Fisher weights reuse X'WX without changing the fit."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -781,7 +784,7 @@ class TestDirectSolverBasic:
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
     def test_poisson_sqrt_constant_weight_cache_is_exact_type_gated(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -795,7 +798,7 @@ class TestDirectSolverBasic:
         assert not irls_direct._has_constant_irls_weights(Poisson(), DerivedSqrtLink())
 
     def test_sqrt_null_shortcut_skips_only_unused_terminal_working_rows(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -862,7 +865,7 @@ class TestDirectSolverBasic:
 
     def test_distribution_subclass_cannot_inherit_constant_weight_cache(self, monkeypatch):
         """Behavior-changing family subclasses must rebuild their weighted Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian, Poisson
         from superglm.links import IdentityLink
 
@@ -927,7 +930,7 @@ class TestDirectSolverBasic:
 
     def test_gamma_log_reuses_centered_gram_when_working_response_changes(self, monkeypatch):
         """Constant Gamma-log weights must not rebuild the invariant Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma
         from superglm.links import LogLink
 
@@ -980,7 +983,7 @@ class TestDirectSolverBasic:
         unconverged score (``rate_exhausts_budget`` returning True) switched
         this solve and rebuilt the Gram on each Newton iteration.
         """
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma
         from superglm.links import LogLink
 
@@ -1231,7 +1234,7 @@ class TestDirectSolverBasic:
         would have ended the solve before the Newton map it chose ran.  The
         solve now takes the Newton iteration and stops at its fixed point.
         """
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma
         from superglm.links import LogLink
         from superglm.solvers.irls_direct import fit_irls_direct
@@ -1542,7 +1545,7 @@ class TestDirectSolverBasic:
         """One-engine design §3.11: Gamma/log takes Fisher rows and Tweedie/log
         observed rows on every iteration; a rejected step ends the fit in the
         same curvature, with no observed rescue and no Fisher latch."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma, Tweedie
         from superglm.links import LogLink
         from superglm.solvers.irls_state import _IRLSStepDecision
@@ -1617,7 +1620,7 @@ class TestDirectSolverBasic:
         """One-engine design §3.11: finiteness is the one condition observed rows
         keep, so a full step to a state whose rows the declared curvature cannot
         form is halved, never accepted and never answered with Fisher rows."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Tweedie
         from superglm.links import LogLink
         from superglm.solvers.working_rows import CoefficientWorkingRows
@@ -1661,7 +1664,7 @@ class TestDirectSolverBasic:
     def test_non_finite_observed_rows_at_the_start_raise(self, monkeypatch):
         """No Fisher substitute: a declared observed pair whose rows are not finite
         at the starting coefficients has no step, and says so."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Tweedie
         from superglm.links import LogLink
         from superglm.solvers.working_rows import CoefficientWorkingRows
@@ -1692,7 +1695,7 @@ class TestDirectSolverBasic:
 
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """Large constrained fits dispatch raw moments through their cached plan."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
@@ -1793,7 +1796,7 @@ class TestDirectSolverBasic:
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 

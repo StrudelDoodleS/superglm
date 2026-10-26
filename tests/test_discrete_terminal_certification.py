@@ -42,7 +42,7 @@ import superglm.model.reml_finalize as reml_finalize
 from superglm import Categorical, LambdaPolicy, RandomEffect, Spline, SuperGLM, Tweedie
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import build_penalty_matrix
-from superglm.solvers import irls_direct
+from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import _IRLSStepDecision
 from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, mode_certification_bar

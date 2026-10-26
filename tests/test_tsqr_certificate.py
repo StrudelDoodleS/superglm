@@ -831,7 +831,7 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     ``finalize_reml_fit`` replaced unread; now only the terminal refit that is
     published does, and its decomposition is on the factor route's rule.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     rng = np.random.default_rng(3)
     n = 4_000
@@ -948,7 +948,7 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     candidates and trials already skip it), so against it the rows below
     are read twice.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm import RandomEffect, Tweedie
 
     rng = np.random.default_rng(8)

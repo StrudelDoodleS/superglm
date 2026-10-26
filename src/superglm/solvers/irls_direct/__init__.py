@@ -1,0 +1,62 @@
+"""Direct penalised IRLS solver (no BCD).
+
+Solves the penalised GLM via iteratively reweighted least squares with a
+single dense system solve per iteration:
+
+    β = (X'WX + S)⁻¹ X'Wz
+
+where p is ~50-80 (total model columns), making the p×p solve trivially
+fast.  Uses gram-based operations (per-group gram + cross_gram) to form
+X'WX without materialising the full (n, p) dense matrix.  For discretized
+groups this reduces the O(n·p²) bottleneck to O(n_bins·K²) per group.
+
+This replaces BCD when lambda1=0 (no L1/group lasso penalty), which is
+the standard REML workflow where smoothing and optional term selection
+are handled through the penalty structure. Without BCD, the 33-iteration aliasing from
+shared B matrices between select=True subgroups vanishes entirely.
+
+The fit lives in ``_fit`` (``fit_irls_direct`` and its method object) and its
+recorder in ``_recorder``.  This module re-exports the names other modules
+import.  A name the fit reads is patched where the fit reads it, in the
+submodule: patching it here would change nothing the fit sees.
+"""
+
+from superglm.solvers.irls_direct._fit import (
+    _QP_FEASIBILITY_TOL,
+    _SUBNORMAL_SPACING,
+    SCOPRunCentring,
+    StructuredSolverError,
+    _build_iterate_factor,
+    _build_penalty_matrix,
+    _centred_system_matvec,
+    _evaluate_scop_trial,
+    _levenberg_shifted_leaf_operator,
+    _safe_decompose_H,
+    _SCOPGroupState,
+    _SCOPTrialState,
+    _separation_weight_ratio,
+    _solve_constrained_qp_with_cold_retry,
+    _structured_solver_errors,
+    _underflow_allowance,
+    fit_irls_direct,
+)
+
+__all__ = [
+    "_QP_FEASIBILITY_TOL",
+    "_SUBNORMAL_SPACING",
+    "SCOPRunCentring",
+    "StructuredSolverError",
+    "_build_iterate_factor",
+    "_build_penalty_matrix",
+    "_centred_system_matvec",
+    "_evaluate_scop_trial",
+    "_levenberg_shifted_leaf_operator",
+    "_safe_decompose_H",
+    "_SCOPGroupState",
+    "_SCOPTrialState",
+    "_separation_weight_ratio",
+    "_solve_constrained_qp_with_cold_retry",
+    "_structured_solver_errors",
+    "_underflow_allowance",
+    "fit_irls_direct",
+]

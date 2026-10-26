@@ -15,7 +15,7 @@ import superglm.reml.discrete as discrete_reml
 import superglm.reml.objective as reml_objective
 import superglm.solvers._structured.moments as moments
 import superglm.solvers._structured.selection as selection
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._fit as irls_direct
 from superglm import generate_tweedie_cpg
 from superglm.distributions import (
     Gamma,

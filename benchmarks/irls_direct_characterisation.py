@@ -1434,8 +1434,9 @@ def _run(args) -> int:
     return 0
 
 
-# What ``--coverage`` reports: the solver's entry point, and the fit it runs, which
-# is a wrapper, a method-object class, its fields and recorder, and the module
+# What ``--coverage`` reports, in every file of the solver: its entry point, and the
+# fit it runs, which is a wrapper, a method-object class, its fields, recorder and
+# step classes (every top-level class named ``_IRLSDirect*``), and the module
 # functions it binds with ``partial``.  Its total (``the fit``) is everything but
 # the entry point.
 _COVERAGE_FUNCTIONS = (
@@ -1461,13 +1462,16 @@ def _line_ranges(lines: list[int]) -> str:
 
 
 def _coverage_rc(out: Path) -> Path:
-    """The run's own coverage settings, measuring and reporting the solver module only.
+    """The run's own coverage settings, measuring and reporting the solver only.
 
-    Without them coverage reads the working directory's configuration, and a
-    ``source`` there (this repository's ``pyproject.toml``) replaces the include.
+    The solver is one module on master and a package on the branch; a ``*`` in
+    coverage's patterns does not cross a ``/``, so each layout has its pattern.
+    Without these settings coverage reads the working directory's configuration,
+    and a ``source`` there (this repository's ``pyproject.toml``) replaces the
+    include.
     """
     rc = out / "coverage" / "coveragerc"
-    include = "include = */superglm/solvers/irls_direct*\n"
+    include = "include =\n    */superglm/solvers/irls_direct.py\n    */superglm/solvers/irls_direct/*.py\n"
     rc.write_text(f"[run]\n{include}[report]\n{include}", encoding="utf-8")
     return rc
 

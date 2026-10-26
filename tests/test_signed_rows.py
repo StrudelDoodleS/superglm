@@ -393,7 +393,7 @@ def test_an_iterate_no_shift_certifies_raises_its_own_refusal(monkeypatch) -> No
     the factor's refusal of ``H`` itself, with the largest shift's refusal
     attached as a note, never the refusal of ``H + 1e8 diag(scale)`` alone.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     case, w, lambdas = _signed_case("cancel", 2, 1e-7, 1e4, 0.0)
     system, penalized = _chain_factor(case, w, lambdas)

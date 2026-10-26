@@ -202,7 +202,7 @@ def _gamma_log_fit(shift: float, spy) -> tuple[SuperGLM, dict]:
     return model, captured
 
 
-@pytest.mark.parametrize("module", ["reml.observed_geometry", "solvers.irls_direct"])
+@pytest.mark.parametrize("module", ["reml.observed_geometry", "solvers.irls_direct._fit"])
 def test_the_mode_certificates_read_the_centred_intercept(module, monkeypatch):
     """The observed-mode and PIRLS certificates read ``alpha`` and ``X~ beta`` centred (item 3).
 
@@ -2481,7 +2481,8 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     import collections
 
     from superglm.reml import direct, w_derivatives
-    from superglm.solvers import centered_system, irls_direct, pirls
+    from superglm.solvers import centered_system, pirls
+    from superglm.solvers.irls_direct import _fit as irls_direct
 
     calls: collections.Counter = collections.Counter()
     ran: collections.Counter = collections.Counter()

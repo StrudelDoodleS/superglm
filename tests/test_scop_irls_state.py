@@ -132,7 +132,7 @@ def _scop_fit_inputs():
 
 def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> None:
     """Ordinary SCOP iterations retain the native matrix matvec hot path."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -157,7 +157,7 @@ def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> 
 
 
 def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -213,7 +213,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
 
 
 def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
     baseline, _, baseline_states = irls_direct.fit_irls_direct(
@@ -269,7 +269,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
 
 
 def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -344,7 +344,7 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
     so a fixture-driven test pins the deviance and nothing else. This drives
     both fields directly instead of hoping a fixture reaches them.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -376,7 +376,7 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
     """The fallback flag must describe the refreshed terminal Hessian block."""
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
     original = SCOPJointNewton.block_curvature
@@ -405,7 +405,7 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
 
 def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None:
     """SCOP merit uses lambda*S_scop in beta-space, not the mapped global block."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
     monkeypatch.setattr(
@@ -447,7 +447,7 @@ def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None
 
 def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
     """Installing terminal SCOP EDF must not profile a known family scale."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     rng = np.random.default_rng(91)
     x = np.linspace(0.0, 1.0, 120)
@@ -494,7 +494,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
     columns included) in row chunks made a 678k-row fit tens of times slower
     once one indicator's weighted frequency crossed 1/2.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.features.categorical import Categorical
 
     rng = np.random.default_rng(20261004)

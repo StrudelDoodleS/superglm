@@ -180,7 +180,7 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
         grams.append(np.array(gram))
         return decide(gram, *args, **kwargs)
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     monkeypatch.setattr(irls_direct, "decide_data_rank", recorded)
     for kind in sorted(FIXTURES):

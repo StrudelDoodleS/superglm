@@ -12,7 +12,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
-from superglm.solvers import irls_direct as irls_direct_module
+from superglm.solvers.irls_direct import _fit as irls_direct_module
 from superglm.solvers.irls_direct import _safe_decompose_H
 from superglm.solvers.rank import decompose_gram
 

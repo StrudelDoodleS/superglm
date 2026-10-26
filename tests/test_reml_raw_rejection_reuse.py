@@ -15,7 +15,8 @@ from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, SparseSSPGroupMatrix
 from superglm.links import IdentityLink, LogLink
 from superglm.reml import direct, observed_geometry
-from superglm.solvers import centered_system, irls_direct
+from superglm.solvers import centered_system
+from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 

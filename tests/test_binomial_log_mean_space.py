@@ -331,7 +331,7 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
     one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
     converges.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.irls_state import _select_irls_trial
 
     decisions = []
@@ -1160,7 +1160,7 @@ def test_a_large_clean_crossing_still_certifies(monkeypatch: pytest.MonkeyPatch)
         selection_penalty=0.0,
         features={"A": Categorical(base="first"), "B": Categorical(base="first")},
     )
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     evaluations: list[int] = []
     judge = irls_direct.row_set_residual
@@ -1398,7 +1398,7 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
     with no record and no warning.  A rejected step returns the committed
     state, the one the refusal judged, so that judgement is the fit's own.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
 
     calls: list[int] = []
@@ -1461,7 +1461,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
     judgement now decides: the loop's own exit, no boundary rows, and that
     state's own record, not the earlier one.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.mode_score import TruncatedDirection, _unresolved
 
     calls: list[int] = []
@@ -1508,7 +1508,7 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     named in the warning as found at an earlier iterate, and the fit keeps
     the loop's own exit with no boundary rows.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.mode_score import TruncatedDirection
 
     calls: list[int] = []
@@ -1564,7 +1564,7 @@ def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
     inaccurate to show whether they move, and no earlier record is shown as
     history.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     judge = irls_direct.truncated_direction_ratio
     monkeypatch.setattr(
@@ -1602,7 +1602,7 @@ def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch)
     The fit is not converged; ``diagnostics()`` records the refusal with no
     rows, and the warning says no record of the rows exists.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.mode_score import _unresolved
 
     monkeypatch.setattr(
@@ -1643,7 +1643,7 @@ def test_an_exact_alias_on_a_large_design_is_not_refused(
     and master certify them.  An empty support is aliasing again unless the
     test is vacuous, at an angle near 1/4.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     angles: list[float] = []
     measure = irls_direct.null_basis_angle
@@ -2068,7 +2068,7 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
     refuses only rows whose score the relative score cannot see.  An offset
     of 3 lowers the start, so the true-score certificate decides.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     rng = np.random.default_rng(11)
     n = 3000
@@ -2342,7 +2342,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     and forms each one's sets once.  Each nested cell is one district's
     rows, already judged as its level, so no cell is kept and no SVD runs.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.mode_score as mode_score
 
     formed: list[int] = []
@@ -3206,7 +3206,7 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
     to 1e-6, and the flag varies across platforms.  (The structured
     increment's own test is the warm-started solve below.)
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     lowered: list[bool] = []
     interior_start = irls_direct.interior_start_intercept

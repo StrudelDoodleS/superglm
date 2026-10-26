@@ -426,7 +426,7 @@ class TestCallSiteWarnings:
         from superglm import Constraint, SuperGLM
         from superglm.families import Gaussian
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers import irls_direct
+        from superglm.solvers.irls_direct import _fit as irls_direct
 
         calls: list[int] = []
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
@@ -483,7 +483,7 @@ class TestCallSiteWarnings:
         from superglm import Constraint, SuperGLM
         from superglm.families import Binomial
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers import irls_direct
+        from superglm.solvers.irls_direct import _fit as irls_direct
 
         calls: list[int] = []
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
@@ -1668,7 +1668,7 @@ class TestRankDeficientKKT:
 
         from superglm import Constraint, SuperGLM
         from superglm.features.spline import BSplineSmooth
-        from superglm.solvers import irls_direct
+        from superglm.solvers.irls_direct import _fit as irls_direct
 
         real_solve = irls_direct.solve_constrained_qp
         observed: list[dict] = []

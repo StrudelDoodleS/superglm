@@ -13,7 +13,7 @@ import scipy.sparse as sp
 import superglm.reml.direct as direct_reml
 import superglm.reml.discrete as discrete_reml
 import superglm.solvers._structured.selection as structured_selection
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._fit as irls_direct
 import superglm.solvers.rank as rank
 from superglm import (
     Categorical,

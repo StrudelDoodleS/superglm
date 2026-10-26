@@ -73,7 +73,7 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
     and the cold solve fail. It replaces their result only when it is
     certified.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.constrained_qp import QPResult
 
     warm_result = QPResult(
@@ -134,7 +134,7 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
     A failed cold start goes straight to the degenerate-vertex attempt,
     and a certified solve makes no further call.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.solvers.constrained_qp import QPResult
 
     result = QPResult(
@@ -172,7 +172,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A finite feasible inner iterate is not thereby a converged QP solution."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -230,7 +230,7 @@ def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
     ``fit_irls_direct``, the failed retry runs again on every IRLS iteration,
     three times here instead of once.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -271,7 +271,7 @@ def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.Monke
     so the third iterate's failure gets the retry again: two retries, not
     one.  Mutation: a latch that never re-arms runs it once.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -313,7 +313,7 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A prior certificate does not describe newly rebuilt Poisson weights."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.distributions import Poisson
     from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
     from superglm.links import LogLink
@@ -785,7 +785,7 @@ def test_line_searched_infeasible_final_state_is_not_converged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tiny accepted step cannot certify an infeasible warm-start state."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm.model.base import model_build_design_matrix
     from superglm.solvers.irls_state import _IRLSStepDecision
 
@@ -878,7 +878,7 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnostics and the public result must agree after an atomic rejection."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm._fit_trace import MemoryTraceSink, TraceRun
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
@@ -1123,8 +1123,8 @@ def test_feasible_committed_state_never_accepts_infeasible_trial(
     """A merit-improving infeasible proposal is truncated at the feasible boundary."""
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
-    from superglm.solvers import irls_direct
     from superglm.solvers.constrained_qp import QPResult
+    from superglm.solvers.irls_direct import _fit as irls_direct
 
     design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
 

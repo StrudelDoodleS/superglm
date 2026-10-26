@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._fit as irls_direct
 from superglm.distributions import Poisson
 from superglm.group_matrix import (
     DenseGroupMatrix,

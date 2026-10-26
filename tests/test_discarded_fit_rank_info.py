@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 import superglm.model.reml_finalize as reml_finalize
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._fit as irls_direct
 import superglm.solvers.rank as rank
 from superglm import Constraint, NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical

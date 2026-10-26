@@ -415,7 +415,7 @@ def test_only_the_fs_leaf_route_re_arms_the_cap(monkeypatch):
     import pandas as pd
 
     from superglm import Categorical, FactorSmooth, Numeric, SuperGLM
-    from superglm.solvers import irls_direct
+    from superglm.solvers.irls_direct import _fit as irls_direct
     from tests.test_nested_structured_fit import _fit
 
     widths: list[int] = []

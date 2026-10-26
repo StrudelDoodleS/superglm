@@ -18,7 +18,8 @@ from superglm.group_matrix import (
 )
 from superglm.links import IdentityLink, LogLink
 from superglm.reml import direct, observed_geometry
-from superglm.solvers import centered_system, irls_direct
+from superglm.solvers import centered_system
+from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.irls_state import _IRLSStepDecision
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.types import GroupSlice, LinearConstraintSet

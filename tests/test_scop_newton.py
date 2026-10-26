@@ -14,8 +14,8 @@ from superglm._roundoff import UNIT_ROUNDOFF as UNIT
 from superglm.distributions import Tweedie
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model.base import model_build_design_matrix
-from superglm.solvers import irls_direct
 from superglm.solvers.centered_system import build_centered_system
+from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.rank import decompose_gram_if_authoritative
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import SCOPGroupSpec, SCOPJointNewton
