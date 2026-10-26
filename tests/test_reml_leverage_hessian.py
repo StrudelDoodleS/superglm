@@ -533,6 +533,61 @@ def test_a_random_effect_takes_the_leverage_route_where_its_design_reads_row_sup
 _REML_TOL = 1e-9  # NEWTON_REML_TOL_DEFAULT, passed explicitly so the bound below is its own
 
 
+@pytest.mark.parametrize("direct_solve", ["gram", "structured"])
+def test_the_leverage_route_does_not_read_the_machines_memory(monkeypatch, direct_solve):
+    """A ``max_memory`` too small for the support tables leaves a random effect's REML route unchanged.
+
+    The design alone decides the route (``reads_row_supports``); memory only
+    chooses whether the dense solver forms the support tables or solves rows
+    in chunks, and either way the Newton model is the gradient-only one.  So
+    the two fits take one path: the same route and iteration count, the
+    objectives within ``tau (1 + |V|)``.  The event, tables declined, is
+    checked on the constrained dense fit.  Mutation: the memory bar back in
+    ``reads_row_supports`` sends the constrained fit to the derivative Grams.
+    """
+    from superglm.reml import _leverage_rows
+    from superglm.reml.convergence import _score_scale
+
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
+    frame, y = _grouped_poisson_frame()
+
+    def fit(max_memory) -> SuperGLM:
+        return SuperGLM(
+            family="poisson",
+            features=_random_effect_features(),
+            selection_penalty=0.0,
+            direct_solve=direct_solve,
+            max_memory=max_memory,
+        ).fit_reml(frame, y, reml_tol=_REML_TOL, runtime_validation="skip")
+
+    ample = fit("auto")
+    dm = ample._dm
+    tables = 8 * _leverage_rows._support_table_rows(dm) * dm.p
+    plans: list[bool] = []
+    support_plan = _leverage_rows._support_plan
+
+    def recorded_plan(*args, **kwargs):
+        plan = support_plan(*args, **kwargs)
+        plans.append(plan is None)
+        return plan
+
+    monkeypatch.setattr(_leverage_rows, "_support_plan", recorded_plan)
+    constrained = fit(4 * tables - 8)
+
+    if direct_solve == "gram":
+        assert plans and all(plans)
+    for model in (ample, constrained):
+        assert reads_row_supports(model._dm)
+        assert model._reml_profile["direct_backend"] == direct_solve
+        assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+        assert model._reml_result.converged
+    assert constrained._reml_result.n_reml_iter == ample._reml_result.n_reml_iter
+    objective = ample._reml_result.objective
+    assert abs(constrained._reml_result.objective - objective) <= _REML_TOL * _score_scale(
+        objective
+    )
+
+
 def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
     """Both routes stop at one stationary point, judged by the stopping rule itself.
 

@@ -133,18 +133,15 @@ _POOLED_ROW_KERNELS = (_solved_rows_and_leverages,)
 writing only the block's own arrays."""
 
 
-def reads_row_supports(dm) -> bool:
-    """Whether the solved-row pass takes the support route on ``dm``, decided from metadata.
+def _support_table_rows(dm) -> int:
+    """The support route's table rows, from metadata, or 0 when it has no tables to form.
 
-    Every group a dense column or an indexed support (a categorical, a random
-    effect, a discretised or support-compressed spline) whose table reads as
-    float64, at least one of them indexed, and the tables within half the rows
-    and a quarter of ``max_memory``: :func:`_support_plan` builds its tables
-    exactly then.
+    Rows count when every group is a dense column or an indexed support (a
+    categorical, a random effect, a discretised or support-compressed spline)
+    whose table reads as float64, and at least one of them is indexed.
     """
     from superglm._group_matrix._group_matrix_centered import _reads_as_float64
     from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
-    from superglm._parallel import resolve_max_memory
     from superglm.group_matrix import (
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
@@ -153,7 +150,7 @@ def reads_row_supports(dm) -> bool:
     )
 
     if type(dm) is not DesignMatrix:
-        return False
+        return 0
     rows = 0
     for gm in dm.group_matrices:
         if type(gm) is DenseGroupMatrix:
@@ -167,10 +164,21 @@ def reads_row_supports(dm) -> bool:
         elif type(gm) in ONE_HOT_CODE_TYPES:
             rows, operands = rows + int(gm.n_levels) + 1, ()
         else:
-            return False
+            return 0
         if not all(_reads_as_float64(np.asarray(operand).dtype) for operand in operands):
-            return False
-    return 0 < rows and 2 * rows <= dm.n and 8 * rows * dm.p <= resolve_max_memory() // 4
+            return 0
+    return rows
+
+
+def reads_row_supports(dm) -> bool:
+    """Whether every group of ``dm`` reads row supports, within half the rows: the design alone decides.
+
+    The REML route a model takes reads this, so it never depends on the
+    machine; ``max_memory`` only chooses, in :func:`_support_plan`, whether the
+    dense solver forms the support tables or solves rows in chunks.
+    """
+    rows = _support_table_rows(dm)
+    return 0 < rows and 2 * rows <= dm.n
 
 
 def _support_plan(
@@ -179,8 +187,9 @@ def _support_plan(
     centre_hi: NDArray,
     centre_lo: NDArray | None,
 ) -> _SupportPlan | None:
-    """The support route's tables, else ``None`` (:func:`reads_row_supports`)."""
+    """The support route's tables, else ``None`` (:func:`reads_row_supports`, or over a quarter of ``max_memory``)."""
     from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
+    from superglm._parallel import resolve_max_memory
     from superglm.group_matrix import (
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
@@ -189,7 +198,7 @@ def _support_plan(
     )
 
     # Sized from metadata before any table is formed.
-    if not reads_row_supports(dm):
+    if not reads_row_supports(dm) or 8 * _support_table_rows(dm) * dm.p > resolve_max_memory() // 4:
         return None
 
     p = dm.p
