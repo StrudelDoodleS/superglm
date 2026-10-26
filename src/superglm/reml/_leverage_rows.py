@@ -136,10 +136,10 @@ _POOLED_ROW_KERNELS = (_solved_rows_and_leverages,)
 writing only the block's own arrays."""
 
 
-def _support_table_rows(dm) -> int:
-    """The support route's table rows, from metadata, or 0 when it has no tables to form.
+def _support_sizes(dm) -> tuple[int, int]:
+    """The support route's table rows and support entries, from metadata, or zeros without tables.
 
-    Rows count when every group is a dense column or an indexed support (a
+    Sizes count when every group is a dense column or an indexed support (a
     categorical, a random effect, a discretised or support-compressed spline)
     whose table reads as float64, and at least one of them is indexed.
     """
@@ -153,41 +153,60 @@ def _support_table_rows(dm) -> int:
     )
 
     if type(dm) is not DesignMatrix:
-        return 0
-    rows = 0
+        return 0, 0
+    rows = entries = 0
     for gm in dm.group_matrices:
         if type(gm) is DenseGroupMatrix:
             continue
+        width = int(gm.shape[1])
         if isinstance(gm, DiscretizedSSPGroupMatrix):
             rows, operands = rows + int(gm.B_unique.shape[0]), (gm.B_unique, gm.R_inv)
+            entries += int(gm.B_unique.shape[0]) * width
         elif isinstance(gm, DiscretizedSCOPGroupMatrix):
             rows, operands = rows + int(gm.B_scop_unique.shape[0]), (gm.B_scop_unique,)
+            entries += int(gm.B_scop_unique.shape[0]) * width
         elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
             rows, operands = rows + int(gm.n_bins) + 1, (gm.B_unique, gm.R_inv)
+            entries += (int(gm.B_unique.shape[0]) + 1) * width
         elif type(gm) in ONE_HOT_CODE_TYPES:
             rows, operands = rows + int(gm.n_levels) + 1, ()
+            entries += (width + 1) * width
         else:
-            return 0
+            return 0, 0
         if not all(_reads_as_float64(np.asarray(operand).dtype) for operand in operands):
-            return 0
-    return rows
+            return 0, 0
+    return rows, entries
+
+
+def _support_table_rows(dm) -> int:
+    """The support route's table rows (:func:`_support_sizes`)."""
+    return _support_sizes(dm)[0]
+
+
+def _support_plan_bytes(dm) -> int:
+    """The bytes a support plan holds: its tables and its groups' centred supports."""
+    rows, entries = _support_sizes(dm)
+    return 8 * (rows * dm.p + entries)
 
 
 def _design_table_bytes(dm) -> int:
-    """The support-table bytes ``dm`` may always form: ``16 p^2``, or the floor."""
+    """The support-plan bytes ``dm`` may always form, tables and supports: ``16 p^2``, or the floor.
+
+    Forming the plan holds about twice that while its blocks are stacked.
+    """
     return max(16 * dm.p * dm.p, _SUPPORT_TABLE_FLOOR_BYTES)
 
 
 def reads_row_supports(dm) -> bool:
     """Whether every group of ``dm`` reads row supports, within the design's own table budget.
 
-    At most half the rows, and tables within :func:`_design_table_bytes`.  The
+    At most half the rows, and a plan within :func:`_design_table_bytes`.  The
     REML route a model takes reads this, so it never depends on the machine,
     and :func:`_support_plan` forms the tables wherever it holds, so a model
     on that route never solves rows in chunks.
     """
     rows = _support_table_rows(dm)
-    return 0 < rows and 2 * rows <= dm.n and 8 * rows * dm.p <= _design_table_bytes(dm)
+    return 0 < rows and 2 * rows <= dm.n and _support_plan_bytes(dm) <= _design_table_bytes(dm)
 
 
 def _support_plan(
@@ -214,7 +233,10 @@ def _support_plan(
     rows = _support_table_rows(dm)
     if not (0 < rows and 2 * rows <= dm.n):
         return None
-    if 8 * rows * dm.p > max(_design_table_bytes(dm), resolve_max_memory() // 4):
+    if not (
+        _support_plan_bytes(dm) <= _design_table_bytes(dm)
+        or 8 * rows * dm.p <= resolve_max_memory() // 4
+    ):
         return None
 
     p = dm.p
@@ -249,7 +271,7 @@ def _support_plan(
         else:  # pragma: no cover - sized above
             return None
         if values is None:  # categorical: the identity, its base level the zero row
-            raw = np.eye(width, dtype=np.float64)
+            raw = None
         else:
             raw = np.asarray(values, dtype=np.float64)
             if transform is not None:
@@ -258,11 +280,19 @@ def _support_plan(
         if level is not None or values is None:
             # Zero rows outside the level (or at the base level): raw table,
             # the centre once in ``base``, the centred zero row last.
-            zero = raw.shape[0]
-            # a categorical's raw table is the identity: its rows of the inverse, as they are
-            tables.append(inverse[cols, :].copy() if values is None else raw @ inverse[cols, :])
+            # A categorical's raw table is the identity: its table is its rows of
+            # the inverse, and its centred support ``[I; 0] - c`` is formed in place.
+            if raw is None:
+                zero = width
+                tables.append(inverse[cols, :])
+                centred = np.empty((width + 1, width), dtype=np.float64)
+                centred[:] = -centre
+                centred[np.arange(width), np.arange(width)] += 1.0
+            else:
+                zero = raw.shape[0]
+                tables.append(raw @ inverse[cols, :])
+                centred = np.vstack((raw, np.zeros((1, width)))) - centre
             base -= centre @ inverse[cols, :]
-            centred = np.vstack((raw, np.zeros((1, width)))) - centre
             if centre_low is not None:
                 base -= centre_low @ inverse[cols, :]
                 centred -= centre_low

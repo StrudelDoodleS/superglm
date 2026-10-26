@@ -843,25 +843,33 @@ def test_a_plain_fit_keeps_no_plan(forced):
 
 
 def test_the_design_table_budget_decides_the_route_and_always_forms_its_tables(monkeypatch):
-    """A design's support tables are bounded by its own ``16 p^2`` bytes, and formed there whatever ``max_memory`` is.
+    """A design's support plan is bounded by its own ``16 p^2`` bytes, and formed there whatever ``max_memory`` is.
 
-    With the 64 MiB floor set to 0, the budget is ``16 p^2``: the default hand-built
-    design (50 table rows, ``p = 16``: 6,400 bytes against 4,096) reads no row
-    supports, so a random effect beside it keeps the Grams; the wide one (210
-    rows, ``p = 110``: 184,800 against 193,600) does, and ``_support_plan`` forms
-    its tables even under a one-byte ``max_memory``.  Mutations: dropping the
-    budget from ``reads_row_supports``, the floor alone as the budget, or the
-    budget out of ``_support_plan``'s bar.
+    The budget counts the tables and the centred supports.  With the 64 MiB floor
+    set to 0, the hand-built design (a support spline beside two categoricals,
+    ``p = 16``) is over ``16 p^2``, so it reads no row supports, while a random
+    effect of 60 levels beside two dense columns is within it, and
+    ``_support_plan`` forms its tables even under a one-byte ``max_memory``.
+    Mutations: dropping the budget from ``reads_row_supports``, the floor alone
+    as the budget, or the budget out of ``_support_plan``'s bar.
     """
+    from superglm.group_matrix import DesignMatrix, RandomEffectGroupMatrix
     from superglm.reml import _leverage_rows
 
     monkeypatch.setattr(_leverage_rows, "_SUPPORT_TABLE_FLOOR_BYTES", 0)
-    narrow, wide = _hand_built_design(), _hand_built_design(basis=100)
-    assert 8 * _leverage_rows._support_table_rows(narrow) * narrow.p > 16 * narrow.p**2
-    assert 8 * _leverage_rows._support_table_rows(wide) * wide.p <= 16 * wide.p**2
+    rng = np.random.default_rng(23)
+    n = 2000
+    groups = [
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+        RandomEffectGroupMatrix(rng.integers(0, 60, n), 60),
+    ]
+    random_effect = DesignMatrix(groups, n=n, p=62)
+    narrow = _hand_built_design()
+    assert _leverage_rows._support_plan_bytes(narrow) > 16 * narrow.p**2
+    assert _leverage_rows._support_plan_bytes(random_effect) <= 16 * random_effect.p**2
     assert not _leverage_rows.reads_row_supports(narrow)
-    assert _leverage_rows.reads_row_supports(wide)
-    p = wide.p
+    assert _leverage_rows.reads_row_supports(random_effect)
+    p = random_effect.p
     with parallel_config(max_memory=1):
-        plan = _leverage_rows._support_plan(wide, np.eye(p), np.zeros(p), None)
+        plan = _leverage_rows._support_plan(random_effect, np.eye(p), np.zeros(p), None)
     assert plan is not None
