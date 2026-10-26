@@ -21,20 +21,21 @@ recorder in ``_recorder``, and its step methods behind the interface in
 linearly constrained (QP) step in ``_qp``, the structured step (random-effect
 chains, ``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained
 (SCOP) step with its own line search in ``_scop``.  ``_centred`` holds what
-more than one step reads of the centred system.  This module re-exports the names other modules import.  A name the
+more than one step reads of the centred system, and ``_mean_space`` the
+binomial/log mean space's overlay: its Newton steps and its true-score
+certificate.  This module re-exports the names other modules import.  A name the
 fit reads is patched where the fit reads it, in the submodule: patching it
 here would change nothing the fit sees.
 """
 
 from superglm.solvers.irls_direct._fit import (
     _QP_FEASIBILITY_TOL,
-    _SUBNORMAL_SPACING,
     _build_penalty_matrix,
     _safe_decompose_H,
     _separation_weight_ratio,
-    _underflow_allowance,
     fit_irls_direct,
 )
+from superglm.solvers.irls_direct._mean_space import _SUBNORMAL_SPACING, _underflow_allowance
 from superglm.solvers.irls_direct._qp import _solve_constrained_qp_with_cold_retry
 from superglm.solvers.irls_direct._scop import (
     SCOPRunCentring,

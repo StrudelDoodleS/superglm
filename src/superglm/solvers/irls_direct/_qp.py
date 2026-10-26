@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,7 +11,6 @@ from numpy.typing import NDArray
 
 from superglm.solvers.constrained_qp import QPResult, solve_constrained_qp
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
-from superglm.solvers.mode_score import centred_data_score
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -149,11 +147,8 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         newton_score = fit.newton_score
         centered = fit.get_centered_system(fit.W, z_off)
         if newton_score is not None:
-            centered = replace(
-                centered,
-                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                rhs=centered.rhs + centred_data_score(fit.dm, newton_score, centered.mean_x),
-            )
+            # the mean space's Newton score in the right-hand side
+            centered = fit.mean_space.centred_rhs(centered, newton_score, fit.dm)
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0
 
@@ -201,3 +196,8 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         fit.recorder.t_solve += time.perf_counter() - _t0
         fit.beta = beta
         _note_svd_fallback(fit)
+
+    def certificate_inputs(self) -> tuple:
+        """The constraint rows active at the proposal: the certificate's KKT residual reads them."""
+        active_set = self.active_set
+        return None, self.A_all[list(active_set)] if active_set else None, None, None

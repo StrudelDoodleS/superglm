@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
-from superglm.solvers.mode_score import centred_data_score
-from superglm.solvers.rank import decompose_gram_if_authoritative
+from superglm.solvers.rank import RankDecomposition, decompose_gram_if_authoritative
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -26,13 +24,20 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
     equations, the intercept profiled out, through the fit's centred system and
     its caches, and solves them by Cholesky where the Gram certifies its own
     rank, else through the factor certificate of the grouped augmented design
-    (``certify_centered_factor``).  It keeps no reference to the fit, whose
-    state each method is handed, and its rank metadata takes the module route,
-    which may be deferred.
+    (``certify_centered_factor``).  Under the mean space's Newton steps the
+    score enters the right-hand side and the step is an increment
+    (``_IRLSDirectMeanSpaceOverlay``).  It keeps the iteration's decomposition,
+    whose truncated directions the true-score certificate judges
+    (``certificate_inputs``), and no reference to the fit, whose state each
+    method is handed; its rank metadata takes the module route, which may be
+    deferred.
     """
 
-    __slots__ = ()
+    __slots__ = ("_held_rank",)
     backend = "gram"
+
+    def __init__(self) -> None:
+        self._held_rank: RankDecomposition | None = None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
         # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
@@ -42,15 +47,9 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         proposal_centred_intercept = fit.proposal_centred_intercept
         centered = fit.get_centered_system(W, z_off)
         if newton_score is not None:
-            # the working mean of ``z_off`` is the centred intercept;
-            # the score moves it by sum(u) / sum(W) and the slopes'
-            # right-hand side by X~' u (the step itself is the increment
-            # below; the stored system is the one it solved)
-            centered = replace(
-                centered,
-                mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-                rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
-            )
+            # the score in the right-hand side (the step itself is the
+            # increment below; the stored system is the one it solved)
+            centered = fit.mean_space.centred_rhs(centered, newton_score, dm)
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0
         _t0 = time.perf_counter()
@@ -71,14 +70,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
             iteration_factor_rhs = certification.transformed_rhs
             fit.used_rank_certification = True
         if newton_score is not None:
-            # the increment, not the iterate: a direction the factor
-            # truncates keeps the iterate's component instead of the
-            # minimum-norm reset of solving for it (Pes & Rodriguez
-            # 2021, eqs. 1.2-1.4)
-            beta = fit.committed.beta + iteration_rank.solve(
-                centred_data_score(dm, newton_score, centered.mean_x)
-                - fit.penalty_matvec(fit.committed.beta)
-            )
+            beta = fit.mean_space.newton_iterate(fit, iteration_rank, centered, newton_score)
         else:
             beta = (
                 iteration_rank.solve(centered.rhs)
@@ -98,7 +90,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
             )
             intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
         fit._cond_est = iteration_rank.pre_truncation_condition
-        fit._held_rank[0] = iteration_rank
+        self._held_rank = iteration_rank
         fit._used_svd = iteration_rank.used_svd_fallback
         fit.rank_truncated = iteration_rank.rank_truncated
         if fit.convergence == "mode_score":
@@ -114,3 +106,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         fit._last_working_offset_mean = _last_working_offset_mean
         fit.proposal_centred_intercept = proposal_centred_intercept
         _note_svd_fallback(fit)
+
+    def certificate_inputs(self) -> tuple:
+        """The iteration's decomposition: the certificate judges its truncated directions."""
+        return self._held_rank, None, None, None

@@ -62,9 +62,6 @@ class _IRLSDirectStep(Protocol):
       coefficients'.
     - ``damped(fit)``: whether the retained step was damped in a way that
       bars a stop this iteration.
-    - ``latent_groups()``: the retained iterate's latent groups, each with its
-      spec, which the true-score certificate tests in their own coordinates
-      (``true_mode_residual``).
     - ``terminal(fit)``: the step's own state at the retained model, before the
       export rows are formed.
     - ``postfit(fit, result)``: the step's part of the publication; what it
@@ -79,7 +76,6 @@ class _IRLSDirectStep(Protocol):
     search: Callable[[_IRLSDirectFit, int], None] | None = None
     latent_change: Callable[[], float] | None = None
     damped: Callable[[_IRLSDirectFit], bool] | None = None
-    latent_groups: Callable[[], tuple] | None = None
     terminal: Callable[[_IRLSDirectFit], None] | None = None
     postfit: Callable[[_IRLSDirectFit, PIRLSResult], dict | None] | None = None
 
@@ -88,11 +84,25 @@ class _IRLSDirectStep(Protocol):
 
         It writes the proposal to the fit: ``beta``, ``intercept`` and
         ``proposal_centred_intercept``; the solve's ``_cond_est``, ``_used_svd``
-        and ``rank_truncated``, and ``_held_rank[0]`` where it holds a
-        decomposition; the system it solved (``_last_working_centered``, or the
-        step's own) and, under ``mode_score``, ``_score_centre``; and its time to
-        the recorder's phase timers.
+        and ``rank_truncated``; the system it solved (``_last_working_centered``,
+        or the step's own) and, under ``mode_score``, ``_score_centre``; and its
+        time to the recorder's phase timers.
         """
+
+    def certificate_inputs(self) -> tuple:
+        """What the binomial/log true-score certificate reads of this iteration's step.
+
+        ``(held_rank, active_rows, latent_columns, latent_groups)``
+        (``_IRLSDirectMeanSpaceOverlay.certify``): the decomposition the solve
+        holds, whose truncated directions it judges (QR and dense); the
+        constraint rows active at the proposal (QP); the columns it tests in
+        latent coordinates instead, and the retained iterate's latent groups,
+        each with its spec (SCOP).  ``None`` for each a step does not hold.
+        """
+        return _NO_CERTIFICATE_INPUTS
+
+
+_NO_CERTIFICATE_INPUTS = (None, None, None, None)
 
 
 def _note_svd_fallback(fit: _IRLSDirectFit) -> None:

@@ -366,16 +366,21 @@ class _IRLSDirectRecorder:
             profile["irls_total_s"] = profile.get("irls_total_s", 0.0) + self.t_elapsed
             profile["irls_calls"] = profile.get("irls_calls", 0) + 1
             profile["irls_iters"] = profile.get("irls_iters", 0) + (it + 1)
-            if fit._boundary_rows:
+            mean_space = fit.mean_space
+            if mean_space is not None and mean_space.boundary_rows:
                 profile["irls_mean_space_boundary_calls"] = (
                     profile.get("irls_mean_space_boundary_calls", 0) + 1
                 )
-            if fit._true_stop and fit._last_true_residual[0] is not None:
+            if (
+                mean_space is not None
+                and mean_space.true_stop
+                and mean_space.last_true_residual is not None
+            ):
                 # the true-score certificate decided the last iteration (Newton
                 # steps): its score, floors and exclusions are the stop rule's
-                true_residual = fit._last_true_residual[0]
+                true_residual = mean_space.last_true_residual
                 profile["irls_mode_rule"] = "mean_space_mode_score"
-                profile["irls_mode_score"] = mode_bar * fit._true_stop_ratio
+                profile["irls_mode_score"] = mode_bar * mean_space.true_stop_ratio
                 profile["irls_mode_bar"] = mode_bar
                 profile["irls_mode_floor_binding"] = true_residual.floor_binding
                 profile["irls_mode_weakly_identified"] = tuple(

@@ -433,7 +433,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
     __slots__ = (
         # setup
         "_run _state _specs _order _newton _reduced_dm _reduced_to_full _S_reduced"
-        " _reduced_tabmat_state _expose_exact_support _curvature _lambda2 _gaussian"
+        " _reduced_tabmat_state _expose_exact_support _curvature _lambda2 _gaussian _columns"
         # the merit (``initial_state``)
         " _outer_penalty _outer_penalty_abs _merit_errors _merit_gamma"
         " _gaussian_response_roundoff _nb2_unit_roundoff"
@@ -453,6 +453,13 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         centred system carries.
         """
         groups, gms, n, lambda2 = fit.groups, fit.gms, fit.n, fit.lambda2
+        # the columns the binomial/log certificate tests in the latent
+        # coordinates instead (``certificate_inputs``)
+        columns = np.zeros(fit.p, dtype=bool)
+        for g in groups:
+            if g.monotone_engine == "scop":
+                columns[g.sl] = True
+        self._columns = columns
         _scop_run = None
         _n_scop_groups = sum(g.monotone_engine == "scop" for g in groups)
         _expose_exact_support_state = False
@@ -1118,10 +1125,19 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         """
         return fit.n_halvings > 0
 
-    def latent_groups(self) -> tuple[tuple[_SCOPGroupState, SCOPGroupSpec], ...]:
-        """The retained iterate's latent groups, each with its spec."""
+    def certificate_inputs(self) -> tuple:
+        """The SCOP columns, and the retained iterate's latent groups, each with its spec.
+
+        The binomial/log certificate tests those columns in the groups' latent
+        coordinates instead (``_IRLSDirectMeanSpaceOverlay.certify``).
+        """
         specs = self._specs
-        return tuple((group, specs[group.group_index]) for group in self._retained.groups)
+        return (
+            None,
+            None,
+            self._columns,
+            tuple((group, specs[group.group_index]) for group in self._retained.groups),
+        )
 
     def terminal(self, fit: _IRLSDirectFit) -> None:
         """The SCOP Hessian caches at the retained model, from its Fisher rows.

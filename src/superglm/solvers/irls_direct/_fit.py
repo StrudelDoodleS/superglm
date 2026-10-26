@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,9 +22,6 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
-from superglm._roundoff import EPS as _EPS_FLOAT
-from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
-from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.distributions import (
     Binomial,
@@ -62,6 +59,7 @@ from superglm.solvers.constrained_qp import _feasibility_slack, _is_feasible
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.irls_direct._dense import _IRLSDirectDenseStep
+from superglm.solvers.irls_direct._mean_space import _IRLSDirectMeanSpaceOverlay
 from superglm.solvers.irls_direct._qp import _IRLSDirectQPStep
 from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
 from superglm.solvers.irls_direct._recorder import _IRLSDirectRecorder
@@ -79,38 +77,24 @@ from superglm.solvers.irls_state import (
     _irls_objective_scale,
     _IRLSState,
     _IRLSStepDecision,
-    _mean_space_halving_budget,
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
     interior_start_intercept,
     link_domain_violation,
-    mean_space_boundary_rows,
-    mean_space_clipped_rows,
-    mean_space_first_halving,
-    mean_space_log_likelihood_rows,
-    mean_space_newton_rows,
-    mean_space_score_rows,
     mean_space_violation,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
-    centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
-    null_basis_angle,
     penalized_mode_residual,
     prior_weighted_centre,
     rate_exhausts_budget,
-    row_set_quadratics,
-    row_set_residual,
-    row_sets,
     stagnation_window,
-    truncated_direction_ratio,
-    weighted_column_centring,
 )
 from superglm.solvers.pirls import (
     PIRLSResult,
@@ -144,10 +128,6 @@ from superglm.solvers.working_rows import (
     supports_observed_newton,
 )
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
-
-if TYPE_CHECKING:
-    from superglm.solvers.irls_direct._scop import _SCOPGroupState
-    from superglm.solvers.scop_newton import SCOPGroupSpec
 
 # the package's logger: its records keep the name they had when the solver was one module
 logger = logging.getLogger(__package__)
@@ -202,43 +182,6 @@ def _feature_edf(
     if scaled is None:
         scaled = decompose_factor(factor(exponent))
     return np.diag(scaled.pseudo_inverse() @ np.ldexp(centered.data_gram, -exponent)).copy()
-
-
-# The spacing of the subnormal numbers, 2^-1074, the smallest positive
-# float64.  Gradual underflow adds at most half of it to one operation
-# (Higham 2002, section 2.1); half is not representable (2.0**-1075 rounds to
-# 0), so the bounds below count the whole spacing per operation.
-_SUBNORMAL_SPACING = 2.0**-1074
-
-
-def _underflow_allowance(rows: int) -> float:
-    """The absolute error gradual underflow can add to a sum over ``rows`` rows and its two companions."""
-    return (rows + 2) * _SUBNORMAL_SPACING
-
-
-# The largest a coordinate's penalty terms may grow to in the certificate's
-# units, short of float64's 2^1024 by enough for the sums that use them.
-_PENALTY_HEADROOM_EXPONENT = 1000
-
-
-def _even_exponent(value: float) -> int:
-    """The even ``e`` with ``value * 2^-e`` in ``[1/4, 1)``; 0 for zero or non-finite ``value``."""
-    if not (value > 0.0 and math.isfinite(value)):
-        return 0
-    exponent = math.frexp(value)[1]
-    return exponent + (exponent % 2)
-
-
-def _column_shift(penalty_size: NDArray, weight_exponent: int) -> NDArray:
-    """Per coordinate, the even shift that keeps its penalty below ``2^1000`` in the weights' units.
-
-    ``penalty_size`` in the penalty's own units; the shift is 0 wherever the
-    penalty, divided by ``2^weight_exponent``, already fits.
-    """
-    size = np.asarray(penalty_size, dtype=np.float64)
-    exponents = np.where(size > 0.0, np.frexp(size)[1], 0)
-    excess = np.maximum(exponents - weight_exponent - _PENALTY_HEADROOM_EXPONENT, 0)
-    return (excess + excess % 2).astype(np.int64)
 
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
@@ -792,26 +735,25 @@ class _IRLSDirectFitFields:
         # _setup_design
         " dm n p gms objective_merit_scale structured_decision _use_structured step"
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
-        " _penalty_curvature _row_set_curvature"
+        " _penalty_curvature"
         # _setup_routes
-        " qp _scop_run _has_scop _scop_columns curvature"
+        " qp _scop_run _has_scop curvature"
         # _setup_systems
-        " _mean_space_newton_available _constant_centered_cache _constant_centered_z"
+        " mean_space _constant_centered_cache _constant_centered_z"
         " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
         " fixed_owners _initial_data_pending"
         # _setup_loop
         " converged XtWX_beta _last_working_centered _last_working_offset_mean _score_centre"
         " _last_mode_residual"
-        " _mode_ratios _stagnation_window score_stagnated _true_ratios _mean_space_newton"
-        " _true_stop _true_confirmed _true_stop_ratio _last_true_residual _held_rank"
-        " _judged_truncated _last_truncated _mean_space_invalid _link_domain_invalid"
+        " _mode_ratios _stagnation_window score_stagnated _mean_space_invalid"
+        " _link_domain_invalid"
         " objective_prev dev_prev eta_unclipped eta mu max_halving _consecutive_svd"
         " termination_reason deviance_relative_change mode_bar committed"
         # _working
         " beta_prev intercept_prev rank_truncated used_rank_certification"
         " proposal_centred_intercept"
         " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
-        " newton_committed_rows w_ratio"
+        " w_ratio"
         # the step (``step.propose``)
         " _cond_est _used_svd"
         # _search, or the step's own search
@@ -820,7 +762,7 @@ class _IRLSDirectFitFields:
         " convergence_label convergence_tolerance dev_rel_change coef_change"
         " convergence_value converged_this_iter"
         # _finish
-        " centred_intercept_lo _boundary_rows _published_truncated _truncated_boundary"
+        " centred_intercept_lo"
         # _terminal_rows
         " export_rows"
         # _final_system
@@ -1017,7 +959,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._setup_systems()
         recorder.start()
         self._setup_loop()
-        step = self.step
+        step, mean_space = self.step, self.mean_space
         search = step.search
         for it in range(self.max_iter):
             self._working(it)
@@ -1027,7 +969,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             else:
                 search(self, it)
             self._converge(it)
-            self._judge_mean_space()
+            if mean_space is not None:
+                mean_space.judge(self)
             self._terminate(it)
             recorder.iteration(self, it)
             dev, dev_prev = self.dev, self.dev_prev
@@ -1196,10 +1139,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.beta, self.intercept, self._start_lowered, self.S = beta, intercept, _start_lowered, S
         # diag(S), formed once per call on first use by the mode score (S is fixed)
         self._penalty_curvature: list[NDArray] = []
-        # d'Sd along each one-hot reference and joint-cell direction
-        # (``mode_score.row_set_quadratics``): one penalty product each, formed
-        # once per call on first use (S and the design are fixed within a call)
-        self._row_set_curvature: list[NDArray] = []
 
     def penalty_matvec(self, beta_values: NDArray, *, magnitude: bool = False) -> NDArray:
         """Apply the fitted penalty without expanding an identity random-effect block.
@@ -1325,365 +1264,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             penalty_rounding=self.penalty_rounding(),
         )
 
-    def true_mode_residual(
-        self,
-        beta_values: NDArray,
-        intercept_value: float,
-        eta_values: NDArray,
-        active_rows: NDArray | None,
-        scop_groups: tuple[tuple[_SCOPGroupState, SCOPGroupSpec], ...] | None,
-    ) -> tuple[float, bool]:
-        """The mode certificate on the binomial/log score itself, for a stop the clip can fool.
-
-        ``(ratio, resolved)``: the largest relative score over its bar
-        (``ModeResidual.ratio``), ``inf`` when the arithmetic cannot resolve
-        it, and whether every relative score is within ``MODE_RESOLVE_CAP``
-        (near the mode).  ``mode_residual``'s relative penalized score, bar,
-        floors and weak tests, evaluated on the score and Fisher weights of
-        the unclipped ``eta_values`` (``irls_state.mean_space_score_rows``)
-        and centred on those weights (``mode_score.weighted_column_centring``),
-        not on the clipped solve's system.
-
-        **Units.** Each relative score is a ratio of quantities of degree one
-        in the weights and the penalty taken together, so it does not depend
-        on their units; the arithmetic that forms it does.
-        - The prior weights are first brought by an even power of two to a
-          largest entry in ``[1/4, 1)``, before any row product, so no row
-          product underflows that would not at unit scale.
-        - Each coordinate then takes its own even power of two: the shift
-          that keeps its penalty terms, in the weights' new units, below
-          ``2^1000``, applied to its data terms too (``penalized_mode_residual``'s
-          ``column_shift``).  A data term that underflows there lies more
-          than ``2^-2000`` below the penalty beside it.
-        - Powers of two are exact on normal and subnormal values, and an even
-          one keeps ``zeta``'s square root exact.
-        - Gradual underflow adds at most half the subnormal spacing
-          ``2^-1074`` of absolute error to each operation (Higham 2002,
-          section 2.1), so a sum over ``n`` rows carries at most ``(n + 2)
-          2^-1074`` beyond its ``gamma_n`` relative error
-          (``_underflow_allowance``, the whole spacing per operation since
-          half of it is not representable).  Where that is not below the
-          bar's allowance, ``bar`` times an identified coordinate's scale,
-          the certificate cannot resolve the score and refuses: ``inf``,
-          never a pass.
-        - Slopes the weak test finds at rounding-level curvature are left out
-          of the ratio only while the iterate is at the mode along them: half
-          their block Newton decrement, over their penalised curvature block
-          (``weak_penalty_block`` for the penalty's part), within the
-          log-likelihood's own rounding over the rows the block touches,
-          ``gamma_{|S| + 4} sum_{i in S} |l_i|`` (``penalized_mode_residual``'s
-          ``decrement_noise``).  The penalty's rounding is left out of that
-          noise, which can only refuse.
-
-        **Constraints.** ``active_rows`` are the hard constraints ``a' beta >=
-        b`` active at the iterate.  A constrained mode is stationary when ``G
-        + A' m = 0`` with ``m >= 0``, so the residual tested is ``G + A' m``
-        at the non-negative least-squares ``m`` of its Jacobi-scaled form.
-        Each row is put in the coordinates' units, brought to a largest entry
-        in ``[1/2, 1)`` by a power of two and then to unit length: this leaves
-        the cone it spans unchanged, and its own units can neither overflow
-        nor vanish in the norm.
-
-        **SCOP.** ``scop_groups`` pairs each shape-constrained group's state
-        with its spec (the step's ``latent_groups``).  A shape-constrained
-        group's coefficients are its latent
-        ``theta``, with ``gamma = forward(theta)``.  Its stationarity is the
-        latent score ``J' B' s - lambda S theta`` (``J = d gamma / d theta``,
-        diagonal).  The groups' latent scores are projected together off the
-        joint directions their Newton step could not resolve, and tested in
-        the same relative form, bar and floor, in the weights' units (a latent
-        penalty that overflows there is refused).
-        """
-        dm, lambda2, p, y, weights = self.dm, self.lambda2, self.p, self.y, self.weights
-        mode_bar, _penalty_curvature = self.mode_bar, self._penalty_curvature
-        _row_set_curvature, penalty_matvec = self._row_set_curvature, self.penalty_matvec
-        penalty_rounding = self.penalty_rounding
-        self._last_true_residual[0] = None
-        # this state is judged: no truncated direction unless one is found below
-        self._judged_truncated[0] = (eta_values, ())
-        positive = weights > 0.0
-        largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
-        weight_exponent = _even_exponent(largest_weight)
-        score, fisher = mean_space_score_rows(y, np.ldexp(weights, -weight_exponent), eta_values)
-        if not (np.all(np.isfinite(score)) and np.all(np.isfinite(fisher))):
-            return math.inf, False
-        if not _penalty_curvature:
-            _penalty_curvature.append(self.penalty_curvature())
-        penalty_score = penalty_matvec(beta_values)
-        penalty_magnitude = penalty_matvec(beta_values, magnitude=True)
-        curvature = np.asarray(_penalty_curvature[0], dtype=np.float64)
-        if not (
-            np.all(np.isfinite(penalty_score))
-            and np.all(np.isfinite(penalty_magnitude))
-            and np.all(np.isfinite(curvature))
-        ):
-            return math.inf, False
-        shift = _column_shift(
-            np.maximum(np.abs(penalty_magnitude), np.abs(curvature)), weight_exponent
-        )
-        penalty_score = np.ldexp(penalty_score, -weight_exponent - shift)
-        penalty_magnitude = np.ldexp(penalty_magnitude, -weight_exponent - shift)
-        curvature = np.ldexp(curvature, -weight_exponent - shift)
-        mean_x, sum_w, diagonal = weighted_column_centring(dm, fisher, positive)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
-        excluded = np.zeros(p, dtype=bool)
-        excluded[list(self._laplace_excluded)] = True
-        if self._scop_columns is not None:
-            excluded |= self._scop_columns
-        tiny = float(np.finfo(np.float64).tiny)
-        zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
-        if active_rows is not None and active_rows.size:
-            rows = np.ldexp(np.asarray(active_rows, dtype=np.float64), -shift[None, :])
-            largest_entry = np.max(np.abs(rows), axis=1)
-            rows = rows[largest_entry > 0.0]
-            exponents = np.frexp(largest_entry[largest_entry > 0.0])[1]
-            rows = np.ldexp(rows, -exponents[:, None])
-            rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
-            gradient = np.ldexp(centred_data_score(dm, score, mean_x), -shift) - penalty_score
-            jacobi = np.ldexp(np.full(p, zeta), -(shift // 2)) * np.sqrt(
-                np.ldexp(np.maximum(diagonal, 0.0), -shift) + np.maximum(curvature, 0.0)
-            )
-            jacobi = jacobi + np.abs(penalty_score)
-            # any positive diagonal gives a valid m >= 0; keeping it within
-            # eps of its largest entry keeps the scaled rows finite
-            jacobi = np.maximum(jacobi, _EPS_FLOAT * max(float(np.max(jacobi, initial=0.0)), 1.0))
-            if rows.size and np.all(np.isfinite(gradient)) and np.all(np.isfinite(jacobi)):
-                from scipy.optimize import nnls
-
-                try:
-                    multipliers = nnls(rows.T / jacobi[:, None], -gradient / jacobi)[0]
-                except RuntimeError:  # the active-set iteration's own limit
-                    multipliers = np.zeros(rows.shape[0])
-                penalty_score = penalty_score - rows.T @ multipliers
-                penalty_magnitude = penalty_magnitude + np.abs(rows).T @ multipliers
-        centre_shift = float(mean_x @ beta_values)
-
-        likelihood_rows: list = []
-
-        def likelihood_noise(support: NDArray) -> float:
-            # the log-likelihood's rounding over the rows a weak block touches
-            # (``penalized_mode_residual``): gamma for the terms summed there,
-            # plus each row's own few roundings
-            if not likelihood_rows:
-                likelihood_rows.append(
-                    np.abs(
-                        mean_space_log_likelihood_rows(
-                            y, np.ldexp(weights, -weight_exponent), eta_values
-                        )
-                    )
-                )
-            touched = np.asarray(support, dtype=bool) & positive
-            noise = _gamma(int(np.count_nonzero(touched)) + 4) * float(
-                np.sum(likelihood_rows[0][touched])
-            )
-            return noise if math.isfinite(noise) else 0.0
-
-        def weak_penalty_block(columns: NDArray) -> NDArray:
-            # the penalty's block on a few weakly identified slopes, in the
-            # weights' units: one penalty product per slope
-            block = np.empty((len(columns), len(columns)))
-            for position, column in enumerate(columns):
-                unit = np.zeros(p)
-                unit[column] = 1.0
-                block[:, position] = penalty_matvec(unit)[columns]
-            with np.errstate(over="ignore"):
-                return np.ldexp(0.5 * (block + block.T), -weight_exponent)
-
-        residual = penalized_mode_residual(
-            dm=dm,
-            row_score=score,
-            fisher_weights=fisher,
-            positive_prior=positive,
-            mean_x=mean_x,
-            centered_scale=np.where(np.isfinite(scale), scale, 0.0),
-            alpha=float(intercept_value) + centre_shift,
-            eta_tilde=eta_values - self.offset - float(intercept_value) - centre_shift,
-            penalty_score=penalty_score,
-            penalty_magnitude=penalty_magnitude,
-            penalty_curvature=curvature,
-            sum_w=sum_w,
-            bar=mode_bar,
-            excluded=excluded,
-            resolve_cap=MODE_RESOLVE_CAP,
-            column_shift=shift,
-            decrement_noise=likelihood_noise,
-            penalty_block=weak_penalty_block,
-            penalty_rounding=penalty_rounding(),
-        )
-        self._last_true_residual[0] = residual
-        rows_n = int(np.count_nonzero(positive))
-        underflow = _underflow_allowance(rows_n)
-        assert residual.scale is not None
-        identified = np.concatenate(([True], ~residual.excluded))
-        if np.any(mode_bar * residual.scale[identified] <= underflow):
-            return math.inf, False
-        ratio = residual.ratio()
-        # every set of rows the one-hot blocks move on their own, certified on
-        # its own rows (``mode_score.row_set_residual``); the sets are the
-        # design's, formed once per design (``mode_score.row_sets``)
-        sets = row_sets(dm)
-        if not _row_set_curvature:
-            _row_set_curvature.append(
-                row_set_quadratics(sets, p, penalty_matvec, penalty_rounding())
-            )
-        with np.errstate(over="ignore", invalid="ignore"):
-            column_penalty = np.ldexp(penalty_score, shift)
-            column_penalty_size = np.ldexp(penalty_magnitude, shift)
-            column_curvature = np.ldexp(curvature, shift)
-            set_curvature = np.ldexp(_row_set_curvature[0], -weight_exponent)
-        ratio = max(
-            ratio,
-            row_set_residual(
-                sets=sets,
-                row_score=score,
-                response=y,
-                fisher_weights=fisher,
-                positive_prior=positive,
-                eta=eta_values,
-                column_penalty=column_penalty,
-                column_penalty_size=column_penalty_size,
-                column_curvature=column_curvature,
-                set_curvature=set_curvature,
-                bar=mode_bar,
-                underflow=underflow,
-                penalty_rounding=penalty_rounding(),
-            ),
-        )
-        # the directions the factorization this iteration holds truncates,
-        # judged on the rows they move (``mode_score.truncated_direction_ratio``):
-        # a light row set the relative score sums beside the heavy rows'
-        # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
-        held_rank = self._held_rank[0]
-        if (
-            held_rank is not None
-            and held_rank.parameter_null_basis is not None
-            and (active_rows is None or not active_rows.size)
-            and not scop_groups
-        ):
-            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-                truncated_ratio, truncated = truncated_direction_ratio(
-                    dm=dm,
-                    null_basis=held_rank.parameter_null_basis,
-                    angle=null_basis_angle(held_rank, self.n),
-                    mean_x=mean_x,
-                    row_score=score,
-                    fisher_weights=fisher,
-                    response=y,
-                    positive_prior=positive,
-                    penalty_gradient=np.ldexp(penalty_matvec(beta_values), -weight_exponent),
-                    penalty_size=np.ldexp(
-                        penalty_matvec(beta_values, magnitude=True), -weight_exponent
-                    ),
-                    penalty_apply=lambda v: np.ldexp(penalty_matvec(v), -weight_exponent),
-                    bar=mode_bar,
-                    underflow=underflow,
-                    column_scale=held_rank.column_scale,
-                    eta=eta_values,
-                    penalty_size_apply=lambda v: np.ldexp(
-                        penalty_matvec(v, magnitude=True), -weight_exponent
-                    ),
-                    penalty_rounding=penalty_rounding(),
-                )
-            ratio = max(ratio, truncated_ratio)
-            self._judged_truncated[0] = (eta_values, truncated)
-            if truncated:
-                self._last_truncated[0] = (eta_values, truncated)
-            if truncated_ratio == math.inf:
-                # refused because the basis or the arithmetic cannot resolve
-                # the truncated rows (an ``unresolved_basis`` record)
-                self.recorder.count("irls_truncated_unresolved")
-        resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
-        latent_parts = []
-        for group_state, spec in scop_groups or ():
-            group = spec.group
-            lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
-            theta = np.asarray(group_state.beta_eff, dtype=np.float64)
-            penalty_matrix = np.asarray(spec.S_scop, dtype=np.float64)
-            with np.errstate(over="ignore", invalid="ignore"):
-                pull = np.ldexp(lam * (penalty_matrix @ theta), -weight_exponent)
-                pull_size = np.ldexp(
-                    lam * (np.abs(penalty_matrix) @ np.abs(theta)), -weight_exponent
-                )
-                pull_diagonal = np.ldexp(lam * np.diag(penalty_matrix), -weight_exponent)
-            # a latent penalty past float64 beside the data's units: refused
-            # (the shape-constrained groups are tested in the weights' units)
-            if not (
-                np.all(np.isfinite(pull))
-                and np.all(np.isfinite(pull_size))
-                and np.all(np.isfinite(pull_diagonal))
-            ):
-                return math.inf, False
-            bins = spec.bin_idx
-            basis = np.asarray(spec.B_scop, dtype=np.float64)
-
-            def by_bin(values: NDArray, bins=bins, basis=basis) -> NDArray:
-                if bins is None:
-                    return values
-                return np.bincount(bins, weights=values, minlength=basis.shape[0])
-
-            jacobian = spec.reparam.jacobian_diagonal(theta)
-            latent_parts.append(
-                (
-                    group_state,
-                    theta,
-                    jacobian * (basis.T @ by_bin(score)) - pull,
-                    jacobian**2 * ((basis**2).T @ by_bin(fisher)) + pull_diagonal,
-                    np.abs(pull),
-                    pull_size,
-                    np.abs(jacobian) * (np.abs(basis).T @ by_bin(np.abs(score))),
-                )
-            )
-        if latent_parts:
-            # The joint step truncates one factor across every SCOP group and
-            # hands each group its own columns of each discarded direction, so
-            # the groups' blocks reassemble row by row into the joint
-            # directions (a group absent here holds zeros in them).  The
-            # concatenated latent score is projected once off their span,
-            # which an SVD finds with its rank (a QR would invent a direction
-            # for a zero block).
-            widths = [part[1].size for part in latent_parts]
-            offsets = np.concatenate(([0], np.cumsum(widths)))
-            blocks = [
-                (k, np.asarray(part[0].discarded_directions, dtype=np.float64))
-                for k, part in enumerate(latent_parts)
-                if part[0].discarded_directions is not None
-                and np.asarray(part[0].discarded_directions).ndim == 2
-                and np.asarray(part[0].discarded_directions).shape[0] > 0
-            ]
-            gradient = np.concatenate([part[2] for part in latent_parts])
-            if blocks:
-                counts = {rows.shape[0] for _, rows in blocks}
-                if len(counts) != 1:  # pragma: no cover - joint-step invariant
-                    raise RuntimeError(
-                        "the joint SCOP step handed its groups different discarded directions"
-                    )
-                directions = np.zeros((counts.pop(), int(offsets[-1])))
-                for k, rows in blocks:
-                    directions[:, offsets[k] : offsets[k + 1]] = rows
-                left, singular, _ = np.linalg.svd(directions.T, full_matrices=False)
-                cutoff = float(np.max(singular, initial=0.0)) * directions.shape[1] * _EPS_FLOAT
-                frozen = left[:, singular > cutoff]
-                gradient = gradient - frozen @ (frozen.T @ gradient)
-            curvature_all = np.concatenate([part[3] for part in latent_parts])
-            pull_all = np.concatenate([part[4] for part in latent_parts])
-            size_all = np.concatenate([part[5] for part in latent_parts])
-            evaluation = np.concatenate([part[6] for part in latent_parts])
-            latent_scale = np.maximum(
-                tiny, zeta * np.sqrt(np.maximum(curvature_all, 0.0)) + pull_all
-            )
-            if np.any(mode_bar * latent_scale <= underflow):
-                return math.inf, False
-            relative = np.abs(gradient) / latent_scale
-            floor = (
-                _gamma(rows_n) * evaluation
-                + _gamma(int(offsets[-1]) + 2) * size_all
-                + _UNIT_ROUNDOFF_FLOAT * size_all
-            ) / latent_scale
-            ratio = max(ratio, float(np.max(relative / np.maximum(mode_bar, floor), initial=0.0)))
-            resolved = resolved and bool(np.max(relative, initial=0.0) <= MODE_RESOLVE_CAP)
-        return ratio, resolved
-
     def evaluate_state(
         self,
         beta_values: NDArray,
@@ -1773,14 +1353,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # ── SCOP monotone engine support ──
         _has_scop = any(g.monotone_engine == "scop" for g in groups)
         self._scop_run: SCOPRunCentring | None = None
-        # the columns the binomial/log certificate tests in SCOP's latent
-        # coordinates instead (``true_mode_residual``)
-        _scop_columns: NDArray | None = None
-        if _has_scop:
-            _scop_columns = np.zeros(self.p, dtype=bool)
-            for g in groups:
-                if g.monotone_engine == "scop":
-                    _scop_columns[g.sl] = True
         if (
             _state_center is None
             and not self._use_structured
@@ -1827,7 +1399,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             has_scop=_has_scop,
             use_structured=self._use_structured,
         )
-        self._has_scop, self._scop_columns = _has_scop, _scop_columns
+        self._has_scop = _has_scop
         self._state_center = _state_center
         if _has_scop:
             # The step is chosen with its route.  Its setup evaluates the start,
@@ -1844,11 +1416,19 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # full design once.
         # Constrained QP / SCOP requires Gram path — force it if constraints present
         _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
-        self._mean_space_newton_available = bool(
-            mean_space_violation(family, link) is not None
-            and not _use_qr
-            and not _has_scop
-            and not self._return_working_system
+        # The binomial/log mean space's overlay, ``None`` for a family and link
+        # whose means cannot leave their space: its certificate judges every
+        # route, and its Newton steps are available off the QR route (whose
+        # least squares cannot carry a zero-curvature row's score), the SCOP
+        # route (which takes its own Newton steps) and the fREML performance
+        # iteration.
+        self.mean_space = (
+            None
+            if mean_space_violation(family, link) is None
+            else _IRLSDirectMeanSpaceOverlay(
+                available=not (_use_qr or _has_scop or self._return_working_system),
+                start_lowered=self._start_lowered,
+            )
         )
         if not (_use_structured or has_constraints or _has_scop):
             self.step: _IRLSDirectStep = (
@@ -2080,31 +1660,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
         self._stagnation_window = stagnation_window(self.max_iter, mode_bar)
         self.score_stagnated = False
-        # the binomial/log score's certificate ratio at every stop it refused
-        # (``true_mode_residual``), for the same stagnation stop
-        self._true_ratios: list[float] = []
-        # Newton steps on the observed information once the certificate refused
-        # a stop near the mode or its refused score stalled (below); never on the
-        # QR route (whose least squares cannot carry a zero-curvature row's
-        # score) or the SCOP route (which takes its own Newton steps)
-        self._mean_space_newton = False
-        # Whether the true-score certificate decided the last iteration under
-        # Newton steps, its ratio there, and its last residual: the diagnostics
-        # then publish that rule's numbers, and ``PIRLSResult.mean_space_true_mode``
-        # tells a criterion read at the state that it is the model's own mode.
-        self._true_stop = False
-        self._true_confirmed = False
-        self._true_stop_ratio = math.inf
-        self._last_true_residual: list[ModeResidual | None] = [None]
-        # the decomposition this iteration's solve holds (gram and qr routes); the
-        # latest certificate's judgement of the truncated directions
-        # (``truncated_direction_ratio``) with the state it judged (its eta), and
-        # the latest judgement that found any.  Only a judgement of the returned
-        # state decides the fit's verdict; an earlier one is published as history
-        # (below)
-        self._held_rank: list = [None]
-        self._judged_truncated: list[tuple] = [(None, ())]
-        self._last_truncated: list[tuple] = [(None, ())]
 
         # The family's mean space, when the link's inverse can leave it (declared
         # by the family and link, ``irls_state.mean_space_violation``).
@@ -2182,9 +1737,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.mode_bar, self.committed = mode_bar, committed
 
     def _working(self, it: int) -> None:
-        committed, family, link, y = self.committed, self.family, self.link, self.y
-        weights, recorder = self.weights, self.recorder
-        self._held_rank[0] = None
+        committed, family, link = self.committed, self.family, self.link
+        recorder, mean_space = self.recorder, self.mean_space
         self.beta_prev = committed.beta
         self.intercept_prev = committed.intercept
         self.beta = committed.beta.copy()
@@ -2198,24 +1752,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         working_rows = self.curvature.working_rows(self.mu, self.eta)
         W = working_rows.weights
         z = working_rows.response
-        # binomial/log Newton rows once engaged (refusal block below): the
-        # observed curvature and the score of the unclipped eta, the step in
-        # score form.  ``z`` is then the predictor itself, so ``W (z - eta)``
-        # adds nothing and the score enters on its own; a state holding rows
-        # at the boundary keeps Fisher's rows.
+        # the mean space's Newton rows once engaged, in score form
+        # (``_IRLSDirectMeanSpaceOverlay.newton_rows``)
         newton_score: NDArray | None = None
-        newton_committed_rows: NDArray | None = None
-        if self._mean_space_newton and not mean_space_boundary_rows(
-            family, link, committed.eta_unclipped, weights
-        ):
-            newton_rows = mean_space_newton_rows(y, weights, committed.eta_unclipped)
+        if mean_space is not None and mean_space.engaged:
+            newton_rows = mean_space.newton_rows(self, committed)
             if newton_rows is not None:
-                W, newton_score = newton_rows
-                z = np.array(committed.eta_unclipped, dtype=np.float64)
-                newton_committed_rows = mean_space_log_likelihood_rows(
-                    y, weights, committed.eta_unclipped
-                )
-                recorder.count("irls_mean_space_newton_iters")
+                W, newton_score, z = newton_rows
         if working_rows.rejection_reason is not None:
             # Every accepted trial of an observed fit had finite rows (the
             # line search rejects the others), so only the entry state can
@@ -2246,14 +1789,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 positive_w_max,
             )
         self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
-        self.newton_committed_rows, self.w_ratio = newton_committed_rows, w_ratio
+        self.w_ratio = w_ratio
 
     def _search(self, it: int) -> None:
         beta, intercept, committed = self.beta, self.intercept, self.committed
-        qp, newton_score = self.qp, self.newton_score
-        newton_committed_rows, y, weights = self.newton_committed_rows, self.y, self.weights
+        qp, newton_score, mean_space = self.qp, self.newton_score, self.mean_space
+        y, weights = self.y, self.weights
         family, link, _mean_space_invalid = self.family, self.link, self._mean_space_invalid
-        _link_domain_invalid, _start_lowered = self._link_domain_invalid, self._start_lowered
+        _link_domain_invalid = self._link_domain_invalid
         max_halving, penalty_matvec = self.max_halving, self.penalty_matvec
         evaluate_state, recorder = self.evaluate_state, self.recorder
         _t0 = time.perf_counter()
@@ -2331,34 +1874,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     abs_A=abs_A_all,
                 )
 
-        # the last trial's rows, read by both the decrease and its
-        # round-off allowance: one log1mexp pass per trial
-        _trial_rows: list = [None, None]
-
-        def _newton_rows_at(state: _IRLSState) -> NDArray:
-            if state is committed and newton_committed_rows is not None:
-                return newton_committed_rows
-            if _trial_rows[0] is not state:
-                _trial_rows[0] = state
-                _trial_rows[1] = mean_space_log_likelihood_rows(y, weights, state.eta_unclipped)
-            return _trial_rows[1]
-
-        def _newton_deviance_delta(candidate: _IRLSState, base: _IRLSState) -> float:
-            # each row's change first, then numpy's pairwise sum
-            return float(-2.0 * np.sum(_newton_rows_at(candidate) - _newton_rows_at(base)))
-
-        def _newton_merit_roundoff(candidate: _IRLSState, base: _IRLSState) -> float:
-            # The true deviance's own magnitudes: the rows' sizes (the
-            # log1mexp and product roundings, and the pairwise sum's
-            # gamma_{log2 n + 8}, are within 64 eps of them for any n
-            # below 2^50), plus each state's penalty part.
-            size = float(np.sum(np.abs(_newton_rows_at(candidate))))
-            size += float(np.sum(np.abs(_newton_rows_at(base))))
-            for state in (candidate, base):
-                if state.penalized_deviance is not None:
-                    size += abs(float(state.penalized_deviance) - float(state.deviance))
-            return 64.0 * _EPS_FLOAT * 2.0 * size
-
         trial_is_invalid = constraint_trial_is_invalid
         if _mean_space_invalid is not None and not _mean_space_invalid(
             committed.eta_unclipped, weights
@@ -2382,6 +1897,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     return True
                 return other is not None and other(candidate)
 
+        # the mean space's hooks (``_IRLSDirectMeanSpaceOverlay.line_search``):
+        # its first halving, a lowered start's budget and, under Newton steps,
+        # the merit on the model's own deviance
+        first_halving = lowered_budget = newton_delta = newton_roundoff = None
+        if mean_space is not None:
+            first_halving, lowered_budget, newton_delta, newton_roundoff = mean_space.line_search(
+                self, committed, proposal, newton_score
+            )
         decision = _select_irls_trial(
             committed=committed,
             proposal=proposal,
@@ -2398,40 +1921,17 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     link=link,
                     default=max_halving,
                 ),
-                # a lowered start can sit far inside the space with a
-                # proposal far outside it, past the ordinary budget
-                _mean_space_halving_budget(
-                    committed=committed,
-                    proposal=proposal,
-                    weights=weights,
-                    family=family,
-                    link=link,
-                    default=max_halving,
-                )
-                if _start_lowered
-                else max_halving,
+                max_halving if lowered_budget is None else lowered_budget(),
             ),
             merit_scale=self.objective_merit_scale,
-            # a Newton step is judged on the model's own deviance, which
-            # still sees the rows clip_mu holds; Fisher's on the clipped one
             merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                 candidate,
                 base,
                 penalty_matvec,
-                deviance_delta=None
-                if newton_score is None
-                else _newton_deviance_delta(candidate, base),
+                deviance_delta=None if newton_delta is None else newton_delta(candidate, base),
             ),
-            merit_roundoff=None if newton_score is None else _newton_merit_roundoff,
-            # a proposal that leaves the space: the halvings above the
-            # boundary are refused without a deviance pass each
-            first_halving=lambda: mean_space_first_halving(
-                committed=committed,
-                proposal=proposal,
-                weights=weights,
-                family=family,
-                link=link,
-            ),
+            merit_roundoff=newton_roundoff,
+            first_halving=first_halving,
         )
         if decision.skipped:
             recorder.count("irls_halvings_skipped", decision.skipped)
@@ -2644,92 +2144,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.convergence_value, self.converged_this_iter = convergence_value, converged_this_iter
         self.score_stagnated, self._last_mode_residual = score_stagnated, _last_mode_residual
 
-    def _judge_mean_space(self) -> None:
-        _mean_space_newton, _stagnation_window = self._mean_space_newton, self._stagnation_window
-        _true_ratios, converged_this_iter = self._true_ratios, self.converged_this_iter
-        family, link, retained, weights = self.family, self.link, self.retained, self.weights
-        score_stagnated = self.score_stagnated
-        # Once Newton steps are engaged the model's own certificate is the
-        # stop, every iteration: the clipped rule a mode_score fit stops on
-        # cannot pass at a mode it does not see (below).
-        newton_stop = bool(_mean_space_newton and np.isfinite(self.dev) and not self.step_rejected)
-        # A state holding rows at the boundary is never published as converged
-        # (``mean_space_boundary`` below), so its stop stands as on master.
-        at_boundary = bool(
-            (converged_this_iter or newton_stop)
-            and self._mean_space_invalid is not None
-            and mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
-        )
-        # rows clip_mu holds, at the step's base or where it landed
-        clipped_rows = (
-            mean_space_clipped_rows(family, link, self.committed.eta_unclipped, weights)
-            + mean_space_clipped_rows(family, link, retained.eta_unclipped, weights)
-            if converged_this_iter and self._mean_space_invalid is not None and not at_boundary
-            else 0
-        )
-        _true_confirmed = False
-        if not at_boundary and (
-            newton_stop or (converged_this_iter and (clipped_rows or self._start_lowered))
-        ):
-            # On a row whose mean leaves clip_mu's band the clipped deviance
-            # is flat and the step's score is not the binomial/log score, and
-            # a lowered start can sit far below that band: a stop read off
-            # the clipped objective, or off a step taken from it, is accepted
-            # only where the model's own penalized score certifies it
-            # (``true_mode_residual``).  A refused stop goes on.  Each refused
-            # stop sits where the iteration's own rule passed, so a score that
-            # has stopped contracting across them (``stagnation_window``) will
-            # not reach the bar: the fit ends uncertified, as under
-            # ``mode_score``.  Under Newton steps the certificate alone
-            # decides, at every iteration, and its own ratios alone stagnate.
-            latent_groups, qp = self.step.latent_groups, self.qp
-            true_ratio, true_resolved = self.true_mode_residual(
-                retained.beta,
-                retained.intercept,
-                retained.eta_unclipped,
-                qp.A_all[list(qp.active_set)] if qp is not None and qp.active_set else None,
-                None if latent_groups is None else latent_groups(),
-            )
-            # the state is certified on the model's own score, Newton or not,
-            # where the clip holds a row (or Newton decided): a criterion read
-            # at it reads the model's own likelihood and curvature
-            _true_confirmed = bool(true_ratio <= 1.0 and (newton_stop or clipped_rows))
-            if newton_stop:
-                converged_this_iter = bool(true_ratio <= 1.0)
-                score_stagnated = False
-                # this rule decided: its numbers are the ones published
-                self.convergence_label = "mean_space_mode_score"
-                self.convergence_value = self.mode_bar * true_ratio
-                self.convergence_tolerance = self.mode_bar
-                self._true_stop_ratio = true_ratio
-            if not true_ratio <= 1.0:
-                converged_this_iter = False
-                _true_ratios.append(true_ratio)
-                score_stagnated = len(_true_ratios) > _stagnation_window and not (
-                    min(_true_ratios[-_stagnation_window:])
-                    < 0.5 * min(_true_ratios[:-_stagnation_window])
-                )
-                if (
-                    self._mean_space_newton_available
-                    and not _mean_space_newton
-                    and (true_resolved or score_stagnated)
-                ):
-                    # Fisher scoring has carried the fit to where its own
-                    # stop passes but the model's score does not: near the
-                    # mode (resolved), or where scoring has stalled.  The
-                    # iterations left take Newton steps on the observed
-                    # information (``irls_state.mean_space_newton_rows``),
-                    # which converge quadratically where scoring is linear;
-                    # far from the mode Fisher's steps stay the safer ones
-                    # (Green 1984, section 2.3 and its discussion).
-                    _mean_space_newton = True
-                    _true_ratios.clear()
-                    score_stagnated = False
-
-        self._true_stop = bool(newton_stop and not at_boundary)
-        self.converged_this_iter, self.score_stagnated = converged_this_iter, score_stagnated
-        self._true_confirmed, self._mean_space_newton = _true_confirmed, _mean_space_newton
-
     def _terminate(self, it: int) -> None:
         converged_this_iter, step_rejected = self.converged_this_iter, self.step_rejected
         dev, max_iter, qp = self.dev, self.max_iter, self.qp
@@ -2787,7 +2201,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         retained, family, link, beta = self.retained, self.family, self.link, self.beta
         weights, eta_unclipped, eta, mu = self.weights, self.eta_unclipped, self.eta, self.mu
         dev, converged, qp = self.dev, self.converged, self.qp
-        termination_reason, _last_truncated = self.termination_reason, self._last_truncated
+        termination_reason = self.termination_reason
 
         # A published Gaussian identity fit carries its centred intercept as the
         # compensated pair (alpha, alpha_lo): alpha's weighted mean rounds by a
@@ -2893,67 +2307,15 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     "constrained-QP KKT certificate; fit is not converged."
                 )
 
-        # A returned state with rows at the mean-space boundary is not a mode of
-        # the model: their capped mean makes the deviance flat there, and the
-        # maximum it approaches is constrained, not stationary.  It is never
-        # converged, whatever stopped the loop (``mean_space_boundary_rows``).
-        _boundary_rows = (
-            0
-            if self._mean_space_invalid is None
-            else mean_space_boundary_rows(family, link, eta_unclipped, weights)
-        )
-        if _boundary_rows:
-            converged = False
-            termination_reason = "mean_space_boundary"
-            logger.info(
-                "fit_irls_direct: %d row(s) at the boundary of the family's mean space; "
-                "the penalized maximum is constrained, fit is not converged.",
-                _boundary_rows,
-            )
-        # The truncated directions published.  A judgement of the returned state
-        # (the certificate read its eta) is the fit's own: published as it is, and
-        # the only one that may decide the verdict.  The returned state of a
-        # rejected step is the committed one, so its judgement counts.  When the
-        # returned state was never judged, a fit that is not converged publishes
-        # the latest judgement that found any as history (``earlier``), so a
-        # refusal stays disclosed, and it decides nothing.
-        _judged_eta, _judged = self._judged_truncated[0]
-        if _judged_eta is not None and _judged_eta is eta_unclipped:
-            _published_truncated = _judged
-        elif converged:
-            _published_truncated = ()
-        else:
-            _published_truncated = tuple(
-                replace(record, earlier=True) for record in _last_truncated[0][1]
-            )
-        _boundary_sets = [
-            record for record in _published_truncated if record.boundary and not record.earlier
-        ]
-        # rows rising to the boundary along a direction the factorization
-        # truncates relabel only an exit the loop ran out on, never a
-        # non-finite deviance or a constraint's verdict
-        _truncated_boundary = bool(
-            not converged
-            and not _boundary_rows
-            and _boundary_sets
-            and termination_reason in ("max_iter", "score_stagnated", "step_rejected")
-        )
-        if _truncated_boundary:
-            # rows whose supremum along a direction the factorization truncates
-            # is the boundary (``TruncatedDirection.boundary``): the same verdict
-            # as rows held at it, though float64 cannot carry them there
-            termination_reason = "mean_space_boundary"
-            _boundary_rows = sum(record.row_count for record in _boundary_sets)
-            logger.info(
-                "fit_irls_direct: %d row(s) rise towards the boundary of the family's mean "
-                "space along a direction float64 cannot resolve; fit is not converged.",
-                _boundary_rows,
+        # the mean space's boundary verdict on the returned state (F04)
+        mean_space = self.mean_space
+        if mean_space is not None:
+            converged, termination_reason = mean_space.final(
+                self, eta_unclipped, converged, termination_reason
             )
         self.centred_intercept_lo = centred_intercept_lo
         self.eta_unclipped, self.eta, self.mu, self.dev = eta_unclipped, eta, mu, dev
         self.converged, self.termination_reason = converged, termination_reason
-        self._boundary_rows, self._published_truncated = _boundary_rows, _published_truncated
-        self._truncated_boundary = _truncated_boundary
 
     def _terminal_rows(self) -> None:
         W, z, terminal = self.W, self.z, self.step.terminal
@@ -3127,7 +2489,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
         _compute_fit_statistics, family, y = self._compute_fit_statistics, self.family, self.y
         weights, p_eff, retained = self.weights, self.p_eff, self.retained
-        XtWX_S_inv_beta = self.XtWX_S_inv_beta
+        XtWX_S_inv_beta, mean_space = self.XtWX_S_inv_beta, self.mean_space
         _resolved_direct_backend = self.step.backend
         self.recorder.disclose_backend(self, _resolved_direct_backend)
 
@@ -3177,10 +2539,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             centred_intercept=retained.centred_intercept,
             state_center=None if retained.centred_intercept is None else self._state_center,
             centred_intercept_lo=self.centred_intercept_lo,
-            mean_space_boundary_rows=self._boundary_rows,
-            mean_space_true_mode=bool(self.converged and self._true_confirmed),
-            truncated_directions=self._published_truncated,
-            mean_space_boundary_unresolved=self._truncated_boundary,
+            mean_space_boundary_rows=0 if mean_space is None else mean_space.boundary_rows,
+            mean_space_true_mode=bool(
+                self.converged and mean_space is not None and mean_space.true_confirmed
+            ),
+            truncated_directions=() if mean_space is None else mean_space.published_truncated,
+            mean_space_boundary_unresolved=(
+                mean_space is not None and mean_space.truncated_boundary
+            ),
         )
 
         # the step's part of the publication: the SCOP latent states and inference

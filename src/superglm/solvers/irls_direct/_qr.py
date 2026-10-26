@@ -58,12 +58,14 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
 
     Taken when the fit has no linear constraints and no SCOP group.  It
     materialises the dense ``(n, p)`` design and the penalty's square root once,
-    at setup, and keeps them; it keeps no reference to the fit, whose state each
-    method is handed.  Each iteration profiles the intercept out (the centred
-    system's means) and solves the slopes from the factor, timed as the solve.
+    at setup, and keeps them, and the iteration's decomposition, whose truncated
+    directions the true-score certificate judges (``certificate_inputs``); it
+    keeps no reference to the fit, whose state each method is handed.  Each
+    iteration profiles the intercept out (the centred system's means) and
+    solves the slopes from the factor, timed as the solve.
     """
 
-    __slots__ = ("_X_full", "_L_aug")
+    __slots__ = ("_X_full", "_L_aug", "_held_rank")
     backend = "qr"
 
     def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int) -> None:
@@ -79,6 +81,7 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
             )
         self._X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
         self._L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
+        self._held_rank: RankDecomposition | None = None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
         W, _state_center = fit.W, fit._state_center
@@ -103,7 +106,7 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
             )
             intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
         fit._cond_est = iteration_rank.pre_truncation_condition
-        fit._held_rank[0] = iteration_rank
+        self._held_rank = iteration_rank
         fit._used_svd = iteration_rank.used_svd_fallback
         fit.rank_truncated = iteration_rank.rank_truncated
         if fit.convergence == "mode_score":
@@ -118,6 +121,10 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
         fit.beta, fit.intercept = beta, intercept
         fit._last_working_offset_mean = _last_working_offset_mean
         fit.proposal_centred_intercept = proposal_centred_intercept
+
+    def certificate_inputs(self) -> tuple:
+        """The iteration's decomposition: the certificate judges its truncated directions."""
+        return self._held_rank, None, None, None
 
     def data_rank(self, centered_final: CenteredSystem, W: NDArray) -> RankDecomposition:
         """The retained fit's data rank, from the factor of its weighted, centred dense rows."""

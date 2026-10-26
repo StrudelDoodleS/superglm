@@ -1160,12 +1160,14 @@ def test_a_large_clean_crossing_still_certifies(monkeypatch: pytest.MonkeyPatch)
         selection_penalty=0.0,
         features={"A": Categorical(base="first"), "B": Categorical(base="first")},
     )
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     evaluations: list[int] = []
-    judge = irls_direct.row_set_residual
+    judge = irls_direct_mean_space.row_set_residual
     monkeypatch.setattr(
-        irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+        irls_direct_mean_space,
+        "row_set_residual",
+        lambda **k: evaluations.append(1) or judge(**k),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1461,7 +1463,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
     judgement now decides: the loop's own exit, no boundary rows, and that
     state's own record, not the earlier one.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import TruncatedDirection, _unresolved
 
     calls: list[int] = []
@@ -1473,7 +1475,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
             return 10.0, (stale,)
         return math.inf, (_unresolved(),)
 
-    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_then_none)
+    monkeypatch.setattr(irls_direct_mean_space, "truncated_direction_ratio", boundary_then_none)
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
         family="binomial",
@@ -1509,6 +1511,7 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     the loop's own exit with no boundary rows.
     """
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import TruncatedDirection
 
     calls: list[int] = []
@@ -1525,7 +1528,7 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
         # the later iterates
         return 0.0 if not calls else real(**kwargs) + 1.0
 
-    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_once)
+    monkeypatch.setattr(irls_direct_mean_space, "truncated_direction_ratio", boundary_once)
     monkeypatch.setattr(irls_direct, "_irls_objective_relative_change", no_stop_after_the_first)
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
@@ -1564,11 +1567,11 @@ def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
     inaccurate to show whether they move, and no earlier record is shown as
     history.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
-    judge = irls_direct.truncated_direction_ratio
+    judge = irls_direct_mean_space.truncated_direction_ratio
     monkeypatch.setattr(
-        irls_direct,
+        irls_direct_mean_space,
         "truncated_direction_ratio",
         lambda **kwargs: judge(**{**kwargs, "angle": 0.3}),
     )
@@ -1602,11 +1605,13 @@ def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch)
     The fit is not converged; ``diagnostics()`` records the refusal with no
     rows, and the warning says no record of the rows exists.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import _unresolved
 
     monkeypatch.setattr(
-        irls_direct, "truncated_direction_ratio", lambda **kwargs: (math.inf, (_unresolved(),))
+        irls_direct_mean_space,
+        "truncated_direction_ratio",
+        lambda **kwargs: (math.inf, (_unresolved(),)),
     )
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
@@ -1643,12 +1648,12 @@ def test_an_exact_alias_on_a_large_design_is_not_refused(
     and master certify them.  An empty support is aliasing again unless the
     test is vacuous, at an angle near 1/4.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     angles: list[float] = []
-    measure = irls_direct.null_basis_angle
+    measure = irls_direct_mean_space.null_basis_angle
     monkeypatch.setattr(
-        irls_direct,
+        irls_direct_mean_space,
         "null_basis_angle",
         lambda decomposition, rows: angles.append(measure(decomposition, rows)) or angles[-1],
     )
@@ -2068,7 +2073,7 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
     refuses only rows whose score the relative score cannot see.  An offset
     of 3 lowers the start, so the true-score certificate decides.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     rng = np.random.default_rng(11)
     n = 3000
@@ -2083,10 +2088,12 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
         features={"x1": Numeric(), "x2": Numeric()},
     )
     evaluations: list[int] = []
-    judge = irls_direct.row_set_residual
+    judge = irls_direct_mean_space.row_set_residual
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
-            irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+            irls_direct_mean_space,
+            "row_set_residual",
+            lambda **k: evaluations.append(1) or judge(**k),
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -2342,7 +2349,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     and forms each one's sets once.  Each nested cell is one district's
     rows, already judged as its level, so no cell is kept and no SVD runs.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     import superglm.solvers.mode_score as mode_score
 
     formed: list[int] = []
@@ -2351,7 +2358,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     form, decide, sets_of = (
         mode_score._form_row_sets,
         mode_score._decide_core,
-        irls_direct.row_sets,
+        irls_direct_mean_space.row_sets,
     )
     monkeypatch.setattr(
         mode_score, "_form_row_sets", lambda *a, **k: formed.append(1) or form(*a, **k)
@@ -2359,7 +2366,9 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         mode_score, "_decide_core", lambda *a, **k: decided.append(1) or decide(*a, **k)
     )
-    monkeypatch.setattr(irls_direct, "row_sets", lambda dm: designs.append(id(dm)) or sets_of(dm))
+    monkeypatch.setattr(
+        irls_direct_mean_space, "row_sets", lambda dm: designs.append(id(dm)) or sets_of(dm)
+    )
     frame, y = _districts_in_regions(2)
     model = SuperGLM(
         family="binomial",
