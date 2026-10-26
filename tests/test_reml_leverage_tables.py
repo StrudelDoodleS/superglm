@@ -840,3 +840,28 @@ def test_a_plain_fit_keeps_no_plan(forced):
             model.fit(frame, y, sample_weight=weights)
     assert bool(built) == forced
     assert leverage_tables._CACHE_KEY not in model._dm._structured_layout_cache
+
+
+def test_the_design_table_budget_decides_the_route_and_always_forms_its_tables(monkeypatch):
+    """A design's support tables are bounded by its own ``16 p^2`` bytes, and formed there whatever ``max_memory`` is.
+
+    With the 64 MiB floor set to 0, the budget is ``16 p^2``: the default hand-built
+    design (50 table rows, ``p = 16``: 6,400 bytes against 4,096) reads no row
+    supports, so a random effect beside it keeps the Grams; the wide one (210
+    rows, ``p = 110``: 184,800 against 193,600) does, and ``_support_plan`` forms
+    its tables even under a one-byte ``max_memory``.  Mutations: dropping the
+    budget from ``reads_row_supports``, the floor alone as the budget, or the
+    budget out of ``_support_plan``'s bar.
+    """
+    from superglm.reml import _leverage_rows
+
+    monkeypatch.setattr(_leverage_rows, "_SUPPORT_TABLE_FLOOR_BYTES", 0)
+    narrow, wide = _hand_built_design(), _hand_built_design(basis=100)
+    assert 8 * _leverage_rows._support_table_rows(narrow) * narrow.p > 16 * narrow.p**2
+    assert 8 * _leverage_rows._support_table_rows(wide) * wide.p <= 16 * wide.p**2
+    assert not _leverage_rows.reads_row_supports(narrow)
+    assert _leverage_rows.reads_row_supports(wide)
+    p = wide.p
+    with parallel_config(max_memory=1):
+        plan = _leverage_rows._support_plan(wide, np.eye(p), np.zeros(p), None)
+    assert plan is not None

@@ -259,7 +259,8 @@ def _support_plan(
             # Zero rows outside the level (or at the base level): raw table,
             # the centre once in ``base``, the centred zero row last.
             zero = raw.shape[0]
-            tables.append(raw @ inverse[cols, :])
+            # a categorical's raw table is the identity: its rows of the inverse, as they are
+            tables.append(inverse[cols, :].copy() if values is None else raw @ inverse[cols, :])
             base -= centre @ inverse[cols, :]
             centred = np.vstack((raw, np.zeros((1, width)))) - centre
             if centre_low is not None:
