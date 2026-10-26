@@ -31,9 +31,11 @@ from tests.test_reml_leverage_hessian import (
     _correction_inputs,
     _count_row_passes,
     _gamma,
+    _penalty_operands,
     _poisson_frame,
     _poisson_model,
     _rounding_bounds,
+    _term_scales,
 )
 
 
@@ -445,15 +447,25 @@ def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
 
 
 def _hand_built_design(
-    n: int = 2 * 8192 + 4096, *, empty_level: bool = False, seed: int = 17, basis: int = 6
+    n: int = 2 * 8192 + 4096,
+    *,
+    empty_level: bool = False,
+    seed: int = 17,
+    basis: int = 6,
+    random_effect: bool = False,
 ):
     """Two dense groups (three columns, offset), two categoricals and a support spline, by hand.
 
     Large enough for the table Gram's row rule and three leverage row blocks.
     ``empty_level`` puts a zero-width categorical between the groups;
-    ``basis=100`` makes the design wide enough for the table Gram's column rule.
+    ``basis=100`` makes the design wide enough for the table Gram's column rule;
+    ``random_effect`` makes the last categorical a random effect over every level.
     """
-    from superglm.group_matrix import DesignMatrix, SupportCompressedSSPGroupMatrix
+    from superglm.group_matrix import (
+        DesignMatrix,
+        RandomEffectGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
 
     rng = np.random.default_rng(seed)
     support = max(40, 2 * basis)
@@ -468,7 +480,9 @@ def _hand_built_design(
         CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
         spline,
         DenseGroupMatrix(rng.normal(-50.0, 2.0, (n, 1))),
-        CategoricalGroupMatrix(rng.integers(-1, 3, n), 3),
+        RandomEffectGroupMatrix(rng.integers(0, 3, n), 3)
+        if random_effect
+        else CategoricalGroupMatrix(rng.integers(-1, 3, n), 3),
     ]
     if empty_level:
         groups.insert(2, CategoricalGroupMatrix(np.full(n, -1), 0))
@@ -483,7 +497,7 @@ def _hand_built_magnitudes(dm, centre: np.ndarray) -> tuple[np.ndarray, int]:
         cols = slice(column, column + gm.shape[1])
         if type(gm) is DenseGroupMatrix:
             rows.append(np.abs(gm.M - centre[cols]))
-        elif type(gm) is CategoricalGroupMatrix:
+        elif isinstance(gm, CategoricalGroupMatrix):
             rows.append(np.abs(gm.toarray()) + 2.0 * np.abs(centre[cols]))
         else:
             support = np.abs(gm.B_unique) @ np.abs(gm.R_inv)
@@ -540,6 +554,148 @@ def test_hand_built_dense_columns_match_the_materialised_design(monkeypatch, pai
     m_largest = max(term.raw.shape[0] for term in plan.terms)
     rmatvec_bound = _gamma(dm.n + m_largest + 4 * widest + 3) * (magnitude.T @ np.abs(values))
     assert np.all(np.abs(product - centred.T @ values) <= rmatvec_bound)
+
+
+def test_a_random_effect_is_a_lookup_on_both_leverage_routes():
+    """A random effect is a categorical over every level, its codes never the sink code.
+
+    The table plan and the solved-row support route both take it, and both
+    give ``x_r' V x_r`` of the materialised design within their bounds: the
+    table route's of ``test_hand_built_dense_columns_match_the_materialised_design``,
+    and the support route's ``gamma_(2p + G + 2)`` of the same magnitudes
+    (``_leverage_rows``, module docstring: ``K = p + G + 2`` for the solved row,
+    ``p`` more for its leverage).  An exact type check sent the subclass to
+    neither: no plan, and the chunked rows.
+    """
+    import superglm.reml._leverage_rows as leverage_rows
+
+    dm = _hand_built_design(random_effect=True)
+    plan = leverage_tables.lookup_plan(dm)
+    assert plan is not None
+    inverse, centre_hi, centre_lo, active = _hand_built_operands(dm)
+    centred = (dm.toarray() - centre_hi) - centre_lo
+    reference = np.where(active, np.einsum("ij,jk,ik->i", centred, inverse, centred), 0.0)
+    magnitude, widest = _hand_built_magnitudes(dm, centre_hi + centre_lo)
+    eta = np.einsum("ij,jk,ik->i", magnitude, np.abs(inverse), magnitude)
+
+    leverage = leverage_tables.table_leverages(plan, inverse, centre_hi, centre_lo, active)
+    bound = _gamma(_count_roundings(plan) + 2 * dm.p + 2 + 4 * widest + 4) * eta
+    assert np.all(np.abs(leverage - reference) <= bound)
+
+    blocks = leverage_rows.solved_row_blocks(dm, inverse, centre_hi, centre_lo, active)
+    assert blocks.block_bytes is not None  # the support route
+    solved = np.zeros(dm.n)
+    for job in blocks.jobs:
+        block = job()
+        if block is not None:
+            rows, _, values = block
+            solved[rows] = values
+    support_bound = _gamma(2 * dm.p + len(dm.group_matrices) + 2) * eta
+    assert np.all(np.abs(solved - reference) <= support_bound)
+
+
+class _DoubledCategorical(CategoricalGroupMatrix):
+    """A categorical whose design is twice its codes' one-hot rows, in every operation."""
+
+    __slots__ = ()
+
+    def matvec(self, v):
+        return 2.0 * super().matvec(v)
+
+    def rmatvec(self, w):
+        return 2.0 * super().rmatvec(w)
+
+    def gram(self, W):
+        return 4.0 * super().gram(W)
+
+    def toarray(self):
+        return 2.0 * super().toarray()
+
+    def row_subset(self, idx):
+        return _DoubledCategorical(self.codes[idx], self.n_levels)
+
+
+def test_a_categorical_subclass_keeps_the_routes_that_read_its_own_algebra():
+    """A categorical subclass may change the algebra its codes imply, so no route reads its codes.
+
+    Only the exact types of ``ONE_HOT_CODE_TYPES`` read codes: neither the
+    table plan nor the solved-row support route takes the subclass, and both
+    leverage routes fall back to chunked solved rows of its own ``toarray``.
+    Their gradient is the exact ``sum_r w'_r (x_r' d) (h_r + 1/sum_w) / 2``, ``d
+    = -H^-1 S beta``, of the materialised design within ``2 gamma_K E``
+    (``_rounding_bounds``' ``E`` and ``K``).  Mutation: ``isinstance`` in place
+    of the exact types sends the subclass to both tables, and the gradient
+    changes sign.
+    """
+    import superglm.reml._leverage_rows as leverage_rows
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DesignMatrix
+    from superglm.links import LogLink
+    from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
+    from superglm.types import GroupSlice, PenaltyComponent
+
+    n = 120
+    level = _DoubledCategorical(np.tile([-1, 0, 1], n // 3), 2)
+    dm = DesignMatrix([level], n=n, p=2)
+    beta, intercept, link = np.array([0.2, -0.3]), -0.4, LogLink()
+    design = level.toarray()
+    eta = design @ beta + intercept
+    mu = link.inverse(eta)  # the Poisson/log working weights
+    sum_w = float(np.sum(mu))
+    mean_x = mu @ design / sum_w
+    centred = design - mean_x
+    inverse = np.linalg.inv(centred.T @ (mu[:, None] * centred) + 2.0 * np.eye(2))
+    group = GroupSlice(name="level", start=0, end=2)
+    penalty = PenaltyComponent(
+        name="level",
+        group_name="level",
+        group_index=0,
+        group_sl=group.sl,
+        omega_raw=None,
+        penalty_kind="identity",
+    )
+    lambdas = {"level": 2.0}
+    result = PIRLSResult(
+        beta=beta,
+        intercept=intercept,
+        n_iter=1,
+        deviance=0.0,
+        converged=True,
+        phi=1.0,
+        effective_df=2.0,
+        reml_geometry=REMLGeometrySummary(mean_x=mean_x, sum_w=sum_w, column_scale=np.ones(2)),
+    )
+    case = {
+        "dm": dm,
+        "link": link,
+        "groups": [group],
+        "pirls_result": result,
+        "XtWX_S_inv": inverse,
+        "lambdas": lambdas,
+        "sample_weight": np.ones(n),
+        "offset_arr": np.zeros(n),
+        "distribution": Poisson(),
+        "reml_penalties": [penalty],
+    }
+    weight_derivative = w_derivatives.compute_dW_deta(link, Poisson(), mu, eta, np.ones(n))
+    smoothing, penalty_rhs = _penalty_operands(dm, [penalty], lambdas, beta)
+    direction = -inverse @ penalty_rhs[:, 0]
+    leverage = np.einsum("ij,jk,ik->i", centred, inverse, centred)
+    reference = 0.5 * np.sum(weight_derivative * (centred @ direction) * (leverage + 1.0 / sum_w))
+    magnitude = np.abs(centred) + np.abs(mean_x)
+    gradient_scale, _ = _term_scales(
+        magnitude, inverse, weight_derivative, penalty_rhs, smoothing, sum_w
+    )
+    bound = 2.0 * _gamma(n + 4 * dm.p + 16) * gradient_scale
+
+    for lookup_tables in (True, False):
+        gradient, _, cross = w_derivatives.reml_w_correction(
+            **case, leverage_hessian=True, lookup_tables=lookup_tables
+        )
+        assert np.all(np.abs(gradient - reference) <= bound)
+        assert cross is not None  # solved rows, never the tables
+    assert leverage_tables.lookup_plan(dm) is None
+    assert leverage_rows._support_plan(dm, inverse, mean_x, None) is None
 
 
 def test_an_empty_categorical_adds_nothing_to_the_tables():
@@ -684,3 +840,36 @@ def test_a_plain_fit_keeps_no_plan(forced):
             model.fit(frame, y, sample_weight=weights)
     assert bool(built) == forced
     assert leverage_tables._CACHE_KEY not in model._dm._structured_layout_cache
+
+
+def test_the_design_table_budget_decides_the_route_and_always_forms_its_tables(monkeypatch):
+    """A design's support plan is bounded by its own ``16 p^2`` bytes, and formed there whatever ``max_memory`` is.
+
+    The budget counts the tables and the centred supports.  With the 64 MiB floor
+    set to 0, the hand-built design (a support spline beside two categoricals,
+    ``p = 16``) is over ``16 p^2``, so it reads no row supports, while a random
+    effect of 60 levels beside two dense columns is within it, and
+    ``_support_plan`` forms its tables even under a one-byte ``max_memory``.
+    Mutations: dropping the budget from ``reads_row_supports``, the floor alone
+    as the budget, or the budget out of ``_support_plan``'s bar.
+    """
+    from superglm.group_matrix import DesignMatrix, RandomEffectGroupMatrix
+    from superglm.reml import _leverage_rows
+
+    monkeypatch.setattr(_leverage_rows, "_SUPPORT_TABLE_FLOOR_BYTES", 0)
+    rng = np.random.default_rng(23)
+    n = 2000
+    groups = [
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+        RandomEffectGroupMatrix(rng.integers(0, 60, n), 60),
+    ]
+    random_effect = DesignMatrix(groups, n=n, p=62)
+    narrow = _hand_built_design()
+    assert _leverage_rows._support_plan_bytes(narrow) > 16 * narrow.p**2
+    assert _leverage_rows._support_plan_bytes(random_effect) <= 16 * random_effect.p**2
+    assert not _leverage_rows.reads_row_supports(narrow)
+    assert _leverage_rows.reads_row_supports(random_effect)
+    p = random_effect.p
+    with parallel_config(max_memory=1):
+        plan = _leverage_rows._support_plan(random_effect, np.eye(p), np.zeros(p), None)
+    assert plan is not None

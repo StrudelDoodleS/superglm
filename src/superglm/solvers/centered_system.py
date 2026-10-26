@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from typing import cast
 
 import numpy as np
+import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm._group_matrix._column_local_centering import (
@@ -31,7 +32,7 @@ from superglm._group_matrix._group_matrix_centered import (
 from superglm._group_matrix._lookup_tables import table_centred_system, table_gram_plan
 from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
 from superglm.solvers.mode_score import (
     corrected_two_pass_pair,
     dense_centred_rmatvec,
@@ -193,6 +194,53 @@ def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDA
         stop = min(start + chunk_rows, dm.n)
         rows = np.arange(start, stop, dtype=np.intp)
         yield start, stop, np.asarray(dm.row_subset(rows).toarray(), dtype=np.float64)
+
+
+def grouped_augmented_row_quadratic_forms(
+    dm: DesignMatrix, forms: Callable, active: NDArray | None = None
+) -> NDArray:
+    """Return ``[1, x_i] H_aug^+ [1, x_i]'`` per row of a grouped design.
+
+    ``forms`` is an augmented factor's ``row_quadratic_forms``, whose first
+    coordinate is the intercept.  Rows reach it as CSR blocks with a leading
+    column of ones; a categorical or random-effect group stays one-hot from its
+    codes, so a block is bounded by the entries stored per row, not the design
+    width: the block, its copy with the ones and three working copies.  With
+    an ``active`` mask only those rows are formed and every other row reads
+    ``0``, so a row outside it cannot overflow into a caller's sums.
+    """
+    stored = sum(
+        1 if isinstance(gm, CategoricalGroupMatrix) else gm.shape[1] for gm in dm.group_matrices
+    )
+    bytes_per_row = 5 * np.dtype(np.float64).itemsize * max(stored, 1)
+    chunk_rows = max(1, min(_FACTOR_CHUNK_ROWS, _FACTOR_CHUNK_BYTES // bytes_per_row))
+    result = np.zeros(dm.n, dtype=np.float64)
+    for start in range(0, dm.n, chunk_rows):
+        stop = min(start + chunk_rows, dm.n)
+        rows = np.arange(start, stop)
+        if active is not None:
+            rows = rows[active[start:stop]]
+            if not rows.size:
+                continue
+        block = scipy.sparse.hstack(
+            [_sparse_row_block(gm, rows) for gm in dm.group_matrices], format="csr"
+        )
+        ones = scipy.sparse.csr_array(np.ones((rows.size, 1)))
+        result[rows] = forms(scipy.sparse.hstack((ones, block), format="csr"))
+    return result
+
+
+def _sparse_row_block(gm, rows: NDArray) -> scipy.sparse.csr_array:
+    """The ``rows`` of one design block; a one-hot block stays sparse from its codes."""
+    if isinstance(gm, CategoricalGroupMatrix):
+        codes = gm.codes[rows]
+        # the base-level sink code stays an empty row
+        present = codes < gm.n_levels
+        return scipy.sparse.csr_array(
+            (np.ones(np.count_nonzero(present)), (np.flatnonzero(present), codes[present])),
+            shape=(len(codes), gm.n_levels),
+        )
+    return scipy.sparse.csr_array(gm.row_subset(rows).toarray())
 
 
 _NO_CENTRE = np.empty(0, dtype=np.float64)
