@@ -1234,7 +1234,7 @@ class TestDirectSolverBasic:
         would have ended the solve before the Newton map it chose ran.  The
         solve now takes the Newton iteration and stops at its fixed point.
         """
-        import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._convergence as irls_direct_convergence
         from superglm.distributions import Gamma
         from superglm.links import LogLink
         from superglm.solvers.irls_direct import fit_irls_direct
@@ -1246,7 +1246,7 @@ class TestDirectSolverBasic:
         _force_constant_working_rows(monkeypatch, np.log(y), weights=np.ones(n))
         floor_verdicts = _force_unresolved_score(monkeypatch, resolved=True)
         monkeypatch.setattr(
-            irls_direct,
+            irls_direct_convergence,
             "rate_exhausts_budget",
             lambda ratios, window, done, max_iter: done >= 2,
         )
@@ -1546,6 +1546,7 @@ class TestDirectSolverBasic:
         observed rows on every iteration; a rejected step ends the fit in the
         same curvature, with no observed rescue and no Fisher latch."""
         import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._search as irls_direct_search
         from superglm.distributions import Gamma, Tweedie
         from superglm.links import LogLink
         from superglm.solvers.irls_state import _IRLSStepDecision
@@ -1565,7 +1566,7 @@ class TestDirectSolverBasic:
             curvature_requests.append(bool(kwargs["prefer_observed"]))
             return original_rows(*args, **kwargs)
 
-        original_select = irls_direct._select_irls_trial
+        original_select = irls_direct_search._select_irls_trial
         selection_calls = 0
 
         def reject_the_second_proposal(*args, **kwargs):
@@ -1576,7 +1577,7 @@ class TestDirectSolverBasic:
             return original_select(*args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "coefficient_working_rows", recording_rows)
-        monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_the_second_proposal)
+        monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_the_second_proposal)
 
         profile: dict[str, float | int] = {}
         result, _ = irls_direct.fit_irls_direct(

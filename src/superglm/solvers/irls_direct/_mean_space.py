@@ -118,7 +118,7 @@ class _IRLSDirectMeanSpaceOverlay:
       merit on the model's own deviance (L12, L14).
 
     **The certificate half** acts on every route, through the step's
-    ``certificate_inputs``: ``judge`` (L17) after the stop rule, ``certify``
+    ``certificate_inputs``: ``judge`` (L17) inside the stop rule, ``certify``
     (the true-score certificate it reads), and ``final`` (F04, the boundary
     verdict), whose numbers the fit publishes.
     """
@@ -314,16 +314,17 @@ class _IRLSDirectMeanSpaceOverlay:
 
     # ── the certificate half ─────────────────────────────────────────
 
-    def judge(self, fit: _IRLSDirectFit) -> None:
+    def judge(self, fit: _IRLSDirectFit, stagnation_window: int) -> None:
         """L17: a stop the clip can fake is certified on the model's own score, after the stop rule.
 
-        It runs after the stop rule's own verdict and its step-rejected veto,
-        and before the feasibility contract's (``_IRLSDirectFit._terminate``),
-        which may still veto the stop.  It may refuse a stop, stop a fit under
-        Newton steps, end one whose refused score stagnates, and engage the
-        Newton steps (``engaged``).
+        The stop rule runs it (``_IRLSDirectConvergence.judge``) after its
+        criterion and the step-rejected veto, and before the feasibility
+        contract's veto, which may still veto the stop; its refused stops
+        stagnate over the rule's window.  It may refuse a stop, stop a fit
+        under Newton steps, end one whose refused score stagnates, and engage
+        the Newton steps (``engaged``).
         """
-        engaged, _stagnation_window = self.engaged, fit._stagnation_window
+        engaged = self.engaged
         _true_ratios, converged_this_iter = self._true_ratios, fit.converged_this_iter
         family, link, retained, weights = fit.family, fit.link, fit.retained, fit.weights
         score_stagnated = fit.score_stagnated
@@ -381,9 +382,9 @@ class _IRLSDirectMeanSpaceOverlay:
             if not true_ratio <= 1.0:
                 converged_this_iter = False
                 _true_ratios.append(true_ratio)
-                score_stagnated = len(_true_ratios) > _stagnation_window and not (
-                    min(_true_ratios[-_stagnation_window:])
-                    < 0.5 * min(_true_ratios[:-_stagnation_window])
+                score_stagnated = len(_true_ratios) > stagnation_window and not (
+                    min(_true_ratios[-stagnation_window:])
+                    < 0.5 * min(_true_ratios[:-stagnation_window])
                 )
                 if self.available and not engaged and (true_resolved or score_stagnated):
                     # Fisher scoring has carried the fit to where its own

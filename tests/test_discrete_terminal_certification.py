@@ -42,7 +42,7 @@ import superglm.model.reml_finalize as reml_finalize
 from superglm import Categorical, LambdaPolicy, RandomEffect, Spline, SuperGLM, Tweedie
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import build_penalty_matrix
-from superglm.solvers.irls_direct import _fit as irls_direct
+from superglm.solvers.irls_direct import _search as irls_direct_search
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import _IRLSStepDecision
 from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, mode_certification_bar
@@ -252,7 +252,7 @@ def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
     frame, y, _ = _response("gamma")
     model = _model("gamma", held=True)
     model.fit_reml(frame, y)
-    original = irls_direct._select_irls_trial
+    original = irls_direct_search._select_irls_trial
     forced = []
 
     def damp_first(**kwargs):
@@ -263,7 +263,7 @@ def test_a_damped_step_does_not_certify_the_fixed_point(monkeypatch) -> None:
         forced.append(alpha)
         return _IRLSStepDecision(alpha=alpha, step_halvings=40, step_rejected=False)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", damp_first)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", damp_first)
     lambdas = dict(model._reml_lambdas)
     result = fit_irls_direct(
         X=model._dm,

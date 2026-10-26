@@ -16,7 +16,8 @@ are handled through the penalty structure. Without BCD, the 33-iteration aliasin
 shared B matrices between select=True subgroups vanishes entirely.
 
 The fit lives in ``_fit`` (``fit_irls_direct`` and its method object), its
-recorder in ``_recorder``, and its step methods behind the interface in
+recorder in ``_recorder``, its stop rule in ``_convergence``, its shared line
+search in ``_search``, and its step methods behind the interface in
 ``_step``: the QR step in ``_qr``, the dense step in ``_dense``, the
 linearly constrained (QP) step in ``_qp``, the structured step (random-effect
 chains, ``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained
@@ -29,14 +30,16 @@ here would change nothing the fit sees.
 """
 
 from superglm.solvers.irls_direct._fit import (
-    _QP_FEASIBILITY_TOL,
     _build_penalty_matrix,
     _safe_decompose_H,
     _separation_weight_ratio,
     fit_irls_direct,
 )
 from superglm.solvers.irls_direct._mean_space import _SUBNORMAL_SPACING, _underflow_allowance
-from superglm.solvers.irls_direct._qp import _solve_constrained_qp_with_cold_retry
+from superglm.solvers.irls_direct._qp import (
+    _QP_FEASIBILITY_TOL,
+    _solve_constrained_qp_with_cold_retry,
+)
 from superglm.solvers.irls_direct._scop import (
     SCOPRunCentring,
     _centred_system_matvec,

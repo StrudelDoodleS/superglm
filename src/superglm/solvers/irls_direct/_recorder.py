@@ -352,7 +352,7 @@ class _IRLSDirectRecorder:
     def profile_fit(self, fit: _IRLSDirectFit, it: int) -> None:
         """The phase times, the call and iteration counts, and the stop rule's numbers."""
         profile, mode_bar = self.profile, fit.mode_bar
-        _last_mode_residual = fit._last_mode_residual
+        _last_mode_residual = fit.stop_rule.last_mode_residual
         # Accumulate phase timing into the profile dict if provided
         if profile is not None:
             profile["irls_working_s"] = profile.get("irls_working_s", 0.0) + self.t_working

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers.constrained_qp import QPResult, solve_constrained_qp
+from superglm.solvers.constrained_qp import QPResult, _is_feasible, solve_constrained_qp
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 
 if TYPE_CHECKING:
@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 # the package's logger: its records keep the name they had when the solver was one module
 logger = logging.getLogger(__package__)
+
+# The feasibility contract's tolerance on the scaled slack of ``A beta >= b``
+# (``constrained_qp._is_feasible``).
+_QP_FEASIBILITY_TOL = 1e-12
 
 
 def _solve_constrained_qp_with_cold_retry(
@@ -96,17 +100,17 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
     set (``_solve_constrained_qp_with_cold_retry``).
 
     It keeps the constraint system, fixed for the whole fit, the active set
-    with the committed state's copy, the proposal's and the retained state's
-    KKT certificates, and the #472 retry and report latches; no reference to
-    the fit, whose state each method is handed.  The feasibility contract the
-    fit applies whatever the step (``_IRLSDirectFit._search``, ``_terminate``
-    and ``_finish``) reads the constraint system and the certificates: it
-    writes ``retained_converged``, and on a rejected step restores
-    ``active_set`` to the committed state's.
+    of the last solve, the proposal's and the retained state's KKT
+    certificates, and the #472 retry and report latches; no reference to the
+    fit, whose state each method is handed.  The feasibility contract the fit
+    applies whatever the step (the shared line search, the stop rule's veto
+    and ``_IRLSDirectFit._finish``) tests ``feasible`` and reads the
+    certificates; the line search writes ``retained_converged``.  A rejected
+    step ends the fit, so no solve warm-starts from its active set.
     """
 
     __slots__ = (
-        "A_all b_all abs_A_all active_set committed_active_set proposal_converged"
+        "A_all b_all abs_A_all active_set proposal_converged"
         " retained_converged _degeneracy_retry_failed _reported_nonconvergence"
     ).split()
     backend = "gram"
@@ -128,7 +132,6 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         # halving.  See ``constrained_qp._feasibility_slack``.
         self.abs_A_all = np.abs(A_all)
         self.active_set: list[int] | None = None
-        self.committed_active_set: list[int] | None = None
         # A constrained fit-entry state has not been certified by the inner QP.
         self.proposal_converged = False
         self.retained_converged = False
@@ -139,8 +142,6 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
         active_set = self.active_set
-        # the committed state's active set, which a rejected step restores
-        self.committed_active_set = None if active_set is None else list(active_set)
         # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
         _t0 = time.perf_counter()
         z_off = fit.z - fit.offset
@@ -196,6 +197,10 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         fit.recorder.t_solve += time.perf_counter() - _t0
         fit.beta = beta
         _note_svd_fallback(fit)
+
+    def feasible(self, beta: NDArray) -> bool:
+        """Whether ``beta`` satisfies ``A beta >= b`` within the feasibility contract's tolerance."""
+        return _is_feasible(self.A_all, beta, self.b_all, _QP_FEASIBILITY_TOL, abs_A=self.abs_A_all)
 
     def certificate_inputs(self) -> tuple:
         """The constraint rows active at the proposal: the certificate's KKT residual reads them."""

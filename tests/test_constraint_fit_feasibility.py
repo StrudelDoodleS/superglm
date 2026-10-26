@@ -318,6 +318,7 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
     """A prior certificate does not describe newly rebuilt Poisson weights."""
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._qp as irls_direct_qp
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.distributions import Poisson
     from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
     from superglm.links import LogLink
@@ -358,7 +359,7 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
         )
 
     monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", record_real_qp)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_then_reject)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_then_reject)
     result, _ = irls_direct.fit_irls_direct(
         design,
         y,
@@ -790,6 +791,7 @@ def test_line_searched_infeasible_final_state_is_not_converged(
 ) -> None:
     """A tiny accepted step cannot certify an infeasible warm-start state."""
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.model.base import model_build_design_matrix
     from superglm.solvers.irls_state import _IRLSStepDecision
 
@@ -836,7 +838,7 @@ def test_line_searched_infeasible_final_state_is_not_converged(
             trials_attempted=20,
         )
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_tiny_line_search_step)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_tiny_line_search_step)
     with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
         result, _ = irls_direct.fit_irls_direct(
             model._dm,
@@ -884,6 +886,7 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     """Diagnostics and the public result must agree after an atomic rejection."""
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._qp as irls_direct_qp
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm._fit_trace import MemoryTraceSink, TraceRun
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
@@ -904,7 +907,7 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
         )
 
     monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", infeasible_qp_proposal)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_every_trial)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
     trace_sink = MemoryTraceSink()
     result, _ = irls_direct.fit_irls_direct(
         design,

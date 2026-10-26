@@ -53,7 +53,7 @@ class _IRLSDirectStep(Protocol):
       from, in place of ``committed``, whose evaluation the fit then does not
       trace (the step traces its own).
     - ``search(fit, it)``: the step's own line search, in place of the shared
-      one (``_IRLSDirectFit._search``).  It writes what that one writes: the
+      one (``_IRLSDirectTrialSearch.search``).  It writes what that one writes: the
       retained state and its ``eta``, ``mu`` and deviance, ``beta`` and
       ``intercept``, the decision, ``n_halvings``, ``step_rejected`` and
       ``proposal_state``.

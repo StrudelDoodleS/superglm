@@ -331,7 +331,7 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
     one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
     converges.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.solvers.irls_state import _select_irls_trial
 
     decisions = []
@@ -341,7 +341,7 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
         decisions.append(decision)
         return decision
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", counted)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", counted)
     rng = np.random.default_rng(3)
     n, levels = 800, 10
     X = pd.DataFrame({"s0": rng.uniform(size=n), "s1": rng.uniform(size=n)})
@@ -1400,7 +1400,7 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
     with no record and no warning.  A rejected step returns the committed
     state, the one the refusal judged, so that judgement is the fit's own.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
 
     calls: list[int] = []
@@ -1411,7 +1411,7 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
             return _select_irls_trial(**kwargs)
         return _IRLSStepDecision(0.0, 0, True)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", first_then_rejected)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", first_then_rejected)
     frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
     model = SuperGLM(
         family="binomial",
@@ -1510,12 +1510,12 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     named in the warning as found at an earlier iterate, and the fit keeps
     the loop's own exit with no boundary rows.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._convergence as irls_direct_convergence
     import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import TruncatedDirection
 
     calls: list[int] = []
-    real = irls_direct._irls_objective_relative_change
+    real = irls_direct_convergence._irls_objective_relative_change
 
     def boundary_once(**kwargs):
         calls.append(1)
@@ -1529,7 +1529,9 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
         return 0.0 if not calls else real(**kwargs) + 1.0
 
     monkeypatch.setattr(irls_direct_mean_space, "truncated_direction_ratio", boundary_once)
-    monkeypatch.setattr(irls_direct, "_irls_objective_relative_change", no_stop_after_the_first)
+    monkeypatch.setattr(
+        irls_direct_convergence, "_irls_objective_relative_change", no_stop_after_the_first
+    )
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
         family="binomial",

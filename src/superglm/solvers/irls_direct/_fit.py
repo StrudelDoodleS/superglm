@@ -55,12 +55,13 @@ from superglm.solvers.centered_system import (
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
-from superglm.solvers.constrained_qp import _feasibility_slack, _is_feasible
+from superglm.solvers.constrained_qp import _feasibility_slack
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._convergence import _IRLSDirectConvergence
 from superglm.solvers.irls_direct._dense import _IRLSDirectDenseStep
 from superglm.solvers.irls_direct._mean_space import _IRLSDirectMeanSpaceOverlay
-from superglm.solvers.irls_direct._qp import _IRLSDirectQPStep
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL, _IRLSDirectQPStep
 from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
 from superglm.solvers.irls_direct._recorder import _IRLSDirectRecorder
 from superglm.solvers.irls_direct._scop import (
@@ -69,18 +70,13 @@ from superglm.solvers.irls_direct._scop import (
     _IRLSDirectSCOPStep,
     _seed_refusals,
 )
+from superglm.solvers.irls_direct._search import _IRLSDirectTrialSearch
 from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.irls_direct._structured import _IRLSDirectStructuredStep
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
-    _irls_objective_relative_change,
     _irls_objective_scale,
     _IRLSState,
-    _IRLSStepDecision,
-    _poisson_sqrt_halving_budget,
-    _select_irls_trial,
-    _stable_penalized_deviance_delta,
-    _state_is_finite,
     interior_start_intercept,
     link_domain_violation,
     mean_space_violation,
@@ -93,8 +89,6 @@ from superglm.solvers.mode_score import (
     centred_matvec,
     penalized_mode_residual,
     prior_weighted_centre,
-    rate_exhausts_budget,
-    stagnation_window,
 )
 from superglm.solvers.pirls import (
     PIRLSResult,
@@ -131,8 +125,6 @@ from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
 # the package's logger: its records keep the name they had when the solver was one module
 logger = logging.getLogger(__package__)
-
-_QP_FEASIBILITY_TOL = 1e-12
 
 
 @dataclass(frozen=True)
@@ -744,23 +736,20 @@ class _IRLSDirectFitFields:
         " fixed_owners _initial_data_pending"
         # _setup_loop
         " converged XtWX_beta _last_working_centered _last_working_offset_mean _score_centre"
-        " _last_mode_residual"
-        " _mode_ratios _stagnation_window score_stagnated _mean_space_invalid"
-        " _link_domain_invalid"
-        " objective_prev dev_prev eta_unclipped eta mu max_halving _consecutive_svd"
+        " stop_rule trial_search"
+        " eta_unclipped eta mu max_halving _consecutive_svd"
         " termination_reason deviance_relative_change mode_bar committed"
         # _working
-        " beta_prev intercept_prev rank_truncated used_rank_certification"
-        " proposal_centred_intercept"
+        " rank_truncated used_rank_certification proposal_centred_intercept"
         " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
         " w_ratio"
         # the step (``step.propose``)
         " _cond_est _used_svd"
-        # _search, or the step's own search
+        # the line search (``trial_search``, or the step's own)
         " step_rejected dev n_halvings decision proposal_state retained"
-        # _converge
+        # the stop rule (``stop_rule``) and the mean space's judge
         " convergence_label convergence_tolerance dev_rel_change coef_change"
-        " convergence_value converged_this_iter"
+        " convergence_value converged_this_iter score_stagnated"
         # _finish
         " centred_intercept_lo"
         # _terminal_rows
@@ -959,21 +948,16 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._setup_systems()
         recorder.start()
         self._setup_loop()
-        step, mean_space = self.step, self.mean_space
-        search = step.search
+        step, stop_rule = self.step, self.stop_rule
+        # the step's own line search, or the shared one
+        search = self.trial_search.search if step.search is None else step.search
         for it in range(self.max_iter):
             self._working(it)
             step.propose(self, it)
-            if search is None:
-                self._search(it)
-            else:
-                search(self, it)
-            self._converge(it)
-            if mean_space is not None:
-                mean_space.judge(self)
-            self._terminate(it)
+            search(self, it)
+            stop_rule.judge(self, it)
             recorder.iteration(self, it)
-            dev, dev_prev = self.dev, self.dev_prev
+            dev, dev_prev = self.dev, self.committed.deviance
             deviance_relative_change = abs(dev - dev_prev) / (abs(dev_prev) + 1)
             self.deviance_relative_change = deviance_relative_change
             logger.info(
@@ -994,19 +978,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 )
                 break
 
-            retained = self.retained
-            self.committed = retained
+            self.committed = self.retained
             if self.converged_this_iter:
                 self.converged = True
                 break
             if self.score_stagnated:
                 break
-            self.dev_prev = dev
-            self.objective_prev = (
-                retained.deviance
-                if retained.penalized_deviance is None
-                else retained.penalized_deviance
-            )
         recorder.stop(it)
         self._finish(it)
         self._terminal_rows()
@@ -1651,21 +1628,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # route that forms no centred system (SCOP, linear constraints), which
         # keeps the coefficient-step test.
         self._score_centre: tuple | None = None
-        self._last_mode_residual: ModeResidual | None = None
-        # the certificate ratio at every iterate of a mode_score solve, for the
-        # stagnation stop
-        self._mode_ratios: list[float] = []
         # the certificate's bar (``mode_score.mode_certification_bar``): the REML
         # fit passes the one its stopping tolerance needs
         mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
-        self._stagnation_window = stagnation_window(self.max_iter, mode_bar)
-        self.score_stagnated = False
-
-        # The family's mean space, when the link's inverse can leave it (declared
-        # by the family and link, ``irls_state.mean_space_violation``).
-        self._mean_space_invalid = mean_space_violation(self.family, self.link)
-        # The link inverse's own domain (``irls_state.link_domain_violation``).
-        self._link_domain_invalid = link_domain_violation(self.link)
+        self.stop_rule = _IRLSDirectConvergence(self.max_iter, mode_bar)
+        # the shared line search, unless the step searches its own way
+        self.trial_search = (
+            _IRLSDirectTrialSearch(self.family, self.link) if self.step.search is None else None
+        )
         # A warm start's centred state carried to this fit's centre (one-engine
         # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -1706,41 +1676,33 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             convergence_value=None,
             termination_reason=None,
         )
-        self.objective_prev = (
-            committed.deviance
-            if committed.penalized_deviance is None
-            else committed.penalized_deviance
-        )
-        self.dev_prev = committed.deviance
         self.eta_unclipped = committed.eta_unclipped
         self.eta = committed.eta
         self.mu = committed.mu
 
         self.max_halving = 20  # max step-halving attempts per iteration
         self._consecutive_svd = 0  # for auto-mode warning
-        # Declared, not bound: the chain below is the whole set of reasons this
-        # solver can end an iteration on, and declaring it against the shared
-        # vocabulary is what ties the two together. A tenth reason invented here is
-        # a type error on its own assignment until ``TerminationReason`` carries
-        # it, so the consumers that switch on the field cannot be handed a string
-        # they have never been shown.
+        # Declared, not bound: the stop rule's chain (``_IRLSDirectConvergence``)
+        # and the final refusals are the whole set of reasons this solver can end
+        # on, and declaring them against the shared vocabulary is what ties the
+        # two together. A tenth reason invented there is a type error on its own
+        # assignment until ``TerminationReason`` carries it, so the consumers that
+        # switch on the field cannot be handed a string they have never been shown.
         self.termination_reason: TerminationReason
 
-        # Captured inside the loop, BEFORE ``dev_prev`` advances, because the
-        # post-loop separation backstop needs the final iteration's movement.
-        # Reading ``abs(dev - dev_prev)`` after the loop cannot work: ``dev_prev``
-        # is assigned ``dev`` as the loop's last statement, so budget exhaustion
-        # makes that difference identically zero and any stagnation test on it
-        # vacuous.  ``inf`` until an iteration completes, so a fit that never
-        # finishes one is never called stagnant.
+        # Captured inside the loop, from the state the iteration started at and
+        # before the retained state is committed, because the post-loop separation
+        # backstop needs the final iteration's movement: read after the loop it
+        # would compare the retained state with itself, identically zero under
+        # budget exhaustion, and any stagnation test on it would be vacuous.
+        # ``inf`` until an iteration completes, so a fit that never finishes one
+        # is never called stagnant.
         self.deviance_relative_change = float("inf")
         self.mode_bar, self.committed = mode_bar, committed
 
     def _working(self, it: int) -> None:
         committed, family, link = self.committed, self.family, self.link
         recorder, mean_space = self.recorder, self.mean_space
-        self.beta_prev = committed.beta
-        self.intercept_prev = committed.intercept
         self.beta = committed.beta.copy()
         self.intercept = committed.intercept
         self.rank_truncated: bool | None = None
@@ -1790,412 +1752,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             )
         self.working_rows, self.W, self.z, self.newton_score = working_rows, W, z, newton_score
         self.w_ratio = w_ratio
-
-    def _search(self, it: int) -> None:
-        beta, intercept, committed = self.beta, self.intercept, self.committed
-        qp, newton_score, mean_space = self.qp, self.newton_score, self.mean_space
-        y, weights = self.y, self.weights
-        family, link, _mean_space_invalid = self.family, self.link, self._mean_space_invalid
-        _link_domain_invalid = self._link_domain_invalid
-        max_halving, penalty_matvec = self.max_halving, self.penalty_matvec
-        evaluate_state, recorder = self.evaluate_state, self.recorder
-        _t0 = time.perf_counter()
-        proposal = evaluate_state(
-            beta,
-            intercept,
-            phase="proposal",
-            iteration=it + 1,
-            alpha=1.0,
-            centred_intercept=self.proposal_centred_intercept,
-        )
-        trial_cache: dict[float, _IRLSState] = {1.0: proposal}
-        trial_directions: tuple[NDArray, float, NDArray] | None = None
-
-        def evaluate_trial(alpha: float) -> _IRLSState:
-            nonlocal trial_directions
-            if trial_directions is None:
-                trial_directions = (
-                    proposal.beta - committed.beta,
-                    proposal.intercept - committed.intercept,
-                    proposal.eta_unclipped - committed.eta_unclipped,
-                )
-            beta_direction, intercept_direction, eta_direction = trial_directions
-            beta_trial = committed.beta + alpha * beta_direction
-            intercept_trial = committed.intercept + alpha * intercept_direction
-            eta_trial = committed.eta_unclipped + alpha * eta_direction
-            centred_trial = None
-            if committed.centred_intercept is not None and proposal.centred_intercept is not None:
-                centred_trial = committed.centred_intercept + alpha * (
-                    proposal.centred_intercept - committed.centred_intercept
-                )
-            candidate = evaluate_state(
-                beta_trial,
-                intercept_trial,
-                phase="line_search_trial",
-                iteration=it + 1,
-                alpha=alpha,
-                eta_unclipped=eta_trial,
-                enclosing_proposal_state_id=proposal.state_id,
-                centred_intercept=centred_trial,
-            )
-            trial_cache[alpha] = candidate
-            return candidate
-
-        committed_constraints_feasible = True
-        proposal_constraints_feasible = True
-        curvature = self.curvature
-        constraint_trial_is_invalid = (
-            curvature.observed_rows_invalid if curvature.observed else None
-        )
-        if qp is not None:
-            # the feasibility contract, on the QP step's constraint system
-            A_all, b_all, abs_A_all = qp.A_all, qp.b_all, qp.abs_A_all
-            committed_constraints_feasible = _is_feasible(
-                A_all,
-                committed.beta,
-                b_all,
-                _QP_FEASIBILITY_TOL,
-                abs_A=abs_A_all,
-            )
-            proposal_constraints_feasible = _is_feasible(
-                A_all,
-                proposal.beta,
-                b_all,
-                _QP_FEASIBILITY_TOL,
-                abs_A=abs_A_all,
-            )
-
-            def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
-                return not _is_feasible(
-                    A_all,
-                    candidate.beta,
-                    b_all,
-                    _QP_FEASIBILITY_TOL,
-                    abs_A=abs_A_all,
-                )
-
-        trial_is_invalid = constraint_trial_is_invalid
-        if _mean_space_invalid is not None and not _mean_space_invalid(
-            committed.eta_unclipped, weights
-        ):
-            # A feasible committed state keeps every accepted trial in the
-            # family's mean space (``mean_space_violation``).
-            def trial_is_invalid(candidate: _IRLSState, other=constraint_trial_is_invalid) -> bool:
-                assert _mean_space_invalid is not None
-                if _mean_space_invalid(candidate.eta_unclipped, weights):
-                    return True
-                return other is not None and other(candidate)
-
-        if _link_domain_invalid is not None and not _link_domain_invalid(
-            committed.eta_unclipped, weights
-        ):
-            # A committed state inside the link's domain keeps every
-            # accepted trial inside it (``link_domain_violation``).
-            def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
-                assert _link_domain_invalid is not None
-                if _link_domain_invalid(candidate.eta_unclipped, weights):
-                    return True
-                return other is not None and other(candidate)
-
-        # the mean space's hooks (``_IRLSDirectMeanSpaceOverlay.line_search``):
-        # its first halving, a lowered start's budget and, under Newton steps,
-        # the merit on the model's own deviance
-        first_halving = lowered_budget = newton_delta = newton_roundoff = None
-        if mean_space is not None:
-            first_halving, lowered_budget, newton_delta, newton_roundoff = mean_space.line_search(
-                self, committed, proposal, newton_score
-            )
-        decision = _select_irls_trial(
-            committed=committed,
-            proposal=proposal,
-            evaluate_state=evaluate_trial,
-            invalid_state=trial_is_invalid,
-            max_halving=max_halving,
-            extended_max_halving=lambda: max(
-                _poisson_sqrt_halving_budget(
-                    committed=committed,
-                    proposal=proposal,
-                    y=y,
-                    weights=weights,
-                    family=family,
-                    link=link,
-                    default=max_halving,
-                ),
-                max_halving if lowered_budget is None else lowered_budget(),
-            ),
-            merit_scale=self.objective_merit_scale,
-            merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
-                candidate,
-                base,
-                penalty_matvec,
-                deviance_delta=None if newton_delta is None else newton_delta(candidate, base),
-            ),
-            merit_roundoff=newton_roundoff,
-            first_halving=first_halving,
-        )
-        if decision.skipped:
-            recorder.count("irls_halvings_skipped", decision.skipped)
-        if (
-            qp is not None
-            and decision.step_rejected
-            and not committed_constraints_feasible
-            and proposal_constraints_feasible
-            and _state_is_finite(proposal)
-        ):
-            # The objective comparison is not allowed to prefer an
-            # inadmissible state over a finite feasible QP proposal. Once
-            # this proposal is committed, convexity of A beta >= b and the
-            # invalid-state predicate above preserve feasibility on every
-            # subsequent accepted line-search segment.
-            decision = _IRLSStepDecision(
-                alpha=1.0,
-                step_halvings=0,
-                step_rejected=False,
-                trials_attempted=decision.trials_attempted,
-            )
-            logger.info(
-                "  irls_direct iter=%d: accepted finite feasible constrained "
-                "proposal after objective line search found no admissible trial",
-                it + 1,
-            )
-        retained = committed if decision.step_rejected else trial_cache[decision.alpha]
-        if qp is not None:
-            # Rejection retains coefficients from the preceding working
-            # problem, while damping retains an interpolation.  Neither
-            # state is the current H/g solution whose stationarity and
-            # dual feasibility the inner QP certified, and a certificate
-            # retained from the preceding iteration belongs to other
-            # working weights: only a certified full proposal of this
-            # iteration's working problem sets the flag.
-            qp.retained_converged = bool(
-                not decision.step_rejected and decision.alpha == 1.0 and qp.proposal_converged
-            )
-        evaluation_elapsed = time.perf_counter() - _t0
-        recorder.t_deviance += evaluation_elapsed
-        recorder.t_deviance_eval += evaluation_elapsed
-        beta = retained.beta.copy()
-        intercept = retained.intercept
-        self.eta_unclipped = retained.eta_unclipped
-        self.eta = retained.eta
-        self.mu = retained.mu
-        dev = retained.deviance
-        n_halvings = decision.step_halvings
-        step_rejected = decision.step_rejected
-        if step_rejected:
-            if qp is not None:
-                qp.active_set = qp.committed_active_set
-        elif n_halvings:
-            logger.info(
-                "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
-                it + 1,
-                decision.alpha,
-                n_halvings,
-                dev,
-            )
-        self.proposal_state, self.decision, self.retained = proposal, decision, retained
-        self.beta = beta
-        self.intercept, self.dev, self.n_halvings = intercept, dev, n_halvings
-        self.step_rejected = step_rejected
-
-    def _converge(self, it: int) -> None:
-        convergence, tol, beta, step = self.convergence, self.tol, self.beta, self.step
-        beta_prev, intercept, retained = self.beta_prev, self.intercept, self.retained
-        _mode_ratios, _stagnation_window = self._mode_ratios, self._stagnation_window
-        _last_mode_residual = self._last_mode_residual
-        score_stagnated = self.score_stagnated
-        dev_rel_change = None
-        coef_change = None
-        self.convergence_label: str = convergence
-        self.convergence_tolerance = tol
-        if np.isfinite(self.dev):
-            if convergence == "mode_score" and self._score_centre is not None:
-                # One-engine design §3.8: stop on the certificate's own score,
-                # in centred coordinates over the identified coefficients,
-                # once it meets the bar the certificate reads (no margin: the
-                # certificate is this residual, ``mode_score``).  The step
-                # length, with its raw intercept, is only reported.
-                coef_change = float(
-                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
-                )
-                residual = self.mode_residual(
-                    beta, intercept, self.mu, self.eta, centred_intercept=retained.centred_intercept
-                )
-                convergence_value = self.mode_bar * residual.ratio()
-                converged_this_iter = residual.ratio() <= 1.0
-                _last_mode_residual = residual
-                _mode_ratios.append(residual.ratio())
-                # The score stopped contracting (``stagnation_window``):
-                # the iterate is at its limiting accuracy, so the solve ends
-                # uncertified and the caller discloses it.
-                score_stagnated = (
-                    not converged_this_iter
-                    and residual.resolved
-                    and len(_mode_ratios) > _stagnation_window
-                    and min(_mode_ratios[-_stagnation_window:])
-                    > 0.5 * min(_mode_ratios[:-_stagnation_window])
-                )
-                switched_curvature, curvature = False, self.curvature
-                if (
-                    curvature.stagnation_newton_available
-                    and not curvature.observed
-                    and not converged_this_iter
-                    and (
-                        score_stagnated
-                        or (
-                            residual.resolved
-                            and rate_exhausts_budget(
-                                _mode_ratios, _stagnation_window, it + 1, self.max_iter
-                            )
-                        )
-                    )
-                ):
-                    # Fisher scoring near the mode contracts too slowly to
-                    # meet the bar in the budget, or not at all (the comment
-                    # at ``_IRLSDirectCurvaturePolicy``): the iterations left
-                    # take Newton steps on the observed information.
-                    curvature.switch_to_newton(self.recorder)
-                    score_stagnated = False
-                    switched_curvature = True
-                    _mode_ratios.clear()
-                if (
-                    not converged_this_iter
-                    and not switched_curvature
-                    and not self.step_rejected
-                    and intercept == self.intercept_prev
-                    and retained.centred_intercept == self.committed.centred_intercept
-                    and np.array_equal(beta, beta_prev)
-                ):
-                    # The full step left the state bitwise where it was: the
-                    # iteration is a deterministic map at a float64 fixed
-                    # point, and every further iteration repeats this one
-                    # (the step-tolerance stop of Dennis & Schnabel 1996,
-                    # section 7.2, at its strictest).  A centred state is
-                    # ``(alpha, beta)``, and the raw intercept only its
-                    # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
-                    # and can hold still while ``alpha`` moves, so ``alpha``
-                    # is compared too (``None`` on both sides otherwise).  An
-                    # iteration that has just changed the map (the Newton
-                    # switch above) is not one: the next iteration takes the
-                    # other step.  A fixed point ends the solve, with the
-                    # floors resolved whatever the relative score: where
-                    # the residuals are at the rounding of the fitted values
-                    # (a model that fits its response exactly, as a linear
-                    # model can) the score's own scale ``sum |s|`` is
-                    # rounding too, the relative score sits near 1 and the
-                    # resolve cap would never let the floor be read.  A score
-                    # within its floor is certified; one above it is the
-                    # limiting accuracy, published as not converged.
-                    residual = self.mode_residual(
-                        beta,
-                        intercept,
-                        self.mu,
-                        self.eta,
-                        centred_intercept=retained.centred_intercept,
-                        resolve_cap=math.inf,
-                    )
-                    convergence_value = self.mode_bar * residual.ratio()
-                    converged_this_iter = residual.ratio() <= 1.0
-                    score_stagnated = not converged_this_iter
-                    _last_mode_residual = residual
-                    _mode_ratios[-1] = residual.ratio()
-            elif convergence in ("coefficients", "mode_score"):
-                coef_change = float(
-                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
-                )
-                coef_change = max(
-                    coef_change,
-                    abs(intercept - self.intercept_prev) / max(1.0, abs(intercept)),
-                )
-                latent_change = step.latent_change
-                if latent_change is not None:
-                    coef_change = max(coef_change, latent_change())
-                convergence_value = coef_change
-                converged_this_iter = coef_change < tol
-                damped = step.damped
-                if damped is not None and damped(self):
-                    # a damped step's change is a fraction of the full
-                    # step's and bounds nothing either (below)
-                    converged_this_iter = False
-            else:
-                objective = (
-                    retained.deviance
-                    if retained.penalized_deviance is None
-                    else retained.penalized_deviance
-                )
-                if np.isfinite(self.objective_prev):
-                    dev_rel_change = _irls_objective_relative_change(
-                        objective=objective,
-                        previous=self.objective_prev,
-                        objective_scale=self.objective_merit_scale,
-                    )
-                converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
-                damped = step.damped
-                if damped is not None and damped(self):
-                    # A step whose decrease bounds nothing never stops the fit
-                    # (the SCOP step's: a damped joint Newton step).
-                    converged_this_iter = False
-                convergence_value = dev_rel_change
-        else:
-            converged_this_iter = False
-            convergence_value = None
-        if self.step_rejected:
-            converged_this_iter = False
-        self.dev_rel_change, self.coef_change = dev_rel_change, coef_change
-        self.convergence_value, self.converged_this_iter = convergence_value, converged_this_iter
-        self.score_stagnated, self._last_mode_residual = score_stagnated, _last_mode_residual
-
-    def _terminate(self, it: int) -> None:
-        converged_this_iter, step_rejected = self.converged_this_iter, self.step_rejected
-        dev, max_iter, qp = self.dev, self.max_iter, self.qp
-        constraints_feasible_this_iter = True
-        if qp is not None:
-            constraints_feasible_this_iter = _is_feasible(
-                qp.A_all,
-                self.beta,
-                qp.b_all,
-                _QP_FEASIBILITY_TOL,
-                abs_A=qp.abs_A_all,
-            )
-            # Objective or coefficient stagnation cannot certify a constrained
-            # mode whose retained coefficients are outside the feasible set.
-            # Keep iterating while budget remains: a later QP/line-search step
-            # may still repair an infeasible warm start.
-            if not constraints_feasible_this_iter:
-                converged_this_iter = False
-            # Outer coefficient/deviance stagnation cannot replace the inner
-            # QP's stationarity and dual-feasibility certificate. Keep a
-            # finite feasible iterate and continue: a later full QP proposal
-            # may still obtain the missing certificate.
-            if not qp.retained_converged:
-                converged_this_iter = False
-
-        terminal_constraint_infeasible = bool(
-            not constraints_feasible_this_iter
-            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
-        )
-        terminal_constraint_kkt_incomplete = bool(
-            qp is not None
-            and not qp.retained_converged
-            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
-        )
-
-        if terminal_constraint_infeasible:
-            termination_reason = "constraint_infeasible"
-        elif terminal_constraint_kkt_incomplete:
-            termination_reason = "constraint_kkt_incomplete"
-        elif step_rejected:
-            termination_reason = "step_rejected"
-        elif not np.isfinite(dev):
-            termination_reason = "nonfinite_deviance"
-        elif converged_this_iter:
-            termination_reason = "converged"
-        elif self.score_stagnated:
-            termination_reason = "score_stagnated"
-        elif it + 1 == max_iter:
-            termination_reason = "max_iter"
-        else:
-            termination_reason = "continue"
-        self.converged_this_iter, self.termination_reason = converged_this_iter, termination_reason
 
     def _finish(self, it: int) -> None:
         retained, family, link, beta = self.retained, self.family, self.link, self.beta
@@ -2288,9 +1844,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     held_warnings.warn(message, SeparationWarning, stacklevel=4)
 
         if qp is not None:
-            A_all, b_all = qp.A_all, qp.b_all
-            if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=qp.abs_A_all):
-                minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
+            if not qp.feasible(beta):
+                minimum_scaled_slack = float(np.min(_feasibility_slack(qp.A_all, beta, qp.b_all)))
                 converged = False
                 termination_reason = "constraint_infeasible"
                 logger.warning(
