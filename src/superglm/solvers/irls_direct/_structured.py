@@ -15,6 +15,7 @@ from superglm._blas_threads import keep_narrow_cap
 from superglm.group_matrix import DesignMatrix
 from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
 from superglm.solvers.hessian_factor import HessianFactor
+from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.mode_score import centre_offset_mean, centred_data_score
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
@@ -275,7 +276,7 @@ def _structured_score_centre(
     return mean_x, float(system.sum_w), diagonal, excluded, offset_mean
 
 
-class _IRLSDirectStructuredStep:
+class _IRLSDirectStructuredStep(_IRLSDirectStep):
     """The fit's step on the structured backend: the random-effect chain, ``fs`` or ``sz`` term in block form.
 
     Chosen with the route, in ``_IRLSDirectFit._setup_design``, from the
@@ -291,7 +292,6 @@ class _IRLSDirectStructuredStep:
 
     __slots__ = ("_group_index", "_layout", "_last_system")
     backend = "structured"
-    data_rank = None
 
     def __init__(
         self, dm: DesignMatrix, groups: list[GroupSlice], decision: StructuredBackendDecision

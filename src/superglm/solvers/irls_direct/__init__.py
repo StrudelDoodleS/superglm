@@ -18,8 +18,9 @@ shared B matrices between select=True subgroups vanishes entirely.
 The fit lives in ``_fit`` (``fit_irls_direct`` and its method object), its
 recorder in ``_recorder``, and its step methods behind the interface in
 ``_step``: the QR step in ``_qr``, the structured step (random-effect chains,
-``fs`` and ``sz`` terms) in ``_structured``; the other Gram-path routes are
-still one step in ``_fit``.  ``_centred`` holds what more than one step reads
+``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained (SCOP) step
+with its own line search in ``_scop``; the dense and QP routes are still one
+step in ``_fit``.  ``_centred`` holds what more than one step reads
 of the centred system.  This module re-exports the names other modules import.  A name the
 fit reads is patched where the fit reads it, in the submodule: patching it
 here would change nothing the fit sees.

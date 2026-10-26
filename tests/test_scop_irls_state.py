@@ -133,13 +133,14 @@ def _scop_fit_inputs():
 def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> None:
     """Ordinary SCOP iterations retain the native matrix matvec hot path."""
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
     def unexpected_centred_matvec(*args, **kwargs):
         raise AssertionError("centred prediction is reserved for ill-scaled columns")
 
-    monkeypatch.setattr(irls_direct, "_centred_system_matvec", unexpected_centred_matvec)
+    monkeypatch.setattr(irls_scop, "_centred_system_matvec", unexpected_centred_matvec)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -158,6 +159,7 @@ def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> 
 
 def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> None:
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -166,7 +168,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
             kwargs["evaluate_state"](2.0**-depth)
         return _IRLSStepDecision(0.0, 0, True, trials_attempted=6)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_all)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", reject_all)
     sink = MemoryTraceSink()
 
     result, _, states = irls_direct.fit_irls_direct(
@@ -214,6 +216,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
 
 def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch) -> None:
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
     baseline, _, baseline_states = irls_direct.fit_irls_direct(
@@ -231,7 +234,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
     )
     baseline_state = next(iter(baseline_states.values()))
     monkeypatch.setattr(
-        irls_direct,
+        irls_scop,
         "_select_irls_trial",
         lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=6),
     )
@@ -270,6 +273,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
 
 def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatch) -> None:
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -277,7 +281,7 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         kwargs["evaluate_state"](0.5)
         return _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", select_half)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", select_half)
     sink = MemoryTraceSink()
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
@@ -345,6 +349,7 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
     both fields directly instead of hoping a fixture reaches them.
     """
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -352,7 +357,7 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
         kwargs["evaluate_state"](alpha)
         return _IRLSStepDecision(alpha, halvings, rejected, trials_attempted=halvings + 1)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", forced_decision)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", forced_decision)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -406,10 +411,11 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
 def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None:
     """SCOP merit uses lambda*S_scop in beta-space, not the mapped global block."""
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
     monkeypatch.setattr(
-        irls_direct,
+        irls_scop,
         "_select_irls_trial",
         lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=1),
     )
@@ -495,6 +501,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
     once one indicator's weighted frequency crossed 1/2.
     """
     import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
     from superglm.features.categorical import Categorical
 
     rng = np.random.default_rng(20261004)
@@ -516,7 +523,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
     )
 
     verdicts: list[bool] = []
-    guard = irls_direct._raw_centering_well_scaled
+    guard = irls_scop._raw_centering_well_scaled
 
     def recording_guard(mean_x, scale):
         verdicts.append(guard(mean_x, scale))
@@ -529,7 +536,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
         materialised.append(len(idx))
         return row_subset(self, idx)
 
-    monkeypatch.setattr(irls_direct, "_raw_centering_well_scaled", recording_guard)
+    monkeypatch.setattr(irls_scop, "_raw_centering_well_scaled", recording_guard)
     monkeypatch.setattr(DesignMatrix, "row_subset", recording_row_subset)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,

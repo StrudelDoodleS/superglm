@@ -17,6 +17,7 @@ from superglm.group_matrix import (
 )
 from superglm.solvers.centered_system import CenteredSystem
 from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.rank import RankDecomposition, decompose_factor
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     return rows if centre_lo is None else rows - centre_lo
 
 
-class _IRLSDirectQRStep:
+class _IRLSDirectQRStep(_IRLSDirectStep):
     """The fit's step under ``direct_solve="qr"``: a QR factor of ``[sqrt(W) X~; sqrt(S)]``.
 
     Taken when the fit has no linear constraints and no SCOP group.  It
@@ -64,7 +65,6 @@ class _IRLSDirectQRStep:
 
     __slots__ = ("_X_full", "_L_aug")
     backend = "qr"
-    finalise = None
 
     def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int) -> None:
         has_disc = any(
