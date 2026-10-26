@@ -221,6 +221,51 @@ def test_a_crossed_pair_and_a_nested_pair_are_not_named() -> None:
     )
 
 
+@pytest.mark.parametrize("parents", [3, 40])
+def test_a_near_nested_pair_names_each_level_majority_parent(monkeypatch, parents) -> None:
+    """The broken rows and majority parents named, against a row-by-row count.
+
+    Fifty child levels under three parents give a table with fewer cells than
+    rows, counted in one ``np.bincount``; under forty, one with more, counted
+    over its sorted occupied cells.  A level split one row each between two
+    parents has the parent seen first as its majority.  Mutations: taking the
+    last of tied counts on either route, or sorting the small table, fail.
+    """
+    rng = np.random.default_rng(4)
+    child = np.concatenate([rng.permutation(np.repeat(np.arange(50), 12)), [50, 50]])
+    parent = child % parents
+    parent[[7, 300]] = (parent[[7, 300]] + 1) % parents
+    parent[-2:] = [1, 0]
+    frame = {"child": [f"c{v}" for v in child], "parent": [f"p{v}" for v in parent]}
+    seen = {value: row for row, value in reversed(list(enumerate(frame["parent"])))}
+    tally: dict[str, dict[str, int]] = {}
+    for level, value in zip(frame["child"], frame["parent"], strict=True):
+        tally.setdefault(level, {}).setdefault(value, 0)
+        tally[level][value] += 1
+    majority = {
+        level: max(counts, key=lambda value: (counts[value], -seen[value]))
+        for level, counts in tally.items()
+    }
+    broken = [
+        row for row, level in enumerate(frame["child"]) if frame["parent"][row] != majority[level]
+    ]
+    sorts = []
+    unique = np.unique
+    monkeypatch.setattr(np, "unique", lambda *a, **k: sorts.append(1) or unique(*a, **k))
+
+    specs = {"child": RandomEffect(), "parent": RandomEffect()}
+    (note,) = near_nesting_notes(specs, lambda name: np.asarray(frame[name], dtype=object))
+
+    assert len(sorts) == (parents == 40)
+    assert f"except for {len(broken)} row(s)" in note
+    for row in broken:
+        level, value = frame["child"][row], frame["parent"][row]
+        assert (
+            f"row {row}: 'child' level {level!r} under 'parent' level {value!r}, where most "
+            f"of its rows are under {majority[level]!r}"
+        ) in note
+
+
 def test_the_re_helper_declares_nesting() -> None:
     """``re(column, nested_in=)`` declares the hierarchy the terms API validates on its rows.
 

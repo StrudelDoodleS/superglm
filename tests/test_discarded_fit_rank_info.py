@@ -20,7 +20,7 @@ import pytest
 import superglm.model.reml_finalize as reml_finalize
 import superglm.solvers.irls_direct as irls_direct
 import superglm.solvers.rank as rank
-from superglm import NegativeBinomial, SuperGLM, Tweedie
+from superglm import Constraint, NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
 
@@ -163,6 +163,48 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
     )
     assert deferred._solver_result.rank_info is deferred.result.rank_info
     assert deferred._reml_result.pirls_result.rank_info is deferred.result.rank_info
+
+
+def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(monkeypatch):
+    """The unconstrained terminal refit only warm-starts the published QP refit.
+
+    Its rank metadata is never read, so only the QP refit factors the data
+    rank, and the published fit is byte for byte the one that computes both
+    (``inline``). Mutation check: the terminal refit computing its rank
+    metadata again counts two factorisations.
+    """
+
+    def fit(inline):
+        rng, frame, mu = _frame(5, 500)
+        y = rng.poisson(mu * np.exp(0.05 * frame["z"].to_numpy())).astype(np.float64)
+        features = {
+            "band": Categorical(),
+            "z": Spline(kind="cr", k=6, constraint=Constraint.fit.increasing),
+        }
+        model = SuperGLM(family="poisson", features=features)
+        calls = []
+        factor = irls_direct.grouped_weighted_factor
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return factor(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            _force_factor_route(patch)
+            patch.setattr(irls_direct, "grouped_weighted_factor", counted)
+            terminal = _record_terminal_refits(patch, inline=inline)
+            model.fit_reml(frame, y)
+        assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
+        assert terminal[-2:] == ["reml_final", "reml_qp_final"]
+        return model, len(calls)
+
+    (skipped, skipped_calls), (inline, inline_calls) = fit(inline=False), fit(inline=True)
+    assert (skipped_calls, inline_calls) == (1, 2)
+    np.testing.assert_array_equal(skipped.result.beta, inline.result.beta)
+    assert skipped.result.rank_info is not None
+    assert pickle.dumps(_without_condition_estimate(skipped.result.rank_info)) == pickle.dumps(
+        _without_condition_estimate(inline.result.rank_info)
+    )
 
 
 def test_qr_backend_never_defers_so_the_dense_design_is_not_kept(monkeypatch):

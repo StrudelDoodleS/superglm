@@ -617,13 +617,17 @@ def finalize_reml_fit(
         # by retained-fit inference.  A power-search candidate is discarded
         # (``_discard_rank_info``), so it skips it; an NB2 auto-theta refit
         # may be replaced by the next, so it defers it (``_defer_rank_info``,
-        # computed by ``fit_ops`` for the refit that is published).  Shaped
-        # fits keep it: their SCOP and QP routes rewrite it after this refit.
-        discard_rank_info = not shaped and bool(getattr(model, "_discard_rank_info", False))
+        # computed by ``fit_ops`` for the refit that is published).  A QP
+        # passthrough publishes its constrained refit
+        # (``maybe_qp_passthrough_refit``), which reads only this refit's
+        # coefficients, so it skips it too.  Other shaped fits keep it: their
+        # SCOP and QP routes rewrite it after this refit.
+        discard_rank_info = qp_passthrough or (
+            not shaped and bool(getattr(model, "_discard_rank_info", False))
+        )
         deferred_rank_info: list | None = (
             []
-            if not (shaped or qp_passthrough or discard_rank_info)
-            and bool(getattr(model, "_defer_rank_info", False))
+            if not (shaped or discard_rank_info) and bool(getattr(model, "_defer_rank_info", False))
             else None
         )
         final_output = fit_irls_direct(
