@@ -1349,8 +1349,77 @@ def _fit_irls_direct_once(**kwargs):
     return _IRLSDirectFit(**kwargs).run()
 
 
-@dataclass(eq=False, repr=False)
-class _IRLSDirectFit:
+class _IRLSDirectFitFields:
+    """The fit's state beyond its parameters, by the method that first sets it.
+
+    Slots, not an instance dict: a field is read and written at a fixed offset, not
+    hashed into a dict of some two hundred entries, and a misspelt field is an error.
+    """
+
+    __slots__ = (
+        # _setup_design
+        "dm n p gms objective_merit_scale structured_decision _use_structured"
+        " _structured_group_index _structured_layout _direct_fallback_reason _state_center beta"
+        " intercept _start_lowered S _penalty_curvature _row_set_curvature"
+        # _setup_trace
+        " trace_basis_id trace_enabled resolved_lambdas"
+        # _setup_routes
+        " prev_active_set _scop_run has_constraints A_all b_all abs_A_all _has_scop"
+        " _scop_columns _scop_curvature _observed_newton_active _stagnation_newton_available"
+        # _setup_scop
+        " _S_reduced _reduced_to_full _reduced_dm _reduced_tabmat_state _scop_specs _scop_order"
+        " _scop_newton _expose_exact_support_state _scop_state"
+        # _setup_systems
+        " _mean_space_newton_available _X_full _L_aug _constant_centered_cache"
+        " _constant_centered_z certify_centered_factor _initial_data_key _use_qr _tabmat_split"
+        " _tabmat_centering_state _can_reuse_weighted_gram fixed_owners _initial_data_pending"
+        # _setup_loop
+        " t_start converged XtWX_beta _final_penalized_operator _t_working _t_gram _t_solve"
+        " _t_deviance _t_eta _t_deviance_eval _last_working_centered _last_working_offset_mean"
+        " _last_working_structured _score_centre _last_mode_residual _mode_ratios"
+        " _stagnation_window score_stagnated _true_ratios _mean_space_newton _true_stop"
+        " _true_confirmed _true_stop_ratio _last_true_residual _held_rank _judged_truncated"
+        " _last_truncated _mean_space_invalid _link_domain_invalid objective_prev dev_prev"
+        " eta_unclipped eta mu iteration_log base_debug_context capture_extrema max_halving"
+        " _consecutive_svd _reported_qp_nonconvergence _degeneracy_retry_failed"
+        " retained_qp_converged termination_reason deviance_relative_change mode_bar committed"
+        " record_debug_rows"
+        # _scop_initial_state
+        " scop_outer_penalty scop_outer_penalty_abs scop_merit_errors merit_gamma"
+        " gaussian_response_roundoff nb2_unit_roundoff scop_committed"
+        # _working
+        " beta_prev intercept_prev committed_active_set proposal_qp_converged rank_truncated"
+        " used_rank_certification scop_proposal_eta_unclipped proposal_centred_intercept"
+        " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
+        " newton_committed_rows w_ratio"
+        # _step_qr
+        " _cond_est _used_svd"
+        # _step_scop
+        " scop_ordinary centred_level scop_results"
+        # _search_scop
+        " step_rejected dev n_halvings decision proposal_scop retained retained_scop"
+        # _search
+        " proposal"
+        # _converge
+        " proposal_state convergence_label convergence_tolerance dev_rel_change coef_change"
+        " convergence_value converged_this_iter"
+        # _record
+        " eta_clipped working_eta_clipped"
+        # _finish
+        " t_elapsed centred_intercept_lo _boundary_rows _published_truncated"
+        " _truncated_boundary"
+        # _terminal_rows
+        " export_rows"
+        # _final_system
+        " centered_final structured_final XtWX XtW1 sum_W mean_x"
+        # _final_geometry
+        " structured_factor reml_geometry_summary XtWX_S_inv_beta log_det_H reml_hessian_rank"
+        " retained_reml_decomposition p_eff rank_info"
+    ).split()
+
+
+@dataclass(eq=False, repr=False, slots=True)
+class _IRLSDirectFit(_IRLSDirectFitFields):
     """Fit a penalised GLM via direct IRLS (no BCD).
 
     Solves β = (X'WX + S)⁻¹ X'Wz at each iteration.  Uses gram-based
