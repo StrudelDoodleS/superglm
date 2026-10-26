@@ -28,17 +28,19 @@ here would change nothing the fit sees.
 from superglm.solvers.irls_direct._fit import (
     _QP_FEASIBILITY_TOL,
     _SUBNORMAL_SPACING,
-    SCOPRunCentring,
     _build_penalty_matrix,
-    _centred_system_matvec,
-    _evaluate_scop_trial,
     _safe_decompose_H,
-    _SCOPGroupState,
-    _SCOPTrialState,
     _separation_weight_ratio,
     _solve_constrained_qp_with_cold_retry,
     _underflow_allowance,
     fit_irls_direct,
+)
+from superglm.solvers.irls_direct._scop import (
+    SCOPRunCentring,
+    _centred_system_matvec,
+    _evaluate_scop_trial,
+    _SCOPGroupState,
+    _SCOPTrialState,
 )
 from superglm.solvers.irls_direct._structured import (
     StructuredSolverError,

@@ -16,6 +16,7 @@ from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model.base import model_build_design_matrix
 from superglm.solvers.centered_system import build_centered_system
 from superglm.solvers.irls_direct import _fit as irls_direct
+from superglm.solvers.irls_direct import _scop as irls_scop
 from superglm.solvers.rank import decompose_gram_if_authoritative
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import SCOPGroupSpec, SCOPJointNewton
@@ -1382,7 +1383,7 @@ def test_the_latent_step_depth_is_the_first_halving_within_the_maximum_step(chan
     step is not counted whatever its length, and a step that is not finite is
     depth 0: no halving brings it back, and the line search refuses it as it is.
     """
-    assert irls_direct._LATENT_MAX_STEP == 1000.0
+    assert irls_scop._LATENT_MAX_STEP == 1000.0
     assert _latent_step_depth_of(*changes) == depth
 
 
@@ -1434,7 +1435,7 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
 
     # the bound below is the shortening's, not a trajectory that never needed it
     assert any(depths)
-    assert lengths and max(lengths) <= irls_direct._LATENT_MAX_STEP
+    assert lengths and max(lengths) <= irls_scop._LATENT_MAX_STEP
     assert model.result.converged
     for column in (np.ones_like(x), x):
         score = float(np.sum(weights * residual * column))
