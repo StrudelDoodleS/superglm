@@ -918,7 +918,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         _scop_specs, scop_ordinary = self._specs, self._ordinary
         scop_committed, dm, y, weights = self._committed, fit.dm, fit.y, fit.weights
         family, link, offset = fit.family, fit.link, fit.offset
-        recorder = fit.recorder
+        recorder, curvature = fit.recorder, fit.curvature
         trace_enabled, trace_run = recorder.trace_enabled, recorder.trace_run
         trace_basis_id, resolved_lambdas = recorder.trace_basis_id, recorder.resolved_lambdas
         max_halving, scop_merit_errors = fit.max_halving, self._merit_errors
@@ -1015,7 +1015,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             committed=scop_committed.irls,
             proposal=search_proposal,
             evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
-            invalid_state=fit.observed_rows_invalid if fit._observed_newton_active else None,
+            invalid_state=curvature.observed_rows_invalid if curvature.observed else None,
             max_halving=max_halving,
             extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                 committed=scop_committed.irls,

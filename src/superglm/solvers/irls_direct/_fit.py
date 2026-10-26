@@ -135,6 +135,7 @@ from superglm.solvers.structured import (
     resolve_structured_backend,
 )
 from superglm.solvers.working_rows import (
+    CoefficientWorkingRows,
     coefficient_initial_intercept,
     coefficient_working_rows,
     concave_observed_rows,
@@ -624,6 +625,160 @@ def _fit_irls_direct_once(**kwargs):
     return _IRLSDirectFit(**kwargs).run()
 
 
+class _IRLSDirectCurvaturePolicy:
+    """Fisher scoring or the observed information: the curvature of the fit's working rows.
+
+    Decided once, at setup, from the family, the link and the route
+    (one-engine design §3.11), and switched at most once, by the stop rule:
+
+    - ``observed``: the working rows carry the observed information (Newton
+      steps), not Fisher's.  Every line search of an observed fit rejects a
+      trial whose observed rows are not finite (``observed_rows_invalid``).
+    - ``stagnation_newton_available``: a declared Newton pair kept on Fisher
+      rows for its constant weights (Gamma/log), which switches to Newton if
+      its Fisher score stagnates (``switch_to_newton``), and starts on Newton
+      when an earlier solve of the same REML fit switched (the latch).
+    - ``weighted_gram_reuse``: the working weights are the same at every
+      iterate (constant Fisher weights on a route whose centred system caches
+      them), so the fit's centred system may reuse its weighted Gram and the
+      caller's Fisher data.  The switch turns it off.
+
+    Each is read where it is used, never cached past the switch.  The policy
+    forms the working rows in its curvature (``working_rows``) and keeps the
+    family, link, response and prior weights they read, and no reference to
+    the fit.
+    """
+
+    __slots__ = (
+        "observed stagnation_newton_available weighted_gram_reuse _latch _family _link _y _weights"
+    ).split()
+
+    def __init__(
+        self,
+        family: Distribution,
+        link: Link,
+        y: NDArray,
+        weights: NDArray,
+        *,
+        use_observed_newton: bool,
+        working_newton: bool,
+        return_working_system: bool,
+        latch: list[bool] | None,
+        has_constraints: bool,
+        has_scop: bool,
+        use_structured: bool,
+    ) -> None:
+        # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
+        # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
+        # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
+        # converges only linearly under a non-canonical link. Newton starts only
+        # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
+        # cache exists for it to invalidate. Gamma/log keeps Fisher: its constant
+        # Fisher weights reuse one weighted Gram that Newton would rebuild every
+        # iteration; the mode certificate's bar is set by the REML tolerance
+        # (``mode_score.mode_certification_bar``), which Fisher's linear rate
+        # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
+        # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
+        # information ``w y / mu`` exceeds twice the Fisher information ``w``
+        # along a direction, as heavy-tailed severities give, and there the score
+        # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
+        # it in the budget.  Such a solve switches to Newton once its resolved
+        # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
+        # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
+        # reaches the bar in time never switches.
+        # The exported geometry is Fisher either way (``export_rows``), and the
+        # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
+        # is decided here, once, from the family, the link and the route
+        # (one-engine design §3.11).
+        # An observed iterate whose Hessian the structured factor refuses as not
+        # positive definite takes a Levenberg shift inside the same curvature
+        # (``_levenberg_shifted_operator``), and a trial whose observed rows are
+        # not finite is rejected by the line search.
+        # The fREML performance iteration (``_return_working_system``) takes
+        # Newton rows when its optimizer asks (``_working_newton``): the discrete
+        # route's working model then carries the observed curvature its REML
+        # criterion is (``reml.discrete``).
+        # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
+        # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
+        # information, and the REML geometry it hands on reads Fisher rows at the
+        # retained model either way.
+        constant_weights = _has_constant_irls_weights(family, link)
+        observed = bool(
+            use_observed_newton
+            and not has_constraints
+            and (
+                (working_newton and concave_observed_rows(family, link))
+                if return_working_system
+                else supports_observed_newton(family, link) and not constant_weights
+            )
+        )
+        stagnation_newton_available = bool(
+            use_observed_newton
+            and not has_constraints
+            and not has_scop
+            and not return_working_system
+            and supports_observed_newton(family, link)
+            and not observed
+        )
+        if stagnation_newton_available and latch is not None and latch[0]:
+            observed = True
+        self.observed = observed
+        self.stagnation_newton_available = stagnation_newton_available
+        # Observed rows are not the constant Fisher weights this reuse assumes.
+        self.weighted_gram_reuse = (
+            constant_weights and not has_scop and not use_structured and not observed
+        )
+        self._latch = latch
+        self._family, self._link, self._y, self._weights = family, link, y, weights
+
+    def working_rows(self, mu: NDArray, eta: NDArray) -> CoefficientWorkingRows:
+        """The iterate's working rows in the current curvature (``coefficient_working_rows``)."""
+        return coefficient_working_rows(
+            distribution=self._family,
+            link=self._link,
+            y=self._y,
+            mu=mu,
+            eta=eta,
+            sample_weight=self._weights,
+            prefer_observed=self.observed,
+        )
+
+    def observed_rows_invalid(self, candidate: _IRLSState) -> bool:
+        """Whether a trial's observed rows are not finite, which rejects it.
+
+        One-engine design §3.11: finiteness is the one condition the declared
+        observed rows keep; a trial without finite rows is not a state the
+        next Newton step can start from. Every line search of an observed fit
+        reads it, the SCOP one included.
+        """
+        rows = coefficient_working_rows(
+            distribution=self._family,
+            link=self._link,
+            y=self._y,
+            mu=candidate.mu,
+            eta=candidate.eta,
+            sample_weight=self._weights,
+            prefer_observed=True,
+        )
+        return rows.rejection_reason is not None
+
+    def switch_to_newton(self, recorder: _IRLSDirectRecorder) -> None:
+        """Newton steps on the observed information for the iterations left.
+
+        Fisher scoring near the mode contracts too slowly to meet the bar in
+        the budget, or not at all: the observed information is positive for
+        Gamma/log (``w y / mu``), so the penalized Hessian stays positive
+        definite.  The weights now change at every iterate, so the weighted
+        Gram is no longer reused, and the REML fit's later solves start on
+        Newton (the latch).
+        """
+        self.observed = True
+        self.weighted_gram_reuse = False
+        if self._latch is not None:
+            self._latch[0] = True
+        recorder.count("irls_fisher_newton_switches")
+
+
 class _IRLSDirectFitFields:
     """The fit's state beyond its parameters, by the method that first sets it.
 
@@ -639,12 +794,11 @@ class _IRLSDirectFitFields:
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
         " _penalty_curvature _row_set_curvature"
         # _setup_routes
-        " qp _scop_run _has_scop _scop_columns _observed_newton_active"
-        " _stagnation_newton_available"
+        " qp _scop_run _has_scop _scop_columns curvature"
         # _setup_systems
         " _mean_space_newton_available _constant_centered_cache _constant_centered_z"
         " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
-        " _can_reuse_weighted_gram fixed_owners _initial_data_pending"
+        " fixed_owners _initial_data_pending"
         # _setup_loop
         " converged XtWX_beta _last_working_centered _last_working_offset_mean _score_centre"
         " _last_mode_residual"
@@ -780,7 +934,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         Internal curvature switch. When enabled, an ordinary Tweedie/log fit
         takes exact observed-Newton steps on every iteration, and a Gamma/log
         fit starts on Fisher scoring, switching to Newton only when its
-        resolved score is measured to stall (``_observed_newton_active``) or
+        resolved score is measured to stall (``_IRLSDirectCurvaturePolicy``) or
         when ``_newton_latch`` is set; no rejected step switches the curvature
         (one-engine design §3.11). Unsupported, constrained, SCOP, and
         cached-working-system routes retain Fisher scoring. Public callers
@@ -1658,95 +1812,27 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 "omitting generic REML geometry requires rank metadata and fit statistics "
                 "to be disabled"
             )
-        # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
-        # runs on full-Newton weights (Wood 2011, JRSSB 73(1), section 3; Wood, Pya
-        # & Saefken 2016, JASA, section 3.3): Fisher scoring shares the mode but
-        # converges only linearly under a non-canonical link. Newton starts only
-        # where the Fisher weights vary, so no constant-weight Gram or Fisher-data
-        # cache exists for it to invalidate. Gamma/log keeps Fisher: its constant
-        # Fisher weights reuse one weighted Gram that Newton would rebuild every
-        # iteration; the mode certificate's bar is set by the REML tolerance
-        # (``mode_score.mode_certification_bar``), which Fisher's linear rate
-        # reaches wherever Fisher scoring contracts.  It need not: Fisher's error
-        # map ``I - F^-1 H`` has an eigenvalue below -1 where the observed
-        # information ``w y / mu`` exceeds twice the Fisher information ``w``
-        # along a direction, as heavy-tailed severities give, and there the score
-        # stagnates above the bar; nearer 0 Fisher contracts too slowly to reach
-        # it in the budget.  Such a solve switches to Newton once its resolved
-        # score shows it (``mode_score.rate_exhausts_budget``; Green 1984, JRSSB
-        # 46, section 2.3), and keeps it to the end; a solve whose Fisher score
-        # reaches the bar in time never switches.
-        # The exported geometry is Fisher either way (``export_rows``), and the
-        # weighted-Gram cache is off while Newton runs.  Otherwise the curvature
-        # is decided here, once, from the family, the link and the route
-        # (one-engine design §3.11).
-        # An observed iterate whose Hessian the structured factor refuses as not
-        # positive definite takes a Levenberg shift inside the same curvature
-        # (``_levenberg_shifted_operator``), and a trial whose observed rows are
-        # not finite is rejected by the line search.
-        # The fREML performance iteration (``_return_working_system``) takes
-        # Newton rows when its optimizer asks (``_working_newton``): the discrete
-        # route's working model then carries the observed curvature its REML
-        # criterion is (``reml.discrete``).
-        # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
-        # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
-        # information, and the REML geometry it hands on reads Fisher rows at the
-        # retained model either way.
-        _observed_newton_active = bool(
-            self._use_observed_newton
-            and not has_constraints
-            and (
-                (self._working_newton and concave_observed_rows(family, link))
-                if _return_working_system
-                else supports_observed_newton(family, link)
-                and not _has_constant_irls_weights(family, link)
-            )
+        # The curvature of the working rows, decided here once from the family,
+        # the link and the route, and switched at most once by the stop rule.
+        self.curvature = _IRLSDirectCurvaturePolicy(
+            family,
+            link,
+            self.y,
+            self.weights,
+            use_observed_newton=self._use_observed_newton,
+            working_newton=self._working_newton,
+            return_working_system=_return_working_system,
+            latch=self._newton_latch,
+            has_constraints=has_constraints,
+            has_scop=_has_scop,
+            use_structured=self._use_structured,
         )
-        # A declared Newton pair kept on Fisher rows for its constant weights
-        # (Gamma/log), which switches to Newton if its Fisher score stagnates,
-        # and starts on Newton when an earlier solve of the same REML fit
-        # switched (``_newton_latch``).
-        _stagnation_newton_available = bool(
-            self._use_observed_newton
-            and not has_constraints
-            and not _has_scop
-            and not _return_working_system
-            and supports_observed_newton(family, link)
-            and not _observed_newton_active
-        )
-        if (
-            _stagnation_newton_available
-            and self._newton_latch is not None
-            and self._newton_latch[0]
-        ):
-            _observed_newton_active = True
         self._has_scop, self._scop_columns = _has_scop, _scop_columns
         self._state_center = _state_center
-        self._observed_newton_active = _observed_newton_active
-        self._stagnation_newton_available = _stagnation_newton_available
         if _has_scop:
             # The step is chosen with its route.  Its setup evaluates the start,
             # so it follows every field the evaluation reads.
             self.step = _IRLSDirectSCOPStep(self, _scop_curvature)
-
-    def observed_rows_invalid(self, candidate: _IRLSState) -> bool:
-        """Whether a trial's observed rows are not finite, which rejects it.
-
-        One-engine design §3.11: finiteness is the one condition the declared
-        observed rows keep; a trial without finite rows is not a state the
-        next Newton step can start from. Every line search of an observed fit
-        reads it, the SCOP one included.
-        """
-        rows = coefficient_working_rows(
-            distribution=self.family,
-            link=self.link,
-            y=self.y,
-            mu=candidate.mu,
-            eta=candidate.eta,
-            sample_weight=self.weights,
-            prefer_observed=True,
-        )
-        return rows.rejection_reason is not None
 
     def _setup_systems(self) -> None:
         dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
@@ -1786,11 +1872,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # contains a native high-cardinality categorical component. Avoid
             # materializing an unused dense duplicate for numeric and low-cardinality fits.
             _tabmat_split = dm.tabmat_centering_split
-        _can_reuse_weighted_gram = _has_constant_irls_weights(family, link) and not _has_scop
-        # Observed rows are not the constant Fisher weights this cache assumes.
-        _can_reuse_weighted_gram = (
-            _can_reuse_weighted_gram and not _use_structured and not self._observed_newton_active
-        )
+        _can_reuse_weighted_gram = self.curvature.weighted_gram_reuse
         dm.execution_plan.validate_group_spans(groups)
         _defer_raw_spline = (
             not dm.raw_spline_tabmat_plan_built
@@ -1895,14 +1977,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         )
         self._tabmat_split = _tabmat_split
         self._tabmat_centering_state = _tabmat_centering_state
-        self._can_reuse_weighted_gram, self.fixed_owners = _can_reuse_weighted_gram, fixed_owners
+        self.fixed_owners = fixed_owners
         self._raw_moment_policy, self._fisher_data_reuse = _raw_moment_policy, _fisher_data_reuse
         self._initial_data_pending = _initial_data_pending
 
     def get_centered_system(self, W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
-        _tabmat_centering_state = self._tabmat_centering_state
+        _tabmat_centering_state, curvature = self._tabmat_centering_state, self.curvature
         # read on every call: the Gamma/log switch turns it off mid-fit
-        _can_reuse_weighted_gram = self._can_reuse_weighted_gram
+        _can_reuse_weighted_gram = curvature.weighted_gram_reuse
         _constant_centered_cache = self._constant_centered_cache
         reuse = self._initial_data_reuse if self._initial_data_pending else None
         self._initial_data_pending = False
@@ -1933,9 +2015,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             self._constant_centered_z = z_off_current.copy()
             return self._constant_centered_cache
         fisher = (
-            self._fisher_data_reuse
-            if _can_reuse_weighted_gram and not self._observed_newton_active
-            else None
+            self._fisher_data_reuse if _can_reuse_weighted_gram and not curvature.observed else None
         )
         data = (
             fisher.take((*self.fixed_owners, self.weight_semantics), W_current)
@@ -2115,15 +2195,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
-        working_rows = coefficient_working_rows(
-            distribution=family,
-            link=link,
-            y=y,
-            mu=self.mu,
-            eta=self.eta,
-            sample_weight=weights,
-            prefer_observed=self._observed_newton_active,
-        )
+        working_rows = self.curvature.working_rows(self.mu, self.eta)
         W = working_rows.weights
         z = working_rows.response
         # binomial/log Newton rows once engaged (refusal block below): the
@@ -2228,8 +2300,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         committed_constraints_feasible = True
         proposal_constraints_feasible = True
+        curvature = self.curvature
         constraint_trial_is_invalid = (
-            self.observed_rows_invalid if self._observed_newton_active else None
+            curvature.observed_rows_invalid if curvature.observed else None
         )
         if qp is not None:
             # the feasibility contract, on the QP step's constraint system
@@ -2461,10 +2534,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     and min(_mode_ratios[-_stagnation_window:])
                     > 0.5 * min(_mode_ratios[:-_stagnation_window])
                 )
-                switched_curvature = False
+                switched_curvature, curvature = False, self.curvature
                 if (
-                    self._stagnation_newton_available
-                    and not self._observed_newton_active
+                    curvature.stagnation_newton_available
+                    and not curvature.observed
                     and not converged_this_iter
                     and (
                         score_stagnated
@@ -2478,18 +2551,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 ):
                     # Fisher scoring near the mode contracts too slowly to
                     # meet the bar in the budget, or not at all (the comment
-                    # at ``_observed_newton_active``): the iterations left
-                    # take Newton steps on the observed information, positive
-                    # for Gamma/log (``w y / mu``), so the penalized Hessian
-                    # stays positive definite.
-                    self._observed_newton_active = True
-                    self._can_reuse_weighted_gram = False
+                    # at ``_IRLSDirectCurvaturePolicy``): the iterations left
+                    # take Newton steps on the observed information.
+                    curvature.switch_to_newton(self.recorder)
                     score_stagnated = False
                     switched_curvature = True
                     _mode_ratios.clear()
-                    if self._newton_latch is not None:
-                        self._newton_latch[0] = True
-                    self.recorder.count("irls_fisher_newton_switches")
                 if (
                     not converged_this_iter
                     and not switched_curvature
