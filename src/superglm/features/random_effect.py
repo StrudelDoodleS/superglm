@@ -228,6 +228,29 @@ def _first_rows(codes: NDArray[np.intp], n_levels: int) -> NDArray[np.intp]:
     return first
 
 
+def _majority_parents(
+    child_codes: NDArray[np.intp], parent_codes: NDArray[np.intp], n_child: int, n_parent: int
+) -> NDArray[np.intp]:
+    """Each child level's most frequent parent level (ties: the lowest parent code).
+
+    Every child level has a row.  The child-by-parent counts are one
+    ``np.bincount`` over the rows when the table has no more cells than there
+    are rows, so it costs no more than the codes; a larger table is counted
+    over its occupied cells, sorted.
+    """
+    pair = child_codes.astype(np.int64) * n_parent + parent_codes
+    cells = n_child * n_parent
+    if cells <= pair.size:
+        return np.bincount(pair, minlength=cells).reshape(n_child, n_parent).argmax(axis=1)
+    occupied, counts = np.unique(pair, return_counts=True)
+    cell_child = occupied // n_parent
+    order = np.lexsort((-counts, cell_child))
+    leading = order[np.r_[True, cell_child[order][1:] != cell_child[order][:-1]]]
+    majority = np.empty(n_child, dtype=np.intp)
+    majority[cell_child[leading]] = occupied[leading] % n_parent
+    return majority
+
+
 def random_effect_specs(specs) -> dict:
     """The ``RandomEffect`` features of a feature mapping, in its order."""
     return {name: spec for name, spec in specs.items() if isinstance(spec, RandomEffect)}
@@ -302,25 +325,17 @@ def near_nesting_notes(specs, column) -> list[str]:
             first = _first_rows(child_codes, len(child_levels))[child_codes]
             if np.array_equal(parent_codes[first], parent_codes):
                 continue  # nested: the solver detects it from the codes
-            pair = child_codes.astype(np.int64) * len(parent_levels) + parent_codes
-            cells, inverse, counts = np.unique(pair, return_inverse=True, return_counts=True)
-            cell_child = cells // len(parent_levels)
-            # each child level's most frequent parent cell (ties: the first)
-            order = np.lexsort((-counts, cell_child))
-            leading = np.zeros(len(cells), dtype=bool)
-            leading[order[np.r_[True, cell_child[order][1:] != cell_child[order][:-1]]]] = True
-            broken = np.flatnonzero(~leading[inverse])
+            majority = _majority_parents(
+                child_codes, parent_codes, len(child_levels), len(parent_levels)
+            )
+            broken = np.flatnonzero(majority[child_codes] != parent_codes)
             limit = max(1, int(_NEAR_NESTING_SHARE * len(child_codes)))
             if not 0 < broken.size <= limit:
                 continue
-            majority = {
-                int(cell // len(parent_levels)): int(cell % len(parent_levels))
-                for cell in cells[leading]
-            }
             examples = "; ".join(
                 f"row {int(row)}: {child!r} level {child_levels[child_codes[row]]!r} under "
                 f"{parent!r} level {parent_levels[parent_codes[row]]!r}, where most of its rows "
-                f"are under {parent_levels[majority[int(child_codes[row])]]!r}"
+                f"are under {parent_levels[majority[child_codes[row]]]!r}"
                 for row in broken[:_NEAR_NESTING_ROWS_SHOWN]
             )
             notes.append(
