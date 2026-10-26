@@ -17,9 +17,10 @@ shared B matrices between select=True subgroups vanishes entirely.
 
 The fit lives in ``_fit`` (``fit_irls_direct`` and its method object), its
 recorder in ``_recorder``, and its step methods behind the interface in
-``_step``: the QR step in ``_qr``; the Gram-path routes are still one step in
-``_fit``.  ``_centred`` holds what more than one step reads of the centred
-system.  This module re-exports the names other modules import.  A name the
+``_step``: the QR step in ``_qr``, the structured step (random-effect chains,
+``fs`` and ``sz`` terms) in ``_structured``; the other Gram-path routes are
+still one step in ``_fit``.  ``_centred`` holds what more than one step reads
+of the centred system.  This module re-exports the names other modules import.  A name the
 fit reads is patched where the fit reads it, in the submodule: patching it
 here would change nothing the fit sees.
 """
@@ -28,20 +29,22 @@ from superglm.solvers.irls_direct._fit import (
     _QP_FEASIBILITY_TOL,
     _SUBNORMAL_SPACING,
     SCOPRunCentring,
-    StructuredSolverError,
-    _build_iterate_factor,
     _build_penalty_matrix,
     _centred_system_matvec,
     _evaluate_scop_trial,
-    _levenberg_shifted_leaf_operator,
     _safe_decompose_H,
     _SCOPGroupState,
     _SCOPTrialState,
     _separation_weight_ratio,
     _solve_constrained_qp_with_cold_retry,
-    _structured_solver_errors,
     _underflow_allowance,
     fit_irls_direct,
+)
+from superglm.solvers.irls_direct._structured import (
+    StructuredSolverError,
+    _build_iterate_factor,
+    _levenberg_shifted_leaf_operator,
+    _structured_solver_errors,
 )
 
 __all__ = [

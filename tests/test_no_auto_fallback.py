@@ -31,6 +31,7 @@ import pytest
 import scipy.sparse as sp
 
 import superglm.solvers.irls_direct._fit as irls_direct
+import superglm.solvers.irls_direct._structured as irls_structured
 from superglm.distributions import Poisson
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -343,7 +344,7 @@ def test_refusal_is_one_clear_error(monkeypatch, site: str) -> None:
         raise np.linalg.LinAlgError(cause)
 
     if site == "build":
-        monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse)
+        monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refuse)
     else:
         from superglm.solvers.structured import ProfiledNestedSchurFactor
 
@@ -361,7 +362,7 @@ def test_refusal_is_one_clear_error(monkeypatch, site: str) -> None:
         return fit_once(**kwargs)
 
     monkeypatch.setattr(irls_direct, "_fit_irls_direct_once", spy)
-    with pytest.raises(irls_direct.StructuredSolverError) as refused:
+    with pytest.raises(irls_structured.StructuredSolverError) as refused:
         irls_direct.fit_irls_direct(direct_solve="auto", **_poisson_problem())
     assert cause.rstrip(".") in str(refused.value)
     assert "direct_solve='gram'" in str(refused.value)
@@ -383,8 +384,8 @@ def test_a_refusals_notes_reach_the_clear_error() -> None:
         "No Levenberg shift up to 1e+08 certified the iterate either; the largest "
         "shift's factor refused with: border curvature -0.03 is material."
     )
-    with pytest.raises(irls_direct.StructuredSolverError) as refused:
-        with irls_direct._structured_solver_errors():
+    with pytest.raises(irls_structured.StructuredSolverError) as refused:
+        with irls_structured._structured_solver_errors():
             raise refusal
     message = str(refused.value)
     assert "tree pivot 0 within its certified uncertainty 1e-16." in message
@@ -428,7 +429,7 @@ def test_a_non_finite_outer_hessian_is_the_clear_error(monkeypatch) -> None:
         selection_penalty=0,
         direct_solve="structured",
     )
-    with pytest.raises(irls_direct.StructuredSolverError, match="direct_solve='gram'"):
+    with pytest.raises(irls_structured.StructuredSolverError, match="direct_solve='gram'"):
         model.fit_reml(frame, y)
 
 

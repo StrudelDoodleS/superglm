@@ -64,6 +64,7 @@ class _IRLSDirectQRStep:
 
     __slots__ = ("_X_full", "_L_aug")
     backend = "qr"
+    finalise = None
 
     def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int) -> None:
         has_disc = any(

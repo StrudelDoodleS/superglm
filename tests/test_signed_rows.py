@@ -393,7 +393,7 @@ def test_an_iterate_no_shift_certifies_raises_its_own_refusal(monkeypatch) -> No
     the factor's refusal of ``H`` itself, with the largest shift's refusal
     attached as a note, never the refusal of ``H + 1e8 diag(scale)`` alone.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._structured as irls_structured
 
     case, w, lambdas = _signed_case("cancel", 2, 1e-7, 1e4, 0.0)
     system, penalized = _chain_factor(case, w, lambdas)
@@ -404,9 +404,9 @@ def test_an_iterate_no_shift_certifies_raises_its_own_refusal(monkeypatch) -> No
         cause = "of the iterate" if operator is penalized else f"shifted, build {len(builds)}"
         raise np.linalg.LinAlgError(f"refusal {cause}")
 
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refuse)
     with pytest.raises(np.linalg.LinAlgError, match="refusal of the iterate") as raised:
         _build_iterate_factor(system, penalized, observed=True)
-    assert len(builds) == 1 + len(irls_direct._LEVENBERG_SHIFTS)
+    assert len(builds) == 1 + len(irls_structured._LEVENBERG_SHIFTS)
     notes = getattr(raised.value, "__notes__", [])
     assert any(f"shifted, build {len(builds)}" in note for note in notes)

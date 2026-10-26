@@ -16,6 +16,7 @@ import superglm.reml.objective as reml_objective
 import superglm.solvers._structured.moments as moments
 import superglm.solvers._structured.selection as selection
 import superglm.solvers.irls_direct._fit as irls_direct
+import superglm.solvers.irls_direct._structured as irls_structured
 from superglm import generate_tweedie_cpg
 from superglm.distributions import (
     Gamma,
@@ -827,7 +828,7 @@ def _refusing_builder(monkeypatch, refuses: Callable[[int], bool]) -> list:
     It refuses as a factor does, with ``np.linalg.LinAlgError``; the other
     calls build normally.  Returns the call log.
     """
-    build = irls_direct.build_augmented_structured_factor
+    build = irls_structured.build_augmented_structured_factor
     calls: list = []
 
     def refusing(system, operator):
@@ -836,7 +837,7 @@ def _refusing_builder(monkeypatch, refuses: Callable[[int], bool]) -> list:
             raise np.linalg.LinAlgError(_REFUSAL)
         return build(system, operator)
 
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refusing)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refusing)
     return calls
 
 
@@ -879,7 +880,7 @@ def _backend_calls(monkeypatch) -> list[str]:
 def _assert_clear_error(error: pytest.ExceptionInfo, cause: str) -> None:
     """The one error an engine that cannot proceed raises (design §6, decision 6)."""
     message = str(error.value)
-    assert isinstance(error.value, irls_direct.StructuredSolverError)
+    assert isinstance(error.value, irls_structured.StructuredSolverError)
     assert isinstance(error.value, np.linalg.LinAlgError)
     assert cause.rstrip(".") in message
     assert "direct_solve='gram'" in message
@@ -1018,8 +1019,8 @@ def test_a_refused_observed_iterate_is_shifted_and_the_fit_stops_at_its_mode(
             _tweedie_rows, factor_basis=route
         )
     build, iterate = (
-        irls_direct.build_augmented_structured_factor,
-        irls_direct._build_iterate_factor,
+        irls_structured.build_augmented_structured_factor,
+        irls_structured._build_iterate_factor,
     )
     refusals = [0]
 
@@ -1036,8 +1037,8 @@ def test_a_refused_observed_iterate_is_shifted_and_the_fit_stops_at_its_mode(
         finally:
             refusals[0] = 0
 
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refusing)
-    monkeypatch.setattr(irls_direct, "_build_iterate_factor", shifted_iterate)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refusing)
+    monkeypatch.setattr(irls_structured, "_build_iterate_factor", shifted_iterate)
     profile: dict = {}
     result, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -1058,7 +1059,7 @@ def test_a_refused_observed_iterate_is_shifted_and_the_fit_stops_at_its_mode(
     assert result.converged and result.termination_reason == "converged"
     assert profile["irls_observed_newton_iters"] == result.n_iter
     assert profile["irls_levenberg_shifts"] == result.n_iter
-    assert profile["irls_levenberg_max_shift"] == irls_direct._LEVENBERG_SHIFTS[3]
+    assert profile["irls_levenberg_max_shift"] == irls_structured._LEVENBERG_SHIFTS[3]
 
 
 def test_a_refused_discrete_trial_is_rejected_with_a_shorter_step(monkeypatch) -> None:
@@ -1100,7 +1101,7 @@ def test_a_refused_exact_trial_is_rejected_with_a_shorter_step(monkeypatch) -> N
     handler around the trial's ``fit_irls_direct`` the refusal fails
     ``fit_reml``.
     """
-    fit, build = direct_reml.fit_irls_direct, irls_direct.build_augmented_structured_factor
+    fit, build = direct_reml.fit_irls_direct, irls_structured.build_augmented_structured_factor
     state = {"trial": False, "refused": 0}
 
     def tracking(*args, **kwargs):
@@ -1117,7 +1118,7 @@ def test_a_refused_exact_trial_is_rejected_with_a_shorter_step(monkeypatch) -> N
         return build(system, operator)
 
     monkeypatch.setattr(direct_reml, "fit_irls_direct", tracking)
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse_first_trial)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refuse_first_trial)
     fits = {}
     for direct_solve in ("auto", "structured"):
         state["refused"] = 0

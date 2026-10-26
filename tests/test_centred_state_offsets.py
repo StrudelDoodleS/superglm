@@ -2484,6 +2484,7 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     from superglm.solvers import centered_system, pirls
     from superglm.solvers.irls_direct import _centred as irls_centred
     from superglm.solvers.irls_direct import _fit as irls_direct
+    from superglm.solvers.irls_direct import _structured as irls_structured
 
     calls: collections.Counter = collections.Counter()
     ran: collections.Counter = collections.Counter()
@@ -2500,7 +2501,7 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
 
     count(centered_system, "corrected_two_pass_pair")
     # read by the structured score centre and by ``_system_offset_mean``
-    count(irls_direct, "centre_offset_mean")
+    count(irls_structured, "centre_offset_mean")
     count(irls_centred, "centre_offset_mean")
     count(w_derivatives, "dense_mean_pair")
     count(centered_system, "_attach_dense_split", ran)
