@@ -262,7 +262,7 @@ def fit_irls_direct(
     _centred_init: tuple[float, NDArray] | None = None,
     _defer_rank_info: list[Callable[[], RankInfo]] | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
-    """Fit by direct IRLS (see ``_fit_irls_direct_once``).
+    """Fit by direct IRLS (``_IRLSDirectFit``, whose docstring documents the parameters).
 
     A structured factor that cannot proceed raises ``StructuredSolverError``
     under every ``direct_solve`` (one-engine design §6, decision 6): no fit is
@@ -581,7 +581,7 @@ class _IRLSDirectFitFields:
         " converged _last_working_centered _last_working_offset_mean _score_centre"
         " stop_rule trial_search"
         " eta_unclipped eta mu max_halving _consecutive_svd"
-        " termination_reason deviance_relative_change mode_bar committed"
+        " termination_reason mode_bar committed"
         # _working
         " rank_truncated used_rank_certification proposal_centred_intercept"
         " working_eta_unclipped working_eta working_mu working_rows W z newton_score"
@@ -593,6 +593,8 @@ class _IRLSDirectFitFields:
         # the stop rule (``stop_rule``) and the mean space's judge
         " convergence_label convergence_tolerance dev_rel_change coef_change"
         " convergence_value converged_this_iter score_stagnated"
+        # run's loop, after the verdict
+        " deviance_relative_change"
         # _finish
         " centred_intercept_lo"
         # _terminal_rows
@@ -799,6 +801,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             search(self, it)
             stop_rule.judge(self, it)
             recorder.iteration(self, it)
+            # Taken from the state the iteration started at, before the retained
+            # state is committed, because the post-loop separation backstop needs
+            # the final iteration's movement: read after the loop it would compare
+            # the retained state with itself, identically zero under budget
+            # exhaustion, and any stagnation test on it would be vacuous.
             dev, dev_prev = self.dev, self.committed.deviance
             deviance_relative_change = abs(dev - dev_prev) / (abs(dev_prev) + 1)
             self.deviance_relative_change = deviance_relative_change
@@ -1528,15 +1535,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # assignment until ``TerminationReason`` carries it, so the consumers that
         # switch on the field cannot be handed a string they have never been shown.
         self.termination_reason: TerminationReason
-
-        # Captured inside the loop, from the state the iteration started at and
-        # before the retained state is committed, because the post-loop separation
-        # backstop needs the final iteration's movement: read after the loop it
-        # would compare the retained state with itself, identically zero under
-        # budget exhaustion, and any stagnation test on it would be vacuous.
-        # ``inf`` until an iteration completes, so a fit that never finishes one
-        # is never called stagnant.
-        self.deviance_relative_change = float("inf")
         self.mode_bar, self.committed = mode_bar, committed
 
     def _working(self, it: int) -> None:
