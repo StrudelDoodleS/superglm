@@ -437,6 +437,64 @@ def test_the_profiles_eta_time_includes_the_scop_proposal_predictor(monkeypatch)
     assert profile["irls_eta_s"] == now[0]
 
 
+def test_the_profiles_eta_time_lies_inside_its_total(monkeypatch):
+    """``irls_eta_s`` counts no state evaluated before the loop's clock starts.
+
+    A controlled clock advances one second per mean formed, the SCOP starting
+    state's included: that state is evaluated before ``irls_total_s`` starts,
+    so its second belongs to neither.
+    """
+    import sys
+
+    from superglm.solvers import irls_state
+
+    rng = np.random.default_rng(0)
+    n = 600
+    frame = pd.DataFrame({"x1": 3.0 + rng.normal(size=n), "x2": rng.uniform(0, 1, n)})
+    y = rng.poisson(np.exp(-0.5 + 0.3 * frame["x1"] + frame["x2"]))
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "x1": Numeric(),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+        },
+    )
+    y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)
+
+    now = [0.0]
+    clock = SimpleNamespace(perf_counter=lambda: now[0])
+    for name, module in list(sys.modules.items()):
+        if name.startswith("superglm.solvers.irls_direct.") or module is irls_state:
+            if hasattr(module, "time"):
+                monkeypatch.setattr(module, "time", clock)
+    clip = irls_state.clip_mu
+
+    def ticking(*args, **kwargs):
+        now[0] += 1.0
+        return clip(*args, **kwargs)
+
+    monkeypatch.setattr(irls_state, "clip_mu", ticking)
+    profile: dict = {}
+    irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 0.0, "x2": 1.0},
+        offset=offset,
+        max_iter=3,
+        weight_semantics="prior",
+        profile=profile,
+    )
+
+    assert profile["irls_eta_s"] >= 1.0
+    assert profile["irls_eta_s"] <= profile["irls_total_s"] < now[0]
+
+
 def test_the_scop_line_search_rejects_trials_without_finite_observed_rows(monkeypatch):
     """An observed fit's SCOP trials pass the finiteness test its ordinary trials do.
 

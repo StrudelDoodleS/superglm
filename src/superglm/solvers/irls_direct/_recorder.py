@@ -179,7 +179,12 @@ class _IRLSDirectRecorder:
         )
 
     def start(self) -> None:
-        """The loop's clock starts: ``irls_total_s`` runs from here to ``stop``."""
+        """The loop's clock starts: ``irls_total_s`` runs from here to ``stop``.
+
+        Every phase time counts inside that window, so a state evaluated before
+        it (a SCOP fit's starting state) leaves ``irls_eta_s`` untouched.
+        """
+        self.t_eta = 0.0
         self.t_start = time.perf_counter()
 
     def iteration(self, fit: _IRLSDirectFit, it: int) -> None:
