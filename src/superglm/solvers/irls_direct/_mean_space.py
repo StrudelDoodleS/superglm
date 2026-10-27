@@ -74,9 +74,7 @@ _PENALTY_HEADROOM_EXPONENT = 1000
 
 
 def _even_exponent(value: float) -> int:
-    """The even ``e`` with ``value * 2^-e`` in ``[1/4, 1)``; 0 for zero or non-finite ``value``."""
-    if not (value > 0.0 and math.isfinite(value)):
-        return 0
+    """The even ``e`` with ``value * 2^-e`` in ``[1/4, 1)``, for a positive finite ``value``."""
     exponent = math.frexp(value)[1]
     return exponent + (exponent % 2)
 
