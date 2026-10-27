@@ -210,7 +210,7 @@ class _IRLSDirectRecorder:
                 channel="pirls",
                 purpose=self.trace_purpose,
             )
-        if np.isfinite(fit.dev):
+        if self.trace_enabled and np.isfinite(fit.dev):
             self.emit_state_commit(
                 retained,
                 iteration=it + 1,
