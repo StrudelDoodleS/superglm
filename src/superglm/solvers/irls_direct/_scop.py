@@ -1151,7 +1151,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         )
 
     def terminal(self, fit: _IRLSDirectFit) -> None:
-        """The SCOP Hessian caches at the retained model, from its Fisher rows.
+        """The SCOP Hessian caches at the retained model, from its Fisher rows (the fit's export rows).
 
         They must describe the retained model, not the working state or a
         discarded full proposal.  ``block_curvature`` takes no step, so however
@@ -1161,16 +1161,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         X beta + intercept would lose score digits for a translated ordinary
         column.
         """
-        _scop_state = self._state
-        final_rows = coefficient_working_rows(
-            distribution=fit.family,
-            link=fit.link,
-            y=fit.y,
-            mu=fit.mu,
-            eta=fit.eta,
-            sample_weight=fit.weights,
-            prefer_observed=False,
-        )
+        _scop_state, final_rows = self._state, fit.export_rows
         terminal = self._newton.block_curvature(
             [_scop_state[gi]["beta_scop"] for gi in self._order],
             W=final_rows.weights,

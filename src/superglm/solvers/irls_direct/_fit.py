@@ -1707,10 +1707,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
     def _terminal_rows(self) -> None:
         W, z, terminal = self.W, self.z, self.step.terminal
-        if terminal is not None:
-            # the step's own state at the retained model (the SCOP Hessian caches)
-            terminal(self)
-
         # Every public/exported matrix and rank claim is evaluated at the retained
         # model. Private fREML performance iterations deliberately reuse the
         # working system used for their one coefficient update.
@@ -1728,6 +1724,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             z = export_rows.response
             self.export_rows = export_rows
         self.W, self.z = W, z
+        if terminal is not None:
+            # the step's own state at the retained model (the SCOP Hessian caches,
+            # from the export rows)
+            terminal(self)
 
     def _publish(
         self, it: int, final: _IRLSDirectFinalGeometry

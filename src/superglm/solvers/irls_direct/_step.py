@@ -61,8 +61,8 @@ class _IRLSDirectStep(Protocol):
       coefficients'.
     - ``damped(fit)``: whether the retained step was damped in a way that
       bars a stop this iteration.
-    - ``terminal(fit)``: the step's own state at the retained model, before the
-      export rows are formed.
+    - ``terminal(fit)``: the step's own state at the retained model, after the
+      export rows are formed (``export_rows``).
     - ``postfit(fit, result, final)``: the step's part of the publication,
       which reads the finaliser's geometry ``final``; what it returns is the
       fit's ``scop_states`` return value.
