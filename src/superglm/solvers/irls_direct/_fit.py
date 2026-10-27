@@ -1405,9 +1405,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             )
             self._constant_centered_z = z_off_current.copy()
             return self._constant_centered_cache
-        fisher = (
-            self._fisher_data_reuse if _can_reuse_weighted_gram and not curvature.observed else None
-        )
+        # reuse is off whenever the rows are observed (``_IRLSDirectCurvaturePolicy``)
+        fisher = self._fisher_data_reuse if _can_reuse_weighted_gram else None
         data = (
             fisher.take((*self.fixed_owners, self.weight_semantics), W_current)
             if fisher is not None
