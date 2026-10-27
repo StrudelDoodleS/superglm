@@ -1322,6 +1322,19 @@ def test_the_leaf_rows_and_their_factor_are_within_their_rounding_on_weights_spr
     assert residual <= formation + gamma_up(count) * (norm + formation) + gamma_up(4 * q) * norm
 
 
+def _support_leaf(length):
+    """One support-compressed SSP block on a 4,000-row leaf, sixteen columns of change and of rows."""
+    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+
+    rng = np.random.default_rng(5)
+    n, q, k = 4_000, 16, 6
+    support, support_inv = rng.uniform(0, 1, (length, k)), rng.normal(size=(k, k - 1))
+    bins = rng.integers(0, length, n)
+    part = DesignMatrix([SupportCompressedSSPGroupMatrix(support, support_inv, bins)], n=n, p=k - 1)
+    change, centre = rng.normal(size=(k - 1, q)), rng.normal(size=k - 1)
+    return part, change, centre, rng.normal(size=(n, q))
+
+
 @pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
 def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
     """A support's products hold no more than one column's products did, however long it is (tracemalloc).
@@ -1337,17 +1350,10 @@ def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
     """
     import tracemalloc
 
-    from superglm._roundoff import gamma_up
-    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
     from superglm.solvers.scop_newton import _leaf_product, _leaf_transposed
 
-    rng = np.random.default_rng(5)
-    n, q, k = 4_000, 16, 6
-    support, support_inv = rng.uniform(0, 1, (length, k)), rng.normal(size=(k, k - 1))
-    bins = rng.integers(0, length, n)
-    part = DesignMatrix([SupportCompressedSSPGroupMatrix(support, support_inv, bins)], n=n, p=k - 1)
-    change, centre = rng.normal(size=(k - 1, q)), rng.normal(size=k - 1)
-    rows = rng.normal(size=(n, q))
+    part, change, centre, rows = _support_leaf(length)
+    n = part.n
 
     _leaf_product(part, change, centre), _leaf_transposed(part, rows, centre)  # compiled
     tracemalloc.start()
@@ -1362,6 +1368,56 @@ def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
 
     assert product_peak <= 8 * max(length + n, 2 * n) + 8 * 1024
     assert moment_peak <= 8 * (length + n) + moment.nbytes + 8 * 1024
+
+
+@pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
+def test_a_support_s_leaf_products_are_within_their_rounding_in_chunks_or_a_column_at_a_time(
+    monkeypatch, length
+):
+    """A support's leaf products, formed in chunks or a column at a time, against bounds from k and u.
+
+    The 1,000-row support's table is formed and summed in four chunks of
+    four columns (counted); the 40,000-row one, longer than the leaf, forms
+    no table and takes its own ``matvec`` and ``rmatvec`` for each of the
+    sixteen columns. Each entry is within ``gamma_k`` of its terms'
+    magnitudes (Higham 2002, sec. 3.5), twice that against a dense product
+    that rounds too. Mutation check: a chunk's column offset dropped, in
+    either product, and a long support given a table whose columns are
+    never formed, each break a bound.
+    """
+    from superglm._roundoff import gamma_up
+    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+    from superglm.solvers import scop_newton
+
+    part, change, centre, rows = _support_leaf(length)
+    matrix = part.group_matrices[0]
+    support, support_inv, bins = matrix.B_unique, matrix.R_inv, matrix.bin_idx
+    n, q, k = part.n, change.shape[1], support.shape[1]
+
+    calls = {"gathered": 0, "summed": 0, "matvec": 0, "rmatvec": 0}
+
+    def counted(name, function):
+        def wrapper(*args, **kwargs):
+            calls[name] += 1
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        scop_newton, "_add_gathered", counted("gathered", scop_newton._add_gathered)
+    )
+    monkeypatch.setattr(scop_newton, "_bin_sums", counted("summed", scop_newton._bin_sums))
+    for method in ("matvec", "rmatvec"):
+        kind = SupportCompressedSSPGroupMatrix
+        monkeypatch.setattr(kind, method, counted(method, getattr(kind, method)))
+    formed = scop_newton._leaf_product(part, change, centre)
+    moment = scop_newton._leaf_transposed(part, rows, centre)
+
+    chunks = n // length if length <= n else 0
+    passes = -(-q // chunks) if chunks else 0
+    assert calls["gathered"] == calls["summed"] == passes
+    assert calls["matvec"] == calls["rmatvec"] == (0 if chunks else q)
+    assert length > n or passes > 1
     # each entry within gamma_k of its terms' magnitudes (Higham 2002, sec. 3.5),
     # twice that against a dense product that rounds too
     basis = support @ support_inv
@@ -1376,10 +1432,8 @@ def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
-def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_all_columns(
-    monkeypatch, discrete
-):
-    """Every joint step takes the rows, and a leaf multiplies each block for all its columns at once (counts).
+def test_every_row_route_leaf_takes_its_tables_and_csr_moments_in_one_pass(monkeypatch, discrete):
+    """Every joint step takes the rows, and a leaf multiplies each table, and a CSR block's transposed product, for all its columns at once (counts).
 
     Five top levels of an increasing ``x`` hold one claim each at exposure
     0.002, where the intercept-only fit expects 2e-4, so the cold start's

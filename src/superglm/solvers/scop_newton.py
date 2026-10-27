@@ -121,7 +121,7 @@ def _joint_weight_tables(codes, offsets, scop_bins, n_scop, W, total):
     return table
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _add_gathered(result, table, index, shifts):
     """``result[:, j] += table[index, j] - shifts[j]`` for every column, in one pass over the rows.
 
@@ -134,7 +134,7 @@ def _add_gathered(result, table, index, shifts):
             result[r, j] += table[row, j] - shifts[j]
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _bin_sums(sums, rows, index):
     """``sums[:, j] += np.bincount(index, rows[:, j])`` for every column, in one pass over the rows.
 
