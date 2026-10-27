@@ -171,7 +171,13 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A finite feasible inner iterate is not thereby a converged QP solution."""
+    """A finite feasible inner iterate is not thereby a converged QP solution.
+
+    The coefficient criterion passes on every iteration and the KKT veto holds
+    each one open, so every reason recorded reads the vetoed verdict: none is
+    ``converged``.  Mutation check: a reason chain that read the verdict from
+    before the veto labelled the first two iterations converged.
+    """
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.distributions import Gaussian
@@ -199,6 +205,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
             max_iter=3,
             tol=1e-10,
             convergence="coefficients",
+            record_diagnostics=True,
             weight_semantics="frequency",
         )
 
@@ -219,6 +226,77 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     ]
     assert len(terminal_warnings) == 1
     assert terminal_warnings[0].levelno == logging.WARNING
+    log = result.iteration_log
+    assert log is not None
+    assert all(row.convergence_value < row.convergence_tolerance for row in log)
+    assert [row.termination_reason for row in log] == [
+        "continue",
+        "continue",
+        "constraint_kkt_incomplete",
+    ]
+
+
+@pytest.mark.parametrize("separation", ["warn", "error"])
+def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    separation: str,
+) -> None:
+    """The separation backstop runs before the QP contract's final refusal.
+
+    The inner QP never certifies, so the fit spends its ten iterations at an
+    unchanged deviance, and the working-weight ratio is forced past the
+    separation bar: one fit carries the backstop's exhausted-budget signature
+    and a state without a KKT certificate.  Under ``"warn"`` it reports both.
+    Under ``"error"`` the backstop raises first, and the refusal of a state the
+    fit never returns is not reported.  Mutation check: the final refusal run
+    before the backstop logged that refusal and then raised.
+    """
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
+    from superglm.diagnostics.separation import SeparationError, SeparationWarning
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    monkeypatch.setattr(
+        irls_direct_qp,
+        "solve_constrained_qp",
+        lambda *_args, **_kwargs: QPResult(beta=np.zeros(1), converged=False),
+    )
+    monkeypatch.setattr(irls_direct, "_separation_weight_ratio", lambda *_args, **_kwargs: 1e13)
+
+    def fit():
+        return irls_direct.fit_irls_direct(
+            design,
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=0.0,
+            max_iter=10,
+            tol=1e-10,
+            convergence="coefficients",
+            separation=separation,
+            weight_semantics="frequency",
+        )
+
+    with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        if separation == "warn":
+            with pytest.warns(SeparationWarning, match="exhausted its iteration budget"):
+                result, _ = fit()
+            assert result.termination_reason == "constraint_kkt_incomplete"
+        else:
+            with pytest.raises(SeparationError, match="exhausted its iteration budget"):
+                fit()
+    refusals = [
+        record
+        for record in caplog.records
+        if "no complete constrained-QP KKT certificate" in record.getMessage()
+    ]
+    assert len(refusals) == (1 if separation == "warn" else 0)
 
 
 def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(

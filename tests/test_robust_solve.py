@@ -370,6 +370,68 @@ class TestQRSolverPath:
             model.fit(df, y)
         assert not any("consecutive SVD fallbacks" in r.message for r in caplog.records)
 
+    def test_auto_warns_at_the_third_consecutive_svd_fallback(self, caplog, monkeypatch):
+        """'auto' warns once, on the third iteration in a row whose Gram took the SVD fallback.
+
+        Each iteration's Gram decomposition (``decompose_gram_if_authoritative``,
+        read by the dense step) is forced to report an uncertified SVD
+        fallback at condition 1e17; the solve is otherwise the real one, and a
+        tolerance of 0 holds the fit to its three iterations.  'gram' never
+        warns.  Mutation check: a dense step that never noted its fallback
+        never warned.
+        """
+        from dataclasses import replace
+
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.types import GroupSlice
+
+        real = irls_direct_dense.decompose_gram_if_authoritative
+        refused = []
+
+        def svd_fallback(*args, **kwargs):
+            rank = real(*args, **kwargs)
+            refused.append(rank is None)
+            if rank is None:
+                return rank
+            return replace(rank, used_svd_fallback=True, pre_truncation_condition=1e17)
+
+        monkeypatch.setattr(irls_direct_dense, "decompose_gram_if_authoritative", svd_fallback)
+        rng = np.random.default_rng(7)
+        n = 300
+        X = rng.normal(size=(n, 3))
+        y = rng.poisson(np.exp(0.2 + X @ np.array([0.3, -0.2, 0.1]))).astype(float)
+        warning = (
+            "fit_irls_direct: 3 consecutive SVD fallbacks (cond ~1.0e+17). "
+            "Consider direct_solve='qr' for near-collinear data."
+        )
+        for direct_solve, warnings_expected in (("auto", 1), ("gram", 0)):
+            refused.clear()
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+                result, _ = fit_irls_direct(
+                    DesignMatrix([DenseGroupMatrix(X)], n=n, p=3),
+                    y,
+                    np.ones(n),
+                    Poisson(),
+                    LogLink(),
+                    [GroupSlice("x", 0, 3)],
+                    lambda2=0.0,
+                    max_iter=3,
+                    tol=0.0,
+                    convergence="coefficients",
+                    direct_solve=direct_solve,
+                    weight_semantics="frequency",
+                )
+            assert result.direct_backend == "gram"
+            assert refused == [False, False, False]
+            messages = [
+                r.getMessage() for r in caplog.records if "consecutive SVD" in r.getMessage()
+            ]
+            assert messages == [warning] * warnings_expected
+
     def test_invalid_direct_solve_raises(self):
         """Invalid direct_solve value raises ValueError."""
         with pytest.raises(ValueError, match="direct_solve"):

@@ -1133,6 +1133,89 @@ class TestDirectSolverBasic:
         assert "irls_fisher_newton_switches" not in latched
         assert latched["irls_observed_newton_iters"] == started.n_iter < result.n_iter
 
+    def test_a_switch_on_a_stagnated_score_takes_newton_steps_judged_afresh(self, monkeypatch):
+        """The Gamma/log switch that stagnation triggers goes on to Newton steps, on a new history.
+
+        The fixture is the slow-Fisher one above.  Until the switch the capped
+        score is forced to twice the bar, resolved, and the rate test never
+        fires, so Fisher's score stagnates after the window and the switch is
+        the stagnation's; from the switch on the score is the real one.  The
+        stagnation that triggered the switch must not end the solve, and the
+        Newton iterates' ratios must not join Fisher's flat history: a Newton
+        iterate is resolved and above the bar before the last, and a history
+        still holding Fisher's ratios would call it stagnated.  Mutation
+        checks: keeping ``score_stagnated`` ended the solve at the switch, and
+        keeping the ratios at that Newton iterate, neither converged.
+        """
+        import math
+        from dataclasses import replace
+
+        import superglm.solvers.irls_direct._convergence as irls_direct_convergence
+        import superglm.solvers.irls_direct._fit as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+
+        n, far = 200, 6
+        x = np.zeros(n)
+        x[:far] = 8.0
+        x[far:] = np.linspace(-1.0, 1.0, n - far)
+        design = np.column_stack([np.ones(n), x])
+        ratio = np.ones(n)
+        ratio[:far] = 0.01
+        correction = np.linalg.lstsq(
+            design[far:].T, -design[:far].T @ (ratio[:far] - 1.0), rcond=None
+        )[0]
+        ratio[far:] = 1.0 + correction
+        y = ratio * np.exp(1.0 + 0.2 * x)
+
+        real_residual = irls_direct.penalized_mode_residual
+        real_switch = irls_direct._IRLSDirectCurvaturePolicy.switch_to_newton
+        switched: list[bool] = []
+        newton_scores: list[tuple[float, bool]] = []
+
+        def residual(**kwargs):
+            result = real_residual(**kwargs)
+            capped = math.isfinite(kwargs["resolve_cap"])
+            if switched:
+                if capped:
+                    newton_scores.append((result.ratio(), result.resolved))
+                return result
+            if not capped:
+                return result
+            return replace(
+                result,
+                relative=np.full_like(result.relative, 2.0 * result.bar),
+                bar_effective=np.full_like(result.bar_effective, result.bar),
+                resolved=True,
+            )
+
+        def switch(self, recorder):
+            switched.append(True)
+            real_switch(self, recorder)
+
+        monkeypatch.setattr(irls_direct, "penalized_mode_residual", residual)
+        monkeypatch.setattr(irls_direct._IRLSDirectCurvaturePolicy, "switch_to_newton", switch)
+        monkeypatch.setattr(irls_direct_convergence, "rate_exhausts_budget", lambda *_args: False)
+        profile: dict = {}
+        result, _ = irls_direct.fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert profile["irls_fisher_newton_switches"] == 1
+        assert result.converged
+        assert result.termination_reason == "converged"
+        assert profile["irls_observed_newton_iters"] == len(newton_scores)
+        # what made the fresh history matter: an unconverged, resolved Newton score
+        assert any(resolved and score > 1.0 for score, resolved in newton_scores[:-1])
+
     def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
         """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
 
@@ -1269,6 +1352,56 @@ class TestDirectSolverBasic:
         assert result.n_iter == 3
         assert result.converged
         assert floor_verdicts and max(floor_verdicts) <= 1.0
+
+    @pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
+    def test_a_rejected_step_is_never_recorded_as_converged(self, monkeypatch, convergence):
+        """The iteration that rejects its step records no stop, though its criterion reads zero.
+
+        Every trial is refused, so the retained state is the committed one and
+        the criterion reads a change of exactly zero, below any tolerance.  A
+        rejected step bounds nothing, so the stop rule vetoes the stop
+        (``_IRLSDirectConvergence._criterion``): the iteration's published
+        verdict is not converged, and its reason is ``step_rejected``.
+        Mutation check: without the veto the trace recorded the rejected
+        iteration as converged.
+        """
+        import superglm.solvers.irls_direct._search as irls_direct_search
+        from superglm._fit_trace import MemoryTraceSink, TraceRun
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.irls_state import _IRLSStepDecision
+
+        def reject_every_trial(**_kwargs):
+            return _IRLSStepDecision(
+                alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+            )
+
+        monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
+        rng = np.random.default_rng(11)
+        n = 60
+        x = rng.uniform(-1.0, 1.0, (n, 2))
+        y = 0.5 + x @ np.array([0.7, -0.4]) + 0.1 * rng.normal(size=n)
+        sink = MemoryTraceSink()
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x)], n=n, p=2),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, 2)],
+            lambda2=0.1,
+            convergence=convergence,
+            weight_semantics="frequency",
+            trace_run=TraceRun("rejected-step", sink=sink),
+        )
+        assert not result.converged
+        assert result.termination_reason == "step_rejected"
+        (decision,) = [e.payload for e in sink.events if e.event_kind == "step_decision"]
+        assert decision["step_rejected"]
+        assert decision["convergence_value"] == 0.0
+        assert not decision["fit_converged"]
+        assert decision["termination_reason"] == "step_rejected"
 
     def test_a_zero_crossing_proposal_takes_the_first_halving_inside_the_domain(self):
         """The line search accepts the first halving that keeps every weighted row at eta > 0.
@@ -1937,6 +2070,61 @@ class TestDirectSolverBasic:
         # edf should be between 1 (intercept-only) and total params + 1
         total_params = sum(g.size for g in m._groups) + 1
         assert 1 < m.result.effective_df < total_params
+
+    def test_an_edf_below_the_traces_resolution_is_published_as_zero(self, monkeypatch):
+        """A coefficient whose penalty swamps its data publishes an EDF of exactly zero.
+
+        A ridge of 1e20 on one of two columns gives that coefficient an EDF of
+        about ``D_bb / 1e20``, near 1e-19: positive, but far below the rounding
+        of a trace whose other entry is of order one.  The finaliser publishes
+        every EDF within ``100 eps`` of zero as zero, so the coefficient, its
+        group and the effective degrees of freedom read no data in it.
+        Mutation check: without the cut the rank metadata published the 1e-19.
+        """
+        import superglm.solvers.irls_direct._finalise as irls_direct_finalise
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.types import PenaltyComponent
+
+        traces = []
+        real_edf = irls_direct_finalise._feature_edf
+
+        def recorded(*args, **kwargs):
+            edf = real_edf(*args, **kwargs)
+            traces.append(edf.copy())
+            return edf
+
+        monkeypatch.setattr(irls_direct_finalise, "_feature_edf", recorded)
+        rng = np.random.default_rng(3)
+        n = 50
+        a, b = rng.uniform(-1.0, 1.0, n), rng.uniform(-1.0, 1.0, n)
+        y = 0.5 + a + 0.3 * b + 0.1 * rng.normal(size=n)
+        ridge = PenaltyComponent(
+            name="b",
+            group_name="b",
+            group_index=1,
+            group_sl=slice(1, 2),
+            omega_raw=None,
+            penalty_kind="identity",
+        )
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(a[:, None]), DenseGroupMatrix(b[:, None])], n=n, p=2),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("a", 0, 1), GroupSlice("b", 1, 2)],
+            lambda2={"b": 1e20},
+            reml_penalties=[ridge],
+            weight_semantics="frequency",
+        )
+        (trace,) = traces
+        assert 0.0 < trace[1] < 100.0 * np.finfo(np.float64).eps
+        assert result.rank_info is not None
+        assert result.rank_info.feature_edf[1] == 0.0
+        assert result.rank_info.group_edf["b"] == 0.0
+        assert result.effective_df == 1.0 + result.rank_info.feature_edf[0]
 
     def test_predict_after_direct_fit(self, poisson_data):
         """predict/reconstruct should work after direct solver fit."""

@@ -153,6 +153,72 @@ def test_a_near_unpenalized_fit_stops_at_the_boundary_and_says_so() -> None:
     assert result.mean_space_boundary_rows >= 1
 
 
+def test_a_boundary_state_the_qp_contract_also_refuses_is_published_at_the_boundary(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mean space's verdict on the returned state comes after the QP contract's, and stands.
+
+    Five event rows at ``x = 1`` put the maximum on the boundary.  The fit
+    starts there, under ``beta >= 0``, with ``mu`` within 1e-7 of one on those
+    rows, and every trial is refused, so the returned state is the start.  A
+    rejected step carries no inner-QP KKT certificate, so the final refusal
+    marks the state ``constraint_kkt_incomplete``.  The state holds rows at
+    the boundary, so the mean space's verdict, which runs after the refusal,
+    marks it ``mean_space_boundary``, and that is the reason published.
+    Mutation check: the mean space's verdict run before the refusal, alone or
+    first of the final checks, published the QP contract's reason.
+    """
+    import logging
+
+    import superglm.solvers.irls_direct._search as irls_direct_search
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.irls_state import _IRLSStepDecision
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    def reject_every_trial(**_kwargs):
+        return _IRLSStepDecision(
+            alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+        )
+
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
+    x = np.r_[np.zeros(10), np.ones(5)]
+    y = np.r_[np.tile([1.0, 0.0], 5), np.ones(5)]
+    intercept = math.log(0.5)
+    slope = math.log1p(-5e-8) - intercept
+    start = intercept + slope * x
+    assert float(start.max()) < 0.0
+    assert np.count_nonzero(start >= math.log1p(-1e-7)) == 5
+    groups = [
+        GroupSlice(
+            "x",
+            0,
+            1,
+            constraints=LinearConstraintSet(A=np.eye(1), b=np.zeros(1)),
+            monotone_engine="qp",
+        )
+    ]
+    with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=15, p=1),
+            y,
+            np.ones(15),
+            Binomial(),
+            LogLink(),
+            groups,
+            lambda2=0.0,
+            beta_init=np.array([slope]),
+            intercept_init=intercept,
+            weight_semantics="frequency",
+        )
+    assert any(
+        "no complete constrained-QP KKT certificate" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not result.converged
+    assert result.mean_space_boundary_rows == 5
+    assert result.termination_reason == "mean_space_boundary"
+
+
 def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
     """The REML optimum's mode is interior: REML reaches it, certified, on structured and gram.
 
@@ -2520,6 +2586,64 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:
     eta = model._dm.matvec(model.result.beta) + model.result.intercept + 2.0
     assert float(eta.max()) < 0.0
     assert float(eta.min()) > np.log(1e-7)
+
+
+def test_the_certificate_tests_a_scop_group_in_the_latent_coordinates_its_step_hands_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SCOP step hands the certificate the latent groups whose columns it leaves out.
+
+    The fixture above.  The binomial/log certificate leaves a shape-constrained
+    group's columns out of the ordinary score and tests them as the group's
+    latent score ``J' B' s - lambda S theta`` instead, so the columns the step
+    excludes are exactly those of the latent groups it hands over, and a
+    latent state off the mode fails.  At the fit's last judged state, one
+    latent coordinate moved by -5 (the fitted values unchanged) leaves its
+    penalty's pull unbalanced, and the certificate refuses it.  Mutation
+    check: a step that handed over no latent groups certified the moved state,
+    its SCOP columns tested nowhere.
+    """
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct._mean_space as irls_mean_space
+
+    certify = irls_mean_space._IRLSDirectMeanSpaceOverlay.certify
+    judged = []
+
+    def recorded(self, fit, beta, intercept, eta, inputs):
+        judged.append((self, fit, beta, intercept, eta, inputs))
+        return certify(self, fit, beta, intercept, eta, inputs)
+
+    monkeypatch.setattr(irls_mean_space._IRLSDirectMeanSpaceOverlay, "certify", recorded)
+    rng = np.random.default_rng(8)
+    x = rng.uniform(0.0, 1.0, 60)
+    y = (rng.uniform(size=60) < 0.1 + 0.3 * x).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
+    )
+    model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
+    assert model.result.converged
+    overlay, fit, beta, intercept, eta, _ = judged[-1]
+    step = fit.step
+    retained = step._retained
+    theta = retained.groups[0].beta_eff.copy()
+    theta[3] -= 5.0
+    step._retained = replace(
+        retained, groups=(replace(retained.groups[0], beta_eff=theta), *retained.groups[1:])
+    )
+    ratio, _ = certify(overlay, fit, beta, intercept, eta, step.certificate_inputs())
+    step._retained = retained
+    assert ratio > 1.0
+
+    _, _, columns, groups = step.certificate_inputs()
+    covered = np.zeros(fit.p, dtype=bool)
+    for _, spec in groups or ():
+        covered[spec.group.sl] = True
+    assert columns is not None and columns.any()
+    np.testing.assert_array_equal(covered, columns)
 
 
 @pytest.mark.parametrize("scale", [100.0, 1.0, 1e-100])
