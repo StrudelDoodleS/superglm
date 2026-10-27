@@ -936,6 +936,71 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     assert decisions[-1].payload["termination_reason"] == result.termination_reason
 
 
+def test_an_infeasible_retained_qp_state_is_never_kkt_certified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No retained state outside ``A beta >= b`` carries the inner QP's KKT certificate.
+
+    The stop rule's one constraint veto is that certificate's
+    (``_IRLSDirectConvergence._terminate``): it stands for primal feasibility
+    too, because the inner QP certifies a solve only where its own feasibility
+    test passes at the contract's tolerance on the point it returns, and the
+    line search hands the certificate only to the full proposal it solved
+    (``_IRLSDirectQPStep.retained_converged``).  Every verdict below reads the
+    retained state's feasibility and certificate: healthy fits, a warm start
+    outside the set repaired by its first proposal, and tiny accepted steps
+    from it that keep the retained state outside for every iteration.
+    Mutation: handing the certificate to any accepted step, not only the full
+    one, certifies those infeasible retained states.
+    """
+    import inspect
+
+    import superglm.solvers.irls_direct._convergence as irls_convergence
+    import superglm.solvers.irls_direct._search as irls_direct_search
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import solve_constrained_qp
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    # the contract tests feasibility at the inner solver's own tolerance
+    assert _QP_FEASIBILITY_TOL == inspect.signature(solve_constrained_qp).parameters["tol"].default
+
+    verdicts: list[tuple[bool, bool]] = []
+    terminate = irls_convergence._IRLSDirectConvergence._terminate
+
+    def recorded(self, fit, it):
+        verdicts.append((fit.qp.feasible(fit.beta), fit.qp.retained_converged))
+        terminate(self, fit, it)
+
+    monkeypatch.setattr(irls_convergence._IRLSDirectConvergence, "_terminate", recorded)
+    frame, y = _healthy_increasing_problem()
+    _increasing_model().fit(frame, y)
+    design, response, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    outside = {
+        "beta_init": np.array([-1.0]),
+        "intercept_init": 0.0,
+        "max_iter": 3,
+        "weight_semantics": "frequency",
+    }
+    fit_irls_direct(design, response, weights, Gaussian(), IdentityLink(), groups, 0.0, **outside)
+
+    def accept_tiny_step(**kwargs):
+        alpha = 2.0**-19
+        kwargs["evaluate_state"](alpha)
+        return _IRLSStepDecision(
+            alpha=alpha, step_halvings=19, step_rejected=False, trials_attempted=20
+        )
+
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_tiny_step)
+    fit_irls_direct(design, response, weights, Gaussian(), IdentityLink(), groups, 0.0, **outside)
+
+    assert any(certified for _, certified in verdicts)
+    assert any(not feasible for feasible, _ in verdicts)
+    assert not any(certified and not feasible for feasible, certified in verdicts)
+
+
 def _force_terminal_qp_refit(monkeypatch: pytest.MonkeyPatch, failure_reason: str) -> None:
     """Make the QP passthrough's terminal refit end with *failure_reason*."""
     from superglm.model import reml_finalize

@@ -26,8 +26,8 @@ class _IRLSDirectConvergence:
        then the step-rejected veto (``_criterion``);
     2. the binomial/log mean space's judge, on the model's own score
        (``_IRLSDirectMeanSpaceOverlay.judge``), when the fit holds the overlay;
-    3. the feasibility contract's veto on a constrained fit's retained state,
-       then the termination reason (``_terminate``).
+    3. the inner QP's KKT veto on a constrained fit's retained state, then the
+       termination reason (``_terminate``).
 
     The verdict is the fit's: ``converged_this_iter``, ``score_stagnated``,
     ``termination_reason``, the rule's numbers ``convergence_label``,
@@ -236,22 +236,25 @@ class _IRLSDirectConvergence:
         fit.score_stagnated, self.last_mode_residual = score_stagnated, _last_mode_residual
 
     def _terminate(self, fit: _IRLSDirectFit, it: int) -> None:
-        """The feasibility contract's veto on a constrained fit, then the termination reason (L18)."""
+        """The inner QP's KKT veto on a constrained fit, then the termination reason (L18).
+
+        The certificate stands for primal feasibility too: the inner QP
+        certifies a solve only where its own feasibility test passes at the
+        contract's tolerance, and the line search hands the certificate only to
+        the full proposal it solved (``_IRLSDirectQPStep.retained_converged``),
+        so a retained state outside ``A beta >= b`` never stops the fit.  The
+        state's feasibility still names the reason a fit ends on.
+        """
         converged_this_iter, step_rejected = fit.converged_this_iter, fit.step_rejected
         dev, max_iter, qp = fit.dev, fit.max_iter, fit.qp
         constraints_feasible_this_iter = True
         if qp is not None:
             constraints_feasible_this_iter = qp.feasible(fit.beta)
-            # Objective or coefficient stagnation cannot certify a constrained
-            # mode whose retained coefficients are outside the feasible set.
-            # Keep iterating while budget remains: a later QP/line-search step
-            # may still repair an infeasible warm start.
-            if not constraints_feasible_this_iter:
-                converged_this_iter = False
             # Outer coefficient/deviance stagnation cannot replace the inner
-            # QP's stationarity and dual-feasibility certificate. Keep a
-            # finite feasible iterate and continue: a later full QP proposal
-            # may still obtain the missing certificate.
+            # QP's certificate of stationarity, dual and primal feasibility.
+            # Keep iterating while budget remains: a later full QP proposal may
+            # still obtain the missing certificate, or repair an infeasible
+            # warm start.
             if not qp.retained_converged:
                 converged_this_iter = False
 
