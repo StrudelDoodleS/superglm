@@ -50,8 +50,9 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         centered = fit.get_centered_system(W, z_off)
         if newton_score is not None:
             # the score in the right-hand side (the step itself is the
-            # increment below; the stored system is the one it solved)
-            centered = fit.mean_space.centred_rhs(centered, newton_score, dm)
+            # increment below, from the same X~' u; the stored system is the
+            # one it solved)
+            centered, data_score = fit.mean_space.centred_rhs(centered, newton_score, dm)
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0
         _t0 = time.perf_counter()
@@ -72,7 +73,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
             iteration_factor_rhs = certification.transformed_rhs
             fit.used_rank_certification = True
         if newton_score is not None:
-            beta = fit.mean_space.newton_iterate(fit, iteration_rank, centered, newton_score)
+            beta = fit.mean_space.newton_iterate(fit, iteration_rank, data_score)
         else:
             beta = (
                 iteration_rank.solve(centered.rhs)

@@ -108,8 +108,9 @@ class _IRLSDirectMeanSpaceOverlay:
     performance iteration.  Its parts:
 
     - ``newton_rows``: the working rows (L02) on the observed information;
-    - ``centred_rhs``: the score in the centred right-hand side (the dense
-      and QP steps, L06 and L07); the structured step puts it in its block
+    - ``centred_rhs``: the score in the centred right-hand side, and its
+      centred data part, which the dense step's increment reads (the dense and
+      QP steps, L06 and L07); the structured step puts the score in its block
       right-hand side and its truncated increment itself, from the fit's
       ``newton_score``;
     - ``newton_iterate``: the dense step's increment form (L06);
@@ -197,37 +198,35 @@ class _IRLSDirectMeanSpaceOverlay:
     @staticmethod
     def centred_rhs(
         centered: CenteredSystem, newton_score: NDArray, dm: DesignMatrix
-    ) -> CenteredSystem:
-        """The centred system with the score in its right-hand side (the dense and QP steps).
+    ) -> tuple[CenteredSystem, NDArray]:
+        """The centred system with the score in its right-hand side, and the score's ``X~' u``.
 
         The working mean of ``z_off`` is the centred intercept; the score moves
-        it by ``sum(u) / sum(W)`` and the slopes' right-hand side by ``X~' u``.
-        ``replace`` keeps the system's arrays, so the factor certificate's
-        cache, which tests them by identity, still hits.
+        it by ``sum(u) / sum(W)`` and the slopes' right-hand side by ``X~' u``,
+        which the dense step's increment reads too (``newton_iterate``), so it
+        is formed once.  ``replace`` keeps the system's arrays, so the factor
+        certificate's cache, which tests them by identity, still hits.
         """
-        return replace(
+        data_score = centred_data_score(dm, newton_score, centered.mean_x)
+        system = replace(
             centered,
             mean_z=centered.mean_z + float(np.sum(newton_score)) / centered.sum_w,
-            rhs=centered.rhs + centred_data_score(dm, newton_score, centered.mean_x),
+            rhs=centered.rhs + data_score,
         )
+        return system, data_score
 
     @staticmethod
     def newton_iterate(
-        fit: _IRLSDirectFit,
-        rank: RankDecomposition,
-        centered: CenteredSystem,
-        newton_score: NDArray,
+        fit: _IRLSDirectFit, rank: RankDecomposition, data_score: NDArray
     ) -> NDArray:
         """The dense step's Newton iterate: the committed coefficients plus the increment.
 
-        The increment, not the iterate: a direction the factor truncates keeps
-        the iterate's component instead of the minimum-norm reset of solving
-        for it (Pes & Rodriguez 2021, eqs. 1.2-1.4).
+        ``data_score`` is the score's ``X~' u`` (``centred_rhs``).  The
+        increment, not the iterate: a direction the factor truncates keeps the
+        iterate's component instead of the minimum-norm reset of solving for it
+        (Pes & Rodriguez 2021, eqs. 1.2-1.4).
         """
-        return fit.committed.beta + rank.solve(
-            centred_data_score(fit.dm, newton_score, centered.mean_x)
-            - fit.penalty_matvec(fit.committed.beta)
-        )
+        return fit.committed.beta + rank.solve(data_score - fit.penalty_matvec(fit.committed.beta))
 
     def line_search(
         self,

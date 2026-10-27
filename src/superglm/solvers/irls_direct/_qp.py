@@ -151,7 +151,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         centered = fit.get_centered_system(fit.W, z_off)
         if newton_score is not None:
             # the mean space's Newton score in the right-hand side
-            centered = fit.mean_space.centred_rhs(centered, newton_score, fit.dm)
+            centered, _ = fit.mean_space.centred_rhs(centered, newton_score, fit.dm)
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0
 
