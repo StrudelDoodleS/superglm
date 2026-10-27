@@ -826,6 +826,7 @@ def _leaf_design(design: DesignMatrix, start: int, stop: int) -> DesignMatrix:
 
 
 _SUPPORT_TABLE_TYPES = (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
+_CSR_TYPES = (SparseGroupMatrix, SparseSSPGroupMatrix)
 
 
 def _table_index(matrix, rows: int) -> tuple[NDArray, int] | None:
@@ -881,25 +882,53 @@ def _add_table_product(result, matrix, block: NDArray, shifts: NDArray, index) -
         _add_gathered(result[:, chunk], _table(matrix, block[:, chunk]), index[0], shifts[chunk])
 
 
-def _table_moments(matrix, rows: NDArray, index) -> NDArray:
-    """``matrix.rmatvec`` of every column of ``rows``, summed by the table's index a chunk at a time.
+def _table_moments(moments: NDArray, matrix, rows: NDArray, index) -> None:
+    """``moments[:, j] = matrix.rmatvec(rows[:, j])`` for every column, summed by the table's index a chunk at a time.
 
     ``rmatvec`` sums the rows by the index into zeros (``np.bincount``),
-    then takes the table's transpose of that contiguous vector.
+    then takes the table's transpose of that contiguous vector. Each column
+    is written to ``moments``, the leaf's result, as it is formed.
     """
-    moments = np.empty((matrix.shape[1], rows.shape[1]))
     for chunk in _chunks(rows.shape[0], index[1], rows.shape[1]):
         sums = np.zeros((index[1], chunk.stop - chunk.start))
         _bin_sums(sums, rows[:, chunk], index[0])
-        moments[:, chunk] = (
-            sums[: matrix.n_levels]
-            if type(matrix) in ONE_HOT_CODE_TYPES
-            else np.column_stack(
-                [matrix.R_inv.T @ (matrix.B_unique.T @ np.ascontiguousarray(c)) for c in sums.T]
-            )
-        )
+        if type(matrix) in ONE_HOT_CODE_TYPES:
+            moments[:, chunk] = sums[: matrix.n_levels]
+        else:
+            for j in range(chunk.stop - chunk.start):
+                summed = matrix.B_unique.T @ np.ascontiguousarray(sums[:, j])
+                moments[:, chunk.start + j] = matrix.R_inv.T @ summed
         del sums  # before the next chunk's sums, so that one chunk's are held at a time
-    return moments
+
+
+def _one_product(matrix, rows: NDArray) -> bool:
+    """Whether a CSR block's transposed product takes every column of ``rows`` in one product.
+
+    Its sums, a column of the block's sparse factor's width for each column
+    of ``rows``, then hold no more than one leaf column (the ``_chunks``
+    bound), and C-ordered rows are read in place. A chunk of the columns
+    would first be copied whole into a C-ordered operand (scipy's
+    multivector product), a leaf column for each column of the chunk where
+    ``rmatvec`` copies one, so wider sums take the block's own ``rmatvec``
+    a column at a time.
+    """
+    width = (matrix.M if type(matrix) is SparseGroupMatrix else matrix.B).shape[1]
+    return rows.flags.c_contiguous and width * rows.shape[1] <= rows.shape[0]
+
+
+def _csr_moments(moments: NDArray, matrix, rows: NDArray) -> None:
+    """``moments[:, j] = matrix.rmatvec(rows[:, j])`` for every column, in one multivector product.
+
+    A CSR product sums each output entry's terms in their stored order for
+    one column or several; an SSP block's ``R^-1'`` then takes each
+    contiguous column of those sums, as its ``rmatvec`` does.
+    """
+    if type(matrix) is SparseGroupMatrix:
+        moments[:] = np.asarray(matrix.M.T @ rows)
+        return
+    sums = np.asarray(matrix.B.T @ rows)
+    for j in range(rows.shape[1]):
+        moments[:, j] = matrix.R_inv.T @ np.ascontiguousarray(sums[:, j])
 
 
 def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArray:
@@ -941,8 +970,10 @@ def _leaf_transposed(part: DesignMatrix, rows: NDArray, centre: NDArray) -> NDAr
     The products ``dense_centred_rmatvec`` and a bounded block's
     ``rmatvec`` form, before their rank-one centring terms: a table's
     columns summed by its index a chunk at a time (``_table_moments``), a
-    CSR block's in one multivector product, whose result is ``q`` columns
-    of its width, any other block's a column at a time.
+    CSR block's in one multivector product when its sums fit in a leaf
+    column (``_one_product``), any other block's a column at a time. Each
+    block's columns are written to the result as they are formed, so a
+    block holds no more beside it than one column's products did.
     """
     result = np.zeros((part.p, rows.shape[1]))
     offset = 0
@@ -953,16 +984,12 @@ def _leaf_transposed(part: DesignMatrix, rows: NDArray, centre: NDArray) -> NDAr
         if type(matrix) is DenseGroupMatrix:
             result[block] = (matrix.M - centre[block]).T @ rows
         elif index is not None:
-            result[block] = _table_moments(matrix, rows, index)
-        elif type(matrix) is SparseSSPGroupMatrix:
-            raw = np.asarray(matrix.B.T @ rows)
-            result[block] = np.column_stack(
-                [matrix.R_inv.T @ np.ascontiguousarray(c) for c in raw.T]
-            )
-        elif type(matrix) is SparseGroupMatrix:
-            result[block] = np.asarray(matrix.M.T @ rows)
+            _table_moments(result[block], matrix, rows, index)
+        elif type(matrix) in _CSR_TYPES and _one_product(matrix, rows):
+            _csr_moments(result[block], matrix, rows)
         else:
-            result[block] = np.column_stack([matrix.rmatvec(column) for column in rows.T])
+            for j, column in enumerate(rows.T):
+                result[block, j] = matrix.rmatvec(column)
     return result
 
 
@@ -1188,7 +1215,8 @@ class SCOPJointNewton:
         leaf's rows (``_leaf_design``): a one-hot or support table's columns
         in one pass over the rows, a chunk at a time and never from a table
         longer than the leaf (``_chunks``), a CSR block's transposed product
-        in one multivector product, and any other product a column at a time
+        in one multivector product when its sums fit in a leaf column, and
+        any other product a column at a time
         (``_leaf_product``, ``_leaf_transposed``).
 
         ``g`` bounds each column's rounding: its SCOP column's norm plus

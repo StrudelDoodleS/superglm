@@ -1370,6 +1370,72 @@ def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
     assert moment_peak <= 8 * (length + n) + moment.nbytes + 8 * 1024
 
 
+def _wide_block(kind, rng, n):
+    """A block thousands of coefficients wide, of a kind whose transposed product a leaf takes in its own way."""
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        FactorSmoothGroupMatrix,
+        SparseGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+
+    if kind == "factor-smooth":  # Sol's: 600 levels of a 5-column basis, its own rmatvec
+        return FactorSmoothGroupMatrix(
+            sp.csr_matrix(rng.uniform(size=(n, 5))),
+            np.arange(n) % 600,
+            600,
+            natural_map=np.eye(5),
+            levels=tuple(range(600)),
+            repeated_penalty_components=(("wiggle", np.eye(5)),),
+        )
+    if kind == "csr":
+        return SparseGroupMatrix(sp.random(n, 2_000, density=0.002, random_state=rng, format="csr"))
+    if kind == "ssp":
+        basis = sp.random(n, 601, density=0.005, random_state=rng, format="csr")
+        return SparseSSPGroupMatrix(basis, rng.normal(size=(601, 600)))
+    # a one-hot table of 3,001 rows, summed a column a pass on a 4,000-row leaf
+    return CategoricalGroupMatrix(rng.integers(0, 3_001, n), 3_000)
+
+
+@pytest.mark.parametrize("kind", ["factor-smooth", "csr", "ssp", "one-hot"])
+def test_a_wide_block_s_transposed_leaf_product_holds_no_more_than_its_column_products_did(kind):
+    """A wide block's ``X' rows`` holds one column's products beside the leaf's result (tracemalloc).
+
+    A column at a time, ``rmatvec`` held a leaf-length copy of the column,
+    or none, beside at most two of the block's widths (a factor smooth's
+    raw sums and their natural coordinates). Every column is written to the
+    result as it is formed, and a CSR block's multivector product is taken
+    only when its sums fit in a leaf column, so the peak above the result
+    is ``n + 2 width`` doubles; the call's Python objects take under 8 KiB.
+    Mutation check: stacking the columns from a list, a CSR product's
+    sums for all 64 columns, or the table's moments formed apart from the
+    result each hold ``64 width`` doubles or more.
+    """
+    import tracemalloc
+
+    from superglm.solvers.scop_newton import _leaf_transposed
+
+    rng = np.random.default_rng(12)
+    n, q = 4_000, 64
+    matrix = _wide_block(kind, rng, n)
+    width = matrix.shape[1]
+    part = DesignMatrix([matrix], n=n, p=width)
+    rows, centre = rng.normal(size=(n, q)), np.zeros(width)
+
+    _leaf_transposed(part, rows, centre)  # compiled
+    tracemalloc.start()
+    try:
+        moment = _leaf_transposed(part, rows, centre)
+        peak = tracemalloc.get_traced_memory()[1] - moment.nbytes
+    finally:
+        tracemalloc.stop()
+
+    assert width >= 600 and 64 * width > n
+    assert peak <= 8 * (n + 2 * width) + 8 * 1024
+
+
 @pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
 def test_a_support_s_leaf_products_are_within_their_rounding_in_chunks_or_a_column_at_a_time(
     monkeypatch, length
