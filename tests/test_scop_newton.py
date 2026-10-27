@@ -1218,6 +1218,181 @@ def test_a_leaf_reads_a_dense_block_in_place_and_matches_its_row_subset():
         assert got.M.flags.c_contiguous and want.M.flags.c_contiguous
 
 
+def _leaf_block_design(rng, n):
+    """A design with every kind of block a leaf multiplies, and its rows' magnitudes as products read them.
+
+    A one-hot block, a support table, a CSR basis (both factored, ``B R^-1``,
+    whose products read ``|B| |R^-1|``), a dense block and a subclass,
+    whose products are its own.
+    """
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        SparseSSPGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    class OwnProducts(CategoricalGroupMatrix):
+        __slots__ = ()
+
+        def row_subset(self, idx):
+            return OwnProducts(self.codes[idx], self.n_levels)
+
+    bins, starts = rng.integers(0, 12, n), rng.integers(0, 5, n)
+    support, support_inv = rng.uniform(0, 1, (12, 6)), rng.normal(size=(6, 5))
+    entries = (np.repeat(np.arange(n), 4), (starts[:, None] + np.arange(4)).ravel())
+    basis = sp.csr_matrix((rng.uniform(0, 1, 4 * n), entries), shape=(n, 8))
+    basis_inv = rng.normal(size=(8, 4))
+    blocks = [
+        CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
+        SupportCompressedSSPGroupMatrix(support, support_inv, bins),
+        SparseSSPGroupMatrix(basis, basis_inv),
+        DenseGroupMatrix(rng.normal(size=(n, 2)) + 3.0),
+        OwnProducts(rng.integers(0, 4, n), 3),
+    ]
+    magnitude = [
+        blocks[0].toarray(),
+        (support @ np.abs(support_inv))[bins],
+        np.asarray(basis @ np.abs(basis_inv)),
+        np.abs(blocks[3].M),
+        blocks[4].toarray(),
+    ]
+    dense = np.hstack([block.toarray() for block in blocks])
+    return DesignMatrix(blocks, n=n, p=dense.shape[1]), dense, np.hstack(magnitude)
+
+
+def test_the_leaf_rows_and_their_factor_are_within_their_rounding_on_weights_spread_over_1e15():
+    """The Schur rows' leaf products and their TSQR factor, against bounds from the dimensions and u.
+
+    The weights span 1e15, as a cold SCOP start's do beside a rare
+    short-exposure claim. Each leaf row ``s - (x - c)' D`` and each entry of
+    ``X~' R`` is within ``gamma_k`` of its terms' magnitudes (Higham 2002,
+    sec. 3.5), twice that against a dense product that rounds too. The
+    factor ``F`` of the weighted rows is a Householder TSQR's, ``A + dA = Q
+    F`` with ``||dA||_F <= gamma ||A||_F`` (Thm 19.4, at ``_schur_rows``'s
+    count), read at the orthogonal ``Q`` nearest ``A F'`` (the Procrustes
+    problem, Golub & Van Loan 2013, sec. 6.4.1).
+    """
+    from superglm._roundoff import gamma_up
+    from superglm.solvers.rank import streamed_weighted_factor
+    from superglm.solvers.scop_newton import _leaf_design, _leaf_product, _leaf_transposed
+
+    rng = np.random.default_rng(11)
+    n, q, leaf = 4000, 6, 500
+    design, dense, magnitude = _leaf_block_design(rng, n)
+    p = design.p
+    change = rng.normal(size=(p, q)) * 10.0 ** rng.uniform(-3.0, 3.0, (p, 1))
+    centre, scop = rng.normal(size=p), rng.normal(size=(n, q))
+    weights = 10.0 ** rng.uniform(0.0, 15.0, n)
+    weights[:2] = 1.0, 1e15
+    # the transposed product centres the dense block's columns, 14 and 15, alone
+    centred = dense.copy()
+    centred[:, 14:16] -= centre[14:16]
+    exact = scop - (dense - centre) @ change
+    size = np.abs(scop) + (magnitude + np.abs(centre)) @ np.abs(change)
+    gamma = gamma_up(4 * p + leaf)
+
+    leaves = []
+    for start in range(0, n, leaf):
+        rows = slice(start, start + leaf)
+        part = _leaf_design(design, start, rows.stop)
+        formed = scop[rows] - _leaf_product(part, change, centre)
+        assert np.all(np.abs(formed - exact[rows]) <= 2 * gamma * size[rows])
+        weighted = formed * weights[rows, None]
+        moment = _leaf_transposed(part, weighted, centre)
+        reach = (magnitude[rows] + np.abs(centre)).T @ np.abs(weighted)
+        assert np.all(np.abs(moment - centred[rows].T @ weighted) <= 2 * gamma * reach)
+        leaves.append((start, rows.stop, formed))
+
+    factor = streamed_weighted_factor(iter(leaves), weights)
+    root = np.sqrt(weights)[:, None]
+    target = root * exact
+    left, _, right = np.linalg.svd(target @ factor.T, full_matrices=False)
+    residual = np.linalg.norm(target - (left @ right) @ factor)
+    norm = np.linalg.norm(target)
+    formation = np.linalg.norm(root * (2 * gamma * size))
+    count = n * q + 2 * (p + 3)
+    assert residual <= formation + gamma_up(count) * (norm + formation) + gamma_up(4 * q) * norm
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_all_columns(
+    monkeypatch, discrete
+):
+    """The Gram cannot decide beside a rare short-exposure claim, so the rows do, one pass a block (counts).
+
+    Five top levels of an increasing ``x`` hold one claim each at exposure
+    0.002, where the intercept-only fit expects 2e-4: the cold start's
+    weights reach ``e^35`` there, and the joint steps take the rows. A
+    leaf multiplies each ordinary block once for all its columns, a table
+    in one pass over the rows (``_add_gathered``, ``_bin_sums``), a CSR
+    basis in one multivector product: never a ``matvec`` or ``rmatvec`` a
+    column at a time. Mutation check: master's leaf products (7dcc85c1)
+    made 14,608 such calls in the exact fit's 166 row-route calls, 88 each.
+    """
+    from superglm import Categorical, PSpline
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+    from superglm.solvers import scop_newton
+
+    rng = np.random.default_rng(1)
+    n = 3000
+    x = np.minimum(rng.geometric(0.15, n) - 1, 60).astype(float)
+    z, exposure = rng.uniform(0.0, 1.0, n), rng.uniform(0.05, 1.0, n)
+    y = rng.poisson(exposure * 0.1 * np.exp(0.02 * x + 0.3 * np.sin(6.0 * z))).astype(float)
+    x[:5], exposure[:5], y[:5] = 60.0 + np.arange(5.0), 0.002, 1.0
+    frame = pd.DataFrame({"x": x, "z": z, "g": rng.integers(0, 4, n).astype(str)})
+
+    calls = {"rows": 0, "columnwise": 0, "gathered": 0, "summed": 0}
+    inside = [False]
+
+    def counted(name, function):
+        def wrapper(*args, **kwargs):
+            calls[name] += inside[0]
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    rows_of = SCOPJointNewton._schur_rows
+
+    def rows(self, *args):
+        calls["rows"] += 1
+        inside[0] = True
+        try:
+            return rows_of(self, *args)
+        finally:
+            inside[0] = False
+
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", rows)
+    for kind in (CategoricalGroupMatrix, DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix):
+        for method in ("matvec", "rmatvec"):
+            monkeypatch.setattr(kind, method, counted("columnwise", getattr(kind, method)))
+    monkeypatch.setattr(
+        scop_newton, "_add_gathered", counted("gathered", scop_newton._add_gathered)
+    )
+    monkeypatch.setattr(scop_newton, "_bin_sums", counted("summed", scop_newton._bin_sums))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=discrete,
+        features={
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "z": PSpline(n_knots=6),
+            "g": Categorical(),
+        },
+    )
+    model.fit_reml(frame, y, offset=np.log(exposure))
+
+    assert model.result.converged
+    assert calls["rows"] > 0
+    assert calls["columnwise"] == 0
+    assert calls["gathered"] >= 2 * calls["rows"] and calls["summed"] >= calls["rows"]
+
+
 def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
     """A fit's only row-level SCOP group is compressed once per REML run, not once per fit (a count).
 
