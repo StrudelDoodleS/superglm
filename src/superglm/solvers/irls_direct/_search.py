@@ -98,7 +98,9 @@ class _IRLSDirectTrialSearch:
             beta_direction, intercept_direction, eta_direction = trial_directions
             beta_trial = committed.beta + alpha * beta_direction
             intercept_trial = committed.intercept + alpha * intercept_direction
+            started = time.perf_counter()
             eta_trial = committed.eta_unclipped + alpha * eta_direction
+            recorder.eta_formed(time.perf_counter() - started)
             centred_trial = None
             if committed.centred_intercept is not None and proposal.centred_intercept is not None:
                 centred_trial = committed.centred_intercept + alpha * (

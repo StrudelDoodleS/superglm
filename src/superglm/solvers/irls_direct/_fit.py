@@ -1109,11 +1109,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             if centred_intercept is None:
                 centred_intercept = float(intercept_value) + shift
             if eta_unclipped is None:
+                started = time.perf_counter()
                 eta_unclipped = (
                     centred_intercept
                     + centred_matvec(self.dm, beta_values, _state_center)
                     + self.offset
                 )
+                recorder.eta_formed(time.perf_counter() - started)
             intercept_value = centred_intercept - shift
         state = _evaluate_irls_state(
             self.dm,
@@ -1130,6 +1132,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             evaluation_id=evaluation_id,
             basis_id=recorder.trace_basis_id,
             lambdas=recorder.resolved_lambdas,
+            eta_clock=recorder.eta_formed,
         )
         if not self._has_scop:
             state = replace(

@@ -251,6 +251,7 @@ def _evaluate_scop_trial(
     basis_id: int | None = None,
     lambdas: tuple[tuple[str, object], ...] = (),
     ordinary: _SCOPOrdinarySolve | None = None,
+    eta_clock: Callable[[float], None] | None = None,
 ) -> _SCOPTrialState:
     """Evaluate a fixed-endpoint SCOP trial by interpolating latent state.
 
@@ -258,6 +259,8 @@ def _evaluate_scop_trial(
     that block's solve at the trial's mapped coefficients
     (``_SCOPOrdinarySolve``); otherwise they are interpolated as the latent
     coordinates are. The groups are in the joint step's latent order.
+    ``eta_clock``, when given, is handed the seconds spent forming the
+    trial's eta and mean (``_evaluate_irls_state``).
     """
     beta_trial = committed.irls.beta + alpha * (proposed.irls.beta - committed.irls.beta)
     intercept_trial = committed.irls.intercept + alpha * (
@@ -307,11 +310,14 @@ def _evaluate_scop_trial(
             beta_trial[ordinary.columns] = solved
             intercept_trial = level - float(ordinary.mean_x @ solved)
             if ordinary.centred_rows is not None:
+                started = time.perf_counter()
                 latent_columns = beta_trial.copy()
                 latent_columns[ordinary.columns] = 0.0
                 eta_unclipped = (
                     level + ordinary.centred_rows(solved) + dm.matvec(latent_columns) + offset
                 )
+                if eta_clock is not None:
+                    eta_clock(time.perf_counter() - started)
         irls = _evaluate_irls_state(
             dm,
             y,
@@ -326,6 +332,7 @@ def _evaluate_scop_trial(
             evaluation_id=evaluation_id,
             basis_id=basis_id,
             lambdas=lambdas,
+            eta_clock=eta_clock,
         )
     return _SCOPTrialState(
         irls=irls,
@@ -1003,6 +1010,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
                 basis_id=trace_basis_id,
                 lambdas=resolved_lambdas,
                 ordinary=scop_ordinary,
+                eta_clock=recorder.eta_formed,
             )
             candidate = with_scop_merit(candidate)
             emit_evaluation(

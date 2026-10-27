@@ -71,7 +71,9 @@ class _IRLSDirectRecorder:
         # Always an empty list; only ``record_diagnostics`` decides whether rows are
         # appended and whether it is published on the result.
         self.iteration_log: list[IterationDiagnostics] = []
-        # Phase timing accumulators
+        # Phase timing accumulators.  ``t_eta`` is the time forming the eta of
+        # every state the fit evaluates (from its coefficients, or a line-search
+        # trial's from its endpoints'), its clip and its mean (``eta_formed``).
         self.t_working = 0.0
         self.t_gram = 0.0
         self.t_solve = 0.0
@@ -84,6 +86,10 @@ class _IRLSDirectRecorder:
         profile = self.profile
         if profile is not None:
             profile[key] = profile.get(key, 0) + n
+
+    def eta_formed(self, seconds: float) -> None:
+        """Add ``seconds`` spent forming an evaluated state's eta or mean (``irls_eta_s``)."""
+        self.t_eta += seconds
 
     def peak(self, key: str, value: float) -> None:
         """Keep the largest ``value`` under ``key`` when the caller keeps a profile."""
