@@ -194,7 +194,9 @@ def _fit(units, truth, lambda2_init=None):
         selection_penalty=0.0,
         features={
             "x1": Spline(kind="ps", k=10),
-            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "x2": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
         },
     )
     with warnings.catch_warnings(record=True) as caught:
@@ -338,7 +340,7 @@ def _sparse_binomial_fit(start):
         family="binomial",
         link="log",
         features={
-            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "x2": Spline(kind="cr", k=8),
             "c1": Categorical(),
         },

@@ -2501,7 +2501,9 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates() -> None:
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
     assert model.result.converged

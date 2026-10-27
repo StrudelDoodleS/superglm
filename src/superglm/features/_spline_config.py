@@ -37,6 +37,9 @@ EXTRAPOLATIONS = ("clip", "extend", "error")
 PENALTIES = ("ssp", "none")
 # The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
 KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
+# The engines a fit-time shape constraint fits on: the QP on the raw rows (every
+# constrained basis), or SCOP's reparameterization (a P-spline that asks for it).
+SHAPE_ENGINES = ("qp", "scop")
 
 
 def _iter_knots(knots: Any) -> list[Any]:
@@ -294,3 +297,15 @@ def initialize_runtime_state(
     spec._omega_range = None
     spec._penalty_components = None
     spec._lambda_policy = lambda_policy
+    clear_scop_state(spec)
+
+
+def clear_scop_state(spec: Any) -> None:
+    """Drop the SCOP transform an earlier build left; every build starts from none.
+
+    ``transform`` scores through ``_scop_Sigma`` whenever it is set, so a spec
+    built on SCOP and rebuilt on the QP would otherwise score its new
+    coefficients through the old SCOP basis instead of its ``R_inv``.
+    """
+    for name in ("_scop_Sigma", "_scop_null_dim", "_scop_col_means"):
+        spec.__dict__.pop(name, None)

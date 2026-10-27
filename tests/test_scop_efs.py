@@ -66,7 +66,9 @@ def scop_model_inputs():
         family=Gaussian(),
         selection_penalty=0,
         discrete=True,
-        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     # Do NOT call auto_detect — features= dict already populates _specs.
     # auto_detect would overwrite the PSpline spec with Numeric().
@@ -1890,7 +1892,9 @@ class TestSCOPEFSOuterLoop:
                 discrete=True,
                 features={
                     "z": Numeric(),
-                    "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+                    "x": PSpline(
+                        n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    ),
                 },
             )
             model.fit_reml(frame, y, max_reml_iter=2, max_pirls_iter=100)
@@ -1960,7 +1964,7 @@ class TestSCOPEFSOuterLoop:
             discrete=True,
             features={
                 "z": Numeric(),
-                "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
 
@@ -2341,7 +2345,9 @@ class TestSCOPEFSOuterLoop:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         y_out, sample_weight, offset = model_build_design_matrix(model, df, y, np.ones(n), None)
         offset_arr = np.zeros(n) if offset is None else np.array(offset)
@@ -2481,7 +2487,11 @@ class TestSCOPEFSOuterLoop:
                 family=Gaussian(),
                 selection_penalty=0,
                 discrete=True,
-                features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+                features={
+                    "x": PSpline(
+                        n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    )
+                },
             )
             y_out, sw, off = model_build_design_matrix(model, df, y, np.ones(n), None)
 
@@ -2750,7 +2760,12 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=12, penalty="ssp", constraint=Constraint.fit.increasing)
+                "x": PSpline(
+                    n_knots=12,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
             },
         )
         with pytest.warns(ConvergenceWarning, match="max_pirls_iter"):
@@ -2802,7 +2817,14 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
+            },
         )
         model.fit_reml(frame, y, max_reml_iter=5)
 
@@ -2841,7 +2863,9 @@ def _scop_frequency_fixture(diesel_share: float, seed: int = 3):
         selection_penalty=0.0,
         discrete=True,
         features={
-            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "BonusMalus": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
             "DrivAge": Spline(kind="ps", k=8),
             "VehGas": Categorical(base="most_exposed"),
         },
@@ -3010,7 +3034,9 @@ def _tweedie_pure_premium_fixture(n: int, seed: int):
         features={
             "DrivAge": Spline(kind="ps", k=12),
             "VehAge": Spline(kind="ps", k=10),
-            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "BonusMalus": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
             "LogDensity": Spline(kind="ps", k=8),
             "Region": Categorical(base="most_exposed"),
         },
@@ -3036,7 +3062,7 @@ def _three_kind_fixture(family="tweedie", n: int = 240, seed: int = 11):
         discrete=True,
         features={
             "s": Spline(kind="ps", k=8),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "a": Spline(kind="ps", k=6),
             "b": Spline(kind="ps", k=6),
         },
@@ -3306,7 +3332,9 @@ class TestColdBootstrapStart:
             link=IdentityLink(),
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         retained: list[object] = []
         real = scop_efs_module.build_cached_scop_joint_geometry
@@ -3354,7 +3382,11 @@ def _small_scop_model():
         family="poisson",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(
+                n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing, shape_engine="scop"
+            )
+        },
     )
     return model, pd.DataFrame({"x": x}), y
 
@@ -3675,7 +3707,14 @@ class TestBootstrapRetryCoverage:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
+            },
         )
         result = cross_validate(
             model,
@@ -3718,7 +3757,11 @@ class TestBootstrapRetryCoverage:
                 family="poisson",
                 selection_penalty=0.0,
                 discrete=True,
-                features={"x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+                features={
+                    "x": Spline(
+                        kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    )
+                },
             )
             offset = np.append(offsets, inactive)
             with warnings.catch_warnings():
@@ -3865,7 +3908,9 @@ def _scop_newton_fixture(
         selection_penalty=0.0,
         discrete=True,
         features={
-            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "BonusMalus": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
             "DrivAge": Spline(kind="ps", k=8),
             "VehGas": Categorical(base="most_exposed" if diesel_share is None else "Regular"),
         },
@@ -3896,7 +3941,9 @@ def _flat_monotone_fixture():
         selection_penalty=0.0,
         discrete=True,
         features={
-            "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "BonusMalus": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
             "DrivAge": Spline(kind="ps", k=8),
             "VehGas": Categorical(base="most_exposed"),
         },
@@ -3932,7 +3979,9 @@ def _half_flat_tensor_fixture(n: int = 3000, seed: int = 3):
             selection_penalty=0.0,
             discrete=True,
             features={
-                "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "BonusMalus": Spline(
+                    kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
                 "DrivAge": Spline(kind="ps", k=8),
                 "VehAge": Spline(kind="ps", k=8),
                 "VehGas": Categorical(base="most_exposed"),
@@ -4193,7 +4242,9 @@ class TestSCOPSuppressionHold:
                 selection_penalty=0.0,
                 discrete=True,
                 features={
-                    "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                    "x": Spline(
+                        kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    ),
                     "z": Spline(kind="ps", k=12),
                 },
             )
@@ -4317,7 +4368,9 @@ class TestSCOPNewtonOuterStep:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "x": Spline(
+                    kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
                 "z": Spline(kind="ps", k=8),
             },
         )
@@ -4414,7 +4467,9 @@ class TestSCOPNewtonOuterStep:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "x": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "x": Spline(
+                    kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
                 "a": Spline(kind="ps", k=8),
                 "v": Spline(kind="ps", k=8),
             },
@@ -5173,7 +5228,14 @@ class TestCandidateStepBackoff:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
+            },
         )
         return model, frame, y
 
@@ -5579,6 +5641,7 @@ class TestCandidateStepBackoff:
                     penalty="ssp",
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                    shape_engine="scop",
                 )
             },
         )
@@ -5627,7 +5690,14 @@ class TestIterationDiagnosticsSmallSample:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=4, penalty="ssp", constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(
+                    n_knots=4,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
+            },
         )
         model.fit_reml(frame, response, max_reml_iter=2)
         assert model.result.beta.shape == (model._dm.p,)
@@ -5676,7 +5746,14 @@ class TestSCOPREMLDoesNotPublishDiagnostics:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"x": PSpline(n_knots=6, penalty="ssp", constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(
+                    n_knots=6,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
+                )
+            },
         )
         model.fit_reml(frame, response, max_reml_iter=3)
         return model
@@ -5715,7 +5792,7 @@ class TestSCOPFitRemlIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -5748,7 +5825,7 @@ class TestSCOPFitRemlIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -5787,6 +5864,7 @@ class TestSCOPFitRemlIntegration:
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -5822,6 +5900,7 @@ class TestSCOPFitRemlIntegration:
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_lambda),
+                    shape_engine="scop",
                 )
             },
         )
@@ -5888,6 +5967,7 @@ class TestSCOPFitRemlIntegration:
                     n_knots=8,
                     constraint=Constraint.fit.concave,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -5912,7 +5992,7 @@ class TestSCOPFitRemlIntegration:
             family=Gaussian(),
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": PSpline(
                     n_knots=8,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
@@ -6067,6 +6147,7 @@ class TestSCOPEFSRegression:
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -6092,6 +6173,7 @@ class TestSCOPEFSRegression:
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0e6),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -6135,7 +6217,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6166,7 +6248,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6189,7 +6271,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6213,7 +6295,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6241,7 +6323,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6268,7 +6350,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6342,7 +6424,7 @@ class TestSCOPNewtonLineSearchSafety:
             family=Gaussian(),
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -6385,8 +6467,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -6434,9 +6516,9 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=500,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x3": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x3": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x1", "x2", "x3"]], y)
@@ -6468,8 +6550,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=500,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
                 "x3": PSpline(n_knots=8),
             },
         )
@@ -6500,11 +6582,12 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": PSpline(
                     n_knots=8,
                     constraint=Constraint.fit.decreasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=fixed_val),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -6534,8 +6617,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -6586,8 +6669,8 @@ class TestMultiSCOPIntegration:
             discrete=True,
             max_iter=200,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x1", "x2"]], y)
@@ -6650,8 +6733,12 @@ class TestMultiSCOPIntegration:
                 discrete=True,
                 max_iter=200,
                 features={
-                    "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                    "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                    "x1": PSpline(
+                        n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    ),
+                    "x2": PSpline(
+                        n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"
+                    ),
                 },
             )
             model.fit_reml(df[["x1", "x2"]], y)
@@ -6690,8 +6777,8 @@ class TestMultiSCOPIntegration:
             max_iter=200,
             tol=1e-3,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop"),
             },
         )
         model.fit(df[["x1", "x2"]], y)
@@ -6728,7 +6815,7 @@ class TestMultiSCOPIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6794,7 +6881,7 @@ class TestMultiSCOPIntegration:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -6957,7 +7044,7 @@ class TestSCOPReferenceMode:
         frame, y, offset = _convex_beside_cr_fixture()
 
         features = {
-            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex),
+            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex, shape_engine="scop"),
             "x1": Spline(kind="cr", k=8),
         }
         model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
@@ -6975,6 +7062,7 @@ class TestSCOPReferenceMode:
                     k=10,
                     constraint=Constraint.fit.convex,
                     lambda_policy=LambdaPolicy.fixed(reml.lambdas["x2"]),
+                    shape_engine="scop",
                 ),
                 "x1": Spline(kind="cr", k=8, lambda_policy=LambdaPolicy.fixed(reml.lambdas["x1"])),
             },
@@ -6995,7 +7083,9 @@ class TestSCOPReferenceMode:
         model = SuperGLM(
             family="gaussian",
             selection_penalty=0.0,
-            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model.fit_reml(frame, y, max_reml_iter=max_reml_iter)
         return model._reml_result

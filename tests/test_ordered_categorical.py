@@ -1045,7 +1045,7 @@ class TestOrderedCategoricalShapeDispatch:
         The case below is the one where that misreading would do damage. An
         ordinal feature is the only way a *categorical* column carries a shape
         constraint, and a factor smooth grouped by that column duplicates its
-        effect through the per-level null-space blocks. So ``ps`` must be
+        effect through the per-level null-space blocks. So ``ps`` on SCOP must be
         refused and ``cr`` -- a QP engine, which pairs with a factor smooth
         normally -- must fit. Both are real, buildable models, and the outcome
         differs only because the wrapper was resolved to its inner spline.
@@ -1067,9 +1067,12 @@ class TestOrderedCategoricalShapeDispatch:
         X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
 
         def band(kind):
+            engine = "scop" if kind == "ps" else "qp"
             return OrderedCategorical(
                 order=levels,
-                basis=Spline(kind=kind, n_knots=6, constraint=Constraint.fit.increasing),
+                basis=Spline(
+                    kind=kind, n_knots=6, constraint=Constraint.fit.increasing, shape_engine=engine
+                ),
             )
 
         def grouped_factor_smooth(kind):

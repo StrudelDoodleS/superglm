@@ -1446,7 +1446,7 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
         fit, "poisson"
     )
     spline = (
-        PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         if fit == "scop_reml"
         else Spline(kind="ps", k=8)
     )

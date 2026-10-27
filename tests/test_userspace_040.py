@@ -194,6 +194,22 @@ def test_the_criterion_change_exempts_only_bases_that_predate_it() -> None:
     assert release_differential.flags(name, _record(), worse, "v0.41")  # read as 0.41.0
 
 
+def test_the_engine_change_exempts_only_bases_that_predate_it() -> None:
+    """A constrained P-spline fits on the QP from v0.42, a different model whose REML
+    criterion is not SCOP's: its objective is compared again only from a v0.42 base on,
+    and its held-out results always."""
+    name = "glm/poisson/log/small/scop/exact/fit_reml"
+    worse = _record(objective=1000.0 + 1.0)
+    assert release_differential.flags(name, _record(), worse, "v0.41.0") == []
+    assert (
+        release_differential.flags("hist/r01/convex-beside-cr/exact", _record(), worse, "v0.41.0")
+        == []
+    )
+    assert release_differential.flags(name, _record(), worse, "v0.42.0")
+    assert release_differential.flags(name, _record(), _record(test_deviance=900.0), "v0.41.0")
+    assert release_differential.flags(name.replace("/scop/", "/qp/"), _record(), worse, "v0.41.0")
+
+
 @pytest.mark.parametrize("ref", ["master", "3681b0c1", "v0.41.0rc1"])
 def test_a_base_that_is_not_a_release_tag_is_compared_without_a_criterion_exemption(ref) -> None:
     """``release REF`` ends in a compare against REF. Fails on df503618, where a REF other

@@ -947,8 +947,8 @@ class OrderedCategorical:
         asks for the matching raw geometry off the FEATURE spec -- the same
         object for a plain ``Spline``, this wrapper for an ``OrderedCategorical``
         -- and without this forward it finds nothing and reports the geometry as
-        unavailable. Only the QP bases (``cr``, ``bs``) were affected: ``ps``
-        routes through SCOP and never takes that branch.
+        unavailable. Only QP bases take that branch; a ``ps`` declared with
+        ``shape_engine="scop"`` routes through SCOP and never does.
 
         The constraint is stated in the inner spline's own coefficient space,
         which is the space the returned design lives in, so it needs no
@@ -974,7 +974,7 @@ class OrderedCategorical:
                 f"cannot build QP constraints for OrderedCategorical(basis="
                 f"{type(inner).__name__}(...)): its raw constraint geometry is "
                 f"unavailable. Fit-time shape constraints need a basis that "
-                f"states them in coefficient space; use kind='cr' or kind='bs'."
+                f"states them in coefficient space; use kind='cr', kind='bs' or kind='ps'."
             )
         return raw_builder()
 

@@ -114,6 +114,7 @@ def test_curvature_scop_sigma_certifies_exact_public_domain_geometry(kind, knot_
         n_knots=8,
         constraint=getattr(Constraint.fit, kind),
         **kwargs,
+        shape_engine="scop",
     )
     spec.build(x)
     curvature = curvature_difference_operator(

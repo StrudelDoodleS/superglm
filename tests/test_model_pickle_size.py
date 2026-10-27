@@ -62,7 +62,7 @@ def _scop_fit(retain_fit_state):
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "band": Categorical(),
         },
         retain_fit_state=retain_fit_state,

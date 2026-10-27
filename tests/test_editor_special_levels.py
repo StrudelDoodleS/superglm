@@ -1258,7 +1258,10 @@ def test_a_scop_curve_bounds_the_gap(family):
     y = mu * rng.gamma(4.0, 0.25, k.size) if family == "gamma" else rng.poisson(mu).astype(float)
     X = pd.DataFrame({"band": np.array(TWELVE)[k]})
     band = OrderedCategorical(
-        order=TWELVE, basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing)
+        order=TWELVE,
+        basis=Spline(
+            kind="ps", n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"
+        ),
     )
     model = SuperGLM(family=family, link="log", features={"band": band}, spline_penalty=5.0).fit(
         X, y

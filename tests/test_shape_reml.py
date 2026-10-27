@@ -1,3 +1,5 @@
+from functools import partial
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -51,7 +53,7 @@ def test_scop_concave_fit_reml_discrete_estimates_lambda():
     model = SuperGLM(
         family="gaussian",
         discrete=True,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.concave)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.concave, shape_engine="scop")},
     ).fit_reml(df, y)
 
     assert model._reml_lambdas["x"] > 0.0
@@ -84,6 +86,7 @@ def test_scop_fit_reml_recovers_both_slope_orientations(
             "x": PSpline(
                 n_knots=10,
                 constraint=getattr(Constraint.fit, kind),
+                shape_engine="scop",
             )
         },
     ).fit_reml(frame, y)
@@ -280,7 +283,9 @@ def test_scop_constraint_rejects_a_main_effect_factor_smooth_of_the_same_variabl
     X, y = _scop_factor_smooth_frame()
     model = SuperGLM(
         family="gaussian",
-        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
         interactions=[FactorSmooth("x", group="group", basis="fs", k=5)],
         direct_solve="auto",
     )
@@ -321,7 +326,12 @@ def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_colu
             features={
                 "g": OrderedCategorical(
                     order=levels,
-                    basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
+                    basis=Spline(
+                        kind="ps",
+                        n_knots=6,
+                        constraint=Constraint.fit.increasing,
+                        shape_engine="scop",
+                    ),
                 )
             },
             interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
@@ -351,7 +361,9 @@ def test_scop_constraints_fit_beside_a_non_duplicating_factor_smooth(
     cases the wider refusal was taking with it.
     """
     X, y = _scop_factor_smooth_frame()
-    features = {features_for: PSpline(n_knots=7, constraint=Constraint.fit.increasing)}
+    features = {
+        features_for: PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+    }
     if interaction_for != features_for:
         features[interaction_for] = PSpline(n_knots=7)
     model = SuperGLM(
@@ -384,6 +396,7 @@ def test_structured_fit_constraint_preflight_runs_before_nb_theta_profile(
             "x": PSpline(
                 n_knots=7,
                 constraint=Constraint.fit.increasing,
+                shape_engine="scop",
             ),
         },
         interactions=[FactorSmooth("x", group="group", k=5)],
@@ -428,7 +441,7 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     model = SuperGLM(
         family="gaussian",
         features={
-            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "group": RandomEffect(),
         },
     )
@@ -448,7 +461,7 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     ("spline_cls", "rel"),
     [
         pytest.param(BSplineSmooth, 1e-12, id="qp-engine"),
-        pytest.param(PSpline, 1e-3, id="scop-engine"),
+        pytest.param(partial(PSpline, shape_engine="scop"), 1e-3, id="scop-engine"),
     ],
 )
 def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(

@@ -136,7 +136,7 @@ def test_write_profile_artifacts_creates_expected_files(tmp_path: Path):
     "feature, expected_engine",
     [
         (BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing), "qp"),
-        (PSpline(n_knots=6, constraint=Constraint.fit.increasing), "scop"),
+        (PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"), "scop"),
     ],
 )
 def test_tweedie_profile_constrained_terms_dispatch_to_direct(
@@ -200,7 +200,7 @@ def test_tweedie_profile_rejects_mixed_scop_and_qp_engines():
         selection_penalty=0,
         features={
             "x_qp": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing),
-            "x_scop": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "x_scop": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
 
