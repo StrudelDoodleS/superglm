@@ -799,8 +799,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             deviance_relative_change = abs(dev - dev_prev) / (abs(dev_prev) + 1)
             self.deviance_relative_change = deviance_relative_change
             logger.info(
-                f"  irls_direct iter={it + 1:3d}  "
-                f"dev={dev:12.1f}  delta={deviance_relative_change:10.2e}"
+                "  irls_direct iter=%3d  dev=%12.1f  delta=%10.2e",
+                it + 1,
+                dev,
+                deviance_relative_change,
             )
 
             if not np.isfinite(dev):
