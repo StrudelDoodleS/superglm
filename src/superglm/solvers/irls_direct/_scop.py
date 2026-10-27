@@ -916,6 +916,8 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             beta[fit.groups[gi].sl] = self._specs[gi].reparam.forward(theta)
         recorder.t_solve += time.perf_counter() - _t0
 
+        # The proposal's eta, which the search's evaluation takes as given.
+        started = time.perf_counter()
         if centred_prediction:
             eta_unconstrained = centred_level + _centred_system_matvec(
                 _reduced_dm, beta_reduced, reduced_centered
@@ -925,6 +927,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         self._proposal_eta_unclipped = (
             eta_unconstrained + fit.offset + _scop_newton.predictor(proposal_thetas)
         )
+        recorder.eta_formed(time.perf_counter() - started)
         fit.beta, fit.intercept = beta, intercept
         self._centred_level, self._results = centred_level, scop_results
         _note_svd_fallback(fit)

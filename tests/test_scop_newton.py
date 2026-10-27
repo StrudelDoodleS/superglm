@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, Spline, SuperGLM
+from superglm import Constraint, Numeric, Spline, SuperGLM
 from superglm._roundoff import UNIT_ROUNDOFF as UNIT
-from superglm.distributions import Tweedie
+from superglm.distributions import Poisson, Tweedie
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model.base import model_build_design_matrix
 from superglm.solvers.centered_system import build_centered_system
@@ -376,6 +376,65 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
 
     assert result.converged
     assert profile.get("irls_observed_newton_iters", 0) == result.n_iter
+
+
+def test_the_profiles_eta_time_includes_the_scop_proposal_predictor(monkeypatch):
+    """``irls_eta_s`` counts the SCOP proposal's predictor, formed before its search.
+
+    A controlled clock advances one second per centred-system product only:
+    a column whose mean exceeds its spread sends the proposal's ordinary
+    predictor through that product, and every such second forms an eta.
+    """
+    import sys
+
+    from superglm.solvers import irls_state
+
+    rng = np.random.default_rng(0)
+    n = 600
+    frame = pd.DataFrame({"x1": 3.0 + rng.normal(size=n), "x2": rng.uniform(0, 1, n)})
+    y = rng.poisson(np.exp(-0.5 + 0.3 * frame["x1"] + frame["x2"]))
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "x1": Numeric(),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+        },
+    )
+    y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)
+
+    now = [0.0]
+    clock = SimpleNamespace(perf_counter=lambda: now[0])
+    for name, module in list(sys.modules.items()):
+        if name.startswith("superglm.solvers.irls_direct.") or module is irls_state:
+            if hasattr(module, "time"):
+                monkeypatch.setattr(module, "time", clock)
+    product = irls_scop._centred_system_matvec
+
+    def ticking(*args, **kwargs):
+        now[0] += 1.0
+        return product(*args, **kwargs)
+
+    monkeypatch.setattr(irls_scop, "_centred_system_matvec", ticking)
+    profile: dict = {}
+    irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 0.0, "x2": 1.0},
+        offset=offset,
+        max_iter=1,
+        weight_semantics="prior",
+        profile=profile,
+    )
+
+    assert now[0] >= 1.0
+    assert profile["irls_total_s"] == now[0]
+    assert profile["irls_eta_s"] == now[0]
 
 
 def test_the_scop_line_search_rejects_trials_without_finite_observed_rows(monkeypatch):
