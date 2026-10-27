@@ -121,7 +121,7 @@ def _joint_weight_tables(codes, offsets, scop_bins, n_scop, W, total):
     return table
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _add_gathered(result, table, index, shifts):
     """``result[:, j] += table[index, j] - shifts[j]`` for every column, in one pass over the rows.
 
@@ -134,18 +134,17 @@ def _add_gathered(result, table, index, shifts):
             result[r, j] += table[row, j] - shifts[j]
 
 
-@njit(cache=True)
-def _bin_sums(rows, index, length):
-    """``np.bincount(index, rows[:, j], length)`` for every column ``j``, as the rows of the result.
+@njit(cache=True, nogil=True)
+def _bin_sums(sums, rows, index):
+    """``sums[:, j] += np.bincount(index, rows[:, j])`` for every column, in one pass over the rows.
 
-    One ``+=`` per row, in row order, as ``np.bincount`` adds: the same sums.
+    One ``+=`` per row, in row order, as ``np.bincount`` adds into zeros: the
+    same sums.
     """
-    sums = np.zeros((rows.shape[1], length))
     for r in range(rows.shape[0]):
         row = index[r]
         for j in range(rows.shape[1]):
-            sums[j, row] += rows[r, j]
-    return sums
+            sums[row, j] += rows[r, j]
 
 
 def _warmup_scop() -> None:
@@ -160,9 +159,10 @@ def _warmup_scop() -> None:
         empty,
         1,
     )
-    index = np.zeros(0, dtype=np.intp)
-    _add_gathered(np.zeros((0, 1)), np.zeros((1, 1)), index, np.zeros(1))
-    _bin_sums(np.zeros((0, 1)), index, 1)
+    index = np.zeros(2, dtype=np.intp)
+    for columns in (np.zeros((2, 1)), np.zeros((2, 2))[:, :1]):  # all a leaf's columns, or a chunk
+        _add_gathered(columns, np.zeros((1, 1)), index, np.zeros(1))
+        _bin_sums(np.zeros((1, 1)), columns, index)
 
 
 @dataclass(frozen=True)
@@ -828,20 +828,39 @@ def _leaf_design(design: DesignMatrix, start: int, stop: int) -> DesignMatrix:
 _SUPPORT_TABLE_TYPES = (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
 
 
-def _table_index(matrix) -> tuple[NDArray, int] | None:
+def _table_index(matrix, rows: int) -> tuple[NDArray, int] | None:
     """``(index, length)`` when each column's ``matvec`` reads a ``length``-row table at ``index``.
 
     Exact types only, as ``ONE_HOT_CODE_TYPES`` admits them, since a subclass
     may change the algebra: a one-hot block's table is the change over a zero
     sink row, a binned or support-compressed SSP block's its support's
     product ``B (R^-1 change)``. Their ``rmatvec`` sums the rows by the same
-    index (``np.bincount``) before the table's transpose.
+    index (``np.bincount``) before the table's transpose. No table longer
+    than the leaf's ``rows`` is formed, since one column of it would hold
+    more than the column-at-a-time products did (``_chunks``): that block
+    takes its own products a column at a time.
     """
     if type(matrix) in ONE_HOT_CODE_TYPES:
-        return matrix.codes, matrix.n_levels + 1
-    if type(matrix) in _SUPPORT_TABLE_TYPES:
-        return matrix.bin_idx, matrix.n_bins
-    return None
+        index = matrix.codes, matrix.n_levels + 1
+    elif type(matrix) in _SUPPORT_TABLE_TYPES:
+        index = matrix.bin_idx, matrix.n_bins
+    else:
+        return None
+    return index if index[1] <= rows else None
+
+
+def _chunks(rows: int, length: int, columns: int) -> list[slice]:
+    """The column chunks a ``length``-row table is formed and summed in, on a leaf of ``rows`` rows.
+
+    A chunk's table or sums holds at most ``rows`` entries, a leaf column.
+    It takes the place of the leaf-length vectors the column-at-a-time
+    products formed beside their one support-length vector (``matvec``'s
+    gather and that less its shift, ``rmatvec``'s contiguous copy of its
+    column), so a chunk holds no more than they did. Each column is formed
+    alone, so the chunks give the same bits.
+    """
+    step = min(columns, rows // length)
+    return [slice(first, min(first + step, columns)) for first in range(0, columns, step)]
 
 
 def _table(matrix, block: NDArray) -> NDArray:
@@ -850,37 +869,37 @@ def _table(matrix, block: NDArray) -> NDArray:
         table = np.zeros((matrix.n_levels + 1, block.shape[1]))
         table[: matrix.n_levels] = block
         return table
-    return np.column_stack([matrix.B_unique @ (matrix.R_inv @ column) for column in block.T])
+    table = np.empty((matrix.n_bins, block.shape[1]))
+    for j, column in enumerate(block.T):
+        table[:, j] = matrix.B_unique @ (matrix.R_inv @ column)
+    return table
 
 
-def _columns(matrix, block: NDArray) -> NDArray:
-    """``matrix @ block`` for a block with no table, each column as ``matvec`` forms it.
+def _add_table_product(result, matrix, block: NDArray, shifts: NDArray, index) -> None:
+    """``result[:, j] += matrix.matvec(block[:, j]) - shifts[j]`` for every column, a chunk at a time."""
+    for chunk in _chunks(result.shape[0], index[1], block.shape[1]):
+        _add_gathered(result[:, chunk], _table(matrix, block[:, chunk]), index[0], shifts[chunk])
 
-    A CSR block multiplies every column in one pass. SciPy sums each row's
-    terms in the order of its stored entries for one column or several, so
-    each column rounds as its ``matvec`` does.
+
+def _table_moments(matrix, rows: NDArray, index) -> NDArray:
+    """``matrix.rmatvec`` of every column of ``rows``, summed by the table's index a chunk at a time.
+
+    ``rmatvec`` sums the rows by the index into zeros (``np.bincount``),
+    then takes the table's transpose of that contiguous vector.
     """
-    if type(matrix) is SparseSSPGroupMatrix:
-        return np.asarray(matrix.B @ np.column_stack([matrix.R_inv @ c for c in block.T]))
-    if type(matrix) is SparseGroupMatrix:
-        return np.asarray(matrix.M @ block)
-    return np.column_stack([matrix.matvec(column) for column in block.T])
-
-
-def _transposed_columns(matrix, rows: NDArray) -> list[NDArray]:
-    """``matrix.rmatvec`` of each column of ``rows``, formed as it forms them."""
-    index = _table_index(matrix)
-    if index is not None:
-        sums = _bin_sums(rows, *index)
-        if type(matrix) in ONE_HOT_CODE_TYPES:
-            return [column[: matrix.n_levels] for column in sums]
-        return [matrix.R_inv.T @ (matrix.B_unique.T @ column) for column in sums]
-    if type(matrix) is SparseSSPGroupMatrix:
-        raw = np.asarray(matrix.B.T @ rows)
-        return [matrix.R_inv.T @ np.ascontiguousarray(column) for column in raw.T]
-    if type(matrix) is SparseGroupMatrix:
-        return list(np.asarray(matrix.M.T @ rows).T)
-    return [matrix.rmatvec(column) for column in rows.T]
+    moments = np.empty((matrix.shape[1], rows.shape[1]))
+    for chunk in _chunks(rows.shape[0], index[1], rows.shape[1]):
+        sums = np.zeros((index[1], chunk.stop - chunk.start))
+        _bin_sums(sums, rows[:, chunk], index[0])
+        moments[:, chunk] = (
+            sums[: matrix.n_levels]
+            if type(matrix) in ONE_HOT_CODE_TYPES
+            else np.column_stack(
+                [matrix.R_inv.T @ (matrix.B_unique.T @ np.ascontiguousarray(c)) for c in sums.T]
+            )
+        )
+        del sums  # before the next chunk's sums, so that one chunk's are held at a time
+    return moments
 
 
 def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArray:
@@ -890,11 +909,12 @@ def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArr
     by row before one product for all columns; every other block takes its
     own product of each column less ``centre' change``, each entry rounding
     as the block's ``matvec`` of that column does. A table's columns are
-    read in one pass over the rows (``_add_gathered``) and a CSR block's in
-    one multivector product (``_columns``): one pass over the block for all
-    ``q`` columns rather than ``q``, as a sparse matrix times several
-    vectors is formed (Gropp, Kaushik, Keyes & Smith 1999; Im, Yelick &
-    Vuduc 2004).
+    gathered a chunk at a time in one pass over the rows
+    (``_add_table_product``), as a sparse matrix times several vectors is
+    formed (Gropp, Kaushik, Keyes & Smith 1999; Im, Yelick & Vuduc 2004).
+    Any other block, a CSR one included, takes its own ``matvec`` a column
+    at a time, two leaf-length vectors: a CSR multivector product holds a
+    leaf product and ran no faster.
     """
     result = np.zeros((part.n, change.shape[1]))
     offset = 0
@@ -906,11 +926,12 @@ def _leaf_product(part: DesignMatrix, change: NDArray, centre: NDArray) -> NDArr
             result += (matrix.M - shift) @ block
             continue
         shifts = np.array([float(shift @ column) for column in block.T])
-        index = _table_index(matrix)
-        if index is None:
-            result += _columns(matrix, block) - shifts
+        index = _table_index(matrix, part.n)
+        if index is not None:
+            _add_table_product(result, matrix, block, shifts, index)
         else:
-            _add_gathered(result, _table(matrix, block), index[0], shifts)
+            for j, column in enumerate(block.T):
+                result[:, j] += matrix.matvec(column) - shifts[j]
     return result
 
 
@@ -918,18 +939,30 @@ def _leaf_transposed(part: DesignMatrix, rows: NDArray, centre: NDArray) -> NDAr
     """``X' rows`` on a leaf's rows, a ``DenseGroupMatrix`` block's centred row by row.
 
     The products ``dense_centred_rmatvec`` and a bounded block's
-    ``rmatvec`` form, before their rank-one centring terms, every column of
-    ``rows`` in one pass over a table's index (``_bin_sums``) or a CSR block.
+    ``rmatvec`` form, before their rank-one centring terms: a table's
+    columns summed by its index a chunk at a time (``_table_moments``), a
+    CSR block's in one multivector product, whose result is ``q`` columns
+    of its width, any other block's a column at a time.
     """
     result = np.zeros((part.p, rows.shape[1]))
     offset = 0
     for matrix in part.group_matrices:
         block = slice(offset, offset + matrix.shape[1])
         offset = block.stop
+        index = _table_index(matrix, part.n)
         if type(matrix) is DenseGroupMatrix:
             result[block] = (matrix.M - centre[block]).T @ rows
+        elif index is not None:
+            result[block] = _table_moments(matrix, rows, index)
+        elif type(matrix) is SparseSSPGroupMatrix:
+            raw = np.asarray(matrix.B.T @ rows)
+            result[block] = np.column_stack(
+                [matrix.R_inv.T @ np.ascontiguousarray(c) for c in raw.T]
+            )
+        elif type(matrix) is SparseGroupMatrix:
+            result[block] = np.asarray(matrix.M.T @ rows)
         else:
-            result[block] = np.column_stack(_transposed_columns(matrix, rows))
+            result[block] = np.column_stack([matrix.rmatvec(column) for column in rows.T])
     return result
 
 
@@ -1152,8 +1185,11 @@ class SCOPJointNewton:
         Z``, a second forms each leaf's ``Z`` again, regresses the correction
         out of it and hands it to the TSQR. A binned group's rows are read off
         its support by bin, and every ordinary group takes its products on the
-        leaf's rows (``_leaf_design``), for all ``q`` columns in one pass over
-        them (``_leaf_product``, ``_leaf_transposed``).
+        leaf's rows (``_leaf_design``): a one-hot or support table's columns
+        in one pass over the rows, a chunk at a time and never from a table
+        longer than the leaf (``_chunks``), a CSR block's transposed product
+        in one multivector product, and any other product a column at a time
+        (``_leaf_product``, ``_leaf_transposed``).
 
         ``g`` bounds each column's rounding: its SCOP column's norm plus
         ``|A^+ C|`` times each ordinary column's, the raw norm on a column the

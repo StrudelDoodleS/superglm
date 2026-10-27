@@ -1222,13 +1222,15 @@ def _leaf_block_design(rng, n):
     """A design with every kind of block a leaf multiplies, and its rows' magnitudes as products read them.
 
     A one-hot block, a support table, a CSR basis (both factored, ``B R^-1``,
-    whose products read ``|B| |R^-1|``), a dense block and a subclass,
-    whose products are its own.
+    whose products read ``|B| |R^-1|``), a dense block, a subclass, whose
+    products are its own, and a plain CSR block as wide as the products'
+    six columns, so that a transposed product still fits its slot.
     """
     import scipy.sparse as sp
 
     from superglm.group_matrix import (
         CategoricalGroupMatrix,
+        SparseGroupMatrix,
         SparseSSPGroupMatrix,
         SupportCompressedSSPGroupMatrix,
     )
@@ -1244,12 +1246,15 @@ def _leaf_block_design(rng, n):
     entries = (np.repeat(np.arange(n), 4), (starts[:, None] + np.arange(4)).ravel())
     basis = sp.csr_matrix((rng.uniform(0, 1, 4 * n), entries), shape=(n, 8))
     basis_inv = rng.normal(size=(8, 4))
+    entries = (np.repeat(np.arange(n), 3), (rng.integers(0, 4, n)[:, None] + np.arange(3)).ravel())
+    plain = sp.csr_matrix((rng.uniform(0, 1, 3 * n), entries), shape=(n, 6))
     blocks = [
         CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
         SupportCompressedSSPGroupMatrix(support, support_inv, bins),
         SparseSSPGroupMatrix(basis, basis_inv),
         DenseGroupMatrix(rng.normal(size=(n, 2)) + 3.0),
         OwnProducts(rng.integers(0, 4, n), 3),
+        SparseGroupMatrix(plain),
     ]
     magnitude = [
         blocks[0].toarray(),
@@ -1257,6 +1262,7 @@ def _leaf_block_design(rng, n):
         np.asarray(basis @ np.abs(basis_inv)),
         np.abs(blocks[3].M),
         blocks[4].toarray(),
+        plain.toarray(),
     ]
     dense = np.hstack([block.toarray() for block in blocks])
     return DesignMatrix(blocks, n=n, p=dense.shape[1]), dense, np.hstack(magnitude)
@@ -1316,20 +1322,75 @@ def test_the_leaf_rows_and_their_factor_are_within_their_rounding_on_weights_spr
     assert residual <= formation + gamma_up(count) * (norm + formation) + gamma_up(4 * q) * norm
 
 
+@pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
+def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
+    """A support's products hold no more than one column's products did, however long it is (tracemalloc).
+
+    A column at a time, ``matvec`` held a support-length vector beside two
+    leaf-length ones, and ``rmatvec`` its sums beside a leaf-length copy of
+    the column. The 1,000-row support's table is formed and summed four
+    columns a pass (``_chunks``); the 40,000-row one, longer than the leaf,
+    forms no table and takes its own products. Peaks are traced allocations
+    above the result; the call's Python objects take under 8 KiB.
+    Mutation check: the whole table at once held ``2 q`` support-length
+    columns, and a one-column table of the long support held two.
+    """
+    import tracemalloc
+
+    from superglm._roundoff import gamma_up
+    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+    from superglm.solvers.scop_newton import _leaf_product, _leaf_transposed
+
+    rng = np.random.default_rng(5)
+    n, q, k = 4_000, 16, 6
+    support, support_inv = rng.uniform(0, 1, (length, k)), rng.normal(size=(k, k - 1))
+    bins = rng.integers(0, length, n)
+    part = DesignMatrix([SupportCompressedSSPGroupMatrix(support, support_inv, bins)], n=n, p=k - 1)
+    change, centre = rng.normal(size=(k - 1, q)), rng.normal(size=k - 1)
+    rows = rng.normal(size=(n, q))
+
+    _leaf_product(part, change, centre), _leaf_transposed(part, rows, centre)  # compiled
+    tracemalloc.start()
+    try:
+        formed = _leaf_product(part, change, centre)
+        product_peak = tracemalloc.get_traced_memory()[1] - formed.nbytes
+        tracemalloc.reset_peak()
+        moment = _leaf_transposed(part, rows, centre)
+        moment_peak = tracemalloc.get_traced_memory()[1] - formed.nbytes - moment.nbytes
+    finally:
+        tracemalloc.stop()
+
+    assert product_peak <= 8 * max(length + n, 2 * n) + 8 * 1024
+    assert moment_peak <= 8 * (length + n) + moment.nbytes + 8 * 1024
+    # each entry within gamma_k of its terms' magnitudes (Higham 2002, sec. 3.5),
+    # twice that against a dense product that rounds too
+    basis = support @ support_inv
+    reach = (support @ np.abs(support_inv) + np.abs(centre)) @ np.abs(change)
+    error = np.abs(formed - (basis[bins] - centre) @ change)
+    assert np.all(error <= 2 * gamma_up(2 * k) * reach[bins])
+    sums = np.zeros((length, q))
+    np.add.at(sums, bins, np.abs(rows))
+    reach = np.abs(support_inv).T @ (support.T @ sums)
+    error = np.abs(moment - basis[bins].T @ rows)
+    assert np.all(error <= 2 * gamma_up(n + length + k) * reach)
+
+
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_all_columns(
     monkeypatch, discrete
 ):
-    """The Gram cannot decide beside a rare short-exposure claim, so the rows do, one pass a block (counts).
+    """Every joint step takes the rows, and a leaf multiplies each block for all its columns at once (counts).
 
     Five top levels of an increasing ``x`` hold one claim each at exposure
-    0.002, where the intercept-only fit expects 2e-4: the cold start's
-    weights reach ``e^35`` there, and the joint steps take the rows. A
-    leaf multiplies each ordinary block once for all its columns, a table
-    in one pass over the rows (``_add_gathered``, ``_bin_sums``), a CSR
-    basis in one multivector product: never a ``matvec`` or ``rmatvec`` a
-    column at a time. Mutation check: master's leaf products (7dcc85c1)
-    made 14,608 such calls in the exact fit's 166 row-route calls, 88 each.
+    0.002, where the intercept-only fit expects 2e-4, so the cold start's
+    weights reach ``e^35`` there. The Gram's decision is forced to the rows
+    on every joint step (``_GREY_FLOOR``), so the counts do not depend on
+    the trajectory reaching a grey step. A leaf multiplies each ordinary
+    block's table once for all its columns, in one pass over the rows
+    (``_add_gathered``, ``_bin_sums``), and a CSR basis's transposed product
+    in one multivector product: never a table's ``matvec`` or ``rmatvec``,
+    or a CSR ``rmatvec``, a column at a time. Mutation check: master's leaf
+    products (7dcc85c1) made such calls on every row-route call.
     """
     from superglm import Categorical, PSpline
     from superglm.group_matrix import (
@@ -1347,7 +1408,7 @@ def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_al
     x[:5], exposure[:5], y[:5] = 60.0 + np.arange(5.0), 0.002, 1.0
     frame = pd.DataFrame({"x": x, "z": z, "g": rng.integers(0, 4, n).astype(str)})
 
-    calls = {"rows": 0, "columnwise": 0, "gathered": 0, "summed": 0}
+    calls = {"rows": 0, "resolved": 0, "columnwise": 0, "gathered": 0, "summed": 0}
     inside = [False]
 
     def counted(name, function):
@@ -1368,9 +1429,22 @@ def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_al
             inside[0] = False
 
     monkeypatch.setattr(SCOPJointNewton, "_schur_rows", rows)
-    for kind in (CategoricalGroupMatrix, DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix):
-        for method in ("matvec", "rmatvec"):
-            monkeypatch.setattr(kind, method, counted("columnwise", getattr(kind, method)))
+    monkeypatch.setattr(scop_newton, "_GREY_FLOOR", np.inf)
+    resolved_of = scop_newton._resolved_root
+
+    def resolved(*args, **kwargs):
+        calls["resolved"] += 1
+        return resolved_of(*args, **kwargs)
+
+    monkeypatch.setattr(scop_newton, "_resolved_root", resolved)
+    for kind, method in (
+        (CategoricalGroupMatrix, "matvec"),
+        (CategoricalGroupMatrix, "rmatvec"),
+        (DiscretizedSSPGroupMatrix, "matvec"),
+        (DiscretizedSSPGroupMatrix, "rmatvec"),
+        (SparseSSPGroupMatrix, "rmatvec"),
+    ):
+        monkeypatch.setattr(kind, method, counted("columnwise", getattr(kind, method)))
     monkeypatch.setattr(
         scop_newton, "_add_gathered", counted("gathered", scop_newton._add_gathered)
     )
@@ -1388,7 +1462,7 @@ def test_a_rare_short_exposure_claim_takes_the_rows_and_each_block_multiplies_al
     model.fit_reml(frame, y, offset=np.log(exposure))
 
     assert model.result.converged
-    assert calls["rows"] > 0
+    assert calls["rows"] == calls["resolved"] > 0
     assert calls["columnwise"] == 0
     assert calls["gathered"] >= 2 * calls["rows"] and calls["summed"] >= calls["rows"]
 
