@@ -593,14 +593,15 @@ class Recorder:                        # S09/S11 emitters live in StateEvaluator
    `id()`-keyed merit allowance and no domain guard. Only dense, QP, QR and structured share
    `TrialSearch`. The design's single "line search" module is two.
 
-### 6.7 As built (S3a to S4)
+### 6.7 As built (S3a to S5)
 
 The package `superglm/solvers/irls_direct/`:
 
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the helpers not yet moved, and (S3d) `_IRLSDirectCurvaturePolicy` |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the centred system's factor certificate (`_certify_centered_factor`), the module helpers the fit reads, and (S3d) `_IRLSDirectCurvaturePolicy` |
+| `_finalise` | (S5) the centred finaliser `_finalise_centred` (with `_final_centred_system`), its `_feature_edf` and `_retained_rank_info`, and `_IRLSDirectFinalGeometry`, what every finaliser returns |
 | `_dense` | (S3d) `_IRLSDirectDenseStep` |
 | `_qp` | (S3d) `_IRLSDirectQPStep` and `_solve_constrained_qp_with_cold_retry`; (S4) the feasibility contract's tolerance `_QP_FEASIBILITY_TOL`, beside the step's `feasible` |
 | `_convergence` | (S4) `_IRLSDirectConvergence`, the stop rule |
@@ -610,7 +611,7 @@ The package `superglm/solvers/irls_direct/`:
 | `_step` | `_IRLSDirectStep`, the interface (a `Protocol`; since S3c its optional hooks default to `None` and every step subclasses it); (S3c) `_note_svd_fallback`, L08 |
 | `_qr` | `_IRLSDirectQRStep`, `_sqrt_penalty_augmented`, `_centred_rows` |
 | `_structured` | (S3b) `_IRLSDirectStructuredStep`; `StructuredSolverError` (its `__module__` still the package) and `_structured_solver_errors`; the Levenberg shifts (`_LEVENBERG_SHIFTS`, `_levenberg_shifted_operator`, `_levenberg_shifted_leaf_operator`, `_build_iterate_factor`); `_structured_score_centre` |
-| `_centred` | `_system_offset_mean`, read by QR, the dense step and the final system |
+| `_centred` | `_system_offset_mean`, read by QR, the dense step and the centred finaliser |
 | `_scop` | (S3c) `_IRLSDirectSCOPStep`; `SCOPRunCentring` with `_seed_refusals` and `_carry_refusals` (which `_fit`'s centred system also calls); the latent state and trial records (`_SCOPGroupState`, `_SCOPTrialState`, `_SCOPOrdinarySolve`), `_evaluate_scop_trial`, `_level_about`, `_LATENT_MAX_STEP`, `_latent_step_depth`, `_centred_system_matvec`, `_lone_scop_support` |
 
 A strategy module never imports `_fit`; `_fit` imports the strategies. A helper that a
@@ -621,17 +622,18 @@ The interface as it stands:
 ```python
 class _IRLSDirectStep(Protocol):      # (S3c) every step subclasses it; each hook defaults to None
     backend: str                       # what the fit publishes ("qr", "gram", "structured")
+    finalise: Callable[[_IRLSDirectFit], _IRLSDirectFinalGeometry]
+                                       # (S5) no default: every step names its finaliser
     data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None
                                        # read by the centred finaliser
-    finalise: Callable[[_IRLSDirectFit], None] | None
-                                       # (S3b) the step's own finaliser; None: the centred one
     # (S3c) the SCOP step's hooks; None on every other step
     initial_state: Callable[[_IRLSDirectFit, _IRLSState], _IRLSState] | None   # S22
     search: Callable[[_IRLSDirectFit, int], None] | None    # L09; None: the shared search
     latent_change: Callable[[], float] | None               # L16, the coefficient criterion
     damped: Callable[[_IRLSDirectFit], bool] | None         # L16, a damped step never stops
-    terminal: Callable[[_IRLSDirectFit], None] | None       # F05
-    postfit: Callable[[_IRLSDirectFit, PIRLSResult], dict | None] | None   # F14, F09's eta
+    terminal: Callable[[_IRLSDirectFit], None] | None       # F05, after the export rows (S5)
+    postfit: Callable[[_IRLSDirectFit, PIRLSResult, _IRLSDirectFinalGeometry], dict | None] | None
+                                                            # F14, F09's eta
     def propose(self, fit, it: int) -> None
     def certificate_inputs(self) -> tuple   # (S3d) L17's inputs; default (None, None, None, None)
 ```
@@ -1045,6 +1047,168 @@ Where S4 (the stop rule and the shared line search) changed it:
       fit or unit outlives its return with the collector off; a unit that kept the fit
       would (`s4_out/checks/cycle6.py`).
 
+Where S5 (finalisation per strategy, the leftovers and the cleanups) changed it:
+
+38. **Two finalisers, and each step names its own.**
+    - `_finalise` holds the centred finaliser, `_finalise_centred(step, fit)`: the fit's
+      `_final_system` (now `_final_centred_system`, F08 and F09) and `_final_geometry`
+      (F11), moved verbatim but for `self` -> `fit`, with `_feature_edf` and
+      `_retained_rank_info` beside them (`s5_out/scripts/split_finalise.py` asserts each
+      rewrite).
+    - The QR, dense, QP and SCOP steps name it: `finalise = _finalise_centred`. A module
+      function set as a class attribute is a method, so the step hands itself in and the
+      finaliser reads its `data_rank`. The structured step's `finalise` is its own, as
+      since S3b (point 8).
+    - The interface gives `finalise` no default: a step that names none fails at its first
+      finalisation. `run()` calls `step.finalise(self)` and hands what it returns to
+      `_publish`, with no route branch.
+39. **What a finaliser returns: `_IRLSDirectFinalGeometry`**, a frozen record (`slots`,
+    `eq=False`) of what F10, F11 and F08 wrote and F12 to F14 read:
+
+    | Field | Centred | Structured | Read by |
+    |---|---|---|---|
+    | `XtWX_beta` | raw `X'WX` | the block data operator | `_publish` (`return_xtwx`); SCOP's `postfit` (the raw Fisher Gram) |
+    | `XtWX_S_inv_beta` | the slope pseudo-inverse | the profiled factor | `_publish` |
+    | `log_det_H`, `reml_hessian_rank` | from the slope decomposition | from the profiled factor | `_publish` |
+    | `reml_geometry_summary`, `retained_reml_decomposition`, `rank_info` | as before | `None` | `_publish` |
+    | `p_eff` | `1 + sum(feature_edf)` | the factor's trace | `_publish` |
+    | `structured_factor` | `None` | the profiled factor | the recorder's `disclose_backend` |
+    | `centered_final`, `XtW1` | the final system, its raw `X'W1` | `None` | SCOP's `postfit` |
+
+    - `_publish(it, final)`, `postfit(fit, result, final)` and
+      `disclose_backend(fit, backend, structured_factor)` read it. SCOP's post-fit reads
+      `sum_W` as `final.centered_final.sum_w`, the float the fit's `sum_W` held.
+    - Why a record, when point 2 kept the proposal in slots: finalisation runs once per
+      fit, so the record is one allocation, and it names the whole interface between the
+      finalisers and publication. Each of the 13 slots it replaces had two writers, one per
+      finaliser, and a reader that could not tell which had run.
+    - **Fields that left the fit (13):** `centered_final`, `XtWX`, `XtW1`, `sum_W`,
+      `XtWX_beta`, `XtWX_S_inv_beta`, `log_det_H`, `reml_hessian_rank`,
+      `reml_geometry_summary`, `retained_reml_decomposition`, `p_eff`, `rank_info` and
+      `structured_factor`. The fit has 72, down from 85.
+40. **After the loop, in this order:**
+    1. `_finish`: F01, F02, F03, then `mean_space.final`, which is F04 with the truncated
+       relabel and compares the certificate's judged eta with `_finish`'s `eta_unclipped`
+       by identity. `_finish` reads no route flag: `qp` and `mean_space` are the
+       feasibility contract's and the overlay's own data, `None` on a fit without them.
+    2. `_terminal_rows`: the export rows (F06), then the step's `terminal` (F05), which now
+       reads them (point 41). F05 writes only the SCOP step's latent state, and F06 reads
+       none of it, so the swap moves nothing.
+    3. `recorder.profile_fit` (F07).
+    4. `step.finalise(self)` (F08 to F11), whose record `_publish` reads (F12 to F14).
+41. **Bitwise cleanups, one commit each:**
+    - **The dense Newton step's `X~' u` once.** `centred_rhs` formed
+      `centred_data_score(dm, newton_score, mean_x)` for the right-hand side and
+      `newton_iterate` formed it again for the increment, from the same arrays. It is
+      formed once, in `centred_rhs`, which returns it beside the system; the QP step drops
+      it. On the binomial/log Newton route (`s5_out/checks/opcount6.py`, `msn_dense`, three
+      Newton iterations) `centred_data_score` runs 14 times, not 17, and the fit executes
+      259 fewer instructions; each saved call is a pass over the rows.
+    - **`_working`'s reset of the iterate.** It copied `committed.beta` into `beta` (O(p)
+      per iteration) and `committed.intercept` into `intercept`. Every step's `propose`
+      writes both before anything reads them, and nothing between `_working` and
+      `propose` reads either.
+    - **Dead stores.** `_setup_loop`'s `XtWX_beta = None`: its one reader, `_publish`, ran
+      only after a finaliser had written it. The old L05 block's
+      `_final_penalized_operator` was already gone (S3b, point 10).
+    - **The Fisher-data gate.** `get_centered_system` took the caller's Fisher data on
+      `weighted_gram_reuse and not observed`. The policy computes the reuse flag with
+      `and not observed`, after the latch, and `switch_to_newton`, the only other writer of
+      either flag, sets `observed` and clears reuse together, so the second test never
+      decided anything.
+    - **`_even_exponent`'s zero branch.** Its one caller hands it the largest positive
+      prior weight, and `_setup_design` refuses weights that are not finite, are negative
+      or have no positive entry before binding the fit's weights, which nothing rebinds.
+      The harness never took the branch (S4's branch coverage). It was redundant as well:
+      `math.frexp` gives exponent 0 for zero, infinity and NaN.
+    - **The per-iteration log line** passes lazy %-arguments, so INFO off formats
+      nothing. The text is the same.
+    - **The recorder's `np.isfinite(dev)`** runs only with the trace on; it guarded
+      `emit_state_commit`, which returns at once without one.
+    - **`t_eta` records what it names.** `irls_eta_s` was always 0. It is now the time
+      forming the eta of every state the fit evaluates (from its coefficients, or a
+      line-search trial's from its endpoints'), its clip and its mean:
+      `_evaluate_irls_state` takes an optional `eta_clock`, which `evaluate_state` and the
+      SCOP trials pass (`recorder.eta_formed`), and the callers time the predictors they
+      form themselves (a centred state's, a shared-search trial's, a SCOP trial's on the
+      ordinary block's centred rows). Wall-clock fields only.
+    - **The SCOP terminal hook reads the export rows.** It formed Fisher rows at the
+      retained model, and the fit formed the same rows from the same arguments as its
+      export rows straight after, a duplicate pass inherited from master. A SCOP fit always
+      forms export rows (it refuses `_return_working_system`), and `block_curvature` writes
+      neither `W` nor `z`.
+    - **The `_use_observed_newton` docstring** said SCOP keeps Fisher, false since #527.
+42. **The stop rule's feasibility veto is gone.**
+    - `_terminate` vetoed a stop on infeasible retained coefficients and again without the
+      inner QP's KKT certificate. The certificate (`retained_converged`) is set only when
+      the QP converged and the search kept its full proposal (point 32), and
+      `solve_constrained_qp` reports `converged` only from a branch that has just tested
+      the returned point with `_is_feasible` at its default `tol` 1e-12, which is
+      `_QP_FEASIBILITY_TOL`, on the same `A` and `b`. So no infeasible retained state is
+      certified, and the KKT veto holds it open (S4's probe saw the feasibility veto fire
+      4 times, each with the KKT veto).
+    - The feasibility test stays: it names `constraint_infeasible`.
+    - `test_an_infeasible_retained_qp_state_is_never_kkt_certified`
+      (`test_constraint_fit_feasibility.py`) pins the invariant: the two tolerances are
+      equal, and at every verdict of healthy QP fits, a warm start outside the set and tiny
+      accepted steps that keep the retained state outside, no infeasible retained state is
+      certified. Mutations: the certificate handed to any accepted step fails it at the
+      invariant, and a contract tolerance of 1e-13 at the tolerance check.
+43. **Leftovers deleted.**
+    - `_setup_loop`'s `deviance_relative_change = inf` seed: its one reader is `_finish`,
+      and the loop sets it in every iteration before any break; the loop runs at least
+      once. The rule its comment gave, why the change is taken before the commit, moved to
+      the line that takes it.
+    - `fit_irls_direct`'s docstring pointed at `_fit_irls_direct_once` for the parameters;
+      it points at `_IRLSDirectFit`.
+    - Kept, with their readers: every name `__init__` re-exports has an importer in `src`
+      or `tests` (17 of 17); `_fit_irls_direct_once` is `test_no_auto_fallback`'s spy
+      point; `_build_penalty_matrix` is imported by four test files and `_safe_decompose_H`
+      by `reml.efs` and two; the working-system guards (`_last_working_centered is None`,
+      the structured `_last_system is None`) are invariants a probe forces (point 44).
+44. **The finalisation's branches the harness does not reach** (its branch coverage at
+    S5's head) each have a probe, run under branch coverage on S4's head and on S5's
+    (`s5_out/probe/branches_s5.py`, `targets_s5.py`): 29 records, identical on both
+    heads, and 28 of the 29 missed lines and arcs executed on both:
+    - the EDF's scaled trace (subnormal-weight binomial/log fits; direct calls for a
+      Hessian with no finite scale and for a scaled Gram that refuses, which takes the
+      factor);
+    - the data rank's two factor routes, unpenalised (the fit's own certificate) and
+      penalised with the Gram and the grey-subspace certificate refusing;
+    - the working-system guards of both finalisers, forced, and the fREML iteration that
+      keeps its system;
+    - publication's SCOP shapes with and without the data Gram;
+    - no caller profile; a candidate without REML geometry, on both routes.
+
+    The one arc not run is in unmoved recorder code: `disclose_backend`'s test of a
+    structured factor without a border certificate, which none of the three profiled
+    factors is (each assigns a `BorderCertificate`).
+
+    Of 23 finaliser mutants (`s5_out/scripts/make_mutants_s5.py`), the harness or the
+    focused tests catch 18: every wrong or missing finaliser, both working-system flags,
+    the record's fields, the dropped relabel, the copied judged eta, the boundary rows, the
+    F01 deviance, the F03 KKT refusal, the QR rank deferred, the dropped `cache_out`
+    entries, and the SCOP post-fit's Gram (the harness; the SCOP tests miss it) and
+    publication's SCOP tuple (the SCOP tests; the harness never returns it). Five are
+    missed, and none is equivalent in principle:
+    - four F-block reorders (F04 before F03, F03 before F02, F02 before F01, F04 first).
+      Two F-blocks interact only when both act on one fit, and no fixture has such a pair:
+      a Gaussian identity fit (F01) with a separation signature (F02); a constrained fit
+      with an extreme weight ratio that runs out its budget, where F02 reads the
+      `converged` F03 clears; a constrained binomial/log fit refused by the QP contract
+      and at the mean-space boundary (F03 and F04);
+    - the EDF's cut at `100 eps`: no fixture has a coefficient EDF in `(0, 100 eps)`.
+45. **The identity hazards hold.**
+    - `final` still compares the certificate's judged eta with the retained state's own
+      `eta_unclipped`, which `_finish` hands it; no state is copied after the loop.
+    - With the collector off, no fit, step, collaborator or record outlives its return on
+      any route of `cycle6.py` (now counting `_IRLSDirectFinalGeometry` too), and each of
+      the six units that keeps the fit is seen. A deferred rank-info callable reaches no
+      fit, step, collaborator or record.
+    - Against S4 (`opcount6.py`), every route executes fewer instructions (gram 11,273 to
+      11,229; SCOP Poisson 20,875 to 20,600; `msn_qp` 49,297 to 48,686) and a few more
+      Python calls, `eta_formed` once per state evaluation.
+
 Tests patch `superglm.solvers.irls_direct._fit`, the module whose globals the fit reads.
 A name that a strategy module reads is patched in that module: since S3b the structured
 factor build, `_build_iterate_factor`, `keep_narrow_cap` and the score centre's
@@ -1056,7 +1220,8 @@ read them there.  Since S3d:
 - the QP step's `solve_constrained_qp` (and `_solve_constrained_qp_with_cold_retry`) are
   `_qp`'s;
 - the dense step's `decompose_gram_if_authoritative` is `_dense`'s, and the three tests
-  that refuse the loop's Gram patch it there as well as in `_fit`, whose finaliser reads it;
+  that refuse the loop's Gram patch it there as well as in `_finalise` (since S5; `_fit`
+  before), whose finaliser reads it;
 - the certificate's `truncated_direction_ratio`, `row_set_residual`, `row_sets` and
   `null_basis_angle` are `_mean_space`'s, and the package re-exports `_SUBNORMAL_SPACING`
   and `_underflow_allowance` from there.
@@ -1065,6 +1230,13 @@ Since S4 the shared search's `_select_irls_trial` is `_search`'s (eight sites), 
 rule's `rate_exhausts_budget` and `_irls_objective_relative_change` are `_convergence`'s. The
 tests patch and read them there; `_fit` no longer imports them, so a stale patch at `_fit`
 raises.
+
+Since S5 the centred finaliser's `decompose_gram_if_authoritative`, `decide_data_rank`,
+`grouped_weighted_factor` and `grouped_projected_factor` are `_finalise`'s, and the seven
+test files that patch them (`test_tsqr_certificate`, `test_irls_direct`,
+`test_factor_smooth_structured_parity`, `test_gamma_fisher_data_reuse`,
+`test_robust_solve`, `test_data_rank_grey_subspace`, `test_discarded_fit_rank_info`)
+patch them there; `_fit` no longer imports them.
 
 What stays at `_fit`:
 - `build_centered_system` (17 sites and `test_lookup_table_gram`'s string path), because

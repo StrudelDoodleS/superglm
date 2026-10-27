@@ -212,6 +212,16 @@ report for the fit object's fields, collaborators, the strategy interface and th
 - **S4, line search and convergence.**
 - **S5, finalisation per strategy.** Then delete the original function body, and review the whole
   diff as one change.
+  - Done (2026-10-27): two finalisers, each step naming its own. The centred one
+    (`_finalise._finalise_centred`) serves QR, dense, QP and SCOP; the structured step's is
+    its own. Both return `_IRLSDirectFinalGeometry`, which publication reads, so 13 fields
+    left the fit. `_finish` keeps F01 to F04 and the truncated relabel in order, with no
+    route flag. What remained of the original body that nothing read is deleted, and eleven
+    bitwise cleanups landed, the stop rule's redundant feasibility veto among them, with a
+    test of the invariant it rested on. The state map's §6.7, points 38 to 45, is the
+    as-built record.
+  - Next: coverage tests for the mutants only a probe catches, a review of the whole diff,
+    then a rebase onto master and the ports.
 
 ## The Binomial/log replacement (second PR, after the split)
 
