@@ -96,6 +96,7 @@ def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
     factor: Callable[[int], NDArray],
+    inverse: NDArray | None = None,
 ) -> NDArray:
     """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
 
@@ -114,10 +115,13 @@ def _feature_edf(
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.
+    trace near its limit, 0.  ``inverse`` is ``decomposition.pseudo_inverse()``
+    when the caller has formed it already.
     """
+    if inverse is None:
+        inverse = decomposition.pseudo_inverse()
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        unscaled = np.diag(decomposition.pseudo_inverse() @ centered.data_gram).copy()
+        unscaled = np.diag(inverse @ centered.data_gram).copy()
     if np.all(np.isfinite(unscaled)):
         return unscaled
     hessian = centered.hessian
@@ -354,6 +358,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
                 np.ldexp(final_system.penalty, -exponent),
                 center=final_system.mean_x,
             ),
+            inverse=XtWX_S_inv_beta,
         )
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
         p_eff = 1.0 + float(np.sum(feature_edf))

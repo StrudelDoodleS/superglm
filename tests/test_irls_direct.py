@@ -409,6 +409,46 @@ class TestDirectSolverBasic:
         np.testing.assert_allclose(inverse, fresh.pseudo_inverse(), rtol=0.0, atol=tolerance)
         assert result.reml_hessian_rank == 1 + fresh.rank
 
+    def test_fit_statistics_read_the_inverse_the_reml_geometry_formed(self, monkeypatch):
+        """One pseudo-inverse per finalise: the EDF trace reads the REML geometry's."""
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers import rank
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(4)
+        raw = rng.normal(size=(200, 4))
+        y = rng.poisson(np.exp(0.2 * raw[:, 0])).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(raw)], n=len(y), p=raw.shape[1])
+        groups = [GroupSlice(name="x", start=0, end=raw.shape[1])]
+        original = rank.RankDecomposition.pseudo_inverse
+        formed = []
+
+        def counted(self):
+            formed.append(self)
+            return original(self)
+
+        monkeypatch.setattr(rank.RankDecomposition, "pseudo_inverse", counted)
+        cache: dict = {}
+        result, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Poisson(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.25,
+            compute_rank_info=False,
+            cache_out=cache,
+            weight_semantics="frequency",
+        )
+
+        assert len(formed) == 1
+        hessian, data_gram = cache["centered_hessian"], cache["centered_XtWX"]
+        expected = 1.0 + np.trace(np.linalg.solve(hessian, data_gram))
+        tolerance = 64 * raw.shape[1] * np.finfo(float).eps * np.linalg.cond(hessian)
+        assert result.effective_df == pytest.approx(expected, rel=tolerance)
+
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
         import superglm.solvers.irls_direct._finalise as irls_finalise
