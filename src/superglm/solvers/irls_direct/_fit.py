@@ -106,12 +106,7 @@ from superglm.solvers.rank import (
     decompose_symmetric,
     weights_fingerprint,
 )
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    NestedDataOperator,
-    SumToZeroBlockOperator,
-    resolve_structured_backend,
-)
+from superglm.solvers.structured import resolve_structured_backend
 from superglm.solvers.working_rows import (
     CoefficientWorkingRows,
     coefficient_initial_intercept,
@@ -1615,9 +1610,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     def _setup_loop(self) -> None:
         _state_center = self._state_center
         self.converged = False
-        self.XtWX_beta: (
-            NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator | None
-        ) = None
         self._last_working_centered: CenteredSystem | None = None
         # its mean_x less the state's centre (``_system_offset_mean``), None without one
         self._last_working_offset_mean: NDArray | None = None
