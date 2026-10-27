@@ -2483,7 +2483,7 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     from superglm.reml import direct, w_derivatives
     from superglm.solvers import centered_system, pirls
     from superglm.solvers.irls_direct import _centred as irls_centred
-    from superglm.solvers.irls_direct import _fit as irls_direct
+    from superglm.solvers.irls_direct import _finalise as irls_finalise
     from superglm.solvers.irls_direct import _structured as irls_structured
 
     calls: collections.Counter = collections.Counter()
@@ -2505,7 +2505,7 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     count(irls_centred, "centre_offset_mean")
     count(w_derivatives, "dense_mean_pair")
     count(centered_system, "_attach_dense_split", ran)
-    count(irls_direct, "_system_offset_mean", ran)
+    count(irls_finalise, "_system_offset_mean", ran)
 
     def carries_pair(*args, **kwargs):
         summary = args[3].reml_geometry
