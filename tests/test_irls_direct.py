@@ -345,6 +345,7 @@ class TestDirectSolverBasic:
 
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
+        import superglm.solvers.irls_direct._finalise as irls_finalise
         import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
@@ -372,7 +373,7 @@ class TestDirectSolverBasic:
         # or not the retained fit would have had to certify it against the
         # observation factor.
         def _counting(name):
-            original = getattr(irls_direct, name)
+            original = getattr(irls_finalise, name)
 
             def counted(matrix, *args, **kwargs):
                 nonlocal decomposition_calls
@@ -383,7 +384,7 @@ class TestDirectSolverBasic:
 
         # The data rank's entry point (``rank.decide_data_rank``) counts too.
         for name in ("decompose_gram_if_authoritative", "decide_data_rank"):
-            monkeypatch.setattr(irls_direct, name, _counting(name))
+            monkeypatch.setattr(irls_finalise, name, _counting(name))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
         retained_geometry_calls = decomposition_calls
         assert retained.rank_info is not None

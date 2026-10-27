@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from superglm.solvers.centered_system import CenteredSystem
+    from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
     from superglm.solvers.irls_state import _IRLSState
     from superglm.solvers.pirls import PIRLSResult
@@ -34,13 +35,11 @@ class _IRLSDirectStep(Protocol):
     iteration that the fit did not already.
 
     ``backend`` is the backend the fit publishes (``PIRLSResult.direct_backend``).
-    ``finalise(fit)`` is the step's own finalisation of the retained model, or
-    ``None`` for the centred one (``_IRLSDirectFit._final_system`` and
-    ``_final_geometry``); a finaliser writes what the fit publishes from its
-    geometry: ``XtWX_beta``, ``XtWX_S_inv_beta``, ``log_det_H``,
-    ``reml_hessian_rank``, ``reml_geometry_summary``,
-    ``retained_reml_decomposition``, ``p_eff``, ``rank_info`` and
-    ``structured_factor``, and fills ``cache_out``.  The centred finaliser reads
+    ``finalise(fit)`` is the finaliser the step names, which every step must:
+    after the loop it fills ``cache_out`` and returns the retained model's
+    geometry, which the fit publishes (``_finalise._IRLSDirectFinalGeometry``).
+    The structured step has its own; the other four name the centred one
+    (``_finalise._finalise_centred``).  The centred finaliser reads
     ``data_rank``, which factors the retained fit's data rank from the step's own
     design, as ``data_rank(centered_final, W)``; ``None`` takes the module route
     (``_retained_rank_info``).  A step's own data rank holds the step, so the fit
@@ -64,20 +63,23 @@ class _IRLSDirectStep(Protocol):
       bars a stop this iteration.
     - ``terminal(fit)``: the step's own state at the retained model, before the
       export rows are formed.
-    - ``postfit(fit, result)``: the step's part of the publication; what it
-      returns is the fit's ``scop_states`` return value.
+    - ``postfit(fit, result, final)``: the step's part of the publication,
+      which reads the finaliser's geometry ``final``; what it returns is the
+      fit's ``scop_states`` return value.
     """
 
     __slots__ = ()
     backend: str
+    finalise: Callable[[_IRLSDirectFit], _IRLSDirectFinalGeometry]
     data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None = None
-    finalise: Callable[[_IRLSDirectFit], None] | None = None
     initial_state: Callable[[_IRLSDirectFit, _IRLSState], _IRLSState] | None = None
     search: Callable[[_IRLSDirectFit, int], None] | None = None
     latent_change: Callable[[], float] | None = None
     damped: Callable[[_IRLSDirectFit], bool] | None = None
     terminal: Callable[[_IRLSDirectFit], None] | None = None
-    postfit: Callable[[_IRLSDirectFit, PIRLSResult], dict | None] | None = None
+    postfit: (
+        Callable[[_IRLSDirectFit, PIRLSResult, _IRLSDirectFinalGeometry], dict | None] | None
+    ) = None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
         """Iteration ``it``'s full step from the fit's working rows (``W``, ``z``, ``newton_score``).

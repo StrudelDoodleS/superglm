@@ -403,10 +403,10 @@ class _IRLSDirectRecorder:
             _t_finalize = time.perf_counter() - t0
             profile["irls_finalize_s"] = profile.get("irls_finalize_s", 0.0) + _t_finalize
 
-    def disclose_backend(self, fit: _IRLSDirectFit, backend: str) -> None:
+    def disclose_backend(self, fit: _IRLSDirectFit, backend: str, structured_factor) -> None:
         """The backend the fit ran on, why, and the structured factor's certificate."""
         profile, structured_decision = self.profile, fit.structured_decision
-        structured_factor, groups = fit.structured_factor, fit.groups
+        groups = fit.groups
         if profile is not None:
             profile["direct_backend"] = backend
             profile["direct_fallback_reason"] = fit._direct_fallback_reason

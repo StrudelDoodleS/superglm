@@ -35,6 +35,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor_rhs,
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -53,6 +54,7 @@ from superglm.solvers.scop_newton import (
 from superglm.solvers.working_rows import coefficient_working_rows, pearson_chi2
 
 if TYPE_CHECKING:
+    from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
     from superglm.solvers.pirls import PIRLSResult
 
@@ -441,6 +443,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         " _committed _retained _ordinary _centred_level _results _proposal_eta_unclipped"
     ).split()
     backend = "gram"
+    finalise = _finalise_centred
 
     def __init__(self, fit: _IRLSDirectFit, curvature: str) -> None:
         """The latent state, the reduced design and the Newton engine, and the first latent coordinates.
@@ -1171,7 +1174,9 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             _scop_state[gi]["last_fisher_fallback"] = refresh.used_fisher_fallback
             _scop_state[gi]["discarded_directions"] = refresh.discarded_directions
 
-    def postfit(self, fit: _IRLSDirectFit, result: PIRLSResult) -> dict[int, dict]:
+    def postfit(
+        self, fit: _IRLSDirectFit, result: PIRLSResult, final: _IRLSDirectFinalGeometry
+    ) -> dict[int, dict]:
         """The latent states the fit returns, the retained predictor, and the post-fit inference.
 
         The latent states are what the EFS outer loop and the fit's result
@@ -1211,8 +1216,8 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             import superglm.reml.scop_geometry as scop_geometry
 
             dm, S = fit.dm, fit.S
-            XtWX, XtW1, sum_W = fit.XtWX, fit.XtW1, fit.sum_W
-            centered_final = fit.centered_final
+            centered_final = final.centered_final
+            XtWX, XtW1, sum_W = final.XtWX_beta, final.XtW1, centered_final.sum_w
             if self._curvature == "observed":
                 joint_geometry = scop_geometry.build_observed_scop_joint_geometry(
                     dm=dm,

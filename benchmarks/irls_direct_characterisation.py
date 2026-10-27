@@ -1436,13 +1436,15 @@ def _run(args) -> int:
 
 # What ``--coverage`` reports, in every file of the solver: its entry point, and the
 # fit it runs, which is a wrapper, a method-object class, its fields, recorder and
-# step classes (every top-level class named ``_IRLSDirect*``), and the module
-# functions it binds with ``partial``.  Its total (``the fit``) is everything but
-# the entry point.
+# step classes (every top-level class named ``_IRLSDirect*``), the centred
+# finaliser, and the module functions it binds with ``partial``.  Its total (``the
+# fit``) is everything but the entry point.
 _COVERAGE_FUNCTIONS = (
     "fit_irls_direct",
     "_fit_irls_direct_once",
     "_certify_centered_factor",
+    "_finalise_centred",
+    "_final_centred_system",
     "_retained_rank_info",
 )
 _COVERAGE_CLASS_PREFIX = "_IRLSDirect"

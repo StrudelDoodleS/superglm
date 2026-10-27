@@ -17,6 +17,7 @@ from superglm.group_matrix import (
 )
 from superglm.solvers.centered_system import CenteredSystem
 from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.rank import RankDecomposition, decompose_factor
 
@@ -67,6 +68,7 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
 
     __slots__ = ("_X_full", "_L_aug", "_held_rank")
     backend = "qr"
+    finalise = _finalise_centred
 
     def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int) -> None:
         has_disc = any(

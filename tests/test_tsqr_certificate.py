@@ -831,7 +831,7 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     ``finalize_reml_fit`` replaced unread; now only the terminal refit that is
     published does, and its decomposition is on the factor route's rule.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._finalise as irls_finalise
 
     rng = np.random.default_rng(3)
     n = 4_000
@@ -846,8 +846,8 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     )
     y = rng.poisson(np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)).astype(float)
     calls: list[int] = []
-    original = irls_direct.grouped_weighted_factor
-    original_projection = irls_direct.grouped_projected_factor
+    original = irls_finalise.grouped_weighted_factor
+    original_projection = irls_finalise.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
@@ -861,8 +861,8 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     # rows once; a failed certificate would add the full factor's pass, so
     # ``[n]`` also says the certificate passes here (the nulls are exact
     # aliases, far from the cut).
-    monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
-    monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
+    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(irls_finalise, "grouped_projected_factor", projected)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
@@ -948,7 +948,7 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     candidates and trials already skip it), so against it the rows below
     are read twice.
     """
-    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._finalise as irls_finalise
     from superglm import RandomEffect, Tweedie
 
     rng = np.random.default_rng(8)
@@ -966,8 +966,8 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     mu = np.exp(0.3 * np.sin(2.0 * frame["x"].to_numpy()) + 0.1 * a - 0.1 * b)
     y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
     calls: list[int] = []
-    original = irls_direct.grouped_weighted_factor
-    original_projection = irls_direct.grouped_projected_factor
+    original = irls_finalise.grouped_weighted_factor
+    original_projection = irls_finalise.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
@@ -981,8 +981,8 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     # rows once; a failed certificate would add the full factor's pass, so
     # ``[n]`` also says the certificate passes here (the nulls are exact
     # aliases, far from the cut).
-    monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
-    monkeypatch.setattr(irls_direct, "grouped_projected_factor", projected)
+    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(irls_finalise, "grouped_projected_factor", projected)
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",

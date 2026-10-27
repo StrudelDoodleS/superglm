@@ -21,7 +21,9 @@ search in ``_search``, and its step methods behind the interface in
 ``_step``: the QR step in ``_qr``, the dense step in ``_dense``, the
 linearly constrained (QP) step in ``_qp``, the structured step (random-effect
 chains, ``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained
-(SCOP) step with its own line search in ``_scop``.  ``_centred`` holds what
+(SCOP) step with its own line search in ``_scop``.  Each step names its
+finaliser: the structured step its own, the others the centred one in
+``_finalise``, beside what every finaliser returns.  ``_centred`` holds what
 more than one step reads of the centred system, and ``_mean_space`` the
 binomial/log mean space's overlay: its Newton steps and its true-score
 certificate.  This module re-exports the names other modules import.  A name the

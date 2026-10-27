@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.solvers.constrained_qp import QPResult, _is_feasible, solve_constrained_qp
+from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 
 if TYPE_CHECKING:
@@ -114,6 +115,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         " retained_converged _degeneracy_retry_failed _reported_nonconvergence"
     ).split()
     backend = "gram"
+    finalise = _finalise_centred
 
     def __init__(self, groups: list[GroupSlice], p: int) -> None:
         A_blocks: list[np.ndarray] = []

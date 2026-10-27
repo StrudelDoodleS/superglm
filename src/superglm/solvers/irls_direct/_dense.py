@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.rank import RankDecomposition, decompose_gram_if_authoritative
 
@@ -35,6 +36,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
 
     __slots__ = ("_held_rank",)
     backend = "gram"
+    finalise = _finalise_centred
 
     def __init__(self) -> None:
         self._held_rank: RankDecomposition | None = None

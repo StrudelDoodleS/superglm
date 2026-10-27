@@ -13,7 +13,7 @@ from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.solvers.irls_direct import _dense as irls_direct_dense
-from superglm.solvers.irls_direct import _fit as irls_direct_module
+from superglm.solvers.irls_direct import _finalise as irls_direct_finalise
 from superglm.solvers.irls_direct import _safe_decompose_H
 from superglm.solvers.rank import decompose_gram
 
@@ -324,7 +324,7 @@ class TestQRSolverPath:
         # own retained subspace", so refusing every one of them drives the loop
         # through factor certification on every iteration.  Faking a truncated
         # rank would also perturb the linear solve, which is not under test.
-        for module in (irls_direct_module, irls_direct_dense):
+        for module in (irls_direct_finalise, irls_direct_dense):
             monkeypatch.setattr(
                 module,
                 "decompose_gram_if_authoritative",

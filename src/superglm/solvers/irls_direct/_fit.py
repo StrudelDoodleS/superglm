@@ -50,16 +50,13 @@ from superglm.solvers.centered_system import (
     build_centered_system,
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
-    grouped_projected_factor,
-    grouped_structural_nulls,
-    grouped_weighted_factor,
     refresh_centered_rhs,
 )
 from superglm.solvers.constrained_qp import _feasibility_slack
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
-from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.irls_direct._convergence import _IRLSDirectConvergence
 from superglm.solvers.irls_direct._dense import _IRLSDirectDenseStep
+from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
 from superglm.solvers.irls_direct._mean_space import _IRLSDirectMeanSpaceOverlay
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL, _IRLSDirectQPStep
 from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
@@ -92,19 +89,14 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import (
     PIRLSResult,
-    REMLGeometrySummary,
     TerminationReason,
     _positive_working_weight_stats,
 )
 from superglm.solvers.rank import (
-    SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
-    decide_data_rank,
     decompose_factor,
-    decompose_gram_if_authoritative,
     decompose_symmetric,
-    weights_fingerprint,
 )
 from superglm.solvers.structured import resolve_structured_backend
 from superglm.solvers.working_rows import (
@@ -130,45 +122,6 @@ class _CenteredFactorCertification:
     factor: NDArray
     decomposition: RankDecomposition
     transformed_rhs: NDArray | None
-
-
-def _feature_edf(
-    centered: CenteredSystem,
-    decomposition: RankDecomposition,
-    factor: Callable[[int], NDArray],
-) -> NDArray:
-    """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
-
-    ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
-    Hessian ``decomposition`` factors.  The trace is invariant under scaling
-    ``D`` and ``S`` jointly by one constant, but the pseudo-inverse is not: at
-    a data scale ``s`` its entries are of order ``1 / s``, which overflows
-    once ``s`` falls below ``1 / max float``, about 5.6e-309 (subnormal
-    weights give ``s ~ 1e-317``).  The unscaled trace is formed first and,
-    when every entry is finite, returned as it is: the unscaled computation,
-    bit for bit, with no scan of the Hessian.  Otherwise the pseudo-inverse
-    overflowed, and ``D`` and ``S`` are multiplied by the one power of two
-    that brings the Hessian's largest entry into ``[1/2, 1)``, exact for
-    normal and subnormal entries alike, and the scaled Hessian is factored
-    again (``factor(exponent)`` when its Gram is not authoritative).  Both
-    are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
-    + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
-    that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.
-    """
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        unscaled = np.diag(decomposition.pseudo_inverse() @ centered.data_gram).copy()
-    if np.all(np.isfinite(unscaled)):
-        return unscaled
-    hessian = centered.hessian
-    largest = float(np.max(np.abs(hessian), initial=0.0))
-    if largest == 0.0 or not math.isfinite(largest):
-        return unscaled
-    exponent = math.frexp(largest)[1]
-    scaled = decompose_gram_if_authoritative(np.ldexp(hessian, -exponent))
-    if scaled is None:
-        scaled = decompose_factor(factor(exponent))
-    return np.diag(scaled.pseudo_inverse() @ np.ldexp(centered.data_gram, -exponent)).copy()
 
 
 def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
@@ -445,111 +398,6 @@ def _certify_centered_factor(
     return cached
 
 
-def _retained_rank_info(
-    centered_final: CenteredSystem,
-    W: NDArray,
-    augmented_rank: RankDecomposition,
-    feature_edf: NDArray,
-    *,
-    dm: DesignMatrix,
-    groups: list[GroupSlice],
-    p: int,
-    step_data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None,
-    _return_working_system: bool,
-    certify_centered_factor: Callable[..., _CenteredFactorCertification],
-) -> RankInfo:
-    """The data-subspace metadata only retained-fit inference reads.
-
-    A pure function of this fit's final centred system and
-    weights, so it is the same whether it runs here or, for a
-    caller that does not yet know whether this fit is the one it
-    publishes (``_defer_rank_info``), after the solve returns.
-
-    Owner and lifetime: the caller's model, from the solve until
-    ``fit_ops._install_deferred_rank_info`` runs it or the next
-    REML attempt drops it. The centred system, weights, augmented
-    decomposition and EDF are bound by ``partial`` with the design
-    (``dm``, read by the data-rank factor route), which is read when it
-    runs, so the invariant is that nothing mutates the design's group
-    matrices in place in between (``update_reml_r_inv`` writes the
-    specs; ``release_leaf_memo`` drops a memo only). A step's own data
-    rank (``step_data_rank``, the QR step's on its dense design) is never
-    deferred (``_final_geometry``), so no step is kept.  It is never a
-    method of the fit object, which it would keep alive (#492).
-    """
-    M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
-        centered_final.mean_x, centered_final.mean_x
-    )
-    coefficient_rank = decompose_gram_if_authoritative(M_beta)
-    if coefficient_rank is None:
-        certification = certify_centered_factor(centered_final, W)
-        raw_factor = np.vstack(
-            (
-                certification.factor,
-                np.sqrt(centered_final.sum_w) * centered_final.mean_x,
-            )
-        )
-        coefficient_rank = decompose_factor(raw_factor)
-    if step_data_rank is not None:
-        data_rank = step_data_rank(centered_final, W)
-    else:
-        # The export rows are Fisher (``prefer_observed=False``), whose
-        # weights are nonnegative: the data Gram is PSD by construction,
-        # so a negative eigenvalue at its null is formation rounding and
-        # sends the rank to the factor below instead of raising.
-        final_centre, final_centre_lo = centered_final.centre_pair()
-
-        def data_factor_rank() -> RankDecomposition:
-            if not np.any(centered_final.penalty):
-                return certify_centered_factor(centered_final, W).decomposition
-            return decompose_factor(
-                grouped_weighted_factor(
-                    dm,
-                    W,
-                    center=final_centre,
-                    center_lo=final_centre_lo,
-                )
-            )
-
-        # Unpenalized, the data Gram is the Hessian, whose factor
-        # certificate the fit already holds for its standard
-        # errors (``reml_slope_rank``); reading it costs nothing.
-        data_rank = decide_data_rank(
-            centered_final.data_gram,
-            data_factor_rank,
-            project=lambda basis: grouped_projected_factor(
-                dm, W, basis, center=final_centre, center_lo=final_centre_lo
-            ),
-            structural=lambda: grouped_structural_nulls(
-                dm, W, center=final_centre, center_lo=final_centre_lo
-            ),
-            rows=dm.n,
-            psd_by_construction=not _return_working_system,
-            certify=not np.any(centered_final.penalty),
-        )
-    group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
-    selected_columns = np.arange(p, dtype=int)
-    selected_columns.setflags(write=False)
-    feature_edf.setflags(write=False)
-    return RankInfo(
-        policy_version=SHARED_RANK_POLICY.version,
-        coordinate_space="solver",
-        selected_columns=selected_columns,
-        selected_group_names=tuple(g.name for g in groups),
-        sum_w=centered_final.sum_w,
-        mean_x=centered_final.mean_x,
-        intercept_edf=1.0,
-        data=data_rank,
-        augmented=augmented_rank,
-        coefficient=coefficient_rank,
-        feature_edf=feature_edf,
-        group_edf=group_edf,
-        objective_loss=None,
-        data_gram=centered_final.data_gram,
-        data_gram_weights=weights_fingerprint(W),
-    )
-
-
 def _fit_irls_direct_once(**kwargs):
     """Run one ``_IRLSDirectFit``: the module-level name callers and tests wrap."""
     return _IRLSDirectFit(**kwargs).run()
@@ -730,7 +578,7 @@ class _IRLSDirectFitFields:
         " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
         " fixed_owners _initial_data_pending"
         # _setup_loop
-        " converged XtWX_beta _last_working_centered _last_working_offset_mean _score_centre"
+        " converged _last_working_centered _last_working_offset_mean _score_centre"
         " stop_rule trial_search"
         " eta_unclipped eta mu max_halving _consecutive_svd"
         " termination_reason deviance_relative_change mode_bar committed"
@@ -749,11 +597,6 @@ class _IRLSDirectFitFields:
         " centred_intercept_lo"
         # _terminal_rows
         " export_rows"
-        # _final_system
-        " centered_final XtWX XtW1 sum_W"
-        # _final_geometry, or the step's own finaliser
-        " structured_factor reml_geometry_summary XtWX_S_inv_beta log_det_H reml_hessian_rank"
-        " retained_reml_decomposition p_eff rank_info"
     ).split()
 
 
@@ -983,12 +826,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._finish(it)
         self._terminal_rows()
         recorder.profile_fit(self, it)
-        if step.finalise is None:
-            self._final_system()
-            self._final_geometry()
-        else:
-            step.finalise(self)
-        return self._publish(it)
+        # the step's finaliser: the retained model's geometry
+        return self._publish(it, step.finalise(self))
 
     def _setup_design(self) -> None:
         X, family, link, groups, weights = self.X, self.family, self.link, self.groups, self.weights
@@ -1888,157 +1727,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             self.export_rows = export_rows
         self.W, self.z = W, z
 
-    def _final_system(self) -> None:
-        _return_working_system, W, cache_out = self._return_working_system, self.W, self.cache_out
-        dm = self.dm
-        # Preserve the raw coefficient-space payload used by REML separately from
-        # the centered inference system.
-        if _return_working_system:
-            if self._last_working_centered is None:
-                raise RuntimeError("working centered system was not computed")
-            centered_final = self._last_working_centered
-            offset_mean_final = self._last_working_offset_mean
-        else:
-            z_off = self.z - self.offset
-            centered_final = self.get_centered_system(W, z_off)
-            offset_mean_final = (
-                None
-                if self._state_center is None or cache_out is None
-                else _system_offset_mean(dm, W, centered_final, self._state_center)
-            )
-        XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
-        sum_W = centered_final.sum_w
-
-        # Cache final-iteration raw and stable centered quantities for the cached-W
-        # fREML optimizer. These allow re-solving the profiled-intercept system with
-        # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
-        if cache_out is not None:
-            cache_out["XtWX"] = XtWX
-            cache_out["centered_XtWX"] = centered_final.data_gram
-            # the pair the Gram was centred about (``(mean_x, None)`` without a dense column)
-            cache_out["centre_pair"] = centered_final.centre_pair()
-            # mean_x less the state's centre, formed on centred rows: a cached
-            # trial's centred intercept (``reml.discrete``) reads it
-            cache_out["centre_offset_mean"] = offset_mean_final
-            # the matrix the slope decomposition was taken of (the identified
-            # part of the Laplace approximation restricts it, ``reml.identified``)
-            cache_out["centered_hessian"] = centered_final.hessian
-            # the rows its Gram summed: its formation bound's length
-            # (``reml.discrete._profiled_formation_error``)
-            cache_out["n_rows"] = int(dm.n)
-            cache_out["XtWz"] = XtWz
-            cache_out["XtW1"] = XtW1
-            cache_out["sum_W"] = sum_W
-            cache_out["sum_Wz"] = sum_Wz
-            cache_out["centered_rhs"] = centered_final.rhs
-            cache_out["mean_x"] = centered_final.mean_x
-            cache_out["mean_z"] = centered_final.mean_z
-        self.centered_final, self.XtWX, self.XtW1, self.sum_W = centered_final, XtWX, XtW1, sum_W
-
-    def _final_geometry(self) -> None:
-        centered_final, W, dm, step = self.centered_final, self.W, self.dm, self.step
-        _defer_rank_info = self._defer_rank_info
-        # REML works in the full (intercept, slopes) coefficient space.  Profiling
-        # the unpenalized intercept yields the centered Schur complement H_c.  Its
-        # inverse is the slope block of H_aug^{-1}, while the unit-determinant
-        # centering transform gives log|H_aug| = log(sum(W)) + log|H_c| at full
-        # rank. With aliases, the same expression is the retained centered-space
-        # determinant measure, not the raw augmented pseudo-determinant.
-        _t0 = time.perf_counter()
-        reml_geometry_summary: REMLGeometrySummary | None = None
-        XtWX_beta = self.XtWX
-        reml_slope_rank: RankDecomposition | None
-        if self._compute_reml_geometry:
-            reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
-            if reml_slope_rank is None:
-                certification = self.certify_centered_factor(
-                    centered_final,
-                    W,
-                )
-                reml_slope_rank = certification.decomposition
-            XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
-            log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
-            reml_hessian_rank = 1 + reml_slope_rank.rank
-            # O(p) summary of the centered system for the REML gradient and
-            # objective, so the loop can run without per-fit rank metadata.
-            # column_scale matches decompose_gram's definition bit-for-bit.
-            reml_geometry_summary = REMLGeometrySummary(
-                mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
-                sum_w=float(centered_final.sum_w),
-                column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
-                mean_hi=centered_final.mean_hi,
-                mean_lo=centered_final.mean_lo,
-            )
-        else:
-            reml_slope_rank = None
-            XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
-            log_det_H = None
-            reml_hessian_rank = None
-        retained_reml_decomposition = reml_slope_rank if self._retain_reml_decomposition else None
-
-        if self._compute_fit_statistics:
-            if reml_slope_rank is None:  # pragma: no cover - validated above
-                raise RuntimeError("fit statistics require generic REML geometry")
-            augmented_rank = reml_slope_rank
-            final_system = centered_final
-            feature_edf = _feature_edf(
-                centered_final,
-                augmented_rank,
-                lambda exponent: grouped_augmented_factor(
-                    dm,
-                    np.ldexp(W, -exponent),
-                    np.ldexp(final_system.penalty, -exponent),
-                    center=final_system.mean_x,
-                ),
-            )
-            feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
-            p_eff = 1.0 + float(np.sum(feature_edf))
-
-            step_data_rank = step.data_rank
-            retained_rank_info = partial(
-                _retained_rank_info,
-                centered_final,
-                W,
-                augmented_rank,
-                feature_edf,
-                dm=dm,
-                groups=self.groups,
-                p=self.p,
-                step_data_rank=step_data_rank,
-                _return_working_system=self._return_working_system,
-                certify_centered_factor=self.certify_centered_factor,
-            )
-
-            if self.compute_rank_info or (
-                _defer_rank_info is not None and step_data_rank is not None
-            ):
-                # A deferred step's own data rank would keep the step, and the
-                # QR step's dense (n, p) design, alive until install; it is
-                # computed here.
-                rank_info = retained_rank_info()
-            else:
-                rank_info = None
-                if _defer_rank_info is not None:
-                    _defer_rank_info.append(retained_rank_info)
-        else:
-            p_eff = 0.0
-            rank_info = None
-        self.recorder.finalize_time(_t0)
-        self.structured_factor = None
-        self.reml_geometry_summary, self.XtWX_beta = reml_geometry_summary, XtWX_beta
-        self.XtWX_S_inv_beta, self.log_det_H = XtWX_S_inv_beta, log_det_H
-        self.reml_hessian_rank = reml_hessian_rank
-        self.retained_reml_decomposition, self.p_eff = retained_reml_decomposition, p_eff
-        self.rank_info = rank_info
-
     def _publish(
-        self, it: int
+        self, it: int, final: _IRLSDirectFinalGeometry
     ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
         _compute_fit_statistics, family, y = self._compute_fit_statistics, self.family, self.y
-        weights, p_eff, retained = self.weights, self.p_eff, self.retained
-        XtWX_S_inv_beta, mean_space = self.XtWX_S_inv_beta, self.mean_space
+        weights, p_eff, retained = self.weights, final.p_eff, self.retained
+        XtWX_S_inv_beta, mean_space = final.XtWX_S_inv_beta, self.mean_space
         _resolved_direct_backend = self.step.backend
-        self.recorder.disclose_backend(self, _resolved_direct_backend)
+        self.recorder.disclose_backend(self, _resolved_direct_backend, final.structured_factor)
 
         # Pearson-based phi for estimated-scale families.  The numerator is the
         # same under either weight contract; only the denominator's likelihood
@@ -2071,11 +1767,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             phi=phi,
             effective_df=p_eff,
             iteration_log=self.recorder.iteration_log if self.record_diagnostics else None,
-            log_det_H=self.log_det_H,
-            reml_hessian_rank=self.reml_hessian_rank,
-            reml_geometry=self.reml_geometry_summary,
-            reml_slope_decomposition=self.retained_reml_decomposition,
-            rank_info=self.rank_info,
+            log_det_H=final.log_det_H,
+            reml_hessian_rank=final.reml_hessian_rank,
+            reml_geometry=final.reml_geometry_summary,
+            reml_slope_decomposition=final.retained_reml_decomposition,
+            rank_info=final.rank_info,
             state_id=retained.state_id,
             evaluation_id=retained.evaluation_id,
             state_space=retained.state_space,
@@ -2098,12 +1794,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         # the step's part of the publication: the SCOP latent states and inference
         postfit = self.step.postfit
-        scop_converged = None if postfit is None else postfit(self, result)
+        scop_converged = None if postfit is None else postfit(self, result, final)
 
         if self.return_xtwx:
             if self.return_scop_state and scop_converged is not None:
-                return result, XtWX_S_inv_beta, self.XtWX_beta, scop_converged
-            return result, XtWX_S_inv_beta, self.XtWX_beta
+                return result, XtWX_S_inv_beta, final.XtWX_beta, scop_converged
+            return result, XtWX_S_inv_beta, final.XtWX_beta
 
         if self.return_scop_state and scop_converged is not None:
             return result, XtWX_S_inv_beta, scop_converged

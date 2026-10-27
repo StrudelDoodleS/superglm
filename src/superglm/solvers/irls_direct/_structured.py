@@ -15,6 +15,7 @@ from superglm._blas_threads import keep_narrow_cap
 from superglm.group_matrix import DesignMatrix
 from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
 from superglm.solvers.hessian_factor import HessianFactor
+from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
 from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.mode_score import centre_offset_mean, centred_data_score
 from superglm.solvers.structured import (
@@ -473,7 +474,7 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         fit.beta, fit.intercept = beta, intercept
         fit.proposal_centred_intercept = proposal_centred_intercept
 
-    def finalise(self, fit: _IRLSDirectFit) -> None:
+    def finalise(self, fit: _IRLSDirectFit) -> _IRLSDirectFinalGeometry:
         """The retained model's block system and ``cache_out``, then its profiled factor.
 
         The structured path retains the moments in block form and never
@@ -596,11 +597,20 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         else:
             p_eff = 0.0
         fit.recorder.finalize_time(_t0)
-        fit.structured_factor, fit.XtWX_beta = structured_factor, XtWX_beta
-        fit.XtWX_S_inv_beta, fit.log_det_H = XtWX_S_inv_beta, log_det_H
-        fit.reml_hessian_rank, fit.p_eff = reml_hessian_rank, p_eff
         # Structured Schur factors have their own retained-factor protocol, and
         # retained-fit inference consumes the factor directly: the dense
         # decomposition seam does not apply, and a dense RankInfo would defeat
         # the backend's O(K q + q²) memory bound.
-        fit.reml_geometry_summary = fit.retained_reml_decomposition = fit.rank_info = None
+        return _IRLSDirectFinalGeometry(
+            XtWX_beta=XtWX_beta,
+            XtWX_S_inv_beta=XtWX_S_inv_beta,
+            log_det_H=log_det_H,
+            reml_hessian_rank=reml_hessian_rank,
+            reml_geometry_summary=None,
+            retained_reml_decomposition=None,
+            p_eff=p_eff,
+            rank_info=None,
+            structured_factor=structured_factor,
+            centered_final=None,
+            XtW1=None,
+        )
