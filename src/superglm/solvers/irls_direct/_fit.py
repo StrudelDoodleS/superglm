@@ -1534,8 +1534,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     def _working(self, it: int) -> None:
         committed, family, link = self.committed, self.family, self.link
         recorder, mean_space = self.recorder, self.mean_space
-        self.beta = committed.beta.copy()
-        self.intercept = committed.intercept
         self.rank_truncated: bool | None = None
         self.used_rank_certification = False
         self.proposal_centred_intercept: float | None = None
