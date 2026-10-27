@@ -164,7 +164,7 @@ def _retained_rank_info(
     matrices in place in between (``update_reml_r_inv`` writes the
     specs; ``release_leaf_memo`` drops a memo only). A step's own data
     rank (``step_data_rank``, the QR step's on its dense design) is never
-    deferred (``_final_geometry``), so no step is kept.  It is never a
+    deferred (``_finalise_centred``), so no step is kept.  It is never a
     method of the fit object, which it would keep alive (#492).
     """
     M_beta = centered_final.hessian + centered_final.sum_w * np.outer(

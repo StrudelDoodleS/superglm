@@ -315,8 +315,8 @@ class _IRLSDirectMeanSpaceOverlay:
         """L17: a stop the clip can fake is certified on the model's own score, after the stop rule.
 
         The stop rule runs it (``_IRLSDirectConvergence.judge``) after its
-        criterion and the step-rejected veto, and before the feasibility
-        contract's veto, which may still veto the stop; its refused stops
+        criterion and the step-rejected veto, and before the inner QP's KKT
+        veto, which may still veto the stop; its refused stops
         stagnate over the rule's window.  It may refuse a stop, stop a fit
         under Newton steps, end one whose refused score stagnates, and engage
         the Newton steps (``engaged``).

@@ -407,9 +407,11 @@ def _authoritative_gram_rank(
     The last Gram decomposition this fit took, with the matrix it was taken
     of.  ``decompose_gram_if_authoritative`` under the default policy is a
     pure function of the matrix's values, and a read-only array that owns its
-    data (every ``CenteredSystem`` Hessian, ``centered_system._freeze``)
-    cannot change, so the same object has the same decomposition and the
-    same authority verdict.  The dense step's iteration and the centred
+    data (every ``CenteredSystem`` Hessian, ``centered_system._freeze``) is
+    never reopened: nothing in superglm calls ``setflags(write=True)`` on a
+    Hessian it holds, though NumPy would allow it.  That is the invalidation
+    rule this memo rests on, so the same object has the same decomposition
+    and the same authority verdict.  The dense step's iteration and the centred
     finaliser's REML slope read it: a finaliser that takes the system its
     last step solved (``_return_working_system``), or a Hessian object the
     fit kept across iterations, reads that step's decomposition.  Owner and
@@ -671,7 +673,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     max_iter : int
         Maximum IRLS iterations (default 100).
     tol : float
-        Deviance convergence tolerance (default 1e-6).
+        Deviance convergence tolerance (default 1e-8).
     return_xtwx : bool
         If True, also return the final weighted Gram matrix X'WX. Used by the
         REML outer loop to avoid rebuilding X'WX in cheap iterations when W is

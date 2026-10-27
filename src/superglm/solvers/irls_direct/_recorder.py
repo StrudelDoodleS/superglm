@@ -74,6 +74,10 @@ class _IRLSDirectRecorder:
         # Phase timing accumulators.  ``t_eta`` is the time forming the eta of
         # every state the fit evaluates (from its coefficients, or a line-search
         # trial's from its endpoints'), its clip and its mean (``eta_formed``).
+        # The timers nest, so they are not summed: a proposal or trial the line
+        # search evaluates is timed inside its evaluation window, so its eta time
+        # is part of ``t_deviance`` and ``t_deviance_eval`` too, while the SCOP
+        # proposal's predictor is formed outside that window.
         self.t_working = 0.0
         self.t_gram = 0.0
         self.t_solve = 0.0
