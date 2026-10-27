@@ -700,14 +700,18 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         (``classify_binned_reml_curvature``), so its working model is the
         criterion it publishes.
     _use_observed_newton : bool
-        Internal curvature switch. When enabled, an ordinary Tweedie/log fit
-        takes exact observed-Newton steps on every iteration, and a Gamma/log
-        fit starts on Fisher scoring, switching to Newton only when its
-        resolved score is measured to stall (``_IRLSDirectCurvaturePolicy``) or
-        when ``_newton_latch`` is set; no rejected step switches the curvature
-        (one-engine design §3.11). Unsupported, constrained, SCOP, and
-        cached-working-system routes retain Fisher scoring. Public callers
-        should leave this True.
+        Internal curvature switch. When enabled, a fit whose observed
+        information is supported and whose Fisher weights vary (Tweedie/log)
+        takes exact observed-Newton steps on every iteration, a
+        shape-constrained (SCOP) fit's joint Newton step included; a Gamma/log
+        fit, whose Fisher weights are constant, starts on Fisher scoring and,
+        without SCOP groups, switches to Newton only when its resolved score
+        is measured to stall (``_IRLSDirectCurvaturePolicy``) or when
+        ``_newton_latch`` is set; no rejected step switches the curvature
+        (one-engine design §3.11). Unsupported pairs and constrained routes
+        retain Fisher scoring, and the fREML performance iteration
+        (``_return_working_system``) takes Newton rows only when
+        ``_working_newton`` asks. Public callers should leave this True.
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
