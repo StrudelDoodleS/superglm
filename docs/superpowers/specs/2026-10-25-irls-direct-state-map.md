@@ -600,7 +600,7 @@ The package `superglm/solvers/irls_direct/`:
 | Module | Holds |
 |---|---|
 | `__init__` | The solver's docstring; re-exports the 17 names other modules and tests import |
-| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the centred system's factor certificate (`_certify_centered_factor`), the module helpers the fit reads, and (S3d) `_IRLSDirectCurvaturePolicy` |
+| `_fit` | `fit_irls_direct`, `_IRLSDirectFit` and its fields, the centred system's factor certificate (`_certify_centered_factor`) and the last Gram decomposition (`_authoritative_gram_rank`), the module helpers the fit reads, and (S3d) `_IRLSDirectCurvaturePolicy` |
 | `_finalise` | (S5) the centred finaliser `_finalise_centred` (with `_final_centred_system`), its `_feature_edf` and `_retained_rank_info`, and `_IRLSDirectFinalGeometry`, what every finaliser returns |
 | `_dense` | (S3d) `_IRLSDirectDenseStep` |
 | `_qp` | (S3d) `_IRLSDirectQPStep` and `_solve_constrained_qp_with_cold_retry`; (S4) the feasibility contract's tolerance `_QP_FEASIBILITY_TOL`, beside the step's `feasible` |
@@ -1237,6 +1237,16 @@ test files that patch them (`test_tsqr_certificate`, `test_irls_direct`,
 `test_factor_smooth_structured_parity`, `test_gamma_fisher_data_reuse`,
 `test_robust_solve`, `test_data_rank_grey_subspace`, `test_discarded_fit_rank_info`)
 patch them there; `_fit` no longer imports them.
+
+Since the port of the finalise reuse (after S6), the dense step's iteration and the centred
+finaliser's REML slope take the Gram decomposition through the fit's
+`authoritative_gram_rank`, a `partial` of `_fit._authoritative_gram_rank` over a one-entry
+memo, bound in `_setup_systems` beside `certify_centered_factor` and, like it, never a bound
+method.  Their `decompose_gram_if_authoritative` is therefore `_fit`'s: `_dense` no longer
+imports it, and `test_robust_solve`, `test_gamma_fisher_data_reuse` and
+`test_factor_smooth_structured_parity` patch it at `_fit` where they patched `_dense`.  The
+finaliser's own calls (the coefficient rank and the EDF's rescaled Hessian) stay
+`_finalise`'s.
 
 What stays at `_fit`:
 - `build_centered_system` (17 sites and `test_lookup_table_gram`'s string path), because

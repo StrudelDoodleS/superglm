@@ -11,7 +11,7 @@ import numpy as np
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
-from superglm.solvers.rank import RankDecomposition, decompose_gram_if_authoritative
+from superglm.solvers.rank import RankDecomposition
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -56,7 +56,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0
         _t0 = time.perf_counter()
-        iteration_rank = decompose_gram_if_authoritative(centered.hessian)
+        iteration_rank = fit.authoritative_gram_rank(centered.hessian)
         iteration_factor_rhs = None
         if iteration_rank is None:
             certification = fit.certify_centered_factor(

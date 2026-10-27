@@ -55,6 +55,33 @@ class _LevelTwoRecorder:
         self.rows.append(payload)
 
 
+def _count_gram_decompositions(monkeypatch) -> list:
+    """Record every Gram decomposition the direct solver takes, in whichever of its modules.
+
+    ``decompose_gram_if_authoritative`` is patched in each module of the
+    package that binds it, so a call site that moves between modules is
+    still counted.
+    """
+    import importlib
+    import pkgutil
+
+    import superglm.solvers.irls_direct as package
+    from superglm.solvers import rank
+
+    original = rank.decompose_gram_if_authoritative
+    calls: list = []
+
+    def counted(matrix, *args, **kwargs):
+        calls.append(matrix)
+        return original(matrix, *args, **kwargs)
+
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        if getattr(module, "decompose_gram_if_authoritative", None) is original:
+            monkeypatch.setattr(module, "decompose_gram_if_authoritative", counted)
+    return calls
+
+
 def _force_constant_working_rows(monkeypatch, response, weights=None):
     """Every PIRLS solve sees the same working rows, whatever the state.
 
@@ -343,6 +370,45 @@ class TestDirectSolverBasic:
         assert np.all(np.isfinite(inverse))
         assert np.all(np.isfinite(gram))
 
+    def test_reml_working_system_decomposes_its_hessian_once(self, monkeypatch):
+        """The finaliser reads the decomposition the solve took of the same frozen Hessian."""
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.rank import decompose_gram
+
+        rng = np.random.default_rng(3)
+        raw = rng.normal(size=(200, 4))
+        y = rng.poisson(np.exp(0.2 * raw[:, 0])).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(raw)], n=len(y), p=raw.shape[1])
+        groups = [GroupSlice(name="x", start=0, end=raw.shape[1])]
+        decomposed = _count_gram_decompositions(monkeypatch)
+        cache: dict = {}
+        result, inverse, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Poisson(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.25,
+            max_iter=1,
+            return_xtwx=True,
+            compute_rank_info=False,
+            _return_working_system=True,
+            _compute_fit_statistics=False,
+            cache_out=cache,
+            weight_semantics="frequency",
+        )
+
+        hessian = cache["centered_hessian"]
+        assert len(decomposed) == 1 and decomposed[0] is hessian
+        fresh = decompose_gram(hessian)
+        scale = np.linalg.norm(fresh.pseudo_inverse(), ord=1)
+        tolerance = 64 * raw.shape[1] * np.finfo(float).eps * scale * np.linalg.cond(hessian)
+        np.testing.assert_allclose(inverse, fresh.pseudo_inverse(), rtol=0.0, atol=tolerance)
+        assert result.reml_hessian_rank == 1 + fresh.rank
+
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
         import superglm.solvers.irls_direct._finalise as irls_finalise
@@ -382,11 +448,12 @@ class TestDirectSolverBasic:
 
             return counted
 
-        # The data rank's entry point (``rank.decide_data_rank``) counts too.
-        for name in ("decompose_gram_if_authoritative", "decide_data_rank"):
-            monkeypatch.setattr(irls_finalise, name, _counting(name))
+        # The data rank's entry point (``rank.decide_data_rank``) counts too,
+        # and so does every Gram decomposition, in whichever module takes it.
+        gram_calls = _count_gram_decompositions(monkeypatch)
+        monkeypatch.setattr(irls_finalise, "decide_data_rank", _counting("decide_data_rank"))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
-        retained_geometry_calls = decomposition_calls
+        retained_geometry_calls = decomposition_calls + len(gram_calls)
         assert retained.rank_info is not None
 
         with pytest.raises(
@@ -398,6 +465,7 @@ class TestDirectSolverBasic:
             )
 
         decomposition_calls = 0
+        gram_calls.clear()
         candidate, omitted_inverse, candidate_gram = irls_direct.fit_irls_direct(
             **common,
             compute_rank_info=False,
@@ -406,7 +474,10 @@ class TestDirectSolverBasic:
             weight_semantics="frequency",
         )
 
-        assert retained_geometry_calls - decomposition_calls == 3
+        # The retained fit's REML slope decomposition is its last solve's (a
+        # Gaussian identity Hessian is one object every iteration), so the
+        # candidate skips the coefficient and data-rank decompositions.
+        assert retained_geometry_calls - (decomposition_calls + len(gram_calls)) == 2
         assert omitted_inverse.shape == (0, 0)
         assert candidate.log_det_H is None
         assert candidate.reml_hessian_rank is None

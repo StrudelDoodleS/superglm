@@ -96,6 +96,7 @@ from superglm.solvers.rank import (
     RankDecomposition,
     RankInfo,
     decompose_factor,
+    decompose_gram_if_authoritative,
     decompose_symmetric,
 )
 from superglm.solvers.structured import resolve_structured_backend
@@ -398,6 +399,33 @@ def _certify_centered_factor(
     return cached
 
 
+def _authoritative_gram_rank(
+    memo: list[tuple[NDArray, RankDecomposition | None] | None], matrix: NDArray
+) -> RankDecomposition | None:
+    """``decompose_gram_if_authoritative(matrix)``, taken once per immutable matrix.
+
+    The last Gram decomposition this fit took, with the matrix it was taken
+    of.  ``decompose_gram_if_authoritative`` under the default policy is a
+    pure function of the matrix's values, and a read-only array that owns its
+    data (every ``CenteredSystem`` Hessian, ``centered_system._freeze``)
+    cannot change, so the same object has the same decomposition and the
+    same authority verdict.  The dense step's iteration and the centred
+    finaliser's REML slope read it: a finaliser that takes the system its
+    last step solved (``_return_working_system``), or a Hessian object the
+    fit kept across iterations, reads that step's decomposition.  Owner and
+    lifetime: this solve (``memo`` is the fit's one-entry list); it holds
+    one matrix, replaced by the next decomposition of another.  A matrix
+    that is writeable or a view is never held.
+    """
+    held = memo[0]
+    if held is not None and held[0] is matrix:
+        return held[1]
+    decomposition = decompose_gram_if_authoritative(matrix)
+    if not matrix.flags.writeable and matrix.flags.owndata:
+        memo[0] = (matrix, decomposition)
+    return decomposition
+
+
 def _fit_irls_direct_once(**kwargs):
     """Run one ``_IRLSDirectFit``: the module-level name callers and tests wrap."""
     return _IRLSDirectFit(**kwargs).run()
@@ -575,7 +603,8 @@ class _IRLSDirectFitFields:
         " qp _scop_run _has_scop curvature"
         # _setup_systems
         " mean_space _constant_centered_cache _constant_centered_z"
-        " certify_centered_factor _initial_data_key _tabmat_split _tabmat_centering_state"
+        " certify_centered_factor authoritative_gram_rank _initial_data_key _tabmat_split"
+        " _tabmat_centering_state"
         " fixed_owners _initial_data_pending"
         # _setup_loop
         " converged _last_working_centered _last_working_offset_mean _score_centre"
@@ -1349,6 +1378,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.certify_centered_factor = partial(
             _certify_centered_factor, dm, _fisher_data_reuse, [None]
         )
+        # the last Gram decomposition and the matrix it was taken of (``_authoritative_gram_rank``)
+        self.authoritative_gram_rank = partial(_authoritative_gram_rank, [None])
         _initial_data_pending = (
             self._initial_data_reuse is not None
             and type(family) is Poisson

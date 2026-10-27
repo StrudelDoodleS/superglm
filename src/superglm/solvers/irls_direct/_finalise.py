@@ -313,7 +313,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
     XtWX_beta = XtWX
     reml_slope_rank: RankDecomposition | None
     if fit._compute_reml_geometry:
-        reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+        reml_slope_rank = fit.authoritative_gram_rank(centered_final.hessian)
         if reml_slope_rank is None:
             certification = fit.certify_centered_factor(
                 centered_final,
