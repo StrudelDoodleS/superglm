@@ -1506,3 +1506,87 @@ def test_a_feasible_proposal_outside_the_link_domain_has_its_intercept_raised(
     reach = abs(result.intercept) + np.abs(x) * abs(result.beta[0])
     assert abs(float(np.min(eta)) - y.mean()) <= 4 * np.finfo(float).eps * float(np.max(reach))
     assert result.termination_reason == "constraint_kkt_incomplete"
+
+
+@pytest.mark.parametrize(("n", "n_knots"), [(100, 6), (200, 6), (200, 8)])
+def test_an_identity_link_poisson_fit_at_the_zero_edge_is_returned_unconverged(
+    n: int, n_knots: int
+) -> None:
+    """Two events in the last tenth: the increasing mean of most rows sits at zero.
+
+    At that edge the Fisher weights ``1 / mu`` can leave the next working QP
+    unbounded, and it raised ``H is rank-deficient``. The fit returns its
+    last accepted coefficients, finite, shape-feasible and not converged.
+    Mutation: without the catch all three raise on the Haswell and Sandy
+    Bridge kernels, and the last two on SkylakeX.
+    """
+    from superglm import PSpline
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    x = np.linspace(0.0, 1.0, n)
+    y = np.zeros(n)
+    y[[90 * n // 100, 96 * n // 100]] = 1.0
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=n_knots, constraint=Constraint.fit.increasing)},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(pd.DataFrame({"x": x}), y)
+
+    assert not model.result.converged
+    assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x}))))
+    _assert_shape_certified(model, "x")
+    for item in caught:
+        if issubclass(item.category, ConvergenceWarning):
+            assert "log link" in str(item.message)
+
+
+@pytest.mark.parametrize("link", ["identity", "log"])
+def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
+    monkeypatch: pytest.MonkeyPatch, link: str
+) -> None:
+    """A ``ValueError`` from the working QP ends an identity-link fit at its committed state.
+
+    The fit returns unconverged, with a ``ConvergenceWarning`` naming the
+    edge and the log link; under the log link, whose domain has no edge,
+    the error is raised. Mutation: catching it under every link fails the
+    log case, and dropping the warning fails the identity case.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm import PSpline
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    real_qp = irls_direct._solve_constrained_qp_with_cold_retry
+    calls: list[int] = []
+
+    def unbounded_second_solve(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("solve_constrained_qp: H is rank-deficient")
+        return real_qp(*args, **kwargs)
+
+    monkeypatch.setattr(
+        irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_second_solve
+    )
+    x = np.linspace(0.0, 1.0, 80)
+    y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link=link,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    )
+    if link == "log":
+        with pytest.raises(ValueError, match="rank-deficient"):
+            model.fit(pd.DataFrame({"x": x}), y)
+        return
+    with pytest.warns(ConvergenceWarning, match="log link"):
+        model.fit(pd.DataFrame({"x": x}), y)
+
+    assert len(calls) == 2
+    assert not model.result.converged
+    assert np.all(np.isfinite(model.result.beta))
+    _assert_shape_certified(model, "x")

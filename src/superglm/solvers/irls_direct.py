@@ -1443,8 +1443,18 @@ def _fit_irls_direct_once(
         # A warm start outside the link's domain is raised the same way, to
         # the default start's level ``g(mean)``. Step halving keeps states
         # inside only from a start inside (Marschner 2011), and a clipped row
-        # outside carries a Fisher weight no solve can use.
-        start_eta = dm.matvec(beta) + intercept + offset
+        # outside carries a Fisher weight no solve can use. A warm start that
+        # carries its centred state is read in it (design §3.8), not by
+        # cancelling X beta against the raw intercept.
+        if _centred_init is not None and np.shape(_centred_init[1]) == beta.shape:
+            warm_alpha, warm_centre = _centred_init
+            start_eta = (
+                float(warm_alpha)
+                + centred_matvec(dm, beta, np.asarray(warm_centre, dtype=np.float64))
+                + offset
+            )
+        else:
+            start_eta = dm.matvec(beta) + intercept + offset
         if link_domain_violation(link, family)(start_eta, weights):
             intercept = interior_start_intercept(
                 family,
@@ -3436,14 +3446,38 @@ def _fit_irls_direct_once(
 
                 # Solve the constrained system in its existing coordinate space.
                 _t0 = time.perf_counter()
-                qp_result = _solve_constrained_qp_with_cold_retry(
-                    centered.hessian,
-                    centered.rhs,
-                    A_all,
-                    b_all,
-                    prev_active_set,
-                    degeneracy_retry=not _degeneracy_retry_failed,
-                )
+                try:
+                    qp_result = _solve_constrained_qp_with_cold_retry(
+                        centered.hessian,
+                        centered.rhs,
+                        A_all,
+                        b_all,
+                        prev_active_set,
+                        degeneracy_retry=not _degeneracy_retry_failed,
+                    )
+                except ValueError:
+                    # Under a link whose domain is bounded at zero, rows at
+                    # that edge carry Fisher weights that can leave the
+                    # working QP unbounded. The committed state is returned
+                    # unconverged and disclosed, never raised.
+                    if _link_domain_invalid is None:
+                        raise
+                    from superglm.diagnostics.convergence import ConvergenceWarning
+
+                    held_warnings.warn(
+                        f"The coefficient fit stopped at iteration {it + 1} and returns "
+                        "its last accepted coefficients, not converged: some rows' "
+                        "linear predictor sits at zero (smallest "
+                        f"{float(np.min(committed.eta_unclipped)):.3g}), the edge of the "
+                        f"range the {type(link).__name__} allows a "
+                        f"{type(family).__name__} mean, where the next working problem "
+                        "is unbounded. This link may not suit these data; a log link "
+                        "cannot reach that edge.",
+                        ConvergenceWarning,
+                        stacklevel=2,
+                    )
+                    retained, dev, step_rejected = committed, committed.deviance, True
+                    break
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
                 proposal_qp_converged = bool(qp_result.converged)

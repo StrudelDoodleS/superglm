@@ -284,6 +284,36 @@ def test_discrete_reml_warm_starts_carry_the_centred_state(family):
     _assert_same_reml(fit(0.0), fit(1e16))
 
 
+def test_an_inverse_link_warm_start_is_checked_in_its_centred_state():
+    """The warm start's link-domain check reads eta from ``(alpha, c)``, not the raw intercept.
+
+    Rebuilt as ``intercept + X beta`` at a 1e16 offset, an interior eta read
+    as outside the inverse link's domain; the raised intercept also dropped
+    the centred warm start, and the run stopped at ``max_reml_iter`` with
+    lambda 0.0012 against 166. Mutation: the raw rebuild fails this.
+    """
+    rng = np.random.default_rng(10)
+    n = 720
+    g = np.tile(np.arange(12), n // 12)
+    z = 2.0 * rng.integers(-4, 5, n)
+    y = rng.gamma(100, 1.0 / (0.82 + 0.1 * z + 0.01 * np.sin(g)) / 100)
+
+    def fit(shift: float) -> SuperGLM:
+        model = SuperGLM(
+            family="gamma",
+            link="inverse",
+            features={"x": Numeric(), "g": RandomEffect()},
+            selection_penalty=0,
+            discrete=True,
+            direct_solve="gram",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(pd.DataFrame({"x": shift + z, "g": g}), y, max_reml_iter=20)
+
+    _assert_same_reml(fit(0.0), fit(1e16))
+
+
 def test_a_centred_warm_state_without_its_beta_is_not_a_start():
     """``_centred_init`` is ``alpha + (X - 1 c') beta_init``: without ``beta_init`` it is ignored.
 

@@ -2793,7 +2793,9 @@ class TestDegenerateVertexRetry:
         weight made NaN, and the SVD failed. Mutation: without the
         ``sqrt(TINY)`` floor (17b69145), +-1e-308 and 1e-310 raise
         ``LinAlgError``; the ordinary solve certifies all ten in 9 to 11
-        iterations.
+        iterations. A force below the smallest normal double may be flushed
+        to zero by the BLAS, so there the solve must certify or refuse, never
+        raise or certify a point the dual oracle rejects.
         """
         H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=1)
         p, m = H0.shape[0], A0.shape[0]
@@ -2803,5 +2805,6 @@ class TestDegenerateVertexRetry:
             A[m, p] = 1.0
         g, b = np.append(g0, force), np.zeros(A.shape[0])
         result = solve_constrained_qp(H, g, A, b, _degeneracy_safeguards=True)
-        assert result.converged
-        self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+        assert result.converged or abs(force) < np.finfo(float).tiny
+        if result.converged:
+            self._assert_agrees_with_dual_oracle(H, g, A, b, result)
