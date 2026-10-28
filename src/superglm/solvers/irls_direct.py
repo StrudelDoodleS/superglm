@@ -621,19 +621,21 @@ def _active_face_basis(
     """
     rows = np.asarray([] if active is None else active, dtype=np.intp)
     if rows.size:
-        # Zero slack on one scale for the whole fit, the largest column
+        # A row binds when its slack is zero to rounding on its own scale
+        # (overflow-safe) or on the whole fit's, the largest column
         # contribution |beta_j| ||x_j||_W read back in each column's units: a
         # term the constraint holds flat has coefficients at round-off, which
-        # a per-row scale reads as free slopes.
+        # its own scale reads as free slopes.
+        bar = _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)
         reach = float(np.max(np.abs(beta) * column_scale, initial=0.0))
         per_unit = np.divide(
             reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
         )
-        scale = np.maximum(np.abs(b[rows]), np.abs(A[rows]) @ per_unit)
-        slack = np.divide(
-            A[rows] @ beta - b[rows], scale, out=np.zeros(rows.size), where=scale > 0.0
-        )
-        rows = rows[slack <= _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)]
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            on_fit = (A[rows] @ beta - b[rows]) / np.maximum(
+                np.abs(b[rows]), np.abs(A[rows]) @ per_unit
+            )
+        rows = rows[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | (on_fit <= bar)]
     if not rows.size:
         return None
     held = A[rows]

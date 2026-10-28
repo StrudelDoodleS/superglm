@@ -1200,32 +1200,45 @@ def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
         alone.fit(frame[["z"]], y)
     solver = model._solver_pirls_result()
     assert solver.converged
+    reference = alone._solver_pirls_result()
+    # each trace entry is within gamma_p kappa of its value, kappa either
+    # fit's penalised Hessian condition (the two traces round differently)
+    kappa = max(
+        solver.rank_info.augmented.pre_truncation_condition,
+        reference.rank_info.augmented.pre_truncation_condition,
+    )
     p = solver.beta.size
-    assert abs(solver.effective_df - alone._solver_pirls_result().effective_df) <= gamma(p) * p
+    assert abs(solver.effective_df - reference.effective_df) <= gamma(p) * kappa * p
 
 
 @pytest.mark.parametrize(
-    ("beta", "column_scale", "held"),
+    ("beta", "column_scale", "row_scale", "held"),
     [
         # a flat term at round-off beside a fitted column: both rows bind
-        ([1e-16, 3e-16, 6e-16, 1.0], [1.0, 1.0, 1.0, 1.0], 2),
+        ([1e-16, 3e-16, 6e-16, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0, 2),
         # a free slope of 1e-3 beside a covariate in units of 1e-9 (coefficient 1e9)
-        ([0.0, 1e-3, 2e-3, 1e9], [1.0, 1.0, 1.0, 1e-9], 0),
+        ([0.0, 1e-3, 2e-3, 1e9], [1.0, 1.0, 1.0, 1e-9], 1.0, 0),
+        # a free slope in large units (contribution 1e-3) beside a fitted column
+        ([0.0, 1e-12, 2e-12, 1.0], [1e9, 1e9, 1e9, 1.0], 1.0, 0),
+        # binding rows whose actions overflow float64: 1e150 rows on 1e160 coefficients
+        ([1e160, 1e160, 1e160, 1e160], [2e-150] * 4, 1e150, 2),
     ],
 )
 def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
-    beta, column_scale, held
+    beta, column_scale, row_scale, held
 ):
-    """Zero slack is judged against ``max_j |beta_j| ||x_j||``, in each column's units.
+    """A row binds when its slack is zero on its own scale or on ``max_j |beta_j| ||x_j||``.
 
-    Mutations: each row's own scale reads the round-off term as free (first
-    case); the largest raw coefficient, whatever its column's units, reads the
-    free slope as held (second case).
+    Mutations: each row's own scale alone reads the round-off term as free
+    (first case); the largest raw coefficient, whatever its column's units,
+    reads the free slope as held (second case), as does the fit's scale left
+    in coefficient units (third case); the fit's scale alone overflows and
+    drops the binding rows (fourth case).
     """
     from superglm.solvers.irls_direct import _active_face_basis
 
     A = np.zeros((2, 4))
-    A[0, :2], A[1, 1:3] = [-1.0, 1.0], [-1.0, 1.0]
+    A[0, :2], A[1, 1:3] = [-row_scale, row_scale], [-row_scale, row_scale]
     face = _active_face_basis(A, np.zeros(2), np.asarray(beta), [0, 1], np.asarray(column_scale))
     assert (4 if face is None else face.shape[1]) == 4 - held
 
