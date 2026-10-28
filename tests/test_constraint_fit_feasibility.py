@@ -1551,7 +1551,7 @@ def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
     """A ``ValueError`` from the working QP ends an identity-link fit at its committed state.
 
     The fit returns unconverged, with a ``ConvergenceWarning`` naming the
-    edge and the log link; under the log link, whose domain has no edge,
+    edge and the log link and carrying the QP's own message; under the log link, whose domain has no edge,
     the error is raised. Mutation: catching it under every link fails the
     log case, and dropping the warning fails the identity case.
     """
@@ -1583,10 +1583,68 @@ def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
         with pytest.raises(ValueError, match="rank-deficient"):
             model.fit(pd.DataFrame({"x": x}), y)
         return
-    with pytest.warns(ConvergenceWarning, match="log link"):
+    with pytest.warns(ConvergenceWarning, match="log link.*H is rank-deficient"):
         model.fit(pd.DataFrame({"x": x}), y)
 
     assert len(calls) == 2
     assert not model.result.converged
     assert np.all(np.isfinite(model.result.beta))
     _assert_shape_certified(model, "x")
+
+
+def test_an_unbounded_working_qp_at_an_infeasible_start_restarts_at_the_zero_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ValueError`` from the QP at an infeasible start leads to phase one, not a stop.
+
+    Poisson/identity, with every working QP raising: the fit commits the
+    violated block's feasible zero, then stops there unconverged with the
+    zero-edge warning. Mutation: stopping at the infeasible start ends the
+    fit ``constraint_infeasible``, which the REML layers refuse.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.model.base import model_build_design_matrix
+
+    def unbounded_qp(*args, **kwargs):
+        raise ValueError("solve_constrained_qp: H is rank-deficient")
+
+    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_qp)
+    x = np.linspace(0.0, 1.0, 80)
+    y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    y_fit, weights, offset = model_build_design_matrix(
+        model, pd.DataFrame({"x": x}), y, np.ones_like(y), None
+    )
+    group = model._groups[0]
+    assert group.constraints is not None
+    infeasible_beta = np.zeros(model._dm.p)
+    infeasible_beta[group.sl] = -0.1 * group.constraints.A[0]
+    with pytest.warns(ConvergenceWarning, match="log link.*H is rank-deficient"):
+        result = irls_direct.fit_irls_direct(
+            model._dm,
+            y_fit,
+            weights,
+            model._distribution,
+            model._link,
+            model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            beta_init=infeasible_beta,
+            intercept_init=float(np.mean(y)),
+            max_iter=50,
+            tol=1e-8,
+            weight_semantics="frequency",
+        )[0]
+
+    assert not result.converged
+    assert result.termination_reason != "constraint_infeasible"
+    np.testing.assert_array_equal(result.beta[group.sl], 0.0)
+    assert np.isfinite(result.intercept)
+    eta = result.intercept + model._dm.matvec(result.beta)
+    assert np.all(eta > 0.0)

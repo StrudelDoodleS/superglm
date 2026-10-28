@@ -3506,68 +3506,92 @@ def _fit_irls_direct_once(
                         prev_active_set,
                         degeneracy_retry=not _degeneracy_retry_failed,
                     )
-                except ValueError:
-                    # Under a link whose domain is bounded at zero, rows at
-                    # that edge carry Fisher weights that can leave the
-                    # working QP unbounded. The committed state is returned
-                    # unconverged and disclosed, never raised.
+                except ValueError as error:
+                    # Under a link whose domain is bounded at zero, rows at that edge
+                    # carry Fisher weights that can leave the working QP unbounded. An
+                    # infeasible committed state restarts from its phase-one point, as
+                    # one whose QP proposal stays infeasible does; any other committed
+                    # state is returned unconverged and disclosed, never raised.
                     if _link_domain_invalid is None:
                         raise
-                    from superglm.diagnostics.convergence import ConvergenceWarning
+                    restart_beta = (
+                        None
+                        if _has_scop
+                        or _is_feasible(
+                            A_all, committed.beta, b_all, _QP_FEASIBILITY_TOL, abs_A=abs_A_all
+                        )
+                        else _homogeneous_feasible_start(
+                            committed.beta, A_all, b_all, _QP_FEASIBILITY_TOL
+                        )
+                    )
+                    if restart_beta is None:
+                        from superglm.diagnostics.convergence import ConvergenceWarning
 
-                    held_warnings.warn(
-                        "The coefficient fit stopped early and returns its last "
-                        "accepted coefficients, not converged: some rows' linear "
-                        "predictor sits at zero, the edge of the "
-                        f"range the {type(link).__name__} allows a "
-                        f"{type(family).__name__} mean, where the next working problem "
-                        "is unbounded. This link may not suit these data; a log link "
-                        "cannot reach that edge.",
-                        ConvergenceWarning,
-                        stacklevel=2,
-                    )
-                    retained, dev, step_rejected = committed, committed.deviance, True
-                    break
-                beta = qp_result.beta
-                intercept = centered.mean_z - float(centered.mean_x @ beta)
-                if _state_center is not None:
-                    # the intercept about the state's centre, as the
-                    # unconstrained solve forms it: shape rows act on the
-                    # coefficients only, so the centred state is the same
-                    proposal_centred_intercept = centered.mean_z - math.fsum(
-                        _system_offset_mean(dm, W, centered, _state_center) * beta
-                    )
-                    intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-                proposal_qp_converged = bool(qp_result.converged)
-                prev_active_set = qp_result.active_set
-                # An uncertified result means the degenerate-vertex retry ran
-                # and failed (or was already latched off). It costs up to a
-                # full active-set solve, so it is not repeated while the QP
-                # keeps failing. A certified result re-arms it: while latched,
-                # that can only be an ordinary solve, so the failure was
-                # transient and a later #472 vertex keeps its rescue.
-                _degeneracy_retry_failed = not qp_result.converged
-                # Non-convergence usually persists for the rest of the fit, so
-                # latch the report to the first occurrence rather than emitting
-                # one identical line per IRLS iteration. A later solve may
-                # recover; the retained state's terminal authority is checked
-                # independently below.
-                if not qp_result.converged and not _reported_qp_nonconvergence:
-                    _reported_qp_nonconvergence = True
-                    logger.info(
-                        "fit_irls_direct: constrained QP did not converge at "
-                        "iteration %d; its KKT certificate is incomplete. "
-                        "A later IRLS iteration may recover; subsequent inner "
-                        "failures in this fit are not reported here.",
-                        it + 1,
-                    )
-                # Report what the QP actually inverted.  These were hardcoded
-                # to False/0.0, so the constrained branch published "perfectly
-                # conditioned" to the consumers below while the unconstrained
-                # branch above read the real numbers off its decomposition.
-                _used_svd = qp_result.used_svd_fallback
-                _cond_est = qp_result.condition
-                _t_solve += time.perf_counter() - _t0
+                        held_warnings.warn(
+                            "The coefficient fit stopped early and returns its last "
+                            "accepted coefficients, not converged: some rows' linear "
+                            "predictor sits at zero, the edge of the "
+                            f"range the {type(link).__name__} allows a "
+                            f"{type(family).__name__} mean, where the next working problem "
+                            "is unbounded. This link may not suit these data; a log link "
+                            f"cannot reach that edge. The working problem reported: {error}",
+                            ConvergenceWarning,
+                            stacklevel=2,
+                        )
+                        retained, dev, step_rejected = committed, committed.deviance, True
+                        break
+                    # the intercept held, as the phase-one restart below holds it
+                    beta = restart_beta
+                    intercept = committed.intercept
+                    if committed.centred_intercept is not None:
+                        proposal_centred_intercept = committed.centred_intercept + math.fsum(
+                            _state_center * (restart_beta - committed.beta)
+                        )
+                    proposal_qp_converged = False
+                    prev_active_set = None
+                    # no system was inverted this iteration
+                    _used_svd, _cond_est = False, math.nan
+                else:
+                    beta = qp_result.beta
+                    intercept = centered.mean_z - float(centered.mean_x @ beta)
+                    if _state_center is not None:
+                        # the intercept about the state's centre, as the
+                        # unconstrained solve forms it: shape rows act on the
+                        # coefficients only, so the centred state is the same
+                        proposal_centred_intercept = centered.mean_z - math.fsum(
+                            _system_offset_mean(dm, W, centered, _state_center) * beta
+                        )
+                        intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
+                    proposal_qp_converged = bool(qp_result.converged)
+                    prev_active_set = qp_result.active_set
+                    # An uncertified result means the degenerate-vertex retry ran
+                    # and failed (or was already latched off). It costs up to a
+                    # full active-set solve, so it is not repeated while the QP
+                    # keeps failing. A certified result re-arms it: while latched,
+                    # that can only be an ordinary solve, so the failure was
+                    # transient and a later #472 vertex keeps its rescue.
+                    _degeneracy_retry_failed = not qp_result.converged
+                    # Non-convergence usually persists for the rest of the fit, so
+                    # latch the report to the first occurrence rather than emitting
+                    # one identical line per IRLS iteration. A later solve may
+                    # recover; the retained state's terminal authority is checked
+                    # independently below.
+                    if not qp_result.converged and not _reported_qp_nonconvergence:
+                        _reported_qp_nonconvergence = True
+                        logger.info(
+                            "fit_irls_direct: constrained QP did not converge at "
+                            "iteration %d; its KKT certificate is incomplete. "
+                            "A later IRLS iteration may recover; subsequent inner "
+                            "failures in this fit are not reported here.",
+                            it + 1,
+                        )
+                    # Report what the QP actually inverted.  These were hardcoded
+                    # to False/0.0, so the constrained branch published "perfectly
+                    # conditioned" to the consumers below while the unconstrained
+                    # branch above read the real numbers off its decomposition.
+                    _used_svd = qp_result.used_svd_fallback
+                    _cond_est = qp_result.condition
+                    _t_solve += time.perf_counter() - _t0
 
             # A bounded factor pass can intentionally replace an uncertain Gram
             # rank.  Preserve that in iteration diagnostics, but do not report it
