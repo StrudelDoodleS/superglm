@@ -2053,7 +2053,7 @@ def test_rank_augmented_covariance_uses_profiled_blocks(monkeypatch) -> None:
         selected_columns=np.array([0, 1]),
         sum_w=20.0,
         mean_x=mean_x,
-        augmented=SimpleNamespace(pseudo_inverse=lambda: feature_covariance),
+        augmented_inverse=lambda: feature_covariance,
     )
     transform = np.eye(3)
     transform[0, 1:] = -mean_x
@@ -2117,7 +2117,9 @@ def test_rank_inference_edf1_spectral_branch_matches_direct_influence(
     F = decomposition.pseudo_inverse() @ data_gram
     edf = np.diag(F).copy()
     expected = 2.0 * edf - np.diag(F @ F)
-    rank_info = SimpleNamespace(augmented=decomposition)
+    rank_info = SimpleNamespace(
+        augmented=decomposition, face=None, augmented_inverse=decomposition.pseudo_inverse
+    )
 
     actual = state_ops._rank_edf1(rank_info, data_gram, edf)
 

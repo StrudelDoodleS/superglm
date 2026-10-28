@@ -186,7 +186,8 @@ def link_domain_violation(
     invalid (R's ``poisson()$validmu``),
     and ``glm.fit`` halves a step that produces one.  The floor would take a
     crossed row as ``mu = 1e-50``, whose Poisson Fisher weight ``1 / mu`` is
-    ``1e50``.
+    ``1e50``.  The inverse is evaluated on a copy of ``eta``: a state's
+    ``eta`` is read-only, and a subclass's inverse may write in place.
     """
     if isinstance(link, InverseLink | InverseSquaredLink):
 
@@ -201,7 +202,8 @@ def link_domain_violation(
     ):
 
         def mean_not_positive(eta_unclipped: NDArray, weights: NDArray) -> bool:
-            return bool(np.any((link.inverse(eta_unclipped) <= 0.0) & (weights > 0.0)))
+            mean = link.inverse(np.array(eta_unclipped, dtype=float))
+            return bool(np.any((mean <= 0.0) & (weights > 0.0)))
 
         return mean_not_positive
     return None

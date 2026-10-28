@@ -1485,6 +1485,43 @@ class TestDirectSolverBasic:
         assert np.min(fits[0]) < 1.0
         np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
 
+    def test_an_identity_subclass_may_write_its_inverse_in_place(self):
+        """The domain guard evaluates a custom inverse on its own copy of ``eta``.
+
+        A state's ``eta`` is read-only; an inverse that writes into its argument
+        computes the same means as ``IdentityLink``, so the two fits run the
+        same arithmetic and agree to a few roundings.  Mutation: the guard
+        passing the state's array raises ``ValueError: output array is
+        read-only``.
+        """
+        from superglm.distributions import Poisson
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        class InPlaceIdentity(IdentityLink):
+            def inverse(self, eta):
+                return np.multiply(eta, 1.0, out=eta)
+
+        n = 300
+        x = np.linspace(-1.0, 1.0, n)
+        y = np.random.default_rng(3).poisson(1.5 + x).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        fits = []
+        for link in (InPlaceIdentity(), IdentityLink()):
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Poisson(),
+                link=link,
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                weight_semantics="frequency",
+            )
+            assert result.converged
+            fits.append(result.intercept + x * result.beta[0])
+        np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
+
     def test_identity_link_poisson_line_search_keeps_every_mean_positive(self):
         """A Poisson/identity step that would carry a row to ``mu = eta <= 0`` is halved.
 

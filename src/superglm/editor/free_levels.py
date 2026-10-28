@@ -675,7 +675,9 @@ def _influence(model, name: str) -> _Influence | str:
         width = covariance.shape[0]
     if X.p != width:
         return _UNMEASURED
-    move = _on_binding_face(model, active, width, apply)
+    # the fit's own covariance is already its face's (``RankInfo.augmented_inverse``)
+    on_face = observed is fisher and getattr(solver.rank_info, "face", None) is not None
+    move = apply if on_face else _on_binding_face(model, active, width, apply)
     if move is None:
         return _UNMEASURED
     columns = _term_columns(active, name)

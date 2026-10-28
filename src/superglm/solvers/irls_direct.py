@@ -145,6 +145,7 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram_if_authoritative,
     decompose_symmetric,
+    face_pseudo_inverse,
     weights_fingerprint,
 )
 from superglm.solvers.scop_newton import (
@@ -603,12 +604,62 @@ def _latent_step_depth(
     return depth
 
 
+def _active_face_basis(
+    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None
+) -> NDArray | None:
+    """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
+
+    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
+    bind at ``beta`` (zero slack in the QP's own units).  On it the constrained
+    fit is, locally, the fit with those rows held as equalities, so its
+    degrees of freedom and covariance are those of that fit (Meyer and
+    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
+    binding row touches keep their unit vectors; the rest of the null space
+    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
+    row binds.
+    """
+    rows = np.asarray([] if active is None else active, dtype=np.intp)
+    if rows.size:
+        slack = _feasibility_slack(A[rows], beta, b[rows])
+        rows = rows[slack <= _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)]
+    if not rows.size:
+        return None
+    held = A[rows]
+    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
+    held = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
+    _, singular, vt = np.linalg.svd(held, full_matrices=True)
+    rank = int(np.count_nonzero(singular > max(held.shape) * _EPS_FLOAT * singular[0]))
+    free = np.setdiff1d(np.arange(A.shape[1]), touched)
+    basis = np.zeros((A.shape[1], free.size + touched.size - rank))
+    basis[free, np.arange(free.size)] = 1.0
+    basis[np.ix_(touched, np.arange(free.size, basis.shape[1]))] = vt[rank:].T
+    return basis
+
+
+def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
+    """``Z' M Z``, the matrix on the face ``Z``; ``M`` itself without a face."""
+    return matrix if face is None else face.T @ matrix @ face
+
+
+def _face_decomposition(
+    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray]
+) -> RankDecomposition:
+    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``."""
+    decomposition = decompose_gram_if_authoritative(_on_face(matrix, face))
+    return decompose_factor(factor() @ face) if decomposition is None else decomposition
+
+
 def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
     factor: Callable[[int], NDArray],
+    face: NDArray | None = None,
 ) -> NDArray:
     """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
+
+    On an active face ``Z`` (``_active_face_basis``), ``decomposition``
+    factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
+    D)``, whose trace is the face fit's.
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -628,7 +679,7 @@ def _feature_edf(
     trace near its limit, 0.
     """
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        unscaled = np.diag(decomposition.pseudo_inverse() @ centered.data_gram).copy()
+        unscaled = np.diag(face_pseudo_inverse(decomposition, face) @ centered.data_gram).copy()
     if np.all(np.isfinite(unscaled)):
         return unscaled
     hessian = centered.hessian
@@ -636,10 +687,11 @@ def _feature_edf(
     if largest == 0.0 or not math.isfinite(largest):
         return unscaled
     exponent = math.frexp(largest)[1]
-    scaled = decompose_gram_if_authoritative(np.ldexp(hessian, -exponent))
+    scaled = decompose_gram_if_authoritative(_on_face(np.ldexp(hessian, -exponent), face))
     if scaled is None:
-        scaled = decompose_factor(factor(exponent))
-    return np.diag(scaled.pseudo_inverse() @ np.ldexp(centered.data_gram, -exponent)).copy()
+        scaled = decompose_factor(factor(exponent) if face is None else factor(exponent) @ face)
+    scaled_gram = np.ldexp(centered.data_gram, -exponent)
+    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy()
 
 
 # The spacing of the subnormal numbers, 2^-1074, the smallest positive
@@ -2154,7 +2206,6 @@ def _fit_irls_direct_once(
     if (
         _state_center is None
         and not _use_structured
-        and not has_constraints
         and not _has_scop
         and hasattr(dm, "group_matrices")
     ):
@@ -3479,6 +3530,14 @@ def _fit_irls_direct_once(
                     break
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
+                if _state_center is not None:
+                    # the intercept about the state's centre, as the
+                    # unconstrained solve forms it: shape rows act on the
+                    # coefficients only, so the centred state is the same
+                    proposal_centred_intercept = centered.mean_z - math.fsum(
+                        _system_offset_mean(dm, W, centered, _state_center) * beta
+                    )
+                    intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
                 proposal_qp_converged = bool(qp_result.converged)
                 prev_active_set = qp_result.active_set
                 # An uncertified result means the degenerate-vertex retry ran
@@ -3896,6 +3955,12 @@ def _fit_irls_direct_once(
                         phase="proposal",
                         iteration=it + 1,
                         alpha=1.0,
+                        centred_intercept=(
+                            None
+                            if committed.centred_intercept is None
+                            else committed.centred_intercept
+                            + math.fsum(_state_center * (feasible_beta - committed.beta))
+                        ),
                     )
                     trial_cache[1.0] = proposal
                     proposal_qp_converged = False
@@ -4948,15 +5013,31 @@ def _fit_irls_direct_once(
                 raise RuntimeError("fit statistics require generic REML geometry")
             augmented_rank = reml_slope_rank
             final_system = centered_final
+            # A constrained fit's statistics are its active face's.
+            face = (
+                _active_face_basis(A_all, b_all, beta, prev_active_set)
+                if A_all is not None and b_all is not None
+                else None
+            )
+            face_rank = (
+                None
+                if face is None
+                else _face_decomposition(
+                    centered_final.hessian,
+                    face,
+                    lambda: certify_centered_factor(final_system, W).factor,
+                )
+            )
             feature_edf = _feature_edf(
                 centered_final,
-                augmented_rank,
+                augmented_rank if face_rank is None else face_rank,
                 lambda exponent: grouped_augmented_factor(
                     dm,
                     np.ldexp(W, -exponent),
                     np.ldexp(final_system.penalty, -exponent),
                     center=final_system.mean_x,
                 ),
+                face,
             )
             feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
             p_eff = 1.0 + float(np.sum(feature_edf))
@@ -4966,6 +5047,8 @@ def _fit_irls_direct_once(
                 W=W,
                 augmented_rank=augmented_rank,
                 feature_edf=feature_edf,
+                face=face,
+                face_rank=face_rank,
             ) -> RankInfo:
                 """The data-subspace metadata only retained-fit inference reads.
 
@@ -4987,16 +5070,18 @@ def _fit_irls_direct_once(
                 M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
                     centered_final.mean_x, centered_final.mean_x
                 )
-                coefficient_rank = decompose_gram_if_authoritative(M_beta)
-                if coefficient_rank is None:
-                    certification = certify_centered_factor(centered_final, W)
-                    raw_factor = np.vstack(
+
+                def raw_factor() -> NDArray:
+                    return np.vstack(
                         (
-                            certification.factor,
+                            certify_centered_factor(centered_final, W).factor,
                             np.sqrt(centered_final.sum_w) * centered_final.mean_x,
                         )
                     )
-                    coefficient_rank = decompose_factor(raw_factor)
+
+                coefficient_rank = decompose_gram_if_authoritative(M_beta)
+                if coefficient_rank is None:
+                    coefficient_rank = decompose_factor(raw_factor())
                 if _use_qr:
                     sqrtW = np.sqrt(W)
                     A_data_final = sqrtW[:, None] * _centred_rows(_X_full, centered_final)
@@ -5056,6 +5141,11 @@ def _fit_irls_direct_once(
                     objective_loss=None,
                     data_gram=centered_final.data_gram,
                     data_gram_weights=weights_fingerprint(W),
+                    face=face,
+                    face_augmented=face_rank,
+                    face_coefficient=(
+                        None if face is None else _face_decomposition(M_beta, face, raw_factor)
+                    ),
                 )
 
             if compute_rank_info or (_defer_rank_info is not None and _use_qr):

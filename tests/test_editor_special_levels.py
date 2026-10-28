@@ -1275,13 +1275,16 @@ def test_a_scop_curve_bounds_the_gap(family):
     )
 
 
-def test_a_binding_face_the_solve_cannot_resolve_falls_back_rather_than_flag():
+def test_a_flat_curve_beside_a_band_of_almost_no_weight_flags_nothing():
     """A flat increasing curve over a band of weight 1e-16.
 
     That band leaves the fit a direction of nearly no information that the
     binding rows cross, and R F R' a condition near 1e16: its default
     pseudo-inverse dropped binding directions, gave the flat curve a pull,
-    and flagged two bands.
+    and flagged two bands.  The fit's covariance is now its face's, formed on
+    the null space of the binding rows (``RankInfo.augmented_inverse``)
+    without solving with R F R', so the flat curve has no pull and the
+    comparison is measured.
     """
     bands = TWELVE[:8]
     k = np.repeat(np.arange(8), 30)
@@ -1298,10 +1301,7 @@ def test_a_binding_face_the_solve_cannot_resolve_falls_back_rather_than_flag():
     )
     free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
     assert free["flagged"] == []
-    assert free["notice"] == (
-        "Each interval allows for any correlation between the curve and the free estimate, "
-        "without the curve's pull toward the level: this fit cannot measure it."
-    )
+    assert free["notice"] is None
 
 
 def test_fits_on_partly_shared_rows_are_judged_on_a_bound_for_any_correlation(monkeypatch):
