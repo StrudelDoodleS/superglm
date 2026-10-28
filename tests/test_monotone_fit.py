@@ -1173,6 +1173,64 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
 
 
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))
+def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
+    """A term the constraint holds flat beside a fitted term adds no degrees of freedom.
+
+    Its coefficients sit at round-off, not at zero, so its rows bind only on a
+    scale shared by the whole fit; its face is ``{0}`` and the EDF is the
+    model's without it.  Mutation: zero slack read on each row's own scale
+    counts the held directions (9.3 against 5.6 for ``ps``).
+    """
+    from superglm._roundoff import gamma
+
+    rng = np.random.default_rng(0)
+    n = 200
+    x, z = rng.uniform(0.0, 1.0, n), rng.uniform(0.0, 1.0, n)
+    y = 1.0 - 2.0 * x + np.sin(6.0 * z) + rng.normal(0.0, 0.1, n)
+    free = type(QP_TERMS[kind]())
+    features = {"x": QP_TERMS[kind](), "z": free(n_knots=6)}
+    model = SuperGLM(family=Gaussian(), selection_penalty=0, spline_penalty=1.0, features=features)
+    alone = SuperGLM(
+        family=Gaussian(), selection_penalty=0, spline_penalty=1.0, features={"z": free(n_knots=6)}
+    )
+    frame = pd.DataFrame({"x": x, "z": z})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+        alone.fit(frame[["z"]], y)
+    solver = model._solver_pirls_result()
+    assert solver.converged
+    p = solver.beta.size
+    assert abs(solver.effective_df - alone._solver_pirls_result().effective_df) <= gamma(p) * p
+
+
+@pytest.mark.parametrize(
+    ("beta", "column_scale", "held"),
+    [
+        # a flat term at round-off beside a fitted column: both rows bind
+        ([1e-16, 3e-16, 6e-16, 1.0], [1.0, 1.0, 1.0, 1.0], 2),
+        # a free slope of 1e-3 beside a covariate in units of 1e-9 (coefficient 1e9)
+        ([0.0, 1e-3, 2e-3, 1e9], [1.0, 1.0, 1.0, 1e-9], 0),
+    ],
+)
+def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
+    beta, column_scale, held
+):
+    """Zero slack is judged against ``max_j |beta_j| ||x_j||``, in each column's units.
+
+    Mutations: each row's own scale reads the round-off term as free (first
+    case); the largest raw coefficient, whatever its column's units, reads the
+    free slope as held (second case).
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    A = np.zeros((2, 4))
+    A[0, :2], A[1, 1:3] = [-1.0, 1.0], [-1.0, 1.0]
+    face = _active_face_basis(A, np.zeros(2), np.asarray(beta), [0, 1], np.asarray(column_scale))
+    assert (4 if face is None else face.shape[1]) == 4 - held
+
+
+@pytest.mark.parametrize("kind", sorted(QP_TERMS))
 def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
     """The EDF of a fit some rows bind is the divergence of its fitted values.
 

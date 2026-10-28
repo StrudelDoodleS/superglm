@@ -605,12 +605,13 @@ def _latent_step_depth(
 
 
 def _active_face_basis(
-    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None
+    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None, column_scale: NDArray
 ) -> NDArray | None:
     """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
 
     The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
-    bind at ``beta`` (zero slack in the QP's own units).  On it the constrained
+    bind at ``beta`` (zero slack against the fit's largest column contribution,
+    ``column_scale`` the working columns' norms).  On it the constrained
     fit is, locally, the fit with those rows held as equalities, so its
     degrees of freedom and covariance are those of that fit (Meyer and
     Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
@@ -620,7 +621,18 @@ def _active_face_basis(
     """
     rows = np.asarray([] if active is None else active, dtype=np.intp)
     if rows.size:
-        slack = _feasibility_slack(A[rows], beta, b[rows])
+        # Zero slack on one scale for the whole fit, the largest column
+        # contribution |beta_j| ||x_j||_W read back in each column's units: a
+        # term the constraint holds flat has coefficients at round-off, which
+        # a per-row scale reads as free slopes.
+        reach = float(np.max(np.abs(beta) * column_scale, initial=0.0))
+        per_unit = np.divide(
+            reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
+        )
+        scale = np.maximum(np.abs(b[rows]), np.abs(A[rows]) @ per_unit)
+        slack = np.divide(
+            A[rows] @ beta - b[rows], scale, out=np.zeros(rows.size), where=scale > 0.0
+        )
         rows = rows[slack <= _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)]
     if not rows.size:
         return None
@@ -5039,7 +5051,13 @@ def _fit_irls_direct_once(
             final_system = centered_final
             # A constrained fit's statistics are its active face's.
             face = (
-                _active_face_basis(A_all, b_all, beta, prev_active_set)
+                _active_face_basis(
+                    A_all,
+                    b_all,
+                    beta,
+                    prev_active_set,
+                    np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+                )
                 if A_all is not None and b_all is not None
                 else None
             )
