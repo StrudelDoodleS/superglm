@@ -3465,10 +3465,9 @@ def _fit_irls_direct_once(
                     from superglm.diagnostics.convergence import ConvergenceWarning
 
                     held_warnings.warn(
-                        f"The coefficient fit stopped at iteration {it + 1} and returns "
-                        "its last accepted coefficients, not converged: some rows' "
-                        "linear predictor sits at zero (smallest "
-                        f"{float(np.min(committed.eta_unclipped)):.3g}), the edge of the "
+                        "The coefficient fit stopped early and returns its last "
+                        "accepted coefficients, not converged: some rows' linear "
+                        "predictor sits at zero, the edge of the "
                         f"range the {type(link).__name__} allows a "
                         f"{type(family).__name__} mean, where the next working problem "
                         "is unbounded. This link may not suit these data; a log link "
