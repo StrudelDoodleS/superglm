@@ -102,6 +102,20 @@ model.fit(df, y)
 This keeps the monotone / curvature constraint in the actual optimization
 problem rather than applying an after-the-fact repair.
 
+A QP-backed fit publishes its statistics on its *active face*: the
+coefficient directions left free by the constraint rows that bind at the fit.
+Effective degrees of freedom, the Pearson scale, AIC/BIC and the coefficient
+covariance all come from the fit on that face (Meyer and Woodroofe 2000;
+Tibshirani and Taylor, "Degrees of freedom in lasso problems", *Annals of
+Statistics* 40(2), 2012, Theorem 3).
+
+- A term the constraint holds flat counts as no free parameters.
+- Standard errors and intervals are conditional on which rows bind. Along the
+  directions those rows hold, they are zero, so a term held flat has a
+  zero-width interval.
+- Under `fit_reml()`, the published scale is still the REML estimate, which
+  does not read the face.
+
 ## SCOP-Backed Shape Fits
 
 Use `PSpline(..., constraint=Constraint.fit.*, shape_engine="scop")` when you
