@@ -1222,6 +1222,8 @@ def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
         ([0.0, 1e-12, 2e-12, 1.0], [1e9, 1e9, 1e9, 1.0], 1.0, 0),
         # binding rows whose actions overflow float64: 1e150 rows on 1e160 coefficients
         ([1e160, 1e160, 1e160, 1e160], [2e-150] * 4, 1e150, 2),
+        # free rows whose fit-scale denominator overflows while their slack does not
+        ([0.0, 1e152, 2e152, 1.0], [5e-155] * 3 + [1.0], 1e154, 0),
     ],
 )
 def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
@@ -1233,7 +1235,8 @@ def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
     (first case); the largest raw coefficient, whatever its column's units,
     reads the free slope as held (second case), as does the fit's scale left
     in coefficient units (third case); the fit's scale alone overflows and
-    drops the binding rows (fourth case).
+    drops the binding rows (fourth case); an overflowing fit-scale denominator
+    divides a free row's slack to zero and holds it (fifth case).
     """
     from superglm.solvers.irls_direct import _active_face_basis
 

@@ -632,10 +632,11 @@ def _active_face_basis(
             reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
         )
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            on_fit = (A[rows] @ beta - b[rows]) / np.maximum(
-                np.abs(b[rows]), np.abs(A[rows]) @ per_unit
-            )
-        rows = rows[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | (on_fit <= bar)]
+            fit_scale = np.maximum(np.abs(b[rows]), np.abs(A[rows]) @ per_unit)
+            on_fit = (A[rows] @ beta - b[rows]) / fit_scale
+        # Beyond float64's range (or at a zero scale) the fit's reading abstains.
+        on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
+        rows = rows[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | on_fit]
     if not rows.size:
         return None
     held = A[rows]
