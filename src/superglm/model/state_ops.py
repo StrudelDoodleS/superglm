@@ -284,7 +284,7 @@ def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
     if decomposition.rank == 0:
         return np.zeros_like(edf)
 
-    if decomposition.cholesky_factor is not None:
+    if decomposition.cholesky_factor is not None and rank_info.face is None:
         active = decomposition.active_columns
         scale = decomposition.column_scale[active]
         retained_gram = data_gram[np.ix_(active, active)] / np.outer(scale, scale)
@@ -298,14 +298,14 @@ def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
         edf1[active] -= diagonal_of_square(retained_F)
         return edf1
 
-    F = decomposition.pseudo_inverse() @ data_gram
+    F = rank_info.augmented_inverse() @ data_gram
     return 2.0 * edf - diagonal_of_square(F)
 
 
 def _rank_augmented_covariance(model, rank_info, active_groups):
     """Transform centered retained covariance to solver and public intercepts."""
     p_active = len(rank_info.selected_columns)
-    feature_covariance = rank_info.augmented.pseudo_inverse()
+    feature_covariance = rank_info.augmented_inverse()
     mean_x = rank_info.mean_x[rank_info.selected_columns]
     intercept_cross = -(feature_covariance @ mean_x)
     solver_covariance = np.empty((p_active + 1, p_active + 1), dtype=np.float64)
@@ -364,7 +364,7 @@ def coef_covariance(model):
         return augmented.scaled(solver.phi).slopes, active_groups
     if solver.rank_info is not None:
         _, active_groups = _rank_active_state(model, solver.rank_info)
-        covariance = solver.phi * solver.rank_info.augmented.pseudo_inverse()
+        covariance = solver.phi * solver.rank_info.augmented_inverse()
         return covariance, active_groups
     W = _solver_space_working_weights(model)
     _, active_groups, _, _, _, profile_inverse, _ = _legacy_active_state(model, solver, W)
@@ -402,7 +402,7 @@ def fit_active_info(model):
         return model._dm, W, inverse, augmented, active_groups
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info)
-        inverse = solver.rank_info.coefficient.pseudo_inverse()
+        inverse = solver.rank_info.coefficient_inverse()
         augmented = _rank_augmented_covariance(model, solver.rank_info, active_groups)
         return X_active, W, inverse, augmented, active_groups
 
@@ -532,7 +532,7 @@ def fit_inference_info(model):
     if solver.rank_info is not None:
         rank_info = solver.rank_info
         X_active, active_groups = _rank_active_state(model, rank_info)
-        inverse = rank_info.coefficient.pseudo_inverse()
+        inverse = rank_info.coefficient_inverse()
         augmented = _rank_augmented_covariance(model, rank_info, active_groups)
         # The fit formed this Gram to decide the data rank, at the weights it
         # ended on; only a record without it forms the Gram again.

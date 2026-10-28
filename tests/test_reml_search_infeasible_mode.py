@@ -367,7 +367,11 @@ class TestSCOPModeFailuresAreRoutable:
         eta = 0.9 * x - 0.6
         y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
         frame = pd.DataFrame({"x": x})
-        features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
+        features = {
+            "x": Spline(
+                kind="ps", n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+            )
+        }
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         result = model.estimate_p(frame, y, fit_mode="reml")

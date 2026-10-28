@@ -223,7 +223,9 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=0.01,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_low.fit(df[["x"]], df["y"])
 
@@ -231,7 +233,9 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=100.0,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_high.fit(df[["x"]], df["y"])
 
@@ -255,7 +259,9 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=0.01,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_low.fit(df[["x"]], df["y"])
 
@@ -263,7 +269,9 @@ class TestSCOPPenaltyInEDF:
             family=Gaussian(),
             selection_penalty=0,
             spline_penalty=100.0,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_high.fit(df[["x"]], df["y"])
 
@@ -328,7 +336,7 @@ class TestMonotoneUnsupportedCombinations:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit(df[["x"]], df["y"])
@@ -389,7 +397,7 @@ class TestMonotoneFitPSpline:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": PSpline(n_knots=8),
             },
         )
@@ -417,8 +425,8 @@ class TestMonotoneFitPSpline:
     @pytest.mark.parametrize("ordered", [False, True], ids=["spline", "ordered"])
     def test_kindless_constraint_beside_scop_builds_ps(self, fit_method, ordered):
         """A constrained spline with no kind was a SCOP ``ps`` term on 0.39. As a
-        ``cr`` QP term beside a ``ps`` one, 0.40.0 refused the model; it builds as
-        ``ps`` again, bit for bit as the explicit declaration. Fails on e7b0df17."""
+        ``cr`` QP term beside a ``ps`` one on SCOP, 0.40.0 refused the model; it builds as
+        ``ps`` on SCOP again, bit for bit as the explicit declaration. Fails on e7b0df17."""
         from superglm import OrderedCategorical, Spline
 
         rng = np.random.default_rng(42)
@@ -429,17 +437,18 @@ class TestMonotoneFitPSpline:
         scop = (
             {
                 "band": OrderedCategorical(
-                    order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc)
+                    order=list("ABCDE"),
+                    basis=Spline(kind="ps", k=5, constraint=inc, shape_engine="scop"),
                 )
             }
             if ordered
-            else {"x2": Spline(kind="ps", k=8, constraint=inc)}
+            else {"x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop")}
         )
         X = df[["x1", *scop]]
         fits = []
         for x1, warned in (
             (Spline(constraint=inc), True),
-            (Spline(kind="ps", constraint=inc), False),
+            (Spline(kind="ps", constraint=inc, shape_engine="scop"), False),
         ):
             model = SuperGLM(family=Gaussian(), selection_penalty=0, features={"x1": x1, **scop})
             with pytest.warns(UserWarning, match="x1.*names no kind") if warned else nullcontext():
@@ -452,9 +461,9 @@ class TestMonotoneFitPSpline:
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
     def test_kindless_ordered_categorical_beside_scop_keeps_its_levels(self, fit_method):
         """An ordered categorical whose basis names no kind, beside a SCOP term, takes the
-        ``ps`` basis and keeps its level map: string levels fit, bit for bit as the
-        explicit ``kind='ps'`` basis (and as 0.39). Fails on eedfa48e, which replaced the
-        wrapper by a bare P-spline on the band column."""
+        ``ps`` basis on SCOP and keeps its level map: string levels fit, bit for bit as the
+        explicit ``kind='ps', shape_engine='scop'`` basis (and as 0.39). Fails on eedfa48e,
+        which replaced the wrapper by a bare P-spline on the band column."""
         from superglm import OrderedCategorical, Spline
 
         rng = np.random.default_rng(42)
@@ -465,9 +474,12 @@ class TestMonotoneFitPSpline:
         fits = []
         for kind, warned in ((None, True), ("ps", False)):
             features = {
-                "x2": Spline(kind="ps", k=8, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop"),
                 "band": OrderedCategorical(
-                    order=list("ABCDE"), basis=Spline(kind=kind, k=5, constraint=inc)
+                    order=list("ABCDE"),
+                    basis=Spline(
+                        kind=kind, k=5, constraint=inc, shape_engine="scop" if kind else "qp"
+                    ),
                 ),
             }
             model = SuperGLM(family=Gaussian(), selection_penalty=0, features=features)
@@ -512,7 +524,12 @@ class TestMonotoneFitPSpline:
         model = SuperGLM(
             family=Gaussian(),
             selection_penalty=0,
-            features={"x1": x1, "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x1": x1,
+                "x2": Spline(
+                    kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
+            },
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -586,7 +603,9 @@ class TestMonotoneFitPSpline:
 
         inc = Constraint.fit.increasing
         opened, *_ = self._kindless_beside_scop(Spline(k=8, constraint=inc))
-        explicit, *_ = self._kindless_beside_scop(Spline(kind="ps", k=8, constraint=inc))
+        explicit, *_ = self._kindless_beside_scop(
+            Spline(kind="ps", k=8, constraint=inc, shape_engine="scop")
+        )
         assert opened._specs["x1"].n_knots == 4
         edited, *_ = self._kindless_beside_scop(
             respaced_spline(declared_spline(opened, "x1"), n_knots=5)
@@ -616,7 +635,10 @@ class TestMonotoneFitPSpline:
         model = SuperGLM(
             family=Gaussian(),
             selection_penalty=0,
-            features={"x2": Spline(kind="ps", k=8, constraint=inc), "band": band},
+            features={
+                "x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop"),
+                "band": band,
+            },
         )
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -643,7 +665,7 @@ class TestMonotoneFitPSpline:
             selection_penalty=0,
             features={
                 "x1": Spline(k=4, constraint=inc),
-                "x2": Spline(kind="ps", k=8, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop"),
             },
         )
         with pytest.raises(NotImplementedError, match="SCOP.*QP"):
@@ -662,7 +684,7 @@ class TestMonotoneFitPSpline:
             family=Gaussian(),
             selection_penalty=0,
             features={
-                "x1": PSpline(n_knots=5, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "x2": BSplineSmooth(n_knots=5, constraint=Constraint.fit.increasing),
             },
         )
@@ -726,6 +748,7 @@ class TestMonotoneFixedLambdaREML:
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -774,7 +797,7 @@ class TestMonotoneFixedLambdaREML:
             selection_penalty=0,
             discrete=True,
             features={
-                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(df[["x"]], y)
@@ -863,6 +886,7 @@ class TestDiscreteMonotoneREML:
                     n_knots=10,
                     constraint=Constraint.fit.increasing,
                     lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                    shape_engine="scop",
                 ),
             },
         )
@@ -930,6 +954,7 @@ class TestSummaryMonotoneEngine:
                 "x": PSpline(
                     n_knots=8,
                     constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
                 ),
             },
         )
@@ -1077,7 +1102,9 @@ class TestDiscreteSCOPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=False,
-            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_dense.fit(df[["x"]], df["y"])
         pred_dense = model_dense.predict(df_grid)
@@ -1086,9 +1113,99 @@ class TestDiscreteSCOPMonotone:
             family=Gaussian(),
             selection_penalty=0,
             discrete=True,
-            features={"x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
         )
         model_disc.fit(df[["x"]], df["y"])
         pred_disc = model_disc.predict(df_grid)
 
         np.testing.assert_allclose(pred_dense, pred_disc, atol=0.05)
+
+
+QP_TERMS = {
+    "ps": lambda: PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+    "cr": lambda: CubicRegressionSpline(n_knots=6, constraint=Constraint.fit.increasing),
+    "bs": lambda: BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing),
+}
+
+
+def _qp_fit(kind: str, x: np.ndarray, y: np.ndarray, constrained: bool = True) -> SuperGLM:
+    term = QP_TERMS[kind]() if constrained else type(QP_TERMS[kind]())(n_knots=6)
+    model = SuperGLM(
+        family=Gaussian(), selection_penalty=0, spline_penalty=1.0, features={"x": term}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return model.fit(pd.DataFrame({"x": x}), y)
+
+
+@pytest.mark.parametrize("kind", sorted(QP_TERMS))
+def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
+    """A decreasing truth under ``increasing`` binds every row: the term's face is ``{0}``.
+
+    The fit is then the intercept alone (Meyer and Woodroofe 2000: the degrees
+    of freedom of a constrained fit are its face's), so the EDF is 1, the
+    Gaussian scale is ``RSS / (n - 1)``, the AIC charges one parameter, and
+    the term's covariance is zero.  Mutation: the export's face dropped
+    (``_active_face_basis`` returning ``None``) publishes the unconstrained
+    trace, 4.7 for ``ps``, and its scale.
+    """
+    from superglm._roundoff import gamma
+    from superglm.model.state_ops import coef_covariance
+
+    n = 60
+    x = np.linspace(0.0, 1.0, n)
+    y = 1.0 - 2.0 * x
+    model = _qp_fit(kind, x, y)
+    mu = model.predict(pd.DataFrame({"x": x}))
+    solver = model._solver_pirls_result()
+    assert solver.converged
+    assert np.ptp(mu) <= gamma(n) * np.max(np.abs(y))
+    p = solver.beta.size
+    assert abs(solver.effective_df - 1.0) <= gamma(p) * p
+    rss = float(np.sum((y - mu) ** 2))
+    np.testing.assert_allclose(solver.phi, rss / (n - 1.0), rtol=gamma(n))
+    metrics = model.metrics(pd.DataFrame({"x": x}), y)
+    np.testing.assert_allclose(metrics.aic + 2.0 * metrics.log_likelihood, 2.0, rtol=gamma(n))
+    covariance, _ = coef_covariance(model)
+    assert np.max(np.abs(covariance)) <= gamma(p) * solver.phi
+
+
+@pytest.mark.parametrize("kind", sorted(QP_TERMS))
+def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
+    """The EDF of a fit some rows bind is the divergence of its fitted values.
+
+    Stein's degrees of freedom are ``E[div mu_hat(y)]`` (Tibshirani and Taylor
+    2012, Theorem 3): near ``y`` the constrained fit is the fit with its
+    binding rows held as equalities, affine in ``y``, so its divergence is
+    the trace on that face and a one-sided difference of size ``h`` is exact
+    but for rounding.  Each fitted value carries at most ``gamma_p kappa
+    max|mu|`` of it, ``kappa`` the equilibrated Hessian's condition, so the
+    sum of ``n`` quotients is within ``2 n gamma_p kappa max|mu| / h``.  The
+    face is partial: the EDF lies strictly between the intercept's 1 and the
+    unconstrained fit's.  Mutation: the export's face dropped publishes the
+    unconstrained trace.
+    """
+    from superglm._roundoff import gamma
+
+    rng = np.random.default_rng(0)
+    n = 30
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    y = np.where(x < 0.5, 1.0 - 0.6 * x, 0.7 + 1.5 * (x - 0.5)) + rng.normal(0.0, 0.05, n)
+    frame = pd.DataFrame({"x": x})
+    model = _qp_fit(kind, x, y)
+    solver = model._solver_pirls_result()
+    assert solver.converged
+    free = _qp_fit(kind, x, y, constrained=False)._solver_pirls_result().effective_df
+    assert 1.0 < solver.effective_df < free - 0.5
+    mu = model.predict(frame)
+    h = 1e-6
+    divergence = 0.0
+    for i in range(n):
+        bumped = y.copy()
+        bumped[i] += h
+        divergence += (_qp_fit(kind, x, bumped).predict(frame)[i] - mu[i]) / h
+    kappa = solver.rank_info.augmented.pre_truncation_condition
+    bound = 2 * n * gamma(solver.beta.size) * kappa * np.max(np.abs(mu)) / h
+    assert abs(solver.effective_df - divergence) <= bound

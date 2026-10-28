@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features._spline_config import clear_scop_state
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
@@ -32,26 +33,32 @@ def _uses_fit_time_shape_constraints(spec: Any) -> bool:
     return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
 
 
-def _uses_fit_time_scop_constraints(spec: Any) -> bool:
-    """Whether the spec should enter the SCOP fit-time shape path."""
-    return _uses_fit_time_shape_constraints(spec) and hasattr(
-        spec, "_build_scop_reparameterization"
-    )
+def shape_engine(spec: Any) -> Literal["qp", "scop"] | None:
+    """The engine that fits ``spec``'s fit-time shape constraint, or None.
 
-
-def _uses_fit_time_qp_constraints(spec: Any) -> bool:
-    """Whether the spec should enter the raw-linear-constraint QP path."""
-    return _uses_fit_time_shape_constraints(spec) and hasattr(
-        spec, "_build_monotone_constraints_raw"
-    )
+    ``"scop"`` for a P-spline declared with ``shape_engine="scop"``, and for one
+    pickled before that option existed (its class default, None): SCOP was the
+    only engine its release gave a P-spline, so a saved model and every
+    declaration it holds refit as they were fitted. ``"qp"`` for every other
+    basis that states its shape as rows on the raw coefficients. None without
+    a fit-time constraint, or when no engine can build it.
+    """
+    if not _uses_fit_time_shape_constraints(spec):
+        return None
+    if hasattr(spec, "_build_scop_reparameterization") and getattr(spec, "shape_engine", None) in (
+        None,
+        "scop",
+    ):
+        return "scop"
+    if hasattr(spec, "_build_monotone_constraints_raw"):
+        return "qp"
+    return None
 
 
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
     """Reject fit-time shape constraints that no current engine can build."""
     kind = _constraint_kind(spec)
-    if _uses_fit_time_shape_constraints(spec) and not (
-        _uses_fit_time_qp_constraints(spec) or _uses_fit_time_scop_constraints(spec)
-    ):
+    if _uses_fit_time_shape_constraints(spec) and shape_engine(spec) is None:
         raise NotImplementedError(
             f"Fit-time {kind} constraints are not implemented yet. "
             f"Use Constraint.postfit.{kind} instead."
@@ -75,6 +82,8 @@ def build_group_info(
 ) -> GroupInfo | list[GroupInfo]:
     """Build the main GroupInfo payload for a spline spec."""
     _raise_if_unsupported_fit_shape_constraint(spec)
+    clear_scop_state(spec)
+    engine = shape_engine(spec)
 
     if _uses_fit_time_shape_constraints(spec):
         if spec.select:
@@ -94,7 +103,7 @@ def build_group_info(
         return info
 
     omega = spec._build_penalty()
-    if _uses_fit_time_scop_constraints(spec):
+    if engine == "scop":
         basis_dense = basis.toarray() if hasattr(basis, "toarray") else basis
         centered_basis, scop_penalty, scop_reparam = spec._build_scop_reparameterization(
             basis_dense, omega
@@ -156,7 +165,7 @@ def build_group_info(
     constraints = None
     monotone_engine = None
     raw_to_solver_map = None
-    if _uses_fit_time_qp_constraints(spec):
+    if engine == "qp":
         constraints = spec._build_monotone_constraints_raw()
         if projection is not None:
             constraints = constraints.compose(projection)
@@ -194,6 +203,7 @@ def build_knots_and_penalty(
 ) -> tuple[NDArray | None, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     _raise_if_unsupported_fit_shape_constraint(spec)
+    clear_scop_state(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight, n_bins)

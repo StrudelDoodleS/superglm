@@ -87,3 +87,36 @@ class TestSimultaneousBands:
         model = SuperGLM(features={"x": Spline(n_knots=5)})
         with pytest.raises(RuntimeError, match="fitted"):
             model.simultaneous_bands("x")
+
+    def test_a_singular_face_covariance_still_gives_finite_bands(self, spline_model):
+        """A constrained fit's active-face covariance is singular by construction.
+
+        Rounding can leave its zero eigenvalue slightly negative, below the
+        Cholesky jitter once the covariance is large. The term's block here has
+        scale 1e6 and one eigenvalue at -1e-9 of it, so the Cholesky factor
+        does not exist and the bands come from the positive-semidefinite root.
+        Mutation: without that root the call raises ``LinAlgError``.
+        """
+        from superglm.inference._term_covariance import simultaneous_bands
+
+        model = spline_model
+        cov, active = model._coef_covariance
+        subs = [g for g in active if g.feature_name == "x"]
+        idx = np.concatenate([np.arange(g.start, g.end) for g in subs])
+        q, _ = np.linalg.qr(np.random.default_rng(0).standard_normal((len(idx), len(idx))))
+        values = np.ones(len(idx))
+        values[-1] = -1e-9
+        crafted = np.zeros_like(cov)
+        crafted[np.ix_(idx, idx)] = 1e6 * (q * values) @ q.T
+        bands = simultaneous_bands(
+            "x",
+            result=model.result,
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            covariance_fn=lambda: (crafted, active),
+            n_sim=500,
+        )
+        assert np.isfinite(
+            bands[["ci_lower_simultaneous", "ci_upper_simultaneous"]].to_numpy()
+        ).all()

@@ -83,6 +83,7 @@ def _fit_representation(case: str):
                 "x": PSpline(
                     n_knots=6,
                     constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
                 )
             },
         ).fit(X[["x"]], y)

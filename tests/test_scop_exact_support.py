@@ -66,7 +66,7 @@ def test_single_scop_feature_support_compression_matches_fallback(monkeypatch):
     fast = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop")},
     ).fit(df, y)
 
     monkeypatch.setattr(scop_exact_support, "build_exact_scop_support", lambda B: None)
@@ -74,7 +74,7 @@ def test_single_scop_feature_support_compression_matches_fallback(monkeypatch):
     slow = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop")},
     ).fit(df, y)
 
     assert_allclose(fast.result.beta, slow.result.beta, atol=1e-8, rtol=1e-8)
@@ -89,7 +89,7 @@ def test_single_scop_feature_support_compression_preserves_predictions(monkeypat
     fast = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop")},
     ).fit(df, y)
 
     monkeypatch.setattr(
@@ -101,7 +101,7 @@ def test_single_scop_feature_support_compression_preserves_predictions(monkeypat
     slow = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop")},
     ).fit(df, y)
 
     assert_allclose(fast.predict(df), slow.predict(df), atol=1e-8, rtol=1e-8)
@@ -115,7 +115,7 @@ def test_single_scop_feature_reuses_support_compression_when_available():
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop")},
     ).fit(df, y)
 
     scop_states = getattr(model._result, "scop_states", None)
@@ -135,8 +135,8 @@ def test_multi_scop_feature_fit_does_not_expose_exact_support_state():
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "x1": PSpline(n_knots=10, constraint=Constraint.fit.convex),
-            "x2": PSpline(n_knots=10, constraint=Constraint.fit.convex),
+            "x1": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop"),
+            "x2": PSpline(n_knots=10, constraint=Constraint.fit.convex, shape_engine="scop"),
         },
     ).fit(df, y)
 

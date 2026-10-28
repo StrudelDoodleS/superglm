@@ -134,7 +134,9 @@ def test_scop_metrics_use_compact_inference_after_fit_state_release():
         selection_penalty=0.0,
         spline_penalty=1.7,
         retain_fit_state=False,
-        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     ).fit(X, y)
 
     assert model._solver_result.scop_inference is not None

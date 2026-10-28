@@ -509,7 +509,8 @@ def term_inference(
                 )
                 safe_se = np.maximum(band_se, 1e-20)
                 c_vals = (np.log(ci_hi_sim) - band_log_rel) / safe_se
-                c_sim = float(np.median(c_vals[safe_se > 1e-15]))
+                live = safe_se > 1e-15
+                c_sim = float(np.median(c_vals[live])) if live.any() else None
 
         spline_meta = _build_spline_metadata(spec)
 

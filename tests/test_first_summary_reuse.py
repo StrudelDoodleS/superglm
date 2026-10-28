@@ -54,7 +54,7 @@ def _scop_fit(retain_fit_state=True, n=400, seed=1):
         selection_penalty=0.0,
         features={
             "z": Numeric(),
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
         retain_fit_state=retain_fit_state,
     )

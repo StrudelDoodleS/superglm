@@ -1411,6 +1411,193 @@ class TestDirectSolverBasic:
         assert result.converged
         assert np.all(result.intercept + x * result.beta[0] + offset > 0.0)
 
+    def test_identity_link_holds_a_positive_mean_family_to_eta_above_zero(self):
+        """Given the family, the identity link's domain is the family's mean space.
+
+        A positive-weight row at ``eta <= 0`` is outside it for every family
+        ``clip_mu`` floors; Gaussian and binomial means are not held there,
+        and the link alone keeps no domain.
+        """
+        from superglm.distributions import (
+            Binomial,
+            Gamma,
+            Gaussian,
+            NegativeBinomial,
+            Poisson,
+            Tweedie,
+        )
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_state import link_domain_violation
+
+        for family in (Poisson(), Gamma(), Tweedie(p=1.5), NegativeBinomial(theta=2.0)):
+            outside = link_domain_violation(IdentityLink(), family)
+            assert outside is not None
+            assert outside(np.array([0.5, 0.0]), np.array([1.0, 1.0]))
+            assert not outside(np.array([0.5, -1.0]), np.array([1.0, 0.0]))
+        for family in (Gaussian(), Binomial()):
+            assert link_domain_violation(IdentityLink(), family) is None
+        assert link_domain_violation(IdentityLink()) is None
+
+    def test_an_identity_subclass_keeps_the_domain_of_its_own_inverse(self):
+        """The domain is ``inverse(eta) > 0``, not ``eta > 0``, for a link that shifts it.
+
+        ``mu = eta + 1`` is the identity link with an offset of 1, so the fit
+        must match that one: both form ``eta`` then add 1, and both start from
+        the same mean, 1.5, so they agree to a few roundings. Mutation: held
+        to ``eta > 0`` (as ec377777 did), every mean is pinned above 1, the
+        deviance is 4.1% higher and the means differ by up to 74%.
+        """
+        from superglm.distributions import Poisson
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.irls_state import link_domain_violation
+
+        class ShiftedIdentity(IdentityLink):
+            def link(self, mu):
+                return mu - 1.0
+
+            def inverse(self, eta):
+                return eta + 1.0
+
+        outside = link_domain_violation(ShiftedIdentity(), Poisson())
+        assert not outside(np.array([-0.5]), np.ones(1))
+        assert outside(np.array([-1.0]), np.ones(1))
+
+        n = 300
+        x = np.linspace(-1.0, 1.0, n)
+        y = np.random.default_rng(3).poisson(1.5 + x).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        fits = []
+        for link, shift in ((ShiftedIdentity(), 0.0), (IdentityLink(), 1.0)):
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Poisson(),
+                link=link,
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                offset=np.full(n, shift),
+                intercept_init=0.5,
+                weight_semantics="frequency",
+            )
+            fits.append(link.inverse(result.intercept + x * result.beta[0] + shift))
+        assert np.min(fits[0]) < 1.0
+        np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
+
+    def test_an_identity_subclass_may_write_its_inverse_in_place(self):
+        """The domain guard evaluates a custom inverse on its own copy of ``eta``.
+
+        A state's ``eta`` is read-only; an inverse that writes into its argument
+        computes the same means as ``IdentityLink``, so the two fits run the
+        same arithmetic and agree to a few roundings.  Mutation: the guard
+        passing the state's array raises ``ValueError: output array is
+        read-only``.
+        """
+        from superglm.distributions import Poisson
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        class InPlaceIdentity(IdentityLink):
+            def inverse(self, eta):
+                return np.multiply(eta, 1.0, out=eta)
+
+        n = 300
+        x = np.linspace(-1.0, 1.0, n)
+        y = np.random.default_rng(3).poisson(1.5 + x).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        fits = []
+        for link in (InPlaceIdentity(), IdentityLink()):
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Poisson(),
+                link=link,
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                weight_semantics="frequency",
+            )
+            assert result.converged
+            fits.append(result.intercept + x * result.beta[0])
+        np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
+
+    def test_identity_link_poisson_line_search_keeps_every_mean_positive(self):
+        """A Poisson/identity step that would carry a row to ``mu = eta <= 0`` is halved.
+
+        ``clip_mu`` floors such a row at ``1e-50``, where a row without events
+        has deviance ``2 mu``, about zero, and Fisher weight ``1 / mu = 1e50``.
+        Mutation: without the identity link's domain (and before the fix) the
+        fit reports convergence with 32 rows at ``eta < 0``, the lowest at
+        ``-0.192``.  The maximum likelihood estimate here is on the boundary,
+        so the fit only approaches it; every published mean stays positive up
+        to the rounding of forming ``eta``.
+        """
+        from superglm._roundoff import gamma
+        from superglm.distributions import Poisson
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import linear_predictor
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        y = rng.poisson(np.maximum(0.01, 3.0 * x - 0.5)).astype(float)
+        columns = np.column_stack([x, x**2])
+        dm = DesignMatrix([DenseGroupMatrix(columns)], n=n, p=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Poisson(),
+                link=IdentityLink(),
+                groups=[GroupSlice(name="x", start=0, end=2)],
+                lambda2=0.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        eta = linear_predictor(dm, result, None)
+        reach = abs(result.intercept) + np.abs(columns) @ np.abs(result.beta)
+        assert np.all(eta >= -gamma(4) * reach), float(np.min(eta))
+
+    def test_a_warm_start_outside_the_link_domain_is_raised_inside(self):
+        """A caller's Gamma/inverse warm start at ``eta <= 0`` starts inside the domain.
+
+        The step halving keeps states inside only from a state inside, so a
+        warm start outside was never guarded.  Mutation: left where it is (as
+        before the fix), the first step is rejected and the fit returns the
+        warm start itself, 216 of 300 rows at ``eta <= 0``.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import linear_predictor
+
+        rng = np.random.default_rng(0)
+        n = 300
+        x = rng.uniform(0.0, 1.0, n)
+        y = rng.gamma(2.0, (1.0 / (1.0 + 2.0 * x)) / 2.0)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Gamma(),
+                link=InverseLink(),
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                beta_init=np.array([-3.0]),
+                intercept_init=1.0,
+                convergence="mode_score",
+                weight_semantics="frequency",
+            )
+        assert result.converged
+        assert np.all(linear_predictor(dm, result, None) > 0.0)
+
     def test_gamma_log_keeps_fisher_scoring_while_steps_are_accepted(self):
         """Accepted Fisher steps must not trigger a clock-based curvature switch."""
         from superglm.distributions import Gamma

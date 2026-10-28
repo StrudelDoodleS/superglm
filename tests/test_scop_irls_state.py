@@ -118,7 +118,9 @@ def _scop_fit_inputs():
         family="gaussian",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     y_out, weights, offset = model_build_design_matrix(
         model,
@@ -457,7 +459,9 @@ def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
         family="poisson",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     y_out, weights, offset = model_build_design_matrix(
         model,
@@ -507,7 +511,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
         selection_penalty=0.0,
         discrete=True,
         features={
-            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "g": Categorical(base="a"),
         },
     )
@@ -637,7 +641,7 @@ def _scop_tensor_frequent_level_fit(monkeypatch, counts: dict):
         selection_penalty=0.0,
         discrete=True,
         features={
-            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "a": PSpline(n_knots=5),
             "b": PSpline(n_knots=5),
             "g": Categorical(base="rare"),

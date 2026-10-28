@@ -278,7 +278,9 @@ def _monotone_model():
         discrete=False,
         features={
             "x1": Spline(kind="ps", k=12),
-            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "x2": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
         },
     )
 
@@ -340,7 +342,7 @@ def _fit_tweedie_scop(n=4000, profile=None):
         discrete=False,
         features={
             "x1": Spline(kind="ps", k=10),
-            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     y_fit, weights, offset = model_build_design_matrix(model, frame, y, exposure, None)
@@ -482,7 +484,7 @@ def test_cross_block_routes_form_the_centred_cross_product():
         features={
             "a": Spline(kind="ps", k=8),
             "b": Spline(kind="ps", k=6),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
         interactions=[("a", "b")],
@@ -613,7 +615,10 @@ def test_a_translated_ordinary_column_leaves_a_damped_step_unchanged(monkeypatch
             family="gaussian",
             selection_penalty=0.0,
             spline_penalty=0.0,
-            features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+            features={
+                "x": Numeric(),
+                "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+            },
         )
         model.fit(pd.DataFrame({"x": x + shift, "s": s}), y, sample_weight=weights)
         fits[shift] = (model.result, list(steps))
@@ -707,7 +712,7 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
         discrete=True,
         features={
             "a": Spline(kind="ps", k=8),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
     )
@@ -779,7 +784,7 @@ def test_packed_codes_past_their_byte_budget_are_refused_before_any_support(monk
         discrete=True,
         features={
             "a": Spline(kind="ps", k=8),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
     )
@@ -849,7 +854,7 @@ def _aliased_slope_fit(with_x):
     x = rng.uniform(0, 1, n)
     y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n)
     weights = rng.uniform(0.3, 3, n)
-    features = {"s": PSpline(n_knots=4, constraint=Constraint.fit.convex)}
+    features = {"s": PSpline(n_knots=4, constraint=Constraint.fit.convex, shape_engine="scop")}
     if with_x:
         features = {"x": Numeric(), **features}
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
@@ -913,7 +918,7 @@ def test_nearly_collinear_ordinary_columns_keep_every_scop_direction(trend, spli
         features={
             "a": Numeric(),
             "b": Numeric(),
-            "s": PSpline(n_knots=4, constraint=Constraint.fit.increasing),
+            "s": PSpline(n_knots=4, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     model.fit(frame, y)
@@ -975,8 +980,8 @@ def test_a_group_beside_a_nearly_collinear_pair_holds_no_other_groups_direction(
         features={
             "a": Numeric(),
             "b": Numeric(),
-            "s": PSpline(n_knots=20, constraint=increasing),
-            "t": PSpline(n_knots=40, constraint=increasing),
+            "s": PSpline(n_knots=20, constraint=increasing, shape_engine="scop"),
+            "t": PSpline(n_knots=40, constraint=increasing, shape_engine="scop"),
         },
     )
     model.fit(pd.DataFrame({"a": a, "b": a + 5e-8 * v, "s": s, "t": t}), y)
@@ -1021,7 +1026,7 @@ def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(m
     y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n) + 0.3 * v
     weights = rng.uniform(0.3, 3, n)
     frame = pd.DataFrame({"x": x, "s": x, "a": a, "b": a + 1e-7 * v})
-    convex = PSpline(n_knots=4, constraint=Constraint.fit.convex)
+    convex = PSpline(n_knots=4, constraint=Constraint.fit.convex, shape_engine="scop")
 
     def fit(features):
         model = SuperGLM(
@@ -1108,8 +1113,8 @@ def test_a_run_finds_each_exact_support_once(monkeypatch):
         selection_penalty=0.0,
         discrete=False,
         features={
-            "a": Spline(kind="ps", k=6, constraint=increasing),
-            "b": Spline(kind="ps", k=6, constraint=increasing),
+            "a": Spline(kind="ps", k=6, constraint=increasing, shape_engine="scop"),
+            "b": Spline(kind="ps", k=6, constraint=increasing, shape_engine="scop"),
         },
     )
     model.fit_reml(frame, y.to_numpy())
@@ -1138,7 +1143,10 @@ def test_a_fit_that_drives_coordinates_to_their_boundary_publishes_finite_infere
         selection_penalty=0.0,
         spline_penalty=0.0,
         discrete=False,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
@@ -1186,7 +1194,10 @@ def test_the_schur_rows_are_formed_a_leaf_at_a_time(monkeypatch):
         selection_penalty=0.0,
         spline_penalty=0.1,
         discrete=True,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+        },
     )
     model.fit(pd.DataFrame({"x": x, "s": x}), y)
 
@@ -1574,7 +1585,7 @@ def test_every_row_route_leaf_takes_its_tables_and_csr_moments_in_one_pass(monke
         selection_penalty=0.0,
         discrete=discrete,
         features={
-            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": PSpline(n_knots=6),
             "g": Categorical(),
         },
@@ -1622,7 +1633,7 @@ def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
         selection_penalty=0.0,
         discrete=False,
         features={
-            "a": Spline(kind="ps", k=6, constraint=Constraint.fit.increasing),
+            "a": Spline(kind="ps", k=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": Numeric(),
         },
     )
@@ -1656,7 +1667,7 @@ def test_an_ordinary_column_within_sqrt_eps_of_a_scop_slope_is_held_not_chased()
         model.fit(frame, y)
         return model
 
-    convex = PSpline(n_knots=8, constraint=Constraint.fit.convex)
+    convex = PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop")
     near, alone = fit({"x": Numeric(), "s": convex}), fit({"s": convex})
 
     assert near.result.converged
@@ -1678,7 +1689,10 @@ def _ordinary_inside_the_spline_fit():
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.0,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
     )
     frame = pd.DataFrame({"x": x, "s": x})
     model.fit(frame, y, sample_weight=weights)
@@ -1794,7 +1808,10 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.0,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+        },
     )
     frame = pd.DataFrame({"x": x, "s": x})
     model.fit(frame, y, sample_weight=weights)
@@ -1979,7 +1996,7 @@ def _sparse_counts_model(n, seed, theta):
     model = SuperGLM(
         family=NegativeBinomial(theta=theta),
         features={
-            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "x2": Spline(kind="cr", k=8),
         },
     )

@@ -1,6 +1,7 @@
 """Final-state feasibility regressions for hard fit-time constraints."""
 
 import logging
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -884,8 +885,13 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
     from superglm.solvers.irls_state import _IRLSStepDecision
+    from superglm.types import LinearConstraintSet
 
     design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    # beta >= 0.5 has no feasible zero point, so phase one cannot restart it.
+    groups = [
+        replace(groups[0], constraints=LinearConstraintSet(A=np.ones((1, 1)), b=np.array([0.5])))
+    ]
 
     def infeasible_qp_proposal(*_args, **_kwargs):
         return QPResult(beta=np.array([-2.0]), converged=False)
@@ -1117,6 +1123,71 @@ def test_infeasible_committed_state_prefers_finite_feasible_proposal_over_merit(
     assert result.termination_reason != "constraint_infeasible"
 
 
+def test_infeasible_start_without_a_feasible_qp_proposal_restarts_at_the_zero_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A QP at an infeasible start that returns no feasible proposal leads to phase one.
+
+    Shape rows are homogeneous, so the violated block's zero is feasible; the
+    fit continues from it instead of ending outside the constraints.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.model.base import model_build_design_matrix
+    from superglm.solvers.constrained_qp import QPResult
+
+    x = np.linspace(0.0, 1.0, 80)
+    y = 0.5 + 2.0 * x + 0.02 * np.sin(8.0 * x)
+    model = _increasing_model()
+    y_fit, weights, offset = model_build_design_matrix(
+        model, pd.DataFrame({"x": x}), y, np.ones_like(y), None
+    )
+    group = model._groups[0]
+    assert group.constraints is not None
+    infeasible_beta = np.zeros(model._dm.p)
+    infeasible_beta[group.sl] = -10.0 * group.constraints.A[0]
+    real_qp = irls_direct._solve_constrained_qp_with_cold_retry
+    calls: list[int] = []
+
+    def no_feasible_first_proposal(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return QPResult(beta=infeasible_beta.copy(), converged=False)
+        return real_qp(*args, **kwargs)
+
+    monkeypatch.setattr(
+        irls_direct, "_solve_constrained_qp_with_cold_retry", no_feasible_first_proposal
+    )
+
+    def fit(max_iter: int):
+        calls.clear()
+        return irls_direct.fit_irls_direct(
+            model._dm,
+            y_fit,
+            weights,
+            model._distribution,
+            model._link,
+            model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            beta_init=infeasible_beta,
+            intercept_init=0.0,
+            max_iter=max_iter,
+            tol=1e-8,
+            weight_semantics="frequency",
+        )[0]
+
+    first = fit(max_iter=1)
+    assert first.termination_reason == "constraint_kkt_incomplete"
+    np.testing.assert_array_equal(first.beta[group.sl], 0.0)
+
+    result = fit(max_iter=50)
+    assert result.converged
+    slack = group.constraints.A @ result.beta[group.sl] - group.constraints.b
+    assert np.min(slack) >= -1e-10 * np.max(
+        np.abs(group.constraints.A) @ np.abs(result.beta[group.sl])
+    )
+
+
 def test_feasible_committed_state_never_accepts_infeasible_trial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1274,3 +1345,306 @@ def test_capped_reml_with_a_flat_monotone_term_at_zero_returns_a_certified_mode(
     for group in constrained:
         A, b = group.constraints.A, group.constraints.b
         assert _is_feasible(A, model.result.beta[group.sl], b, 1e-12)
+
+
+def _restricted_link_book(link: str, seed: int, n: int = 400) -> tuple[pd.DataFrame, np.ndarray]:
+    """A log-scale trend increasing in ``x1``, a wave in ``x2`` and a six-level factor.
+
+    Under the inverse link an increasing mean is a decreasing linear
+    predictor, so an ``increasing`` term in ``x1`` is held flat, at a
+    smoothing parameter near 1e7. Under the identity link, Poisson rows
+    without events pull an unconstrained fit's means through zero.
+    """
+    rng = np.random.default_rng(seed)
+    x1, x2 = rng.uniform(0.0, 10.0, n), rng.uniform(-2.0, 2.0, n)
+    levels = np.array(list("abcdef"))
+    c1 = rng.choice(levels, n)
+    effect = dict(zip(levels, [0.0, 0.2, -0.15, 0.3, -0.1, 0.25], strict=True))
+    eta = 0.06 * x1 + 0.3 * np.sin(1.3 * x2) + pd.Series(c1).map(effect).to_numpy()
+    eta -= eta.mean()
+    if link == "inverse":
+        y = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
+    else:
+        y = rng.poisson(np.exp(eta)).astype(float)
+    return pd.DataFrame({"x1": x1, "x2": x2, "c1": c1}), y
+
+
+def _restricted_link_model(family: str, link: str, kind: str) -> SuperGLM:
+    from superglm import PSpline
+
+    increasing = Constraint.fit.increasing
+    term = (
+        Spline(kind="bs", k=8, constraint=increasing)
+        if kind == "bs"
+        else PSpline(n_knots=8, constraint=increasing)
+    )
+    return SuperGLM(
+        family=family,
+        link=link,
+        features={"x1": term, "x2": Spline(kind="cr", k=8), "c1": Categorical()},
+    )
+
+
+def _assert_shape_certified(model: SuperGLM, name: str) -> None:
+    from superglm.constraints import shape_constraint_is_roundoff_feasible
+
+    spec = model._specs[name]
+    group = next(group for group in model._groups if group.feature_name == name)
+    assert group.monotone_engine == "qp"
+    beta = model.result.beta[group.start : group.end]
+    assert shape_constraint_is_roundoff_feasible(spec, beta, spec.constraint_kind)
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+def test_an_increasing_term_held_flat_by_an_inverse_link_returns_a_certified_mode(
+    kind: str,
+) -> None:
+    """Gamma/inverse: the passthrough's terminal QP at a flat term certifies.
+
+    The term sits at its zero face, or on a ray of it near 1e-6, in
+    coordinates scaled by its smoothing parameter; its QP certifies only on
+    the retry, whose multipliers are fitted in the certificate's units.
+    Mutation: fitted unweighted, as before, the REML fit ends unconverged.
+    """
+    frame, y = _restricted_link_book("inverse", seed=0)
+    model = _restricted_link_model("gamma", "inverse", kind)
+    model.fit_reml(frame, y)
+
+    assert model.reml_diagnostics()["converged"]
+    assert model._reml_result.terminal_refit_termination is None
+    _assert_shape_certified(model, "x1")
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+@pytest.mark.parametrize(("seed", "certain"), [(1, True), (7, False)])
+def test_an_identity_link_poisson_shape_fit_keeps_every_mean_positive(
+    kind: str, seed: int, certain: bool
+) -> None:
+    """Poisson/identity: every state holds ``mu = eta > 0``, so the QP's weights exist.
+
+    ``clip_mu`` floored a crossed row at ``mu = 1e-50``, whose Fisher weight
+    ``1 / mu`` is ``1e50``; the terminal QP's ``H`` then read as rank 6 of 19
+    with its gradient in the null space. Mutation: without the identity
+    link's domain both seeds raise that ``ValueError``. A search that stops
+    short is disclosed, never refused. Every published mean is positive up
+    to the rounding of forming ``eta``.
+    """
+    from superglm._roundoff import gamma
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.solvers.mode_score import linear_predictor
+
+    frame, y = _restricted_link_book("identity", seed=seed)
+    model = _restricted_link_model("poisson", "identity", kind)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+
+    converged = model.reml_diagnostics()["converged"]
+    warned = any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    assert converged if certain else (converged or warned)
+    result = model.result
+    reach = abs(result.intercept) + np.abs(model._dm.toarray()) @ np.abs(result.beta)
+    if result.centred_intercept is not None:
+        reach += abs(result.centred_intercept) + np.abs(result.state_center) @ np.abs(result.beta)
+    eta = linear_predictor(model._dm, result, None)
+    assert np.all(eta >= -gamma(4) * reach), float(np.min(eta))
+    _assert_shape_certified(model, "x1")
+
+
+def test_a_feasible_proposal_outside_the_link_domain_has_its_intercept_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """From an infeasible start, a feasible QP proposal at ``mu <= 0`` is raised into the domain.
+
+    The start ``beta = -1`` breaks ``beta >= 0``; the QP returns ``beta = 10``,
+    whose rows near ``x = -1`` have ``eta < 0``, and every trial is rejected.
+    The proposal is accepted for its feasibility, with its intercept raised,
+    as a start's is, until the smallest ``eta`` is ``g(mean y)``; the slope
+    is the QP's. Mutation: accepted as it stands, ``min eta`` is about -9.4.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+    from superglm.solvers.irls_state import _IRLSStepDecision
+    from superglm.solvers.mode_score import linear_predictor
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    x = np.linspace(-1.0, 1.0, 41)
+    y = np.random.default_rng(0).poisson(1.5, x.size).astype(float)
+    design = DesignMatrix([DenseGroupMatrix(x[:, None])], n=x.size, p=1)
+    constraint = LinearConstraintSet(A=np.ones((1, 1)), b=np.zeros(1))
+    groups = [GroupSlice("x", 0, 1, constraints=constraint, monotone_engine="qp")]
+
+    def feasible_qp_proposal(*_args, **_kwargs):
+        return QPResult(beta=np.array([10.0]), converged=True)
+
+    def reject_every_trial(**_kwargs):
+        return _IRLSStepDecision(
+            alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+        )
+
+    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", feasible_qp_proposal)
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_every_trial)
+    result, _ = irls_direct.fit_irls_direct(
+        design,
+        y,
+        np.ones(x.size),
+        Poisson(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        beta_init=np.array([-1.0]),
+        intercept_init=3.0,
+        max_iter=1,
+        weight_semantics="frequency",
+    )
+
+    assert result.beta[0] == 10.0
+    eta = linear_predictor(design, result, None)
+    reach = abs(result.intercept) + np.abs(x) * abs(result.beta[0])
+    assert abs(float(np.min(eta)) - y.mean()) <= 4 * np.finfo(float).eps * float(np.max(reach))
+    assert result.termination_reason == "constraint_kkt_incomplete"
+
+
+@pytest.mark.parametrize(("n", "n_knots"), [(100, 6), (200, 6), (200, 8)])
+def test_an_identity_link_poisson_fit_at_the_zero_edge_is_returned_unconverged(
+    n: int, n_knots: int
+) -> None:
+    """Two events in the last tenth: the increasing mean of most rows sits at zero.
+
+    At that edge the Fisher weights ``1 / mu`` can leave the next working QP
+    unbounded, and it raised ``H is rank-deficient``. The fit returns its
+    last accepted coefficients, finite, shape-feasible and not converged.
+    Mutation: without the catch all three raise on the Haswell and Sandy
+    Bridge kernels, and the last two on SkylakeX.
+    """
+    from superglm import PSpline
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    x = np.linspace(0.0, 1.0, n)
+    y = np.zeros(n)
+    y[[90 * n // 100, 96 * n // 100]] = 1.0
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=n_knots, constraint=Constraint.fit.increasing)},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(pd.DataFrame({"x": x}), y)
+
+    assert not model.result.converged
+    assert np.all(np.isfinite(model.predict(pd.DataFrame({"x": x}))))
+    _assert_shape_certified(model, "x")
+    for item in caught:
+        if issubclass(item.category, ConvergenceWarning):
+            assert "log link" in str(item.message)
+
+
+@pytest.mark.parametrize("link", ["identity", "log"])
+def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
+    monkeypatch: pytest.MonkeyPatch, link: str
+) -> None:
+    """A ``ValueError`` from the working QP ends an identity-link fit at its committed state.
+
+    The fit returns unconverged, with a ``ConvergenceWarning`` naming the
+    edge and the log link and carrying the QP's own message; under the log link, whose domain has no edge,
+    the error is raised. Mutation: catching it under every link fails the
+    log case, and dropping the warning fails the identity case.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm import PSpline
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    real_qp = irls_direct._solve_constrained_qp_with_cold_retry
+    calls: list[int] = []
+
+    def unbounded_second_solve(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("solve_constrained_qp: H is rank-deficient")
+        return real_qp(*args, **kwargs)
+
+    monkeypatch.setattr(
+        irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_second_solve
+    )
+    x = np.linspace(0.0, 1.0, 80)
+    y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link=link,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    )
+    if link == "log":
+        with pytest.raises(ValueError, match="rank-deficient"):
+            model.fit(pd.DataFrame({"x": x}), y)
+        return
+    with pytest.warns(ConvergenceWarning, match="log link.*H is rank-deficient"):
+        model.fit(pd.DataFrame({"x": x}), y)
+
+    assert len(calls) == 2
+    assert not model.result.converged
+    assert np.all(np.isfinite(model.result.beta))
+    _assert_shape_certified(model, "x")
+
+
+def test_an_unbounded_working_qp_at_an_infeasible_start_restarts_at_the_zero_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ValueError`` from the QP at an infeasible start leads to phase one, not a stop.
+
+    Poisson/identity, with every working QP raising: the fit commits the
+    violated block's feasible zero, then stops there unconverged with the
+    zero-edge warning. Mutation: stopping at the infeasible start ends the
+    fit ``constraint_infeasible``, which the REML layers refuse.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.model.base import model_build_design_matrix
+
+    def unbounded_qp(*args, **kwargs):
+        raise ValueError("solve_constrained_qp: H is rank-deficient")
+
+    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_qp)
+    x = np.linspace(0.0, 1.0, 80)
+    y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    y_fit, weights, offset = model_build_design_matrix(
+        model, pd.DataFrame({"x": x}), y, np.ones_like(y), None
+    )
+    group = model._groups[0]
+    assert group.constraints is not None
+    infeasible_beta = np.zeros(model._dm.p)
+    infeasible_beta[group.sl] = -0.1 * group.constraints.A[0]
+    with pytest.warns(ConvergenceWarning, match="log link.*H is rank-deficient"):
+        result = irls_direct.fit_irls_direct(
+            model._dm,
+            y_fit,
+            weights,
+            model._distribution,
+            model._link,
+            model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            beta_init=infeasible_beta,
+            intercept_init=float(np.mean(y)),
+            max_iter=50,
+            tol=1e-8,
+            weight_semantics="frequency",
+        )[0]
+
+    assert not result.converged
+    assert result.termination_reason != "constraint_infeasible"
+    np.testing.assert_array_equal(result.beta[group.sl], 0.0)
+    assert np.isfinite(result.intercept)
+    eta = result.intercept + model._dm.matvec(result.beta)
+    assert np.all(eta > 0.0)

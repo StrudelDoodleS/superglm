@@ -600,7 +600,9 @@ class TestFitModes:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                "BonusMalus": Spline(
+                    kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
                 "DrivAge": Spline(kind="ps", k=8),
                 "VehAge": Spline(kind="ps", k=8),
                 "VehGas": Categorical(base="most_exposed"),

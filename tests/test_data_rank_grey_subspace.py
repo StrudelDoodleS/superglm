@@ -680,7 +680,10 @@ def test_scop_terminal_data_rank_takes_the_fits_route(discrete, monkeypatch):
 
     frame, y, features, interactions = _thin_level_curve()
     frame = frame.assign(x=np.random.default_rng(3).uniform(0.0, 1.0, len(y)))
-    features = {**features, "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing)}
+    features = {
+        **features,
+        "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+    }
     passes = []
     factor = scop_efs.grouped_weighted_factor
     monkeypatch.setattr(

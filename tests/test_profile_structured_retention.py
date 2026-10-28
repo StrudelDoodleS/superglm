@@ -98,6 +98,7 @@ def _profile_model(
             n_knots=5,
             constraint=Constraint.fit.increasing,
             lambda_policy=constraint_policy,
+            shape_engine="scop",
         )
 
     if family_name == "nb":
