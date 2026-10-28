@@ -1202,13 +1202,19 @@ def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
     assert solver.converged
     reference = alone._solver_pirls_result()
     # each trace entry is within gamma_p kappa of its value, kappa either
-    # fit's penalised Hessian condition (the two traces round differently)
-    kappa = max(
-        solver.rank_info.augmented.pre_truncation_condition,
-        reference.rank_info.augmented.pre_truncation_condition,
+    # fit's penalised Hessian condition (the two traces round differently);
+    # pre_truncation_condition is the factor's, the square root of it
+    kappa = (
+        max(
+            solver.rank_info.augmented.pre_truncation_condition,
+            reference.rank_info.augmented.pre_truncation_condition,
+        )
+        ** 2
     )
     p = solver.beta.size
-    assert abs(solver.effective_df - reference.effective_df) <= gamma(p) * kappa * p
+    bound = gamma(p) * kappa * p
+    assert bound < 1.0  # the per-row reading moves the EDF by about 3.7
+    assert abs(solver.effective_df - reference.effective_df) <= bound
 
 
 @pytest.mark.parametrize(
