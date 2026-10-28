@@ -1964,6 +1964,10 @@ def fit_reml(
         # whether a later refit replaces it is known only after its theta
         # solve, and only the published fit's is computed (below).
         workspace.model._defer_rank_info = True
+        # Nor does one take the exact path's cached-W pre-solve: with it the
+        # alternation's published fit on freMTPL2 (four interaction pairs)
+        # ended 3.7e-4 farther from a certified reference optimum.
+        workspace.model._nb_theta_search = True
     debug_recorder = _fit_reml_in_workspace(
         workspace.model,
         X,

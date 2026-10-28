@@ -2884,6 +2884,34 @@ def _ten_penalty_poisson(n=3000, seed=1):
     return model, X, rng.poisson(np.exp(eta)).astype(float)
 
 
+def _rounding_stall_gamma(n=4000, seed=1053):
+    """Gamma/log rows on two smooths and a factor (the release differential's
+    mid-size draw), the first ``n`` of ``n + 2000``."""
+    rng = np.random.default_rng(seed)
+    total = n + 2000
+    x1, x2 = rng.uniform(0, 10, total), rng.uniform(-2, 2, total)
+    levels = [f"a{i}" for i in range(6)]
+    c1 = rng.choice(levels, total, p=[0.3, 0.25, 0.2, 0.12, 0.08, 0.05])
+    c2 = rng.choice([f"g{i:02d}" for i in range(25)], total)
+    lin = rng.normal(0, 1, total)
+    rng.uniform(0, 1, total)
+    rng.uniform(0.2, 1.0, total)
+    c1_effect = dict(zip(levels, [0, 0.2, -0.15, 0.3, -0.1, 0.25], strict=True))
+    c2_effect = dict(zip(sorted(set(c2)), rng.normal(0, 0.15, 25), strict=True))
+    eta = (
+        0.06 * x1
+        + 0.3 * np.sin(1.3 * x2)
+        + pd.Series(c1).map(c1_effect).to_numpy()
+        + pd.Series(c2).map(c2_effect).to_numpy()
+        + 0.1 * lin
+        + 0.04 * x1 * np.tanh(x2)
+    )
+    eta = eta - eta.mean()
+    y = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
+    X = pd.DataFrame({"x1": x1, "x2": x2, "c1": c1})
+    return X.iloc[:n], y[:n]
+
+
 class TestExactPresolve:
     """A cold exact fit with many smoothing parameters starts from the cached-W fixed point.
 
@@ -2962,6 +2990,77 @@ class TestExactPresolve:
         info = _two_smooth_model(False).fit_reml(X, y).reml_diagnostics()
         assert "reml_presolve_n_iter" not in info["profile"]
 
+    def test_the_first_step_from_the_presolve_holds_no_placeable_direction(self, monkeypatch):
+        """The pre-solve's point is the working model's fixed point, which lacks
+        the dW/drho term, so the exact loop's first step moves every direction
+        whose curvature puts a minimum within the step bound, whatever the
+        freeze test says there; only later iterations hold flat directions.
+        Here the freeze test is made to hold every direction at its first
+        call.  Mutation check: without the release the first iteration took no
+        step (its successor refitted the same lambdas); on freMTPL2 the
+        release lowered the published objective on all seven pairs, by
+        0.0064 (Gamma/log) to 0.034 (Tweedie/log)."""
+        import dataclasses
+
+        import superglm.reml.direct as direct_module
+
+        real_freeze = direct_module.freeze_flat_directions
+        calls = []
+
+        def hold_all_first(*args, **kwargs):
+            decision = real_freeze(*args, **kwargs)
+            calls.append(1)
+            if len(calls) > 1:
+                return decision
+            return dataclasses.replace(decision, frozen=np.ones_like(decision.frozen))
+
+        monkeypatch.setattr(direct_module, "freeze_flat_directions", hold_all_first)
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert info["n_presolve_iter"] > 0
+        assert info["converged"]
+        first, second = info["lambda_history"][1], info["lambda_history"][2]
+        assert any(abs(np.log(second[k] / first[k])) > 1e-3 for k in first)
+
+    def test_a_decrease_within_rounding_hands_over_to_the_certificate(self, monkeypatch):
+        """From the pre-solve's point this Gamma/log fit's exact loop accepts
+        steps that lower the objective by about ten units in its last place,
+        while the gradient, whose own error is above the score bar, keeps the
+        score test from firing.  A decrease within the two evaluations'
+        rounding is no decrease: the dead-search certificate judges the
+        candidate, and certifies it.  Mutation check: with the rounding bound
+        set to zero the loop accepted 9e-12 .. 1.2e-11 decreases until
+        ``max_reml_iter`` (20 iterations, not converged); with it, iteration 4
+        certifies."""
+        import superglm.model.reml_ops as reml_ops_module
+
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def presolved(*args, **kw):
+            kw["presolve"] = True
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", presolved)
+        X, y = _rounding_stall_gamma()
+        model = SuperGLM(
+            family="gamma",
+            link="log",
+            features={
+                "x1": Spline(kind="bs", k=8),
+                "x2": Spline(kind="cr", k=8),
+                "c1": Categorical(),
+            },
+        )
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        dead = info["profile"]["reml_dead_line_search"]
+        # the stall was reached: the score test could not fire on this gradient,
+        # and the accepted decrease was within the evaluations' rounding
+        assert dead["active_gradient_norm"] > 1e-9 * (1.0 + abs(info["objective"]))
+        assert 0.0 < dead["unresolved_decrease"] <= 2.5 * dead["objective_roundoff"]
+        assert info["converged"]
+        assert info["termination_reason"] == "converged_at_precision"
+        assert info["n_reml_iter"] < 10
+
 
 def _ten_penalty_frame(n=3000, seed=1):
     rng = np.random.default_rng(seed)
@@ -2992,42 +3091,81 @@ def _ten_penalty_features(random_effect: bool) -> dict:
     return features
 
 
-class TestExactPresolveScope:
-    """The automatic pre-solve runs only where it was measured.
+def _ten_penalty_response(case, eta, rng):
+    """A response for ``_ten_penalty_frame``'s predictor and the model kwargs fitting it."""
+    if case == "binomial_log":
+        return rng.binomial(1, np.exp(eta - 2.5)).astype(float), {
+            "family": "binomial",
+            "link": "log",
+        }
+    if case.startswith("binomial_"):
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(1.0 - eta))).astype(float)
+        return y, {"family": "binomial", "link": case.split("_")[1]}
+    if case.startswith("gamma_"):
+        return rng.gamma(4.0, np.exp(eta) / 4.0), {"family": "gamma", "link": case.split("_")[1]}
+    if case == "gaussian":
+        return eta + rng.normal(size=len(eta)), {"family": "gaussian"}
+    if case == "tweedie_log":
+        from superglm import families
 
-    That is Poisson with the log link on the dense solver.  A non-canonical
-    link (whose exact loop uses observed curvature, or, binomial with the log
-    link, a boundary restoration the cached-W engine lacks), an unmeasured
-    canonical one (binomial with the logit link, Gaussian with the identity),
-    a model the structured solvers can take, and a Tweedie power search's
-    candidates keep the plain cold start, bit for bit.  Mutation check: on the
-    PR #487 head eeea40f5 the binomial/log, Gamma/log and structured cases
-    pre-solved, and on fa839a72 the binomial/logit and Gaussian cases did.
+        y = rng.poisson(np.exp(eta - 1.0)) * rng.gamma(2.0, 0.5, len(eta))
+        return y, {"family": families.tweedie(p=1.5), "link": "log"}
+    if case == "nb2_log":
+        from superglm import families
+
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + np.exp(eta - 1.0))).astype(float)
+        return y, {"family": families.nb2(theta=2.0), "link": "log"}
+    return rng.poisson(np.exp(eta - 1.0)).astype(float), {"family": "poisson"}
+
+
+class TestExactPresolveScope:
+    """The automatic pre-solve runs only where it was measured to pay.
+
+    That is Poisson/log, binomial with the logit, probit and cloglog links,
+    Gamma/log, Tweedie/log and NB2/log, on the dense solver: the pairs whose
+    cached-W working model carries the exact loop's curvature.  Binomial with
+    the log link (a boundary restoration the cached-W engine lacks), Gamma
+    with the inverse link (measured slower), Gaussian with the identity (its
+    cached-W criterion is the exact one), a model the structured solvers can
+    take, and a Tweedie power search's candidates keep the plain cold start,
+    bit for bit.  Mutation check: on the PR #487 head eeea40f5 the
+    binomial/log and structured cases pre-solved, and on fa839a72 the
+    Gaussian case did; on master dd9710ac none of the admitted pairs but
+    Poisson/log pre-solved.
     """
 
     @pytest.mark.parametrize(
-        "case", ["binomial_log", "gamma_log", "binomial_logit", "gaussian", "structured"]
+        "case",
+        [
+            "gamma_log",
+            "tweedie_log",
+            "nb2_log",
+            "binomial_logit",
+            "binomial_probit",
+            "binomial_cloglog",
+        ],
     )
+    def test_an_admitted_pair_starts_from_the_presolve(self, case):
+        X, eta, rng = _ten_penalty_frame()
+        y, kwargs = _ten_penalty_response(case, eta, rng)
+        model = SuperGLM(
+            discrete=False,
+            features=_ten_penalty_features(False),
+            interactions=[("x3", "g")],
+            **kwargs,
+        )
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert len(info["lambdas"]) >= 8
+        assert info["n_presolve_iter"] > 0
+        assert info["converged"]
+
+    @pytest.mark.parametrize("case", ["binomial_log", "gamma_inverse", "gaussian", "structured"])
     def test_an_excluded_fit_keeps_the_plain_cold_start(self, case, monkeypatch):
         import superglm.model.reml_ops as reml_ops_module
         import superglm.reml.direct as direct_module
 
         X, eta, rng = _ten_penalty_frame()
-        if case == "binomial_log":
-            y = rng.binomial(1, np.exp(eta - 2.5)).astype(float)
-            kwargs = {"family": "binomial", "link": "log"}
-        elif case == "gamma_log":
-            y = rng.gamma(4.0, np.exp(eta) / 4.0)
-            kwargs = {"family": "gamma", "link": "log"}
-        elif case == "binomial_logit":
-            y = rng.binomial(1, 1.0 / (1.0 + np.exp(1.0 - eta))).astype(float)
-            kwargs = {"family": "binomial"}
-        elif case == "gaussian":
-            y = eta + rng.normal(size=len(eta))
-            kwargs = {"family": "gaussian"}
-        else:
-            y = rng.poisson(np.exp(eta - 1.0)).astype(float)
-            kwargs = {"family": "poisson"}
+        y, kwargs = _ten_penalty_response(case, eta, rng)
 
         def model():
             return SuperGLM(
@@ -3083,3 +3221,59 @@ class TestExactPresolveScope:
         )
         model.estimate_p(X, y, fit_mode="reml", p_bounds=(1.3, 1.7), xatol=0.05)
         assert calls and all(presolve is False for presolve in calls[:-1])
+
+    def test_an_estimated_theta_alternation_keeps_the_plain_cold_start(self, monkeypatch):
+        """NB2 with theta="auto" alternates a theta solve with REML fits; with the
+        pre-solve its published fit on freMTPL2 ended 3.7e-4 farther from a
+        certified reference optimum, so none of its fits take it (mutation
+        check: without the flag the first fit pre-solved)."""
+        import superglm.model.reml_ops as reml_ops_module
+        from superglm import families
+
+        X, eta, rng = _ten_penalty_frame(n=1500)
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + np.exp(eta - 1.0))).astype(float)
+        calls = []
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def recorded(*args, **kw):
+            calls.append(kw.get("presolve"))
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", recorded)
+        model = SuperGLM(
+            family=families.nb2(theta="auto"),
+            discrete=False,
+            features=_ten_penalty_features(False),
+            interactions=[("x3", "g")],
+        )
+        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        assert calls and all(presolve is False for presolve in calls)
+        assert info["n_presolve_iter"] == 0
+
+    @pytest.mark.parametrize("link", ["log", "power"])
+    def test_the_route_does_not_turn_on_the_power_under_a_fixed_link(self, link):
+        """A Tweedie power search holds its link while p moves, and a power link
+        is canonical where its power is 1 - p: the exact loop's curvature is
+        Fisher there and observed elsewhere (test_reml_observed_geometry).  The
+        route is decided on the family and link types, so every power takes the
+        same one: the log link pre-solves at each p, and PowerLink(-0.5),
+        canonical at p = 1.5, at none.  Mutation check: gating on the curvature
+        class instead (``not use_observed_geometry``, master's term) pre-solved
+        the power link at p = 1.5 alone."""
+        from superglm import families
+        from superglm.links import PowerLink
+
+        X, eta, rng = _ten_penalty_frame(n=1500)
+        y = rng.poisson(np.exp(eta - 1.0)) * rng.gamma(2.0, 0.5, len(eta))
+        routes = []
+        for p in (1.4, 1.5, 1.6):
+            model = SuperGLM(
+                family=families.tweedie(p=p),
+                link="log" if link == "log" else PowerLink(power=-0.5),
+                discrete=False,
+                features=_ten_penalty_features(False),
+                interactions=[("x3", "g")],
+            )
+            info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            routes.append(info["n_presolve_iter"] > 0)
+        assert routes == [link == "log"] * 3
