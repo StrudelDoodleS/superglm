@@ -1442,13 +1442,14 @@ class TestDirectSolverBasic:
         """The domain is ``inverse(eta) > 0``, not ``eta > 0``, for a link that shifts it.
 
         ``mu = eta + 1`` is the identity link with an offset of 1, so the fit
-        must match that one: both evaluate ``eta`` then add 1, and start from
-        the same ``eta``, so they agree to a few roundings. Mutation: held to ``eta > 0`` (as ec377777 did),
-        every mean is pinned above 1 and the deviance is 4.5% higher.
+        must match that one: both form ``eta`` then add 1, and both start from
+        the same mean, 1.5, so they agree to a few roundings. Mutation: held
+        to ``eta > 0`` (as ec377777 did), every mean is pinned above 1, the
+        deviance is 4.1% higher and the means differ by up to 74%.
         """
         from superglm.distributions import Poisson
-        from superglm.features.numeric import Numeric
         from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
         from superglm.solvers.irls_state import link_domain_violation
 
         class ShiftedIdentity(IdentityLink):
@@ -1462,16 +1463,25 @@ class TestDirectSolverBasic:
         assert not outside(np.array([-0.5]), np.ones(1))
         assert outside(np.array([-1.0]), np.ones(1))
 
-        x = np.linspace(-1.0, 1.0, 300)
+        n = 300
+        x = np.linspace(-1.0, 1.0, n)
         y = np.random.default_rng(3).poisson(1.5 + x).astype(float)
-        X = pd.DataFrame({"x": x})
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
         fits = []
-        for link, offset in ((ShiftedIdentity(), None), ("identity", np.ones_like(x))):
-            model = SuperGLM(
-                family="poisson", link=link, features={"x": Numeric()}, selection_penalty=0
+        for link, shift in ((ShiftedIdentity(), 0.0), (IdentityLink(), 1.0)):
+            result, _ = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=np.ones(n),
+                family=Poisson(),
+                link=link,
+                groups=[GroupSlice(name="x", start=0, end=1)],
+                lambda2=0.0,
+                offset=np.full(n, shift),
+                intercept_init=0.5,
+                weight_semantics="frequency",
             )
-            model.fit(X, y, offset=offset)
-            fits.append(model.predict(X, offset=offset))
+            fits.append(link.inverse(result.intercept + x * result.beta[0] + shift))
         assert np.min(fits[0]) < 1.0
         np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
 

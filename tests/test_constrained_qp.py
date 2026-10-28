@@ -2781,3 +2781,27 @@ class TestDegenerateVertexRetry:
         result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("touched", [False, True], ids=["free", "row"])
+    @pytest.mark.parametrize("force", [1e-308, -1e-308, 1e-310, 1e-200, 2.0**-1074])
+    def test_the_weighted_certificate_stays_finite_across_the_exponent_range(self, force, touched):
+        """The safeguarded solve beside a coefficient whose only action is ``force``.
+
+        Seed 1's vertex plus a coefficient with ``H = 1``, force ``g`` and
+        either no row or ``x >= 0``. Its own action, divided into a weight,
+        overflows below about 1e-308; zero constraint entries times that
+        weight made NaN, and the SVD failed. Mutation: without the
+        ``sqrt(TINY)`` floor (17b69145), +-1e-308 and 1e-310 raise
+        ``LinAlgError``; the ordinary solve certifies all ten in 9 to 11
+        iterations.
+        """
+        H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=1)
+        p, m = H0.shape[0], A0.shape[0]
+        H, A = np.zeros((p + 1, p + 1)), np.zeros((m + int(touched), p + 1))
+        H[:p, :p], H[p, p], A[:m, :p] = H0, 1.0, A0
+        if touched:
+            A[m, p] = 1.0
+        g, b = np.append(g0, force), np.zeros(A.shape[0])
+        result = solve_constrained_qp(H, g, A, b, _degeneracy_safeguards=True)
+        assert result.converged
+        self._assert_agrees_with_dual_oracle(H, g, A, b, result)

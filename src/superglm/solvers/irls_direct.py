@@ -81,6 +81,7 @@ from superglm.solvers.centered_system import (
 from superglm.solvers.constrained_qp import (
     QPResult,
     _feasibility_slack,
+    _homogeneous_feasible_start,
     _is_feasible,
     solve_constrained_qp,
 )
@@ -3843,6 +3844,29 @@ def _fit_irls_direct_once(
                 profile["irls_halvings_skipped"] = (
                     profile.get("irls_halvings_skipped", 0) + decision.skipped
                 )
+            if (
+                has_constraints
+                and decision.step_rejected
+                and not committed_constraints_feasible
+                and not (proposal_constraints_feasible and _state_is_finite(proposal))
+            ):
+                # The QP formed at an infeasible start gave no feasible
+                # proposal: the fit restarts from the phase-one point, where
+                # each violated block sits at its feasible zero.
+                feasible_beta = _homogeneous_feasible_start(
+                    committed.beta, A_all, b_all, _QP_FEASIBILITY_TOL
+                )
+                if feasible_beta is not None:
+                    proposal = evaluate_state(
+                        feasible_beta,
+                        committed.intercept,
+                        phase="proposal",
+                        iteration=it + 1,
+                        alpha=1.0,
+                    )
+                    trial_cache[1.0] = proposal
+                    proposal_qp_converged = False
+                    proposal_constraints_feasible = True
             if (
                 has_constraints
                 and decision.step_rejected

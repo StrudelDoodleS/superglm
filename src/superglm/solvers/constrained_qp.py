@@ -30,7 +30,7 @@ from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS as _EPS
-from superglm._roundoff import UNIT_ROUNDOFF, gamma
+from superglm._roundoff import TINY, UNIT_ROUNDOFF, gamma
 from superglm.solvers.rank import (
     RankDecomposition,
     _symmetric_part,
@@ -47,6 +47,9 @@ from superglm.solvers.rank import (
 # structural floor below carries its own literal rather than deriving from
 # this one.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
+
+# The smallest action the coordinate-weighted certificate divides by.
+_SQRT_TINY = TINY**0.5
 
 # Dimension term for the spectral floor.  The retained-condition term above
 # models error amplification, but ``eigh``'s own backward error grows with the
@@ -459,8 +462,11 @@ def _stationarity_certificate(
             # A positive diagonal weighting cannot change the rank, but it
             # can push a genuine singular value under a cutoff relative to
             # the largest weighted one: the rank is decided unweighted.
+            # Weights stay at most 1 / sqrt(TINY), so the weighted rows and
+            # any product of two of them are finite (the square-root safe
+            # range of LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
             own = np.maximum(h_action, g_action)
-            weight = 1.0 / np.where(own > 0.0, own, 1.0)
+            weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
             rank = np.linalg.matrix_rank(rows.T)
             u, s, vt = np.linalg.svd(rows.T * weight[:, None], full_matrices=False)
             inverse_action = (vt[:rank].T / s[:rank]) @ (u[:, :rank].T * weight)
@@ -797,6 +803,29 @@ def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
         if block_cols.size:
             blocks.append((block_cols, frozenset(np.flatnonzero(labels[:m] == label).tolist())))
     return blocks
+
+
+def _homogeneous_feasible_start(
+    beta: NDArray, A: NDArray, b: NDArray, tol: float
+) -> NDArray | None:
+    """Phase one for homogeneous rows: each block that violates its rows restarts at zero.
+
+    A primal active-set method needs a feasible start (Nocedal and Wright,
+    *Numerical Optimization*, 2nd ed., 2006, section 16.5), found in general
+    by a phase-one LP. A block whose rows all have ``b == 0`` is a cone, and
+    its apex ``beta[block] = 0`` is feasible, so no LP is needed. Blocks that
+    satisfy their rows keep their coefficients. ``None`` when a violated
+    block has a row with ``b != 0``.
+    """
+    beta = beta.copy()
+    for block_cols, block_rows in _constraint_blocks(A):
+        rows = sorted(block_rows)
+        if _is_feasible(A[rows], beta, b[rows], tol):
+            continue
+        if np.any(b[rows] != 0.0):
+            return None
+        beta[block_cols] = 0.0
+    return beta
 
 
 def _raises_working_rank(
