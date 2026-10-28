@@ -519,7 +519,13 @@ def simultaneous_bands(
         se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
         f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
     else:
-        L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
+        try:
+            L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
+        except np.linalg.LinAlgError:
+            # A covariance on a constrained fit's active face is singular by
+            # construction; simulate from its positive-semidefinite root.
+            values, vectors = np.linalg.eigh(Cov_g)
+            L = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
         beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
         f_sim = beta_sim @ M.T
 

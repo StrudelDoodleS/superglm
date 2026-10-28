@@ -139,8 +139,9 @@ model = SuperGLM(
 model.fit_reml(df, y)
 ```
 
-This works with both exact and `discrete=True` fitting paths and is the
-preferred solver-backed shape story for P-splines.
+This works with both exact and `discrete=True` fitting paths. Choose it when
+you want smoothing parameters estimated under the constraint (see REML
+Semantics).
 
 ## REML Semantics
 
@@ -299,7 +300,9 @@ original estimate was produced (Chernozhukov, Fernández-Val and Galichon,
 rearrangement", *Biometrika* 96(3):559–575, 2009, Proposition 1).
 
 If you need a test or an interval for a shape-constrained term, fit the
-constraint — `Constraint.fit.*` — rather than repairing after the fact.
+constraint — `Constraint.fit.*` — rather than repairing after the fact. On the
+QP engine that interval is conditional on the rows that bind (see QP-Backed
+Shape Fits).
 
 ### Constraints on an `OrderedCategorical` bind on the whole level axis
 
