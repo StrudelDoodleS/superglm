@@ -1348,9 +1348,9 @@ def test_an_increasing_term_held_flat_by_an_inverse_link_returns_a_certified_mod
 
 
 @pytest.mark.parametrize("kind", ["bs", "ps"])
-@pytest.mark.parametrize(("seed", "certain"), [(1, True), (7, False)])
+@pytest.mark.parametrize(("seed", "certain", "raised"), [(1, True, False), (7, False, True)])
 def test_an_identity_link_poisson_shape_fit_keeps_every_mean_positive(
-    kind: str, seed: int, certain: bool
+    kind: str, seed: int, certain: bool, raised: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Poisson/identity: every state holds ``mu = eta > 0``, so the QP's weights exist.
 
@@ -1360,13 +1360,27 @@ def test_an_identity_link_poisson_shape_fit_keeps_every_mean_positive(
     link's domain both seeds raise that ``ValueError``. Seed 7's terminal
     refit starts outside the shape set, and its first QP solution leaves the
     mean space; that solution's intercept is raised into it, as a start's
-    is. Mutation: accepted as it stands, it carries the weights into the next
-    QP, which raises the same error. A search that stops short is disclosed,
-    never refused.
+    is (that raise is the only caller passing a zero intercept, and the test
+    checks it ran). Mutation: accepted as it stands, it carries the weights
+    into the next QP, which raises the same error. A search that stops short
+    is disclosed, never refused. Every published mean is positive up to the
+    rounding of forming ``eta``.
     """
+    from superglm._roundoff import gamma
     from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.solvers import irls_direct
     from superglm.solvers.mode_score import linear_predictor
 
+    raises = []
+    interior = irls_direct.interior_start_intercept
+
+    def recorded(family, link, eta, weights, intercept, level):
+        moved = interior(family, link, eta, weights, intercept, level=level)
+        if intercept == 0.0 and moved > 0.0:
+            raises.append(moved)
+        return moved
+
+    monkeypatch.setattr(irls_direct, "interior_start_intercept", recorded)
     frame, y = _restricted_link_book("identity", seed=seed)
     model = _restricted_link_model("poisson", "identity", kind)
     with warnings.catch_warnings(record=True) as caught:
@@ -1376,5 +1390,11 @@ def test_an_identity_link_poisson_shape_fit_keeps_every_mean_positive(
     converged = model.reml_diagnostics()["converged"]
     warned = any(issubclass(item.category, ConvergenceWarning) for item in caught)
     assert converged if certain else (converged or warned)
-    assert np.all(linear_predictor(model._dm, model.result, None) > 0.0)
+    assert raises or not raised, "the fixture no longer reaches the raise"
+    result = model.result
+    reach = abs(result.intercept) + np.abs(model._dm.toarray()) @ np.abs(result.beta)
+    if result.centred_intercept is not None:
+        reach += abs(result.centred_intercept) + np.abs(result.state_center) @ np.abs(result.beta)
+    eta = linear_predictor(model._dm, result, None)
+    assert np.all(eta >= -gamma(4) * reach), float(np.min(eta))
     _assert_shape_certified(model, "x1")

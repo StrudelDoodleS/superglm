@@ -1438,6 +1438,43 @@ class TestDirectSolverBasic:
             assert link_domain_violation(IdentityLink(), family) is None
         assert link_domain_violation(IdentityLink()) is None
 
+    def test_an_identity_subclass_keeps_the_domain_of_its_own_inverse(self):
+        """The domain is ``inverse(eta) > 0``, not ``eta > 0``, for a link that shifts it.
+
+        ``mu = eta + 1`` is the identity link with an offset of 1, so the fit
+        must match that one: both evaluate ``eta`` then add 1, and start from
+        the same ``eta``, so they agree to a few roundings. Mutation: held to ``eta > 0`` (as ec377777 did),
+        every mean is pinned above 1 and the deviance is 4.5% higher.
+        """
+        from superglm.distributions import Poisson
+        from superglm.features.numeric import Numeric
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_state import link_domain_violation
+
+        class ShiftedIdentity(IdentityLink):
+            def link(self, mu):
+                return mu - 1.0
+
+            def inverse(self, eta):
+                return eta + 1.0
+
+        outside = link_domain_violation(ShiftedIdentity(), Poisson())
+        assert not outside(np.array([-0.5]), np.ones(1))
+        assert outside(np.array([-1.0]), np.ones(1))
+
+        x = np.linspace(-1.0, 1.0, 300)
+        y = np.random.default_rng(3).poisson(1.5 + x).astype(float)
+        X = pd.DataFrame({"x": x})
+        fits = []
+        for link, offset in ((ShiftedIdentity(), None), ("identity", np.ones_like(x))):
+            model = SuperGLM(
+                family="poisson", link=link, features={"x": Numeric()}, selection_penalty=0
+            )
+            model.fit(X, y, offset=offset)
+            fits.append(model.predict(X, offset=offset))
+        assert np.min(fits[0]) < 1.0
+        np.testing.assert_allclose(fits[0], fits[1], rtol=1e-12)
+
     def test_identity_link_poisson_line_search_keeps_every_mean_positive(self):
         """A Poisson/identity step that would carry a row to ``mu = eta <= 0`` is halved.
 

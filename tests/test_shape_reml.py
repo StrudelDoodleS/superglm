@@ -461,6 +461,7 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     ("spline_cls", "rel"),
     [
         pytest.param(BSplineSmooth, 1e-12, id="qp-engine"),
+        pytest.param(PSpline, 1e-12, id="ps-qp-engine"),
         pytest.param(partial(PSpline, shape_engine="scop"), 1e-3, id="scop-engine"),
     ],
 )
@@ -478,7 +479,7 @@ def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
     The two engines earn different bars, and the difference is structural rather
     than a tolerance chosen for comfort:
 
-    * QP reaches the free fit **exactly**. Its automatic-lambda path is an
+    * QP, a ``bs`` term or a default ``PSpline``, reaches the free fit **exactly**. Its automatic-lambda path is an
       unconstrained REML pass followed by a constrained refit, so a slack
       constraint makes the refit a no-op: measured ``0`` on the variance
       component and ``2.1e-16`` on the deviance across five seeds, i.e. pure

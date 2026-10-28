@@ -19,6 +19,7 @@ import pytest
 from superglm import Constraint, PSpline, Spline, SuperGLM, _roundoff, families
 from superglm.features._spline_build import shape_engine
 from superglm.features.spline import BSplineSmooth
+from superglm.model.reml_execute import STEP_REML_TOL_DEFAULT
 from superglm.solvers import irls_direct
 
 from .test_saved_fs_models import assert_predicts_as_saved
@@ -109,7 +110,9 @@ def test_ps_default_engine_is_qp() -> None:
 # Master 973ca2cd's SCOP fit of ``_book("poisson")`` (``fit_reml``): deviance,
 # EDF, and the prediction at x = 0.5, 2.75, 5, 7.25, 9.5. They agree between
 # AVX-512 and Haswell kernels to 3e-15 relative; the same fit on the QP is
-# 4e-3 away in deviance. Agreement to 1e-9 is therefore master's SCOP fit.
+# 4e-3 away in deviance. Agreement to the SCOP engine's stopping tolerance
+# (``STEP_REML_TOL_DEFAULT``, 1e-6) is therefore master's SCOP fit; another
+# kernel may stop a step earlier or later inside it.
 MASTER_SCOP = (
     787.1287586104952,
     4.449902735241759,
@@ -138,9 +141,9 @@ def test_ps_scop_opt_in(declare: str) -> None:
     assert model._specs["x"]._scop_Sigma is not None
     deviance, edf, prediction = MASTER_SCOP
     grid = pd.DataFrame({"x": np.linspace(0.5, 9.5, 5)})
-    np.testing.assert_allclose(model.result.deviance, deviance, rtol=1e-9)
-    np.testing.assert_allclose(model.result.effective_df, edf, rtol=1e-9)
-    np.testing.assert_allclose(model.predict(grid), prediction, rtol=1e-9)
+    np.testing.assert_allclose(model.result.deviance, deviance, rtol=STEP_REML_TOL_DEFAULT)
+    np.testing.assert_allclose(model.result.effective_df, edf, rtol=STEP_REML_TOL_DEFAULT)
+    np.testing.assert_allclose(model.predict(grid), prediction, rtol=STEP_REML_TOL_DEFAULT)
 
 
 def test_shape_engine_scop_needs_a_p_spline() -> None:
@@ -206,24 +209,24 @@ def test_ps_qp_matches_bs_qp_rows(kind: str) -> None:
     np.testing.assert_array_equal(ps_info.constraints.A, bs_info.constraints.A)
 
 
-def test_warm_qp_takes_one_step_per_changed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each IRLS step's QP starts from the last active set.
+def test_each_irls_qp_starts_from_an_earlier_active_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each IRLS step's QP is handed an active set an earlier solve returned.
 
-    An active-set solve takes one step per row entering or leaving its working
-    set, one on the set it starts from, and one that certifies it. Warm, that is
-    the change from the previous solve plus two; cold, every active row enters
-    again. Fails when every QP starts cold.
+    The last solve's set, or the committed state's after a rejected step. The
+    test reads what each solve receives, not the steps it takes, which depend on
+    the trajectory and on any cold retry. Fails when every QP starts cold.
     """
     calls = []
-    solve = irls_direct.solve_constrained_qp
+    solve = irls_direct._solve_constrained_qp_with_cold_retry
 
-    def counted(*args, **kwargs):
-        result = solve(*args, **kwargs)
-        calls.append((set(result.active_set), result.n_iter))
+    def recorded(H, g, A, b, active_set_init, **kwargs):
+        result = solve(H, g, A, b, active_set_init, **kwargs)
+        calls.append((active_set_init, list(result.active_set)))
         return result
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", counted)
+    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", recorded)
     _fit("poisson", PSpline(n_knots=10, constraint=Constraint.fit.increasing), method="fit")
-    assert len(calls) >= 2 and len(calls[0][0]) >= 3
-    for (before, _), (after, steps) in zip(calls, calls[1:], strict=False):
-        assert steps <= len(before ^ after) + 2, (sorted(before), sorted(after), steps)
+    assert len(calls) >= 2 and len(calls[0][1]) >= 3 and calls[0][0] is None
+    for index, (handed, _) in enumerate(calls[1:], start=1):
+        assert handed is not None
+        assert any(list(handed) == returned for _, returned in calls[:index]), index

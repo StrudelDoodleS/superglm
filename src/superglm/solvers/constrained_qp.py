@@ -456,12 +456,16 @@ def _stationarity_certificate(
     arithmetic = _roundoff_tolerance(len(beta) + len(rows))
     if len(rows):
         if coordinate_weighted:
+            # A positive diagonal weighting cannot change the rank, but it
+            # can push a genuine singular value under a cutoff relative to
+            # the largest weighted one: the rank is decided unweighted.
             own = np.maximum(h_action, g_action)
             weight = 1.0 / np.where(own > 0.0, own, 1.0)
-            system, target = rows.T * weight[:, None], np.diag(weight)
+            rank = np.linalg.matrix_rank(rows.T)
+            u, s, vt = np.linalg.svd(rows.T * weight[:, None], full_matrices=False)
+            inverse_action = (vt[:rank].T / s[:rank]) @ (u[:, :rank].T * weight)
         else:
-            system, target = rows.T, np.eye(len(beta))
-        inverse_action = np.linalg.lstsq(system, target, rcond=None)[0]
+            inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
         multipliers = inverse_action @ residual
         dual_action = np.abs(rows.T) @ np.abs(multipliers)
         score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
