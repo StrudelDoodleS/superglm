@@ -1,6 +1,7 @@
 """Final-state feasibility regressions for hard fit-time constraints."""
 
 import logging
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -1274,3 +1275,106 @@ def test_capped_reml_with_a_flat_monotone_term_at_zero_returns_a_certified_mode(
     for group in constrained:
         A, b = group.constraints.A, group.constraints.b
         assert _is_feasible(A, model.result.beta[group.sl], b, 1e-12)
+
+
+def _restricted_link_book(link: str, seed: int, n: int = 400) -> tuple[pd.DataFrame, np.ndarray]:
+    """A log-scale trend increasing in ``x1``, a wave in ``x2`` and a six-level factor.
+
+    Under the inverse link an increasing mean is a decreasing linear
+    predictor, so an ``increasing`` term in ``x1`` is held flat, at a
+    smoothing parameter near 1e7. Under the identity link, Poisson rows
+    without events pull an unconstrained fit's means through zero.
+    """
+    rng = np.random.default_rng(seed)
+    x1, x2 = rng.uniform(0.0, 10.0, n), rng.uniform(-2.0, 2.0, n)
+    levels = np.array(list("abcdef"))
+    c1 = rng.choice(levels, n)
+    effect = dict(zip(levels, [0.0, 0.2, -0.15, 0.3, -0.1, 0.25], strict=True))
+    eta = 0.06 * x1 + 0.3 * np.sin(1.3 * x2) + pd.Series(c1).map(effect).to_numpy()
+    eta -= eta.mean()
+    if link == "inverse":
+        y = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
+    else:
+        y = rng.poisson(np.exp(eta)).astype(float)
+    return pd.DataFrame({"x1": x1, "x2": x2, "c1": c1}), y
+
+
+def _restricted_link_model(family: str, link: str, kind: str) -> SuperGLM:
+    from superglm import PSpline
+
+    increasing = Constraint.fit.increasing
+    term = (
+        Spline(kind="bs", k=8, constraint=increasing)
+        if kind == "bs"
+        else PSpline(n_knots=8, constraint=increasing)
+    )
+    return SuperGLM(
+        family=family,
+        link=link,
+        features={"x1": term, "x2": Spline(kind="cr", k=8), "c1": Categorical()},
+    )
+
+
+def _assert_shape_certified(model: SuperGLM, name: str) -> None:
+    from superglm.constraints import shape_constraint_is_roundoff_feasible
+
+    spec = model._specs[name]
+    group = next(group for group in model._groups if group.feature_name == name)
+    assert group.monotone_engine == "qp"
+    beta = model.result.beta[group.start : group.end]
+    assert shape_constraint_is_roundoff_feasible(spec, beta, spec.constraint_kind)
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+def test_an_increasing_term_held_flat_by_an_inverse_link_returns_a_certified_mode(
+    kind: str,
+) -> None:
+    """Gamma/inverse: the passthrough's terminal QP at a flat term certifies.
+
+    The term sits at its zero face, or on a ray of it near 1e-6, in
+    coordinates scaled by its smoothing parameter; its QP certifies only on
+    the retry, whose multipliers are fitted in the certificate's units.
+    Mutation: fitted unweighted, as before, the terminal refit raises
+    ``ObservedModeNotConvergedError`` ("ended at an infeasible coefficient
+    mode").
+    """
+    frame, y = _restricted_link_book("inverse", seed=0)
+    model = _restricted_link_model("gamma", "inverse", kind)
+    model.fit_reml(frame, y)
+
+    assert model.reml_diagnostics()["converged"]
+    assert model._reml_result.terminal_refit_termination is None
+    _assert_shape_certified(model, "x1")
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+@pytest.mark.parametrize(("seed", "certain"), [(1, True), (7, False)])
+def test_an_identity_link_poisson_shape_fit_keeps_every_mean_positive(
+    kind: str, seed: int, certain: bool
+) -> None:
+    """Poisson/identity: every state holds ``mu = eta > 0``, so the QP's weights exist.
+
+    ``clip_mu`` floored a crossed row at ``mu = 1e-50``, whose Fisher weight
+    ``1 / mu`` is ``1e50``; the terminal QP's ``H`` then read as rank 6 of 19
+    with its gradient in the null space. Mutation: without the identity
+    link's domain both seeds raise that ``ValueError``. Seed 7's terminal
+    refit starts outside the shape set, and its first QP solution leaves the
+    mean space; that solution's intercept is raised into it, as a start's
+    is. Mutation: accepted as it stands, it carries the weights into the next
+    QP, which raises the same error. A search that stops short is disclosed,
+    never refused.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.solvers.mode_score import linear_predictor
+
+    frame, y = _restricted_link_book("identity", seed=seed)
+    model = _restricted_link_model("poisson", "identity", kind)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+
+    converged = model.reml_diagnostics()["converged"]
+    warned = any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    assert converged if certain else (converged or warned)
+    assert np.all(linear_predictor(model._dm, model.result, None) > 0.0)
+    _assert_shape_certified(model, "x1")

@@ -410,7 +410,13 @@ def _scaled_constraint_step(
 
 
 def _stationarity_certificate(
-    H: NDArray, g: NDArray, beta: NDArray, active_matrix: NDArray, tol: float
+    H: NDArray,
+    g: NDArray,
+    beta: NDArray,
+    active_matrix: NDArray,
+    tol: float,
+    *,
+    coordinate_weighted: bool = False,
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -420,6 +426,14 @@ def _stationarity_certificate(
     uncertainty. A multiplier below that allowance releases its constraint.
     The clipped, nonnegative multipliers must then reproduce stationarity;
     an uncertain sign alone never supplies a success certificate.
+
+    The test is per coefficient, against that coefficient's own actions, but
+    an ordinary least-squares multiplier fit leaves a residual of rounding
+    size relative to the largest coefficient. ``coordinate_weighted`` fits
+    the multipliers in the test's own units instead, each coefficient's
+    equation divided by ``max(|H||beta|, |g|)`` there. That matters where the
+    active rows touch coefficients orders of magnitude apart: a shape term
+    at a very large smoothing parameter, in coordinates scaled by it.
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
     products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
@@ -441,7 +455,13 @@ def _stationarity_certificate(
     )
     arithmetic = _roundoff_tolerance(len(beta) + len(rows))
     if len(rows):
-        inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
+        if coordinate_weighted:
+            own = np.maximum(h_action, g_action)
+            weight = 1.0 / np.where(own > 0.0, own, 1.0)
+            system, target = rows.T * weight[:, None], np.diag(weight)
+        else:
+            system, target = rows.T, np.eye(len(beta))
+        inverse_action = np.linalg.lstsq(system, target, rcond=None)[0]
         multipliers = inverse_action @ residual
         dual_action = np.abs(rows.T) @ np.abs(multipliers)
         score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
@@ -476,6 +496,8 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
+    *,
+    coordinate_weighted: bool = False,
 ) -> bool:
     """Whether ``beta`` passes the complete KKT certificate on ``active`` as it stands.
 
@@ -486,7 +508,9 @@ def _certifies_kkt_point(
     """
     if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False
-    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
+    stationary, drop_idx, multipliers = _stationarity_certificate(
+        H, g, beta, A[active], tol, coordinate_weighted=coordinate_weighted
+    )
     if not stationary or drop_idx is not None:
         return False
     return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol)
@@ -960,8 +984,10 @@ def solve_constrained_qp(
     blocking row that is linearly dependent on the working rows (see
     _raises_working_rank). It also constructs the exact zero point of each
     block whose homogeneous working rows have full column rank, as the
-    n_eq >= p branch does for the whole vector. Neither change alters the
-    certificate. Callers use it as a retry, so default solves stay unchanged.
+    n_eq >= p branch does for the whole vector. It also fits the
+    certificate's multipliers in the certificate's own units (see
+    _stationarity_certificate); the test itself is unchanged. Callers use it
+    as a retry, so default solves stay unchanged.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -1290,7 +1316,9 @@ def solve_constrained_qp(
             at_face_minimum
             and not small_step
             and not kkt_may_be_singular
-            and _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+            and _certifies_kkt_point(
+                H_sym, g, beta, A, b, active, tol, abs_A, coordinate_weighted=_degeneracy_safeguards
+            )
         ):
             # The complete certificate, so a pass means the same here as at a
             # small step; a failure changes nothing and the loop steps on.
@@ -1298,7 +1326,7 @@ def solve_constrained_qp(
         at_face_minimum = False
         if small_step:
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol
+                H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
@@ -1310,7 +1338,7 @@ def solve_constrained_qp(
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol
+                    H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)

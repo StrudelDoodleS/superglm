@@ -308,9 +308,10 @@ def _solve_constrained_qp_with_cold_retry(
     solve followed by a failed cold one. It also covers a single failed cold
     solve, made when ``active_set_init`` is ``None`` or empty. The
     safeguards are for a flat monotone term at zero with more active rows
-    than coefficients. The safeguarded result replaces the first one only if
-    it passes the same complete certificate, so a solve that certifies
-    without it is unchanged.
+    than coefficients, and for a term whose coefficients are orders of
+    magnitude below the rest. The safeguarded result replaces the first one
+    only if it passes the same complete certificate, so a solve that
+    certifies without it is unchanged.
 
     ``degeneracy_retry=False`` skips that attempt. ``fit_irls_direct`` passes
     it while the previous solve in the fit was uncertified and re-arms it
@@ -1417,13 +1418,14 @@ def _fit_irls_direct_once(
     # (binomial/log; a start raised into an inverse link's domain is not).
     _start_lowered = False
     if intercept_init is None and (
-        mean_space_violation(family, link) is not None or link_domain_violation(link) is not None
+        mean_space_violation(family, link) is not None
+        or link_domain_violation(link, family) is not None
     ):
         # The domain guards below keep every accepted state inside the mean
         # space and the link's domain only from a start inside them, and the
         # default intercept is chosen before the offset: move it until the
         # start is inside (``irls_state.interior_start_intercept``).  A
-        # caller's warm start is left as it is.
+        # caller's warm start is moved into the link's domain below.
         start_intercept = interior_start_intercept(
             family,
             link,
@@ -1436,6 +1438,24 @@ def _fit_irls_direct_once(
             intercept = start_intercept
             _deviance_init = None
             _start_lowered = mean_space_violation(family, link) is not None
+    elif link_domain_violation(link, family) is not None:
+        # A warm start outside the link's domain is raised the same way, to
+        # the default start's level ``g(mean)``. Step halving keeps states
+        # inside only from a start inside (Marschner 2011), and a clipped row
+        # outside carries a Fisher weight no solve can use.
+        start_eta = dm.matvec(beta) + intercept + offset
+        if link_domain_violation(link, family)(start_eta, weights):
+            intercept = interior_start_intercept(
+                family,
+                link,
+                start_eta,
+                weights,
+                intercept,
+                level=coefficient_initial_intercept(
+                    distribution=family, link=link, y=y, sample_weight=weights
+                ),
+            )
+            _deviance_init = None
 
     # Dense paths retain the existing p x p penalty oracle. Structured paths
     # add each penalty directly to A or d, unless a caller already supplied a
@@ -2755,7 +2775,7 @@ def _fit_irls_direct_once(
     # by the family and link, ``irls_state.mean_space_violation``).
     _mean_space_invalid = mean_space_violation(family, link)
     # The link inverse's own domain (``irls_state.link_domain_violation``).
-    _link_domain_invalid = link_domain_violation(link)
+    _link_domain_invalid = link_domain_violation(link, family)
     # A warm start's centred state carried to this fit's centre (one-engine
     # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
     # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -3835,6 +3855,38 @@ def _fit_irls_direct_once(
                 # this proposal is committed, convexity of A beta >= b and the
                 # invalid-state predicate above preserve feasibility on every
                 # subsequent accepted line-search segment.
+                if _link_domain_invalid is not None and _link_domain_invalid(
+                    proposal.eta_unclipped, weights
+                ):
+                    # Outside the link's domain the proposal is no state of
+                    # the model. No constraint row holds the intercept, so it
+                    # is raised as a start is; the state is then not the QP's
+                    # solution.
+                    raise_by = interior_start_intercept(
+                        family,
+                        link,
+                        proposal.eta_unclipped,
+                        weights,
+                        0.0,
+                        level=coefficient_initial_intercept(
+                            distribution=family, link=link, y=y, sample_weight=weights
+                        ),
+                    )
+                    proposal = evaluate_state(
+                        proposal.beta,
+                        proposal.intercept + raise_by,
+                        phase="proposal",
+                        iteration=it + 1,
+                        alpha=1.0,
+                        eta_unclipped=proposal.eta_unclipped + raise_by,
+                        centred_intercept=(
+                            None
+                            if proposal.centred_intercept is None
+                            else proposal.centred_intercept + raise_by
+                        ),
+                    )
+                    trial_cache[1.0] = proposal
+                    proposal_qp_converged = False
                 decision = _IRLSStepDecision(
                     alpha=1.0,
                     step_halvings=0,

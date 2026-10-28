@@ -2527,6 +2527,7 @@ class TestFaceMinimumAboveTheStepGate:
 
 
 _ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
+_SCALED_BLOCK_QPS = Path(__file__).parent / "fixtures" / "shape_block_scaled_terminal_qp.json"
 
 
 class TestDegenerateVertexRetry:
@@ -2712,6 +2713,25 @@ class TestDegenerateVertexRetry:
         doc = json.loads(_ISSUE_472_QP.read_text())
         H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
         A = np.asarray(A, order=order)
+        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        assert result.converged
+        self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("face", ["ray", "vertex"])
+    def test_a_shape_term_far_below_the_rest_is_certified_by_the_retry(self, face):
+        """A shape term at a smoothing parameter near 1e7 has a terminal QP the retry certifies.
+
+        In its penalty-scaled coordinates the term's columns of ``A`` are
+        about 1e-4 against 0.4 for its unpenalized direction (provenance in
+        the fixture). The stationarity test is per coefficient, against that
+        coefficient's own actions, and a least-squares multiplier fit leaves a
+        residual of rounding size against the largest. Mutation: with the
+        retry's multipliers fitted unweighted, as before, both exhaust 200
+        iterations uncertified, and the fits they came from raised
+        ``ObservedModeNotConvergedError``.
+        """
+        doc = json.loads(_SCALED_BLOCK_QPS.read_text())[face]
+        H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
         result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
