@@ -518,3 +518,41 @@ def test_debug_trace_summarises_the_presolve_before_the_reml_events(tmp_path: Pa
         if event["channel"] == "reml" and event["event_kind"] == "evaluation"
     )
     assert summaries[0]["sequence"] < first_reml_evaluation
+
+
+def test_debug_trace_records_a_stop_on_rounding(tmp_path: Path, monkeypatch):
+    """A pre-solved fit that stops on a decrease within rounding discards the
+    trial its line-search event shows as accepted.  One step_decision event,
+    purpose reml_rounding_stall, records that, after that evaluation, with
+    the decrease and the rounding bound the profile reports (mutation check:
+    without the emit the stream has none).  The stop is forced as in
+    test_a_stop_on_rounding_publishes_the_candidate."""
+    import superglm.reml.direct as direct_module
+    from superglm._debug import set_debug_level
+    from superglm.model.reml_debug import load_reml_debug_run
+    from tests.test_reml import TestExactPresolve
+
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    TestExactPresolve._count_every_decrease_as_rounding(monkeypatch)
+    monkeypatch.setattr(
+        direct_module,
+        "classify_dead_feasible_exit",
+        lambda *args, **kw: "converged_at_precision",
+    )
+    info = TestExactPresolve._fit_stall_gamma(monkeypatch)
+
+    run_file = next(tmp_path.glob("*run.json"))
+    run = load_reml_debug_run(tmp_path, run_file.name.removesuffix("_run.json"))
+    stalls = [event for event in run.events if event["purpose"] == "reml_rounding_stall"]
+    assert len(stalls) == 1
+    payload = stalls[0]["payload"]
+    dead = info["profile"]["reml_dead_line_search"]
+    assert payload["unresolved_decrease"] == dead["unresolved_decrease"] > 0.0
+    assert payload["objective_roundoff"] == dead["objective_roundoff"]
+    accepted = [
+        event["sequence"]
+        for event in run.events
+        if event["purpose"] == "reml_line_search" and event["payload"].get("accepted")
+    ]
+    assert accepted and accepted[-1] < stalls[0]["sequence"]

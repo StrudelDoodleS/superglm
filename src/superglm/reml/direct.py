@@ -21,9 +21,9 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
-from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
-from superglm.links import LogitLink, LogLink
+from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -121,17 +121,39 @@ _PRESOLVE_MIN_ESTIMATED = 8
 # this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
 # would get up to twice the work it budgeted for.
 _PRESOLVE_MIN_REML_ITER = 10
-# It also runs only where it was measured: Poisson with the log link, with
-# no RandomEffect or FactorSmooth term the structured solvers could take.
-# Elsewhere it would choose its start on curvature the exact loop does not
-# use (observed-curvature families), carry a boundary coefficient into the
-# exact fit without the mean-space restoration (binomial with the log link),
-# take a backend route whose parity with the dense one is untested past a few
-# smoothing parameters, or rest on an unmeasured cost: binomial with the logit
-# link takes its own leverage-gradient route, and a constant-weight Gaussian
-# identity fit's cached-W criterion is already the exact one.  Each of those
-# keeps the plain cold start until it is measured.  A Tweedie power
-# search turns it off itself: a changed start moves the selected power.
+# It also runs only for the family/link pairs below, with no RandomEffect or
+# FactorSmooth term the structured solvers could take.  On each pair the
+# cached-W working model carries the exact loop's curvature (Fisher on a
+# canonical link; observed rows where ``concave_observed_rows`` declares them,
+# #500), and on freMTPL2 with four interaction pairs (27 smoothing parameters)
+# it pays.  Single-threaded seconds, cold start / pre-solve, and the published
+# objective's excess over a certified reference optimum: Tweedie/log 95 / 58,
+# 0.052 / 0.018; Gamma/log 14 / 11, 0.010 / 0.004; binomial logit 207 / 127,
+# 0.041 / 0.018; probit 108 / 66, 0.056 / 0.028; cloglog 137 / 70, 0.049 /
+# 0.023; NB2/log (theta 1) 141 / 74, 0.055 / 0.024; Poisson/log, pre-solved
+# before this first-step rule, 46 / 37, 0.049 / 0.021.  Elsewhere it chooses
+# its start on curvature the exact loop does not use (a Fisher working model
+# beside observed curvature), carries a boundary coefficient into the exact
+# fit without the mean-space restoration (binomial with the log link), takes a
+# backend route whose parity with the dense one is untested past a few
+# smoothing parameters, or does not pay: a constant-weight Gaussian identity
+# fit's cached-W criterion is already the exact one (6 s cold, 9 s
+# pre-solved), and Gamma with the inverse link measured 13 s against 16 s.
+# The pairs are exact types, so a Tweedie power search, whose link stays fixed
+# while its power moves through a canonical point of a power link, keeps one
+# route; its candidates, and an estimated-theta NB2 alternation's fits, keep
+# the plain cold start in any case (``model.reml_ops``).
+_PRESOLVE_PAIRS = frozenset(
+    {
+        (Poisson, LogLink),
+        (Binomial, LogitLink),
+        (Binomial, ProbitLink),
+        (Binomial, CloglogLink),
+        (Gamma, LogLink),
+        (Tweedie, LogLink),
+        (NegativeBinomial, LogLink),
+    }
+)
 # The other first-order fits keep the derivative Grams, and with them the
 # outer Hessian's weight-product term, until those Grams cost real time: one
 # ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
@@ -288,15 +310,18 @@ def optimize_direct_reml(
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
     A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters, Poisson with the log link, no
-    structured-solver term and an iteration cap of at least ``_PRESOLVE_MIN_REML_ITER`` first
-    runs the cached-W performance
+    estimated smoothing parameters, a family/link pair in ``_PRESOLVE_PAIRS``,
+    no structured-solver term and an iteration cap of at least
+    ``_PRESOLVE_MIN_REML_ITER`` first runs the cached-W performance
     iteration (``optimize_discrete_reml_cached_w``) on this same lossless
     design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
     (performance-iteration steps that initialize the outer iteration), taken
-    to the cached-W fixed point.  The exact loop's gradient and stopping test
-    are unchanged.  ``presolve`` overrides the rule for tests only.
+    to the cached-W fixed point.  The exact loop's gradient is unchanged.
+    Its first step holds no direction its curvature can place, and an
+    accepted decrease within the two evaluations' rounding counts as no
+    decrease, so the dead-search certificate decides that stop.
+    ``presolve`` overrides the rule for tests only.
 
     Two algorithm variants depending on ``discrete``:
 
@@ -523,9 +548,7 @@ def optimize_direct_reml(
         presolve = (
             not warm_lambdas
             and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
-            and type(distribution) is Poisson
-            and type(link) is LogLink
-            and not use_observed_geometry
+            and (type(distribution), type(link)) in _PRESOLVE_PAIRS
             and not structured_alternative
             and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
         )
@@ -1091,8 +1114,10 @@ def optimize_direct_reml(
         inverse_phi = 1.0
         inverse_phi_derivative = None
         penalty_nullity: float | None = None
+        obj_roundoff = 0.0
         if isinstance(objective_evaluation, REMLObjectiveEvaluation):
             obj = objective_evaluation.value
+            obj_roundoff = objective_evaluation.roundoff
             penalty_nullity = objective_evaluation.penalty_nullity
             profiled_scale = objective_evaluation.profiled_scale
         else:
@@ -1545,6 +1570,24 @@ def optimize_direct_reml(
         )
         frozen = freeze_decision.frozen
         shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)
+        if outer == 0 and presolve_beta is not None:
+            # The pre-solve's point is the working model's fixed point, which
+            # lacks the dW/drho term (#500), so no direction has yet been shown
+            # flat on the exact criterion: the first exact step is a Newton step
+            # on every direction whose curvature puts a minimum within the step
+            # bound.  Held there, a weakly identified one kept the working
+            # model's placement, its exact gradient under the freeze bar
+            # (measured: a spline-by-brand term at log lambda 9.8 against the
+            # optimum's 8.9, Tweedie/log on freMTPL2).  A direction held at a
+            # bound, or with no minimum in reach, stays held.
+            diagonal = np.diagonal(hess)
+            in_reach = (
+                estimated_mask
+                & (diagonal > 0.0)
+                & (proj_grad != 0.0)
+                & (np.abs(proj_grad) <= max_newton_step * diagonal)
+            )
+            frozen = frozen & ~in_reach
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
@@ -1675,6 +1718,19 @@ def optimize_direct_reml(
                 w_correction_order = 2
                 exact_hessian_available = False
         _t_hessian += _time.perf_counter() - _t0
+        # What the dead-search exit below judges: the active set's gradient and
+        # the decrease its Newton model predicts (half the squared decrement of
+        # the uncapped step, its Hessian unmodified).
+        active_grad_norm = (
+            float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
+        )
+        dead_predicted_decrease = (
+            None
+            if max_delta > max_newton_step or bool(shoulder.any())
+            else newton_predicted_decrease(
+                grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
+            )
+        )
 
         # Step-halving line search with Armijo condition
         _t0 = _time.perf_counter()
@@ -1686,6 +1742,10 @@ def optimize_direct_reml(
         accepted = False
         had_feasible_trial = False
         evaluated_feasible_trial = False
+        # an accepted trial's decrease within the two evaluations' rounding,
+        # and that rounding
+        unresolved_decrease: float | None = None
+        stall_roundoff: float | None = None
         # The synchronous search owns fixed design coordinates and warm state.
         # Its rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
@@ -1944,6 +2004,58 @@ def optimize_direct_reml(
                     purpose="reml_line_search",
                     authoritative=False,
                 )
+            trial_roundoff = (
+                trial_evaluation.roundoff
+                if isinstance(trial_evaluation, REMLObjectiveEvaluation)
+                else 0.0
+            )
+            if (
+                trial_accepted
+                and presolve_beta is not None
+                and obj - trial_obj <= obj_roundoff + trial_roundoff
+                and classify_dead_feasible_exit(
+                    active_grad_norm,
+                    objective=obj,
+                    tolerance=_tol,
+                    evaluated_trial=evaluated_feasible_trial
+                    and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
+                    predicted_decrease=dead_predicted_decrease,
+                )
+                == "converged_at_precision"
+            ):
+                # A decrease within the two evaluations' rounding is no decrease:
+                # the search is as dead as one that rejected every trial, and the
+                # dead-search certificate judges the candidate.  From the
+                # pre-solve's start the loop begins at the working model's
+                # optimum, where accepting it would keep the loop stepping on
+                # rounding while a gradient whose own error exceeds the score bar
+                # keeps the score test from firing (measured: a Gamma/log fit took
+                # 15 more iterations of 10-ulp decreases, its gradient 1.5 times
+                # the bar).  A cold search keeps its path: in the release
+                # differential's corpus 29 of 407 cold exact fits accepted such a
+                # decrease and then gained up to 7.5e-8 more before the score test
+                # ended them.  Where the certificate refuses, the step is taken as
+                # before.
+                unresolved_decrease = float(obj - trial_obj)
+                stall_roundoff = float(obj_roundoff + trial_roundoff)
+                if trace_run is not None and trace_run.enabled:
+                    # The trial's evaluation event above reads accepted; this
+                    # records that the stop discarded it.
+                    trace_run.emit_lazy(
+                        "step_decision",
+                        lambda: {
+                            "solver": "direct_reml",
+                            "phase": "line_search",
+                            "outer_iteration": n_iter,
+                            "line_search_iteration": _ls + 1,
+                            "unresolved_decrease": unresolved_decrease,
+                            "objective_roundoff": stall_roundoff,
+                        },
+                        channel="reml",
+                        purpose="reml_rounding_stall",
+                        authoritative=False,
+                    )
+                break
 
             if trial_accepted:
                 if trial_mode_residual is not None:
@@ -2029,18 +2141,8 @@ def optimize_direct_reml(
             # above its bar but within a decade of it -- #459 measured that
             # decrease at 1.2e-8 against evaluation noise of 4.2e-7, so
             # rounding alone decided whether the full step was accepted.
-            active_grad_norm = (
-                float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
-            )
             dead_evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
                 candidate_mode_stationary, obj
-            )
-            dead_predicted_decrease = (
-                None
-                if max_delta > max_newton_step or bool(shoulder.any())
-                else newton_predicted_decrease(
-                    grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
-                )
             )
             termination_reason = classify_dead_feasible_exit(
                 active_grad_norm,
@@ -2061,6 +2163,12 @@ def optimize_direct_reml(
                     "evaluated_trial": bool(dead_evidence),
                     "candidate_mode_stationary": bool(candidate_mode_stationary),
                     "termination_reason": termination_reason,
+                    # an accepted trial's decrease, within the two evaluations'
+                    # rounding; without one, the candidate's own rounding
+                    "unresolved_decrease": unresolved_decrease,
+                    "objective_roundoff": (
+                        float(obj_roundoff) if stall_roundoff is None else stall_roundoff
+                    ),
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,

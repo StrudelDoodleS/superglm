@@ -65,8 +65,11 @@ def model_optimize_direct_reml(
         debug_recorder=debug_recorder,
         trace_run=trace_run,
         warm_lambdas=warm_lambdas,
-        # A Tweedie power search's candidate fits keep the plain cold start.
-        presolve=False if getattr(model, "_in_power_search", False) else None,
+        # A Tweedie power search's candidate fits, and the fits of an
+        # estimated-theta NB2 alternation, keep the plain cold start.
+        presolve=False
+        if getattr(model, "_in_power_search", False) or getattr(model, "_nb_theta_search", False)
+        else None,
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas

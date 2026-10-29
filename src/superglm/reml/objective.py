@@ -6,12 +6,14 @@ Laplace-approximate restricted maximum likelihood objective
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
 from superglm._tweedie import TweedieRows
 from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
@@ -53,6 +55,29 @@ class REMLObjectiveEvaluation:
     penalty_quad: float
     penalty_nullity: float | None
     penalized_deviance: float
+    # The rounding of forming ``value`` from its summands (``_value_roundoff``).
+    roundoff: float = 0.0
+
+
+def _value_roundoff(n_rows: int, width: int, *summands: float) -> float:
+    """``gamma_k`` times the absolute summands of the objective, ``k = ceil(log2 n) + p + 4``.
+
+    It counts the rounding of forming the objective from its summands.  A
+    pairwise sum over the rows errs by at most ``gamma_ceil(log2 n)`` of its
+    terms' absolute total (Higham 2002, Accuracy and Stability of Numerical
+    Algorithms, sec. 4.2), which is the summand's magnitude where the terms
+    share a sign (deviance rows, a known-scale family's log-probabilities); a
+    log-determinant sums ``p`` pivot logarithms; four additions join the
+    summands.  It is not a bound on the whole evaluation: a profiled scale
+    criterion's rows (Gamma, Tweedie) mix signs, and the factors' backward
+    error (sec. 10.1) moves a log-determinant by an amount set by
+    conditioning, not by its size.  The exact loop's stall rule reads it only
+    beside the dead-search certificate, so a value too small makes the rule
+    fire less often, and one too large cannot stop a fit the certificate does
+    not pass.
+    """
+    k = math.ceil(math.log2(max(int(n_rows), 2))) + int(width) + 4
+    return float(gamma(k) * sum(abs(float(term)) for term in summands))
 
 
 def reml_laml_objective(
@@ -414,12 +439,20 @@ def reml_laml_objective(
             )
             d_plus_pq = max(penalized_deviance, 1e-300)
             scale_term = 0.5 * max(n - M_p, 1.0) * np.log(d_plus_pq)
+        deviance_term = (
+            0.5 * penalized_deviance * profiled_scale.inverse_phi
+            if profiled_scale is not None
+            else 0.0
+        )
         evaluation = REMLObjectiveEvaluation(
             value=float(0.5 * (logdet_m - logdet_s) + scale_term),
             profiled_scale=profiled_scale,
             penalty_quad=penalty_quad,
             penalty_nullity=M_p,
             penalized_deviance=penalized_deviance,
+            roundoff=_value_roundoff(
+                len(y), p, scale_term, deviance_term, 0.5 * logdet_m, 0.5 * logdet_s
+            ),
         )
         return evaluation if return_evaluation else evaluation.value
 
@@ -439,6 +472,9 @@ def reml_laml_objective(
         penalty_quad=penalty_quad,
         penalty_nullity=None,
         penalized_deviance=penalized_deviance,
+        roundoff=_value_roundoff(
+            len(y), p, nll, 0.5 * penalty_quad, 0.5 * logdet_m, 0.5 * logdet_s
+        ),
     )
     return evaluation if return_evaluation else evaluation.value
 
