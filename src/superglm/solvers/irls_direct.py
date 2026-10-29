@@ -604,34 +604,20 @@ def _latent_step_depth(
     return depth
 
 
-def _active_face_basis(
-    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None, column_scale: NDArray
-) -> NDArray | None:
-    """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
+def _binding_rows(A: NDArray, b: NDArray, beta: NDArray, column_scale: NDArray) -> NDArray:
+    """The rows of ``A beta >= b`` that bind at ``beta``, each scaled by a power of two.
 
-    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
-    bind at ``beta``: zero slack on the row's own scale, or against the fit's
-    largest column contribution (``column_scale`` the working columns' norms)
-    where that scale is finite and positive (so a slack below
-    ``_QP_FEASIBILITY_TOL`` of that contribution reads as zero, whatever the
-    coefficient's own size).  On it the constrained
-    fit is, locally, the fit with those rows held as equalities, so its
-    degrees of freedom and covariance are those of that fit (Meyer and
-    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
-    binding row touches keep their unit vectors; the rest of the null space
-    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
-    row binds.
+    ``column_scale`` is the working columns' norms.  A slack below
+    ``_QP_FEASIBILITY_TOL`` of the fit's largest column contribution reads as
+    zero, whatever the coefficient's own size.
     """
-    rows = np.asarray([] if active is None else active, dtype=np.intp)
-    if not rows.size:
-        return None
     # Each row and its bound scaled by the one power of two that brings the
     # row's largest entry into [1/2, 1) (exact), so the fit's reading and the
     # row norms do not depend on a row's magnitude; a bound far larger than its
     # row leaves the row's norm in range.
-    exponent = np.frexp(np.max(np.abs(A[rows]), axis=1))[1]
-    held = np.ldexp(A[rows], -exponent[:, None])
-    bound = np.ldexp(b[rows], -exponent)
+    exponent = np.frexp(np.max(np.abs(A), axis=1))[1]
+    held = np.ldexp(A, -exponent[:, None])
+    bound = np.ldexp(b, -exponent)
     # A row binds when its slack is zero to rounding on its own scale
     # (overflow-safe) or on the whole fit's, the largest column contribution
     # |beta_j| ||x_j||_W read back in each column's units: a term the
@@ -652,7 +638,27 @@ def _active_face_basis(
     # the row's own reading is on the unscaled row, where a bound that
     # overflows when scaled stays readable.
     on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
-    held = held[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | on_fit]
+    return held[(_feasibility_slack(A, beta, b) <= bar) | on_fit]
+
+
+def _active_face_basis(
+    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None, column_scale: NDArray
+) -> NDArray | None:
+    """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
+
+    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
+    bind at ``beta`` (``_binding_rows``).  On it the constrained
+    fit is, locally, the fit with those rows held as equalities, so its
+    degrees of freedom and covariance are those of that fit (Meyer and
+    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
+    binding row touches keep their unit vectors; the rest of the null space
+    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
+    row binds.
+    """
+    rows = np.asarray([] if active is None else active, dtype=np.intp)
+    if not rows.size:
+        return None
+    held = _binding_rows(A[rows], b[rows], beta, column_scale)
     if not held.shape[0]:
         return None
     touched = np.flatnonzero(np.any(held != 0.0, axis=0))
