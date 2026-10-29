@@ -3127,12 +3127,19 @@ class TestExactPresolve:
         """The stop on a decrease within rounding is a pre-solved fit's alone:
         in the release differential's corpus 29 of 407 cold exact fits
         accepted such a decrease and then gained up to 7.5e-8 more before the
-        score test ended them.  With every accepted decrease made to count as
-        rounding, a cold fit is bit for bit the unforced one.  Mutation check:
-        with the rule applied to cold fits too, this one stopped on a decrease
-        of 3.4e-12."""
+        score test ended them.  With the dead-search certificate made to pass
+        in both fits, and every accepted decrease made to count as rounding in
+        one, a cold fit is bit for bit the other.  Mutation check: with the
+        rule applied to cold fits too, the forced fit stopped on its first
+        accepted trial."""
         import superglm.model.reml_ops as reml_ops_module
+        import superglm.reml.direct as direct_module
 
+        monkeypatch.setattr(
+            direct_module,
+            "classify_dead_feasible_exit",
+            lambda *args, **kw: "converged_at_precision",
+        )
         real_direct = reml_ops_module.optimize_direct_reml
 
         def cold(*args, **kw):
