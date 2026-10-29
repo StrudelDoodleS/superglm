@@ -1218,7 +1218,7 @@ def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence
 
 
 def _restriction_case(case):
-    """Rows, the QP's active rows, coefficients, F's diagonal, a probe, and ``c' move(c)`` on the face."""
+    """Rows, the QP's active rows, coefficients, F, a probe, and ``c' move(c)``, None for the fit's face."""
     width = {"slack-row-near-the-face": 10, "nearly-dependent-rows": 100}.get(case, 2)
     A, f = np.zeros((2, width)), np.ones(width)
     active, beta, c, expected = [0, 1], np.zeros(width), np.zeros(width), 0.0
@@ -1249,6 +1249,11 @@ def _restriction_case(case):
         A[0, 0], A[1, 1], f[1], c[1] = 1.0, 1e-6, 1e12, 1e-6
     elif case == "restriction-near-underflow":
         A[0, 0], f[:], c[0], active = 1.0, 2e-308, 1.0, [0]
+    elif case == "restriction-near-underflow-correlated":  # the fit holds e0 + e1
+        A[0, :], active, c[0], expected = 1.0, [0], 1.0, None
+        f = np.linalg.inv(np.array([[1.0, 0.9], [0.9, 1.0]])) * 1e-308
+    elif case == "rows-parallel-to-rounding-under-unit-curvature":  # the fit holds both
+        A[:, 0], A[1, 1], c[1], expected = 1.0, 1e-10, 1.0, None
     elif case == "nearly-dependent-rows":  # e0 and e0 + 1.5e-15 e1, which the fit holds both of
         A[:, 0], A[1, 1], f[1], c[1] = 1.0, 1.5e-15, 1.5e-15**-2, 1.0
     else:  # rows-equal-to-rounding: the fit holds e0 alone
@@ -1261,7 +1266,7 @@ def _restriction_case(case):
             np.zeros(3),
         )
         expected = None  # on the fit's recorded face
-    return A, active, beta, f, c, expected
+    return A, active, beta, f if f.ndim == 2 else np.diag(f), c, expected
 
 
 @pytest.mark.parametrize(
@@ -1275,6 +1280,8 @@ def _restriction_case(case):
         "restriction-near-underflow",
         "nearly-dependent-rows",
         "rows-redundant-in-the-curvature-metric",
+        "restriction-near-underflow-correlated",
+        "rows-parallel-to-rounding-under-unit-curvature",
         "rows-equal-to-rounding",
     ],
 )
@@ -1304,6 +1311,14 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
       ``F = diag(1, 1e12, 1, 1)``. A pivoted QR of the rows kept two that are
       nearly parallel in F's metric, and the restriction was refused; scaling
       two inequalities by 1.2 made it succeed (8794e05e).
+    - ``restriction-near-underflow-correlated``: one row ``[1, 1]`` under a
+      correlated F near 1e-308. The rank taken on the equilibrated rows
+      overflowed their squared norms, read 0, and raised (1021ce9a). Checked
+      against the fit's recorded face.
+    - ``rows-parallel-to-rounding-under-unit-curvature``: ``e0`` and
+      ``e0 + 1e-10 e1`` under ``F = I``, which the fit holds both of. The
+      restriction may be refused, but must not keep one row and publish
+      ``e1``'s whole variance, which a rank from the pivoting would.
     - ``restriction-near-underflow``: one row under ``F = 2e-308``. The
       inverse of the unscaled ``R F R'`` overflowed to inf (66ebf657).
     - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
@@ -1322,7 +1337,7 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
     from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
     from superglm.types import GroupSlice, LinearConstraintSet
 
-    A, active, beta, f, c, expected = _restriction_case(case)
+    A, active, beta, F, c, expected = _restriction_case(case)
     width, b = A.shape[1], np.zeros(A.shape[0])
     # recorded as the fit records them: the binding rows of its active set
     face_rows = _binding_rows(A[active], b[active], beta, np.ones(width))
@@ -1338,15 +1353,17 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
         _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
     )
     move = free_levels_module._on_binding_face(
-        model, [group], lambda v: f * v, SimpleNamespace(p=width), None
+        model, [group], lambda v: F @ v, SimpleNamespace(p=width), None
     )
+    if case == "rows-parallel-to-rounding-under-unit-curvature" and move is None:
+        return  # refused as unmeasured: a condition near 1e20 cannot resolve it
     assert move is not None
     if expected is None:
         face = record.face
-        expected = c @ face @ np.linalg.solve(face.T @ (face / f[:, None]), face.T @ c)
+        expected = c @ face @ np.linalg.solve(face.T @ np.linalg.solve(F, face), face.T @ c)
     moved = c @ move(c)
     assert np.isfinite(moved)
-    tolerance = 1e-6 * float(c @ (f * c))
+    tolerance = 1e-6 * float(c @ F @ c)
     if case == "rows-equal-to-rounding" and abs(moved - expected) > tolerance:
         pytest.xfail("rows tied to within rounding (#541)")
     assert abs(moved - expected) <= tolerance

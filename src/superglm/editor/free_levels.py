@@ -590,6 +590,9 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
+    # The fit's rank rule (``irls_direct._binding_rank``) on the rows as
+    # recorded, so it decides as the fit's face did.
+    rank = _binding_rank(R)[2]
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
@@ -600,13 +603,16 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         return None
     R, moves = R / scale[:, None], moves / scale
     gram = 0.5 * (R @ moves + (R @ moves).T)
-    # As many rows as the fit's rank rule finds independent among them
-    # (``irls_direct._binding_rank``), the most independent in the curvature
-    # metric first: pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham
-    # 2002, sec. 10.3), so the basis is as well conditioned there as the rows
-    # allow. Rows equal to within rounding tie, and which is kept moves a
-    # contrast by about d sqrt(cond F) of its variance, for rows d apart.
-    pivots = scipy.linalg.lapack.dpstrf(gram)[1][: _binding_rank(R)[2]] - 1
+    # That many rows, the most independent in the curvature metric first:
+    # pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham 2002, sec. 10.3),
+    # so the basis is as well conditioned there as the rows allow. Its
+    # diagonal is 1 exactly for the pivot choice, which otherwise turns on
+    # the last bit of each scaled product. Rows equal to within rounding tie,
+    # and which is kept moves a contrast by about d sqrt(cond F) of its
+    # variance, for rows d apart.
+    pivoting = gram.copy()
+    np.fill_diagonal(pivoting, 1.0)
+    pivots = scipy.linalg.lapack.dpstrf(pivoting)[1][:rank] - 1
     R, moves, gram = R[pivots], moves[:, pivots], gram[np.ix_(pivots, pivots)]
     values, vectors = np.linalg.eigh(gram)
     u = UNIT_ROUNDOFF
