@@ -1998,6 +1998,8 @@ def fit_reml(
             refit_kwargs=attempt_kwargs,
         )
         _install_deferred_rank_info(workspace.model)
+        # The pre-solve flag belongs to the alternation, not the public model.
+        workspace.model.__dict__.pop("_nb_theta_search", None)
         if not durable_retain:
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)

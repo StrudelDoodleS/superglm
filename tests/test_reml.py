@@ -2917,8 +2917,9 @@ class TestExactPresolve:
 
     The cached-W (performance) iteration, mgcv's ``outerPIsteps`` taken to its
     fixed point, runs on the same lossless design and hands the exact Newton
-    loop its smoothing parameters and coefficients; the exact loop's gradient
-    and stopping rule are unchanged.
+    loop its smoothing parameters and coefficients.  The exact loop's
+    gradient is unchanged; its first step and its stop on a decrease within
+    rounding are the two rules a pre-solved fit adds.
     """
 
     def test_a_cold_ten_parameter_fit_converges_from_the_presolve(self):
@@ -2996,22 +2997,30 @@ class TestExactPresolve:
         whose curvature puts a minimum within the step bound, whatever the
         freeze test says there; only later iterations hold flat directions.
         Here the freeze test is made to hold every direction at its first
-        call.  Mutation check: without the release the first iteration took no
-        step (its successor refitted the same lambdas); on freMTPL2 the
-        release lowered the published objective on all seven pairs, by
-        0.0064 (Gamma/log) to 0.034 (Tweedie/log)."""
+        call, and the direction with the largest gradient is given a curvature
+        that puts its minimum at twice the step bound: it alone stays where
+        the pre-solve put it, exactly, and the others move.  Mutation checks:
+        without the release the first iteration took no step (its successor
+        refitted the same lambdas); releasing every estimated direction moved
+        the out-of-reach one too.  On freMTPL2 the release lowered the
+        published objective on all seven pairs, by 0.0064 (Gamma/log) to
+        0.034 (Tweedie/log)."""
         import dataclasses
 
         import superglm.reml.direct as direct_module
 
         real_freeze = direct_module.freeze_flat_directions
-        calls = []
+        out_of_reach = []
 
         def hold_all_first(*args, **kwargs):
             decision = real_freeze(*args, **kwargs)
-            calls.append(1)
-            if len(calls) > 1:
+            if out_of_reach:
                 return decision
+            gradient, hessian, _, estimated = args[:4]
+            k = int(np.argmax(np.abs(gradient) * estimated))
+            # The release reads this same array's diagonal.
+            hessian[k, k] = abs(gradient[k]) / (2.0 * kwargs["step_bound"])
+            out_of_reach.append(k)
             return dataclasses.replace(decision, frozen=np.ones_like(decision.frozen))
 
         monkeypatch.setattr(direct_module, "freeze_flat_directions", hold_all_first)
@@ -3019,19 +3028,15 @@ class TestExactPresolve:
         info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
         assert info["n_presolve_iter"] > 0
         assert info["converged"]
+        names = info["profile"]["reml_freeze_decision"]["names"]
+        held = names[out_of_reach[0]]
         first, second = info["lambda_history"][1], info["lambda_history"][2]
-        assert any(abs(np.log(second[k] / first[k])) > 1e-3 for k in first)
+        assert second[held] == first[held]
+        assert any(abs(np.log(second[k] / first[k])) > 1e-3 for k in names if k != held)
 
-    def test_a_decrease_within_rounding_hands_over_to_the_certificate(self, monkeypatch):
-        """From the pre-solve's point this Gamma/log fit's exact loop accepts
-        steps that lower the objective by about ten units in its last place,
-        while the gradient, whose own error is above the score bar, keeps the
-        score test from firing.  A decrease within the two evaluations'
-        rounding is no decrease: the dead-search certificate judges the
-        candidate, and certifies it.  Mutation check: with the rounding bound
-        set to zero the loop accepted 9e-12 .. 1.2e-11 decreases until
-        ``max_reml_iter`` (20 iterations, not converged); with it, iteration 4
-        certifies."""
+    @staticmethod
+    def _fit_stall_gamma(monkeypatch):
+        """The Gamma/log fixture whose stall was measured, fitted from the pre-solve."""
         import superglm.model.reml_ops as reml_ops_module
 
         real_direct = reml_ops_module.optimize_direct_reml
@@ -3052,14 +3057,71 @@ class TestExactPresolve:
             },
         )
         info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
-        dead = info["profile"]["reml_dead_line_search"]
-        # the stall was reached: the score test could not fire on this gradient,
-        # and the accepted decrease was within the evaluations' rounding
-        assert dead["active_gradient_norm"] > 1e-9 * (1.0 + abs(info["objective"]))
-        assert 0.0 < dead["unresolved_decrease"] <= 2.5 * dead["objective_roundoff"]
-        assert info["converged"]
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", real_direct)
+        return info
+
+    @staticmethod
+    def _count_every_decrease_as_rounding(monkeypatch):
+        """Widen each evaluation's rounding by ``1 + |V|``, past any decrease a trial makes."""
+        import dataclasses
+
+        import superglm.reml.direct as direct_module
+        from superglm.reml.objective import REMLObjectiveEvaluation
+
+        real_objective = direct_module.reml_laml_objective
+
+        def widened(*args, **kw):
+            evaluation = real_objective(*args, **kw)
+            if not isinstance(evaluation, REMLObjectiveEvaluation):
+                return evaluation
+            roundoff = evaluation.roundoff + 1.0 + abs(evaluation.value)
+            return dataclasses.replace(evaluation, roundoff=roundoff)
+
+        monkeypatch.setattr(direct_module, "reml_laml_objective", widened)
+
+    def test_a_stop_on_rounding_needs_the_dead_search_certificate(self, monkeypatch):
+        """From the pre-solve's point this Gamma/log fit's exact loop accepted
+        steps that lowered the objective by about ten units in its last place,
+        while a gradient whose own error is above the score bar kept the score
+        test from firing: 20 iterations to ``max_reml_iter``.  A decrease
+        within the two evaluations' rounding counts as no decrease, but only
+        where the dead-search certificate passes the candidate.  Here every
+        accepted decrease is made to count as rounding, so the certificate
+        alone decides each such stop, and the published objective is the
+        unforced fit's to the stop's resolution, ``reml_tol (1 + |V|)``
+        (measured: 5.5e-11 apart).  Mutation check: with the certificate
+        dropped from the rule, the fit stopped at its first accepted trial
+        and reported ``line_search_failed``."""
+        plain = self._fit_stall_gamma(monkeypatch)
+        self._count_every_decrease_as_rounding(monkeypatch)
+        forced = self._fit_stall_gamma(monkeypatch)
+        assert forced["converged"]
+        resolution = 1e-9 * (1.0 + abs(plain["objective"]))
+        assert abs(forced["objective"] - plain["objective"]) <= resolution
+
+    def test_a_stop_on_rounding_publishes_the_candidate(self, monkeypatch):
+        """Where the certificate passes, a trial accepted within rounding is
+        discarded: the fit stops at the candidate it was tried from, records
+        the decrease it left unresolved, and reports convergence at
+        precision.  Here every accepted decrease counts as rounding and the
+        certificate always passes, so the first accepted trial ends the fit
+        at the pre-solve's point.  Mutation check: with the rounding bounds
+        left out of the rule, the loop went on stepping and recorded no
+        unresolved decrease."""
+        import superglm.reml.direct as direct_module
+
+        self._count_every_decrease_as_rounding(monkeypatch)
+        monkeypatch.setattr(
+            direct_module,
+            "classify_dead_feasible_exit",
+            lambda *args, **kw: "converged_at_precision",
+        )
+        info = self._fit_stall_gamma(monkeypatch)
+        dead = info["profile"].get("reml_dead_line_search", {})
+        assert (dead.get("unresolved_decrease") or 0.0) > 0.0
         assert info["termination_reason"] == "converged_at_precision"
-        assert info["n_reml_iter"] < 10
+        assert info["n_reml_iter"] == 1
+        assert info["lambdas"] == info["lambda_history"][1]
 
 
 def _ten_penalty_frame(n=3000, seed=1):
@@ -3145,19 +3207,40 @@ class TestExactPresolveScope:
             "binomial_cloglog",
         ],
     )
-    def test_an_admitted_pair_starts_from_the_presolve(self, case):
+    def test_an_admitted_pair_starts_from_the_presolve(self, case, monkeypatch):
+        """And lands no worse than the plain cold start, to the stop's
+        resolution ``reml_tol (1 + |V|)``: on these fixtures 3.4e-4 .. 9.7e-4
+        lower, against resolutions near 3e-6 (the cold probit fit stopped at
+        ``max_reml_iter``).  Mutation check: without the first step's release,
+        five of the six pairs ended 9.8e-6 .. 2.2e-4 above the cold start."""
+        import superglm.model.reml_ops as reml_ops_module
+
         X, eta, rng = _ten_penalty_frame()
         y, kwargs = _ten_penalty_response(case, eta, rng)
-        model = SuperGLM(
-            discrete=False,
-            features=_ten_penalty_features(False),
-            interactions=[("x3", "g")],
-            **kwargs,
-        )
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+
+        def fit():
+            model = SuperGLM(
+                discrete=False,
+                features=_ten_penalty_features(False),
+                interactions=[("x3", "g")],
+                **kwargs,
+            )
+            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+
+        info = fit()
         assert len(info["lambdas"]) >= 8
         assert info["n_presolve_iter"] > 0
         assert info["converged"]
+
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def without_presolve(*args, **kw):
+            kw["presolve"] = False
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", without_presolve)
+        cold = fit()
+        assert info["objective"] <= cold["objective"] + 1e-9 * (1.0 + abs(cold["objective"]))
 
     @pytest.mark.parametrize("case", ["binomial_log", "gamma_inverse", "gaussian", "structured"])
     def test_an_excluded_fit_keeps_the_plain_cold_start(self, case, monkeypatch):
@@ -3226,7 +3309,8 @@ class TestExactPresolveScope:
         """NB2 with theta="auto" alternates a theta solve with REML fits; with the
         pre-solve its published fit on freMTPL2 ended 3.7e-4 farther from a
         certified reference optimum, so none of its fits take it (mutation
-        check: without the flag the first fit pre-solved)."""
+        check: without the flag the first fit pre-solved).  The flag is the
+        alternation's: the public model does not keep it."""
         import superglm.model.reml_ops as reml_ops_module
         from superglm import families
 
@@ -3249,6 +3333,7 @@ class TestExactPresolveScope:
         info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
         assert calls and all(presolve is False for presolve in calls)
         assert info["n_presolve_iter"] == 0
+        assert "_nb_theta_search" not in vars(model)
 
     @pytest.mark.parametrize("link", ["log", "power"])
     def test_the_route_does_not_turn_on_the_power_under_a_fixed_link(self, link):

@@ -55,21 +55,26 @@ class REMLObjectiveEvaluation:
     penalty_quad: float
     penalty_nullity: float | None
     penalized_deviance: float
-    # A bound on ``value``'s rounding (``_value_roundoff``).
+    # The rounding of forming ``value`` from its summands (``_value_roundoff``).
     roundoff: float = 0.0
 
 
 def _value_roundoff(n_rows: int, width: int, *summands: float) -> float:
     """``gamma_k`` times the absolute summands of the objective, ``k = ceil(log2 n) + p + 4``.
 
-    Each summand is a pairwise sum over the rows, whose error is at most
-    ``gamma_ceil(log2 n)`` of its absolute terms (Higham 2002, Accuracy and
-    Stability of Numerical Algorithms, sec. 4.2), or a log-determinant over
-    ``p`` Cholesky pivots, each from a factor with backward error
-    ``gamma_(p+1)`` (sec. 10.1); four additions join them.  The row sums read
-    here have terms of one sign (deviance rows, and log-probabilities of a
-    known-scale family's mass function), so a summand's magnitude is its
-    terms' total.
+    It counts the rounding of forming the objective from its summands.  A
+    pairwise sum over the rows errs by at most ``gamma_ceil(log2 n)`` of its
+    terms' absolute total (Higham 2002, Accuracy and Stability of Numerical
+    Algorithms, sec. 4.2), which is the summand's magnitude where the terms
+    share a sign (deviance rows, a known-scale family's log-probabilities); a
+    log-determinant sums ``p`` pivot logarithms; four additions join the
+    summands.  It is not a bound on the whole evaluation: a profiled scale
+    criterion's rows (Gamma, Tweedie) mix signs, and the factors' backward
+    error (sec. 10.1) moves a log-determinant by an amount set by
+    conditioning, not by its size.  The exact loop's stall rule reads it only
+    beside the dead-search certificate, so a value too small makes the rule
+    fire less often, and one too large cannot stop a fit the certificate does
+    not pass.
     """
     k = math.ceil(math.log2(max(int(n_rows), 2))) + int(width) + 4
     return float(gamma(k) * sum(abs(float(term)) for term in summands))

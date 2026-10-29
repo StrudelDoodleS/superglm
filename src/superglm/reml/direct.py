@@ -317,8 +317,10 @@ def optimize_direct_reml(
     design until its objective settles, and the exact Newton loop starts
     from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
     (performance-iteration steps that initialize the outer iteration), taken
-    to the cached-W fixed point.  The exact loop's gradient and stopping test
-    are unchanged; its first step holds no direction its curvature can place.
+    to the cached-W fixed point.  The exact loop's gradient is unchanged.
+    Its first step holds no direction its curvature can place, and an
+    accepted decrease within the two evaluations' rounding counts as no
+    decrease, so the dead-search certificate decides that stop.
     ``presolve`` overrides the rule for tests only.
 
     Two algorithm variants depending on ``discrete``:
@@ -2033,6 +2035,23 @@ def optimize_direct_reml(
                 # ended them.  Where the certificate refuses, the step is taken as
                 # before.
                 unresolved_decrease = float(obj - trial_obj)
+                if trace_run is not None and trace_run.enabled:
+                    # The trial's evaluation event above reads accepted; this
+                    # records that the stop discarded it.
+                    trace_run.emit_lazy(
+                        "step_decision",
+                        lambda: {
+                            "solver": "direct_reml",
+                            "phase": "line_search",
+                            "outer_iteration": n_iter,
+                            "line_search_iteration": _ls + 1,
+                            "unresolved_decrease": unresolved_decrease,
+                            "objective_roundoff": float(obj_roundoff + trial_roundoff),
+                        },
+                        channel="reml",
+                        purpose="reml_rounding_stall",
+                        authoritative=False,
+                    )
                 break
 
             if trial_accepted:
