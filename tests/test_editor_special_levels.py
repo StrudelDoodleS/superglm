@@ -1239,8 +1239,19 @@ def _restriction_case(case):
         A[0, 0], A[1, 1], f[1], c[1] = 1.0, 1e-6, 1e12, 1e-6
     elif case == "restriction-near-underflow":
         A[0, 0], f[:], c[0], active = 1.0, 2e-308, 1.0, [0]
-    else:  # nearly-dependent-rows: e0 and e0 + 1.5e-15 e1, which the fit holds both of
+    elif case == "nearly-dependent-rows":  # e0 and e0 + 1.5e-15 e1, which the fit holds both of
         A[:, 0], A[1, 1], f[1], c[1] = 1.0, 1.5e-15, 1.5e-15**-2, 1.0
+    else:  # rows-equal-to-rounding, in either order: the fit holds e0 alone
+        d = 2.0**-51
+        rows = [[1.0, d, 0.0], [2.0, 0.0, 0.0], [1.0, -d, 0.0]]
+        A = np.array(rows if case.endswith("slanted-first") else [rows[1], rows[0], rows[2]])
+        f, c, active, beta = (
+            np.array([1.0, 2.0**96, 1.0]),
+            np.array([0.0, 2.0**-48, 0.0]),
+            [0, 1, 2],
+            np.zeros(3),
+        )
+        expected = None  # on the fit's recorded face
     return A, active, beta, f, c, expected
 
 
@@ -1252,6 +1263,8 @@ def _restriction_case(case):
         "rows-in-other-units",
         "restriction-near-underflow",
         "nearly-dependent-rows",
+        "rows-equal-to-rounding-slanted-first",
+        "rows-equal-to-rounding-level-first",
     ],
 )
 def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
@@ -1277,6 +1290,12 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
     - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
       columns. The fit's rank rule holds both, but a pivot cut scaled by the
       model's width dropped the second and freed ``e1`` (66ebf657).
+    - ``rows-equal-to-rounding``: rows ``[1, ±d, 0]`` and ``[2, 0, 0]`` with
+      ``d = 2**-51``, all binding, under ``F = diag(1, 2**96, 1)``. The fit's
+      rank rule finds one row. Keeping whichever original row a pivoted QR
+      put first read 64/65 or 1 depending on the rows' order (c032cf02). The
+      editor holds the rows' retained singular subspace, which is the
+      complement of the fit's face, and is checked against that face.
     """
     from types import SimpleNamespace
 
@@ -1300,6 +1319,9 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
         model, [group], lambda v: f * v, SimpleNamespace(p=width), None
     )
     assert move is not None
+    if expected is None:
+        face = record.face
+        expected = c @ face @ np.linalg.solve(face.T @ (face / f[:, None]), face.T @ c)
     moved = c @ move(c)
     assert np.isfinite(moved)
     assert abs(moved - expected) <= 1e-6 * float(c @ (f * c))

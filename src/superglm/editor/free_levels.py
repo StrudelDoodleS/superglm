@@ -49,7 +49,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import scipy.linalg
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -590,11 +589,12 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
-    # As many rows as the fit's rank rule finds independent among them
-    # (``irls_direct._binding_rank``), the most independent first: a pivoted QR
-    # of R' (Businger and Golub 1965).
-    _q, _triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
-    R = R[order[: _binding_rank(R)[2]]]
+    # The rows' retained singular subspace by the fit's own rank rule
+    # (``irls_direct._binding_rank``), whose complement is the face the fit
+    # holds, whatever the rows' order.
+    touched, vt, rank = _binding_rank(R)
+    R = np.zeros((rank, width))
+    R[:, touched] = vt[:rank]
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
