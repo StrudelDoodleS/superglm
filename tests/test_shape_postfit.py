@@ -419,9 +419,11 @@ def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(bind
     put it, so its rows still bind: the record keeps them and is formed again
     at the new weights. ``a``'s EDF and curve variances are checked against
     ``Z (Z'HZ)^-1 Z'`` for an orthonormal null-space basis ``Z`` of the
-    recorded rows, ``H`` formed from the repaired predictions. Mutation check:
-    dropping the record, keeping it at the fit's weights, or forming it
-    again off the face each fail.
+    recorded rows, ``H`` formed from the repaired predictions, and the
+    record's weight total and mean row against those predictions. Mutation
+    check: dropping the record, keeping it at the fit's weights, forming it
+    again off the face, or leaving its intercept part at the fit's weights
+    each fail.
     """
     import scipy.linalg
 
@@ -484,6 +486,13 @@ def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(bind
     kept = model._solver_result.rank_info
     assert kept is not None and kept is model.result.rank_info
     assert np.array_equal(kept.face_rows, rows) and (kept.face is None) == (fitted.face is None)
+    # The intercept's part of the record, the repaired weights' total and mean
+    # row, to the sums' rounding, n u of their absolute totals.
+    rounding = n * np.finfo(float).eps
+    assert abs(kept.sum_w - np.sum(mu)) <= rounding * np.sum(mu)
+    np.testing.assert_allclose(
+        kept.mean_x, (design.T @ mu) / np.sum(mu), rtol=0, atol=rounding * np.abs(design).max()
+    )
 
 
 def test_shape_repair_preserves_geometry_when_working_weights_are_coefficient_invariant():

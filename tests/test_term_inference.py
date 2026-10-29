@@ -243,16 +243,16 @@ class TestTermInferenceNumeric:
         assert ti.se_log_relativity is not None
         assert np.all(np.isfinite(ti.se_log_relativity))
 
-    def test_a_slope_past_the_exp_range_reports_its_coefficient_and_no_relativity(self):
+    def test_a_slope_past_the_exp_range_reports_its_coefficient_without_a_warning(self):
         """Gaussian slopes of 1e11, -1e11 and 0.5 under the identity link.
 
         ``exp`` of the first overflowed with a warning, and the log relativity
         read back from it was ``inf``; the second's underflowed to 0.0, whose
         log warned and read ``-inf``. The log relativity is the coefficient,
-        and a relativity past float64's range is not reported (NaN); one in
-        range is ``exp(coef)`` as before. Mutation check: the unfixed
-        ``reconstruct`` warns, and log relativities read back from the
-        relativity, in either surface, warn and read NaN and ``-inf``.
+        and the relativity is ``exp(coef)`` rounded as ``exp`` rounds, ``inf``
+        and ``0.0`` past float64's range, without a warning. Mutation check:
+        the unfixed ``reconstruct`` warns, and log relativities read back from
+        the relativity, in either surface, warn and read ``inf`` and ``-inf``.
         """
         rng = np.random.default_rng(3)
         n = 200
@@ -263,7 +263,7 @@ class TestTermInferenceNumeric:
             warnings.simplefilter("error")
             inference = {name: model.term_inference(name, with_se=True) for name in "uvw"}
             tables = model.relativities()
-        for name, relativity in (("u", np.nan), ("v", 0.0), ("w", None)):
+        for name, relativity in (("u", np.inf), ("v", 0.0), ("w", None)):
             coef = model.reconstruct_feature(name)["coef"]
             expected = np.exp(coef) if relativity is None else relativity
             table = tables[name]

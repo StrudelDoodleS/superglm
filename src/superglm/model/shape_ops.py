@@ -678,10 +678,15 @@ def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_name
 
     # A repair moves only its own term's coefficients and the intercept, so a
     # record of the rows a constrained fit held keeps them, none binding
-    # included, formed again at the new weights; any other record is dropped.
+    # included, formed again at the new weights over the active design, which
+    # is the record's full width only where every column was selected; any
+    # other record is dropped.
     refreshed = (
         state_ops.face_record_at(model, current_working_weights)
-        if record is not None and record.face_rows is not None and selection_unchanged
+        if record is not None
+        and record.face_rows is not None
+        and selection_unchanged
+        and record.selected_columns.size == record.mean_x.size
         else None
     )
     updated: set[int] = set()

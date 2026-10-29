@@ -63,14 +63,11 @@ class Numeric:
         """Reconstruct the coefficient on the original scale.
 
         ``relativity_per_unit`` is ``exp(coef)``, as every term reports the
-        exponential of its contribution whatever the link; past float64's
-        range it is not reported (NaN), without a warning. ``coef`` is the
-        log relativity.
+        exponential of its contribution whatever the link, rounded as ``exp``
+        rounds and without a warning: ``inf`` above float64's range, ``0.0``
+        below it. ``coef`` is the log relativity.
         """
         b = float(beta[0])
         with np.errstate(over="ignore"):
             relativity = float(np.exp(b))
-        return {
-            "coef": b,
-            "relativity_per_unit": relativity if np.isfinite(relativity) else float("nan"),
-        }
+        return {"coef": b, "relativity_per_unit": relativity}
