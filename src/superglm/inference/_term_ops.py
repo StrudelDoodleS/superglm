@@ -669,7 +669,7 @@ def term_inference(
     # ── Numeric ──────────────────────────────────────────────────
     elif isinstance(spec, Numeric):
         raw = spec.reconstruct(beta_combined)
-        log_rel = np.array([np.log(raw["relativity_per_unit"])])
+        log_rel = np.array([raw["coef"]])
         rel = np.array([raw["relativity_per_unit"]])
 
         se = ci_lo = ci_hi = None
