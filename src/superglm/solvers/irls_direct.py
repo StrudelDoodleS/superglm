@@ -656,7 +656,7 @@ def _active_face_basis(held: NDArray) -> NDArray | None:
     if not held.shape[0]:
         return None
     width = held.shape[1]
-    touched, vt, rank = _held_rank(held)
+    touched, vt, rank = _binding_rank(held)
     free = np.setdiff1d(np.arange(width), touched)
     basis = np.zeros((width, free.size + touched.size - rank))
     basis[free, np.arange(free.size)] = 1.0
@@ -664,7 +664,7 @@ def _active_face_basis(held: NDArray) -> NDArray | None:
     return basis
 
 
-def _held_rank(held: NDArray) -> tuple[NDArray, NDArray, int]:
+def _binding_rank(held: NDArray) -> tuple[NDArray, NDArray, int]:
     """The columns rows ``held`` touch, their unit rows' right singular vectors there, and their rank.
 
     The rank is NumPy's ``matrix_rank`` cut on the unit rows: the face's

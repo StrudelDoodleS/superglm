@@ -72,7 +72,7 @@ from superglm.model.state_ops import (
     _legacy_active_state,
     _rank_centered_data_gram,
 )
-from superglm.solvers.irls_direct import _binding_rows, _held_rank
+from superglm.solvers.irls_direct import _binding_rank, _binding_rows
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -591,10 +591,10 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     if not R.shape[0]:
         return apply
     # As many rows as the fit's rank rule finds independent among them
-    # (``irls_direct._held_rank``), the most independent first: a pivoted QR
+    # (``irls_direct._binding_rank``), the most independent first: a pivoted QR
     # of R' (Businger and Golub 1965).
     _q, _triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
-    R = R[order[: _held_rank(R)[2]]]
+    R = R[order[: _binding_rank(R)[2]]]
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
