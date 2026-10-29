@@ -49,7 +49,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import scipy.linalg
+import scipy.linalg.lapack
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -550,15 +550,15 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
     The rows held are the ones the fit held (``RankInfo.face_rows``), an
-    independent set of them in their own units, none where it held none. A record without them, pickled
-    before fits kept them (0.41 and earlier) or dropped by a post-fit repair
-    that moved the working weights, has its rows read as the fit reads them
-    (``irls_direct._binding_rows``), all of them, the QP's active set being
-    unknown, over the active columns ``X`` at the ``curvature`` weights,
-    whose centred Gram is ``data_gram`` when the caller has it. There a slack
-    below ``_QP_FEASIBILITY_TOL`` of the fit's largest column contribution
-    reads as held. None when the restriction cannot be formed to a relative
-    accuracy of 1e-6.
+    independent set of them in their own units, none where it held none. A
+    record without them, pickled before fits kept them (0.41 and earlier) or
+    dropped by a post-fit repair that moved the working weights, has its rows
+    read as the fit reads them (``irls_direct._binding_rows``), all of them,
+    the QP's active set being unknown, over the active columns ``X`` at the
+    ``curvature`` weights, whose centred Gram is ``data_gram`` when the caller
+    has it. There a slack below ``_QP_FEASIBILITY_TOL`` of the fit's largest
+    column contribution reads as held. None when the restriction cannot be
+    formed to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
     recorded = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
@@ -590,14 +590,6 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
-    # As many of the rows as the fit's rank rule finds independent among them
-    # (``irls_direct._binding_rank``), the most independent first by pivoted
-    # QR (Businger and Golub 1965), in their own units: a basis of the face's
-    # complement as well conditioned as the rows themselves. Rows equal to
-    # within rounding tie, and which one is kept matters only through a
-    # curvature conditioned far beyond 1/u.
-    _q, _triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
-    R = R[order[: _binding_rank(R)[2]]]
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
@@ -608,6 +600,14 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         return None
     R, moves = R / scale[:, None], moves / scale
     gram = 0.5 * (R @ moves + (R @ moves).T)
+    # As many rows as the fit's rank rule finds independent among them
+    # (``irls_direct._binding_rank``), the most independent in the curvature
+    # metric first: pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham
+    # 2002, sec. 10.3), so the basis is as well conditioned there as the rows
+    # allow. Rows equal to within rounding tie, and which is kept moves a
+    # contrast by about d sqrt(cond F) of its variance, for rows d apart.
+    pivots = scipy.linalg.lapack.dpstrf(gram)[1][: _binding_rank(R)[2]] - 1
+    R, moves, gram = R[pivots], moves[:, pivots], gram[np.ix_(pivots, pivots)]
     values, vectors = np.linalg.eigh(gram)
     u = UNIT_ROUNDOFF
     # Solving with R F R' loses about its condition number times u of each

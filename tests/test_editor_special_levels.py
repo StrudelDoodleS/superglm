@@ -1238,6 +1238,10 @@ def _restriction_case(case):
     elif case == "row-in-small-units-leading":
         A[0, :] = 1e-16, 1.0
         f[0], c[0], active, expected = 1e32, 1e-16, [0], 0.5
+    elif case == "rows-redundant-in-the-curvature-metric":  # rank 2; e0 held, e2 free
+        A = np.array([[0.9, 0.9, 0, 0], [0.9, -0.9, 0, 0], [1e6, 0, 0, 0], [0, 1.0, 0, 0]])
+        active, beta, f = [0, 1, 2, 3], np.zeros(4), np.array([1.0, 1e12, 1.0, 1.0])
+        c, expected = np.array([1.0, 0.0, 1.0, 0.0]), 1.0
     elif case == "rows-in-micro-units":  # both bind; the face leaves e2 free
         A, f = np.array([[1.0, 0.0, 0.0], [1e-6, 1e-6, 0.0]]), np.array([1.0, 1e12, 1.0])
         beta, c = np.zeros(3), np.array([0.0, 1e-6, 0.0])
@@ -1270,12 +1274,8 @@ def _restriction_case(case):
         "rows-in-micro-units",
         "restriction-near-underflow",
         "nearly-dependent-rows",
-        pytest.param(
-            "rows-equal-to-rounding",
-            marks=pytest.mark.xfail(
-                reason="rows tied to within rounding, under a curvature beyond 1/u (#541)"
-            ),
-        ),
+        "rows-redundant-in-the-curvature-metric",
+        "rows-equal-to-rounding",
     ],
 )
 def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
@@ -1300,18 +1300,22 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
       under ``F = diag(1, 1e12, 1)``. Rotated to their singular vectors
       (d9fcbe4d), the restriction's condition was near 5e11 even after
       equilibration, and it was refused.
+    - ``rows-redundant-in-the-curvature-metric``: four rows of rank 2 under
+      ``F = diag(1, 1e12, 1, 1)``. A pivoted QR of the rows kept two that are
+      nearly parallel in F's metric, and the restriction was refused; scaling
+      two inequalities by 1.2 made it succeed (8794e05e).
     - ``restriction-near-underflow``: one row under ``F = 2e-308``. The
       inverse of the unscaled ``R F R'`` overflowed to inf (66ebf657).
     - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
       columns. The fit's rank rule holds both, but a pivot cut scaled by the
       model's width dropped the second and freed ``e1`` (66ebf657).
-    - ``rows-equal-to-rounding`` (expected to fail, #541): rows ``[1, ±d, 0]``
-      and ``[2, 0, 0]`` with ``d = 2**-51``, under ``F = diag(1, 2**96, 1)``.
-      The fit's rank rule finds one row, and which of the tied rows the pivoted
-      QR keeps decides between 64/65 and 1, the value on the fit's recorded
-      face. The difference is about ``d**2 cond(F)``, so it reaches the
-      restriction's 1e-6 only beyond a condition near 1e21, where F is
-      singular to working precision.
+    - ``rows-equal-to-rounding`` (an expected failure where it fails, #541):
+      rows ``[1, ±d, 0]`` and ``[2, 0, 0]`` with ``d = 2**-51``, under
+      ``F = diag(1, 2**96, 1)``. The fit's rank rule finds one row, and which
+      of the tied rows is kept decides between 64/65 and 1, the value on the
+      fit's recorded face. A contrast mixing the held and freed directions
+      moves by about ``d sqrt(cond F)`` of its variance, which reaches the
+      restriction's 1e-6 only past a condition near 5e18, beyond 1/u.
     """
     from types import SimpleNamespace
 
@@ -1342,7 +1346,10 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
         expected = c @ face @ np.linalg.solve(face.T @ (face / f[:, None]), face.T @ c)
     moved = c @ move(c)
     assert np.isfinite(moved)
-    assert abs(moved - expected) <= 1e-6 * float(c @ (f * c))
+    tolerance = 1e-6 * float(c @ (f * c))
+    if case == "rows-equal-to-rounding" and abs(moved - expected) > tolerance:
+        pytest.xfail("rows tied to within rounding (#541)")
+    assert abs(moved - expected) <= tolerance
 
 
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
