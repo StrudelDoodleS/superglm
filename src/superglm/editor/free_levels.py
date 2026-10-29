@@ -72,7 +72,7 @@ from superglm.model.state_ops import (
     _legacy_active_state,
     _rank_centered_data_gram,
 )
-from superglm.solvers.irls_direct import _binding_rows
+from superglm.solvers.irls_direct import _binding_rows, _held_rank
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -561,13 +561,13 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
-    held = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
+    recorded = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
     width = X.p
-    if held is not None:
+    if recorded is not None:
         # Over the active columns; an inactive term's coefficients are zero,
         # so its rows drop.
         columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
-        R = held[:, np.concatenate(columns)]
+        R = recorded[:, np.concatenate(columns)]
         R = R[np.any(R != 0.0, axis=1)]
     else:
         beta = np.asarray(model.result.beta, dtype=np.float64)
@@ -590,27 +590,34 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
-    # The independent rows, decided on the rows themselves: a pivoted QR of
-    # R', whose diagonal falls below the rounding of its first entry only at
-    # a row the others already span (past R's width, every further row is).
-    _q, triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
-    diagonal = np.abs(np.diag(triangle))
-    u = UNIT_ROUNDOFF
-    R = R[order[: diagonal.size][diagonal > width * u * diagonal[0]]]
+    # As many rows as the fit's rank rule finds independent among them
+    # (``irls_direct._held_rank``), the most independent first: a pivoted QR
+    # of R' (Businger and Golub 1965).
+    _q, _triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
+    R = R[order[: _held_rank(R)[2]]]
     moves = np.column_stack([apply(row) for row in R])
+    # Scaled to a unit diagonal, R F R' has within a factor of its size the
+    # least condition any diagonal scaling gives it (van der Sluis 1969;
+    # Higham 2002, Theorem 7.5): the guard below judges the restriction, not
+    # the rows' units, and the scaled factors stay in range.
+    scale = np.sqrt(np.einsum("ij,ji->i", R, moves))
+    if not np.all(np.isfinite(scale) & (scale > 0.0)):
+        return None
+    R, moves = R / scale[:, None], moves / scale
     gram = 0.5 * (R @ moves + (R @ moves).T)
     values, vectors = np.linalg.eigh(gram)
+    u = UNIT_ROUNDOFF
     # Solving with R F R' loses about its condition number times u of each
     # result; past 1e-6 relative the restriction no longer resolves what an
     # interval shows, as when a level of almost no weight leaves F a
     # direction of nearly no information that the binding rows cross.
     if not (np.all(np.isfinite(values)) and values[0] > 0.0 and values[-1] * u <= 1e-6 * values[0]):
         return None
-    held = (vectors / values) @ vectors.T
+    inverse = (vectors / values) @ vectors.T
 
     def restricted(contrast: np.ndarray) -> np.ndarray:
         moved = apply(contrast)
-        return moved - moves @ (held @ (R @ moved))
+        return moved - moves @ (inverse @ (R @ moved))
 
     return restricted
 

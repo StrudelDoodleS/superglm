@@ -1217,38 +1217,79 @@ def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence
     assert free["flagged"] == whole["flagged"] != []
 
 
-@pytest.mark.parametrize("case", ["slack-row-near-the-face", "row-in-small-units"])
+def _restriction_case(case):
+    """Rows, the QP's active rows, coefficients, F's diagonal, a probe, and ``c' move(c)`` on the face."""
+    width = {"slack-row-near-the-face": 10, "nearly-dependent-rows": 100}.get(case, 2)
+    A, f = np.zeros((2, width)), np.ones(width)
+    active, beta, c, expected = [0, 1], np.zeros(width), np.zeros(width), 0.0
+    if case == "slack-row-near-the-face":
+        A[:, 0], A[1, 1], beta[1], f[1], c[1], active, expected = (
+            1,
+            1e-14,
+            1e14,
+            1e28,
+            1e-14,
+            [0],
+            1,
+        )
+    elif case == "row-in-small-units":
+        A[0, :] = 1.0, 1e-16
+        f[1], c[1], active, expected = 1e32, 1e-16, [0], 0.5
+    elif case == "rows-in-other-units":
+        A[0, 0], A[1, 1], f[1], c[1] = 1.0, 1e-6, 1e12, 1e-6
+    elif case == "restriction-near-underflow":
+        A[0, 0], f[:], c[0], active = 1.0, 2e-308, 1.0, [0]
+    else:  # nearly-dependent-rows: e0 and e0 + 1.5e-15 e1, which the fit holds both of
+        A[:, 0], A[1, 1], f[1], c[1] = 1.0, 1.5e-15, 1.5e-15**-2, 1.0
+    return A, active, beta, f, c, expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "slack-row-near-the-face",
+        "row-in-small-units",
+        "rows-in-other-units",
+        "restriction-near-underflow",
+        "nearly-dependent-rows",
+    ],
+)
 def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
     """The rows a fit records holding are the restriction, entry for entry.
 
-    ``slack-row-near-the-face``: rows ``e0`` and ``e0 + 1e-14 e1`` beside a
-    coefficient of 1e14 along ``e1``; the QP held ``e0``, the second row has
-    slack 1. A cut on the second row's share of the face (1e-14) held it too
-    and took ``e1``'s response: ``c' move(c)`` for ``c = 1e-14 e1`` fell from
-    1 to about 5e-16. ``row-in-small-units``: one binding row ``[1, 1e-16]``
-    under a curvature of 1e32 on its second column; the face's complement
-    from an SVD of its basis came back as ``[1, 0]``, and ``c' move(c)`` for
-    ``c = 1e-16 e1`` read 1 against 0.5. Each restriction is to its relative
-    accuracy of 1e-6. Mutation: 03ab16f5 fails the first, 3f622ba9 the second.
+    Each case is a defect an earlier form of the restriction had, with
+    ``c' move(c)`` checked against its value on the face to 1e-6 of
+    ``c' F c``, the restriction's relative accuracy:
+
+    - ``slack-row-near-the-face``: rows ``e0`` and ``e0 + 1e-14 e1`` beside a
+      coefficient of 1e14 along ``e1``. The QP held ``e0``; the second row has
+      slack 1. A cut on its share of the face (1e-14) held it too and took
+      ``e1``'s response (03ab16f5).
+    - ``row-in-small-units``: one row ``[1, 1e-16]`` under a curvature of 1e32
+      on its second column. The face's complement from an SVD of its basis
+      came back as ``[1, 0]``, and ``c' move(c)`` read 1 against 0.5
+      (3f622ba9).
+    - ``rows-in-other-units``: rows ``diag(1, 1e-6)``, ``F = diag(1, 1e12)``.
+      Each row scaled to a unit largest entry left ``R F R'`` a condition near
+      1e12, so the restriction was refused (66ebf657).
+    - ``restriction-near-underflow``: one row under ``F = 2e-308``. The
+      inverse of the unscaled ``R F R'`` overflowed to inf (66ebf657).
+    - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
+      columns. The fit's rank rule holds both, but a pivot cut scaled by the
+      model's width dropped the second and freed ``e1`` (66ebf657).
     """
     from types import SimpleNamespace
 
     from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
     from superglm.types import GroupSlice, LinearConstraintSet
 
-    if case == "slack-row-near-the-face":
-        width, active_rows, expected = 10, [0], 1.0
-        A = np.zeros((2, width))
-        A[:, 0], A[1, 1] = 1.0, 1e-14
-        beta, scale, c = 1e14 * np.eye(width)[1], np.diag([1.0, 1e28, *[1.0] * 8]), 1e-14
-    else:
-        width, active_rows, expected = 2, [0], 0.5
-        A = np.array([[1.0, 1e-16]])
-        beta, scale, c = np.zeros(width), np.diag([1.0, 1e32]), 1e-16
-    b = np.zeros(A.shape[0])
+    A, active, beta, f, c, expected = _restriction_case(case)
+    width, b = A.shape[1], np.zeros(A.shape[0])
     # recorded as the fit records them: the binding rows of its active set
-    face_rows = _binding_rows(A[active_rows], b[active_rows], beta, np.ones(width))
+    face_rows = _binding_rows(A[active], b[active], beta, np.ones(width))
     record = SimpleNamespace(face=_active_face_basis(face_rows), face_rows=face_rows)
+    if case == "nearly-dependent-rows":
+        assert record.face.shape[1] == width - 2
     group = GroupSlice(name="t", start=0, end=width, constraints=LinearConstraintSet(A, b))
     model = SimpleNamespace(
         _groups=[group],
@@ -1256,10 +1297,12 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
         _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
     )
     move = free_levels_module._on_binding_face(
-        model, [group], lambda v: scale @ v, SimpleNamespace(p=width), None
+        model, [group], lambda v: f * v, SimpleNamespace(p=width), None
     )
-    direction = c * np.eye(width)[1]
-    np.testing.assert_allclose(direction @ move(direction), expected, rtol=1e-6)
+    assert move is not None
+    moved = c @ move(c)
+    assert np.isfinite(moved)
+    assert abs(moved - expected) <= 1e-6 * float(c @ (f * c))
 
 
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():

@@ -653,18 +653,27 @@ def _active_face_basis(held: NDArray) -> NDArray | None:
     is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
     row binds.
     """
-    width = held.shape[1]
     if not held.shape[0]:
         return None
-    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
-    held = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
-    _, singular, vt = np.linalg.svd(held, full_matrices=True)
-    rank = int(np.count_nonzero(singular > max(held.shape) * _EPS_FLOAT * singular[0]))
+    width = held.shape[1]
+    touched, vt, rank = _held_rank(held)
     free = np.setdiff1d(np.arange(width), touched)
     basis = np.zeros((width, free.size + touched.size - rank))
     basis[free, np.arange(free.size)] = 1.0
     basis[np.ix_(touched, np.arange(free.size, basis.shape[1]))] = vt[rank:].T
     return basis
+
+
+def _held_rank(held: NDArray) -> tuple[NDArray, NDArray, int]:
+    """The columns rows ``held`` touch, their unit rows' right singular vectors there, and their rank.
+
+    The rank is NumPy's ``matrix_rank`` cut on the unit rows: the face's
+    rank decision, which the editor shares.
+    """
+    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
+    unit = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
+    _, singular, vt = np.linalg.svd(unit, full_matrices=True)
+    return touched, vt, int(np.count_nonzero(singular > max(unit.shape) * _EPS_FLOAT * singular[0]))
 
 
 def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
