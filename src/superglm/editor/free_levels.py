@@ -49,7 +49,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import scipy.linalg
+import scipy.linalg.lapack
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -67,9 +67,12 @@ from superglm.inference._term_types import _safe_exp
 from superglm.inference.covariance import covariance_selected_block
 from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
-from superglm.model.state_ops import _grouped_active_state, _legacy_active_state
-from superglm.solvers.constrained_qp import _feasibility_slack, _roundoff_tolerance
-from superglm.solvers.irls_direct import _QP_FEASIBILITY_TOL
+from superglm.model.state_ops import (
+    _grouped_active_state,
+    _legacy_active_state,
+    _rank_centered_data_gram,
+)
+from superglm.solvers.irls_direct import _binding_rank, _binding_rows
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -539,58 +542,91 @@ def _observed_rows(distribution, link, y, eta, fisher) -> np.ndarray | None:
     return fisher * (1.0 + (y - mean) * np.where(resolved, bracket, 0.0))
 
 
-def _on_binding_face(model, active, width: int, apply) -> Any:
+def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     """``apply`` restricted to the face of the fit's binding shape constraints.
 
     A constraint ``A theta >= b`` that binds at the fit holds the solution on
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    A row binds when its slack, in the QP's own units, is within the
-    feasibility tolerance the solver holds its active rows to, and the dot
-    product's rounding: the solver keeps those rows on their face. None when
-    the restriction cannot be formed to a relative accuracy of 1e-6.
+    The rows held are the ones the fit held (``RankInfo.face_rows``), an
+    independent set of them in their own units, none where it held none. A
+    record without them, pickled before fits kept them (0.41 and earlier) or
+    dropped by a post-fit repair that moved the working weights, has its rows
+    read as the fit reads them (``irls_direct._binding_rows``), all of them,
+    the QP's active set being unknown, over the active columns ``X`` at the
+    ``curvature`` weights, whose centred Gram is ``data_gram`` when the caller
+    has it. There a slack below ``_QP_FEASIBILITY_TOL`` of the fit's largest
+    column contribution reads as held. None when the restriction cannot be
+    formed to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
-    beta = np.asarray(model.result.beta, dtype=np.float64)
-    rows = []
-    for group in active:
-        constraints = getattr(full.get(group.name), "constraints", None)
-        if constraints is None or not constraints.n_constraints:
-            continue
-        source = full[group.name]
-        theta = beta[source.start : source.end]
-        A = np.asarray(constraints.A, dtype=np.float64)
-        slack = _feasibility_slack(A, theta, np.asarray(constraints.b, dtype=np.float64))
-        within = _QP_FEASIBILITY_TOL + _roundoff_tolerance(A.shape[1])
-        for row in A[slack <= within]:
-            embedded = np.zeros(width)
-            embedded[group.start : group.end] = row
+    recorded = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
+    width = X.p
+    if recorded is not None:
+        # Over the active columns; an inactive term's coefficients are zero,
+        # so its rows drop.
+        columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
+        R = recorded[:, np.concatenate(columns)]
+        R = R[np.any(R != 0.0, axis=1)]
+    else:
+        beta = np.asarray(model.result.beta, dtype=np.float64)
+        theta = np.zeros(width)
+        rows, bounds = [], []
+        for group in active:
+            source = full[group.name]
+            theta[group.start : group.end] = beta[source.start : source.end]
+            constraints = getattr(source, "constraints", None)
+            if constraints is None or not constraints.n_constraints:
+                continue
+            embedded = np.zeros((constraints.n_constraints, width))
+            embedded[:, group.start : group.end] = np.asarray(constraints.A, dtype=np.float64)
             rows.append(embedded)
-    if not rows:
+            bounds.append(np.asarray(constraints.b, dtype=np.float64))
+        if not rows:
+            return apply
+        gram = _rank_centered_data_gram(X, curvature) if data_gram is None else data_gram
+        column_scale = np.sqrt(np.maximum(np.diag(gram), 0.0))
+        R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
+    if not R.shape[0]:
         return apply
-    R = np.array(rows)
-    # The independent rows, decided on the rows themselves: a pivoted QR of
-    # R', whose diagonal falls below the rounding of its first entry only at
-    # a row the others already span.
-    _q, triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
-    diagonal = np.abs(np.diag(triangle))
-    u = UNIT_ROUNDOFF
-    R = R[order[diagonal > width * u * diagonal[0]]]
+    # The fit's rank rule (``irls_direct._binding_rank``) on the rows as
+    # recorded, so it decides as the fit's face did.
+    rank = _binding_rank(R)[2]
     moves = np.column_stack([apply(row) for row in R])
+    # Scaled to a unit diagonal, R F R' has within a factor of its size the
+    # least condition any diagonal scaling gives it (van der Sluis 1969;
+    # Higham 2002, Theorem 7.5): the guard below judges the restriction, not
+    # the rows' units, and the scaled factors stay in range.
+    scale = np.sqrt(np.einsum("ij,ji->i", R, moves))
+    if not np.all(np.isfinite(scale) & (scale > 0.0)):
+        return None
+    R, moves = R / scale[:, None], moves / scale
     gram = 0.5 * (R @ moves + (R @ moves).T)
+    # That many rows, the most independent in the curvature metric first:
+    # pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham 2002, sec. 10.3),
+    # so the basis is as well conditioned there as the rows allow. Its
+    # diagonal is 1 exactly for the pivot choice, which otherwise turns on
+    # the last bit of each scaled product. Rows equal to within rounding tie,
+    # and which is kept moves a contrast by about d sqrt(cond F) of its
+    # variance, for rows d apart.
+    pivoting = gram.copy()
+    np.fill_diagonal(pivoting, 1.0)
+    pivots = scipy.linalg.lapack.dpstrf(pivoting)[1][:rank] - 1
+    R, moves, gram = R[pivots], moves[:, pivots], gram[np.ix_(pivots, pivots)]
     values, vectors = np.linalg.eigh(gram)
+    u = UNIT_ROUNDOFF
     # Solving with R F R' loses about its condition number times u of each
     # result; past 1e-6 relative the restriction no longer resolves what an
     # interval shows, as when a level of almost no weight leaves F a
     # direction of nearly no information that the binding rows cross.
     if not (np.all(np.isfinite(values)) and values[0] > 0.0 and values[-1] * u <= 1e-6 * values[0]):
         return None
-    held = (vectors / values) @ vectors.T
+    inverse = (vectors / values) @ vectors.T
 
     def restricted(contrast: np.ndarray) -> np.ndarray:
         moved = apply(contrast)
-        return moved - moves @ (held @ (R @ moved))
+        return moved - moves @ (inverse @ (R @ moved))
 
     return restricted
 
@@ -649,7 +685,7 @@ def _influence(model, name: str) -> _Influence | str:
             return _SIGNED
         curvature = observed
         try:
-            X, active, _inverse, _augmented, _gram, inverse, _rank = _legacy_active_state(
+            X, active, _inverse, _augmented, data_gram, inverse, _rank = _legacy_active_state(
                 model, solver, curvature
             )
         except (ValueError, ArithmeticError, np.linalg.LinAlgError):
@@ -662,7 +698,7 @@ def _influence(model, name: str) -> _Influence | str:
 
         width = inverse.shape[0]
     else:
-        curvature = fisher
+        curvature, data_gram = fisher, None
         covariance, active = model._coef_covariance
         X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
         scale = float(model.result.phi)
@@ -677,7 +713,7 @@ def _influence(model, name: str) -> _Influence | str:
         return _UNMEASURED
     # the fit's own covariance is already its face's (``RankInfo.augmented_inverse``)
     on_face = observed is fisher and getattr(solver.rank_info, "face", None) is not None
-    move = apply if on_face else _on_binding_face(model, active, width, apply)
+    move = apply if on_face else _on_binding_face(model, active, apply, X, curvature, data_gram)
     if move is None:
         return _UNMEASURED
     columns = _term_columns(active, name)

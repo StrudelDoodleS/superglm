@@ -604,34 +604,20 @@ def _latent_step_depth(
     return depth
 
 
-def _active_face_basis(
-    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None, column_scale: NDArray
-) -> NDArray | None:
-    """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
+def _binding_rows(A: NDArray, b: NDArray, beta: NDArray, column_scale: NDArray) -> NDArray:
+    """The rows of ``A beta >= b`` that bind at ``beta``, each scaled by a power of two.
 
-    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
-    bind at ``beta``: zero slack on the row's own scale, or against the fit's
-    largest column contribution (``column_scale`` the working columns' norms)
-    where that scale is finite and positive (so a slack below
-    ``_QP_FEASIBILITY_TOL`` of that contribution reads as zero, whatever the
-    coefficient's own size).  On it the constrained
-    fit is, locally, the fit with those rows held as equalities, so its
-    degrees of freedom and covariance are those of that fit (Meyer and
-    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
-    binding row touches keep their unit vectors; the rest of the null space
-    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
-    row binds.
+    ``column_scale`` is the working columns' norms.  A slack below
+    ``_QP_FEASIBILITY_TOL`` of the fit's largest column contribution reads as
+    zero, whatever the coefficient's own size.
     """
-    rows = np.asarray([] if active is None else active, dtype=np.intp)
-    if not rows.size:
-        return None
     # Each row and its bound scaled by the one power of two that brings the
     # row's largest entry into [1/2, 1) (exact), so the fit's reading and the
     # row norms do not depend on a row's magnitude; a bound far larger than its
     # row leaves the row's norm in range.
-    exponent = np.frexp(np.max(np.abs(A[rows]), axis=1))[1]
-    held = np.ldexp(A[rows], -exponent[:, None])
-    bound = np.ldexp(b[rows], -exponent)
+    exponent = np.frexp(np.max(np.abs(A), axis=1))[1]
+    held = np.ldexp(A, -exponent[:, None])
+    bound = np.ldexp(b, -exponent)
     # A row binds when its slack is zero to rounding on its own scale
     # (overflow-safe) or on the whole fit's, the largest column contribution
     # |beta_j| ||x_j||_W read back in each column's units: a term the
@@ -652,18 +638,42 @@ def _active_face_basis(
     # the row's own reading is on the unscaled row, where a bound that
     # overflows when scaled stays readable.
     on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
-    held = held[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | on_fit]
+    return held[(_feasibility_slack(A, beta, b) <= bar) | on_fit]
+
+
+def _active_face_basis(held: NDArray) -> NDArray | None:
+    """An orthonormal basis ``Z`` of the coefficients the binding shape rows ``held`` leave free.
+
+    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
+    bind at the fit (``_binding_rows``).  On it the constrained
+    fit is, locally, the fit with those rows held as equalities, so its
+    degrees of freedom and covariance are those of that fit (Meyer and
+    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
+    binding row touches keep their unit vectors; the rest of the null space
+    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
+    row binds.
+    """
     if not held.shape[0]:
         return None
-    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
-    held = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
-    _, singular, vt = np.linalg.svd(held, full_matrices=True)
-    rank = int(np.count_nonzero(singular > max(held.shape) * _EPS_FLOAT * singular[0]))
-    free = np.setdiff1d(np.arange(A.shape[1]), touched)
-    basis = np.zeros((A.shape[1], free.size + touched.size - rank))
+    width = held.shape[1]
+    touched, vt, rank = _binding_rank(held)
+    free = np.setdiff1d(np.arange(width), touched)
+    basis = np.zeros((width, free.size + touched.size - rank))
     basis[free, np.arange(free.size)] = 1.0
     basis[np.ix_(touched, np.arange(free.size, basis.shape[1]))] = vt[rank:].T
     return basis
+
+
+def _binding_rank(held: NDArray) -> tuple[NDArray, NDArray, int]:
+    """The columns rows ``held`` touch, their unit rows' right singular vectors there, and their rank.
+
+    The rank is NumPy's ``matrix_rank`` cut on the unit rows: the face's
+    rank decision, which the editor shares.
+    """
+    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
+    unit = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
+    _, singular, vt = np.linalg.svd(unit, full_matrices=True)
+    return touched, vt, int(np.count_nonzero(singular > max(unit.shape) * _EPS_FLOAT * singular[0]))
 
 
 def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
@@ -5068,17 +5078,18 @@ def _fit_irls_direct_once(
             augmented_rank = reml_slope_rank
             final_system = centered_final
             # A constrained fit's statistics are its active face's.
-            face = (
-                _active_face_basis(
-                    A_all,
-                    b_all,
+            face_rows = None
+            if A_all is not None and b_all is not None:
+                active_rows = np.asarray(
+                    [] if prev_active_set is None else prev_active_set, dtype=np.intp
+                )
+                face_rows = _binding_rows(
+                    A_all[active_rows],
+                    b_all[active_rows],
                     beta,
-                    prev_active_set,
                     np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
                 )
-                if A_all is not None and b_all is not None
-                else None
-            )
+            face = None if face_rows is None else _active_face_basis(face_rows)
             face_rank = (
                 None
                 if face is None
@@ -5108,6 +5119,7 @@ def _fit_irls_direct_once(
                 augmented_rank=augmented_rank,
                 feature_edf=feature_edf,
                 face=face,
+                face_rows=face_rows,
                 face_rank=face_rank,
             ) -> RankInfo:
                 """The data-subspace metadata only retained-fit inference reads.
@@ -5202,6 +5214,7 @@ def _fit_irls_direct_once(
                     data_gram=centered_final.data_gram,
                     data_gram_weights=weights_fingerprint(W),
                     face=face,
+                    face_rows=face_rows,
                     face_augmented=face_rank,
                     face_coefficient=(
                         None if face is None else _face_decomposition(M_beta, face, raw_factor)

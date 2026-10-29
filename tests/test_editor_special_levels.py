@@ -1129,6 +1129,246 @@ def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(
     np.testing.assert_allclose(gaps.gap_var, (jacobian**2) @ variance, rtol=1e-5)
 
 
+@pytest.mark.parametrize("family", ["gamma", "poisson"])
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatch, family, kind):
+    """An increasing curve over falling bands beside a fitted term.
+
+    Held flat, the curve's coefficients sit at the other term's round-off,
+    which each row's own scale read as free slopes on most of its rows, so
+    the curve kept a pull. Its rows are now the ones the fit holds, and each
+    gap's variance is the one with the curve taken as fixed, to the
+    restriction's relative accuracy of 1e-6. The Gamma/log fit takes the
+    observed curvature and the rows it recorded. The Poisson fit loads as a
+    model pickled before fits recorded them does, and the editor reads its
+    rows. The ``cr`` curve has seven rows over six active columns. Mutation:
+    the per-row reading moves a gap's variance by up to 94%; indexing the
+    pivots past the QR's diagonal raises on ``cr``; and telling a 0.41 record
+    by a missing face entry, which a real load fills, holds nothing on the
+    Poisson cases.
+    """
+    bands = TWELVE[:8]
+    rng = np.random.default_rng(5)
+    k = np.repeat(np.arange(8), 30)
+    z = rng.uniform(0.0, 1.0, k.size)
+    mean = np.exp(1.0 - 0.1 * k + 2.0 * z)
+    y = mean * rng.gamma(4.0, 0.25, k.size) if family == "gamma" else rng.poisson(mean)
+    X = pd.DataFrame({"band": np.array(bands)[k], "z": z})
+    band = OrderedCategorical(
+        order=bands, basis=Spline(kind=kind, n_knots=4, constraint=Constraint.fit.increasing)
+    )
+    model = SuperGLM(
+        family=family,
+        link="log",
+        features={"band": band, "z": Numeric()},
+        spline_penalty=1.0,
+        tol=1e-12,
+    ).fit(X, y)
+    group, solver = model._groups[0], model._solver_pirls_result()
+    assert not np.any(solver.rank_info.face[group.start : group.end])
+    if family == "poisson":
+        # a record from before the face fields, published as a fit's result
+        # is, through a pickle: the load fills the fields with their defaults
+        unrecorded = object.__new__(type(solver.rank_info))
+        unrecorded.__dict__.update(
+            {key: value for key, value in vars(solver.rank_info).items() if "face" not in key}
+        )
+        result = dataclasses.replace(solver, rank_info=unrecorded)
+        result._publish()
+        model._solver_result = result
+        model.__dict__.pop("_coef_covariance", None)
+        model = pickle.loads(pickle.dumps(model))
+        assert model._solver_pirls_result().rank_info.face_rows is None
+    found = _captured_gaps(monkeypatch)
+    free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    monkeypatch.setattr(free_levels_module, "_ordered_contrasts", lambda *args: None)
+    free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    held, fixed = found
+    np.testing.assert_allclose(held.gap_var, fixed.gap_var, rtol=1e-6)
+
+
+def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence(monkeypatch):
+    """A free increasing curve beside a term contributing 1e11, Gaussian.
+
+    Its smallest slack, 0.056, is below 1e-12 of that contribution, so the
+    fit's reading would count its rows as binding; the QP never held them and
+    the fit recorded no face, so the editor holds none. Mutation: reading
+    every row as the fit reads its active set raised the first gap's
+    variance from 6.1e-7 to 1.1e-5 and dropped both flags.
+    """
+    bands = TWELVE[:8]
+    k = np.repeat(np.arange(8), 30)
+    z = np.tile(np.linspace(-1.0, 1.0, 30), 8)
+    noise = np.random.default_rng(5).normal(0.0, 0.02, k.size)
+    y = 1e11 * z + 0.1 * k + noise + 0.05 * (k == 0)
+    X = pd.DataFrame({"band": np.array(bands)[k], "z": z})
+    band = OrderedCategorical(
+        order=bands, basis=Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing)
+    )
+    model = SuperGLM(
+        family="gaussian", features={"band": band, "z": Numeric()}, spline_penalty=1.0, tol=1e-12
+    ).fit(X, y)
+    assert model._solver_pirls_result().rank_info.face is None
+    found = _captured_gaps(monkeypatch)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    monkeypatch.setattr(free_levels_module, "_on_binding_face", lambda m, a, apply, *rest: apply)
+    whole = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    np.testing.assert_array_equal(found[0].gap_var, found[1].gap_var)
+    assert free["flagged"] == whole["flagged"] != []
+
+
+def _restriction_case(case):
+    """Rows, the QP's active rows, coefficients, F, a probe, and ``c' move(c)``, None for the fit's face."""
+    width = {"slack-row-near-the-face": 10, "nearly-dependent-rows": 100}.get(case, 2)
+    A, f = np.zeros((2, width)), np.ones(width)
+    active, beta, c, expected = [0, 1], np.zeros(width), np.zeros(width), 0.0
+    if case == "slack-row-near-the-face":
+        A[:, 0], A[1, 1], beta[1], f[1], c[1], active, expected = (
+            1,
+            1e-14,
+            1e14,
+            1e28,
+            1e-14,
+            [0],
+            1,
+        )
+    elif case == "row-in-small-units":
+        A[0, :] = 1.0, 1e-16
+        f[1], c[1], active, expected = 1e32, 1e-16, [0], 0.5
+    elif case == "row-in-small-units-leading":
+        A[0, :] = 1e-16, 1.0
+        f[0], c[0], active, expected = 1e32, 1e-16, [0], 0.5
+    elif case == "rows-redundant-in-the-curvature-metric":  # rank 2; e0 held, e2 free
+        A = np.array([[0.9, 0.9, 0, 0], [0.9, -0.9, 0, 0], [1e6, 0, 0, 0], [0, 1.0, 0, 0]])
+        active, beta, f = [0, 1, 2, 3], np.zeros(4), np.array([1.0, 1e12, 1.0, 1.0])
+        c, expected = np.array([1.0, 0.0, 1.0, 0.0]), 1.0
+    elif case == "rows-in-micro-units":  # both bind; the face leaves e2 free
+        A, f = np.array([[1.0, 0.0, 0.0], [1e-6, 1e-6, 0.0]]), np.array([1.0, 1e12, 1.0])
+        beta, c = np.zeros(3), np.array([0.0, 1e-6, 0.0])
+    elif case == "rows-in-other-units":
+        A[0, 0], A[1, 1], f[1], c[1] = 1.0, 1e-6, 1e12, 1e-6
+    elif case == "restriction-near-underflow":
+        A[0, 0], f[:], c[0], active = 1.0, 2e-308, 1.0, [0]
+    elif case == "restriction-near-underflow-correlated":  # the fit holds e0 + e1
+        A[0, :], active, c[0], expected = 1.0, [0], 1.0, None
+        f = np.linalg.inv(np.array([[1.0, 0.9], [0.9, 1.0]])) * 1e-308
+    elif case == "rows-parallel-to-rounding-under-unit-curvature":  # the fit holds both
+        A[:, 0], A[1, 1], c[1], expected = 1.0, 1e-10, 1.0, None
+    elif case == "nearly-dependent-rows":  # e0 and e0 + 1.5e-15 e1, which the fit holds both of
+        A[:, 0], A[1, 1], f[1], c[1] = 1.0, 1.5e-15, 1.5e-15**-2, 1.0
+    else:  # rows-equal-to-rounding: the fit holds e0 alone
+        d = 2.0**-51
+        A = np.array([[1.0, d, 0.0], [2.0, 0.0, 0.0], [1.0, -d, 0.0]])
+        f, c, active, beta = (
+            np.array([1.0, 2.0**96, 1.0]),
+            np.array([0.0, 2.0**-48, 0.0]),
+            [0, 1, 2],
+            np.zeros(3),
+        )
+        expected = None  # on the fit's recorded face
+    return A, active, beta, f if f.ndim == 2 else np.diag(f), c, expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "slack-row-near-the-face",
+        "row-in-small-units",
+        "row-in-small-units-leading",
+        "rows-in-other-units",
+        "rows-in-micro-units",
+        "restriction-near-underflow",
+        "nearly-dependent-rows",
+        "rows-redundant-in-the-curvature-metric",
+        "restriction-near-underflow-correlated",
+        "rows-parallel-to-rounding-under-unit-curvature",
+        "rows-equal-to-rounding",
+    ],
+)
+def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
+    """An independent set of the rows a fit records holding, in their own units, is the restriction.
+
+    Each case is a defect an earlier form of the restriction had, with
+    ``c' move(c)`` checked against its value on the face to 1e-6 of
+    ``c' F c``, the restriction's relative accuracy:
+
+    - ``slack-row-near-the-face``: rows ``e0`` and ``e0 + 1e-14 e1`` beside a
+      coefficient of 1e14 along ``e1``. The QP held ``e0``; the second row has
+      slack 1. A cut on its share of the face (1e-14) held it too and took
+      ``e1``'s response (03ab16f5).
+    - ``row-in-small-units`` and ``-leading``: one row ``[1, 1e-16]``, or
+      ``[1e-16, 1]``, under a curvature of 1e32 on its small column. An SVD
+      of the face basis (3f622ba9), or of the rows (d9fcbe4d), loses the small
+      entry, and ``c' move(c)`` read 1 against 0.5.
+    - ``rows-in-other-units``: rows ``diag(1, 1e-6)``, ``F = diag(1, 1e12)``.
+      Each row scaled to a unit largest entry left ``R F R'`` a condition near
+      1e12, so the restriction was refused (66ebf657).
+    - ``rows-in-micro-units``: rows ``[1, 0, 0]`` and ``[1e-6, 1e-6, 0]``
+      under ``F = diag(1, 1e12, 1)``. Rotated to their singular vectors
+      (d9fcbe4d), the restriction's condition was near 5e11 even after
+      equilibration, and it was refused.
+    - ``rows-redundant-in-the-curvature-metric``: four rows of rank 2 under
+      ``F = diag(1, 1e12, 1, 1)``. A pivoted QR of the rows kept two that are
+      nearly parallel in F's metric, and the restriction was refused; scaling
+      two inequalities by 1.2 made it succeed (8794e05e).
+    - ``restriction-near-underflow-correlated``: one row ``[1, 1]`` under a
+      correlated F near 1e-308. The rank taken on the equilibrated rows
+      overflowed their squared norms, read 0, and raised (1021ce9a). Checked
+      against the fit's recorded face.
+    - ``rows-parallel-to-rounding-under-unit-curvature``: ``e0`` and
+      ``e0 + 1e-10 e1`` under ``F = I``, which the fit holds both of. The
+      restriction may be refused, but must not keep one row and publish
+      ``e1``'s whole variance, which a rank from the pivoting would.
+    - ``restriction-near-underflow``: one row under ``F = 2e-308``. The
+      inverse of the unscaled ``R F R'`` overflowed to inf (66ebf657).
+    - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
+      columns. The fit's rank rule holds both, but a pivot cut scaled by the
+      model's width dropped the second and freed ``e1`` (66ebf657).
+    - ``rows-equal-to-rounding`` (an expected failure where it fails, #541):
+      rows ``[1, ±d, 0]`` and ``[2, 0, 0]`` with ``d = 2**-51``, under
+      ``F = diag(1, 2**96, 1)``. The fit's rank rule finds one row, and which
+      of the tied rows is kept decides between 64/65 and 1, the value on the
+      fit's recorded face. A contrast mixing the held and freed directions
+      moves by about ``d sqrt(cond F)`` of its variance, which reaches the
+      restriction's 1e-6 only past a condition near 5e18, beyond 1/u.
+    """
+    from types import SimpleNamespace
+
+    from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    A, active, beta, F, c, expected = _restriction_case(case)
+    width, b = A.shape[1], np.zeros(A.shape[0])
+    # recorded as the fit records them: the binding rows of its active set
+    face_rows = _binding_rows(A[active], b[active], beta, np.ones(width))
+    record = SimpleNamespace(face=_active_face_basis(face_rows), face_rows=face_rows)
+    if case == "nearly-dependent-rows":
+        assert record.face.shape[1] == width - 2
+    if case == "rows-equal-to-rounding":
+        assert record.face.shape[1] == width - 1  # the fit's rule holds one direction
+    group = GroupSlice(name="t", start=0, end=width, constraints=LinearConstraintSet(A, b))
+    model = SimpleNamespace(
+        _groups=[group],
+        result=SimpleNamespace(beta=beta),
+        _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
+    )
+    move = free_levels_module._on_binding_face(
+        model, [group], lambda v: F @ v, SimpleNamespace(p=width), None
+    )
+    if case == "rows-parallel-to-rounding-under-unit-curvature" and move is None:
+        return  # refused as unmeasured: a condition near 1e20 cannot resolve it
+    assert move is not None
+    if expected is None:
+        face = record.face
+        expected = c @ face @ np.linalg.solve(face.T @ np.linalg.solve(F, face), face.T @ c)
+    moved = c @ move(c)
+    assert np.isfinite(moved)
+    tolerance = 1e-6 * float(c @ F @ c)
+    if case == "rows-equal-to-rounding" and abs(moved - expected) > tolerance:
+        pytest.xfail("rows tied to within rounding (#541)")
+    assert abs(moved - expected) <= tolerance
+
+
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
     """Bands a million times apart, five iterations: the free refit stops unconverged.
 

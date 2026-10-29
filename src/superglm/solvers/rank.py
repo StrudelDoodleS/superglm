@@ -1192,8 +1192,12 @@ class RankInfo:
     # ``Z' H Z`` for the ``augmented`` and ``coefficient`` Hessians.  The
     # covariance is the face fit's (``augmented_inverse``); ``augmented`` and
     # ``coefficient`` keep the penalized Gram's own rank decision.  ``None``
-    # where no row binds.
+    # where no row binds.  ``face_rows`` are the binding rows themselves,
+    # each scaled by a power of two (exact): none where no row binds, and
+    # ``None`` for a fit without shape rows or a record from before fits kept
+    # them.
     face: NDArray | None = field(default=None, repr=False, compare=False)
+    face_rows: NDArray | None = field(default=None, repr=False, compare=False)
     face_augmented: RankDecomposition | None = field(default=None, repr=False, compare=False)
     face_coefficient: RankDecomposition | None = field(default=None, repr=False, compare=False)
 
