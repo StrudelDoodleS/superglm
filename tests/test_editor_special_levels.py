@@ -1130,37 +1130,45 @@ def test_a_curve_held_by_its_binding_constraints_moves_only_along_their_face(
 
 
 @pytest.mark.parametrize("family", ["gamma", "poisson"])
-def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatch, family):
-    """An increasing curve over falling bands beside a fitted spline.
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatch, family, kind):
+    """An increasing curve over falling bands beside a fitted term.
 
-    Held flat, the curve's coefficients sit at the spline's round-off, which
-    each row's own scale read as free slopes on most of its rows, so the curve
-    kept a pull. Read as the fit reads them, every row binds and each gap's
-    variance is the one with the curve taken as fixed, to the restriction's
-    relative accuracy of 1e-6. The Gamma/log fit takes the observed
-    curvature; the Poisson fit's covariance, as a model saved before fits
-    recorded their face loads, without one. Mutation: the per-row reading
-    moves it by up to 96%.
+    Held flat, the curve's coefficients sit at the other term's round-off,
+    which each row's own scale read as free slopes on most of its rows, so
+    the curve kept a pull. Its rows are now the ones the fit holds, and each
+    gap's variance is the one with the curve taken as fixed, to the
+    restriction's relative accuracy of 1e-6. The Gamma/log fit takes the
+    observed curvature and the face it recorded. The Poisson fit loads as a
+    model pickled before fits recorded a face does, and the editor reads its
+    rows. The ``cr`` curve has seven rows over six active columns. Mutation:
+    the per-row reading moves a gap's variance by up to 94%, and indexing
+    the pivots past the QR's diagonal raises on ``cr``.
     """
     bands = TWELVE[:8]
     rng = np.random.default_rng(5)
     k = np.repeat(np.arange(8), 30)
     z = rng.uniform(0.0, 1.0, k.size)
-    mean = np.exp(1.0 - 0.1 * k + 2.0 * np.sin(6.0 * z))
+    mean = np.exp(1.0 - 0.1 * k + 2.0 * z)
     y = mean * rng.gamma(4.0, 0.25, k.size) if family == "gamma" else rng.poisson(mean)
     X = pd.DataFrame({"band": np.array(bands)[k], "z": z})
     band = OrderedCategorical(
-        order=bands, basis=Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing)
+        order=bands, basis=Spline(kind=kind, n_knots=4, constraint=Constraint.fit.increasing)
     )
-    features = {"band": band, "z": Spline(kind="cr", n_knots=6)}
     model = SuperGLM(
-        family=family, link="log", features=features, spline_penalty=1.0, tol=1e-12
+        family=family,
+        link="log",
+        features={"band": band, "z": Numeric()},
+        spline_penalty=1.0,
+        tol=1e-12,
     ).fit(X, y)
     group, solver = model._groups[0], model._solver_pirls_result()
     assert not np.any(solver.rank_info.face[group.start : group.end])
     if family == "poisson":
-        unrecorded = dataclasses.replace(
-            solver.rank_info, face=None, face_augmented=None, face_coefficient=None
+        # what unpickling a record from before the face fields does
+        unrecorded = object.__new__(type(solver.rank_info))
+        unrecorded.__dict__.update(
+            {key: value for key, value in vars(solver.rank_info).items() if "face" not in key}
         )
         model._solver_result = dataclasses.replace(solver, rank_info=unrecorded)
         model.__dict__.pop("_coef_covariance", None)
@@ -1170,6 +1178,36 @@ def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatc
     free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     held, fixed = found
     np.testing.assert_allclose(held.gap_var, fixed.gap_var, rtol=1e-6)
+
+
+def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence(monkeypatch):
+    """A free increasing curve beside a term contributing 1e11, Gaussian.
+
+    Its smallest slack, 0.056, is below 1e-12 of that contribution, so the
+    fit's reading would count its rows as binding; the QP never held them and
+    the fit recorded no face, so the editor holds none. Mutation: reading
+    every row as the fit reads its active set raised the first gap's
+    variance from 6.1e-7 to 1.1e-5 and dropped both flags.
+    """
+    bands = TWELVE[:8]
+    k = np.repeat(np.arange(8), 30)
+    z = np.tile(np.linspace(-1.0, 1.0, 30), 8)
+    noise = np.random.default_rng(5).normal(0.0, 0.02, k.size)
+    y = 1e11 * z + 0.1 * k + noise + 0.05 * (k == 0)
+    X = pd.DataFrame({"band": np.array(bands)[k], "z": z})
+    band = OrderedCategorical(
+        order=bands, basis=Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing)
+    )
+    model = SuperGLM(
+        family="gaussian", features={"band": band, "z": Numeric()}, spline_penalty=1.0, tol=1e-12
+    ).fit(X, y)
+    assert model._solver_pirls_result().rank_info.face is None
+    found = _captured_gaps(monkeypatch)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    monkeypatch.setattr(free_levels_module, "_on_binding_face", lambda m, a, apply, *rest: apply)
+    whole = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
+    np.testing.assert_array_equal(found[0].gap_var, found[1].gap_var)
+    assert free["flagged"] == whole["flagged"] != []
 
 
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
