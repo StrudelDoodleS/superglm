@@ -5,7 +5,10 @@ pre-solve untraced: the stream carries one ``step_decision`` event for it
 (channel ``reml``, purpose ``reml_presolve``: updates, objective, lambdas,
 wall time), and its REML evaluations start after it.  Such a fit has no
 bootstrap state in the stream either; its first candidate starts from the
-pre-solve's mode.
+pre-solve's mode.  Where such a fit stops on a decrease within the
+evaluations' rounding, a ``step_decision`` event (purpose
+``reml_rounding_stall``: the decrease and its rounding bound) records that
+the last accepted trial was discarded.
 """
 
 from __future__ import annotations

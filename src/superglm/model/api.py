@@ -768,10 +768,12 @@ class SuperGLM:
             iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
             returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
-            summary says why. A cold exact Poisson fit with the log link, at
-            least eight smoothing parameters, no ``RandomEffect`` or
-            ``FactorSmooth`` term and a cap of at least 10 can first run up to
-            this many cached-W updates (a pre-solve) before the exact loop;
+            summary says why. A cold exact fit of Poisson/log, binomial
+            with the logit, probit or cloglog link, Gamma/log, Tweedie/log
+            or NB2/log with a fixed theta, with at least eight smoothing
+            parameters, no ``RandomEffect`` or ``FactorSmooth`` term and a
+            cap of at least 10 can first run up to this many cached-W updates
+            (a pre-solve) before the exact loop;
             ``reml_diagnostics()["n_reml_iter"]`` counts the exact loop and
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
