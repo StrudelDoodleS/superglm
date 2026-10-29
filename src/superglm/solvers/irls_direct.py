@@ -623,9 +623,11 @@ def _active_face_basis(
     rows = np.asarray([] if active is None else active, dtype=np.intp)
     if not rows.size:
         return None
-    # Each row and its bound scaled by a power of two (exact), so neither
-    # reading below nor the row norms depend on a row's magnitude.
-    exponent = np.frexp(np.maximum(np.max(np.abs(A[rows]), axis=1), np.abs(b[rows])))[1]
+    # Each row and its bound scaled by the power of two below the row's
+    # largest entry (exact), so neither reading below nor the row norms depend
+    # on a row's magnitude; a bound far larger than its row leaves the row's
+    # norm in range (a bound that overflows makes the fit's reading abstain).
+    exponent = np.frexp(np.max(np.abs(A[rows]), axis=1))[1]
     held = np.ldexp(A[rows], -exponent[:, None])
     bound = np.ldexp(b[rows], -exponent)
     # A row binds when its slack is zero to rounding on its own scale

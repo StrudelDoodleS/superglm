@@ -1226,14 +1226,18 @@ def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
         ([0.0, 1e-3, 2e-3, 1e9], [1.0, 1.0, 1.0, 1e-9], 1.0, 0),
         # a free slope in large units (contribution 1e-3) beside a fitted column
         ([0.0, 1e-12, 2e-12, 1.0], [1e9, 1e9, 1e9, 1.0], 1.0, 0),
-        # binding rows whose actions overflow float64: 1e150 rows on 1e160 coefficients
+        # binding rows at large magnitudes: 1e150 rows on 1e160 coefficients
         ([1e160, 1e160, 1e160, 1e160], [2e-150] * 4, 1e150, 2),
-        # free rows whose fit-scale denominator overflows while their slack does not
+        # free rows of 1e154 on coefficients near 1e152
         ([0.0, 1e152, 2e152, 1.0], [5e-155] * 3 + [1.0], 1e154, 0),
-        # a flat term at round-off whose fit-scale denominator overflows: both rows bind
+        # a flat term at round-off on rows of 1e154: both rows bind
         ([1e138, 3e138, 6e138, 1.0], [5e-155] * 3 + [1.0], 1e154, 2),
         # a flat term at round-off on rows of 1e-200, whose squared norms underflow
         ([1e-16, 3e-16, 6e-16, 1.0], [1.0] * 4, 1e-200, 2),
+        # binding rows on columns with no data norm: the fit's scale is zero and abstains
+        ([1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0], 1.0, 2),
+        # free rows whose fit-scale denominator overflows after row scaling (2 * 0.9 * 1e308)
+        ([0.0, 1.0, 2.0, 1.0], [1e-308] * 3 + [1.0], 1.8, 0),
     ],
 )
 def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
@@ -1241,15 +1245,13 @@ def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
 ):
     """A row binds when its slack is zero on its own scale or on ``max_j |beta_j| ||x_j||``.
 
-    Mutations: each row's own scale alone reads the round-off term as free
-    (first case); the largest raw coefficient, whatever its column's units,
-    reads the free slope as held (second case), as does the fit's scale left
-    in coefficient units (third case); the fit's scale alone overflows and
-    drops the binding rows (fourth case); an overflowing fit-scale denominator
-    divides a free row's slack to zero and holds it (fifth case), or, left to
-    abstain, frees a flat row (sixth case); rows normalised on their raw norms
-    underflow and the null-space SVD fails (seventh case).  Each row is read
-    after an exact power-of-two scaling, so no case depends on its magnitude.
+    Mutations, and the cases each fails: the row's own scale alone (1, 6, 7);
+    the fit's scale alone (8, columns with no data norm); the largest raw
+    coefficient as the reference (2, 3, 6); the reference left in coefficient
+    units (3, 6); no power-of-two row scaling (6 frees a flat term, 7 fails
+    in the null-space SVD); no finiteness check on the fit's scale (9).  Cases
+    4 and 5 check that rows and coefficients near float64's range read as they
+    do at unit scale.
     """
     from superglm.solvers.irls_direct import _active_face_basis
 
@@ -1257,6 +1259,25 @@ def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
     A[0, :2], A[1, 1:3] = [-row_scale, row_scale], [-row_scale, row_scale]
     face = _active_face_basis(A, np.zeros(2), np.asarray(beta), [0, 1], np.asarray(column_scale))
     assert (4 if face is None else face.shape[1]) == 4 - held
+
+
+def test_a_bound_far_above_its_row_leaves_the_row_in_range():
+    """A row of order one with a bound of 1e200 that binds holds its direction.
+
+    Mutation: the scaling exponent taken from the bound as well shrinks the row
+    to about 1e-200, its squared norm underflows, and the face keeps a
+    spurious free direction.
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    face = _active_face_basis(
+        np.array([[1.0, 0.0]]),
+        np.array([1e200]),
+        np.array([1e200, 1.0]),
+        [0],
+        np.array([1e-100, 1.0]),
+    )
+    assert face is not None and face.shape[1] == 1
 
 
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))
