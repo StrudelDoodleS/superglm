@@ -33,7 +33,12 @@ fit reads is patched where the fit reads it, in the submodule: patching it
 here would change nothing the fit sees.
 """
 
-from superglm.solvers.irls_direct._finalise import _active_face_basis, _binding_rank
+from superglm.solvers.irls_direct._finalise import (
+    _active_face_basis,
+    _binding_rank,
+    _face_decomposition,
+    _feature_edf,
+)
 from superglm.solvers.irls_direct._fit import (
     _build_penalty_matrix,
     _safe_decompose_H,
@@ -72,6 +77,8 @@ __all__ = [
     "_build_penalty_matrix",
     "_centred_system_matvec",
     "_evaluate_scop_trial",
+    "_face_decomposition",
+    "_feature_edf",
     "_levenberg_shifted_leaf_operator",
     "_safe_decompose_H",
     "_SCOPGroupState",

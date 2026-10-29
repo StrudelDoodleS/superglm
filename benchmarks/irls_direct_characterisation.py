@@ -29,7 +29,10 @@ routes and fits that do not engage it, the Gamma/log Fisher-to-Newton switch
 and its latch, Tweedie/log observed Newton, nested random-effect chains,
 shape-constrained P-splines with repeated rows, two groups and a translated
 column, on the QP (``x/scop/``) and on SCOP (``x/scop-engine/``), a term the
-QP holds flat beside a fitted one (its active face), the true-score
+QP holds flat beside a fitted one (its active face), identity-link fits at
+the zero edge, where the working QP goes unbounded, and the QP step's
+infeasible-start restarts (``x/qp/``, some with the QP solve or the line
+search's trial replaced as master's tests replace them), the true-score
 certificate's constrained, latent and truncated-direction branches, score
 stagnation, the float64 fixed-point stop, an ndarray design and the input
 refusals.  ``census`` says which routes and branches a run reached, the
@@ -230,6 +233,16 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
         "x/binlog/scop-engine-lowered": (_binlog_scop_lowered, {"engine": "scop"}),
         "x/qp/flat-held/fit_reml": (_flat_held, {"fit": "fit_reml"}),
         "x/qp/flat-held/fit": (_flat_held, {"fit": "fit"}),
+        "x/qp/zero-edge/n100-k6": (_zero_edge, {"n": 100, "n_knots": 6}),
+        "x/qp/zero-edge/n200-k6": (_zero_edge, {"n": 200, "n_knots": 6}),
+        "x/qp/zero-edge/n200-k8": (_zero_edge, {"n": 200, "n_knots": 8}),
+        "x/qp/unbounded/first-solve": (_qp_unbounded, {"raise_on": 1, "link": "identity"}),
+        "x/qp/unbounded/second-solve": (_qp_unbounded, {"raise_on": 2, "link": "identity"}),
+        "x/qp/unbounded/log-link": (_qp_unbounded, {"raise_on": 2, "link": "log"}),
+        "x/qp/unbounded/infeasible-start": (_qp_unbounded_infeasible_start, {}),
+        "x/qp/infeasible-start/no-feasible-proposal": (_qp_no_feasible_proposal, {}),
+        "x/qp/infeasible-start/outside-link-domain": (_qp_outside_link_domain, {}),
+        "x/qp/rejected-step/active-set": (_qp_rejected_second_step, {}),
         "x/separation/logit-numeric": (_separation, {"separation": "warn"}),
         "x/separation/logit-numeric-error": (_separation, {"separation": "error"}),
         "x/binlog/scop-lowered": (_binlog_scop_lowered, {}),
@@ -716,6 +729,265 @@ def _flat_held(fit: str) -> dict:
     )
     getattr(model, fit)(frame, y)
     return _model_outputs(model, frame, None, fit)
+
+
+def _zero_edge(n: int, n_knots: int) -> dict:
+    """Poisson/identity, two events in the last tenth: an increasing mean at zero on most rows.
+
+    There the working QP can go unbounded (``H is rank-deficient``), and the
+    fit returns its last accepted state, unconverged (#537).
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Constraint, PSpline, SuperGLM
+
+    x = np.linspace(0.0, 1.0, n)
+    y = np.zeros(n)
+    y[[90 * n // 100, 96 * n // 100]] = 1.0
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=n_knots, constraint=Constraint.fit.increasing)},
+    )
+    frame = pd.DataFrame({"x": x})
+    model.fit(frame, y)
+    return _model_outputs(model, frame, None, "fit")
+
+
+def _replace_everywhere(original, replacement) -> None:
+    """``replacement`` for ``original`` in every module that binds it (``_rebind``).
+
+    The module layout and the package layout bind the QP solve in different
+    modules; replaced by identity, the fixture is the same on both.
+    """
+    if not _rebind(original, replacement):
+        raise RuntimeError(f"no module binds {original!r}")
+
+
+def _qp_solve():
+    from superglm.solvers.irls_direct import _solve_constrained_qp_with_cold_retry
+
+    return _solve_constrained_qp_with_cold_retry
+
+
+def _qp_unbounded(raise_on: int, link: str) -> dict:
+    """The working QP raises on solve ``raise_on``: under the identity link the fit ends there.
+
+    Disclosed with a ``ConvergenceWarning``; under the log link, whose domain
+    has no edge, the error is raised (#537).
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Constraint, PSpline, SuperGLM
+
+    real_qp = _qp_solve()
+    calls: list[int] = []
+
+    def unbounded(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == raise_on:
+            raise ValueError("solve_constrained_qp: H is rank-deficient")
+        return real_qp(*args, **kwargs)
+
+    _replace_everywhere(real_qp, unbounded)
+    x = np.linspace(0.0, 1.0, 80)
+    y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link=link,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    )
+    frame = pd.DataFrame({"x": x})
+    model.fit(frame, y)
+    return {**_model_outputs(model, frame, None, "fit"), "qp_calls": len(calls)}
+
+
+def _bspline_increasing_design(family: str, link: str, y):
+    """An increasing ``bs`` term's design, response, weights, offset and groups."""
+    import numpy as np
+    import pandas as pd
+
+    from superglm import BSplineSmooth, Constraint, SuperGLM
+    from superglm.model.base import model_build_design_matrix
+
+    x = np.linspace(0.0, 1.0, 80)
+    model = SuperGLM(
+        family=family,
+        link=link,
+        selection_penalty=0.0,
+        features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    response = y(x)
+    y_fit, weights, offset = model_build_design_matrix(
+        model, pd.DataFrame({"x": x}), response, np.ones_like(response), None
+    )
+    return model, y_fit, weights, offset
+
+
+def _qp_unbounded_infeasible_start() -> dict:
+    """Every working QP raises, from an infeasible start: phase one, then the zero-edge stop."""
+    import numpy as np
+
+    def unbounded(*args, **kwargs):
+        raise ValueError("solve_constrained_qp: H is rank-deficient")
+
+    _replace_everywhere(_qp_solve(), unbounded)
+    model, y_fit, weights, offset = _bspline_increasing_design(
+        "poisson",
+        "identity",
+        lambda x: np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float),
+    )
+    group = model._groups[0]
+    infeasible_beta = np.zeros(model._dm.p)
+    infeasible_beta[group.sl] = -0.1 * group.constraints.A[0]
+    result, inverse = _solver()(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        beta_init=infeasible_beta,
+        intercept_init=float(np.mean(y_fit)),
+        max_iter=50,
+        tol=1e-8,
+        weight_semantics="frequency",
+    )
+    return {"result": result, "inverse": inverse}
+
+
+def _qp_no_feasible_proposal() -> dict:
+    """The first working QP at an infeasible start returns an infeasible proposal: phase one."""
+    import numpy as np
+
+    from superglm.solvers.constrained_qp import QPResult
+
+    model, y_fit, weights, offset = _bspline_increasing_design(
+        "gaussian", "identity", lambda x: 0.5 + 2.0 * x + 0.02 * np.sin(8.0 * x)
+    )
+    group = model._groups[0]
+    infeasible_beta = np.zeros(model._dm.p)
+    infeasible_beta[group.sl] = -10.0 * group.constraints.A[0]
+    real_qp = _qp_solve()
+    calls: list[int] = []
+
+    def no_feasible_first_proposal(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return QPResult(beta=infeasible_beta.copy(), converged=False)
+        return real_qp(*args, **kwargs)
+
+    _replace_everywhere(real_qp, no_feasible_first_proposal)
+    out = {}
+    for max_iter in (1, 50):
+        calls.clear()
+        out[f"max_iter={max_iter}"] = _solver()(
+            model._dm,
+            y_fit,
+            weights,
+            model._distribution,
+            model._link,
+            model._groups,
+            lambda2={"x": 1.0},
+            offset=offset,
+            beta_init=infeasible_beta,
+            intercept_init=0.0,
+            max_iter=max_iter,
+            tol=1e-8,
+            weight_semantics="frequency",
+        )[0]
+    return out
+
+
+def _qp_outside_link_domain() -> dict:
+    """From an infeasible start, every trial rejected, a feasible QP proposal at ``mu <= 0``.
+
+    Accepted for its feasibility, its intercept raised into the link's domain (#537).
+    """
+    import numpy as np
+
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+    from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    def feasible_qp_proposal(*_args, **_kwargs):
+        return QPResult(beta=np.array([10.0]), converged=True)
+
+    def reject_every_trial(**_kwargs):
+        return _IRLSStepDecision(
+            alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+        )
+
+    _replace_everywhere(_qp_solve(), feasible_qp_proposal)
+    _replace_everywhere(_select_irls_trial, reject_every_trial)
+    x = np.linspace(-1.0, 1.0, 41)
+    y = np.random.default_rng(0).poisson(1.5, x.size).astype(float)
+    constraint = LinearConstraintSet(A=np.ones((1, 1)), b=np.zeros(1))
+    result, inverse = _solver()(
+        DesignMatrix([DenseGroupMatrix(x[:, None])], n=x.size, p=1),
+        y,
+        np.ones(x.size),
+        Poisson(),
+        IdentityLink(),
+        [GroupSlice("x", 0, 1, constraints=constraint, monotone_engine="qp")],
+        lambda2=0.0,
+        beta_init=np.array([-1.0]),
+        intercept_init=3.0,
+        max_iter=1,
+        weight_semantics="frequency",
+    )
+    return {"result": result, "inverse": inverse}
+
+
+def _qp_rejected_second_step() -> dict:
+    """An increasing P-spline whose second working QP drops two rows active at the first.
+
+    Its second step is rejected, so the fit returns the first iterate, whose
+    statistics are on the face of the rows that bind there: the active set
+    that iteration started from, not the rejected proposal's.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Constraint, PSpline, Spline, SuperGLM
+    from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
+
+    calls: list[int] = []
+
+    def reject_the_second(**kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            return _IRLSStepDecision(
+                alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+            )
+        return _select_irls_trial(**kwargs)
+
+    _replace_everywhere(_select_irls_trial, reject_the_second)
+    rng = np.random.default_rng(3)
+    n = 300
+    frame = pd.DataFrame({"x": rng.uniform(0, 1, n), "z": rng.uniform(0, 1, n)})
+    signal = 0.6 * np.minimum(frame["x"] * 3, 1.0) + 0.5 * np.sin(4 * frame["z"])
+    y = rng.poisson(np.exp(signal)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing),
+            "z": Spline(kind="cr", k=8),
+        },
+    )
+    model.fit(frame, y)
+    return {**_model_outputs(model, frame, None, "fit"), "line_searches": len(calls)}
 
 
 def _binlog_qp_lowered(direct_solve: str) -> dict:

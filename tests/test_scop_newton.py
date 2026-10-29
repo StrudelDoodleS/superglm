@@ -401,7 +401,7 @@ def test_the_profiles_eta_time_includes_the_scop_proposal_predictor(monkeypatch)
         discrete=False,
         features={
             "x1": Numeric(),
-            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)
@@ -460,7 +460,7 @@ def test_the_profiles_eta_time_lies_inside_its_total(monkeypatch):
         discrete=False,
         features={
             "x1": Numeric(),
-            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)

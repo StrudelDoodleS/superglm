@@ -2626,7 +2626,9 @@ def test_the_certificate_tests_a_scop_group_in_the_latent_coordinates_its_step_h
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
     assert model.result.converged
