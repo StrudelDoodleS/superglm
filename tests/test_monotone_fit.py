@@ -1173,6 +1173,136 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
 
 
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))
+def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
+    """A term the constraint holds flat beside a fitted term adds no degrees of freedom.
+
+    Its coefficients sit at round-off, not at zero, so its rows bind only on a
+    scale shared by the whole fit; its face is ``{0}`` and the EDF is the
+    model's without it.  Mutation: zero slack read on each row's own scale
+    counts the held directions (9.3 against 5.6 for ``ps``).
+    """
+    from superglm._roundoff import gamma
+
+    rng = np.random.default_rng(0)
+    n = 200
+    x, z = rng.uniform(0.0, 1.0, n), rng.uniform(0.0, 1.0, n)
+    y = 1.0 - 2.0 * x + np.sin(6.0 * z) + rng.normal(0.0, 0.1, n)
+    free = type(QP_TERMS[kind]())
+    features = {"x": QP_TERMS[kind](), "z": free(n_knots=6)}
+    model = SuperGLM(family=Gaussian(), selection_penalty=0, spline_penalty=1.0, features=features)
+    alone = SuperGLM(
+        family=Gaussian(), selection_penalty=0, spline_penalty=1.0, features={"z": free(n_knots=6)}
+    )
+    frame = pd.DataFrame({"x": x, "z": z})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+        alone.fit(frame[["z"]], y)
+    solver = model._solver_pirls_result()
+    assert solver.converged
+    reference = alone._solver_pirls_result()
+    # each trace entry is within gamma_p kappa of its value, kappa either
+    # fit's penalised Hessian condition (the two traces round differently);
+    # pre_truncation_condition is the factor's, the square root of it
+    kappa = (
+        max(
+            solver.rank_info.augmented.pre_truncation_condition,
+            reference.rank_info.augmented.pre_truncation_condition,
+        )
+        ** 2
+    )
+    p = solver.beta.size
+    bound = gamma(p) * kappa * p
+    assert bound < 1.0  # the per-row reading moves the EDF by about 3.7
+    assert abs(solver.effective_df - reference.effective_df) <= bound
+
+
+@pytest.mark.parametrize(
+    ("beta", "column_scale", "row_scale", "held"),
+    [
+        # a flat term at round-off beside a fitted column: both rows bind
+        ([1e-16, 3e-16, 6e-16, 1.0], [1.0, 1.0, 1.0, 1.0], 1.0, 2),
+        # a free slope of 1e-3 beside a covariate in units of 1e-9 (coefficient 1e9)
+        ([0.0, 1e-3, 2e-3, 1e9], [1.0, 1.0, 1.0, 1e-9], 1.0, 0),
+        # a free slope in large units (contribution 1e-3) beside a fitted column
+        ([0.0, 1e-12, 2e-12, 1.0], [1e9, 1e9, 1e9, 1.0], 1.0, 0),
+        # binding rows at large magnitudes: 1e150 rows on 1e160 coefficients
+        ([1e160, 1e160, 1e160, 1e160], [2e-150] * 4, 1e150, 2),
+        # free rows of 1e154 on coefficients near 1e152
+        ([0.0, 1e152, 2e152, 1.0], [5e-155] * 3 + [1.0], 1e154, 0),
+        # a flat term at round-off on rows of 1e154: both rows bind
+        ([1e138, 3e138, 6e138, 1.0], [5e-155] * 3 + [1.0], 1e154, 2),
+        # a flat term at round-off on rows of 1e-200, whose squared norms underflow
+        ([1e-16, 3e-16, 6e-16, 1.0], [1.0] * 4, 1e-200, 2),
+        # binding rows on columns with no data norm: the fit's scale is zero and abstains
+        ([1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0], 1.0, 2),
+        # free rows whose fit-scale denominator overflows after row scaling (2 * 0.9 * 1e308)
+        ([0.0, 1.0, 2.0, 1.0], [1e-308] * 3 + [1.0], 1.8, 0),
+    ],
+)
+def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
+    beta, column_scale, row_scale, held
+):
+    """A row binds when its slack is zero on its own scale or on ``max_j |beta_j| ||x_j||``.
+
+    Mutations, and the cases each fails: the row's own scale alone (1, 6, 7);
+    the fit's scale alone (8, columns with no data norm); the largest raw
+    coefficient as the reference (2, 3, 6); the reference left in coefficient
+    units (3, 6); no power-of-two row scaling (6 frees a flat term, 7 fails
+    in the null-space SVD); no finiteness check on the fit's scale (9).  Cases
+    4 and 5 check that rows and coefficients near float64's range read as they
+    do at unit scale.
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    A = np.zeros((2, 4))
+    A[0, :2], A[1, 1:3] = [-row_scale, row_scale], [-row_scale, row_scale]
+    face = _active_face_basis(A, np.zeros(2), np.asarray(beta), [0, 1], np.asarray(column_scale))
+    assert (4 if face is None else face.shape[1]) == 4 - held
+
+
+def test_a_bound_far_above_its_row_leaves_the_row_in_range():
+    """A row of order one with a bound of 1e200 that binds holds its direction.
+
+    Mutation: the scaling exponent taken from the bound as well shrinks the row
+    to about 1e-200, its squared norm underflows, and the face keeps a
+    spurious free direction.
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    face = _active_face_basis(
+        np.array([[1.0, 0.0]]),
+        np.array([1e200]),
+        np.array([1e200, 1.0]),
+        [0],
+        np.array([1e-100, 1.0]),
+    )
+    assert face is not None and face.shape[1] == 1
+
+
+def test_an_overflowing_unit_scale_on_a_column_no_row_touches_reads_the_rows():
+    """A flat term beside a fitted column of 1e150 binds, whatever an untouched column's norm.
+
+    The fifth column's norm, 1e-160 against a contribution of 1e150, overflows
+    its unit scale.  Mutation: the fit's scale summed over every column
+    multiplies that by the rows' zero entries (NaN), the fit's reading
+    abstains, and the flat term reads as free.
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    A = np.zeros((2, 5))
+    A[0, :2], A[1, 1:3] = [-1.0, 1.0], [-1.0, 1.0]
+    face = _active_face_basis(
+        A,
+        np.zeros(2),
+        np.array([1e134, 3e134, 6e134, 1e150, 0.0]),
+        [0, 1],
+        np.array([1.0, 1.0, 1.0, 1.0, 1e-160]),
+    )
+    assert face is not None and face.shape[1] == 3
+
+
+@pytest.mark.parametrize("kind", sorted(QP_TERMS))
 def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
     """The EDF of a fit some rows bind is the divergence of its fitted values.
 
