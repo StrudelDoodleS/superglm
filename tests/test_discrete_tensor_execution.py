@@ -17,6 +17,7 @@ from superglm.group_matrix import (
     DiscretizedTensorGroupMatrix,
 )
 from superglm.types import GroupSlice, TensorRawChannels
+from tests._traced_memory import own_traced_peak
 
 
 def _tensor(n1: int, n2: int, k1: int, k2: int, n: int, p: int):
@@ -165,17 +166,11 @@ def test_tensor_gram_workspace_has_no_bin_grid_times_basis_axis():
     group, rng = _tensor(128, 192, 3, 5, 17, 11)
     grid = rng.normal(size=(128, 192))
     group._factored_gram_raw(grid)
-    tracemalloc.start()
-    try:
-        before, _ = tracemalloc.get_traced_memory()
-        result = group._factored_gram_raw(grid)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, result = own_traced_peak(group._factored_gram_raw, grid)
     # Two marginal outer tables, two contraction/output workspaces, and
     # interpreter overhead. In particular this excludes a (128, 192, 5) array.
     workspace = 8 * (128 * 3**2 + 192 * 5**2 + 2 * 128 * 5**2 + 3 * (3 * 5) ** 2)
-    assert peak - before < workspace + 64 * 1024
+    assert peak < workspace + 64 * 1024
     assert result.shape == (15, 15)
 
 
@@ -1160,16 +1155,15 @@ def test_raw_channel_admission_counts_simultaneous_workspace(
         twin_cache = algebra._BlockWeightCache() if cached else None
         algebra._cross_gram(twin_left, twin_right, weights, cache=twin_cache)
     del twin_left, twin_right, twin_cache
-    if cold:
-        left._cell_csr = None
-    tracemalloc.start()
-    try:
+
+    def admitted():
+        if cold:  # each measured call forms the grid's cell order
+            left._cell_csr = None
         cache = algebra._BlockWeightCache() if cached else None
         profile = {}
-        actual = algebra._cross_gram(left, right, weights, cache=cache, profile=profile)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+        return algebra._cross_gram(left, right, weights, cache=cache, profile=profile), profile
+
+    peak, (actual, profile) = own_traced_peak(admitted)
     raw = profile.get("block_cross_tensor_tensor_channel_raw", 0)
     fit_owned = (8 * n if cached else 0) + (sum(a.nbytes for a in left.cell_csr()) if cold else 0)
     assert peak - (fit_owned if raw else 0) <= budget + (32 << 10)
@@ -1188,13 +1182,13 @@ def test_raw_channel_budget_includes_marginal_validation_before_histogram(monkey
     right.raw_channels = band
     retained = sum(array.nbytes for array in left.cell_csr())
     monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
-    tracemalloc.start()
-    try:
+
+    def validated():
         profile = {}
         algebra._cross_gram(left, right, weights, profile=profile)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+        return profile
+
+    peak, profile = own_traced_peak(validated)
     assert peak + retained <= budget + (4 << 10)
     assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
@@ -1257,9 +1251,11 @@ def test_channel_workspace_growth_and_dense_fallback_release_unused_buffers(monk
         algebra._cross_gram(left, right, weights)
         expected.append(_dense_cross(left, right, weights))
     retained = max(sum(a.nbytes for a in pair[0].cell_csr()) for pair in (small, large))
-    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
-    tracemalloc.start()
-    try:
+    band = large[1].raw_channels
+
+    def grown_and_released():
+        monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+        large[1].raw_channels = band
         cache = algebra._BlockWeightCache()
         for pair, oracle in ((small, expected[0]), (large, expected[1]), (small, expected[0])):
             profile = {}
@@ -1272,9 +1268,8 @@ def test_channel_workspace_growth_and_dense_fallback_release_unused_buffers(monk
         actual = algebra._cross_gram(*large[:2], weights, cache=cache)
         _assert_cross_matches(actual, *expected[1])
         assert cache._channel_scratch.size == 0 and not cache._cell_weights
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+
+    peak, _ = own_traced_peak(grown_and_released)
     assert peak + retained <= budget + (32 << 10)
 
 
@@ -1308,18 +1303,19 @@ def test_channel_buffers_are_released_before_other_tensor_routes(monkeypatch, ro
         if route == "aggregate":
             warm.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
         algebra._cross_gram(left, right, later_weights)
-    tracemalloc.start()
-    try:
+
+    def released():
         cache = algebra._BlockWeightCache()
         algebra._cross_gram(*first[:2], weights, cache=cache)
         assert cache._channel_scratch.size and cache._cell_weights
-        if route == "aggregate":
-            monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
         profile = {}
-        actual = algebra._cross_gram(left, right, later_weights, cache=cache, profile=profile)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+        with monkeypatch.context() as later:
+            if route == "aggregate":
+                later.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
+            actual = algebra._cross_gram(left, right, later_weights, cache=cache, profile=profile)
+        return actual, profile, cache
+
+    peak, (actual, profile, cache) = own_traced_peak(released)
     assert peak <= budget + (32 << 10)
     if route in ("aggregate", "dtype", "range"):
         assert profile["block_cross_tensor_tensor_channel_declines"] == 1

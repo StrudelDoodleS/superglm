@@ -13,6 +13,7 @@ from superglm._group_matrix import _group_matrix_core as core
 from superglm._group_matrix._group_matrix_algebra import _weighted_row_chunk
 from superglm._group_matrix._group_matrix_kernels import _csr_row_chunk
 from superglm.group_matrix import SparseSSPGroupMatrix
+from tests._traced_memory import own_traced_peak
 
 
 @pytest.mark.parametrize("rows", [100, 9_999, 10_001])
@@ -45,12 +46,7 @@ def test_projected_sparse_gram_accounts_for_subhalf_slice_scratch(monkeypatch, b
     weights = np.linspace(0.5, 1.5, n)
     group.gram(weights)
     monkeypatch.setattr(core, "_MAX_SSP_GRAM_WORKSPACE_BYTES", budget)
-    tracemalloc.start()
-    try:
-        group.gram(weights)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, _ = own_traced_peak(group.gram, weights)
     # Observation scratch is bounded by the cap. Allow fixed coefficient
     # products and Python/SciPy allocation bookkeeping, not a fraction of n.
     assert peak <= budget + (32 << 10) + 64 * transform.shape[1] ** 2
@@ -85,12 +81,7 @@ def test_sensitive_int64_sparse_cross_bounds_actual_peak(monkeypatch, budget):
         return original(csr, start, stop)
 
     monkeypatch.setattr(algebra, "_csr_row_chunk", record)
-    tracemalloc.start()
-    try:
-        result = algebra._cross_gram_sparse_ssp(*groups, weights)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, result = own_traced_peak(algebra._cross_gram_sparse_ssp, *groups, weights)
     assert result is not None and rows and max(rows) < n
     assert peak <= budget + (32 << 10) + 64 * p**2
     assert all(shared)
