@@ -1210,6 +1210,39 @@ def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence
     assert free["flagged"] == whole["flagged"] != []
 
 
+def test_a_recorded_face_holds_its_complement_and_no_row_merely_near_it():
+    """A face of every direction but ``e0``, recorded beside a slack row ``e0 + 1e-14 e1``.
+
+    A coefficient of 1e14 along ``e1`` gives that row slack 1, yet its share
+    of the face, 1e-14, sat below a near-orthogonality cut: held too, it took
+    the ``e1`` direction's whole response. The restriction is now the face's
+    own complement, ``e0`` alone, to its relative accuracy of 1e-6.
+    Mutation: holding the rows within the cut drops ``c' move(c)`` for
+    ``c = 1e-14 e1`` from 1 to about 5e-16.
+    """
+    from types import SimpleNamespace
+
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    A = np.zeros((2, 10))
+    A[:, 0], A[1, 1] = 1.0, 1e-14
+    group = GroupSlice(name="t", start=0, end=10, constraints=LinearConstraintSet(A, np.zeros(2)))
+    unit = np.eye(10)
+    record = SimpleNamespace(face=unit[:, 1:])
+    model = SimpleNamespace(
+        _groups=[group],
+        result=SimpleNamespace(beta=1e14 * unit[1]),
+        _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
+    )
+    curvature_inverse = np.diag([1.0, 1e28, *[1.0] * 8])
+    move = free_levels_module._on_binding_face(
+        model, [group], lambda c: curvature_inverse @ c, SimpleNamespace(p=10), None
+    )
+    c = 1e-14 * unit[1]
+    np.testing.assert_allclose(move(unit[0]), 0.0, atol=1e-6)
+    np.testing.assert_allclose(c @ move(c), 1.0, rtol=1e-6)
+
+
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():
     """Bands a million times apart, five iterations: the free refit stops unconverged.
 

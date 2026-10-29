@@ -549,14 +549,17 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    The binding rows are the fit's: those orthogonal to the face it recorded
-    (``RankInfo.face``), none where it recorded none. A record pickled before
-    fits recorded their face (0.41 and earlier) has no face entry of its own,
-    so its rows are read as the fit reads them (``irls_direct._binding_rows``),
-    all of them, the QP's active set being unknown, over the active columns
-    ``X`` at the ``curvature`` weights, whose centred Gram is ``data_gram``
-    when the caller has it. None when the restriction cannot be formed to a
-    relative accuracy of 1e-6.
+    The rows held are the fit's: the complement of the face it recorded
+    (``RankInfo.face``, :func:`_face_complement`), none where it recorded
+    none. A record pickled before fits recorded their face (0.41 and earlier)
+    has no face entry of its own, and a post-fit repair that moved the
+    working weights drops the record; their rows are read as the fit reads
+    them (``irls_direct._binding_rows``), all of them, the QP's active set
+    being unknown, over the active columns ``X`` at the ``curvature``
+    weights, whose centred Gram is ``data_gram`` when the caller has it.
+    There a slack below ``_QP_FEASIBILITY_TOL`` of the fit's largest column
+    contribution reads as held. None when the restriction cannot be formed
+    to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
     record = model._solver_pirls_result().rank_info
@@ -564,37 +567,25 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     face = record.face if recorded else None
     if recorded and face is None:
         return apply
-    u = UNIT_ROUNDOFF
-    if face is not None:
-        # The face's basis keeps each unit binding row within its SVD rank
-        # cut, d eps sqrt(m) (d >= m rows, p columns), of each of its k <= d
-        # columns: within d^2 eps of all of them.
-        counts = [getattr(group.constraints, "n_constraints", 0) for group in model._groups]
-        size = max(face.shape[0], sum(counts))
-        within = 2.0 * u * size * size
-    beta = np.asarray(model.result.beta, dtype=np.float64)
     width = X.p
-    theta = np.zeros(width)
-    rows, bounds, held = [], [], []
-    for group in active:
-        source = full[group.name]
-        theta[group.start : group.end] = beta[source.start : source.end]
-        constraints = getattr(source, "constraints", None)
-        if constraints is None or not constraints.n_constraints:
-            continue
-        A = np.asarray(constraints.A, dtype=np.float64)
-        embedded = np.zeros((A.shape[0], width))
-        embedded[:, group.start : group.end] = A
-        rows.append(embedded)
-        bounds.append(np.asarray(constraints.b, dtype=np.float64))
-        if face is not None:
-            leak = np.linalg.norm(A @ face[source.start : source.end], axis=1)
-            held.append(leak <= within * np.linalg.norm(A, axis=1))
-    if not rows:
-        return apply
     if face is not None:
-        R = np.vstack(rows)[np.concatenate(held)]
+        R = _face_complement(model, active, face)
     else:
+        beta = np.asarray(model.result.beta, dtype=np.float64)
+        theta = np.zeros(width)
+        rows, bounds = [], []
+        for group in active:
+            source = full[group.name]
+            theta[group.start : group.end] = beta[source.start : source.end]
+            constraints = getattr(source, "constraints", None)
+            if constraints is None or not constraints.n_constraints:
+                continue
+            embedded = np.zeros((constraints.n_constraints, width))
+            embedded[:, group.start : group.end] = np.asarray(constraints.A, dtype=np.float64)
+            rows.append(embedded)
+            bounds.append(np.asarray(constraints.b, dtype=np.float64))
+        if not rows:
+            return apply
         gram = _rank_centered_data_gram(X, curvature) if data_gram is None else data_gram
         column_scale = np.sqrt(np.maximum(np.diag(gram), 0.0))
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
@@ -605,6 +596,7 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     # a row the others already span (past R's width, every further row is).
     _q, triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
     diagonal = np.abs(np.diag(triangle))
+    u = UNIT_ROUNDOFF
     R = R[order[: diagonal.size][diagonal > width * u * diagonal[0]]]
     moves = np.column_stack([apply(row) for row in R])
     gram = 0.5 * (R @ moves + (R @ moves).T)
@@ -622,6 +614,31 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         return moved - moves @ (held @ (R @ moved))
 
     return restricted
+
+
+def _face_complement(model, active, face: np.ndarray) -> np.ndarray:
+    """The rows a recorded face holds, over the active columns: an orthonormal basis of its complement.
+
+    Each column of the face's basis (``irls_direct._active_face_basis``) is
+    a free column's unit vector or a null vector of binding rows, which lie
+    in the constrained terms' columns. So the columns that meet those are
+    orthonormal there, and the complement is their null space, with no rank
+    to decide. An inactive term's coefficients are zero, so its columns drop,
+    and with them any row that lies in them alone.
+    """
+    full = {group.name: group for group in model._groups}
+    inside = np.zeros(face.shape[0], dtype=bool)
+    for group in model._groups:
+        if getattr(group.constraints, "n_constraints", 0):
+            inside[group.start : group.end] = True
+    block = face[inside]
+    meeting = block[:, np.any(block != 0.0, axis=0)]
+    basis = scipy.linalg.null_space(meeting.T) if meeting.shape[1] else np.eye(len(block))
+    complement = np.zeros((basis.shape[1], face.shape[0]))
+    complement[:, inside] = basis.T
+    columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
+    complement = complement[:, np.concatenate(columns)]
+    return complement[np.any(complement != 0.0, axis=1)]
 
 
 @dataclass(frozen=True)
