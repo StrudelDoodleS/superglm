@@ -550,10 +550,10 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
     The rows held are the ones the fit held (``RankInfo.face_rows``), an
-    independent set of them in their own units, none where it held none. A
-    record without them, pickled before fits kept them (0.41 and earlier) or
-    dropped by a post-fit repair that moved the working weights, has its rows
-    read as the fit reads them (``irls_direct._binding_rows``), all of them,
+    independent set of them in their own units, none where it held none; a
+    post-fit repair keeps them (``state_ops.face_record_at``). A record
+    without them, pickled before fits kept them (0.41 and earlier), has its
+    rows read as the fit reads them (``irls_direct._binding_rows``), all of them,
     the QP's active set being unknown, over the active columns ``X`` at the
     ``curvature`` weights, whose centred Gram is ``data_gram`` when the caller
     has it. There a slack below ``_QP_FEASIBILITY_TOL`` of the fit's largest

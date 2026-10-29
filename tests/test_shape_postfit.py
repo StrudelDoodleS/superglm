@@ -407,6 +407,85 @@ def test_non_gaussian_shape_repair_rebuilds_working_geometry():
     assert model._solver_result.effective_df == pytest.approx(model.result.effective_df)
 
 
+@pytest.mark.parametrize("binds", [True, False], ids=["rows-bind", "no-row-binds"])
+def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(binds):
+    """A ``Constraint.fit`` term beside a ``Constraint.postfit`` one, Poisson.
+
+    Repairing ``z`` moves the working weights, which dropped the fit's rank
+    record: ``a``, held on five of its seven directions, had its EDF and
+    covariance rebuilt off the face (EDF 4.80 against 1.01; curve SEs off by
+    up to 0.087 against a largest SE of 0.076), and a record of rows that do
+    not bind read as no record at all. The repair leaves ``a`` where its QP
+    put it, so its rows still bind: the record keeps them and is formed again
+    at the new weights. ``a``'s EDF and curve variances are checked against
+    ``Z (Z'HZ)^-1 Z'`` for an orthonormal null-space basis ``Z`` of the
+    recorded rows, ``H`` formed from the repaired predictions. Mutation check:
+    dropping the record, keeping it at the fit's weights, or forming it
+    again off the face each fail.
+    """
+    import scipy.linalg
+
+    from superglm import Spline
+    from superglm.inference.covariance import _active_penalty_matrix
+
+    rng = np.random.default_rng(7)
+    n = 600
+    a, z = rng.uniform(0.0, 1.0, n), rng.uniform(0.0, 1.0, n)
+    effect = 0.8 * a - 0.9 * (a > 0.5) if binds else 2.5 * a
+    y = rng.poisson(np.exp(1.0 + effect + 0.8 * z + 0.4 * np.sin(9.0 * z)))
+    X = pd.DataFrame({"a": a, "z": z})
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Spline(kind="bs", n_knots=4, constraint=Constraint.fit.increasing),
+            "z": Spline(kind="bs", n_knots=8, constraint=Constraint.postfit.increasing),
+        },
+        spline_penalty=1.0,
+        tol=1e-12,
+    ).fit(X, y)
+    group = next(group for group in model._groups if group.feature_name == "a")
+    fitted = model._solver_result.rank_info
+    theta = model.result.beta[group.sl].copy()
+    rows = fitted.face_rows
+    if binds:  # held on part of the term
+        assert 0 < group.size - np.linalg.matrix_rank(fitted.face[group.sl]) < group.size
+    else:
+        assert rows.shape == (0, len(fitted.mean_x)) and fitted.face is None
+
+    model.apply_shape_postfit(X)
+
+    assert set(model._shape_repairs) == {"z"}
+    assert np.array_equal(model.result.beta[group.sl], theta)
+    mu = model.predict(X)  # Poisson/log: the working weight is the mean
+    design = np.hstack([matrix.toarray() for matrix in model._dm.group_matrices])
+    centred = design - (design.T @ mu) / np.sum(mu)
+    data = centred.T @ (mu[:, None] * centred)
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices, model._groups, model._groups, fitted_lambda2(model)
+    )
+    face = scipy.linalg.null_space(rows) if binds else np.eye(design.shape[1])
+    reduced = face.T @ (data + penalty) @ face
+    covariance = face @ np.linalg.solve(reduced, face.T)
+    term = model.term_inference("a", with_se=True, n_points=50)
+    basis = model._specs["a"].transform(term.x)
+    variance = model.result.phi * np.einsum(
+        "ij,jk,ik->i", basis, covariance[group.sl, group.sl], basis
+    )
+    # The two inverses part by their formation and solve roundings, a few u
+    # per entry amplified by the reduced Hessian's condition (Higham 2002,
+    # sec. 7.1); the dropped record moved the EDF by 3.8 and the variances by
+    # more than their size.
+    bound = 64 * design.shape[1] * np.linalg.cond(reduced) * np.finfo(float).eps
+    expected_edf = float(np.trace(covariance[group.sl] @ data[:, group.sl]))
+    assert abs(term.edf - expected_edf) <= bound * max(1.0, expected_edf)
+    np.testing.assert_allclose(
+        term.se_log_relativity**2, variance, rtol=0, atol=bound * variance.max()
+    )
+    kept = model._solver_result.rank_info
+    assert kept is not None and kept is model.result.rank_info
+    assert np.array_equal(kept.face_rows, rows) and (kept.face is None) == (fitted.face is None)
+
+
 def test_shape_repair_preserves_geometry_when_working_weights_are_coefficient_invariant():
     rng = np.random.default_rng(20260721)
     x = np.linspace(0.0, 1.0, 300)
