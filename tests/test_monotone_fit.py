@@ -1280,6 +1280,28 @@ def test_a_bound_far_above_its_row_leaves_the_row_in_range():
     assert face is not None and face.shape[1] == 1
 
 
+def test_an_overflowing_unit_scale_on_a_column_no_row_touches_reads_the_rows():
+    """A flat term beside a fitted column of 1e150 binds, whatever an untouched column's norm.
+
+    The fifth column's norm, 1e-160 against a contribution of 1e150, overflows
+    its unit scale.  Mutation: the fit's scale summed over every column
+    multiplies that by the rows' zero entries (NaN), the fit's reading
+    abstains, and the flat term reads as free.
+    """
+    from superglm.solvers.irls_direct import _active_face_basis
+
+    A = np.zeros((2, 5))
+    A[0, :2], A[1, 1:3] = [-1.0, 1.0], [-1.0, 1.0]
+    face = _active_face_basis(
+        A,
+        np.zeros(2),
+        np.array([1e134, 3e134, 6e134, 1e150, 0.0]),
+        [0, 1],
+        np.array([1.0, 1.0, 1.0, 1.0, 1e-160]),
+    )
+    assert face is not None and face.shape[1] == 3
+
+
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))
 def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
     """The EDF of a fit some rows bind is the divergence of its fitted values.

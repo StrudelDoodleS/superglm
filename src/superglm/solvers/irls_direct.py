@@ -612,7 +612,9 @@ def _active_face_basis(
     The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
     bind at ``beta``: zero slack on the row's own scale, or against the fit's
     largest column contribution (``column_scale`` the working columns' norms)
-    where that scale is finite and positive.  On it the constrained
+    where that scale is finite and positive (so a slack below
+    ``_QP_FEASIBILITY_TOL`` of that contribution reads as zero, whatever the
+    coefficient's own size).  On it the constrained
     fit is, locally, the fit with those rows held as equalities, so its
     degrees of freedom and covariance are those of that fit (Meyer and
     Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
@@ -623,10 +625,10 @@ def _active_face_basis(
     rows = np.asarray([] if active is None else active, dtype=np.intp)
     if not rows.size:
         return None
-    # Each row and its bound scaled by the power of two below the row's
-    # largest entry (exact), so neither reading below nor the row norms depend
-    # on a row's magnitude; a bound far larger than its row leaves the row's
-    # norm in range (a bound that overflows makes the fit's reading abstain).
+    # Each row and its bound scaled by the one power of two that brings the
+    # row's largest entry into [1/2, 1) (exact), so the fit's reading and the
+    # row norms do not depend on a row's magnitude; a bound far larger than its
+    # row leaves the row's norm in range.
     exponent = np.frexp(np.max(np.abs(A[rows]), axis=1))[1]
     held = np.ldexp(A[rows], -exponent[:, None])
     bound = np.ldexp(b[rows], -exponent)
@@ -637,15 +639,20 @@ def _active_face_basis(
     # reads as free slopes.
     bar = _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)
     reach = float(np.max(np.abs(beta) * column_scale, initial=0.0))
-    per_unit = np.divide(
-        reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
-    )
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        fit_scale = np.maximum(np.abs(bound), np.abs(held) @ per_unit)
+        per_unit = np.divide(
+            reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
+        )
+        # summed over the columns each row touches: a column it does not touch
+        # cannot carry another column's overflow into it as 0 * inf
+        reached = np.sum(np.abs(held) * per_unit, axis=1, where=held != 0.0)
+        fit_scale = np.maximum(np.abs(bound), reached)
         on_fit = (held @ beta - bound) / fit_scale
-    # Beyond float64's range (or at a zero scale) the fit's reading abstains.
+    # Beyond float64's range (or at a zero scale) the fit's reading abstains;
+    # the row's own reading is on the unscaled row, where a bound that
+    # overflows when scaled stays readable.
     on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
-    held = held[(_feasibility_slack(held, beta, bound) <= bar) | on_fit]
+    held = held[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | on_fit]
     if not held.shape[0]:
         return None
     touched = np.flatnonzero(np.any(held != 0.0, axis=0))
