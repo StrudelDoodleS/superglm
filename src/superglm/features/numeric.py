@@ -60,9 +60,14 @@ class Numeric:
         return (self._centred_values(x) - float(centre[0])) * float(beta[0])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
-        """Reconstruct the coefficient on the original scale."""
+        """Reconstruct the coefficient on the original scale.
+
+        ``relativity_per_unit`` is ``exp(coef)``, as every term reports the
+        exponential of its contribution whatever the link, rounded as ``exp``
+        rounds and without a warning: ``inf`` above float64's range, ``0.0``
+        below it. ``coef`` is the log relativity.
+        """
         b = float(beta[0])
-        return {
-            "coef": b,
-            "relativity_per_unit": float(np.exp(b)),
-        }
+        with np.errstate(over="ignore"):
+            relativity = float(np.exp(b))
+        return {"coef": b, "relativity_per_unit": relativity}
