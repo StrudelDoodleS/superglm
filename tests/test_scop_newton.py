@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, Spline, SuperGLM
+from superglm import Constraint, Numeric, Spline, SuperGLM
 from superglm._roundoff import UNIT_ROUNDOFF as UNIT
-from superglm.distributions import Tweedie
+from superglm.distributions import Poisson, Tweedie
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.model.base import model_build_design_matrix
-from superglm.solvers import irls_direct
 from superglm.solvers.centered_system import build_centered_system
+from superglm.solvers.irls_direct import _fit as irls_direct
+from superglm.solvers.irls_direct import _scop as irls_scop
 from superglm.solvers.rank import decompose_gram_if_authoritative
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import SCOPGroupSpec, SCOPJointNewton
@@ -380,6 +381,123 @@ def test_tweedie_log_scop_fit_takes_observed_newton_rows():
     assert profile.get("irls_observed_newton_iters", 0) == result.n_iter
 
 
+def test_the_profiles_eta_time_includes_the_scop_proposal_predictor(monkeypatch):
+    """``irls_eta_s`` counts the SCOP proposal's predictor, formed before its search.
+
+    A controlled clock advances one second per centred-system product only:
+    a column whose mean exceeds its spread sends the proposal's ordinary
+    predictor through that product, and every such second forms an eta.
+    """
+    import sys
+
+    from superglm.solvers import irls_state
+
+    rng = np.random.default_rng(0)
+    n = 600
+    frame = pd.DataFrame({"x1": 3.0 + rng.normal(size=n), "x2": rng.uniform(0, 1, n)})
+    y = rng.poisson(np.exp(-0.5 + 0.3 * frame["x1"] + frame["x2"]))
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "x1": Numeric(),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
+    )
+    y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)
+
+    now = [0.0]
+    clock = SimpleNamespace(perf_counter=lambda: now[0])
+    for name, module in list(sys.modules.items()):
+        if name.startswith("superglm.solvers.irls_direct.") or module is irls_state:
+            if hasattr(module, "time"):
+                monkeypatch.setattr(module, "time", clock)
+    product = irls_scop._centred_system_matvec
+
+    def ticking(*args, **kwargs):
+        now[0] += 1.0
+        return product(*args, **kwargs)
+
+    monkeypatch.setattr(irls_scop, "_centred_system_matvec", ticking)
+    profile: dict = {}
+    irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 0.0, "x2": 1.0},
+        offset=offset,
+        max_iter=1,
+        weight_semantics="prior",
+        profile=profile,
+    )
+
+    assert now[0] >= 1.0
+    assert profile["irls_total_s"] == now[0]
+    assert profile["irls_eta_s"] == now[0]
+
+
+def test_the_profiles_eta_time_lies_inside_its_total(monkeypatch):
+    """``irls_eta_s`` counts no state evaluated before the loop's clock starts.
+
+    A controlled clock advances one second per mean formed, the SCOP starting
+    state's included: that state is evaluated before ``irls_total_s`` starts,
+    so its second belongs to neither.
+    """
+    import sys
+
+    from superglm.solvers import irls_state
+
+    rng = np.random.default_rng(0)
+    n = 600
+    frame = pd.DataFrame({"x1": 3.0 + rng.normal(size=n), "x2": rng.uniform(0, 1, n)})
+    y = rng.poisson(np.exp(-0.5 + 0.3 * frame["x1"] + frame["x2"]))
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        discrete=False,
+        features={
+            "x1": Numeric(),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
+    )
+    y_fit, weights, offset = model_build_design_matrix(model, frame, y, np.ones(n), None)
+
+    now = [0.0]
+    clock = SimpleNamespace(perf_counter=lambda: now[0])
+    for name, module in list(sys.modules.items()):
+        if name.startswith("superglm.solvers.irls_direct.") or module is irls_state:
+            if hasattr(module, "time"):
+                monkeypatch.setattr(module, "time", clock)
+    clip = irls_state.clip_mu
+
+    def ticking(*args, **kwargs):
+        now[0] += 1.0
+        return clip(*args, **kwargs)
+
+    monkeypatch.setattr(irls_state, "clip_mu", ticking)
+    profile: dict = {}
+    irls_direct.fit_irls_direct(
+        model._dm,
+        y_fit,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x1": 0.0, "x2": 1.0},
+        offset=offset,
+        max_iter=3,
+        weight_semantics="prior",
+        profile=profile,
+    )
+
+    assert profile["irls_eta_s"] >= 1.0
+    assert profile["irls_eta_s"] <= profile["irls_total_s"] < now[0]
+
+
 def test_the_scop_line_search_rejects_trials_without_finite_observed_rows(monkeypatch):
     """An observed fit's SCOP trials pass the finiteness test its ordinary trials do.
 
@@ -389,13 +507,13 @@ def test_the_scop_line_search_rejects_trials_without_finite_observed_rows(monkey
     from types import SimpleNamespace
 
     predicates = []
-    select = irls_direct._select_irls_trial
+    select = irls_scop._select_irls_trial
 
     def recorded(**kwargs):
         predicates.append(kwargs.get("invalid_state"))
         return select(**kwargs)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", recorded)
     result, model, y, weights = _fit_tweedie_scop(n=1000)
 
     assert result.converged
@@ -417,7 +535,7 @@ def test_a_rejected_last_step_publishes_the_retained_models_curvature(monkeypatc
     from superglm.solvers.irls_state import _IRLSStepDecision
 
     selections = []
-    select = irls_direct._select_irls_trial
+    select = irls_scop._select_irls_trial
 
     def reject_third(**kwargs):
         selections.append(kwargs)
@@ -433,7 +551,7 @@ def test_a_rejected_last_step_publishes_the_retained_models_curvature(monkeypatc
         terminal.append(([np.array(theta) for theta in thetas], curvature))
         return curvature
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_third)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", reject_third)
     monkeypatch.setattr(SCOPJointNewton, "block_curvature", recorded)
     frame, y, offset = _correlated_monotone_frame(0.7)
     model = _monotone_model()
@@ -596,14 +714,14 @@ def test_a_translated_ordinary_column_leaves_a_damped_step_unchanged(monkeypatch
     from superglm import Numeric, PSpline
 
     steps = []
-    select = irls_direct._select_irls_trial
+    select = irls_scop._select_irls_trial
 
     def recorded(**kwargs):
         decision = select(**kwargs)
         steps.append((decision.step_halvings, decision.step_rejected))
         return decision
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", recorded)
     rng = np.random.default_rng(5)
     x = rng.integers(-8, 9, 200).astype(float)
     s = rng.uniform(size=200)
@@ -1710,16 +1828,16 @@ def _latent_step_depth_of(*changes, free_dim=2):
 
     def trial(betas):
         groups = tuple(
-            irls_direct._SCOPGroupState(i, beta, np.zeros_like(beta), None, 0.0, False)
+            irls_scop._SCOPGroupState(i, beta, np.zeros_like(beta), None, 0.0, False)
             for i, beta in enumerate(betas)
         )
-        return irls_direct._SCOPTrialState(irls=None, groups=groups)
+        return irls_scop._SCOPTrialState(irls=None, groups=groups)
 
     moved = [np.asarray(change, dtype=float) for change in changes]
     specs = {
         i: SimpleNamespace(reparam=SimpleNamespace(free_dim=free_dim)) for i in range(len(moved))
     }
-    return irls_direct._latent_step_depth(
+    return irls_scop._latent_step_depth(
         trial([np.zeros_like(m) for m in moved]), trial(moved), specs
     )
 
@@ -1750,7 +1868,7 @@ def test_the_latent_step_depth_is_the_first_halving_within_the_maximum_step(chan
     step is not counted whatever its length, and a step that is not finite is
     depth 0: no halving brings it back, and the line search refuses it as it is.
     """
-    assert irls_direct._LATENT_MAX_STEP == 1000.0
+    assert irls_scop._LATENT_MAX_STEP == 1000.0
     assert _latent_step_depth_of(*changes) == depth
 
 
@@ -1769,8 +1887,8 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
     from superglm import Numeric, PSpline
 
     lengths, depths = [], []
-    evaluate = irls_direct._evaluate_scop_trial
-    depth_of = irls_direct._latent_step_depth
+    evaluate = irls_scop._evaluate_scop_trial
+    depth_of = irls_scop._latent_step_depth
 
     def recorded(**kwargs):
         trial = evaluate(**kwargs)
@@ -1783,8 +1901,8 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
         depths.append(depth_of(*args))
         return depths[-1]
 
-    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
-    monkeypatch.setattr(irls_direct, "_latent_step_depth", recorded_depth)
+    monkeypatch.setattr(irls_scop, "_evaluate_scop_trial", recorded)
+    monkeypatch.setattr(irls_scop, "_latent_step_depth", recorded_depth)
     rng = np.random.default_rng(11)
     x = rng.uniform(size=200)
     y = 0.2 + 2.2 * x + 0.6 * x * x + 0.05 * rng.normal(size=200)
@@ -1805,7 +1923,7 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
 
     # the bound below is the shortening's, not a trajectory that never needed it
     assert any(depths)
-    assert lengths and max(lengths) <= irls_direct._LATENT_MAX_STEP
+    assert lengths and max(lengths) <= irls_scop._LATENT_MAX_STEP
     assert model.result.converged
     for column in (np.ones_like(x), x):
         score = float(np.sum(weights * residual * column))
@@ -1826,14 +1944,14 @@ def test_a_damped_trial_takes_the_ordinary_solve_at_its_latent_coordinates(monke
     carried through the scores' sums.
     """
     trials = []
-    evaluate = irls_direct._evaluate_scop_trial
+    evaluate = irls_scop._evaluate_scop_trial
 
     def recorded(**kwargs):
         trial = evaluate(**kwargs)
         trials.append((kwargs["alpha"], kwargs["committed"].irls, trial.irls))
         return trial
 
-    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    monkeypatch.setattr(irls_scop, "_evaluate_scop_trial", recorded)
     model, frame, x, y, weights = _ordinary_inside_the_spline_fit()
     design = model._dm.toarray()
     columns = np.column_stack([np.ones_like(x), x])
@@ -1888,7 +2006,7 @@ def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
     from superglm.solvers.irls_state import _IRLSStepDecision
 
     decisions = []
-    select = irls_direct._select_irls_trial
+    select = irls_scop._select_irls_trial
 
     def damp_the_second(**kwargs):
         decisions.append(kwargs)
@@ -1897,9 +2015,11 @@ def test_a_damped_step_is_never_where_the_fit_stops(monkeypatch, convergence):
             return _IRLSStepDecision(2.0**-20, 20, False, trials_attempted=2)
         return select(**kwargs)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", damp_the_second)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", damp_the_second)
     result = _fit_coupled_monotone(convergence)
 
+    # the search took the patched selector, through the damped step and past it
+    assert len(decisions) > 2
     assert result.converged
     assert result.n_iter > 2
 
@@ -1923,9 +2043,9 @@ def test_a_step_shortened_into_the_latent_range_is_never_where_the_fit_stops(
     """
     depth = 30
     states, trials, decisions = [], [], []
-    depth_of = irls_direct._latent_step_depth
-    evaluate = irls_direct._evaluate_scop_trial
-    select = irls_direct._select_irls_trial
+    depth_of = irls_scop._latent_step_depth
+    evaluate = irls_scop._evaluate_scop_trial
+    select = irls_scop._select_irls_trial
 
     def shortened_second(committed, proposed, specs):
         states.append((committed, proposed))
@@ -1941,9 +2061,9 @@ def test_a_step_shortened_into_the_latent_range_is_never_where_the_fit_stops(
         decisions.append((len(states), decision))
         return decision
 
-    monkeypatch.setattr(irls_direct, "_latent_step_depth", shortened_second)
-    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded_trial)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", recorded_decision)
+    monkeypatch.setattr(irls_scop, "_latent_step_depth", shortened_second)
+    monkeypatch.setattr(irls_scop, "_evaluate_scop_trial", recorded_trial)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", recorded_decision)
     result = _fit_coupled_monotone(convergence)
 
     assert result.converged
@@ -1998,14 +2118,14 @@ def test_a_trial_past_binary64s_range_is_refused_without_a_warning(monkeypatch):
     the merit, warning on a trial the line search refuses anyway.
     """
     largest = []
-    evaluate = irls_direct._evaluate_scop_trial
+    evaluate = irls_scop._evaluate_scop_trial
 
     def recorded(**kwargs):
         trial = evaluate(**kwargs)
         largest.append(float(np.max(np.abs(trial.irls.beta))))
         return trial
 
-    monkeypatch.setattr(irls_direct, "_evaluate_scop_trial", recorded)
+    monkeypatch.setattr(irls_scop, "_evaluate_scop_trial", recorded)
     model, frame, y, offset = _sparse_counts_model(400, 2, "auto")
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)

@@ -134,14 +134,15 @@ def _scop_fit_inputs():
 
 def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> None:
     """Ordinary SCOP iterations retain the native matrix matvec hot path."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
     def unexpected_centred_matvec(*args, **kwargs):
         raise AssertionError("centred prediction is reserved for ill-scaled columns")
 
-    monkeypatch.setattr(irls_direct, "_centred_system_matvec", unexpected_centred_matvec)
+    monkeypatch.setattr(irls_scop, "_centred_system_matvec", unexpected_centred_matvec)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -159,7 +160,8 @@ def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> 
 
 
 def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -168,7 +170,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
             kwargs["evaluate_state"](2.0**-depth)
         return _IRLSStepDecision(0.0, 0, True, trials_attempted=6)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_all)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", reject_all)
     sink = MemoryTraceSink()
 
     result, _, states = irls_direct.fit_irls_direct(
@@ -215,7 +217,8 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
 
 
 def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
     baseline, _, baseline_states = irls_direct.fit_irls_direct(
@@ -233,7 +236,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
     )
     baseline_state = next(iter(baseline_states.values()))
     monkeypatch.setattr(
-        irls_direct,
+        irls_scop,
         "_select_irls_trial",
         lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=6),
     )
@@ -271,7 +274,8 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
 
 
 def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -279,7 +283,7 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         kwargs["evaluate_state"](0.5)
         return _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", select_half)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", select_half)
     sink = MemoryTraceSink()
     result, _, states = irls_direct.fit_irls_direct(
         model._dm,
@@ -346,7 +350,8 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
     so a fixture-driven test pins the deviance and nothing else. This drives
     both fields directly instead of hoping a fixture reaches them.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
 
@@ -354,7 +359,7 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
         kwargs["evaluate_state"](alpha)
         return _IRLSStepDecision(alpha, halvings, rejected, trials_attempted=halvings + 1)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", forced_decision)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", forced_decision)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
         y,
@@ -378,7 +383,7 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
     """The fallback flag must describe the refreshed terminal Hessian block."""
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     model, y, weights, offset = _scop_fit_inputs()
     original = SCOPJointNewton.block_curvature
@@ -407,11 +412,12 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
 
 def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None:
     """SCOP merit uses lambda*S_scop in beta-space, not the mapped global block."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
 
     model, y, weights, offset = _scop_fit_inputs()
     monkeypatch.setattr(
-        irls_direct,
+        irls_scop,
         "_select_irls_trial",
         lambda **kwargs: _IRLSStepDecision(0.0, 0, True, trials_attempted=1),
     )
@@ -449,7 +455,7 @@ def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None
 
 def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
     """Installing terminal SCOP EDF must not profile a known family scale."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     rng = np.random.default_rng(91)
     x = np.linspace(0.0, 1.0, 120)
@@ -498,7 +504,8 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
     columns included) in row chunks made a 678k-row fit tens of times slower
     once one indicator's weighted frequency crossed 1/2.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
     from superglm.features.categorical import Categorical
 
     rng = np.random.default_rng(20261004)
@@ -520,7 +527,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
     )
 
     verdicts: list[bool] = []
-    guard = irls_direct._raw_centering_well_scaled
+    guard = irls_scop._raw_centering_well_scaled
 
     def recording_guard(mean_x, scale):
         verdicts.append(guard(mean_x, scale))
@@ -533,7 +540,7 @@ def test_scop_fit_never_materialises_design_for_frequent_indicator(monkeypatch) 
         materialised.append(len(idx))
         return row_subset(self, idx)
 
-    monkeypatch.setattr(irls_direct, "_raw_centering_well_scaled", recording_guard)
+    monkeypatch.setattr(irls_scop, "_raw_centering_well_scaled", recording_guard)
     monkeypatch.setattr(DesignMatrix, "row_subset", recording_row_subset)
     result, _ = irls_direct.fit_irls_direct(
         model._dm,
@@ -688,3 +695,55 @@ def test_scop_reml_run_builds_its_reduced_plan_once_and_carries_refusals(monkeyp
     np.testing.assert_array_equal(predictions, fresh_predictions)
     assert model.result.deviance == fresh_model.result.deviance
     assert model.reml_diagnostics()["lambdas"] == fresh_model.reml_diagnostics()["lambdas"]
+
+
+def test_the_solver_refuses_scop_beside_linear_constraints() -> None:
+    """``fit_irls_direct`` refuses a SCOP group beside a linearly constrained group.
+
+    Every model entry point refuses the mix (``test_monotone_fit.py::
+    test_scop_plus_qp_raises``).  The solver's SCOP step has no constrained QP,
+    so it would check the linear constraint after each step and never enforce
+    it; refusing at the solver's entry leaves each fit one step method.
+    Mutation: without ``_refuse_scop_with_linear_constraints`` this fit runs.
+    """
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import LinearConstraintSet
+
+    rng = np.random.default_rng(3)
+    n = 40
+    bounded = rng.uniform(-1.0, 1.0, n)
+    shaped = rng.uniform(0.0, 1.0, n)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(bounded[:, None]), DenseGroupMatrix(shaped[:, None])], n=n, p=2
+    )
+    groups = [
+        GroupSlice(
+            name="bounded",
+            start=0,
+            end=1,
+            constraints=LinearConstraintSet(A=np.eye(1), b=np.zeros(1)),
+            monotone_engine="qp",
+        ),
+        GroupSlice(
+            name="shape",
+            start=1,
+            end=2,
+            monotone_engine="scop",
+            scop_reparameterization=build_scop_solver_reparam(q_raw=2, kind="increasing"),
+        ),
+    ]
+    y = 1.0 + bounded + shaped + rng.normal(0.0, 0.1, n)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"'shape' is shape-constrained and 'bounded' has linear constraints",
+    ):
+        fit_irls_direct(
+            dm,
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=1.0,
+            weight_semantics="frequency",
+        )

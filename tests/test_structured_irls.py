@@ -15,7 +15,8 @@ import superglm.reml.discrete as discrete_reml
 import superglm.reml.objective as reml_objective
 import superglm.solvers._structured.moments as moments
 import superglm.solvers._structured.selection as selection
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._fit as irls_direct
+import superglm.solvers.irls_direct._structured as irls_structured
 from superglm import generate_tweedie_cpg
 from superglm.distributions import (
     Gamma,
@@ -827,7 +828,7 @@ def _refusing_builder(monkeypatch, refuses: Callable[[int], bool]) -> list:
     It refuses as a factor does, with ``np.linalg.LinAlgError``; the other
     calls build normally.  Returns the call log.
     """
-    build = irls_direct.build_augmented_structured_factor
+    build = irls_structured.build_augmented_structured_factor
     calls: list = []
 
     def refusing(system, operator):
@@ -836,7 +837,7 @@ def _refusing_builder(monkeypatch, refuses: Callable[[int], bool]) -> list:
             raise np.linalg.LinAlgError(_REFUSAL)
         return build(system, operator)
 
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refusing)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refusing)
     return calls
 
 
@@ -879,7 +880,7 @@ def _backend_calls(monkeypatch) -> list[str]:
 def _assert_clear_error(error: pytest.ExceptionInfo, cause: str) -> None:
     """The one error an engine that cannot proceed raises (design §6, decision 6)."""
     message = str(error.value)
-    assert isinstance(error.value, irls_direct.StructuredSolverError)
+    assert isinstance(error.value, irls_structured.StructuredSolverError)
     assert isinstance(error.value, np.linalg.LinAlgError)
     assert cause.rstrip(".") in message
     assert "direct_solve='gram'" in message
@@ -988,6 +989,79 @@ def test_a_refusal_after_the_factor_build_raises_under_every_mode(
     assert backends == [direct_solve]
 
 
+def _tweedie_rows(rng, eta):
+    return generate_tweedie_cpg(len(eta), mu=np.exp(eta), phi=0.8, p=1.5, rng=rng)
+
+
+@pytest.mark.parametrize("route", ["nested", "fs", "sz"])
+def test_a_refused_observed_iterate_is_shifted_and_the_fit_stops_at_its_mode(
+    monkeypatch, route: str
+) -> None:
+    """Every iterate's factor refuses up to the fourth Levenberg shift: the fit keeps its mode.
+
+    Tweedie/log takes observed rows from the start.  Each iterate's own factor
+    and its shifts 1e-8 to 1e-4 refuse, as a pivot inside its certified
+    uncertainty does, so every step solves ``(H + E) b_new = X'Wz + E b`` at
+    the shift 1e-2 (Wood, Pya and Saefken 2016, section 3.1.2), whose fixed
+    point is the mode: the mode score, read on the unshifted penalised score,
+    certifies the stop.  The nested chain's ``diag(E)`` is an array, the
+    ``sz`` level shift a callable.  Mutations: a step that passes its rows as
+    Fisher takes no shift and raises the refusal; one that drops ``E b`` ends
+    at max_iter, away from the mode; one without its counters fails the profile.
+    """
+    if route == "nested":
+        dm, groups, penalties, y, weights, offset = _structured_problem(_tweedie_response)
+        lambdas: dict[str, float] = {"policy": 2.75}
+    else:
+        from tests.test_factor_smooth_structured_parity import _factor_smooth_problem
+
+        dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+            _tweedie_rows, factor_basis=route
+        )
+    build, iterate = (
+        irls_structured.build_augmented_structured_factor,
+        irls_structured._build_iterate_factor,
+    )
+    refusals = [0]
+
+    def refusing(system, operator):
+        if refusals[0]:
+            refusals[0] -= 1
+            raise np.linalg.LinAlgError(_REFUSAL)
+        return build(system, operator)
+
+    def shifted_iterate(system, operator, *, observed):
+        refusals[0] = 4  # the iterate's own factor and the shifts 1e-8, 1e-6 and 1e-4
+        try:
+            return iterate(system, operator, observed=observed)
+        finally:
+            refusals[0] = 0
+
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refusing)
+    monkeypatch.setattr(irls_structured, "_build_iterate_factor", shifted_iterate)
+    profile: dict = {}
+    result, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Tweedie(1.5),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="structured",
+        reml_penalties=penalties,
+        convergence="mode_score",
+        profile=profile,
+        weight_semantics="prior",
+    )
+    assert result.direct_backend == "structured"
+    assert result.converged and result.termination_reason == "converged"
+    assert profile["irls_observed_newton_iters"] == result.n_iter
+    assert profile["irls_levenberg_shifts"] == result.n_iter
+    assert profile["irls_levenberg_max_shift"] == irls_structured._LEVENBERG_SHIFTS[3]
+
+
 def test_a_refused_discrete_trial_is_rejected_with_a_shorter_step(monkeypatch) -> None:
     """The discrete line search's cached structured solve refuses its first trial.
 
@@ -1027,7 +1101,7 @@ def test_a_refused_exact_trial_is_rejected_with_a_shorter_step(monkeypatch) -> N
     handler around the trial's ``fit_irls_direct`` the refusal fails
     ``fit_reml``.
     """
-    fit, build = direct_reml.fit_irls_direct, irls_direct.build_augmented_structured_factor
+    fit, build = direct_reml.fit_irls_direct, irls_structured.build_augmented_structured_factor
     state = {"trial": False, "refused": 0}
 
     def tracking(*args, **kwargs):
@@ -1044,7 +1118,7 @@ def test_a_refused_exact_trial_is_rejected_with_a_shorter_step(monkeypatch) -> N
         return build(system, operator)
 
     monkeypatch.setattr(direct_reml, "fit_irls_direct", tracking)
-    monkeypatch.setattr(irls_direct, "build_augmented_structured_factor", refuse_first_trial)
+    monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refuse_first_trial)
     fits = {}
     for direct_solve in ("auto", "structured"):
         state["refused"] = 0

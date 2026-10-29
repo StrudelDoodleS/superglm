@@ -3693,8 +3693,8 @@ class TestModeCertifiesAtTheRoundOffFloor:
                 return isinstance(key, ast.Constant) and key.value == "termination_reason"
             return False
 
-        def assigned_literals(module) -> set[str]:
-            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        def assigned_literals(path: Path) -> set[str]:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             literals: set[str] = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.AnnAssign):
@@ -3726,10 +3726,16 @@ class TestModeCertifiesAtTheRoundOffFloor:
                 )
             return literals
 
-        written = assigned_literals(pirls_module) | assigned_literals(irls_direct_module)
+        pirls_written = assigned_literals(Path(pirls_module.__file__))
+        # the direct solver is a package: every file of it
+        direct_written = set().union(
+            *map(assigned_literals, Path(irls_direct_module.__file__).parent.glob("*.py"))
+        )
+        written = pirls_written | direct_written
         # Without this the test passes by parsing nothing -- a renamed local, a
-        # moved loop, a file that no longer holds either.
-        assert written, "no termination_reason literal was found in either solver"
+        # moved loop, a file that no longer holds them.
+        assert pirls_written, "no termination_reason literal was found in pirls"
+        assert direct_written, "no termination_reason literal was found in irls_direct"
         assert written <= set(PIRLS_TERMINATION_REASONS), sorted(
             written - set(PIRLS_TERMINATION_REASONS)
         )

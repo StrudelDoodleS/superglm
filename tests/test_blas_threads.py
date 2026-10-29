@@ -415,11 +415,11 @@ def test_only_the_fs_leaf_route_re_arms_the_cap(monkeypatch):
     import pandas as pd
 
     from superglm import Categorical, FactorSmooth, Numeric, SuperGLM
-    from superglm.solvers import irls_direct
+    from superglm.solvers.irls_direct import _structured as irls_structured
     from tests.test_nested_structured_fit import _fit
 
     widths: list[int] = []
-    monkeypatch.setattr(irls_direct, "keep_narrow_cap", widths.append)
+    monkeypatch.setattr(irls_structured, "keep_narrow_cap", widths.append)
     nested = _fit("poisson", "structured")
     assert nested._reml_profile.get("structured_chain")
     assert widths == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -97,8 +98,14 @@ def _evaluate_irls_state(
     basis_id: int | None = None,
     lambdas: tuple[tuple[str, object], ...] = (),
     dispersion: float | None = None,
+    eta_clock: Callable[[float], None] | None = None,
 ) -> _IRLSState:
-    """Evaluate and freeze all state derived from one coefficient vector."""
+    """Evaluate and freeze all state derived from one coefficient vector.
+
+    ``eta_clock``, when given, is handed the seconds spent forming the state's
+    eta and mean, everything but the deviance.
+    """
+    started = time.perf_counter() if eta_clock is not None else 0.0
     retained_beta = _immutable_array(beta)
     if eta_unclipped is None:
         eta_unclipped = dm.matvec(retained_beta) + intercept + offset
@@ -108,6 +115,8 @@ def _evaluate_irls_state(
             raise ValueError(f"eta_unclipped must have shape {(dm.n,)}, got {eta_unclipped.shape}")
     eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), family)
+    if eta_clock is not None:
+        eta_clock(time.perf_counter() - started)
     retained_deviance = (
         weighted_row_sum(weights, family.deviance_unit, y, mu)
         if deviance is None

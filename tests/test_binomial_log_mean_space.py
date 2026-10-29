@@ -153,6 +153,72 @@ def test_a_near_unpenalized_fit_stops_at_the_boundary_and_says_so() -> None:
     assert result.mean_space_boundary_rows >= 1
 
 
+def test_a_boundary_state_the_qp_contract_also_refuses_is_published_at_the_boundary(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mean space's verdict on the returned state comes after the QP contract's, and stands.
+
+    Five event rows at ``x = 1`` put the maximum on the boundary.  The fit
+    starts there, under ``beta >= 0``, with ``mu`` within 1e-7 of one on those
+    rows, and every trial is refused, so the returned state is the start.  A
+    rejected step carries no inner-QP KKT certificate, so the final refusal
+    marks the state ``constraint_kkt_incomplete``.  The state holds rows at
+    the boundary, so the mean space's verdict, which runs after the refusal,
+    marks it ``mean_space_boundary``, and that is the reason published.
+    Mutation check: the mean space's verdict run before the refusal, alone or
+    first of the final checks, published the QP contract's reason.
+    """
+    import logging
+
+    import superglm.solvers.irls_direct._search as irls_direct_search
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.irls_state import _IRLSStepDecision
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    def reject_every_trial(**_kwargs):
+        return _IRLSStepDecision(
+            alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+        )
+
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
+    x = np.r_[np.zeros(10), np.ones(5)]
+    y = np.r_[np.tile([1.0, 0.0], 5), np.ones(5)]
+    intercept = math.log(0.5)
+    slope = math.log1p(-5e-8) - intercept
+    start = intercept + slope * x
+    assert float(start.max()) < 0.0
+    assert np.count_nonzero(start >= math.log1p(-1e-7)) == 5
+    groups = [
+        GroupSlice(
+            "x",
+            0,
+            1,
+            constraints=LinearConstraintSet(A=np.eye(1), b=np.zeros(1)),
+            monotone_engine="qp",
+        )
+    ]
+    with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=15, p=1),
+            y,
+            np.ones(15),
+            Binomial(),
+            LogLink(),
+            groups,
+            lambda2=0.0,
+            beta_init=np.array([slope]),
+            intercept_init=intercept,
+            weight_semantics="frequency",
+        )
+    assert any(
+        "no complete constrained-QP KKT certificate" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not result.converged
+    assert result.mean_space_boundary_rows == 5
+    assert result.termination_reason == "mean_space_boundary"
+
+
 def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
     """The REML optimum's mode is interior: REML reaches it, certified, on structured and gram.
 
@@ -331,7 +397,7 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
     one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
     converges.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.solvers.irls_state import _select_irls_trial
 
     decisions = []
@@ -341,7 +407,7 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
         decisions.append(decision)
         return decision
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", counted)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", counted)
     rng = np.random.default_rng(3)
     n, levels = 800, 10
     X = pd.DataFrame({"s0": rng.uniform(size=n), "s1": rng.uniform(size=n)})
@@ -1160,12 +1226,14 @@ def test_a_large_clean_crossing_still_certifies(monkeypatch: pytest.MonkeyPatch)
         selection_penalty=0.0,
         features={"A": Categorical(base="first"), "B": Categorical(base="first")},
     )
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     evaluations: list[int] = []
-    judge = irls_direct.row_set_residual
+    judge = irls_direct_mean_space.row_set_residual
     monkeypatch.setattr(
-        irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+        irls_direct_mean_space,
+        "row_set_residual",
+        lambda **k: evaluations.append(1) or judge(**k),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1398,7 +1466,7 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
     with no record and no warning.  A rejected step returns the committed
     state, the one the refusal judged, so that judgement is the fit's own.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.solvers.irls_state import _IRLSStepDecision, _select_irls_trial
 
     calls: list[int] = []
@@ -1409,7 +1477,7 @@ def test_a_refused_direction_keeps_its_record_through_a_rejected_step(
             return _select_irls_trial(**kwargs)
         return _IRLSStepDecision(0.0, 0, True)
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", first_then_rejected)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", first_then_rejected)
     frame, y, fit = _light_cut(_TWO_LINKS, -20.0)
     model = SuperGLM(
         family="binomial",
@@ -1461,7 +1529,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
     judgement now decides: the loop's own exit, no boundary rows, and that
     state's own record, not the earlier one.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import TruncatedDirection, _unresolved
 
     calls: list[int] = []
@@ -1473,7 +1541,7 @@ def test_an_earlier_boundary_record_never_decides_the_verdict(
             return 10.0, (stale,)
         return math.inf, (_unresolved(),)
 
-    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_then_none)
+    monkeypatch.setattr(irls_direct_mean_space, "truncated_direction_ratio", boundary_then_none)
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
         family="binomial",
@@ -1508,11 +1576,12 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     named in the warning as found at an earlier iterate, and the fit keeps
     the loop's own exit with no boundary rows.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._convergence as irls_direct_convergence
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import TruncatedDirection
 
     calls: list[int] = []
-    real = irls_direct._irls_objective_relative_change
+    real = irls_direct_convergence._irls_objective_relative_change
 
     def boundary_once(**kwargs):
         calls.append(1)
@@ -1525,8 +1594,10 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
         # the later iterates
         return 0.0 if not calls else real(**kwargs) + 1.0
 
-    monkeypatch.setattr(irls_direct, "truncated_direction_ratio", boundary_once)
-    monkeypatch.setattr(irls_direct, "_irls_objective_relative_change", no_stop_after_the_first)
+    monkeypatch.setattr(irls_direct_mean_space, "truncated_direction_ratio", boundary_once)
+    monkeypatch.setattr(
+        irls_direct_convergence, "_irls_objective_relative_change", no_stop_after_the_first
+    )
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
         family="binomial",
@@ -1564,11 +1635,11 @@ def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
     inaccurate to show whether they move, and no earlier record is shown as
     history.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
-    judge = irls_direct.truncated_direction_ratio
+    judge = irls_direct_mean_space.truncated_direction_ratio
     monkeypatch.setattr(
-        irls_direct,
+        irls_direct_mean_space,
         "truncated_direction_ratio",
         lambda **kwargs: judge(**{**kwargs, "angle": 0.3}),
     )
@@ -1602,11 +1673,13 @@ def test_a_refusal_with_no_rows_to_name_says_so(monkeypatch: pytest.MonkeyPatch)
     The fit is not converged; ``diagnostics()`` records the refusal with no
     rows, and the warning says no record of the rows exists.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     from superglm.solvers.mode_score import _unresolved
 
     monkeypatch.setattr(
-        irls_direct, "truncated_direction_ratio", lambda **kwargs: (math.inf, (_unresolved(),))
+        irls_direct_mean_space,
+        "truncated_direction_ratio",
+        lambda **kwargs: (math.inf, (_unresolved(),)),
     )
     frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
     model = SuperGLM(
@@ -1643,12 +1716,12 @@ def test_an_exact_alias_on_a_large_design_is_not_refused(
     and master certify them.  An empty support is aliasing again unless the
     test is vacuous, at an angle near 1/4.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     angles: list[float] = []
-    measure = irls_direct.null_basis_angle
+    measure = irls_direct_mean_space.null_basis_angle
     monkeypatch.setattr(
-        irls_direct,
+        irls_direct_mean_space,
         "null_basis_angle",
         lambda decomposition, rows: angles.append(measure(decomposition, rows)) or angles[-1],
     )
@@ -2068,7 +2141,7 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
     refuses only rows whose score the relative score cannot see.  An offset
     of 3 lowers the start, so the true-score certificate decides.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
 
     rng = np.random.default_rng(11)
     n = 3000
@@ -2083,10 +2156,12 @@ def test_two_nearly_collinear_columns_are_truncated_but_certified(direct_solve: 
         features={"x1": Numeric(), "x2": Numeric()},
     )
     evaluations: list[int] = []
-    judge = irls_direct.row_set_residual
+    judge = irls_direct_mean_space.row_set_residual
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
-            irls_direct, "row_set_residual", lambda **k: evaluations.append(1) or judge(**k)
+            irls_direct_mean_space,
+            "row_set_residual",
+            lambda **k: evaluations.append(1) or judge(**k),
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -2342,7 +2417,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     and forms each one's sets once.  Each nested cell is one district's
     rows, already judged as its level, so no cell is kept and no SVD runs.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     import superglm.solvers.mode_score as mode_score
 
     formed: list[int] = []
@@ -2351,7 +2426,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     form, decide, sets_of = (
         mode_score._form_row_sets,
         mode_score._decide_core,
-        irls_direct.row_sets,
+        irls_direct_mean_space.row_sets,
     )
     monkeypatch.setattr(
         mode_score, "_form_row_sets", lambda *a, **k: formed.append(1) or form(*a, **k)
@@ -2359,7 +2434,9 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         mode_score, "_decide_core", lambda *a, **k: decided.append(1) or decide(*a, **k)
     )
-    monkeypatch.setattr(irls_direct, "row_sets", lambda dm: designs.append(id(dm)) or sets_of(dm))
+    monkeypatch.setattr(
+        irls_direct_mean_space, "row_sets", lambda dm: designs.append(id(dm)) or sets_of(dm)
+    )
     frame, y = _districts_in_regions(2)
     model = SuperGLM(
         family="binomial",
@@ -2513,6 +2590,66 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine:
     eta = model._dm.matvec(model.result.beta) + model.result.intercept + 2.0
     assert float(eta.max()) < 0.0
     assert float(eta.min()) > np.log(1e-7)
+
+
+def test_the_certificate_tests_a_scop_group_in_the_latent_coordinates_its_step_hands_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SCOP step hands the certificate the latent groups whose columns it leaves out.
+
+    The fixture above.  The binomial/log certificate leaves a shape-constrained
+    group's columns out of the ordinary score and tests them as the group's
+    latent score ``J' B' s - lambda S theta`` instead, so the columns the step
+    excludes are exactly those of the latent groups it hands over, and a
+    latent state off the mode fails.  At the fit's last judged state, one
+    latent coordinate moved by -5 (the fitted values unchanged) leaves its
+    penalty's pull unbalanced, and the certificate refuses it.  Mutation
+    check: a step that handed over no latent groups certified the moved state,
+    its SCOP columns tested nowhere.
+    """
+    from dataclasses import replace
+
+    import superglm.solvers.irls_direct._mean_space as irls_mean_space
+
+    certify = irls_mean_space._IRLSDirectMeanSpaceOverlay.certify
+    judged = []
+
+    def recorded(self, fit, beta, intercept, eta, inputs):
+        judged.append((self, fit, beta, intercept, eta, inputs))
+        return certify(self, fit, beta, intercept, eta, inputs)
+
+    monkeypatch.setattr(irls_mean_space._IRLSDirectMeanSpaceOverlay, "certify", recorded)
+    rng = np.random.default_rng(8)
+    x = rng.uniform(0.0, 1.0, 60)
+    y = (rng.uniform(size=60) < 0.1 + 0.3 * x).astype(np.float64)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
+    )
+    model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
+    assert model.result.converged
+    overlay, fit, beta, intercept, eta, _ = judged[-1]
+    step = fit.step
+    retained = step._retained
+    theta = retained.groups[0].beta_eff.copy()
+    theta[3] -= 5.0
+    step._retained = replace(
+        retained, groups=(replace(retained.groups[0], beta_eff=theta), *retained.groups[1:])
+    )
+    ratio, _ = certify(overlay, fit, beta, intercept, eta, step.certificate_inputs())
+    step._retained = retained
+    assert ratio > 1.0
+
+    _, _, columns, groups = step.certificate_inputs()
+    covered = np.zeros(fit.p, dtype=bool)
+    for _, spec in groups or ():
+        covered[spec.group.sl] = True
+    assert columns is not None and columns.any()
+    np.testing.assert_array_equal(covered, columns)
 
 
 @pytest.mark.parametrize("scale", [100.0, 1.0, 1e-100])
@@ -3210,7 +3347,7 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
     to 1e-6, and the flag varies across platforms.  (The structured
     increment's own test is the warm-started solve below.)
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     lowered: list[bool] = []
     interior_start = irls_direct.interior_start_intercept

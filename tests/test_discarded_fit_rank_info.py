@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 import superglm.model.reml_finalize as reml_finalize
-import superglm.solvers.irls_direct as irls_direct
+import superglm.solvers.irls_direct._finalise as irls_finalise
 import superglm.solvers.rank as rank
 from superglm import Constraint, NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
@@ -69,14 +69,14 @@ def _record_terminal_refits(patch, *, inline=False):
 def data_rank_factorisations(monkeypatch):
     """Send the data rank to its TSQR route on every fit and count the factorisations."""
     calls = []
-    factor = irls_direct.grouped_weighted_factor
+    factor = irls_finalise.grouped_weighted_factor
 
     def counted(*args, **kwargs):
         calls.append(1)
         return factor(*args, **kwargs)
 
     _force_factor_route(monkeypatch)
-    monkeypatch.setattr(irls_direct, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
     return calls
 
 
@@ -183,7 +183,7 @@ def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(mon
         }
         model = SuperGLM(family="poisson", features=features)
         calls = []
-        factor = irls_direct.grouped_weighted_factor
+        factor = irls_finalise.grouped_weighted_factor
 
         def counted(*args, **kwargs):
             calls.append(1)
@@ -191,7 +191,7 @@ def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(mon
 
         with monkeypatch.context() as patch:
             _force_factor_route(patch)
-            patch.setattr(irls_direct, "grouped_weighted_factor", counted)
+            patch.setattr(irls_finalise, "grouped_weighted_factor", counted)
             terminal = _record_terminal_refits(patch, inline=inline)
             model.fit_reml(frame, y)
         assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"

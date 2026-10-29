@@ -202,7 +202,7 @@ def _gamma_log_fit(shift: float, spy) -> tuple[SuperGLM, dict]:
     return model, captured
 
 
-@pytest.mark.parametrize("module", ["reml.observed_geometry", "solvers.irls_direct"])
+@pytest.mark.parametrize("module", ["reml.observed_geometry", "solvers.irls_direct._fit"])
 def test_the_mode_certificates_read_the_centred_intercept(module, monkeypatch):
     """The observed-mode and PIRLS certificates read ``alpha`` and ``X~ beta`` centred (item 3).
 
@@ -2562,7 +2562,10 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
     import collections
 
     from superglm.reml import direct, w_derivatives
-    from superglm.solvers import centered_system, irls_direct, pirls
+    from superglm.solvers import centered_system, pirls
+    from superglm.solvers.irls_direct import _centred as irls_centred
+    from superglm.solvers.irls_direct import _finalise as irls_finalise
+    from superglm.solvers.irls_direct import _structured as irls_structured
 
     calls: collections.Counter = collections.Counter()
     ran: collections.Counter = collections.Counter()
@@ -2578,10 +2581,12 @@ def test_a_fit_forms_each_working_mean_once(monkeypatch):
         monkeypatch.setattr(module, name, counted)
 
     count(centered_system, "corrected_two_pass_pair")
-    count(irls_direct, "centre_offset_mean")
+    # read by the structured score centre and by ``_system_offset_mean``
+    count(irls_structured, "centre_offset_mean")
+    count(irls_centred, "centre_offset_mean")
     count(w_derivatives, "dense_mean_pair")
     count(centered_system, "_attach_dense_split", ran)
-    count(irls_direct, "_system_offset_mean", ran)
+    count(irls_finalise, "_system_offset_mean", ran)
 
     def carries_pair(*args, **kwargs):
         summary = args[3].reml_geometry

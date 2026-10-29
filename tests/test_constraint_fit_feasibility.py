@@ -74,7 +74,7 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
     and the cold solve fail. It replaces their result only when it is
     certified.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.solvers.constrained_qp import QPResult
 
     warm_result = QPResult(
@@ -100,8 +100,8 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
             return safeguarded_result
         return warm_result if active_set_init is not None else cold_result
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", fake_solve)
-    result = irls_direct._solve_constrained_qp_with_cold_retry(
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", fake_solve)
+    result = irls_direct_qp._solve_constrained_qp_with_cold_retry(
         np.eye(1),
         np.ones(1),
         np.ones((1, 1)),
@@ -135,7 +135,7 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
     A failed cold start goes straight to the degenerate-vertex attempt,
     and a certified solve makes no further call.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.solvers.constrained_qp import QPResult
 
     result = QPResult(
@@ -154,8 +154,8 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
         active_sets.append(active_set_init)
         return result
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", fake_solve)
-    observed = irls_direct._solve_constrained_qp_with_cold_retry(
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", fake_solve)
+    observed = irls_direct_qp._solve_constrained_qp_with_cold_retry(
         np.eye(1),
         np.ones(1),
         np.ones((1, 1)),
@@ -172,8 +172,15 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A finite feasible inner iterate is not thereby a converged QP solution."""
-    import superglm.solvers.irls_direct as irls_direct
+    """A finite feasible inner iterate is not thereby a converged QP solution.
+
+    The coefficient criterion passes on every iteration and the KKT veto holds
+    each one open, so every reason recorded reads the vetoed verdict: none is
+    ``converged``.  Mutation check: a reason chain that read the verdict from
+    before the veto labelled the first two iterations converged.
+    """
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -186,7 +193,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
             calls.append(None)
         return QPResult(beta=np.zeros(1), converged=False)
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", feasible_but_uncertified_qp)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", feasible_but_uncertified_qp)
     with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
         result, _ = irls_direct.fit_irls_direct(
             design,
@@ -199,6 +206,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
             max_iter=3,
             tol=1e-10,
             convergence="coefficients",
+            record_diagnostics=True,
             weight_semantics="frequency",
         )
 
@@ -219,6 +227,77 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     ]
     assert len(terminal_warnings) == 1
     assert terminal_warnings[0].levelno == logging.WARNING
+    log = result.iteration_log
+    assert log is not None
+    assert all(row.convergence_value < row.convergence_tolerance for row in log)
+    assert [row.termination_reason for row in log] == [
+        "continue",
+        "continue",
+        "constraint_kkt_incomplete",
+    ]
+
+
+@pytest.mark.parametrize("separation", ["warn", "error"])
+def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    separation: str,
+) -> None:
+    """The separation backstop runs before the QP contract's final refusal.
+
+    The inner QP never certifies, so the fit spends its ten iterations at an
+    unchanged deviance, and the working-weight ratio is forced past the
+    separation bar: one fit carries the backstop's exhausted-budget signature
+    and a state without a KKT certificate.  Under ``"warn"`` it reports both.
+    Under ``"error"`` the backstop raises first, and the refusal of a state the
+    fit never returns is not reported.  Mutation check: the final refusal run
+    before the backstop logged that refusal and then raised.
+    """
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
+    from superglm.diagnostics.separation import SeparationError, SeparationWarning
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    monkeypatch.setattr(
+        irls_direct_qp,
+        "solve_constrained_qp",
+        lambda *_args, **_kwargs: QPResult(beta=np.zeros(1), converged=False),
+    )
+    monkeypatch.setattr(irls_direct, "_separation_weight_ratio", lambda *_args, **_kwargs: 1e13)
+
+    def fit():
+        return irls_direct.fit_irls_direct(
+            design,
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=0.0,
+            max_iter=10,
+            tol=1e-10,
+            convergence="coefficients",
+            separation=separation,
+            weight_semantics="frequency",
+        )
+
+    with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        if separation == "warn":
+            with pytest.warns(SeparationWarning, match="exhausted its iteration budget"):
+                result, _ = fit()
+            assert result.termination_reason == "constraint_kkt_incomplete"
+        else:
+            with pytest.raises(SeparationError, match="exhausted its iteration budget"):
+                fit()
+    refusals = [
+        record
+        for record in caplog.records
+        if "no complete constrained-QP KKT certificate" in record.getMessage()
+    ]
+    assert len(refusals) == (1 if separation == "warn" else 0)
 
 
 def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
@@ -231,7 +310,8 @@ def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
     ``fit_irls_direct``, the failed retry runs again on every IRLS iteration,
     three times here instead of once.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -244,7 +324,7 @@ def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
         (safeguarded if _degeneracy_safeguards else ordinary).append(None)
         return QPResult(beta=np.zeros(1), converged=False)
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", uncertified_qp)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", uncertified_qp)
     result, _ = irls_direct.fit_irls_direct(
         design,
         y,
@@ -272,7 +352,8 @@ def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.Monke
     so the third iterate's failure gets the retry again: two retries, not
     one.  Mutation: a latch that never re-arms runs it once.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -291,7 +372,7 @@ def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.Monke
         ordinary.append(None)
         return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=len(ordinary) == 2)
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", qp)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", qp)
     irls_direct.fit_irls_direct(
         design,
         y,
@@ -314,7 +395,9 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A prior certificate does not describe newly rebuilt Poisson weights."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.distributions import Poisson
     from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
     from superglm.links import LogLink
@@ -335,7 +418,7 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
             monotone_engine="qp",
         )
     ]
-    real_solve_constrained_qp = irls_direct.solve_constrained_qp
+    real_solve_constrained_qp = irls_direct_qp.solve_constrained_qp
     qp_systems: list[tuple[np.ndarray, np.ndarray, np.ndarray, bool]] = []
     decision_calls = [0]
 
@@ -354,8 +437,8 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
             trials_attempted=1 if accepted else 20,
         )
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", record_real_qp)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_then_reject)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", record_real_qp)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_then_reject)
     result, _ = irls_direct.fit_irls_direct(
         design,
         y,
@@ -786,7 +869,8 @@ def test_line_searched_infeasible_final_state_is_not_converged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tiny accepted step cannot certify an infeasible warm-start state."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.model.base import model_build_design_matrix
     from superglm.solvers.irls_state import _IRLSStepDecision
 
@@ -833,7 +917,7 @@ def test_line_searched_infeasible_final_state_is_not_converged(
             trials_attempted=20,
         )
 
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_tiny_line_search_step)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_tiny_line_search_step)
     with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
         result, _ = irls_direct.fit_irls_direct(
             model._dm,
@@ -879,7 +963,9 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Diagnostics and the public result must agree after an atomic rejection."""
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm._fit_trace import MemoryTraceSink, TraceRun
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
@@ -904,8 +990,8 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
             trials_attempted=20,
         )
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", infeasible_qp_proposal)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_every_trial)
+    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", infeasible_qp_proposal)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
     trace_sink = MemoryTraceSink()
     result, _ = irls_direct.fit_irls_direct(
         design,
@@ -932,6 +1018,71 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     decisions = [event for event in trace_sink.events if event.event_kind == "step_decision"]
     assert decisions[-1].payload["step_rejected"]
     assert decisions[-1].payload["termination_reason"] == result.termination_reason
+
+
+def test_an_infeasible_retained_qp_state_is_never_kkt_certified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No retained state outside ``A beta >= b`` carries the inner QP's KKT certificate.
+
+    The stop rule's one constraint veto is that certificate's
+    (``_IRLSDirectConvergence._terminate``): it stands for primal feasibility
+    too, because the inner QP certifies a solve only where its own feasibility
+    test passes at the contract's tolerance on the point it returns, and the
+    line search hands the certificate only to the full proposal it solved
+    (``_IRLSDirectQPStep.retained_converged``).  Every verdict below reads the
+    retained state's feasibility and certificate: healthy fits, a warm start
+    outside the set repaired by its first proposal, and tiny accepted steps
+    from it that keep the retained state outside for every iteration.
+    Mutation: handing the certificate to any accepted step, not only the full
+    one, certifies those infeasible retained states.
+    """
+    import inspect
+
+    import superglm.solvers.irls_direct._convergence as irls_convergence
+    import superglm.solvers.irls_direct._search as irls_direct_search
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import solve_constrained_qp
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    # the contract tests feasibility at the inner solver's own tolerance
+    assert _QP_FEASIBILITY_TOL == inspect.signature(solve_constrained_qp).parameters["tol"].default
+
+    verdicts: list[tuple[bool, bool]] = []
+    terminate = irls_convergence._IRLSDirectConvergence._terminate
+
+    def recorded(self, fit, it):
+        verdicts.append((fit.qp.feasible(fit.beta), fit.qp.retained_converged))
+        terminate(self, fit, it)
+
+    monkeypatch.setattr(irls_convergence._IRLSDirectConvergence, "_terminate", recorded)
+    frame, y = _healthy_increasing_problem()
+    _increasing_model().fit(frame, y)
+    design, response, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    outside = {
+        "beta_init": np.array([-1.0]),
+        "intercept_init": 0.0,
+        "max_iter": 3,
+        "weight_semantics": "frequency",
+    }
+    fit_irls_direct(design, response, weights, Gaussian(), IdentityLink(), groups, 0.0, **outside)
+
+    def accept_tiny_step(**kwargs):
+        alpha = 2.0**-19
+        kwargs["evaluate_state"](alpha)
+        return _IRLSStepDecision(
+            alpha=alpha, step_halvings=19, step_rejected=False, trials_attempted=20
+        )
+
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", accept_tiny_step)
+    fit_irls_direct(design, response, weights, Gaussian(), IdentityLink(), groups, 0.0, **outside)
+
+    assert any(certified for _, certified in verdicts)
+    assert any(not feasible for feasible, _ in verdicts)
+    assert not any(certified and not feasible for feasible, certified in verdicts)
 
 
 def _force_terminal_qp_refit(monkeypatch: pytest.MonkeyPatch, failure_reason: str) -> None:
@@ -1132,6 +1283,7 @@ def test_infeasible_start_without_a_feasible_qp_proposal_restarts_at_the_zero_po
     fit continues from it instead of ending outside the constraints.
     """
     import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.model.base import model_build_design_matrix
     from superglm.solvers.constrained_qp import QPResult
 
@@ -1145,7 +1297,7 @@ def test_infeasible_start_without_a_feasible_qp_proposal_restarts_at_the_zero_po
     assert group.constraints is not None
     infeasible_beta = np.zeros(model._dm.p)
     infeasible_beta[group.sl] = -10.0 * group.constraints.A[0]
-    real_qp = irls_direct._solve_constrained_qp_with_cold_retry
+    real_qp = irls_direct_qp._solve_constrained_qp_with_cold_retry
     calls: list[int] = []
 
     def no_feasible_first_proposal(*args, **kwargs):
@@ -1155,7 +1307,7 @@ def test_infeasible_start_without_a_feasible_qp_proposal_restarts_at_the_zero_po
         return real_qp(*args, **kwargs)
 
     monkeypatch.setattr(
-        irls_direct, "_solve_constrained_qp_with_cold_retry", no_feasible_first_proposal
+        irls_direct_qp, "_solve_constrained_qp_with_cold_retry", no_feasible_first_proposal
     )
 
     def fit(max_iter: int):
@@ -1192,10 +1344,11 @@ def test_feasible_committed_state_never_accepts_infeasible_trial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A merit-improving infeasible proposal is truncated at the feasible boundary."""
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
-    from superglm.solvers import irls_direct
     from superglm.solvers.constrained_qp import QPResult
+    from superglm.solvers.irls_direct import _fit as irls_direct
 
     design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
 
@@ -1203,7 +1356,7 @@ def test_feasible_committed_state_never_accepts_infeasible_trial(
         return QPResult(beta=np.array([-1.0]), converged=True)
 
     monkeypatch.setattr(
-        irls_direct,
+        irls_direct_qp,
         "solve_constrained_qp",
         infeasible_qp_proposal,
     )
@@ -1463,6 +1616,8 @@ def test_a_feasible_proposal_outside_the_link_domain_has_its_intercept_raised(
     is the QP's. Mutation: accepted as it stands, ``min eta`` is about -9.4.
     """
     import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
+    import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.distributions import Poisson
     from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
     from superglm.links import IdentityLink
@@ -1485,8 +1640,10 @@ def test_a_feasible_proposal_outside_the_link_domain_has_its_intercept_raised(
             alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
         )
 
-    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", feasible_qp_proposal)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_every_trial)
+    monkeypatch.setattr(
+        irls_direct_qp, "_solve_constrained_qp_with_cold_retry", feasible_qp_proposal
+    )
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
     result, _ = irls_direct.fit_irls_direct(
         design,
         y,
@@ -1555,11 +1712,11 @@ def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
     the error is raised. Mutation: catching it under every link fails the
     log case, and dropping the warning fails the identity case.
     """
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm import PSpline
     from superglm.diagnostics.convergence import ConvergenceWarning
 
-    real_qp = irls_direct._solve_constrained_qp_with_cold_retry
+    real_qp = irls_direct_qp._solve_constrained_qp_with_cold_retry
     calls: list[int] = []
 
     def unbounded_second_solve(*args, **kwargs):
@@ -1569,7 +1726,7 @@ def test_an_unbounded_working_qp_is_disclosed_only_under_a_zero_bounded_link(
         return real_qp(*args, **kwargs)
 
     monkeypatch.setattr(
-        irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_second_solve
+        irls_direct_qp, "_solve_constrained_qp_with_cold_retry", unbounded_second_solve
     )
     x = np.linspace(0.0, 1.0, 80)
     y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
@@ -1603,13 +1760,14 @@ def test_an_unbounded_working_qp_at_an_infeasible_start_restarts_at_the_zero_poi
     fit ``constraint_infeasible``, which the REML layers refuse.
     """
     import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.diagnostics.convergence import ConvergenceWarning
     from superglm.model.base import model_build_design_matrix
 
     def unbounded_qp(*args, **kwargs):
         raise ValueError("solve_constrained_qp: H is rank-deficient")
 
-    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", unbounded_qp)
+    monkeypatch.setattr(irls_direct_qp, "_solve_constrained_qp_with_cold_retry", unbounded_qp)
     x = np.linspace(0.0, 1.0, 80)
     y = np.random.default_rng(0).poisson(1.0 + 2.0 * x).astype(float)
     model = SuperGLM(

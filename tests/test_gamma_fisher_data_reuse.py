@@ -18,7 +18,10 @@ from superglm.group_matrix import (
 )
 from superglm.links import IdentityLink, LogLink
 from superglm.reml import direct, observed_geometry
-from superglm.solvers import centered_system, irls_direct
+from superglm.solvers import centered_system
+from superglm.solvers.irls_direct import _finalise as irls_direct_finalise
+from superglm.solvers.irls_direct import _fit as irls_direct
+from superglm.solvers.irls_direct import _search as irls_direct_search
 from superglm.solvers.irls_state import _IRLSStepDecision
 from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.types import GroupSlice, LinearConstraintSet
@@ -322,7 +325,7 @@ def test_a_rejected_fisher_step_keeps_the_reuse_entry_on_fisher_systems(monkeypa
     original_rows = irls_direct.coefficient_working_rows
     original_build = irls_direct.build_centered_system
     original_remember = centered_system._FisherDataReuse.remember
-    original_select = irls_direct._select_irls_trial
+    original_select = irls_direct_search._select_irls_trial
     selections = 0
 
     def working(**kwargs):
@@ -348,7 +351,7 @@ def test_a_rejected_fisher_step_keeps_the_reuse_entry_on_fisher_systems(monkeypa
     monkeypatch.setattr(irls_direct, "coefficient_working_rows", working)
     monkeypatch.setattr(irls_direct, "build_centered_system", build)
     monkeypatch.setattr(centered_system._FisherDataReuse, "remember", remember)
-    monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_the_first)
+    monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_the_first)
     result, _ = _fit(problem, entry, y=np.array([0.8, 1.2, 1.1, 1.3, 0.9, 1.5]))
     assert not result.converged and result.n_iter == 1
     assert set(rows) == {"fisher"}
@@ -393,9 +396,8 @@ def test_gram_certificate_refusal_clears_payload(monkeypatch):
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
-    monkeypatch.setattr(
-        irls_direct, "decompose_gram_if_authoritative", lambda *args, **kwargs: None
-    )
+    for module in (irls_direct_finalise, irls_direct):
+        monkeypatch.setattr(module, "decompose_gram_if_authoritative", lambda *args, **kwargs: None)
     result, inverse = _fit(problem, entry)
     assert result.converged
     np.testing.assert_allclose(inverse, np.diag([1 / 5, 1 / 2.5]), rtol=32 * np.finfo(float).eps)

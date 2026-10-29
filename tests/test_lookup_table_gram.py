@@ -158,7 +158,7 @@ def test_a_lookup_fit_takes_every_centred_gram_from_the_tables(monkeypatch):
 
     monkeypatch.setattr(centered_system, "table_centred_system", counted_tables)
     monkeypatch.setattr(centered_system, "build_centered_system", counted_build)
-    for module in ("superglm.solvers.irls_direct", "superglm.reml.observed_geometry"):
+    for module in ("superglm.solvers.irls_direct._fit", "superglm.reml.observed_geometry"):
         monkeypatch.setattr(f"{module}.build_centered_system", counted_build)
     monkeypatch.setattr(lookup_tables, "_MIN_TABLE_GRAM_ROWS", 0)
     monkeypatch.setattr(lookup_tables, "_TABLE_GRAM_COLUMNS_PER_SWEEP", 0)

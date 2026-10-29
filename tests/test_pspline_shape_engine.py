@@ -21,6 +21,7 @@ from superglm.features._spline_build import shape_engine
 from superglm.features.spline import BSplineSmooth
 from superglm.model.reml_execute import STEP_REML_TOL_DEFAULT
 from superglm.solvers import irls_direct
+from superglm.solvers.irls_direct import _qp as irls_direct_qp
 
 from .test_saved_fs_models import assert_predicts_as_saved
 
@@ -217,14 +218,14 @@ def test_each_irls_qp_starts_from_an_earlier_active_set(monkeypatch: pytest.Monk
     the trajectory and on any cold retry. Fails when every QP starts cold.
     """
     calls = []
-    solve = irls_direct._solve_constrained_qp_with_cold_retry
+    solve = irls_direct_qp._solve_constrained_qp_with_cold_retry
 
     def recorded(H, g, A, b, active_set_init, **kwargs):
         result = solve(H, g, A, b, active_set_init, **kwargs)
         calls.append((active_set_init, list(result.active_set)))
         return result
 
-    monkeypatch.setattr(irls_direct, "_solve_constrained_qp_with_cold_retry", recorded)
+    monkeypatch.setattr(irls_direct_qp, "_solve_constrained_qp_with_cold_retry", recorded)
     _fit("poisson", PSpline(n_knots=10, constraint=Constraint.fit.increasing), method="fit")
     assert len(calls) >= 2 and len(calls[0][1]) >= 3 and calls[0][0] is None
     for index, (handed, _) in enumerate(calls[1:], start=1):

@@ -384,7 +384,7 @@ def test_the_solver_passes_the_penalty_product_rounding_to_its_mode_residual(mon
     import pandas as pd
 
     import superglm.reml.penalty_algebra as penalty_algebra
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
     from superglm import RandomEffect, Spline, SuperGLM
 
     counts = []

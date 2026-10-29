@@ -55,6 +55,33 @@ class _LevelTwoRecorder:
         self.rows.append(payload)
 
 
+def _count_gram_decompositions(monkeypatch) -> list:
+    """Record every Gram decomposition the direct solver takes, in whichever of its modules.
+
+    ``decompose_gram_if_authoritative`` is patched in each module of the
+    package that binds it, so a call site that moves between modules is
+    still counted.
+    """
+    import importlib
+    import pkgutil
+
+    import superglm.solvers.irls_direct as package
+    from superglm.solvers import rank
+
+    original = rank.decompose_gram_if_authoritative
+    calls: list = []
+
+    def counted(matrix, *args, **kwargs):
+        calls.append(matrix)
+        return original(matrix, *args, **kwargs)
+
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f"{package.__name__}.{info.name}")
+        if getattr(module, "decompose_gram_if_authoritative", None) is original:
+            monkeypatch.setattr(module, "decompose_gram_if_authoritative", counted)
+    return calls
+
+
 def _force_constant_working_rows(monkeypatch, response, weights=None):
     """Every PIRLS solve sees the same working rows, whatever the state.
 
@@ -65,7 +92,7 @@ def _force_constant_working_rows(monkeypatch, response, weights=None):
     """
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     real = irls_direct.coefficient_working_rows
 
@@ -88,7 +115,7 @@ def _force_unresolved_score(monkeypatch, *, resolved=False):
     import math
     from dataclasses import replace
 
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     real = irls_direct.penalized_mode_residual
     floor_verdicts: list[float] = []
@@ -284,7 +311,7 @@ class TestDirectSolverBasic:
         assert result.reml_hessian_rank == 2  # intercept plus one identifiable slope
 
     def test_reml_working_system_avoids_rebuilding_one_step_crossproducts(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 
@@ -343,9 +370,89 @@ class TestDirectSolverBasic:
         assert np.all(np.isfinite(inverse))
         assert np.all(np.isfinite(gram))
 
+    def test_reml_working_system_decomposes_its_hessian_once(self, monkeypatch):
+        """The finaliser reads the decomposition the solve took of the same frozen Hessian."""
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.rank import decompose_gram
+
+        rng = np.random.default_rng(3)
+        raw = rng.normal(size=(200, 4))
+        y = rng.poisson(np.exp(0.2 * raw[:, 0])).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(raw)], n=len(y), p=raw.shape[1])
+        groups = [GroupSlice(name="x", start=0, end=raw.shape[1])]
+        decomposed = _count_gram_decompositions(monkeypatch)
+        cache: dict = {}
+        result, inverse, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Poisson(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.25,
+            max_iter=1,
+            return_xtwx=True,
+            compute_rank_info=False,
+            _return_working_system=True,
+            _compute_fit_statistics=False,
+            cache_out=cache,
+            weight_semantics="frequency",
+        )
+
+        hessian = cache["centered_hessian"]
+        assert len(decomposed) == 1 and decomposed[0] is hessian
+        fresh = decompose_gram(hessian)
+        scale = np.linalg.norm(fresh.pseudo_inverse(), ord=1)
+        tolerance = 64 * raw.shape[1] * np.finfo(float).eps * scale * np.linalg.cond(hessian)
+        np.testing.assert_allclose(inverse, fresh.pseudo_inverse(), rtol=0.0, atol=tolerance)
+        assert result.reml_hessian_rank == 1 + fresh.rank
+
+    def test_fit_statistics_read_the_inverse_the_reml_geometry_formed(self, monkeypatch):
+        """One pseudo-inverse per finalise: the EDF trace reads the REML geometry's."""
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers import rank
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        rng = np.random.default_rng(4)
+        raw = rng.normal(size=(200, 4))
+        y = rng.poisson(np.exp(0.2 * raw[:, 0])).astype(float)
+        dm = DesignMatrix([DenseGroupMatrix(raw)], n=len(y), p=raw.shape[1])
+        groups = [GroupSlice(name="x", start=0, end=raw.shape[1])]
+        original = rank.RankDecomposition.pseudo_inverse
+        formed = []
+
+        def counted(self):
+            formed.append(self)
+            return original(self)
+
+        monkeypatch.setattr(rank.RankDecomposition, "pseudo_inverse", counted)
+        cache: dict = {}
+        result, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones_like(y),
+            family=Poisson(),
+            link=LogLink(),
+            groups=groups,
+            lambda2=0.25,
+            compute_rank_info=False,
+            cache_out=cache,
+            weight_semantics="frequency",
+        )
+
+        assert len(formed) == 1
+        hessian, data_gram = cache["centered_hessian"], cache["centered_XtWX"]
+        expected = 1.0 + np.trace(np.linalg.solve(hessian, data_gram))
+        tolerance = 64 * raw.shape[1] * np.finfo(float).eps * np.linalg.cond(hessian)
+        assert result.effective_df == pytest.approx(expected, rel=tolerance)
+
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -372,7 +479,7 @@ class TestDirectSolverBasic:
         # or not the retained fit would have had to certify it against the
         # observation factor.
         def _counting(name):
-            original = getattr(irls_direct, name)
+            original = getattr(irls_finalise, name)
 
             def counted(matrix, *args, **kwargs):
                 nonlocal decomposition_calls
@@ -381,11 +488,12 @@ class TestDirectSolverBasic:
 
             return counted
 
-        # The data rank's entry point (``rank.decide_data_rank``) counts too.
-        for name in ("decompose_gram_if_authoritative", "decide_data_rank"):
-            monkeypatch.setattr(irls_direct, name, _counting(name))
+        # The data rank's entry point (``rank.decide_data_rank``) counts too,
+        # and so does every Gram decomposition, in whichever module takes it.
+        gram_calls = _count_gram_decompositions(monkeypatch)
+        monkeypatch.setattr(irls_finalise, "decide_data_rank", _counting("decide_data_rank"))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
-        retained_geometry_calls = decomposition_calls
+        retained_geometry_calls = decomposition_calls + len(gram_calls)
         assert retained.rank_info is not None
 
         with pytest.raises(
@@ -397,6 +505,7 @@ class TestDirectSolverBasic:
             )
 
         decomposition_calls = 0
+        gram_calls.clear()
         candidate, omitted_inverse, candidate_gram = irls_direct.fit_irls_direct(
             **common,
             compute_rank_info=False,
@@ -405,7 +514,10 @@ class TestDirectSolverBasic:
             weight_semantics="frequency",
         )
 
-        assert retained_geometry_calls - decomposition_calls == 3
+        # The retained fit's REML slope decomposition is its last solve's (a
+        # Gaussian identity Hessian is one object every iteration), so the
+        # candidate skips the coefficient and data-rank decompositions.
+        assert retained_geometry_calls - (decomposition_calls + len(gram_calls)) == 2
         assert omitted_inverse.shape == (0, 0)
         assert candidate.log_det_H is None
         assert candidate.reml_hessian_rank is None
@@ -415,7 +527,8 @@ class TestDirectSolverBasic:
         assert np.all(np.isfinite(candidate_gram))
 
     def test_skips_extrema_scans_when_diagnostics_disabled(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._recorder as irls_recorder
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -452,7 +565,9 @@ class TestDirectSolverBasic:
 
         extrema_spy = NumpyExtremaSpy(np)
         monkeypatch.setattr(irls_direct, "_positive_working_weight_stats", counting_stats)
+        # the fit and its recorder, which takes the extrema
         monkeypatch.setattr(irls_direct, "np", extrema_spy)
+        monkeypatch.setattr(irls_recorder, "np", extrema_spy)
 
         irls_direct.fit_irls_direct(
             X=dm,
@@ -472,7 +587,7 @@ class TestDirectSolverBasic:
         assert extrema_spy.max_calls == 0
 
     def test_level_two_recorder_keeps_extrema_without_iteration_diagnostics(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -506,7 +621,7 @@ class TestDirectSolverBasic:
         } <= recorder.rows[0].keys()
 
     def test_level_two_recorder_decision_is_frozen_before_iterations(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -548,7 +663,7 @@ class TestDirectSolverBasic:
 
     def test_one_step_return_xtwx_returns_h_inverse_and_gram(self):
         """A one-step fit with ``return_xtwx`` returns the final H inverse and weighted Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 
@@ -579,7 +694,7 @@ class TestDirectSolverBasic:
         assert XtWX.shape == (2, 2)
 
     def test_safe_decompose_h_uses_unpivoted_cholesky_for_spd(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
 
         rng = np.random.default_rng(11)
         A = rng.standard_normal((6, 6))
@@ -597,7 +712,7 @@ class TestDirectSolverBasic:
         assert cholesky_ok
 
     def test_gram_decomposition_uses_cholesky_for_spd(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.solvers.rank import decompose_gram
 
         rng = np.random.default_rng(13)
@@ -620,7 +735,7 @@ class TestDirectSolverBasic:
 
     def test_constant_weight_fit_reuses_weighted_gram(self, monkeypatch):
         """Gaussian identity fits reuse X'WX across IRLS iterations."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -665,7 +780,7 @@ class TestDirectSolverBasic:
 
     def test_constant_weight_cache_preserves_solution(self, monkeypatch):
         """Reusing X'WX does not change the fitted coefficients."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
@@ -716,7 +831,7 @@ class TestDirectSolverBasic:
 
     def test_poisson_sqrt_reuses_constant_weighted_gram(self, monkeypatch):
         """Exact Poisson/sqrt Fisher weights reuse X'WX without changing the fit."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -781,7 +896,7 @@ class TestDirectSolverBasic:
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
     def test_poisson_sqrt_constant_weight_cache_is_exact_type_gated(self):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -795,7 +910,7 @@ class TestDirectSolverBasic:
         assert not irls_direct._has_constant_irls_weights(Poisson(), DerivedSqrtLink())
 
     def test_sqrt_null_shortcut_skips_only_unused_terminal_working_rows(self, monkeypatch):
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -862,7 +977,7 @@ class TestDirectSolverBasic:
 
     def test_distribution_subclass_cannot_inherit_constant_weight_cache(self, monkeypatch):
         """Behavior-changing family subclasses must rebuild their weighted Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gaussian, Poisson
         from superglm.links import IdentityLink
 
@@ -927,7 +1042,7 @@ class TestDirectSolverBasic:
 
     def test_gamma_log_reuses_centered_gram_when_working_response_changes(self, monkeypatch):
         """Constant Gamma-log weights must not rebuild the invariant Gram."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma
         from superglm.links import LogLink
 
@@ -980,7 +1095,7 @@ class TestDirectSolverBasic:
         unconverged score (``rate_exhausts_budget`` returning True) switched
         this solve and rebuilt the Gram on each Newton iteration.
         """
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Gamma
         from superglm.links import LogLink
 
@@ -1129,6 +1244,89 @@ class TestDirectSolverBasic:
         assert "irls_fisher_newton_switches" not in latched
         assert latched["irls_observed_newton_iters"] == started.n_iter < result.n_iter
 
+    def test_a_switch_on_a_stagnated_score_takes_newton_steps_judged_afresh(self, monkeypatch):
+        """The Gamma/log switch that stagnation triggers goes on to Newton steps, on a new history.
+
+        The fixture is the slow-Fisher one above.  Until the switch the capped
+        score is forced to twice the bar, resolved, and the rate test never
+        fires, so Fisher's score stagnates after the window and the switch is
+        the stagnation's; from the switch on the score is the real one.  The
+        stagnation that triggered the switch must not end the solve, and the
+        Newton iterates' ratios must not join Fisher's flat history: a Newton
+        iterate is resolved and above the bar before the last, and a history
+        still holding Fisher's ratios would call it stagnated.  Mutation
+        checks: keeping ``score_stagnated`` ended the solve at the switch, and
+        keeping the ratios at that Newton iterate, neither converged.
+        """
+        import math
+        from dataclasses import replace
+
+        import superglm.solvers.irls_direct._convergence as irls_direct_convergence
+        import superglm.solvers.irls_direct._fit as irls_direct
+        from superglm.distributions import Gamma
+        from superglm.links import LogLink
+
+        n, far = 200, 6
+        x = np.zeros(n)
+        x[:far] = 8.0
+        x[far:] = np.linspace(-1.0, 1.0, n - far)
+        design = np.column_stack([np.ones(n), x])
+        ratio = np.ones(n)
+        ratio[:far] = 0.01
+        correction = np.linalg.lstsq(
+            design[far:].T, -design[:far].T @ (ratio[:far] - 1.0), rcond=None
+        )[0]
+        ratio[far:] = 1.0 + correction
+        y = ratio * np.exp(1.0 + 0.2 * x)
+
+        real_residual = irls_direct.penalized_mode_residual
+        real_switch = irls_direct._IRLSDirectCurvaturePolicy.switch_to_newton
+        switched: list[bool] = []
+        newton_scores: list[tuple[float, bool]] = []
+
+        def residual(**kwargs):
+            result = real_residual(**kwargs)
+            capped = math.isfinite(kwargs["resolve_cap"])
+            if switched:
+                if capped:
+                    newton_scores.append((result.ratio(), result.resolved))
+                return result
+            if not capped:
+                return result
+            return replace(
+                result,
+                relative=np.full_like(result.relative, 2.0 * result.bar),
+                bar_effective=np.full_like(result.bar_effective, result.bar),
+                resolved=True,
+            )
+
+        def switch(self, recorder):
+            switched.append(True)
+            real_switch(self, recorder)
+
+        monkeypatch.setattr(irls_direct, "penalized_mode_residual", residual)
+        monkeypatch.setattr(irls_direct._IRLSDirectCurvaturePolicy, "switch_to_newton", switch)
+        monkeypatch.setattr(irls_direct_convergence, "rate_exhausts_budget", lambda *_args: False)
+        profile: dict = {}
+        result, _ = irls_direct.fit_irls_direct(
+            X=DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1),
+            y=y,
+            weights=np.ones(n),
+            family=Gamma(),
+            link=LogLink(),
+            groups=[GroupSlice(name="x", start=0, end=1)],
+            lambda2=0.0,
+            convergence="mode_score",
+            profile=profile,
+            weight_semantics="frequency",
+        )
+        assert profile["irls_fisher_newton_switches"] == 1
+        assert result.converged
+        assert result.termination_reason == "converged"
+        assert profile["irls_observed_newton_iters"] == len(newton_scores)
+        # what made the fresh history matter: an unconverged, resolved Newton score
+        assert any(resolved and score > 1.0 for score, resolved in newton_scores[:-1])
+
     def test_inverse_link_line_search_keeps_every_row_inside_the_domain(self):
         """A Gamma/inverse step that would carry a row to eta <= 0 is halved, not clipped.
 
@@ -1231,7 +1429,7 @@ class TestDirectSolverBasic:
         would have ended the solve before the Newton map it chose ran.  The
         solve now takes the Newton iteration and stops at its fixed point.
         """
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._convergence as irls_direct_convergence
         from superglm.distributions import Gamma
         from superglm.links import LogLink
         from superglm.solvers.irls_direct import fit_irls_direct
@@ -1243,7 +1441,7 @@ class TestDirectSolverBasic:
         _force_constant_working_rows(monkeypatch, np.log(y), weights=np.ones(n))
         floor_verdicts = _force_unresolved_score(monkeypatch, resolved=True)
         monkeypatch.setattr(
-            irls_direct,
+            irls_direct_convergence,
             "rate_exhausts_budget",
             lambda ratios, window, done, max_iter: done >= 2,
         )
@@ -1265,6 +1463,56 @@ class TestDirectSolverBasic:
         assert result.n_iter == 3
         assert result.converged
         assert floor_verdicts and max(floor_verdicts) <= 1.0
+
+    @pytest.mark.parametrize("convergence", ["deviance", "coefficients"])
+    def test_a_rejected_step_is_never_recorded_as_converged(self, monkeypatch, convergence):
+        """The iteration that rejects its step records no stop, though its criterion reads zero.
+
+        Every trial is refused, so the retained state is the committed one and
+        the criterion reads a change of exactly zero, below any tolerance.  A
+        rejected step bounds nothing, so the stop rule vetoes the stop
+        (``_IRLSDirectConvergence._criterion``): the iteration's published
+        verdict is not converged, and its reason is ``step_rejected``.
+        Mutation check: without the veto the trace recorded the rejected
+        iteration as converged.
+        """
+        import superglm.solvers.irls_direct._search as irls_direct_search
+        from superglm._fit_trace import MemoryTraceSink, TraceRun
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.irls_state import _IRLSStepDecision
+
+        def reject_every_trial(**_kwargs):
+            return _IRLSStepDecision(
+                alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+            )
+
+        monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_every_trial)
+        rng = np.random.default_rng(11)
+        n = 60
+        x = rng.uniform(-1.0, 1.0, (n, 2))
+        y = 0.5 + x @ np.array([0.7, -0.4]) + 0.1 * rng.normal(size=n)
+        sink = MemoryTraceSink()
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x)], n=n, p=2),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, 2)],
+            lambda2=0.1,
+            convergence=convergence,
+            weight_semantics="frequency",
+            trace_run=TraceRun("rejected-step", sink=sink),
+        )
+        assert not result.converged
+        assert result.termination_reason == "step_rejected"
+        (decision,) = [e.payload for e in sink.events if e.event_kind == "step_decision"]
+        assert decision["step_rejected"]
+        assert decision["convergence_value"] == 0.0
+        assert not decision["fit_converged"]
+        assert decision["termination_reason"] == "step_rejected"
 
     def test_a_zero_crossing_proposal_takes_the_first_halving_inside_the_domain(self):
         """The line search accepts the first halving that keeps every weighted row at eta > 0.
@@ -1729,7 +1977,8 @@ class TestDirectSolverBasic:
         """One-engine design §3.11: Gamma/log takes Fisher rows and Tweedie/log
         observed rows on every iteration; a rejected step ends the fit in the
         same curvature, with no observed rescue and no Fisher latch."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._search as irls_direct_search
         from superglm.distributions import Gamma, Tweedie
         from superglm.links import LogLink
         from superglm.solvers.irls_state import _IRLSStepDecision
@@ -1749,7 +1998,7 @@ class TestDirectSolverBasic:
             curvature_requests.append(bool(kwargs["prefer_observed"]))
             return original_rows(*args, **kwargs)
 
-        original_select = irls_direct._select_irls_trial
+        original_select = irls_direct_search._select_irls_trial
         selection_calls = 0
 
         def reject_the_second_proposal(*args, **kwargs):
@@ -1760,7 +2009,7 @@ class TestDirectSolverBasic:
             return original_select(*args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "coefficient_working_rows", recording_rows)
-        monkeypatch.setattr(irls_direct, "_select_irls_trial", reject_the_second_proposal)
+        monkeypatch.setattr(irls_direct_search, "_select_irls_trial", reject_the_second_proposal)
 
         profile: dict[str, float | int] = {}
         result, _ = irls_direct.fit_irls_direct(
@@ -1804,7 +2053,7 @@ class TestDirectSolverBasic:
         """One-engine design §3.11: finiteness is the one condition observed rows
         keep, so a full step to a state whose rows the declared curvature cannot
         form is halved, never accepted and never answered with Fisher rows."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Tweedie
         from superglm.links import LogLink
         from superglm.solvers.working_rows import CoefficientWorkingRows
@@ -1848,7 +2097,7 @@ class TestDirectSolverBasic:
     def test_non_finite_observed_rows_at_the_start_raise(self, monkeypatch):
         """No Fisher substitute: a declared observed pair whose rows are not finite
         at the starting coefficients has no step, and says so."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Tweedie
         from superglm.links import LogLink
         from superglm.solvers.working_rows import CoefficientWorkingRows
@@ -1879,7 +2128,8 @@ class TestDirectSolverBasic:
 
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
         """Large constrained fits dispatch raw moments through their cached plan."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
+        import superglm.solvers.irls_direct._qp as irls_direct_qp
         from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
@@ -1902,7 +2152,7 @@ class TestDirectSolverBasic:
             )
         ]
 
-        original_qp = irls_direct.solve_constrained_qp
+        original_qp = irls_direct_qp.solve_constrained_qp
         original_moments = MatrixExecutionPlan._moments_prevalidated
         constraint_matrices = []
         moment_plan_ids = []
@@ -1915,7 +2165,7 @@ class TestDirectSolverBasic:
             moment_plan_ids.append(id(self))
             return original_moments(self, *args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", recording_qp)
         monkeypatch.setattr(
             MatrixExecutionPlan,
             "_moments_prevalidated",
@@ -1951,7 +2201,7 @@ class TestDirectSolverBasic:
             kwargs["_force_chunked"] = True
             return original_centered(*args, **kwargs)
 
-        monkeypatch.setattr(irls_direct, "solve_constrained_qp", original_qp)
+        monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", original_qp)
         monkeypatch.setattr(
             irls_direct,
             "build_centered_system",
@@ -1980,7 +2230,7 @@ class TestDirectSolverBasic:
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""
-        import superglm.solvers.irls_direct as irls_direct
+        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import LogLink
 
@@ -2118,6 +2368,61 @@ class TestDirectSolverBasic:
         # edf should be between 1 (intercept-only) and total params + 1
         total_params = sum(g.size for g in m._groups) + 1
         assert 1 < m.result.effective_df < total_params
+
+    def test_an_edf_below_the_traces_resolution_is_published_as_zero(self, monkeypatch):
+        """A coefficient whose penalty swamps its data publishes an EDF of exactly zero.
+
+        A ridge of 1e20 on one of two columns gives that coefficient an EDF of
+        about ``D_bb / 1e20``, near 1e-19: positive, but far below the rounding
+        of a trace whose other entry is of order one.  The finaliser publishes
+        every EDF within ``100 eps`` of zero as zero, so the coefficient, its
+        group and the effective degrees of freedom read no data in it.
+        Mutation check: without the cut the rank metadata published the 1e-19.
+        """
+        import superglm.solvers.irls_direct._finalise as irls_direct_finalise
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.types import PenaltyComponent
+
+        traces = []
+        real_edf = irls_direct_finalise._feature_edf
+
+        def recorded(*args, **kwargs):
+            edf = real_edf(*args, **kwargs)
+            traces.append(edf.copy())
+            return edf
+
+        monkeypatch.setattr(irls_direct_finalise, "_feature_edf", recorded)
+        rng = np.random.default_rng(3)
+        n = 50
+        a, b = rng.uniform(-1.0, 1.0, n), rng.uniform(-1.0, 1.0, n)
+        y = 0.5 + a + 0.3 * b + 0.1 * rng.normal(size=n)
+        ridge = PenaltyComponent(
+            name="b",
+            group_name="b",
+            group_index=1,
+            group_sl=slice(1, 2),
+            omega_raw=None,
+            penalty_kind="identity",
+        )
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(a[:, None]), DenseGroupMatrix(b[:, None])], n=n, p=2),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("a", 0, 1), GroupSlice("b", 1, 2)],
+            lambda2={"b": 1e20},
+            reml_penalties=[ridge],
+            weight_semantics="frequency",
+        )
+        (trace,) = traces
+        assert 0.0 < trace[1] < 100.0 * np.finfo(np.float64).eps
+        assert result.rank_info is not None
+        assert result.rank_info.feature_edf[1] == 0.0
+        assert result.rank_info.group_edf["b"] == 0.0
+        assert result.effective_df == 1.0 + result.rank_info.feature_edf[0]
 
     def test_predict_after_direct_fit(self, poisson_data):
         """predict/reconstruct should work after direct solver fit."""

@@ -20,7 +20,8 @@ from superglm.group_matrix import (
 )
 from superglm.links import LogLink
 from superglm.reml import direct
-from superglm.solvers import centered_system, irls_direct
+from superglm.solvers import centered_system
+from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.types import GroupSlice
 
 

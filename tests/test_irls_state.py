@@ -307,7 +307,7 @@ def test_poisson_sqrt_objective_convergence_ratio_is_response_scale_equivariant(
 
 
 def test_direct_sqrt_irls_computes_objective_scale_once_per_fit(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct
+    import superglm.solvers.irls_direct._fit as irls_direct
 
     real_scale = irls_direct._irls_objective_scale
     calls = 0
@@ -986,7 +986,7 @@ def test_direct_nonfinite_full_trial_can_accept_safe_half_step() -> None:
 
 
 def test_direct_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) -> None:
-    import superglm.solvers.irls_direct as irls_direct_module
+    import superglm.solvers.irls_direct._fit as irls_direct_module
 
     n = 6
     dm = DesignMatrix([DenseGroupMatrix(np.zeros((n, 1)))], n=n, p=1)
