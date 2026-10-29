@@ -1343,3 +1343,72 @@ def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
     kappa = solver.rank_info.augmented.pre_truncation_condition
     bound = 2 * n * gamma(solver.beta.size) * kappa * np.max(np.abs(mu)) / h
     assert abs(solver.effective_df - divergence) <= bound
+
+
+def test_a_rejected_qp_step_publishes_the_face_of_the_iterate_it_returns(monkeypatch):
+    """An increasing P-spline whose second working QP drops rows the first held.
+
+    Its second step is made to be rejected, so the fit returns its first
+    iterate, whose statistics are on the face of the rows that bind there:
+    the active set that iteration started from, not the rejected proposal's.
+    The reference is the same fit stopped after one iteration, whose retained
+    state is that iterate.  Mutation check: without the restore in
+    ``_search``, the fit published the rejected proposal's face.
+    """
+    from superglm import Spline
+    from superglm.solvers.irls_direct import _qp, _search
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    rng = np.random.default_rng(3)
+    n = 300
+    frame = pd.DataFrame({"x": rng.uniform(0, 1, n), "z": rng.uniform(0, 1, n)})
+    signal = 0.6 * np.minimum(frame["x"] * 3, 1.0) + 0.5 * np.sin(4 * frame["z"])
+    y = rng.poisson(np.exp(signal)).astype(float)
+
+    def fit(**kwargs):
+        model = SuperGLM(
+            family="poisson",
+            link="log",
+            selection_penalty=0.0,
+            features={
+                "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing),
+                "z": Spline(kind="cr", k=8),
+            },
+            **kwargs,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit(frame, y)
+
+    reference = fit(max_iter=1)
+
+    active_sets = []
+    real_solve = _qp._solve_constrained_qp_with_cold_retry
+
+    def recorded(*args, **kwargs):
+        result = real_solve(*args, **kwargs)
+        active_sets.append(sorted(result.active_set))
+        return result
+
+    calls = []
+    real_select = _search._select_irls_trial
+
+    def reject_the_second(**kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            return _IRLSStepDecision(
+                alpha=0.0, step_halvings=20, step_rejected=True, trials_attempted=20
+            )
+        return real_select(**kwargs)
+
+    monkeypatch.setattr(_qp, "_solve_constrained_qp_with_cold_retry", recorded)
+    monkeypatch.setattr(_search, "_select_irls_trial", reject_the_second)
+    rejected = fit()
+    assert len(calls) == 2
+    # the second proposal really did drop rows the first iterate held
+    assert len(active_sets) >= 2 and not set(active_sets[0]) <= set(active_sets[1])
+
+    held, kept = reference._solver_pirls_result(), rejected._solver_pirls_result()
+    np.testing.assert_array_equal(kept.beta, held.beta)
+    np.testing.assert_array_equal(kept.rank_info.face_rows, held.rank_info.face_rows)
+    assert kept.effective_df == held.effective_df

@@ -321,7 +321,7 @@ def build_line_profiler():
 
     from superglm.model import reml_execute
     from superglm.solvers import irls_direct
-    from superglm.solvers.irls_direct import _fit, _search
+    from superglm.solvers.irls_direct import _dense, _finalise, _fit, _search, _structured
 
     bench = load_benchmark_module()
     profiler = LineProfiler()
@@ -334,6 +334,10 @@ def build_line_profiler():
         _fit._IRLSDirectFit._working,
         _fit._IRLSDirectFit._finish,
         _search._IRLSDirectTrialSearch.search,
+        _fit._IRLSDirectFit.get_centered_system,
+        _dense._IRLSDirectDenseStep.propose,
+        _structured._IRLSDirectStructuredStep.propose,
+        _finalise._finalise_centred,
         irls_direct._safe_decompose_H,
         reml_execute.optimize_reml_best,
     ):
