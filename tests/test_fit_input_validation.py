@@ -740,6 +740,7 @@ def test_fixed_scop_lambda_uses_falsey_feature_label(label) -> None:
                 n_knots=6,
                 constraint=Constraint.fit.increasing,
                 lambda_policy=LambdaPolicy.fixed(1.7),
+                shape_engine="scop",
             )
         },
     ).fit_reml(X, y)

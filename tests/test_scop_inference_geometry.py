@@ -308,7 +308,7 @@ def test_canonical_scop_fit_is_invariant_to_large_ordinary_column_translation():
             discrete=True,
             features={
                 "z": Numeric(),
-                "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+                "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit(frame, y)
@@ -322,7 +322,7 @@ def test_canonical_scop_fit_is_invariant_to_large_ordinary_column_translation():
         discrete=True,
         features={
             "z": Numeric(),
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     stable_reference.fit(stable_frame, y)
@@ -953,7 +953,9 @@ def test_gamma_log_reml_publishes_pya_wood_covariance_and_edf():
         family=Gamma(),
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
 
     model.fit_reml(frame, y, max_reml_iter=3, max_pirls_iter=100)
@@ -1059,7 +1061,7 @@ def test_fixed_scop_fit_lifecycle_builds_postfit_inference_once(monkeypatch, fit
     y = 0.2 + 1.7 * x + rng.normal(0.0, 0.18, size=n)
     frame = pd.DataFrame({"x": x})
     if fit_kind == "fit":
-        spline = PSpline(n_knots=7, constraint=Constraint.fit.increasing)
+        spline = PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
         model = SuperGLM(
             family="gaussian",
             selection_penalty=0.0,
@@ -1072,6 +1074,7 @@ def test_fixed_scop_fit_lifecycle_builds_postfit_inference_once(monkeypatch, fit
             n_knots=7,
             constraint=Constraint.fit.increasing,
             lambda_policy=LambdaPolicy(mode="fixed", value=1.7),
+            shape_engine="scop",
         )
         model = SuperGLM(
             family="gaussian",
@@ -1193,7 +1196,9 @@ def test_estimated_scop_reml_builds_postfit_inference_only_for_terminal_mode(mon
         family="gaussian",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
 
     model.fit_reml(pd.DataFrame({"x": x}), y, max_reml_iter=3, max_pirls_iter=100)

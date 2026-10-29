@@ -7,7 +7,8 @@ After the loop and its shared blocks (``_IRLSDirectFit._finish``, the step's
 (``_IRLSDirectStructuredStep.finalise``): the block-form moments and the
 profiled factor.  The QR, dense, QP and SCOP steps name the centred one here
 (``_finalise_centred``): the centred system of the export rows, its slope
-decomposition and ``RankInfo``.
+decomposition and ``RankInfo``, on a constrained fit's active face (the QP
+step's binding rows, ``_active_face_basis``).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS as _EPS_FLOAT
 from superglm.solvers.centered_system import (
     CenteredSystem,
     grouped_augmented_factor,
@@ -38,6 +40,7 @@ from superglm.solvers.rank import (
     decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
+    face_pseudo_inverse,
     weights_fingerprint,
 )
 
@@ -92,13 +95,66 @@ class _IRLSDirectFinalGeometry:
     XtW1: NDArray | None
 
 
+def _active_face_basis(held: NDArray) -> NDArray | None:
+    """An orthonormal basis ``Z`` of the coefficients the binding shape rows ``held`` leave free.
+
+    The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
+    bind at the fit (``_binding_rows``).  On it the constrained
+    fit is, locally, the fit with those rows held as equalities, so its
+    degrees of freedom and covariance are those of that fit (Meyer and
+    Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
+    binding row touches keep their unit vectors; the rest of the null space
+    is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
+    row binds.
+    """
+    if not held.shape[0]:
+        return None
+    width = held.shape[1]
+    touched, vt, rank = _binding_rank(held)
+    free = np.setdiff1d(np.arange(width), touched)
+    basis = np.zeros((width, free.size + touched.size - rank))
+    basis[free, np.arange(free.size)] = 1.0
+    basis[np.ix_(touched, np.arange(free.size, basis.shape[1]))] = vt[rank:].T
+    return basis
+
+
+def _binding_rank(held: NDArray) -> tuple[NDArray, NDArray, int]:
+    """The columns rows ``held`` touch, their unit rows' right singular vectors there, and their rank.
+
+    The rank is NumPy's ``matrix_rank`` cut on the unit rows: the face's
+    rank decision, which the editor shares.
+    """
+    touched = np.flatnonzero(np.any(held != 0.0, axis=0))
+    unit = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
+    _, singular, vt = np.linalg.svd(unit, full_matrices=True)
+    return touched, vt, int(np.count_nonzero(singular > max(unit.shape) * _EPS_FLOAT * singular[0]))
+
+
+def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
+    """``Z' M Z``, the matrix on the face ``Z``; ``M`` itself without a face."""
+    return matrix if face is None else face.T @ matrix @ face
+
+
+def _face_decomposition(
+    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray]
+) -> RankDecomposition:
+    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``."""
+    decomposition = decompose_gram_if_authoritative(_on_face(matrix, face))
+    return decompose_factor(factor() @ face) if decomposition is None else decomposition
+
+
 def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
     factor: Callable[[int], NDArray],
+    face: NDArray | None = None,
     inverse: NDArray | None = None,
 ) -> NDArray:
     """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
+
+    On an active face ``Z`` (``_active_face_basis``), ``decomposition``
+    factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
+    D)``, whose trace is the face fit's.
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -115,11 +171,11 @@ def _feature_edf(
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.  ``inverse`` is ``decomposition.pseudo_inverse()``
-    when the caller has formed it already.
+    trace near its limit, 0.  ``inverse`` is ``face_pseudo_inverse(decomposition,
+    face)`` when the caller has formed it already.
     """
     if inverse is None:
-        inverse = decomposition.pseudo_inverse()
+        inverse = face_pseudo_inverse(decomposition, face)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         unscaled = np.diag(inverse @ centered.data_gram).copy()
     if np.all(np.isfinite(unscaled)):
@@ -129,10 +185,11 @@ def _feature_edf(
     if largest == 0.0 or not math.isfinite(largest):
         return unscaled
     exponent = math.frexp(largest)[1]
-    scaled = decompose_gram_if_authoritative(np.ldexp(hessian, -exponent))
+    scaled = decompose_gram_if_authoritative(_on_face(np.ldexp(hessian, -exponent), face))
     if scaled is None:
-        scaled = decompose_factor(factor(exponent))
-    return np.diag(scaled.pseudo_inverse() @ np.ldexp(centered.data_gram, -exponent)).copy()
+        scaled = decompose_factor(factor(exponent) if face is None else factor(exponent) @ face)
+    scaled_gram = np.ldexp(centered.data_gram, -exponent)
+    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy()
 
 
 def _retained_rank_info(
@@ -147,6 +204,9 @@ def _retained_rank_info(
     step_data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None,
     _return_working_system: bool,
     certify_centered_factor: Callable[..., _CenteredFactorCertification],
+    face: NDArray | None,
+    face_rows: NDArray | None,
+    face_rank: RankDecomposition | None,
 ) -> RankInfo:
     """The data-subspace metadata only retained-fit inference reads.
 
@@ -165,21 +225,25 @@ def _retained_rank_info(
     specs; ``release_leaf_memo`` drops a memo only). A step's own data
     rank (``step_data_rank``, the QR step's on its dense design) is never
     deferred (``_finalise_centred``), so no step is kept.  It is never a
-    method of the fit object, which it would keep alive (#492).
+    method of the fit object, which it would keep alive (#492).  A
+    constrained fit's active face (``face``, its binding rows ``face_rows``
+    and the face's augmented decomposition ``face_rank``) is bound with them.
     """
     M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
         centered_final.mean_x, centered_final.mean_x
     )
-    coefficient_rank = decompose_gram_if_authoritative(M_beta)
-    if coefficient_rank is None:
-        certification = certify_centered_factor(centered_final, W)
-        raw_factor = np.vstack(
+
+    def raw_factor() -> NDArray:
+        return np.vstack(
             (
-                certification.factor,
+                certify_centered_factor(centered_final, W).factor,
                 np.sqrt(centered_final.sum_w) * centered_final.mean_x,
             )
         )
-        coefficient_rank = decompose_factor(raw_factor)
+
+    coefficient_rank = decompose_gram_if_authoritative(M_beta)
+    if coefficient_rank is None:
+        coefficient_rank = decompose_factor(raw_factor())
     if step_data_rank is not None:
         data_rank = step_data_rank(centered_final, W)
     else:
@@ -237,6 +301,10 @@ def _retained_rank_info(
         objective_loss=None,
         data_gram=centered_final.data_gram,
         data_gram_weights=weights_fingerprint(W),
+        face=face,
+        face_rows=face_rows,
+        face_augmented=face_rank,
+        face_coefficient=(None if face is None else _face_decomposition(M_beta, face, raw_factor)),
     )
 
 
@@ -300,6 +368,8 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
     The retained model's centred system (``_final_centred_system``), then its
     profiled slope decomposition, ``log det H``, the REML summary, the EDF
     and ``RankInfo``, computed here or deferred (``_retained_rank_info``).  A
+    constrained fit's statistics are its active face's: the face of the rows
+    the QP step reads as binding at the fit (``binding_rows``).  A
     step's own data rank (``data_rank``, the QR step's on its dense design) is
     computed here, never deferred, so no deferred callable keeps the step.
     """
@@ -349,16 +419,37 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             raise RuntimeError("fit statistics require generic REML geometry")
         augmented_rank = reml_slope_rank
         final_system = centered_final
+        # A constrained fit's statistics are its active face's.
+        qp = fit.qp
+        face_rows = (
+            None
+            if qp is None
+            else qp.binding_rows(
+                fit.beta, np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0))
+            )
+        )
+        face = None if face_rows is None else _active_face_basis(face_rows)
+        face_rank = (
+            None
+            if face is None
+            else _face_decomposition(
+                centered_final.hessian,
+                face,
+                lambda: fit.certify_centered_factor(final_system, W).factor,
+            )
+        )
         feature_edf = _feature_edf(
             centered_final,
-            augmented_rank,
+            augmented_rank if face_rank is None else face_rank,
             lambda exponent: grouped_augmented_factor(
                 dm,
                 np.ldexp(W, -exponent),
                 np.ldexp(final_system.penalty, -exponent),
                 center=final_system.mean_x,
             ),
-            inverse=XtWX_S_inv_beta,
+            face,
+            # off a face, the inverse the REML geometry formed
+            inverse=XtWX_S_inv_beta if face is None else None,
         )
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
         p_eff = 1.0 + float(np.sum(feature_edf))
@@ -376,6 +467,9 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             step_data_rank=step_data_rank,
             _return_working_system=fit._return_working_system,
             certify_centered_factor=fit.certify_centered_factor,
+            face=face,
+            face_rows=face_rows,
+            face_rank=face_rank,
         )
 
         if fit.compute_rank_info or (_defer_rank_info is not None and step_data_rank is not None):

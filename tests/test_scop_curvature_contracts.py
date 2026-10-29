@@ -115,6 +115,7 @@ def test_fit_time_convex_pspline_fits_a_point_mass_at_the_predictor_minimum(disc
                 n_knots=N_KNOTS,
                 knot_strategy="quantile_rows",
                 constraint=Constraint.fit.convex,
+                shape_engine="scop",
             )
         },
     ).fit(frame, y)

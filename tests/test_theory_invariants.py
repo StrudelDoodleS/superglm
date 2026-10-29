@@ -1388,8 +1388,8 @@ class TestBackendLinearAlgebraInvariants:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
-                "x2": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+                "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+                "x2": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
             },
         )
         model.fit_reml(X, y, max_reml_iter=6)
@@ -1423,7 +1423,7 @@ class TestBackendLinearAlgebraInvariants:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "s": PSpline(n_knots=9, constraint=Constraint.fit.increasing),
+                "s": PSpline(n_knots=9, constraint=Constraint.fit.increasing, shape_engine="scop"),
                 "z": Spline(kind="cr", k=10),
                 "area": Categorical(base="first"),
             },

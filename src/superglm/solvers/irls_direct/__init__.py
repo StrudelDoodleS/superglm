@@ -23,7 +23,9 @@ linearly constrained (QP) step in ``_qp``, the structured step (random-effect
 chains, ``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained
 (SCOP) step with its own line search in ``_scop``.  Each step names its
 finaliser: the structured step its own, the others the centred one in
-``_finalise``, beside what every finaliser returns.  ``_centred`` holds what
+``_finalise``, beside what every finaliser returns and the active face a
+constrained fit's statistics are taken on (the QP step's binding rows,
+``_qp._binding_rows``).  ``_centred`` holds what
 more than one step reads of the centred system, and ``_mean_space`` the
 binomial/log mean space's overlay: its Newton steps and its true-score
 certificate.  This module re-exports the names other modules import.  A name the
@@ -31,6 +33,7 @@ fit reads is patched where the fit reads it, in the submodule: patching it
 here would change nothing the fit sees.
 """
 
+from superglm.solvers.irls_direct._finalise import _active_face_basis, _binding_rank
 from superglm.solvers.irls_direct._fit import (
     _build_penalty_matrix,
     _safe_decompose_H,
@@ -40,6 +43,7 @@ from superglm.solvers.irls_direct._fit import (
 from superglm.solvers.irls_direct._mean_space import _SUBNORMAL_SPACING, _underflow_allowance
 from superglm.solvers.irls_direct._qp import (
     _QP_FEASIBILITY_TOL,
+    _binding_rows,
     _solve_constrained_qp_with_cold_retry,
 )
 from superglm.solvers.irls_direct._scop import (
@@ -61,6 +65,9 @@ __all__ = [
     "_SUBNORMAL_SPACING",
     "SCOPRunCentring",
     "StructuredSolverError",
+    "_active_face_basis",
+    "_binding_rank",
+    "_binding_rows",
     "_build_iterate_factor",
     "_build_penalty_matrix",
     "_centred_system_matvec",

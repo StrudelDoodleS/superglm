@@ -986,34 +986,38 @@ class BuildResult:
 
 
 def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order) -> None:
-    """Constrained splines with no kind beside a SCOP (``ps``) constrained term build as ``ps``.
+    """Constrained splines with no kind beside a SCOP constrained term build as ``ps`` on SCOP.
 
     A ``cr`` constraint goes to the QP, and one model cannot use both engines.
     Before 0.40 such a spline was ``ps``; it is again when every QP term named no kind.
     A wrapper such as an ordered categorical keeps its levels and takes the ``ps`` basis.
+    Only a P-spline declared with ``shape_engine="scop"``, or saved before that
+    option existed, is on SCOP (``shape_engine``).
     """
-    from superglm.features._spline_build import _uses_fit_time_scop_constraints as scop
     from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
+    from superglm.features._spline_build import shape_engine
     from superglm.features._spline_factory import kindless_as_ps, warn_kindless_ps
     from superglm.features.ordered_categorical import _CLAMP_WARNING_PREFIX
 
     inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
-    on_scop = [name for name, spec in inner.items() if scop(spec)]
+    on_scop = [name for name, spec in inner.items() if shape_engine(spec) == "scop"]
     if not on_scop:
         return
-    shaped_qp = {name: spec for name, spec in inner.items() if shaped(spec) and not scop(spec)}
+    shaped_qp = {
+        name: spec for name, spec in inner.items() if shaped(spec) and shape_engine(spec) != "scop"
+    }
     if not shaped_qp or any(
         getattr(spec, "_kindless_args", None) is None for spec in shaped_qp.values()
     ):
         return
     try:
-        on_qp = {name: kindless_as_ps(spec) for name, spec in shaped_qp.items()}
+        on_qp = {name: kindless_as_ps(spec, "scop") for name, spec in shaped_qp.items()}
     except ValueError:
         # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands.
         return
     for name, replacement in on_qp.items():
         reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
-        warn_kindless_ps(reason, f"Feature {name!r}: ")
+        warn_kindless_ps(reason, f"Feature {name!r}: ", "kind='ps', shape_engine='scop'")
         if inner[name] is specs[name]:
             specs[name] = cast(FeatureSpec, replacement)
             continue

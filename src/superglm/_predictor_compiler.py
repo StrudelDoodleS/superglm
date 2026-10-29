@@ -24,6 +24,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm._parallel import pooled_map
+from superglm.features._spline_build import shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
@@ -305,16 +306,8 @@ def compile_predictor_design(
         exposure_agg = None
 
         constraint_kind = getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
-        constraint_mode = getattr(
-            spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit")
-        )
-
-        _scop_discrete = (
-            use_discrete
-            and constraint_kind is not None
-            and constraint_mode == "fit"
-            and hasattr(spec, "_build_scop_reparameterization")
-        )
+        engine = shape_engine(spec)
+        _scop_discrete = use_discrete and engine == "scop"
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
@@ -333,11 +326,7 @@ def compile_predictor_design(
             constraints = None
             monotone_engine = None
             raw_to_solver_map = None
-            if (
-                constraint_kind is not None
-                and constraint_mode == "fit"
-                and hasattr(spec, "_build_monotone_constraints_raw")
-            ):
+            if engine == "qp":
                 cs_raw = spec._build_monotone_constraints_raw()
                 constraints = (
                     cs_raw.compose(projection_penalty) if projection_penalty is not None else cs_raw

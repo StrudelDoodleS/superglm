@@ -27,7 +27,7 @@ def _make_scop_model() -> SuperGLM:
         family="gaussian",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop")},
     )
 
 
@@ -401,6 +401,7 @@ def test_fixed_scop_terminal_trace_identifies_its_single_evaluated_mode(
                 n_knots=7,
                 constraint=Constraint.fit.increasing,
                 lambda_policy=LambdaPolicy(mode="fixed", value=1.5),
+                shape_engine="scop",
             )
         },
     )

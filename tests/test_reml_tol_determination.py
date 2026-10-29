@@ -1010,7 +1010,9 @@ class TestSCOPPlateauExit:
         y = rng.poisson(np.exp(eta)).astype(float)
         frame = pd.DataFrame({"x1": x1, "x2": x2})
         features = {
-            "x1": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing),
+            "x1": Spline(
+                kind="ps", n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
             "x2": CubicRegressionSpline(n_knots=8),
         }
         return frame, y, features
@@ -1189,7 +1191,7 @@ class TestPublicationREMLBudget:
         frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.uniform(0.0, 1.0, n)})
         mean = np.exp(0.2 + 0.8 * frame["x"] + 0.3 * np.sin(6.0 * frame["z"])).to_numpy()
         features = {
-            "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": Spline(kind="ps", k=8),
         }
         if estimate == "p":

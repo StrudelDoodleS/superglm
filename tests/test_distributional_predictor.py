@@ -786,6 +786,7 @@ def _ordered_geometry_feature(route: str, *, model_discrete: bool) -> OrderedCat
             kind="ps",
             constraint=Constraint.fit.increasing,
             **common,
+            shape_engine="scop",
         )
     else:  # pragma: no cover - test parameter owns the route set
         raise AssertionError(f"unknown ordered geometry route {route!r}")

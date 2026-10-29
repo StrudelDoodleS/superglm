@@ -271,7 +271,8 @@ from superglm import BSplineSmooth, Constraint, CubicRegressionSpline, PSpline
 
 BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)   # QP
 CubicRegressionSpline(n_knots=8, constraint=Constraint.fit.decreasing)  # QP
-PSpline(n_knots=10, constraint=Constraint.fit.increasing)        # SCOP
+PSpline(n_knots=10, constraint=Constraint.fit.increasing)        # QP
+PSpline(n_knots=10, constraint=Constraint.fit.increasing, shape_engine="scop")  # SCOP
 ```
 
 See [Monotone Splines](constrain-a-smooth.md) for the full decision guide.

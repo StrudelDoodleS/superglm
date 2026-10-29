@@ -377,7 +377,11 @@ class TestMaximumLikelihoodPhi:
             family=TweedieDistribution(p=1.5),
             selection_penalty=0.0,
             discrete=True,
-            features={"x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing)},
+            features={
+                "x": Spline(
+                    kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                )
+            },
         )
         profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(y.size), None, "fit_reml")
         assert profile(1.5) == math.inf

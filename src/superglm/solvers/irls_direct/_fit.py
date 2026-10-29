@@ -828,7 +828,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         search = self.trial_search.search if step.search is None else step.search
         for it in range(self.max_iter):
             self._working(it)
-            step.propose(self, it)
+            if step.propose(self, it):
+                break
             search(self, it)
             stop_rule.judge(self, it)
             recorder.iteration(self, it)
@@ -955,13 +956,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         _start_lowered = False
         if intercept_init is None and (
             mean_space_violation(family, link) is not None
-            or link_domain_violation(link) is not None
+            or link_domain_violation(link, family) is not None
         ):
             # The domain guards below keep every accepted state inside the mean
             # space and the link's domain only from a start inside them, and the
             # default intercept is chosen before the offset: move it until the
             # start is inside (``irls_state.interior_start_intercept``).  A
-            # caller's warm start is left as it is.
+            # caller's warm start is moved into the link's domain below.
             start_intercept = interior_start_intercept(
                 family,
                 link,
@@ -974,6 +975,35 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 intercept = start_intercept
                 self._deviance_init = None
                 _start_lowered = mean_space_violation(family, link) is not None
+        elif link_domain_violation(link, family) is not None:
+            # A warm start outside the link's domain is raised the same way, to
+            # the default start's level ``g(mean)``. Step halving keeps states
+            # inside only from a start inside (Marschner 2011), and a clipped row
+            # outside carries a Fisher weight no solve can use. A warm start that
+            # carries its centred state is read in it (design §3.8), not by
+            # cancelling X beta against the raw intercept.
+            _centred_init = self._centred_init
+            if _centred_init is not None and np.shape(_centred_init[1]) == beta.shape:
+                warm_alpha, warm_centre = _centred_init
+                start_eta = (
+                    float(warm_alpha)
+                    + centred_matvec(dm, beta, np.asarray(warm_centre, dtype=np.float64))
+                    + offset
+                )
+            else:
+                start_eta = dm.matvec(beta) + intercept + offset
+            if link_domain_violation(link, family)(start_eta, weights):
+                intercept = interior_start_intercept(
+                    family,
+                    link,
+                    start_eta,
+                    weights,
+                    intercept,
+                    level=coefficient_initial_intercept(
+                        distribution=family, link=link, y=self.y, sample_weight=weights
+                    ),
+                )
+                self._deviance_init = None
 
         # Dense paths retain the existing p x p penalty oracle. Structured paths
         # add each penalty directly to A or d, unless a caller already supplied a
@@ -1203,7 +1233,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # the constraint system, fixed for the whole fit, which the feasibility
         # contract reads whatever the step (``qp``; ``None`` without constraints).
         has_constraints = any(g.constraints is not None for g in groups)
-        qp = _IRLSDirectQPStep(groups, self.p) if has_constraints else None
+        qp = _IRLSDirectQPStep(groups, self.p, family, link) if has_constraints else None
         self.qp = qp
         if qp is not None:
             self.step = qp
@@ -1214,7 +1244,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         if (
             _state_center is None
             and not self._use_structured
-            and not has_constraints
             and not _has_scop
             and hasattr(self.dm, "group_matrices")
         ):

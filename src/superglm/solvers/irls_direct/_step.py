@@ -81,14 +81,17 @@ class _IRLSDirectStep(Protocol):
         Callable[[_IRLSDirectFit, PIRLSResult, _IRLSDirectFinalGeometry], dict | None] | None
     ) = None
 
-    def propose(self, fit: _IRLSDirectFit, it: int) -> None:
+    def propose(self, fit: _IRLSDirectFit, it: int) -> bool | None:
         """Iteration ``it``'s full step from the fit's working rows (``W``, ``z``, ``newton_score``).
 
         It writes the proposal to the fit: ``beta``, ``intercept`` and
         ``proposal_centred_intercept``; the solve's ``_cond_est``, ``_used_svd``
         and ``rank_truncated``; the system it solved (``_last_working_centered``,
         or the step's own) and, under ``mode_score``, ``_score_centre``; and its
-        time to the recorder's phase timers.
+        time to the recorder's phase timers.  ``True`` ends the fit at its
+        committed state before the iteration's search: the step has written the
+        retained state, ``dev`` and ``step_rejected`` itself (the QP step, when
+        its working problem is unbounded at a link's zero edge).
         """
 
     def certificate_inputs(self) -> tuple:

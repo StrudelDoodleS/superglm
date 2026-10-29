@@ -279,7 +279,9 @@ def _monotone_model():
         discrete=False,
         features={
             "x1": Spline(kind="ps", k=12),
-            "x2": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+            "x2": Spline(
+                kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+            ),
         },
     )
 
@@ -341,7 +343,7 @@ def _fit_tweedie_scop(n=4000, profile=None):
         discrete=False,
         features={
             "x1": Spline(kind="ps", k=10),
-            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     y_fit, weights, offset = model_build_design_matrix(model, frame, y, exposure, None)
@@ -600,7 +602,7 @@ def test_cross_block_routes_form_the_centred_cross_product():
         features={
             "a": Spline(kind="ps", k=8),
             "b": Spline(kind="ps", k=6),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
         interactions=[("a", "b")],
@@ -731,7 +733,10 @@ def test_a_translated_ordinary_column_leaves_a_damped_step_unchanged(monkeypatch
             family="gaussian",
             selection_penalty=0.0,
             spline_penalty=0.0,
-            features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+            features={
+                "x": Numeric(),
+                "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+            },
         )
         model.fit(pd.DataFrame({"x": x + shift, "s": s}), y, sample_weight=weights)
         fits[shift] = (model.result, list(steps))
@@ -825,7 +830,7 @@ def test_a_categorical_cross_block_never_forms_its_identity(monkeypatch):
         discrete=True,
         features={
             "a": Spline(kind="ps", k=8),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
     )
@@ -897,7 +902,7 @@ def test_packed_codes_past_their_byte_budget_are_refused_before_any_support(monk
         discrete=True,
         features={
             "a": Spline(kind="ps", k=8),
-            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+            "m": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "c": Categorical(base="most_exposed"),
         },
     )
@@ -967,7 +972,7 @@ def _aliased_slope_fit(with_x):
     x = rng.uniform(0, 1, n)
     y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n)
     weights = rng.uniform(0.3, 3, n)
-    features = {"s": PSpline(n_knots=4, constraint=Constraint.fit.convex)}
+    features = {"s": PSpline(n_knots=4, constraint=Constraint.fit.convex, shape_engine="scop")}
     if with_x:
         features = {"x": Numeric(), **features}
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features=features)
@@ -1031,7 +1036,7 @@ def test_nearly_collinear_ordinary_columns_keep_every_scop_direction(trend, spli
         features={
             "a": Numeric(),
             "b": Numeric(),
-            "s": PSpline(n_knots=4, constraint=Constraint.fit.increasing),
+            "s": PSpline(n_knots=4, constraint=Constraint.fit.increasing, shape_engine="scop"),
         },
     )
     model.fit(frame, y)
@@ -1093,8 +1098,8 @@ def test_a_group_beside_a_nearly_collinear_pair_holds_no_other_groups_direction(
         features={
             "a": Numeric(),
             "b": Numeric(),
-            "s": PSpline(n_knots=20, constraint=increasing),
-            "t": PSpline(n_knots=40, constraint=increasing),
+            "s": PSpline(n_knots=20, constraint=increasing, shape_engine="scop"),
+            "t": PSpline(n_knots=40, constraint=increasing, shape_engine="scop"),
         },
     )
     model.fit(pd.DataFrame({"a": a, "b": a + 5e-8 * v, "s": s, "t": t}), y)
@@ -1139,7 +1144,7 @@ def test_an_alias_beside_an_ill_conditioned_ordinary_block_is_null_on_the_rows(m
     y = 0.2 + 2 * x + 0.6 * x * x + 0.02 * rng.normal(size=n) + 0.3 * v
     weights = rng.uniform(0.3, 3, n)
     frame = pd.DataFrame({"x": x, "s": x, "a": a, "b": a + 1e-7 * v})
-    convex = PSpline(n_knots=4, constraint=Constraint.fit.convex)
+    convex = PSpline(n_knots=4, constraint=Constraint.fit.convex, shape_engine="scop")
 
     def fit(features):
         model = SuperGLM(
@@ -1226,8 +1231,8 @@ def test_a_run_finds_each_exact_support_once(monkeypatch):
         selection_penalty=0.0,
         discrete=False,
         features={
-            "a": Spline(kind="ps", k=6, constraint=increasing),
-            "b": Spline(kind="ps", k=6, constraint=increasing),
+            "a": Spline(kind="ps", k=6, constraint=increasing, shape_engine="scop"),
+            "b": Spline(kind="ps", k=6, constraint=increasing, shape_engine="scop"),
         },
     )
     model.fit_reml(frame, y.to_numpy())
@@ -1256,7 +1261,10 @@ def test_a_fit_that_drives_coordinates_to_their_boundary_publishes_finite_infere
         selection_penalty=0.0,
         spline_penalty=0.0,
         discrete=False,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
@@ -1304,7 +1312,10 @@ def test_the_schur_rows_are_formed_a_leaf_at_a_time(monkeypatch):
         selection_penalty=0.0,
         spline_penalty=0.1,
         discrete=True,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+        },
     )
     model.fit(pd.DataFrame({"x": x, "s": x}), y)
 
@@ -1334,6 +1345,379 @@ def test_a_leaf_reads_a_dense_block_in_place_and_matches_its_row_subset():
         assert np.array_equal(got.toarray(), want.toarray())
     for got, want in zip(leaf.group_matrices[:2], copy.group_matrices[:2], strict=True):
         assert got.M.flags.c_contiguous and want.M.flags.c_contiguous
+
+
+def _leaf_block_design(rng, n):
+    """A design with every kind of block a leaf multiplies, and its rows' magnitudes as products read them.
+
+    A one-hot block, a support table, a CSR basis (both factored, ``B R^-1``,
+    whose products read ``|B| |R^-1|``), a dense block, a subclass, whose
+    products are its own, and a plain CSR block as wide as the products'
+    six columns, so that a transposed product still fits its slot.
+    """
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        SparseGroupMatrix,
+        SparseSSPGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    class OwnProducts(CategoricalGroupMatrix):
+        __slots__ = ()
+
+        def row_subset(self, idx):
+            return OwnProducts(self.codes[idx], self.n_levels)
+
+    bins, starts = rng.integers(0, 12, n), rng.integers(0, 5, n)
+    support, support_inv = rng.uniform(0, 1, (12, 6)), rng.normal(size=(6, 5))
+    entries = (np.repeat(np.arange(n), 4), (starts[:, None] + np.arange(4)).ravel())
+    basis = sp.csr_matrix((rng.uniform(0, 1, 4 * n), entries), shape=(n, 8))
+    basis_inv = rng.normal(size=(8, 4))
+    entries = (np.repeat(np.arange(n), 3), (rng.integers(0, 4, n)[:, None] + np.arange(3)).ravel())
+    plain = sp.csr_matrix((rng.uniform(0, 1, 3 * n), entries), shape=(n, 6))
+    blocks = [
+        CategoricalGroupMatrix(rng.integers(-1, 5, n), 5),
+        SupportCompressedSSPGroupMatrix(support, support_inv, bins),
+        SparseSSPGroupMatrix(basis, basis_inv),
+        DenseGroupMatrix(rng.normal(size=(n, 2)) + 3.0),
+        OwnProducts(rng.integers(0, 4, n), 3),
+        SparseGroupMatrix(plain),
+    ]
+    magnitude = [
+        blocks[0].toarray(),
+        (support @ np.abs(support_inv))[bins],
+        np.asarray(basis @ np.abs(basis_inv)),
+        np.abs(blocks[3].M),
+        blocks[4].toarray(),
+        plain.toarray(),
+    ]
+    dense = np.hstack([block.toarray() for block in blocks])
+    return DesignMatrix(blocks, n=n, p=dense.shape[1]), dense, np.hstack(magnitude)
+
+
+def test_the_leaf_rows_and_their_factor_are_within_their_rounding_on_weights_spread_over_1e15():
+    """The Schur rows' leaf products and their TSQR factor, against bounds from the dimensions and u.
+
+    The weights span 1e15, as a cold SCOP start's do beside a rare
+    short-exposure claim. Each leaf row ``s - (x - c)' D`` and each entry of
+    ``X~' R`` is within ``gamma_k`` of its terms' magnitudes (Higham 2002,
+    sec. 3.5), twice that against a dense product that rounds too. The
+    factor ``F`` of the weighted rows is a Householder TSQR's, ``A + dA = Q
+    F`` with ``||dA||_F <= gamma ||A||_F`` (Thm 19.4, at ``_schur_rows``'s
+    count), read at the orthogonal ``Q`` nearest ``A F'`` (the Procrustes
+    problem, Golub & Van Loan 2013, sec. 6.4.1).
+    """
+    from superglm._roundoff import gamma_up
+    from superglm.solvers.rank import streamed_weighted_factor
+    from superglm.solvers.scop_newton import _leaf_design, _leaf_product, _leaf_transposed
+
+    rng = np.random.default_rng(11)
+    n, q, leaf = 4000, 6, 500
+    design, dense, magnitude = _leaf_block_design(rng, n)
+    p = design.p
+    change = rng.normal(size=(p, q)) * 10.0 ** rng.uniform(-3.0, 3.0, (p, 1))
+    centre, scop = rng.normal(size=p), rng.normal(size=(n, q))
+    weights = 10.0 ** rng.uniform(0.0, 15.0, n)
+    weights[:2] = 1.0, 1e15
+    # the transposed product centres the dense block's columns, 14 and 15, alone
+    centred = dense.copy()
+    centred[:, 14:16] -= centre[14:16]
+    exact = scop - (dense - centre) @ change
+    size = np.abs(scop) + (magnitude + np.abs(centre)) @ np.abs(change)
+    gamma = gamma_up(4 * p + leaf)
+
+    leaves = []
+    for start in range(0, n, leaf):
+        rows = slice(start, start + leaf)
+        part = _leaf_design(design, start, rows.stop)
+        formed = scop[rows] - _leaf_product(part, change, centre)
+        assert np.all(np.abs(formed - exact[rows]) <= 2 * gamma * size[rows])
+        weighted = formed * weights[rows, None]
+        moment = _leaf_transposed(part, weighted, centre)
+        reach = (magnitude[rows] + np.abs(centre)).T @ np.abs(weighted)
+        assert np.all(np.abs(moment - centred[rows].T @ weighted) <= 2 * gamma * reach)
+        leaves.append((start, rows.stop, formed))
+
+    factor = streamed_weighted_factor(iter(leaves), weights)
+    root = np.sqrt(weights)[:, None]
+    target = root * exact
+    left, _, right = np.linalg.svd(target @ factor.T, full_matrices=False)
+    residual = np.linalg.norm(target - (left @ right) @ factor)
+    norm = np.linalg.norm(target)
+    formation = np.linalg.norm(root * (2 * gamma * size))
+    count = n * q + 2 * (p + 3)
+    assert residual <= formation + gamma_up(count) * (norm + formation) + gamma_up(4 * q) * norm
+
+
+def _support_leaf(length):
+    """One support-compressed SSP block on a 4,000-row leaf, sixteen columns of change and of rows."""
+    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+
+    rng = np.random.default_rng(5)
+    n, q, k = 4_000, 16, 6
+    support, support_inv = rng.uniform(0, 1, (length, k)), rng.normal(size=(k, k - 1))
+    bins = rng.integers(0, length, n)
+    part = DesignMatrix([SupportCompressedSSPGroupMatrix(support, support_inv, bins)], n=n, p=k - 1)
+    change, centre = rng.normal(size=(k - 1, q)), rng.normal(size=k - 1)
+    return part, change, centre, rng.normal(size=(n, q))
+
+
+def _own_traced_peak(call, *args):
+    """``call(*args)``'s traced peak above its result, the least of three calls, and the result.
+
+    tracemalloc's peak is the process's: another thread's allocations (an
+    xdist worker's receiver thread taking back tests to steal) add to it and
+    never subtract, so the least of three calls is the call's own.
+    """
+    import tracemalloc
+
+    peaks = []
+    for _ in range(3):
+        tracemalloc.start()
+        try:
+            result = call(*args)
+            peaks.append(tracemalloc.get_traced_memory()[1] - result.nbytes)
+        finally:
+            tracemalloc.stop()
+    return min(peaks), result
+
+
+@pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
+def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
+    """A support's products hold no more than one column's products did, however long it is (tracemalloc).
+
+    A column at a time, ``matvec`` held a support-length vector beside two
+    leaf-length ones, and ``rmatvec`` its sums beside a leaf-length copy of
+    the column. The 1,000-row support's table is formed and summed four
+    columns a pass (``_chunks``); the 40,000-row one, longer than the leaf,
+    forms no table and takes its own products. Peaks are traced allocations
+    above the result; the call's Python objects take under 8 KiB.
+    Mutation check: the whole table at once held ``2 q`` support-length
+    columns, and a one-column table of the long support held two.
+    """
+    from superglm.solvers.scop_newton import _leaf_product, _leaf_transposed
+
+    part, change, centre, rows = _support_leaf(length)
+    n = part.n
+
+    _leaf_product(part, change, centre), _leaf_transposed(part, rows, centre)  # compiled
+    product_peak, _ = _own_traced_peak(_leaf_product, part, change, centre)
+    moment_peak, moment = _own_traced_peak(_leaf_transposed, part, rows, centre)
+
+    assert product_peak <= 8 * max(length + n, 2 * n) + 8 * 1024
+    assert moment_peak <= 8 * (length + n) + moment.nbytes + 8 * 1024
+
+
+def _wide_block(kind, rng, n):
+    """A block thousands of coefficients wide, of a kind whose transposed product a leaf takes in its own way."""
+    import scipy.sparse as sp
+
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        FactorSmoothGroupMatrix,
+        SparseGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+
+    if kind == "factor-smooth":  # Sol's: 600 levels of a 5-column basis, its own rmatvec
+        return FactorSmoothGroupMatrix(
+            sp.csr_matrix(rng.uniform(size=(n, 5))),
+            np.arange(n) % 600,
+            600,
+            natural_map=np.eye(5),
+            levels=tuple(range(600)),
+            repeated_penalty_components=(("wiggle", np.eye(5)),),
+        )
+    if kind == "csr":
+        return SparseGroupMatrix(sp.random(n, 2_000, density=0.002, random_state=rng, format="csr"))
+    if kind == "ssp":
+        basis = sp.random(n, 601, density=0.005, random_state=rng, format="csr")
+        return SparseSSPGroupMatrix(basis, rng.normal(size=(601, 600)))
+    # a one-hot table of 3,001 rows, summed a column a pass on a 4,000-row leaf
+    return CategoricalGroupMatrix(rng.integers(0, 3_001, n), 3_000)
+
+
+@pytest.mark.parametrize("kind", ["factor-smooth", "csr", "ssp", "one-hot"])
+def test_a_wide_block_s_transposed_leaf_product_holds_no_more_than_its_column_products_did(kind):
+    """A wide block's ``X' rows`` holds one column's products beside the leaf's result (tracemalloc).
+
+    A column at a time, ``rmatvec`` held a leaf-length copy of the column,
+    or none, beside at most two of the block's widths (a factor smooth's
+    raw sums and their natural coordinates). Every column is written to the
+    result as it is formed, and a CSR block's multivector product is taken
+    only when its sums fit in a leaf column, so the peak above the result
+    is ``n + 2 width`` doubles; the call's Python objects take under 8 KiB.
+    Mutation check: stacking the columns from a list, a CSR product's
+    sums for all 64 columns, or the table's moments formed apart from the
+    result each hold ``64 width`` doubles or more.
+    """
+    from superglm.solvers.scop_newton import _leaf_transposed
+
+    rng = np.random.default_rng(12)
+    n, q = 4_000, 64
+    matrix = _wide_block(kind, rng, n)
+    width = matrix.shape[1]
+    part = DesignMatrix([matrix], n=n, p=width)
+    rows, centre = rng.normal(size=(n, q)), np.zeros(width)
+
+    _leaf_transposed(part, rows, centre)  # compiled
+    peak, _ = _own_traced_peak(_leaf_transposed, part, rows, centre)
+
+    assert width >= 600 and 64 * width > n
+    assert peak <= 8 * (n + 2 * width) + 8 * 1024
+
+
+@pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
+def test_a_support_s_leaf_products_are_within_their_rounding_in_chunks_or_a_column_at_a_time(
+    monkeypatch, length
+):
+    """A support's leaf products, formed in chunks or a column at a time, against bounds from k and u.
+
+    The 1,000-row support's table is formed and summed in four chunks of
+    four columns (counted); the 40,000-row one, longer than the leaf, forms
+    no table and takes its own ``matvec`` and ``rmatvec`` for each of the
+    sixteen columns. Each entry is within ``gamma_k`` of its terms'
+    magnitudes (Higham 2002, sec. 3.5), twice that against a dense product
+    that rounds too. Mutation check: a chunk's column offset dropped, in
+    either product, and a long support given a table whose columns are
+    never formed, each break a bound.
+    """
+    from superglm._roundoff import gamma_up
+    from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+    from superglm.solvers import scop_newton
+
+    part, change, centre, rows = _support_leaf(length)
+    matrix = part.group_matrices[0]
+    support, support_inv, bins = matrix.B_unique, matrix.R_inv, matrix.bin_idx
+    n, q, k = part.n, change.shape[1], support.shape[1]
+
+    calls = {"gathered": 0, "summed": 0, "matvec": 0, "rmatvec": 0}
+
+    def counted(name, function):
+        def wrapper(*args, **kwargs):
+            calls[name] += 1
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        scop_newton, "_add_gathered", counted("gathered", scop_newton._add_gathered)
+    )
+    monkeypatch.setattr(scop_newton, "_bin_sums", counted("summed", scop_newton._bin_sums))
+    for method in ("matvec", "rmatvec"):
+        kind = SupportCompressedSSPGroupMatrix
+        monkeypatch.setattr(kind, method, counted(method, getattr(kind, method)))
+    formed = scop_newton._leaf_product(part, change, centre)
+    moment = scop_newton._leaf_transposed(part, rows, centre)
+
+    chunks = n // length if length <= n else 0
+    passes = -(-q // chunks) if chunks else 0
+    assert calls["gathered"] == calls["summed"] == passes
+    assert calls["matvec"] == calls["rmatvec"] == (0 if chunks else q)
+    assert length > n or passes > 1
+    # each entry within gamma_k of its terms' magnitudes (Higham 2002, sec. 3.5),
+    # twice that against a dense product that rounds too
+    basis = support @ support_inv
+    reach = (support @ np.abs(support_inv) + np.abs(centre)) @ np.abs(change)
+    error = np.abs(formed - (basis[bins] - centre) @ change)
+    assert np.all(error <= 2 * gamma_up(2 * k) * reach[bins])
+    sums = np.zeros((length, q))
+    np.add.at(sums, bins, np.abs(rows))
+    reach = np.abs(support_inv).T @ (support.T @ sums)
+    error = np.abs(moment - basis[bins].T @ rows)
+    assert np.all(error <= 2 * gamma_up(n + length + k) * reach)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_every_row_route_leaf_takes_its_tables_and_csr_moments_in_one_pass(monkeypatch, discrete):
+    """Every joint step takes the rows, and a leaf multiplies each table, and a CSR block's transposed product, for all its columns at once (counts).
+
+    Five top levels of an increasing ``x`` hold one claim each at exposure
+    0.002, where the intercept-only fit expects 2e-4, so the cold start's
+    weights reach ``e^35`` there. The Gram's decision is forced to the rows
+    on every joint step (``_GREY_FLOOR``), so the counts do not depend on
+    the trajectory reaching a grey step. A leaf multiplies each ordinary
+    block's table once for all its columns, in one pass over the rows
+    (``_add_gathered``, ``_bin_sums``), and a CSR basis's transposed product
+    in one multivector product: never a table's ``matvec`` or ``rmatvec``,
+    or a CSR ``rmatvec``, a column at a time. Mutation check: master's leaf
+    products (7dcc85c1) made such calls on every row-route call.
+    """
+    from superglm import Categorical, PSpline
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+    from superglm.solvers import scop_newton
+
+    rng = np.random.default_rng(1)
+    n = 3000
+    x = np.minimum(rng.geometric(0.15, n) - 1, 60).astype(float)
+    z, exposure = rng.uniform(0.0, 1.0, n), rng.uniform(0.05, 1.0, n)
+    y = rng.poisson(exposure * 0.1 * np.exp(0.02 * x + 0.3 * np.sin(6.0 * z))).astype(float)
+    x[:5], exposure[:5], y[:5] = 60.0 + np.arange(5.0), 0.002, 1.0
+    frame = pd.DataFrame({"x": x, "z": z, "g": rng.integers(0, 4, n).astype(str)})
+
+    calls = {"rows": 0, "resolved": 0, "columnwise": 0, "gathered": 0, "summed": 0}
+    inside = [False]
+
+    def counted(name, function):
+        def wrapper(*args, **kwargs):
+            calls[name] += inside[0]
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    rows_of = SCOPJointNewton._schur_rows
+
+    def rows(self, *args):
+        calls["rows"] += 1
+        inside[0] = True
+        try:
+            return rows_of(self, *args)
+        finally:
+            inside[0] = False
+
+    monkeypatch.setattr(SCOPJointNewton, "_schur_rows", rows)
+    monkeypatch.setattr(scop_newton, "_GREY_FLOOR", np.inf)
+    resolved_of = scop_newton._resolved_root
+
+    def resolved(*args, **kwargs):
+        calls["resolved"] += 1
+        return resolved_of(*args, **kwargs)
+
+    monkeypatch.setattr(scop_newton, "_resolved_root", resolved)
+    for kind, method in (
+        (CategoricalGroupMatrix, "matvec"),
+        (CategoricalGroupMatrix, "rmatvec"),
+        (DiscretizedSSPGroupMatrix, "matvec"),
+        (DiscretizedSSPGroupMatrix, "rmatvec"),
+        (SparseSSPGroupMatrix, "rmatvec"),
+    ):
+        monkeypatch.setattr(kind, method, counted("columnwise", getattr(kind, method)))
+    monkeypatch.setattr(
+        scop_newton, "_add_gathered", counted("gathered", scop_newton._add_gathered)
+    )
+    monkeypatch.setattr(scop_newton, "_bin_sums", counted("summed", scop_newton._bin_sums))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=discrete,
+        features={
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+            "z": PSpline(n_knots=6),
+            "g": Categorical(),
+        },
+    )
+    model.fit_reml(frame, y, offset=np.log(exposure))
+
+    assert model.result.converged
+    assert calls["rows"] == calls["resolved"] > 0
+    assert calls["columnwise"] == 0
+    assert calls["gathered"] >= 2 * calls["rows"] and calls["summed"] >= calls["rows"]
 
 
 def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
@@ -1371,7 +1755,7 @@ def test_a_run_finds_a_lone_exact_support_once(monkeypatch):
         selection_penalty=0.0,
         discrete=False,
         features={
-            "a": Spline(kind="ps", k=6, constraint=Constraint.fit.increasing),
+            "a": Spline(kind="ps", k=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": Numeric(),
         },
     )
@@ -1405,7 +1789,7 @@ def test_an_ordinary_column_within_sqrt_eps_of_a_scop_slope_is_held_not_chased()
         model.fit(frame, y)
         return model
 
-    convex = PSpline(n_knots=8, constraint=Constraint.fit.convex)
+    convex = PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop")
     near, alone = fit({"x": Numeric(), "s": convex}), fit({"s": convex})
 
     assert near.result.converged
@@ -1427,7 +1811,10 @@ def _ordinary_inside_the_spline_fit():
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.0,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+        },
     )
     frame = pd.DataFrame({"x": x, "s": x})
     model.fit(frame, y, sample_weight=weights)
@@ -1543,7 +1930,10 @@ def test_a_latent_step_past_the_maximum_step_is_searched_from_within_it(monkeypa
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.0,
-        features={"x": Numeric(), "s": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
+        features={
+            "x": Numeric(),
+            "s": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop"),
+        },
     )
     frame = pd.DataFrame({"x": x, "s": x})
     model.fit(frame, y, sample_weight=weights)
@@ -1730,7 +2120,7 @@ def _sparse_counts_model(n, seed, theta):
     model = SuperGLM(
         family=NegativeBinomial(theta=theta),
         features={
-            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x1": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "x2": Spline(kind="cr", k=8),
         },
     )

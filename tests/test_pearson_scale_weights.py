@@ -130,6 +130,7 @@ def test_scop_pearson_phi_frequency_weights_match_row_replication() -> None:
                     n_knots=6,
                     knot_strategy="uniform",
                     constraint=Constraint.fit.increasing,
+                    shape_engine="scop",
                 )
             },
             weight_semantics="frequency",
@@ -264,6 +265,7 @@ def test_weighted_tweedie_scop_reml_uses_observation_count_for_terminal_phi(
                 n_knots=6,
                 knot_strategy="uniform",
                 constraint=Constraint.fit.increasing,
+                shape_engine="scop",
             )
         },
     )

@@ -21,6 +21,7 @@ from superglm.solvers.constrained_qp import (
     _project_feasible,
     _raises_working_rank,
     _solve_saddle_least_squares,
+    _stationarity_certificate,
     _zero_block_faces,
     solve_constrained_qp,
 )
@@ -2527,6 +2528,7 @@ class TestFaceMinimumAboveTheStepGate:
 
 
 _ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
+_SCALED_BLOCK_QPS = Path(__file__).parent / "fixtures" / "shape_block_scaled_terminal_qp.json"
 
 
 class TestDegenerateVertexRetry:
@@ -2715,3 +2717,94 @@ class TestDegenerateVertexRetry:
         result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("face", ["ray", "vertex"])
+    def test_a_shape_term_far_below_the_rest_is_certified_by_the_retry(self, face):
+        """A shape term at a smoothing parameter near 1e7 has a terminal QP the retry certifies.
+
+        In its penalty-scaled coordinates the term's columns of ``A`` are
+        about 1e-4 against 0.4 for its unpenalized direction (provenance in
+        the fixture). The stationarity test is per coefficient, against that
+        coefficient's own actions, and a least-squares multiplier fit leaves a
+        residual of rounding size against the largest. Mutation: with the
+        retry's multipliers fitted unweighted, as before, both exhaust 200
+        iterations uncertified, and the fits they came from raised
+        ``ObservedModeNotConvergedError``.
+        """
+        doc = json.loads(_SCALED_BLOCK_QPS.read_text())[face]
+        H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
+        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        assert result.converged
+        self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("stiff_force", [-1e-12, -1e-16])
+    def test_the_retry_fits_multipliers_in_each_coefficients_own_units(self, stiff_force):
+        """At the dual oracle's optimum the weighted certificate passes; the unweighted fails.
+
+        Row ``u + s >= 0`` is active with multiplier 1e-9 on a coefficient
+        ``s`` whose actions are near 1e-9, beside ``u`` near 1: the unweighted
+        fit leaves ``s`` a residual of ``u``'s rounding, 1e7 times its own
+        allowance. Row ``t >= 0`` holds an independent coefficient with
+        ``H = 1`` and force ``stiff_force``, whose weight is near
+        ``1 / |stiff_force|``. At 1e-16 that weight puts lstsq's relative
+        cutoff above the genuine singular value of row ``w >= 0``. Mutations:
+        fitted unweighted, both fail; with the rank decided on the weighted
+        rows (as ec377777 did), 1e-16 fails.
+        """
+        H = np.diag([1.0, 1.0, 1e-9, 1.0, 1.0])
+        H[0, 1] = H[1, 0] = 0.5
+        A = np.zeros((3, 5))
+        A[0, 1] = A[0, 2] = A[1, 3] = A[2, 4] = 1.0
+        g = H @ np.array([0.7, 0.3, -0.3, 0.0, 0.0]) - A.T @ np.array([1e-9, 0.5, 0.0])
+        g[4] = stiff_force
+        x, _ = self._dual_oracle(H, g, A)
+        unweighted = _stationarity_certificate(H, g, x, A, self._TOL)
+        weighted = _stationarity_certificate(H, g, x, A, self._TOL, coordinate_weighted=True)
+        assert unweighted[:2] == (False, None), "the fixture no longer separates the scales"
+        assert weighted[:2] == (True, None)
+
+    def test_a_stiff_independent_row_leaves_the_degenerate_vertex_certified(self):
+        """The degenerate vertex plus a coefficient with ``H = 1``, force -1e-12 and ``x >= 0``.
+
+        Its row's weight, near 1e12, would make lstsq discard a genuine
+        singular value of the vertex's rows if the rank were decided on the
+        weighted system. Mutation: decided there (as ec377777 did), the retry
+        exhausts 200 iterations; decided unweighted it certifies in 8, as the
+        unweighted fit does.
+        """
+        H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=113)
+        p, m = H0.shape[0], A0.shape[0]
+        H, A = np.zeros((p + 1, p + 1)), np.zeros((m + 1, p + 1))
+        H[:p, :p], H[p, p] = H0, 1.0
+        A[:m, :p], A[m, p] = A0, 1.0
+        g, b = np.append(g0, -1e-12), np.append(b0, 0.0)
+        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        assert result.converged
+        self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("touched", [False, True], ids=["free", "row"])
+    @pytest.mark.parametrize("force", [1e-308, -1e-308, 1e-310, 1e-200, 2.0**-1074])
+    def test_the_weighted_certificate_stays_finite_across_the_exponent_range(self, force, touched):
+        """The safeguarded solve beside a coefficient whose only action is ``force``.
+
+        Seed 1's vertex plus a coefficient with ``H = 1``, force ``g`` and
+        either no row or ``x >= 0``. Its own action, divided into a weight,
+        overflows below about 1e-308; zero constraint entries times that
+        weight made NaN, and the SVD failed. Mutation: without the
+        ``sqrt(TINY)`` floor (17b69145), +-1e-308 and 1e-310 raise
+        ``LinAlgError``; the ordinary solve certifies all ten in 9 to 11
+        iterations. A force below the smallest normal double may be flushed
+        to zero by the BLAS, so there the solve must certify or refuse, never
+        raise or certify a point the dual oracle rejects.
+        """
+        H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=1)
+        p, m = H0.shape[0], A0.shape[0]
+        H, A = np.zeros((p + 1, p + 1)), np.zeros((m + int(touched), p + 1))
+        H[:p, :p], H[p, p], A[:m, :p] = H0, 1.0, A0
+        if touched:
+            A[m, p] = 1.0
+        g, b = np.append(g0, force), np.zeros(A.shape[0])
+        result = solve_constrained_qp(H, g, A, b, _degeneracy_safeguards=True)
+        assert result.converged or abs(force) < np.finfo(float).tiny
+        if result.converged:
+            self._assert_agrees_with_dual_oracle(H, g, A, b, result)

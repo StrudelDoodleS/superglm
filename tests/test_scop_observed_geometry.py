@@ -404,7 +404,9 @@ def test_noncanonical_log_scop_fit_installs_observed_geometry(family_name):
         family=family,
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     y_fit, sample_weight, offset = model_build_design_matrix(
         model,
@@ -669,7 +671,9 @@ def test_gamma_log_model_geometry_matches_dense_latent_oracle():
         family=Gamma(),
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
     y_fit, sample_weight, offset = model_build_design_matrix(
         model,
@@ -771,7 +775,9 @@ def test_gamma_log_scop_reml_installs_observed_latent_geometry():
         family=Gamma(),
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        features={
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
     )
 
     model.fit_reml(frame, y, max_reml_iter=3, max_pirls_iter=100)

@@ -30,7 +30,7 @@ from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS as _EPS
-from superglm._roundoff import UNIT_ROUNDOFF, gamma
+from superglm._roundoff import TINY, UNIT_ROUNDOFF, gamma
 from superglm.solvers.rank import (
     RankDecomposition,
     _symmetric_part,
@@ -47,6 +47,9 @@ from superglm.solvers.rank import (
 # structural floor below carries its own literal rather than deriving from
 # this one.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
+
+# The smallest action the coordinate-weighted certificate divides by.
+_SQRT_TINY = TINY**0.5
 
 # Dimension term for the spectral floor.  The retained-condition term above
 # models error amplification, but ``eigh``'s own backward error grows with the
@@ -410,7 +413,13 @@ def _scaled_constraint_step(
 
 
 def _stationarity_certificate(
-    H: NDArray, g: NDArray, beta: NDArray, active_matrix: NDArray, tol: float
+    H: NDArray,
+    g: NDArray,
+    beta: NDArray,
+    active_matrix: NDArray,
+    tol: float,
+    *,
+    coordinate_weighted: bool = False,
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -420,6 +429,14 @@ def _stationarity_certificate(
     uncertainty. A multiplier below that allowance releases its constraint.
     The clipped, nonnegative multipliers must then reproduce stationarity;
     an uncertain sign alone never supplies a success certificate.
+
+    The test is per coefficient, against that coefficient's own actions, but
+    an ordinary least-squares multiplier fit leaves a residual of rounding
+    size relative to the largest coefficient. ``coordinate_weighted`` fits
+    the multipliers in the test's own units instead, each coefficient's
+    equation divided by ``max(|H||beta|, |g|)`` there. That matters where the
+    active rows touch coefficients orders of magnitude apart: a shape term
+    at a very large smoothing parameter, in coordinates scaled by it.
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
     products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
@@ -441,7 +458,20 @@ def _stationarity_certificate(
     )
     arithmetic = _roundoff_tolerance(len(beta) + len(rows))
     if len(rows):
-        inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
+        if coordinate_weighted:
+            # A positive diagonal weighting cannot change the rank, but it
+            # can push a genuine singular value under a cutoff relative to
+            # the largest weighted one: the rank is decided unweighted.
+            # Weights stay at most 1 / sqrt(TINY), so the weighted rows and
+            # any product of two of them are finite (the square-root safe
+            # range of LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
+            own = np.maximum(h_action, g_action)
+            weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
+            rank = np.linalg.matrix_rank(rows.T)
+            u, s, vt = np.linalg.svd(rows.T * weight[:, None], full_matrices=False)
+            inverse_action = (vt[:rank].T / s[:rank]) @ (u[:, :rank].T * weight)
+        else:
+            inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
         multipliers = inverse_action @ residual
         dual_action = np.abs(rows.T) @ np.abs(multipliers)
         score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
@@ -476,6 +506,8 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
+    *,
+    coordinate_weighted: bool = False,
 ) -> bool:
     """Whether ``beta`` passes the complete KKT certificate on ``active`` as it stands.
 
@@ -486,7 +518,9 @@ def _certifies_kkt_point(
     """
     if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False
-    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
+    stationary, drop_idx, multipliers = _stationarity_certificate(
+        H, g, beta, A[active], tol, coordinate_weighted=coordinate_weighted
+    )
     if not stationary or drop_idx is not None:
         return False
     return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol)
@@ -771,6 +805,29 @@ def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
     return blocks
 
 
+def _homogeneous_feasible_start(
+    beta: NDArray, A: NDArray, b: NDArray, tol: float
+) -> NDArray | None:
+    """Phase one for homogeneous rows: each block that violates its rows restarts at zero.
+
+    A primal active-set method needs a feasible start (Nocedal and Wright,
+    *Numerical Optimization*, 2nd ed., 2006, section 16.5), found in general
+    by a phase-one LP. A block whose rows all have ``b == 0`` is a cone, and
+    its apex ``beta[block] = 0`` is feasible, so no LP is needed. Blocks that
+    satisfy their rows keep their coefficients. ``None`` when a violated
+    block has a row with ``b != 0``.
+    """
+    beta = beta.copy()
+    for block_cols, block_rows in _constraint_blocks(A):
+        rows = sorted(block_rows)
+        if _is_feasible(A[rows], beta, b[rows], tol):
+            continue
+        if np.any(b[rows] != 0.0):
+            return None
+        beta[block_cols] = 0.0
+    return beta
+
+
 def _raises_working_rank(
     A: NDArray, active: list[int], row: int, working_rank: dict[tuple[int, ...], int]
 ) -> bool:
@@ -960,8 +1017,10 @@ def solve_constrained_qp(
     blocking row that is linearly dependent on the working rows (see
     _raises_working_rank). It also constructs the exact zero point of each
     block whose homogeneous working rows have full column rank, as the
-    n_eq >= p branch does for the whole vector. Neither change alters the
-    certificate. Callers use it as a retry, so default solves stay unchanged.
+    n_eq >= p branch does for the whole vector. It also fits the
+    certificate's multipliers in the certificate's own units (see
+    _stationarity_certificate); the test itself is unchanged. Callers use it
+    as a retry, so default solves stay unchanged.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -1290,7 +1349,9 @@ def solve_constrained_qp(
             at_face_minimum
             and not small_step
             and not kkt_may_be_singular
-            and _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+            and _certifies_kkt_point(
+                H_sym, g, beta, A, b, active, tol, abs_A, coordinate_weighted=_degeneracy_safeguards
+            )
         ):
             # The complete certificate, so a pass means the same here as at a
             # small step; a failure changes nothing and the loop steps on.
@@ -1298,7 +1359,7 @@ def solve_constrained_qp(
         at_face_minimum = False
         if small_step:
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol
+                H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
@@ -1310,7 +1371,7 @@ def solve_constrained_qp(
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol
+                    H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)

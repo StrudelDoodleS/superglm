@@ -1145,6 +1145,17 @@ class RankDecomposition:
         return result
 
 
+def face_pseudo_inverse(decomposition: RankDecomposition, face: NDArray | None) -> NDArray:
+    """``Z (Z' M Z)^+ Z'`` from the decomposition of ``Z' M Z`` on a face ``Z``; ``M^+`` without one.
+
+    ``Z`` is an orthonormal basis of the coefficients a constrained fit's
+    binding rows leave free (``irls_direct._active_face_basis``): the fit is
+    the equality-constrained fit on that face, whose covariance this is.
+    """
+    inverse = decomposition.pseudo_inverse()
+    return inverse if face is None else _symmetric_part(face @ inverse @ face.T)
+
+
 def weights_fingerprint(W: NDArray) -> bytes:
     """A 128-bit digest of the weights' float64 bytes (a few ms at n = 500,000)."""
     return hashlib.blake2b(np.ascontiguousarray(W, dtype=np.float64), digest_size=16).digest()
@@ -1176,6 +1187,19 @@ class RankInfo:
     # built from a dense centred system.
     data_gram: NDArray | None = field(default=None, repr=False, compare=False)
     data_gram_weights: bytes | None = field(default=None, repr=False, compare=False)
+    # A constrained fit's active face: the orthonormal basis ``Z`` of the
+    # coefficients its binding rows leave free, and the decompositions of
+    # ``Z' H Z`` for the ``augmented`` and ``coefficient`` Hessians.  The
+    # covariance is the face fit's (``augmented_inverse``); ``augmented`` and
+    # ``coefficient`` keep the penalized Gram's own rank decision.  ``None``
+    # where no row binds.  ``face_rows`` are the binding rows themselves,
+    # each scaled by a power of two (exact): none where no row binds, and
+    # ``None`` for a fit without shape rows or a record from before fits kept
+    # them.
+    face: NDArray | None = field(default=None, repr=False, compare=False)
+    face_rows: NDArray | None = field(default=None, repr=False, compare=False)
+    face_augmented: RankDecomposition | None = field(default=None, repr=False, compare=False)
+    face_coefficient: RankDecomposition | None = field(default=None, repr=False, compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
@@ -1199,6 +1223,18 @@ class RankInfo:
     @property
     def total_edf(self) -> float:
         return self.intercept_edf + float(np.sum(self.feature_edf))
+
+    def augmented_inverse(self) -> NDArray:
+        """The centred slopes' inverse Hessian, on the active face when there is one."""
+        if self.face is None or self.face_augmented is None:
+            return self.augmented.pseudo_inverse()
+        return face_pseudo_inverse(self.face_augmented, self.face)
+
+    def coefficient_inverse(self) -> NDArray:
+        """The raw slopes' inverse Hessian, on the active face when there is one."""
+        if self.face is None or self.face_coefficient is None:
+            return self.coefficient.pseudo_inverse()
+        return face_pseudo_inverse(self.face_coefficient, self.face)
 
     def is_estimable(self, contrast: NDArray) -> bool:
         contrast = np.asarray(contrast, dtype=float)

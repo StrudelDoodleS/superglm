@@ -2469,7 +2469,9 @@ class TestREMLWarmStart:
                 selection_penalty=0.0,
                 discrete=True,
                 features={
-                    "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
+                    "BonusMalus": Spline(
+                        kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    ),
                     "DrivAge": Spline(kind="ps", k=8),
                     "VehAge": Spline(kind="ps", k=8),
                     "VehGas": Categorical(base="most_exposed"),
@@ -2763,7 +2765,9 @@ class TestREMLNonConvergenceDisclosure:
                 selection_penalty=0.0,
                 discrete=True,
                 features={
-                    "x1": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+                    "x1": Spline(
+                        kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    ),
                     "x2": Spline(kind="ps", k=8),
                 },
             )
@@ -2842,7 +2846,9 @@ class TestREMLNonConvergenceDisclosure:
             selection_penalty=0.0,
             discrete=True,
             features={
-                "x1": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
+                "x1": Spline(
+                    kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                ),
                 "x2": Spline(kind="ps", k=8),
             },
         ).fit_reml(X, y)

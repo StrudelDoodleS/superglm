@@ -19,16 +19,21 @@ Run it on each tree with that tree's interpreter and the same harness file::
 
 The matrix (``m/``): every family and link of ``release_differential``'s GLM
 corpus, on its 400-row data, through the dense route (exact and binned by
-``fit_reml``, exact by ``fit``), SCOP (exact and binned), the constrained QP,
-QR, and the structured random-effect, ``fs`` and ``sz`` routes, with binned,
-``fit`` and further term kinds on a few pairs.  The fixtures (``x/``): #437's
-mean-space Newton on the dense, QP and structured routes and fits that do not
-engage it, the Gamma/log Fisher-to-Newton switch and its latch, Tweedie/log
-observed Newton, nested random-effect chains, SCOP with repeated rows, two
-groups and a translated column, the true-score certificate's constrained,
-latent and truncated-direction branches, score stagnation, the float64
-fixed-point stop, an ndarray design and the input refusals.  ``census`` says
-which routes and branches a run reached; ``--coverage`` adds line coverage.
+``fit_reml``, exact by ``fit``), the shape-constrained P-spline on the QP
+(``scop``, its term's name; the QP from #537) and on SCOP (``scopeng``, the
+same term with ``shape_engine="scop"``), both exact and binned, the
+constrained QP, QR, and the structured random-effect, ``fs`` and ``sz``
+routes, with binned, ``fit`` and further term kinds on a few pairs.  The
+fixtures (``x/``): #437's mean-space Newton on the dense, QP and structured
+routes and fits that do not engage it, the Gamma/log Fisher-to-Newton switch
+and its latch, Tweedie/log observed Newton, nested random-effect chains,
+shape-constrained P-splines with repeated rows, two groups and a translated
+column, on the QP (``x/scop/``) and on SCOP (``x/scop-engine/``), a term the
+QP holds flat beside a fitted one (its active face), the true-score
+certificate's constrained, latent and truncated-direction branches, score
+stagnation, the float64 fixed-point stop, an ndarray design and the input
+refusals.  ``census`` says which routes and branches a run reached, the
+active faces among them; ``--coverage`` adds line coverage.
 
 Each case runs in its own process with every thread pool pinned to one thread
 and ``PYTHONHASHSEED=0``.  The process rebinds ``fit_irls_direct`` and
@@ -116,6 +121,8 @@ MODES = {
     "qr": ("re", "qr"),
     "qrmains": ("mains", "qr"),
     "scop": ("scop", "auto"),
+    # the ``scop`` term with its P-spline on SCOP (``shape_engine="scop"``)
+    "scopeng": ("scop", "auto"),
     "re": ("re", "structured"),
     "fs": ("fs", "structured"),
     "sz": ("sz", "structured"),
@@ -131,6 +138,8 @@ TRACED = [
     "m/binomial-log/dense/exact/fit_reml",
     "m/poisson-log/scop/exact/fit_reml",
     "m/gaussian-identity/scop/binned/fit_reml",
+    "m/poisson-log/scopeng/exact/fit_reml",
+    "m/gaussian-identity/scopeng/binned/fit_reml",
     "m/gaussian-identity/qp/exact/fit_reml",
     "m/poisson-log/qr/exact/fit_reml",
     "m/binomial-logit/re/exact/fit_reml",
@@ -162,6 +171,7 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
         for route in ("exact", "binned"):
             matrix(family, link, "dense", route, "fit_reml")
             matrix(family, link, "scop", route, "fit_reml")
+            matrix(family, link, "scopeng", route, "fit_reml")
         matrix(family, link, "dense", "exact", "fit")
         for mode in ("qp", "qr", "re", "fs", "sz"):
             matrix(family, link, mode, "exact", "fit_reml")
@@ -181,7 +191,9 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
     for family, link in [("poisson", "log"), ("gaussian", "identity"), ("gamma", "log"),
                          ("binomial", "logit"), ("tweedie15", "log")]:  # fmt: skip
         matrix(family, link, "scop", "exact", "fit")
+        matrix(family, link, "scopeng", "exact", "fit")
     matrix("poisson", "log", "scop", "binned", "fit")
+    matrix("poisson", "log", "scopeng", "binned", "fit")
     matrix("poisson", "log", "fs", "exact", "fit")
 
     specials = {
@@ -204,6 +216,20 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
         "x/scop/two-groups/binned": (_scop_variant, {"variant": "two", "route": "binned"}),
         "x/scop/translated-column": (_scop_variant, {"variant": "translated", "route": "exact"}),
         "x/scop/binomial-log-two-groups": (_scop_variant, {"variant": "binlog", "route": "exact"}),
+        "x/scop-engine/lone-repeated-rows": (_scop_variant, {"variant": "repeated", "route": "exact",
+                                                             "engine": "scop"}),
+        "x/scop-engine/two-groups/exact": (_scop_variant, {"variant": "two", "route": "exact",
+                                                           "engine": "scop"}),
+        "x/scop-engine/two-groups/binned": (_scop_variant, {"variant": "two", "route": "binned",
+                                                            "engine": "scop"}),
+        "x/scop-engine/translated-column": (_scop_variant, {"variant": "translated",
+                                                            "route": "exact", "engine": "scop"}),
+        "x/scop-engine/binomial-log-two-groups": (_scop_variant, {"variant": "binlog",
+                                                                  "route": "exact",
+                                                                  "engine": "scop"}),
+        "x/binlog/scop-engine-lowered": (_binlog_scop_lowered, {"engine": "scop"}),
+        "x/qp/flat-held/fit_reml": (_flat_held, {"fit": "fit_reml"}),
+        "x/qp/flat-held/fit": (_flat_held, {"fit": "fit"}),
         "x/separation/logit-numeric": (_separation, {"separation": "warn"}),
         "x/separation/logit-numeric-error": (_separation, {"separation": "error"}),
         "x/binlog/scop-lowered": (_binlog_scop_lowered, {}),
@@ -278,6 +304,14 @@ def _matrix_case(family: str, link: str, mode: str, route: str, fit: str) -> dic
     frame, eta, rng = rd.make_data(n, seed)
     y = rd.glm_response(family, link, eta, frame, rng, False)
     features, interactions = rd.glm_terms(term)
+    if mode == "scopeng":
+        from superglm import Constraint, PSpline
+
+        increasing = Constraint.fit.increasing
+        features = {
+            **features,
+            "x1": PSpline(n_knots=8, constraint=increasing, shape_engine="scop"),
+        }
     model = SuperGLM(
         family=rd.glm_family(family),
         link=link,
@@ -558,12 +592,19 @@ def _nested(family: str) -> dict:
     return _model_outputs(model, frame, None, "fit_reml")
 
 
-def _scop_variant(variant: str, route: str) -> dict:
-    """SCOP fits beyond the matrix: compressed lone group, two groups, a translated column."""
+def _scop_variant(variant: str, route: str, engine: str | None = None) -> dict:
+    """Shape-constrained P-splines beyond the matrix: compressed lone group, two groups, a translated column.
+
+    On the QP by default (#537), on SCOP with ``engine="scop"``.
+    """
     import numpy as np
     import release_differential as rd
 
-    from superglm import Categorical, Constraint, Numeric, PSpline, Spline, SuperGLM
+    from superglm import Categorical, Constraint, Numeric, Spline, SuperGLM
+    from superglm import PSpline as _PSpline
+
+    def PSpline(**kwargs):  # noqa: N802
+        return _PSpline(**kwargs, **({} if engine is None else {"shape_engine": engine}))
 
     frame, eta, rng = rd.make_data(SMALL_N, 77)
     frame = frame.copy()
@@ -626,8 +667,8 @@ def _separation(separation: str) -> dict:
     return _model_outputs(model, frame, None, "fit")
 
 
-def _binlog_scop_lowered() -> dict:
-    """An increasing PSpline (SCOP) under offset +2: certified in its latent coordinates."""
+def _binlog_scop_lowered(engine: str | None = None) -> dict:
+    """An increasing PSpline under offset +2: on the QP, or on SCOP (``engine="scop"``) in latent coordinates."""
     import numpy as np
     import pandas as pd
 
@@ -636,15 +677,45 @@ def _binlog_scop_lowered() -> dict:
     rng = np.random.default_rng(8)
     x = rng.uniform(0.0, 1.0, 60)
     y = (rng.uniform(size=60) < 0.1 + 0.3 * x).astype(np.float64)
+    shape = {} if engine is None else {"shape_engine": engine}
     model = SuperGLM(
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
+        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, **shape)},
     )
     frame, offset = pd.DataFrame({"x": x}), np.full(60, 2.0)
     model.fit(frame, y, offset=offset)
     return _model_outputs(model, frame, offset, "fit")
+
+
+def _flat_held(fit: str) -> dict:
+    """An increasing P-spline on a decreasing signal beside a fitted ``cr`` term: the QP holds it flat.
+
+    Its binding rows (``RankInfo.face_rows``) and active face carry the fit's
+    EDF and covariance (#537, #538, #540).
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Constraint, PSpline, Spline, SuperGLM
+
+    rng = np.random.default_rng(12)
+    n = 400
+    frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.uniform(0.0, 1.0, n)})
+    mean = np.exp(0.4 - 0.8 * frame["x"].to_numpy() + np.sin(3.0 * frame["z"].to_numpy()))
+    y = rng.poisson(mean).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            "z": Spline(kind="cr", k=8),
+        },
+    )
+    getattr(model, fit)(frame, y)
+    return _model_outputs(model, frame, None, fit)
 
 
 def _binlog_qp_lowered(direct_solve: str) -> dict:
@@ -1065,6 +1136,13 @@ class Recorder:
             census["scop_calls"] += 1
         if any(g.constraints is not None for g in groups):
             census["constrained_calls"] += 1
+        rank_info = result.rank_info
+        # a constrained fit's binding rows and active face (#537, #540)
+        if rank_info is not None and getattr(rank_info, "face_rows", None) is not None:
+            census["face_rows_recorded"] += 1
+            census["face_rows"] += int(rank_info.face_rows.shape[0])
+        if rank_info is not None and getattr(rank_info, "face", None) is not None:
+            census["face_bound_calls"] += 1
         for switch in ("_return_working_system", "_working_newton"):
             if arguments[switch]:
                 census[f"switch:{switch}"] += 1

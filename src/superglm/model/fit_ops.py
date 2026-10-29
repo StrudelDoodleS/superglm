@@ -404,8 +404,8 @@ def _reject_structured_fit_constraints(model) -> None:
     ``OrderedCategorical`` be seen at all.
     """
     from superglm.features._spline_build import (
-        _uses_fit_time_scop_constraints,
         _uses_fit_time_shape_constraints,
+        shape_engine,
     )
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.ordered_categorical import OrderedCategorical
@@ -414,11 +414,12 @@ def _reject_structured_fit_constraints(model) -> None:
         """The spec that answers the engine question, not merely the declaration.
 
         ``OrderedCategorical`` delegates its build to an inner spline, and it is
-        the inner basis that picks the engine: ``ps`` routes through SCOP. The
-        wrapper defines ``_build_monotone_constraints_raw`` unconditionally --
-        deliberately, so the builder can find raw geometry through it -- and
-        defines no SCOP method, so asking the wrapper reports QP for every basis
-        including the SCOP ones. Resolve to the inner spline before asking.
+        the inner basis that picks the engine: a ``ps`` declared with
+        ``shape_engine="scop"`` routes through SCOP. The wrapper defines
+        ``_build_monotone_constraints_raw`` unconditionally -- deliberately, so
+        the builder can find raw geometry through it -- and defines no SCOP
+        method, so asking the wrapper reports QP for every basis including the
+        SCOP ones. Resolve to the inner spline before asking.
 
         A pre-0.24 step pickle never reaches this function: the declaration test
         above reads ``constraint_kind`` through ``getattr(spec, name, default)``,
@@ -431,12 +432,10 @@ def _reject_structured_fit_constraints(model) -> None:
         """
         return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
 
-    # SCOP wins engine precedence in the build path, so classify it first.
     scop_constrained = [
         name
         for name, spec in model._specs.items()
-        if _uses_fit_time_shape_constraints(spec)
-        and _uses_fit_time_scop_constraints(_engine_spec(spec))
+        if _uses_fit_time_shape_constraints(spec) and shape_engine(_engine_spec(spec)) == "scop"
     ]
     if not scop_constrained:
         return
@@ -467,10 +466,10 @@ def _reject_structured_fit_constraints(model) -> None:
         f"term(s) {joined}; a basis='fs' factor smooth carries its own main "
         "effect, so the constrained variable's effect is stated twice -- once "
         "confined to the shape cone and once free -- and no coefficient mode is "
-        "reached. Use basis='sz', which excludes the main effect, or a QP-engine "
-        "spline (BSplineSmooth or CubicRegressionSpline), or a post-fit shape "
-        "constraint. A factor smooth of any other variable is unaffected, and a "
-        "RandomEffect carries no such restriction."
+        "reached. Use basis='sz', which excludes the main effect, or the QP engine "
+        "(drop shape_engine='scop'), or a post-fit shape constraint. A factor "
+        "smooth of any other variable is unaffected, and a RandomEffect carries no "
+        "such restriction."
     )
 
 

@@ -1016,7 +1016,7 @@ class ModelMetrics:
 
         if uses_fitted_rank:
             X_a, active_groups = _rank_active_state(self._model, rank_info)
-            inverse = rank_info.coefficient.pseudo_inverse()
+            inverse = rank_info.coefficient_inverse()
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
             self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
             return X_a, W, inverse, augmented, active_groups

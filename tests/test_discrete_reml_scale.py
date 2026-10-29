@@ -116,12 +116,15 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
     assert hessian_checks >= 2
 
 
-def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("family", "link"), [("gamma", "inverse"), ("poisson", "identity")])
+def test_discrete_line_search_refuses_a_trial_outside_the_links_domain(
+    family: str, link: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A smoothing-parameter trial that carries a row to eta <= 0 under the inverse link is
-    refused, as a rejected trial, instead of being scored on clipped means of about 1e12: no
-    trial the line search scores has a positive-weight row outside the domain."""
+    """A smoothing-parameter trial that carries a row to eta <= 0 under the inverse link, or
+    to a Poisson identity mean ``mu = eta <= 0``, is refused, as a rejected trial, instead of
+    being scored on clipped means of about 1e12 or 1e-50: no trial the line search scores has
+    a positive-weight row outside the domain. Mutation: the guard keyed on the link alone
+    (as ec377777 did) scores a Poisson identity trial outside it."""
     from superglm.reml import discrete
     from superglm.solvers.mode_score import centred_matvec
 
@@ -150,9 +153,11 @@ def test_discrete_line_search_refuses_a_trial_outside_the_inverse_links_domain(
 
     monkeypatch.setattr(discrete, "_solve_cached_profiled_system", crossing_first)
     X, y, weights = _gamma_data()
+    if family == "poisson":
+        y = np.round(y)
     model = SuperGLM(
-        family="gamma",
-        link="inverse",
+        family=family,
+        link=link,
         selection_penalty=0.0,
         discrete=True,
         features={"x": Spline(n_knots=6, penalty="ssp")},

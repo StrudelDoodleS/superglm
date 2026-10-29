@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import TYPE_CHECKING
 
+from superglm.solvers.constrained_qp import _homogeneous_feasible_start
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 from superglm.solvers.irls_state import (
     _IRLSState,
     _IRLSStepDecision,
@@ -13,9 +16,11 @@ from superglm.solvers.irls_state import (
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
+    interior_start_intercept,
     link_domain_violation,
     mean_space_violation,
 )
+from superglm.solvers.working_rows import coefficient_initial_intercept
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -47,8 +52,11 @@ class _IRLSDirectTrialSearch:
     budget and, under its Newton steps, its merit
     (``_IRLSDirectMeanSpaceOverlay.line_search``).  The feasibility contract
     also accepts a finite feasible QP proposal that an infeasible committed
-    state would otherwise reject, and certifies the retained state's KKT
-    conditions only on a full step (``_IRLSDirectQPStep.retained_converged``).
+    state would otherwise reject (raised into the link's domain when it left
+    it), restarts from the phase-one point when the QP gave no such proposal,
+    certifies the retained state's KKT conditions only on a full step
+    (``_IRLSDirectQPStep.retained_converged``) and, on a rejected step,
+    restores the active set the iteration started from.
 
     ``search(fit, it)`` writes what the SCOP step's own search writes: the
     retained state and its ``eta``, ``mu`` and deviance, ``beta`` and
@@ -64,7 +72,7 @@ class _IRLSDirectTrialSearch:
         # by the family and link, ``irls_state.mean_space_violation``).
         self._mean_space_invalid = mean_space_violation(family, link)
         # The link inverse's own domain (``irls_state.link_domain_violation``).
-        self._link_domain_invalid = link_domain_violation(link)
+        self._link_domain_invalid = link_domain_violation(link, family)
 
     def search(self, fit: _IRLSDirectFit, it: int) -> None:
         """Iteration ``it``'s line search from the committed state to the step's proposal."""
@@ -198,6 +206,35 @@ class _IRLSDirectTrialSearch:
             qp is not None
             and decision.step_rejected
             and not committed_constraints_feasible
+            and not (proposal_constraints_feasible and _state_is_finite(proposal))
+        ):
+            # The QP formed at an infeasible start gave no feasible
+            # proposal: the fit restarts from the phase-one point, where
+            # each violated block sits at its feasible zero.
+            feasible_beta = _homogeneous_feasible_start(
+                committed.beta, qp.A_all, qp.b_all, _QP_FEASIBILITY_TOL
+            )
+            if feasible_beta is not None:
+                proposal = evaluate_state(
+                    feasible_beta,
+                    committed.intercept,
+                    phase="proposal",
+                    iteration=it + 1,
+                    alpha=1.0,
+                    centred_intercept=(
+                        None
+                        if committed.centred_intercept is None
+                        else committed.centred_intercept
+                        + math.fsum(fit._state_center * (feasible_beta - committed.beta))
+                    ),
+                )
+                trial_cache[1.0] = proposal
+                qp.proposal_converged = False
+                proposal_constraints_feasible = True
+        if (
+            qp is not None
+            and decision.step_rejected
+            and not committed_constraints_feasible
             and proposal_constraints_feasible
             and _state_is_finite(proposal)
         ):
@@ -206,6 +243,38 @@ class _IRLSDirectTrialSearch:
             # this proposal is committed, convexity of A beta >= b and the
             # invalid-state predicate above preserve feasibility on every
             # subsequent accepted line-search segment.
+            if _link_domain_invalid is not None and _link_domain_invalid(
+                proposal.eta_unclipped, weights
+            ):
+                # Outside the link's domain the proposal is no state of
+                # the model. No constraint row holds the intercept, so it
+                # is raised as a start is; the state is then not the QP's
+                # solution.
+                raise_by = interior_start_intercept(
+                    family,
+                    link,
+                    proposal.eta_unclipped,
+                    weights,
+                    0.0,
+                    level=coefficient_initial_intercept(
+                        distribution=family, link=link, y=y, sample_weight=weights
+                    ),
+                )
+                proposal = evaluate_state(
+                    proposal.beta,
+                    proposal.intercept + raise_by,
+                    phase="proposal",
+                    iteration=it + 1,
+                    alpha=1.0,
+                    eta_unclipped=proposal.eta_unclipped + raise_by,
+                    centred_intercept=(
+                        None
+                        if proposal.centred_intercept is None
+                        else proposal.centred_intercept + raise_by
+                    ),
+                )
+                trial_cache[1.0] = proposal
+                qp.proposal_converged = False
             decision = _IRLSStepDecision(
                 alpha=1.0,
                 step_halvings=0,
@@ -240,6 +309,10 @@ class _IRLSDirectTrialSearch:
         dev = retained.deviance
         n_halvings = decision.step_halvings
         step_rejected = decision.step_rejected
+        if step_rejected and qp is not None:
+            # the rejected proposal's active set belongs to no retained state;
+            # the finaliser reads the committed state's binding rows
+            qp.active_set = qp.committed_active_set
         if n_halvings and not step_rejected:
             logger.info(
                 "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",

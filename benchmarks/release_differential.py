@@ -72,6 +72,16 @@ CRITERION_CHANGES = {
         ]
     }
 }  # fmt: skip
+# Term kinds (and history cases) whose engine changed in a release, keyed by that
+# release, compared as CRITERION_CHANGES are. From v0.42 a P-spline's fit-time
+# constraint fits on the QP unless it opts into SCOP: a different model, whose
+# criterion is not SCOP's. It is the ``scop`` term's, and history row 1's.
+ENGINE_CHANGES = {
+    (0, 42, 0): {
+        "scop": "P-spline shape constraints on the QP",
+        "convex-beside-cr": "P-spline shape constraints on the QP",
+    }
+}
 
 
 def _release_tuple(release: str) -> tuple[int, ...]:
@@ -524,9 +534,16 @@ def history_book(n: int):
 
 
 def history_terms(kind):
+    import inspect
+
     from superglm import Categorical, Constraint, Numeric, OrderedCategorical, Polynomial, Spline
 
     inc = Constraint.fit.increasing
+    # Row 2 is a kindless spline beside a SCOP P-spline. From the release that added
+    # ``shape_engine`` a P-spline's constraint fits on the QP unless it opts into SCOP.
+    scop = (
+        {"shape_engine": "scop"} if "shape_engine" in inspect.signature(Spline).parameters else {}
+    )
     base = {
         "x1": Spline(kind="ps", k=10),
         "x2": Spline(kind="cr", k=8),
@@ -536,8 +553,8 @@ def history_terms(kind):
     return {
         "base": lambda: base,
         "convex_cr": lambda: {"x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex), "x1": Spline(kind="cr", k=8)},
-        "mono_kindless_ps": lambda: {"x4": Spline(constraint=inc), "x1": Spline(kind="ps", k=8, constraint=inc), "g": Categorical()},
-        "mono_kindless_ordcat": lambda: {"x4": Spline(constraint=inc), "o": OrderedCategorical(order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc))},
+        "mono_kindless_ps": lambda: {"x4": Spline(constraint=inc), "x1": Spline(kind="ps", k=8, constraint=inc, **scop), "g": Categorical()},
+        "mono_kindless_ordcat": lambda: {"x4": Spline(constraint=inc), "o": OrderedCategorical(order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc, **scop))},
         "edge": lambda: {"x1": Spline(kind="ps", k=10), "x4": Spline(kind="cr", k=8), "x3": Numeric(), "g": Categorical()},
         "select": lambda: {"x1": Spline(kind="ps", k=10, select=True), "x4": Spline(kind="cr", k=8, select=True), "x3": Spline(kind="cr", k=6, select=True)},
         "constant": lambda: {"x1": Spline(n_knots=8), "x4c": Spline(n_knots=5), "g": Categorical()},
@@ -656,9 +673,14 @@ def flags(name: str, base: dict, candidate: dict, base_release: str) -> list[str
     found = []
     parts = name.split("/")
     key = tuple(parts[:3]) + (parts[5] if parts[0] == "glm" else "",)
+    term = parts[4] if parts[0] == "glm" else parts[2] if parts[0] == "hist" else ""
     changed = any(
         key in pairs
         for since, pairs in CRITERION_CHANGES.items()
+        if _release_tuple(base_release) < since
+    ) or any(
+        term in terms
+        for since, terms in ENGINE_CHANGES.items()
         if _release_tuple(base_release) < since
     )
     for metric in ("objective", "test_nll", "test_deviance", "gini"):

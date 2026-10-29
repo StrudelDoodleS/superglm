@@ -817,7 +817,7 @@ def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(
             selection_penalty=0,
             features={
                 "x1": Spline(k=8, constraint=inc),
-                "x2": Spline(kind="ps", k=8, constraint=inc),
+                "x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop"),
                 "band": OrderedCategorical(order=BANDS, basis=Spline(k=6, constraint=inc)),
             },
         )

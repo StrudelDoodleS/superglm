@@ -1386,3 +1386,35 @@ NUMBA_CACHE_DIR=<s0_out>/numba_cache benchboard heavy <label> --cores 10 --wait-
   run --out <dir> --jobs 10
 python3 <tree>/benchmarks/irls_direct_characterisation.py compare <s0_out>/master_final <dir>
 ```
+
+## 10. Master's #535 and #537–#540, merged into the package
+
+Merged from master at 7cb06b48 (one merge commit; the 47 split commits are not replayed).
+
+- **#535** (the SCOP row-route leaf) changed only `scop_newton.py`, which the SCOP step
+  calls; nothing moved.
+- **#537** (P-splines on the QP), in the package:
+  - `_qp`: the QP step keeps the dense step's state centre (S13's gate no longer excludes
+    constraints, so item 23's "never has a state centre" no longer holds) and forms the
+    proposal's centred intercept; a `ValueError` from the working QP under a link bounded at
+    zero restarts an infeasible committed state from its phase-one point, and otherwise ends
+    the fit at the committed state with a `ConvergenceWarning`. `propose` returns `True`
+    for that end, and `run()` breaks before the search, as the monolith's `break` did.
+  - `_search`: the link-domain predicate takes the family; the phase-one restart when an
+    infeasible committed state's QP gave no feasible proposal; an accepted infeasible-start
+    proposal outside the link's domain is raised into it.
+  - `_fit`: a warm start outside the link's domain is raised into it (`_setup_design`).
+  - `_finalise`: a constrained fit's EDF and `RankInfo` are its active face's
+    (`_active_face_basis`, `_on_face`, `_face_decomposition`, `face_pseudo_inverse`).
+- **#538** (a flat-held term adds no EDF): the binding test reads the fit's column scale
+  (`_qp._binding_rows`).
+- **#540** (`face_rows`): `_binding_rows` in `_qp` (it reads `_QP_FEASIBILITY_TOL`),
+  `_binding_rank` and `_active_face_basis(held)` in `_finalise`; `RankInfo.face_rows` is
+  bound into `_retained_rank_info`. The package re-exports the three for the editor.
+- **Item 34 is reversed.** The finaliser now reads the active set after the loop, so a
+  rejected step restores the active set the iteration started from
+  (`_IRLSDirectQPStep.committed_active_set`, taken at the start of `propose`), as the
+  monolith did.
+- **The harness** gained the `scopeng` mode and the `x/scop-engine/` fixtures, because the
+  `scop` term's P-spline now fits on the QP, a flat-held QP fixture (`x/qp/flat-held/`), and
+  census keys for recorded face rows.

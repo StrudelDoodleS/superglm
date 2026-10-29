@@ -284,6 +284,36 @@ def test_discrete_reml_warm_starts_carry_the_centred_state(family):
     _assert_same_reml(fit(0.0), fit(1e16))
 
 
+def test_an_inverse_link_warm_start_is_checked_in_its_centred_state():
+    """The warm start's link-domain check reads eta from ``(alpha, c)``, not the raw intercept.
+
+    Rebuilt as ``intercept + X beta`` at a 1e16 offset, an interior eta read
+    as outside the inverse link's domain; the raised intercept also dropped
+    the centred warm start, and the run stopped at ``max_reml_iter`` with
+    lambda 0.0012 against 166. Mutation: the raw rebuild fails this.
+    """
+    rng = np.random.default_rng(10)
+    n = 720
+    g = np.tile(np.arange(12), n // 12)
+    z = 2.0 * rng.integers(-4, 5, n)
+    y = rng.gamma(100, 1.0 / (0.82 + 0.1 * z + 0.01 * np.sin(g)) / 100)
+
+    def fit(shift: float) -> SuperGLM:
+        model = SuperGLM(
+            family="gamma",
+            link="inverse",
+            features={"x": Numeric(), "g": RandomEffect()},
+            selection_penalty=0,
+            discrete=True,
+            direct_solve="gram",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(pd.DataFrame({"x": shift + z, "g": g}), y, max_reml_iter=20)
+
+    _assert_same_reml(fit(0.0), fit(1e16))
+
+
 def test_a_centred_warm_state_without_its_beta_is_not_a_start():
     """``_centred_init`` is ``alpha + (X - 1 c') beta_init``: without ``beta_init`` it is ignored.
 
@@ -978,6 +1008,57 @@ def test_gram_and_qr_fits_are_translation_invariant_at_1e16(family, direct_solve
     np.testing.assert_array_less(np.abs(eta_shifted - eta_base), bound)
 
 
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+@pytest.mark.parametrize("kind", ["ps", "cr", "bs"])
+def test_a_shape_constrained_fit_is_translation_invariant_at_1e16(kind, family):
+    """A QP-constrained fit keeps the centred state beside a translated column.
+
+    Shape rows act on the coefficients, never on the intercept, so the
+    constrained fit's state is ``(alpha, beta)`` about the same centre as an
+    unconstrained one, and its intercept is formed from the system's pair
+    (``_system_offset_mean``).  Its predictors at offsets 0 and 1e16 then
+    agree to the solve's forward error, as the unconstrained fits do
+    (``test_gram_and_qr_fits_are_translation_invariant_at_1e16``).  Mutations:
+    constrained fits left out of the centred state (8db6632b: at 1e16 the
+    Gaussian ``ps`` fit reports converged with 66 times the unshifted
+    deviance), or the constrained branch's intercept rebuilt from the raw
+    ``mean_z - mean_x' beta`` (Poisson; a Gaussian identity fit's published
+    intercept is compensated afterwards and hides it).
+    """
+    terms = {
+        "ps": lambda: PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+        "cr": lambda: Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing),
+        "bs": lambda: Spline(kind="bs", n_knots=6, constraint=Constraint.fit.increasing),
+    }
+    fits = {}
+    for shift in (0.0, 1e16):
+        rng = np.random.default_rng(3)
+        n = 240
+        z = 2.0 * rng.integers(-4, 5, n)
+        s = rng.uniform(0.0, 1.0, n)
+        eta = 0.1 * z + 0.3 * s
+        noise = rng.normal(0.0, 0.01, n)
+        y = rng.poisson(np.exp(eta)).astype(float) if family == "poisson" else eta + noise
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0,
+            features={"z": Numeric(), "s": terms[kind]()},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fits[shift] = model.fit(pd.DataFrame({"z": z + shift, "s": s}), y)
+    base, shifted = fits[0.0], fits[1e16]
+    solver, shifted_solver = base._solver_pirls_result(), shifted._solver_pirls_result()
+    assert solver.converged and shifted_solver.converged
+    eta_base = linear_predictor(base._dm, solver, None)
+    eta_shifted = linear_predictor(shifted._dm, shifted_solver, None)
+    weights = np.exp(eta_base) if family == "poisson" else np.ones(n)
+    design = np.column_stack([np.ones(n), np.asarray(base._dm.toarray(), dtype=np.float64)])
+    kappa = float(np.linalg.cond(design.T @ (weights[:, None] * design)))
+    bound = _gamma(n) * kappa * float(np.max(np.abs(eta_base)))
+    np.testing.assert_array_less(np.abs(eta_shifted - eta_base), bound)
+
+
 def _gram_qr_reml(family: str, direct_solve: str, shift: float) -> SuperGLM:
     """REML on ``Numeric(x) + Spline(s)`` from ``_even_grid_frame``, no random effect."""
     rng, eta, frame = _even_grid_frame(shift)
@@ -1446,7 +1527,7 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
         fit, "poisson"
     )
     spline = (
-        PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         if fit == "scop_reml"
         else Spline(kind="ps", k=8)
     )

@@ -185,7 +185,9 @@ def test_fitted_model_keeps_no_raw_receipts(monkeypatch, path):
     y = mean * rng.gamma(8.0, 1 / 8.0, size=400)
     features = {"z1": Spline(kind="ps", k=8), "z2": Spline(kind="ps", k=10)}
     if path == "scop":
-        features["x"] = PSpline(n_knots=6, constraint=Constraint.fit.increasing)
+        features["x"] = PSpline(
+            n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"
+        )
     model = SuperGLM(family="gamma", selection_penalty=0.0, features=features)
     model.fit_reml(pd.DataFrame({"x": x, "z1": z1, "z2": z2}), y, max_reml_iter=5)
     geometries = {item.name: item._penalty_geometry for item in model._reml_penalties}

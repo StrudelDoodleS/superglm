@@ -130,7 +130,7 @@ def test_postfit_repair_rejects_mixed_scop_model_before_state_revision() -> None
         selection_penalty=0.0,
         spline_penalty=1.2,
         features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": PSpline(n_knots=7, constraint=Constraint.postfit.convex),
         },
     ).fit(X, y)
@@ -288,7 +288,7 @@ def test_mixed_scop_with_feasible_postfit_term_is_an_exact_noop():
         selection_penalty=0.0,
         spline_penalty=2.0,
         features={
-            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
             "z": PSpline(n_knots=8, constraint=Constraint.postfit.increasing),
         },
     ).fit(X, y)

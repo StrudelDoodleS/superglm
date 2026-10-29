@@ -250,9 +250,13 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
         selection_penalty=0.0,
         discrete=True,
         features={
-            "DrivAge": PSpline(n_knots=10, penalty="ssp", constraint=Constraint.fit.concave),
+            "DrivAge": PSpline(
+                n_knots=10, penalty="ssp", constraint=Constraint.fit.concave, shape_engine="scop"
+            ),
             "VehAge": CubicRegressionSpline(n_knots=8),
-            "BonusMalus": PSpline(n_knots=10, penalty="ssp", constraint=Constraint.fit.concave),
+            "BonusMalus": PSpline(
+                n_knots=10, penalty="ssp", constraint=Constraint.fit.concave, shape_engine="scop"
+            ),
             "LogDensity": CubicRegressionSpline(n_knots=8),
             "Area": Categorical(base="most_exposed"),
         },

@@ -213,14 +213,14 @@ class TestCRSMonotoneConstraints:
         info_dec = s_dec.build(x)
         np.testing.assert_allclose(info_dec.constraints.A, -info_inc.constraints.A)
 
-    def test_ps_monotone_fit_uses_scop(self):
-        """PSpline monotone_mode='fit' now builds SCOP reparameterization."""
+    def test_ps_monotone_fit_uses_qp(self):
+        """PSpline monotone_mode='fit' builds QP rows unless it opts into SCOP."""
         s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
         x = np.linspace(0, 1, 200)
         info = s.build(x)
-        assert info.scop_reparameterization is not None
-        assert info.monotone_engine == "scop"
-        assert info.constraints is None
+        assert info.scop_reparameterization is None
+        assert info.monotone_engine == "qp"
+        assert info.constraints is not None
 
     def test_ns_monotone_not_supported(self):
         """NaturalSpline does not accept monotone parameter."""
@@ -229,10 +229,10 @@ class TestCRSMonotoneConstraints:
 
 
 class TestPSplineSCOPConstraints:
-    """PSpline builds SCOP reparameterization for monotone_mode='fit'."""
+    """PSpline with shape_engine="scop" builds the SCOP reparameterization."""
 
     def test_monotone_increasing_builds(self):
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         assert info.scop_reparameterization is not None
@@ -240,7 +240,7 @@ class TestPSplineSCOPConstraints:
         assert info.constraints is None
 
     def test_monotone_decreasing_builds(self):
-        s = PSpline(n_knots=8, constraint=Constraint.fit.decreasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.decreasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         assert info.scop_reparameterization is not None
@@ -255,14 +255,14 @@ class TestPSplineSCOPConstraints:
 
     def test_scop_reparam_q_matches_solver_dimension(self):
         """Solver-space reparam has q_eff = q_raw - 1 = n_cols."""
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         assert info.scop_reparameterization.q == info.n_cols
 
     def test_scop_penalty_shape_matches(self):
         """SCOP penalty matrix shape matches n_cols."""
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         S_scop = info.scop_reparameterization.penalty_matrix()
@@ -270,14 +270,14 @@ class TestPSplineSCOPConstraints:
 
     def test_reparametrize_false(self):
         """SCOP terms bypass standard SSP."""
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         assert info.reparametrize is False
 
     def test_columns_centered(self):
         """SCAM-style centering: columns of B_centered have zero mean."""
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         B = info.columns
@@ -288,7 +288,7 @@ class TestPSplineSCOPConstraints:
 
     def test_forward_map_produces_monotone(self):
         """Random solver-space beta produces monotone gamma through the SCOP chain."""
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing)
+        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
         x = np.linspace(0, 1, 200)
         info = s.build(x)
         rng = np.random.default_rng(42)

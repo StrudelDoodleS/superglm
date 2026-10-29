@@ -87,7 +87,8 @@ than repairing it afterward.
 
 - `BSplineSmooth(..., constraint=Constraint.fit.increasing)`: QP-backed monotone fit
 - `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)`: QP-backed monotone fit
-- `PSpline(..., constraint=Constraint.fit.increasing)`: SCOP-backed monotone fit
+- `PSpline(..., constraint=Constraint.fit.increasing)`: QP-backed monotone fit
+- `PSpline(..., constraint=Constraint.fit.increasing, shape_engine="scop")`: SCOP-backed monotone fit
 
 ```python
 from superglm import Constraint, PSpline, SuperGLM

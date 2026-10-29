@@ -11,10 +11,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._utils import weighted_row_sum
-from superglm.distributions import Binomial, Distribution, Poisson, clip_mu
+from superglm.distributions import Binomial, Distribution, Gaussian, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import (
     _BINOMIAL_CLIP_MU_EPS,
+    IdentityLink,
     InverseLink,
     InverseSquaredLink,
     Link,
@@ -170,7 +171,9 @@ def mean_space_violation(
     return None
 
 
-def link_domain_violation(link: Link) -> Callable[[NDArray, NDArray], bool] | None:
+def link_domain_violation(
+    link: Link, family: Distribution | None = None
+) -> Callable[[NDArray, NDArray], bool] | None:
     """The test that a linear predictor leaves the link inverse's domain, or ``None``.
 
     The inverse and inverse-squared links map only ``eta > 0`` to a positive
@@ -184,6 +187,16 @@ def link_domain_violation(link: Link) -> Callable[[NDArray, NDArray], bool] | No
     2011, R Journal 3(2), "inner loop 2").  The set ``{beta : X beta +
     offset > 0}`` is convex, so halving from a state inside it finds a step
     inside it.
+
+    Given ``family``, the identity link on a family whose means are positive
+    (every family ``clip_mu`` floors) is held to a positive mean
+    ``link.inverse(eta) > 0`` as well, through the link's own inverse, so a
+    subclass that shifts it keeps its own domain.  A mean ``mu <= 0`` is
+    invalid (R's ``poisson()$validmu``),
+    and ``glm.fit`` halves a step that produces one.  The floor would take a
+    crossed row as ``mu = 1e-50``, whose Poisson Fisher weight ``1 / mu`` is
+    ``1e50``.  The inverse is evaluated on a copy of ``eta``: a state's
+    ``eta`` is read-only, and a subclass's inverse may write in place.
     """
     if isinstance(link, InverseLink | InverseSquaredLink):
 
@@ -191,6 +204,17 @@ def link_domain_violation(link: Link) -> Callable[[NDArray, NDArray], bool] | No
             return bool(np.any((eta_unclipped <= 0.0) & (weights > 0.0)))
 
         return violates
+    if (
+        family is not None
+        and isinstance(link, IdentityLink)
+        and not isinstance(family, Gaussian | Binomial)
+    ):
+
+        def mean_not_positive(eta_unclipped: NDArray, weights: NDArray) -> bool:
+            mean = link.inverse(np.array(eta_unclipped, dtype=float))
+            return bool(np.any((mean <= 0.0) & (weights > 0.0)))
+
+        return mean_not_positive
     return None
 
 
@@ -349,8 +373,9 @@ def interior_start_intercept(
     offset, ignores.  An inverse or inverse-squared start outside the link's
     domain (``eta <= 0``, ``link_domain_violation``) is raised, the same way,
     until the smallest positive-weight ``eta`` is ``level``, that link's
-    intercept-only start ``g(mean) > 0``.  A constant offset ``c`` then
-    starts at ``intercept - c``, the no-offset start shifted with the
+    intercept-only start ``g(mean)``, when that level is inside the domain;
+    so is an identity-link start of a family whose means are positive.  A
+    constant offset ``c`` then starts at ``intercept - c``, the no-offset start shifted with the
     optimum.  A start already inside is left alone, so a fit without an
     offset starts exactly as before.
     """
@@ -361,8 +386,12 @@ def interior_start_intercept(
         if not math.isfinite(top):
             return float(intercept)
         return float(intercept) - (top - float(level))
-    outside = link_domain_violation(link)
-    if outside is not None and outside(eta, weights) and float(level) > 0.0:
+    outside = link_domain_violation(link, family)
+    if (
+        outside is not None
+        and outside(eta, weights)
+        and not outside(np.array([float(level)]), np.ones(1))
+    ):
         bottom = float(np.min(eta[weights > 0.0]))
         if not math.isfinite(bottom):
             return float(intercept)
