@@ -1346,15 +1346,18 @@ def test_a_partly_binding_constraint_publishes_the_divergence_of_its_fit(kind):
 
 
 def test_a_rejected_qp_step_publishes_the_face_of_the_iterate_it_returns(monkeypatch):
-    """An increasing P-spline whose second working QP drops rows the first held.
+    """An increasing P-spline whose rejected second step drops the rows the first held.
 
-    Its second step is made to be rejected, so the fit returns its first
-    iterate, whose statistics are on the face of the rows that bind there:
-    the active set that iteration started from, not the rejected proposal's.
-    The reference is the same fit stopped after one iteration, whose retained
-    state is that iterate.  Mutation check: without the restore in
-    ``_search``, the fit published the rejected proposal's face.
+    Its second step is made to be rejected, and its second working QP to
+    hold no row, so the fit returns its first iterate, whose statistics are
+    on the face of the rows that bind there: the active set that iteration
+    started from, not the rejected proposal's.  The reference is the same fit
+    stopped after one iteration, whose retained state is that iterate.
+    Mutation check: without the restore in ``_search``, the fit published the
+    rejected proposal's empty face.
     """
+    from dataclasses import replace
+
     from superglm import Spline
     from superglm.solvers.irls_direct import _qp, _search
     from superglm.solvers.irls_state import _IRLSStepDecision
@@ -1388,7 +1391,9 @@ def test_a_rejected_qp_step_publishes_the_face_of_the_iterate_it_returns(monkeyp
     def recorded(*args, **kwargs):
         result = real_solve(*args, **kwargs)
         active_sets.append(sorted(result.active_set))
-        return result
+        # the rejected second proposal holds no row, so its face is empty on
+        # any build; the iterate the fit returns holds the first QP's rows
+        return replace(result, active_set=[]) if len(active_sets) == 2 else result
 
     calls = []
     real_select = _search._select_irls_trial
@@ -1404,11 +1409,10 @@ def test_a_rejected_qp_step_publishes_the_face_of_the_iterate_it_returns(monkeyp
     monkeypatch.setattr(_qp, "_solve_constrained_qp_with_cold_retry", recorded)
     monkeypatch.setattr(_search, "_select_irls_trial", reject_the_second)
     rejected = fit()
-    assert len(calls) == 2
-    # the second proposal really did drop rows the first iterate held
-    assert len(active_sets) >= 2 and not set(active_sets[0]) <= set(active_sets[1])
+    assert len(calls) == 2 and len(active_sets) >= 2
 
     held, kept = reference._solver_pirls_result(), rejected._solver_pirls_result()
+    assert held.rank_info.face_rows.shape[0] > 0  # a face for the restore to keep
     np.testing.assert_array_equal(kept.beta, held.beta)
     np.testing.assert_array_equal(kept.rank_info.face_rows, held.rank_info.face_rows)
     assert kept.effective_df == held.effective_df
