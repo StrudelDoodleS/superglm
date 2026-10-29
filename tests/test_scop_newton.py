@@ -1346,6 +1346,26 @@ def _support_leaf(length):
     return part, change, centre, rng.normal(size=(n, q))
 
 
+def _own_traced_peak(call, *args):
+    """``call(*args)``'s traced peak above its result, the least of three calls, and the result.
+
+    tracemalloc's peak is the process's: another thread's allocations (an
+    xdist worker's receiver thread taking back tests to steal) add to it and
+    never subtract, so the least of three calls is the call's own.
+    """
+    import tracemalloc
+
+    peaks = []
+    for _ in range(3):
+        tracemalloc.start()
+        try:
+            result = call(*args)
+            peaks.append(tracemalloc.get_traced_memory()[1] - result.nbytes)
+        finally:
+            tracemalloc.stop()
+    return min(peaks), result
+
+
 @pytest.mark.parametrize("length", [1_000, 40_000], ids=["chunked", "column-at-a-time"])
 def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
     """A support's products hold no more than one column's products did, however long it is (tracemalloc).
@@ -1359,23 +1379,14 @@ def test_a_leaf_holds_no_more_of_a_support_than_its_column_products_did(length):
     Mutation check: the whole table at once held ``2 q`` support-length
     columns, and a one-column table of the long support held two.
     """
-    import tracemalloc
-
     from superglm.solvers.scop_newton import _leaf_product, _leaf_transposed
 
     part, change, centre, rows = _support_leaf(length)
     n = part.n
 
     _leaf_product(part, change, centre), _leaf_transposed(part, rows, centre)  # compiled
-    tracemalloc.start()
-    try:
-        formed = _leaf_product(part, change, centre)
-        product_peak = tracemalloc.get_traced_memory()[1] - formed.nbytes
-        tracemalloc.reset_peak()
-        moment = _leaf_transposed(part, rows, centre)
-        moment_peak = tracemalloc.get_traced_memory()[1] - formed.nbytes - moment.nbytes
-    finally:
-        tracemalloc.stop()
+    product_peak, _ = _own_traced_peak(_leaf_product, part, change, centre)
+    moment_peak, moment = _own_traced_peak(_leaf_transposed, part, rows, centre)
 
     assert product_peak <= 8 * max(length + n, 2 * n) + 8 * 1024
     assert moment_peak <= 8 * (length + n) + moment.nbytes + 8 * 1024
@@ -1424,8 +1435,6 @@ def test_a_wide_block_s_transposed_leaf_product_holds_no_more_than_its_column_pr
     sums for all 64 columns, or the table's moments formed apart from the
     result each hold ``64 width`` doubles or more.
     """
-    import tracemalloc
-
     from superglm.solvers.scop_newton import _leaf_transposed
 
     rng = np.random.default_rng(12)
@@ -1436,12 +1445,7 @@ def test_a_wide_block_s_transposed_leaf_product_holds_no_more_than_its_column_pr
     rows, centre = rng.normal(size=(n, q)), np.zeros(width)
 
     _leaf_transposed(part, rows, centre)  # compiled
-    tracemalloc.start()
-    try:
-        moment = _leaf_transposed(part, rows, centre)
-        peak = tracemalloc.get_traced_memory()[1] - moment.nbytes
-    finally:
-        tracemalloc.stop()
+    peak, _ = _own_traced_peak(_leaf_transposed, part, rows, centre)
 
     assert width >= 600 and 64 * width > n
     assert peak <= 8 * (n + 2 * width) + 8 * 1024
