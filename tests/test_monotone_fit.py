@@ -1230,6 +1230,10 @@ def test_a_term_held_flat_beside_a_fitted_one_adds_no_degrees_of_freedom(kind):
         ([1e160, 1e160, 1e160, 1e160], [2e-150] * 4, 1e150, 2),
         # free rows whose fit-scale denominator overflows while their slack does not
         ([0.0, 1e152, 2e152, 1.0], [5e-155] * 3 + [1.0], 1e154, 0),
+        # a flat term at round-off whose fit-scale denominator overflows: both rows bind
+        ([1e138, 3e138, 6e138, 1.0], [5e-155] * 3 + [1.0], 1e154, 2),
+        # a flat term at round-off on rows of 1e-200, whose squared norms underflow
+        ([1e-16, 3e-16, 6e-16, 1.0], [1.0] * 4, 1e-200, 2),
     ],
 )
 def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
@@ -1242,7 +1246,10 @@ def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
     reads the free slope as held (second case), as does the fit's scale left
     in coefficient units (third case); the fit's scale alone overflows and
     drops the binding rows (fourth case); an overflowing fit-scale denominator
-    divides a free row's slack to zero and holds it (fifth case).
+    divides a free row's slack to zero and holds it (fifth case), or, left to
+    abstain, frees a flat row (sixth case); rows normalised on their raw norms
+    underflow and the null-space SVD fails (seventh case).  Each row is read
+    after an exact power-of-two scaling, so no case depends on its magnitude.
     """
     from superglm.solvers.irls_direct import _active_face_basis
 

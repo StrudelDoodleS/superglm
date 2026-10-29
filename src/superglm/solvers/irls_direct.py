@@ -610,8 +610,9 @@ def _active_face_basis(
     """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
 
     The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
-    bind at ``beta`` (zero slack against the fit's largest column contribution,
-    ``column_scale`` the working columns' norms).  On it the constrained
+    bind at ``beta``: zero slack on the row's own scale, or against the fit's
+    largest column contribution (``column_scale`` the working columns' norms)
+    where that scale is finite and positive.  On it the constrained
     fit is, locally, the fit with those rows held as equalities, so its
     degrees of freedom and covariance are those of that fit (Meyer and
     Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
@@ -620,26 +621,31 @@ def _active_face_basis(
     row binds.
     """
     rows = np.asarray([] if active is None else active, dtype=np.intp)
-    if rows.size:
-        # A row binds when its slack is zero to rounding on its own scale
-        # (overflow-safe) or on the whole fit's, the largest column
-        # contribution |beta_j| ||x_j||_W read back in each column's units: a
-        # term the constraint holds flat has coefficients at round-off, which
-        # its own scale reads as free slopes.
-        bar = _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)
-        reach = float(np.max(np.abs(beta) * column_scale, initial=0.0))
-        per_unit = np.divide(
-            reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
-        )
-        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            fit_scale = np.maximum(np.abs(b[rows]), np.abs(A[rows]) @ per_unit)
-            on_fit = (A[rows] @ beta - b[rows]) / fit_scale
-        # Beyond float64's range (or at a zero scale) the fit's reading abstains.
-        on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
-        rows = rows[(_feasibility_slack(A[rows], beta, b[rows]) <= bar) | on_fit]
     if not rows.size:
         return None
-    held = A[rows]
+    # Each row and its bound scaled by a power of two (exact), so neither
+    # reading below nor the row norms depend on a row's magnitude.
+    exponent = np.frexp(np.maximum(np.max(np.abs(A[rows]), axis=1), np.abs(b[rows])))[1]
+    held = np.ldexp(A[rows], -exponent[:, None])
+    bound = np.ldexp(b[rows], -exponent)
+    # A row binds when its slack is zero to rounding on its own scale
+    # (overflow-safe) or on the whole fit's, the largest column contribution
+    # |beta_j| ||x_j||_W read back in each column's units: a term the
+    # constraint holds flat has coefficients at round-off, which its own scale
+    # reads as free slopes.
+    bar = _QP_FEASIBILITY_TOL + _gamma(A.shape[1] + 2)
+    reach = float(np.max(np.abs(beta) * column_scale, initial=0.0))
+    per_unit = np.divide(
+        reach, column_scale, out=np.zeros_like(column_scale), where=column_scale > 0.0
+    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        fit_scale = np.maximum(np.abs(bound), np.abs(held) @ per_unit)
+        on_fit = (held @ beta - bound) / fit_scale
+    # Beyond float64's range (or at a zero scale) the fit's reading abstains.
+    on_fit = np.isfinite(fit_scale) & (fit_scale > 0.0) & (on_fit <= bar)
+    held = held[(_feasibility_slack(held, beta, bound) <= bar) | on_fit]
+    if not held.shape[0]:
+        return None
     touched = np.flatnonzero(np.any(held != 0.0, axis=0))
     held = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
     _, singular, vt = np.linalg.svd(held, full_matrices=True)
