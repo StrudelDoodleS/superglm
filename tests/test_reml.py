@@ -3123,6 +3123,39 @@ class TestExactPresolve:
         assert info["n_reml_iter"] == 1
         assert info["lambdas"] == info["lambda_history"][1]
 
+    def test_each_evaluation_carries_its_rounding_estimate(self, monkeypatch):
+        """The stall rule reads each evaluation's rounding estimate, which the
+        forced tests widen.  Unforced, it is at least the value's own last
+        place, ``u |V|`` (the summands' absolute total is at least ``|V|``),
+        and below the stop's resolution, ``reml_tol (1 + |V|)``, so the rule
+        absorbs only decreases the score test cannot resolve.  Measured: 203
+        to 207 times ``u |V|`` and 2.3e-5 of the resolution on the known-scale
+        Poisson fit, 46 times and 5.1e-6 on the profiled-scale Gamma fit.
+        Mutation check: with the estimate zeroed, the Gamma fixture ran to
+        ``max_reml_iter`` unconverged, and this test fails on the first
+        evaluation."""
+        import superglm.reml.direct as direct_module
+        from superglm.reml.objective import REMLObjectiveEvaluation
+
+        real_objective = direct_module.reml_laml_objective
+        evaluations = []
+
+        def recorded(*args, **kw):
+            evaluation = real_objective(*args, **kw)
+            if isinstance(evaluation, REMLObjectiveEvaluation):
+                evaluations.append(evaluation)
+            return evaluation
+
+        monkeypatch.setattr(direct_module, "reml_laml_objective", recorded)
+        model, X, y = _ten_penalty_poisson()
+        model.fit_reml(X, y, runtime_validation="skip")
+        self._fit_stall_gamma(monkeypatch)
+        assert evaluations
+        u = 2.0**-53
+        for evaluation in evaluations:
+            value = abs(evaluation.value)
+            assert u * value <= evaluation.roundoff <= 1e-9 * (1.0 + value)
+
     def test_a_cold_search_keeps_its_path(self, monkeypatch):
         """The stop on a decrease within rounding is a pre-solved fit's alone:
         in the release differential's corpus 29 of 407 cold exact fits
