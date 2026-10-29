@@ -549,27 +549,26 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    The rows held are the fit's: the complement of the face it recorded
-    (``RankInfo.face``, :func:`_face_complement`), none where it recorded
-    none. A record pickled before fits recorded their face (0.41 and earlier)
-    has no face entry of its own, and a post-fit repair that moved the
-    working weights drops the record; their rows are read as the fit reads
-    them (``irls_direct._binding_rows``), all of them, the QP's active set
-    being unknown, over the active columns ``X`` at the ``curvature``
-    weights, whose centred Gram is ``data_gram`` when the caller has it.
-    There a slack below ``_QP_FEASIBILITY_TOL`` of the fit's largest column
-    contribution reads as held. None when the restriction cannot be formed
-    to a relative accuracy of 1e-6.
+    The rows held are the ones the fit held (``RankInfo.face_rows``), in
+    their own units, none where it held none. A record without them, pickled
+    before fits kept them (0.41 and earlier) or dropped by a post-fit repair
+    that moved the working weights, has its rows read as the fit reads them
+    (``irls_direct._binding_rows``), all of them, the QP's active set being
+    unknown, over the active columns ``X`` at the ``curvature`` weights,
+    whose centred Gram is ``data_gram`` when the caller has it. There a slack
+    below ``_QP_FEASIBILITY_TOL`` of the fit's largest column contribution
+    reads as held. None when the restriction cannot be formed to a relative
+    accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
-    record = model._solver_pirls_result().rank_info
-    recorded = record is not None and "face" in vars(record)
-    face = record.face if recorded else None
-    if recorded and face is None:
-        return apply
+    held = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
     width = X.p
-    if face is not None:
-        R = _face_complement(model, active, face)
+    if held is not None:
+        # Over the active columns; an inactive term's coefficients are zero,
+        # so its rows drop.
+        columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
+        R = held[:, np.concatenate(columns)]
+        R = R[np.any(R != 0.0, axis=1)]
     else:
         beta = np.asarray(model.result.beta, dtype=np.float64)
         theta = np.zeros(width)
@@ -614,31 +613,6 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         return moved - moves @ (held @ (R @ moved))
 
     return restricted
-
-
-def _face_complement(model, active, face: np.ndarray) -> np.ndarray:
-    """The rows a recorded face holds, over the active columns: an orthonormal basis of its complement.
-
-    Each column of the face's basis (``irls_direct._active_face_basis``) is
-    a free column's unit vector or a null vector of binding rows, which lie
-    in the constrained terms' columns. So the columns that meet those are
-    orthonormal there, and the complement is their null space, with no rank
-    to decide. An inactive term's coefficients are zero, so its columns drop,
-    and with them any row that lies in them alone.
-    """
-    full = {group.name: group for group in model._groups}
-    inside = np.zeros(face.shape[0], dtype=bool)
-    for group in model._groups:
-        if getattr(group.constraints, "n_constraints", 0):
-            inside[group.start : group.end] = True
-    block = face[inside]
-    meeting = block[:, np.any(block != 0.0, axis=0)]
-    basis = scipy.linalg.null_space(meeting.T) if meeting.shape[1] else np.eye(len(block))
-    complement = np.zeros((basis.shape[1], face.shape[0]))
-    complement[:, inside] = basis.T
-    columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
-    complement = complement[:, np.concatenate(columns)]
-    return complement[np.any(complement != 0.0, axis=1)]
 
 
 @dataclass(frozen=True)

@@ -1139,11 +1139,13 @@ def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatc
     the curve kept a pull. Its rows are now the ones the fit holds, and each
     gap's variance is the one with the curve taken as fixed, to the
     restriction's relative accuracy of 1e-6. The Gamma/log fit takes the
-    observed curvature and the face it recorded. The Poisson fit loads as a
-    model pickled before fits recorded a face does, and the editor reads its
+    observed curvature and the rows it recorded. The Poisson fit loads as a
+    model pickled before fits recorded them does, and the editor reads its
     rows. The ``cr`` curve has seven rows over six active columns. Mutation:
-    the per-row reading moves a gap's variance by up to 94%, and indexing
-    the pivots past the QR's diagonal raises on ``cr``.
+    the per-row reading moves a gap's variance by up to 94%; indexing the
+    pivots past the QR's diagonal raises on ``cr``; and telling a 0.41 record
+    by a missing face entry, which a real load fills, holds nothing on the
+    Poisson cases.
     """
     bands = TWELVE[:8]
     rng = np.random.default_rng(5)
@@ -1165,13 +1167,18 @@ def test_a_curve_held_flat_beside_a_fitted_term_adds_nothing_to_a_gap(monkeypatc
     group, solver = model._groups[0], model._solver_pirls_result()
     assert not np.any(solver.rank_info.face[group.start : group.end])
     if family == "poisson":
-        # what unpickling a record from before the face fields does
+        # a record from before the face fields, published as a fit's result
+        # is, through a pickle: the load fills the fields with their defaults
         unrecorded = object.__new__(type(solver.rank_info))
         unrecorded.__dict__.update(
             {key: value for key, value in vars(solver.rank_info).items() if "face" not in key}
         )
-        model._solver_result = dataclasses.replace(solver, rank_info=unrecorded)
+        result = dataclasses.replace(solver, rank_info=unrecorded)
+        result._publish()
+        model._solver_result = result
         model.__dict__.pop("_coef_covariance", None)
+        model = pickle.loads(pickle.dumps(model))
+        assert model._solver_pirls_result().rank_info.face_rows is None
     found = _captured_gaps(monkeypatch)
     free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
     monkeypatch.setattr(free_levels_module, "_ordered_contrasts", lambda *args: None)
@@ -1210,37 +1217,49 @@ def test_a_curve_whose_rows_the_fit_does_not_hold_moves_with_its_whole_influence
     assert free["flagged"] == whole["flagged"] != []
 
 
-def test_a_recorded_face_holds_its_complement_and_no_row_merely_near_it():
-    """A face of every direction but ``e0``, recorded beside a slack row ``e0 + 1e-14 e1``.
+@pytest.mark.parametrize("case", ["slack-row-near-the-face", "row-in-small-units"])
+def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
+    """The rows a fit records holding are the restriction, entry for entry.
 
-    A coefficient of 1e14 along ``e1`` gives that row slack 1, yet its share
-    of the face, 1e-14, sat below a near-orthogonality cut: held too, it took
-    the ``e1`` direction's whole response. The restriction is now the face's
-    own complement, ``e0`` alone, to its relative accuracy of 1e-6.
-    Mutation: holding the rows within the cut drops ``c' move(c)`` for
-    ``c = 1e-14 e1`` from 1 to about 5e-16.
+    ``slack-row-near-the-face``: rows ``e0`` and ``e0 + 1e-14 e1`` beside a
+    coefficient of 1e14 along ``e1``; the QP held ``e0``, the second row has
+    slack 1. A cut on the second row's share of the face (1e-14) held it too
+    and took ``e1``'s response: ``c' move(c)`` for ``c = 1e-14 e1`` fell from
+    1 to about 5e-16. ``row-in-small-units``: one binding row ``[1, 1e-16]``
+    under a curvature of 1e32 on its second column; the face's complement
+    from an SVD of its basis came back as ``[1, 0]``, and ``c' move(c)`` for
+    ``c = 1e-16 e1`` read 1 against 0.5. Each restriction is to its relative
+    accuracy of 1e-6. Mutation: 03ab16f5 fails the first, 3f622ba9 the second.
     """
     from types import SimpleNamespace
 
+    from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
     from superglm.types import GroupSlice, LinearConstraintSet
 
-    A = np.zeros((2, 10))
-    A[:, 0], A[1, 1] = 1.0, 1e-14
-    group = GroupSlice(name="t", start=0, end=10, constraints=LinearConstraintSet(A, np.zeros(2)))
-    unit = np.eye(10)
-    record = SimpleNamespace(face=unit[:, 1:])
+    if case == "slack-row-near-the-face":
+        width, active_rows, expected = 10, [0], 1.0
+        A = np.zeros((2, width))
+        A[:, 0], A[1, 1] = 1.0, 1e-14
+        beta, scale, c = 1e14 * np.eye(width)[1], np.diag([1.0, 1e28, *[1.0] * 8]), 1e-14
+    else:
+        width, active_rows, expected = 2, [0], 0.5
+        A = np.array([[1.0, 1e-16]])
+        beta, scale, c = np.zeros(width), np.diag([1.0, 1e32]), 1e-16
+    b = np.zeros(A.shape[0])
+    # recorded as the fit records them: the binding rows of its active set
+    face_rows = _binding_rows(A[active_rows], b[active_rows], beta, np.ones(width))
+    record = SimpleNamespace(face=_active_face_basis(face_rows), face_rows=face_rows)
+    group = GroupSlice(name="t", start=0, end=width, constraints=LinearConstraintSet(A, b))
     model = SimpleNamespace(
         _groups=[group],
-        result=SimpleNamespace(beta=1e14 * unit[1]),
+        result=SimpleNamespace(beta=beta),
         _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
     )
-    curvature_inverse = np.diag([1.0, 1e28, *[1.0] * 8])
     move = free_levels_module._on_binding_face(
-        model, [group], lambda c: curvature_inverse @ c, SimpleNamespace(p=10), None
+        model, [group], lambda v: scale @ v, SimpleNamespace(p=width), None
     )
-    c = 1e-14 * unit[1]
-    np.testing.assert_allclose(move(unit[0]), 0.0, atol=1e-6)
-    np.testing.assert_allclose(c @ move(c), 1.0, rtol=1e-6)
+    direction = c * np.eye(width)[1]
+    np.testing.assert_allclose(direction @ move(direction), expected, rtol=1e-6)
 
 
 def test_free_levels_judge_no_level_when_a_fit_stops_before_converging():

@@ -641,13 +641,11 @@ def _binding_rows(A: NDArray, b: NDArray, beta: NDArray, column_scale: NDArray) 
     return held[(_feasibility_slack(A, beta, b) <= bar) | on_fit]
 
 
-def _active_face_basis(
-    A: NDArray, b: NDArray, beta: NDArray, active: list[int] | None, column_scale: NDArray
-) -> NDArray | None:
-    """An orthonormal basis ``Z`` of the coefficients the binding shape rows leave free.
+def _active_face_basis(held: NDArray) -> NDArray | None:
+    """An orthonormal basis ``Z`` of the coefficients the binding shape rows ``held`` leave free.
 
     The face is ``null(A_F)`` for the rows ``F`` of the QP's active set that
-    bind at ``beta`` (``_binding_rows``).  On it the constrained
+    bind at the fit (``_binding_rows``).  On it the constrained
     fit is, locally, the fit with those rows held as equalities, so its
     degrees of freedom and covariance are those of that fit (Meyer and
     Woodroofe 2000; Tibshirani and Taylor 2012, Theorem 3).  Columns no
@@ -655,18 +653,15 @@ def _active_face_basis(
     is decided on unit rows at NumPy's ``matrix_rank`` cut.  ``None`` when no
     row binds.
     """
-    rows = np.asarray([] if active is None else active, dtype=np.intp)
-    if not rows.size:
-        return None
-    held = _binding_rows(A[rows], b[rows], beta, column_scale)
+    width = held.shape[1]
     if not held.shape[0]:
         return None
     touched = np.flatnonzero(np.any(held != 0.0, axis=0))
     held = held[:, touched] / np.linalg.norm(held, axis=1)[:, None]
     _, singular, vt = np.linalg.svd(held, full_matrices=True)
     rank = int(np.count_nonzero(singular > max(held.shape) * _EPS_FLOAT * singular[0]))
-    free = np.setdiff1d(np.arange(A.shape[1]), touched)
-    basis = np.zeros((A.shape[1], free.size + touched.size - rank))
+    free = np.setdiff1d(np.arange(width), touched)
+    basis = np.zeros((width, free.size + touched.size - rank))
     basis[free, np.arange(free.size)] = 1.0
     basis[np.ix_(touched, np.arange(free.size, basis.shape[1]))] = vt[rank:].T
     return basis
@@ -5074,17 +5069,18 @@ def _fit_irls_direct_once(
             augmented_rank = reml_slope_rank
             final_system = centered_final
             # A constrained fit's statistics are its active face's.
-            face = (
-                _active_face_basis(
-                    A_all,
-                    b_all,
+            face_rows = None
+            if A_all is not None and b_all is not None:
+                active_rows = np.asarray(
+                    [] if prev_active_set is None else prev_active_set, dtype=np.intp
+                )
+                face_rows = _binding_rows(
+                    A_all[active_rows],
+                    b_all[active_rows],
                     beta,
-                    prev_active_set,
                     np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
                 )
-                if A_all is not None and b_all is not None
-                else None
-            )
+            face = None if face_rows is None else _active_face_basis(face_rows)
             face_rank = (
                 None
                 if face is None
@@ -5114,6 +5110,7 @@ def _fit_irls_direct_once(
                 augmented_rank=augmented_rank,
                 feature_edf=feature_edf,
                 face=face,
+                face_rows=face_rows,
                 face_rank=face_rank,
             ) -> RankInfo:
                 """The data-subspace metadata only retained-fit inference reads.
@@ -5208,6 +5205,7 @@ def _fit_irls_direct_once(
                     data_gram=centered_final.data_gram,
                     data_gram_weights=weights_fingerprint(W),
                     face=face,
+                    face_rows=face_rows,
                     face_augmented=face_rank,
                     face_coefficient=(
                         None if face is None else _face_decomposition(M_beta, face, raw_factor)

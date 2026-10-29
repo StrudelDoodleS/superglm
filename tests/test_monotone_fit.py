@@ -1253,11 +1253,13 @@ def test_the_face_reads_zero_slack_against_the_largest_column_contribution(
     4 and 5 check that rows and coefficients near float64's range read as they
     do at unit scale.
     """
-    from superglm.solvers.irls_direct import _active_face_basis
+    from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
 
     A = np.zeros((2, 4))
     A[0, :2], A[1, 1:3] = [-row_scale, row_scale], [-row_scale, row_scale]
-    face = _active_face_basis(A, np.zeros(2), np.asarray(beta), [0, 1], np.asarray(column_scale))
+    face = _active_face_basis(
+        _binding_rows(A, np.zeros(2), np.asarray(beta), np.asarray(column_scale))
+    )
     assert (4 if face is None else face.shape[1]) == 4 - held
 
 
@@ -1268,14 +1270,15 @@ def test_a_bound_far_above_its_row_leaves_the_row_in_range():
     to about 1e-200, its squared norm underflows, and the face keeps a
     spurious free direction.
     """
-    from superglm.solvers.irls_direct import _active_face_basis
+    from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
 
     face = _active_face_basis(
-        np.array([[1.0, 0.0]]),
-        np.array([1e200]),
-        np.array([1e200, 1.0]),
-        [0],
-        np.array([1e-100, 1.0]),
+        _binding_rows(
+            np.array([[1.0, 0.0]]),
+            np.array([1e200]),
+            np.array([1e200, 1.0]),
+            np.array([1e-100, 1.0]),
+        )
     )
     assert face is not None and face.shape[1] == 1
 
@@ -1288,16 +1291,17 @@ def test_an_overflowing_unit_scale_on_a_column_no_row_touches_reads_the_rows():
     multiplies that by the rows' zero entries (NaN), the fit's reading
     abstains, and the flat term reads as free.
     """
-    from superglm.solvers.irls_direct import _active_face_basis
+    from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
 
     A = np.zeros((2, 5))
     A[0, :2], A[1, 1:3] = [-1.0, 1.0], [-1.0, 1.0]
     face = _active_face_basis(
-        A,
-        np.zeros(2),
-        np.array([1e134, 3e134, 6e134, 1e150, 0.0]),
-        [0, 1],
-        np.array([1.0, 1.0, 1.0, 1.0, 1e-160]),
+        _binding_rows(
+            A,
+            np.zeros(2),
+            np.array([1e134, 3e134, 6e134, 1e150, 0.0]),
+            np.array([1.0, 1.0, 1.0, 1.0, 1e-160]),
+        )
     )
     assert face is not None and face.shape[1] == 3
 
