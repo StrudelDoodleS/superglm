@@ -3123,6 +3123,36 @@ class TestExactPresolve:
         assert info["n_reml_iter"] == 1
         assert info["lambdas"] == info["lambda_history"][1]
 
+    def test_a_cold_search_keeps_its_path(self, monkeypatch):
+        """The stop on a decrease within rounding is a pre-solved fit's alone:
+        in the release differential's corpus 29 of 407 cold exact fits
+        accepted such a decrease and then gained up to 7.5e-8 more before the
+        score test ended them.  With every accepted decrease made to count as
+        rounding, a cold fit is bit for bit the unforced one.  Mutation check:
+        with the rule applied to cold fits too, this one stopped on a decrease
+        of 3.4e-12."""
+        import superglm.model.reml_ops as reml_ops_module
+
+        real_direct = reml_ops_module.optimize_direct_reml
+
+        def cold(*args, **kw):
+            kw["presolve"] = False
+            return real_direct(*args, **kw)
+
+        monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", cold)
+
+        def fit():
+            model, X, y = _ten_penalty_poisson()
+            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+
+        plain = fit()
+        self._count_every_decrease_as_rounding(monkeypatch)
+        forced = fit()
+        assert forced["objective"] == plain["objective"]
+        assert forced["lambdas"] == plain["lambdas"]
+        dead = forced["profile"].get("reml_dead_line_search", {})
+        assert dead.get("unresolved_decrease") is None
+
 
 def _ten_penalty_frame(n=3000, seed=1):
     rng = np.random.default_rng(seed)
@@ -3210,7 +3240,7 @@ class TestExactPresolveScope:
     def test_an_admitted_pair_starts_from_the_presolve(self, case, monkeypatch):
         """And lands no worse than the plain cold start, to the stop's
         resolution ``reml_tol (1 + |V|)``: on these fixtures 3.4e-4 .. 9.7e-4
-        lower, against resolutions near 3e-6 (the cold probit fit stopped at
+        lower, against resolutions of 1.9e-6 .. 3.5e-6 (the cold probit fit stopped at
         ``max_reml_iter``).  Mutation check: without the first step's release,
         five of the six pairs ended 9.8e-6 .. 2.2e-4 above the cold start."""
         import superglm.model.reml_ops as reml_ops_module

@@ -1742,8 +1742,10 @@ def optimize_direct_reml(
         accepted = False
         had_feasible_trial = False
         evaluated_feasible_trial = False
-        # an accepted trial's decrease within the two evaluations' rounding
+        # an accepted trial's decrease within the two evaluations' rounding,
+        # and that rounding
         unresolved_decrease: float | None = None
+        stall_roundoff: float | None = None
         # The synchronous search owns fixed design coordinates and warm state.
         # Its rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
@@ -2035,6 +2037,7 @@ def optimize_direct_reml(
                 # ended them.  Where the certificate refuses, the step is taken as
                 # before.
                 unresolved_decrease = float(obj - trial_obj)
+                stall_roundoff = float(obj_roundoff + trial_roundoff)
                 if trace_run is not None and trace_run.enabled:
                     # The trial's evaluation event above reads accepted; this
                     # records that the stop discarded it.
@@ -2046,7 +2049,7 @@ def optimize_direct_reml(
                             "outer_iteration": n_iter,
                             "line_search_iteration": _ls + 1,
                             "unresolved_decrease": unresolved_decrease,
-                            "objective_roundoff": float(obj_roundoff + trial_roundoff),
+                            "objective_roundoff": stall_roundoff,
                         },
                         channel="reml",
                         purpose="reml_rounding_stall",
@@ -2160,9 +2163,12 @@ def optimize_direct_reml(
                     "evaluated_trial": bool(dead_evidence),
                     "candidate_mode_stationary": bool(candidate_mode_stationary),
                     "termination_reason": termination_reason,
-                    # an accepted trial's decrease, within the evaluations' rounding
+                    # an accepted trial's decrease, within the two evaluations'
+                    # rounding; without one, the candidate's own rounding
                     "unresolved_decrease": unresolved_decrease,
-                    "objective_roundoff": float(obj_roundoff),
+                    "objective_roundoff": (
+                        float(obj_roundoff) if stall_roundoff is None else stall_roundoff
+                    ),
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,
