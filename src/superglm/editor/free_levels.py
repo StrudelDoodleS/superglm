@@ -49,6 +49,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -548,8 +549,8 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    The rows held are the ones the fit held (``RankInfo.face_rows``), in
-    their own units, none where it held none. A record without them, pickled
+    The rows held are the ones the fit held (``RankInfo.face_rows``), an
+    independent set of them in their own units, none where it held none. A record without them, pickled
     before fits kept them (0.41 and earlier) or dropped by a post-fit repair
     that moved the working weights, has its rows read as the fit reads them
     (``irls_direct._binding_rows``), all of them, the QP's active set being
@@ -589,12 +590,14 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
-    # The rows' retained singular subspace by the fit's own rank rule
-    # (``irls_direct._binding_rank``), whose complement is the face the fit
-    # holds, whatever the rows' order.
-    touched, vt, rank = _binding_rank(R)
-    R = np.zeros((rank, width))
-    R[:, touched] = vt[:rank]
+    # As many of the rows as the fit's rank rule finds independent among them
+    # (``irls_direct._binding_rank``), the most independent first by pivoted
+    # QR (Businger and Golub 1965), in their own units: a basis of the face's
+    # complement as well conditioned as the rows themselves. Rows equal to
+    # within rounding tie, and which one is kept matters only through a
+    # curvature conditioned far beyond 1/u.
+    _q, _triangle, order = scipy.linalg.qr(R.T, mode="economic", pivoting=True)
+    R = R[order[: _binding_rank(R)[2]]]
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
