@@ -1,5 +1,7 @@
 """Tests for term_inference API and enriched summary."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -240,6 +242,37 @@ class TestTermInferenceNumeric:
         ti = fitted_model.term_inference("density")
         assert ti.se_log_relativity is not None
         assert np.all(np.isfinite(ti.se_log_relativity))
+
+    def test_a_slope_past_the_exp_range_reports_its_coefficient_without_a_warning(self):
+        """Gaussian slopes of 1e11, -1e11 and 0.5 under the identity link.
+
+        ``exp`` of the first overflowed with a warning, and the log relativity
+        read back from it was ``inf``; the second's underflowed to 0.0, whose
+        log warned and read ``-inf``. The log relativity is the coefficient,
+        and the relativity is ``exp(coef)`` rounded as ``exp`` rounds, ``inf``
+        and ``0.0`` past float64's range, without a warning. Mutation check:
+        the unfixed ``reconstruct`` warns, and log relativities read back from
+        the relativity, in either surface, warn and read ``inf`` and ``-inf``.
+        """
+        rng = np.random.default_rng(3)
+        n = 200
+        X = pd.DataFrame({name: rng.uniform(-1.0, 1.0, n) for name in "uvw"})
+        y = 1e11 * X["u"] - 1e11 * X["v"] + 0.5 * X["w"] + rng.normal(0.0, 0.1, n)
+        model = SuperGLM(family="gaussian", features={name: Numeric() for name in "uvw"}).fit(X, y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            inference = {name: model.term_inference(name, with_se=True) for name in "uvw"}
+            tables = model.relativities()
+        for name, relativity in (("u", np.inf), ("v", 0.0), ("w", None)):
+            coef = model.reconstruct_feature(name)["coef"]
+            expected = np.exp(coef) if relativity is None else relativity
+            table = tables[name]
+            for log_relativity, reported in (
+                (inference[name].log_relativity[0], inference[name].relativity[0]),
+                (table["log_relativity"].iloc[0], table["relativity"].iloc[0]),
+            ):
+                assert log_relativity == coef
+                np.testing.assert_equal(reported, expected)
 
 
 class TestTermInferencePolynomialResolution:

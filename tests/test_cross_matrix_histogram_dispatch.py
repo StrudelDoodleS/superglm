@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import tracemalloc
-
 import numpy as np
 import pytest
 
@@ -12,6 +10,7 @@ from superglm._group_matrix import _group_matrix_kernels as kernels
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import DiscretizedSCOPGroupMatrix, DiscretizedSSPGroupMatrix
+from tests._traced_memory import own_traced_peak
 
 
 def _group(kind, *, n, bins, width, seed):
@@ -215,12 +214,7 @@ def test_support_gather_uses_take_only_for_contiguous_storage(monkeypatch, dtype
 def test_noncontiguous_support_gather_does_not_copy_entire_support():
     support = np.ones((100_000, 14))[:, ::2]
     indices = np.arange(96, dtype=np.intp)
-    tracemalloc.start()
-    try:
-        actual = algebra._expand_support_rows(support, indices)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, actual = own_traced_peak(algebra._expand_support_rows, support, indices)
     # Allow indexing metadata, but not a contiguous copy of the 5.6 MB support.
     assert peak <= actual.nbytes + 64_000
     np.testing.assert_array_equal(actual, np.ones((96, 7)))

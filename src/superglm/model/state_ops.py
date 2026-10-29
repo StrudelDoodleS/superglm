@@ -143,8 +143,14 @@ def _rank_active_state(model, rank_info):
     return design, active_groups
 
 
-def _legacy_active_state(model, solver, W: NDArray):
-    """Rebuild old fit inference with grouped, centered coefficient algebra."""
+def _legacy_rank_state(model, solver, W: NDArray):
+    """The selected grouped design, its centred system at ``W`` and their rank decisions.
+
+    Returns ``design, active_groups, centered, coefficient_rank,
+    profile_rank, data_rank``: the raw and centred Hessians' and the data
+    Gram's decompositions, decided as the fit decides them, and ``None`` for
+    the last four when no column is selected.
+    """
     from superglm.inference.covariance import _active_penalty_matrix
     from superglm.solvers.centered_system import (
         build_centered_system,
@@ -184,18 +190,7 @@ def _legacy_active_state(model, solver, W: NDArray):
         active_groups=active_groups,
     )
     if design.p == 0:
-        sum_w = float(np.sum(W))
-        augmented = np.array([[1.0 / sum_w]]) if sum_w > 0.0 else np.array([[0.0]])
-        data_rank = decompose_gram(np.empty((0, 0)))
-        return (
-            design,
-            active_groups,
-            np.empty((0, 0)),
-            _public_augmented_covariance(model, augmented, active_groups),
-            np.empty((0, 0)),
-            np.empty((0, 0)),
-            data_rank,
-        )
+        return design, active_groups, None, None, None, None
 
     centered = build_centered_system(
         dm=design,
@@ -203,7 +198,7 @@ def _legacy_active_state(model, solver, W: NDArray):
         z_off=np.zeros(design.n),
         penalty=curvature,
     )
-    raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
+    raw_gram, _, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
     # rows centred about the system's exact centre pair (issue #430)
     centre, centre_lo = centered.centre_pair()
@@ -240,6 +235,28 @@ def _legacy_active_state(model, solver, W: NDArray):
                 )
             )
             profile_rank = certified
+    return design, active_groups, centered, coefficient_rank, profile_rank, data_rank
+
+
+def _legacy_active_state(model, solver, W: NDArray):
+    """Rebuild old fit inference with grouped, centered coefficient algebra."""
+    design, active_groups, centered, coefficient_rank, profile_rank, data_rank = _legacy_rank_state(
+        model, solver, W
+    )
+    if centered is None:
+        sum_w = float(np.sum(W))
+        augmented = np.array([[1.0 / sum_w]]) if sum_w > 0.0 else np.array([[0.0]])
+        data_rank = decompose_gram(np.empty((0, 0)))
+        return (
+            design,
+            active_groups,
+            np.empty((0, 0)),
+            _public_augmented_covariance(model, augmented, active_groups),
+            np.empty((0, 0)),
+            np.empty((0, 0)),
+            data_rank,
+        )
+    _, xtw1, _, _ = centered.raw_weighted_moments()
     coefficient_inverse = coefficient_rank.pseudo_inverse()
     profile_inverse = profile_rank.pseudo_inverse()
     mean_x = xtw1 / centered.sum_w
@@ -258,6 +275,66 @@ def _legacy_active_state(model, solver, W: NDArray):
         centered.data_gram,
         profile_inverse,
         data_rank,
+    )
+
+
+def face_record_at(model, W: NDArray):
+    """The fit's rank record formed again at the weights ``W``, on the face it recorded.
+
+    The face and its rows are the fit's: a revision that leaves every
+    constrained term's coefficients where its QP put them leaves the rows the
+    QP held binding. Each decomposition, on the face and off it, the EDF and
+    the centre are formed at ``W`` as the fit forms them; the data Gram is
+    left for the first inference at ``W`` to take.
+    """
+    from dataclasses import replace
+
+    from superglm.solvers.centered_system import grouped_augmented_factor
+    from superglm.solvers.irls_direct import _face_decomposition, _feature_edf
+    from superglm.solvers.rank import weights_fingerprint
+
+    solver = model._solver_pirls_result()
+    record = solver.rank_info
+    design, active_groups, centered, coefficient, augmented, data = _legacy_rank_state(
+        model, solver, W
+    )
+    curvature, face = centered.penalty, record.face
+    centre, centre_lo = centered.centre_pair()
+
+    def factor(exponent: int = 0) -> NDArray:
+        return grouped_augmented_factor(
+            design,
+            np.ldexp(W, -exponent),
+            np.ldexp(curvature, -exponent),
+            center=centre,
+            center_lo=centre_lo,
+        )
+
+    face_augmented = face_coefficient = None
+    if face is not None:
+        face_augmented = _face_decomposition(centered.hessian, face, factor)
+        raw = centered.hessian + centered.sum_w * np.outer(centered.mean_x, centered.mean_x)
+        face_coefficient = _face_decomposition(
+            raw, face, lambda: grouped_augmented_factor(design, W, curvature)
+        )
+    feature_edf = _feature_edf(
+        centered, augmented if face is None else face_augmented, factor, face
+    )
+    feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
+    feature_edf.setflags(write=False)
+    return replace(
+        record,
+        sum_w=centered.sum_w,
+        mean_x=centered.mean_x,
+        data=data,
+        augmented=augmented,
+        coefficient=coefficient,
+        feature_edf=feature_edf,
+        group_edf={group.name: float(np.sum(feature_edf[group.sl])) for group in active_groups},
+        data_gram=centered.data_gram,
+        data_gram_weights=weights_fingerprint(W),
+        face_augmented=face_augmented,
+        face_coefficient=face_coefficient,
     )
 
 

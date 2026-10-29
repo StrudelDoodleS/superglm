@@ -145,12 +145,11 @@ def relativities(
                 )
             out[name] = _center_df(df)
         elif "relativity_per_unit" in raw:
-            rel = raw["relativity_per_unit"]
             df = pd.DataFrame(
                 {
                     "label": ["per_unit"],
-                    "relativity": [rel],
-                    "log_relativity": [np.log(rel)],
+                    "relativity": [raw["relativity_per_unit"]],
+                    "log_relativity": [raw["coef"]],
                 }
             )
             if with_se:

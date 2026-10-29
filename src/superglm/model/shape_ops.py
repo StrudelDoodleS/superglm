@@ -672,20 +672,29 @@ def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_name
     weights_unchanged = np.array_equal(current_working_weights, prior_working_weights)
     selection_unchanged = current_selected_names == prior_selected_names
     curvature_changes = _selection_local_curvature_depends_on_beta(fitted_penalty(model))
-    if (
-        weights_unchanged
-        and selection_unchanged
-        and not curvature_changes
-        and model._solver_result.rank_info is not None
-    ):
+    record = model._solver_result.rank_info
+    if weights_unchanged and selection_unchanged and not curvature_changes and record is not None:
         return
 
+    # A repair moves only its own term's coefficients and the intercept, so a
+    # record of the rows a constrained fit held keeps them, none binding
+    # included, formed again at the new weights over the active design, which
+    # is the record's full width only where every column was selected; any
+    # other record is dropped.
+    refreshed = (
+        state_ops.face_record_at(model, current_working_weights)
+        if record is not None
+        and record.face_rows is not None
+        and selection_unchanged
+        and record.selected_columns.size == record.mean_x.size
+        else None
+    )
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)
         if result is None or id(result) in updated:
             continue
-        result.rank_info = None
+        result.rank_info = refreshed
         updated.add(id(result))
 
     inference = state_ops.fit_inference_info(model)
