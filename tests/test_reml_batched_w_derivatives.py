@@ -371,8 +371,9 @@ def _exact_signed_gram(X, weights, hi, lo):
     )
 
 
+@pytest.mark.parametrize("family", ["poisson", "binomial"])
 @pytest.mark.parametrize("shift", [1e8, 1e16])
-def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift):
+def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift, family):
     """A dense column at a large offset between bounded ones: each derivative Gram against exact products.
 
     The Grams take raw signed moments on the bounded columns and centre the
@@ -383,10 +384,12 @@ def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift):
     + |l_j|)(|x~_k| + |l_k|)``, ``x~`` the bounded values and the dense rows
     ``x - c``, ``l`` their centres.  Control: the raw moments of the whole
     design, centred after, exceed it; mutation: the dense rows left
-    uncentred, about anchor 0.
+    uncentred, about anchor 0.  Under Poisson/log ``dW/deta = W``, so every
+    direction has ``sum a = 0`` at the mode and the terms that scale with
+    it vanish; binomial/logit directions carry a weight sum.
     """
     monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: True)
-    kwargs = _correction_fixture(p=3, shift=shift, storage="split")
+    kwargs = _correction_fixture(p=3, shift=shift, storage="split", family=family)
     calls = []
     split_gram = w_derivatives._dense_split_signed_gram
 
