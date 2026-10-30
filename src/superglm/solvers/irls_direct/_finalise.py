@@ -145,8 +145,8 @@ def _face_decomposition(
     """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``.
 
     ``M`` is a computed Gram of ``rows`` rows with nonnegative weights, plus a
-    penalty, so a negative eigenvalue of ``Z' M Z`` past the eigensolver's
-    resolution is the rounding of forming ``M`` and not curvature
+    penalty, so a negative eigenvalue or diagonal of ``Z' M Z`` past the
+    eigensolver's resolution is the rounding of forming ``M`` and not curvature
     (``psd_by_construction``).  Nor can a Gram whose formation may have moved
     it by its smallest eigenvalue certify its spectrum
     (``_face_formation_unresolved``), even when it factors.  Both happen when

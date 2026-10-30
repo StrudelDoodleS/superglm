@@ -2680,6 +2680,35 @@ class TestDirectSolverBasic:
         # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
         assert error <= 64 * np.finfo(float).eps * scale * np.linalg.cond(exact)
 
+    def test_a_face_gram_that_forming_left_a_negative_diagonal_is_decided_by_the_factor(self):
+        """A face Gram of nonnegative weights with a negative diagonal is decided by the factor.
+
+        A diagonal of ``Z' M Z`` is ``z' M z``, and on a face that cancels
+        weights near ``1e15`` its rounding is as large as the face's own
+        curvature.  The event is forced: the face Gram's second diagonal is
+        ``-1e-3`` beside a unit one, where the factor gives ``0.2501``.  That
+        Gram cannot certify its spectrum, so the factor on the face decides.
+        A Gram not semidefinite by construction is still refused.  Mutation:
+        without the diagonal's refusal in the authoritative check, the face
+        decomposition raises "materially negative diagonal".
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
+
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 0.5], [0.0, 0.5, -1e-3]])
+        factor = np.array([[0.0, 1.0, 0.5], [0.0, 0.0, 1e-2]])
+        with pytest.raises(ValueError, match="materially negative diagonal"):
+            decompose_gram_if_authoritative(face.T @ matrix @ face)
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
+        assert decomposition.method == decompose_factor(factor @ face).method == "qr_svd"
+        assert decomposition.rank == 2
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        bound = 64 * np.finfo(float).eps * np.linalg.norm(exact, 2) * np.linalg.cond(exact)
+        assert error <= bound
+
     def test_a_face_gram_that_forming_may_have_moved_by_its_spectrum_is_decided_by_the_factor(
         self,
     ):

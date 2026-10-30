@@ -1266,6 +1266,17 @@ class RankInfo:
         return result
 
 
+def _materially_negative_diagonal(diagonal: NDArray) -> bool:
+    """Whether an entry of ``diagonal`` is below ``-100 eps`` times its largest magnitude.
+
+    The comparison is of dimensionless diagonals: an absolute unit floor can
+    turn an indefinite matrix into a structural zero merely by rescaling it.
+    Dividing before testing keeps the relative allowance from underflowing.
+    """
+    scale_reference = float(np.max(np.abs(diagonal), initial=0.0))
+    return scale_reference > 0.0 and bool(np.any(diagonal / scale_reference < -100.0 * _EPS))
+
+
 def _equilibrate_gram(
     matrix: NDArray, *, allow_indefinite: bool = False
 ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
@@ -1276,15 +1287,7 @@ def _equilibrate_gram(
         raise ValueError("matrix must be finite")
     symmetric = _symmetric_part(values)
     diagonal = np.diag(symmetric)
-    scale_reference = float(np.max(np.abs(diagonal), initial=0.0))
-    # Compare dimensionless diagonals: an absolute unit floor can turn an
-    # indefinite matrix into a structural zero merely by rescaling it. Divide
-    # before testing so the relative allowance does not itself underflow.
-    if (
-        not allow_indefinite
-        and scale_reference > 0.0
-        and np.any(diagonal / scale_reference < -100.0 * _EPS)
-    ):
+    if not allow_indefinite and _materially_negative_diagonal(diagonal):
         raise ValueError("matrix has a materially negative diagonal")
     if allow_indefinite:
         # With r_i = max_j |A_ij|, symmetry gives |A_ij| <= sqrt(r_i r_j).
@@ -2124,6 +2127,16 @@ def _decompose_gram(
     see :func:`decompose_gram_if_authoritative`.  ``formation_error``: see
     :func:`decompose_gram`.
     """
+    # A materially negative diagonal is a negative Rayleigh quotient ``e_k' M
+    # e_k``, so the same rounding of a semidefinite Gram as a negative
+    # eigenvalue past the eigensolver's resolution.
+    if (
+        omit_uncertifiable
+        and psd_by_construction
+        and not allow_indefinite
+        and _materially_negative_diagonal(np.diagonal(np.asarray(matrix, dtype=float)))
+    ):
+        return None
     equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
     )
@@ -2556,11 +2569,14 @@ def decompose_gram_if_authoritative(
     Gram's formation, not curvature, and it falls where a near-null of the
     data sits: the Gram cannot certify its own spectrum there, so this
     returns ``None`` (the caller goes to its observation factor) instead of
-    refusing the matrix as indefinite.  Measured: an fs data Gram whose
-    exact null came out at -1.17e-13 on macOS ARM64 (Accelerate) against a
-    resolution of 8.9e-14, at most -8.7e-15 on OpenBLAS; ``gamma_n`` at its
-    4000 rows is 4.4e-13.  Without the flag a materially negative
-    eigenvalue still raises: signed (observed) rows make it real.
+    refusing the matrix as indefinite.  So does a materially negative
+    diagonal, a negative Rayleigh quotient: a projection ``Z'MZ`` of such a
+    Gram that cancels its heavy rows can round one below zero.  Measured: an
+    fs data Gram whose exact null came out at -1.17e-13 on macOS ARM64
+    (Accelerate) against a resolution of 8.9e-14, at most -8.7e-15 on
+    OpenBLAS; ``gamma_n`` at its 4000 rows is 4.4e-13.  Without the flag a
+    materially negative eigenvalue or diagonal still raises: signed
+    (observed) rows make it real.
     """
     decomposition = _decompose_gram(
         matrix,
