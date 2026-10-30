@@ -19,7 +19,7 @@ from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
-#: A level is thin when it holds fewer rows than this, or less weight than this
+#: A level is thin when it holds fewer rows than this and less weight than this
 #: many rows of average weight (``_thin_levels``).
 _THIN_LEVEL_ROWS = 20
 
@@ -27,11 +27,13 @@ _THIN_LEVEL_ROWS = 20
 def _thin_levels(
     codes: NDArray, n_levels: int, sample_weights: NDArray, weight_semantics: str | None
 ) -> NDArray:
-    """Which levels of a categorical are thin: few rows, or little weight.
+    """Which levels of a categorical are thin: few rows, and little weight.
 
-    A level is thin when it holds fewer than ``_THIN_LEVEL_ROWS`` rows, or less
-    weight than that many rows of average weight.  Rows are counted as the
-    weight contract counts them:
+    A level is thin when it holds fewer than ``_THIN_LEVEL_ROWS`` rows AND less
+    weight than that many rows of average weight.  Either one is enough
+    experience: many rows, or a large share of the book's weight however few
+    rows carry it, as in an aggregated book of rating cells.  Rows are counted
+    as the weight contract counts them:
 
     - ``"frequency"``: a weight is a replication count, so a level's rows are
       the replications it holds and integer weights flag as the replicated
@@ -52,7 +54,7 @@ def _thin_levels(
     rows = np.bincount(codes, weights=counted, minlength=n_levels + 1)[:n_levels]
     weight = np.bincount(codes, weights=weights, minlength=n_levels + 1)[:n_levels]
     rows_of_average_weight = weight * (np.sum(counted) / max(float(np.sum(weights)), 1e-300))
-    return (rows < _THIN_LEVEL_ROWS) | (rows_of_average_weight < _THIN_LEVEL_ROWS)
+    return (rows < _THIN_LEVEL_ROWS) & (rows_of_average_weight < _THIN_LEVEL_ROWS)
 
 
 def _ordered_piecewise_structural_rows(

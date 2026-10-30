@@ -808,6 +808,21 @@ class TestThinLevelUnderTheWeightContract:
 
         assert compressed["cat[R]"] == expanded["cat[R]"] == ""
 
+    def test_a_level_with_a_large_share_of_an_aggregated_book_is_not_thin(self):
+        """One row per rating cell: experience is in the weights, however few cells hold it."""
+        rng = np.random.default_rng(3)
+        level = np.array(["A"] * 200 + ["B"] * 175 + ["C"] * 25 + ["D"] * 5 + ["E"] * 5)
+        exposure = rng.uniform(2000, 6000, len(level))
+        exposure[level == "C"] = rng.uniform(400, 600, 25)  # 25 small cells, about 0.8% of the book
+        exposure[level == "D"] = 20_000.0  # 5 cells, 6% of the book
+        exposure[level == "E"] = 500.0  # 5 small cells: little of either
+        claims = rng.poisson(0.12 * exposure)
+        flags = self._flags(pd.DataFrame({"cat": level}), claims / exposure, exposure, "prior")
+
+        assert flags["cat[C]"] == ""
+        assert flags["cat[D]"] == ""
+        assert flags["cat[E]"] == "thin_level"
+
     def test_rows_without_prior_weight_are_not_counted(self):
         """A zero prior weight is a row that was not observed."""
         rng = np.random.default_rng(5)
