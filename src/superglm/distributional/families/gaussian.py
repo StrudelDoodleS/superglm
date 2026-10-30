@@ -412,6 +412,15 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self) -> tuple[bool, ...]:
+        """A level censored on one side escapes along the location, not the scale.
+
+        ``P(Y > c)`` rises and ``P(Y <= c)`` falls with the location at every
+        row; along the scale ``Phi((mu - c)/sigma)`` peaks at a finite value
+        once the rows' ``mu - c`` differ in sign.
+        """
+        return (True, False)
+
     def to_config(self) -> dict[str, Any]:
         """Return JSON-safe complete family configuration."""
         return {"type": type(self).__name__, "scale_floor": self.scale_floor}
@@ -679,7 +688,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 lo, hi, values[rows, 0], values[rows, 1], law[rows], "prior", derivative_order=0
             )
 
-        return readonly(log_window_values(lower, upper, len(values), window))
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=-np.inf))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``P(Y <= y)`` per row from ``(location, scale)``."""

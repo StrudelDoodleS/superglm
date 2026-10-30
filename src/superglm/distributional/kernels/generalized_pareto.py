@@ -398,14 +398,18 @@ def window_rows(
     if len(rows) == 0:
         return window
 
-    def log_density(points: NDArray) -> TailChannels:
+    def log_density(fraction: float) -> TailChannels:
         evaluation = scale_rows(
-            points, psi[rows], xi[rows], np.ones(len(rows)), derivative_order=derivative_order
+            lo[rows] + fraction * span[rows],
+            psi[rows],
+            xi[rows],
+            np.ones(len(rows)),
+            derivative_order=derivative_order,
         )
         return evaluation.optimizing_log_likelihood, evaluation.score, evaluation.hessian_packed
 
     quadrature = quadrature_window_channels(
-        lo[rows], 0.5 * span[rows], log_density, derivative_order=derivative_order
+        0.5 * span[rows], log_density, derivative_order=derivative_order
     )
     for target, source in zip(window, quadrature, strict=True):
         if target is not None and source is not None:

@@ -58,6 +58,7 @@ from superglm.distributional.result import (
 )
 from superglm.distributional.separation import (
     apply_separation_policy,
+    censored_recession,
     format_censored_separation_message,
     predictor_response_boundaries,
     record_factor_smooth_levels,
@@ -653,7 +654,11 @@ def _fit_candidate(
     if bound_rows is not None and separation_policy != "ignore":
         apply_separation_policy(
             scan_censored_separation(
-                compiled, retained_frame, bound_rows.side, resolved_weights.values
+                compiled,
+                retained_frame,
+                bound_rows.side,
+                resolved_weights.values,
+                recession=censored_recession(family, len(compiled)),
             ),
             separation_policy,
             stacklevel=4,

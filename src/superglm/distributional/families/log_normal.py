@@ -266,6 +266,16 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self) -> tuple[bool, ...]:
+        """A level censored on one side escapes along the location or mean, not the scale.
+
+        ``P(Y > c)`` rises with ``mu`` and with the mean at fixed ``sigma``;
+        along ``sigma`` it can peak at a finite value, as in the mean form
+        below a limit, where ``(log(m/c) - sigma^2/2)/sigma`` peaks at
+        ``sigma = sqrt(2 log(c/m))``.
+        """
+        return (True, False)
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": _FAMILY_NAME,
@@ -609,7 +619,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
             return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
 
-        return readonly(log_window_values(lower, upper, len(values), window))
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)

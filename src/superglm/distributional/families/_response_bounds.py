@@ -94,18 +94,23 @@ def log_window_values(
     upper: NDArray,
     n_rows: int,
     window: WindowFunction,
+    *,
+    support_lower: float,
 ) -> NDArray[np.float64]:
-    """``log P(lower < Y <= upper)`` per row; zero where both ends are open.
+    """``log P(lower < Y <= upper)`` per row; zero where the window holds the whole support.
 
-    Each end is a number or one number per row, with ``lower <= upper``; an
-    empty window (``lower == upper``) has log probability ``-inf``.
+    Each end is a number or one number per row, with ``lower <= upper``.  A
+    lower end below the support's start reads as that start, and a window
+    left empty, at or below the support, has log probability ``-inf``.
     """
     lo = _window_side(lower, n_rows, "lower")
     hi = _window_side(upper, n_rows, "upper")
     if np.any(lo > hi):
         raise ValueError("each window must have lower <= upper")
-    values = np.zeros(n_rows, dtype=np.float64)
-    rows = np.flatnonzero((lo > -np.inf) | (hi < np.inf))
+    lo = np.maximum(lo, support_lower)
+    empty = lo >= hi
+    values = np.where(empty, -np.inf, 0.0)
+    rows = np.flatnonzero(~empty & ((lo > support_lower) | (hi < np.inf)))
     if len(rows):
         values[rows] = window(lo[rows], hi[rows], rows)[0]
     return values

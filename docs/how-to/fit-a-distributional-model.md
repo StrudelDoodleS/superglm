@@ -788,10 +788,13 @@ have no reachable boundary and are never scanned for it.
 
 Censoring has the same failure. A level whose rows are all censored on the
 same side, such as a policy type whose every claim was paid at its limit, has
-only a bound on its response, so its effect can walk to infinity too. A fit
-with censored rows scans every `Categorical` term and `CategoricalInteraction`
-on every predictor for such levels and cells, under the same `separation`
-policy. Ordered-categorical smooths
+only a bound on its response, so its effect walks to infinity along any
+predictor that moves every such bound probability one way: the location or
+mean of `GaussianLS` and `LogNormalLS`, and both predictors of
+`GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
+term and `CategoricalInteraction` on those predictors for such levels and
+cells, under the same `separation` policy. A scale predictor is not scanned:
+there a level censored on one side can still have a finite estimate. Ordered-categorical smooths
 are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
