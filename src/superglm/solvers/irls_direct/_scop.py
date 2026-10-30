@@ -1019,11 +1019,10 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
 
         def merit_error(state: _IRLSState) -> float:
             """The allowance of the committed or trial state the search holds as ``state``."""
-            return next(
-                trial.merit_error
-                for trial in (scop_committed, *scop_trial_cache.values())
-                if trial.irls is state
-            )
+            for trial in (scop_committed, *scop_trial_cache.values()):
+                if trial.irls is state:
+                    return trial.merit_error
+            raise LookupError("the SCOP search holds no such state")
 
         def evaluate_scop_trial(alpha: float) -> _IRLSState:
             if trace_enabled:

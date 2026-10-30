@@ -925,7 +925,9 @@ def test_a_scop_trial_carries_the_rounding_allowance_of_its_own_merit(monkeypatc
 
     The search reads the allowance of the candidate and of the committed state
     it is handed; each is the one ``_with_merit`` formed for that state, a
-    finite nonnegative number, and a state the search does not hold has none.
+    finite nonnegative number, and a state the search does not hold has none:
+    a ``LookupError``, not the ``StopIteration`` of a bare ``next``, which a
+    caller inside a generator would see as a ``RuntimeError`` (PEP 479).
     """
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._scop as irls_scop
@@ -952,7 +954,7 @@ def test_a_scop_trial_carries_the_rounding_allowance_of_its_own_merit(monkeypatc
         assert read == expected
         assert np.isfinite(read) and read >= 0.0
         checked.append(read)
-        with pytest.raises(StopIteration):
+        with pytest.raises(LookupError, match="holds no such state"):
             kwargs["merit_roundoff"](candidate, object())
         return real_select(**kwargs)
 
