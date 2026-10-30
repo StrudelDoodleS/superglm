@@ -240,19 +240,21 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return _CAPABILITIES
 
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
-        """A censored row with no upper truncation escapes along both predictors.
+        """Every censored row escapes along the scale; one with no upper
+        truncation also escapes along the shape.
 
-        ``log S(c) = -log1p(xi c/psi)/xi`` rises with ``psi`` (``t/(psi s) > 0``)
-        and with ``xi`` (``t^2 D(z) > 0``), and so does ``S(c)/S(a)`` above a
-        lower truncation bound ``a``: its ``psi`` derivative is
-        ``1/(psi + xi a) - 1/(psi + xi c) > 0`` over ``xi``, and its ``xi``
-        derivative ``(L - (u - v))/xi^2 >= 0`` with ``u, v`` the ``xi y/(psi + xi y)``
-        of ``c, a`` and ``L = log((1 - v)/(1 - u))``.  The shape walks to its
-        wall.  An upper truncation bound ``b`` breaks this: ``(S(c) - S(b))/(1 - S(b))``
-        can peak at an interior shape.
+        At a fixed shape ``d^2 log f/(dy dpsi) = (1 + xi)/(psi + xi y)^2 > 0``, a
+        monotone likelihood ratio in ``psi``, so within any truncation window
+        ``P(Y > c)`` rises and ``P(Y <= c)`` falls strictly with ``psi``.
+        ``log S(c) = -log1p(xi c/psi)/xi`` rises with ``xi`` (``t^2 D(z) > 0``),
+        and so does ``S(c)/S(a)`` above a lower truncation bound ``a``: its
+        ``xi`` derivative is ``(L - (u - v))/xi^2 >= 0`` with ``u, v`` the
+        ``xi y/(psi + xi y)`` of ``c, a`` and ``L = log((1 - v)/(1 - u))``.  The
+        shape walks to its wall.  An upper truncation bound ``b`` breaks this
+        for the shape: ``(S(c) - S(b))/(1 - S(b))`` can peak at an interior shape.
         """
-        flags = (bounds.side != 0) & ~np.isfinite(bounds.upper)
-        return np.column_stack((flags, flags))
+        censored = bounds.side != 0
+        return np.column_stack((censored, censored & ~np.isfinite(bounds.upper)))
 
     def to_config(self) -> dict[str, Any]:
         return {

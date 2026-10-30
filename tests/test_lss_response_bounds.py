@@ -1065,6 +1065,12 @@ def test_upper_truncation_anchors_a_censored_pareto_level():
     np.testing.assert_allclose(fitted["shape"], [xi_a, xi_b], rtol=1e-4)
     np.testing.assert_allclose(fitted["scale"], np.exp([log_scale] * 2), rtol=1e-5)
 
+    # Along the scale the bound does not anchor the level: P(Y > 1 | Y <= 3)
+    # rises with psi towards 2/3.
+    strict = SuperLSS(family, family.scale(cat("g")), family.shape(), separation="error")
+    with pytest.raises(SeparationError, match=r"'scale:g': 1 of 2 occupied levels"):
+        strict.fit(X, y, censoring=censoring, truncation=truncation)
+
     X, y, _, censoring, truncation = _pareto_shape_levels("lower")
     with pytest.warns(SeparationWarning, match=r"'shape:g': 1 of 2 occupied levels"):
         SuperLSS(family, family.scale(), family.shape(cat("g"))).fit(
@@ -1087,6 +1093,33 @@ def test_a_left_censored_mean_form_scale_level_is_separated():
         SuperLSS(family, family.mean(), family.scale(cat("g"))).fit(
             pd.DataFrame({"g": group}), y, censoring=(lower, None)
         )
+
+
+def test_a_right_censored_mean_form_scale_level_below_its_limit_keeps_its_estimate():
+    # P(Y > c) = Phi(log(m/c)/sigma - sigma/2) peaks at sigma = sqrt(2 log(c/m))
+    # while the mean is below the limit, so the level's scale has an estimate.
+    y_a = np.exp(8.0 + stats.norm.ppf((np.arange(200) + 0.5) / 200))
+    limit = 15_000.0
+    y = np.concatenate([y_a, np.full(20, limit)])
+    group = np.array(["a"] * 200 + ["b"] * 20)
+    family = LogNormalLS()
+    model = SuperLSS(family, family.mean(), family.scale(cat("g")), separation="error")
+    model.fit(
+        pd.DataFrame({"g": group}), y, censoring=(None, np.where(group == "b", limit, np.inf))
+    )
+
+    def negative(point):
+        mean, scale_a, scale_b = np.exp(point)
+        return -(
+            stats.norm.logpdf(np.log(y_a), np.log(mean) - 0.5 * scale_a**2, scale_a).sum()
+            + 20 * stats.norm.logsf(np.log(limit), np.log(mean) - 0.5 * scale_b**2, scale_b)
+        )
+
+    mean, scale_a, scale_b = np.exp(_mle(negative, np.array([8.5, 0.0, 0.3])))
+    assert mean < limit
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["mean"], [mean, mean], rtol=1e-5)
+    np.testing.assert_allclose(fitted["scale"], [scale_a, scale_b], rtol=1e-5)
 
 
 def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated():
@@ -1119,6 +1152,50 @@ def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated(
     mean, scale = np.exp(_mle(negative, np.array([0.0, np.log(0.5)])))
     np.testing.assert_allclose(fitted["mean"], [mean, mean], rtol=1e-5)
     assert float(fitted["scale"].iloc[0]) == pytest.approx(scale, rel=1e-5)
+
+    # A non-reference level keeps its own column, so it still runs off.
+    y = np.concatenate([y, np.full(5, 0.5)])
+    group = np.concatenate([group, ["c"] * 5])
+    with pytest.raises(SeparationError, match=r"only left-censored rows: 'c'") as raised:
+        model.fit(
+            pd.DataFrame({"g": group}), y, censoring=(np.where(group == "a", -np.inf, 0.5), None)
+        )
+    assert "'b'" not in str(raised.value)
+
+
+def test_an_intercept_free_interaction_pins_only_its_reference_cell():
+    from superglm.features import Categorical
+    from superglm.features.interaction import CategoricalInteraction
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(571)
+    n = 800
+    X = pd.DataFrame({"g": rng.choice(["a", "b"], n), "h": rng.choice(["x", "y"], n)})
+    limit = 5000.0
+    clean = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
+
+    def fit(cell):
+        g, h = cell
+        paid = np.where((X.g == g).to_numpy() & (X.h == h).to_numpy(), limit, clean)
+        model_from_templates(
+            family=LogNormalLS(parametrisation="location"),
+            predictors=(
+                distributional.Predictor(
+                    "location",
+                    {"g": Categorical(base="a"), "h": Categorical(base="x")},
+                    interaction_specs={"g:h": CategoricalInteraction("g", "h")},
+                    intercept=False,
+                ),
+                distributional.Predictor("scale", {}),
+            ),
+            separation="error",
+        ).fit(X, paid, censoring=(None, limit))
+
+    # Without an intercept only the (a, x) cell is pinned at the offset.
+    fit(("a", "x"))
+    with pytest.raises(SeparationError, match=r"'location:g:h': 1 of 4 occupied cells") as raised:
+        fit(("a", "y"))
+    assert "('a' x 'y')" in str(raised.value)
 
 
 def test_a_wide_log_window_far_from_overflow_keeps_its_mass():

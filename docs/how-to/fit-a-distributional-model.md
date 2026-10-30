@@ -796,14 +796,21 @@ term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy.
 
 The scan reads only what the data decide before the fit:
-- A generalized Pareto row with an upper truncation bound anchors its level,
-  since its conditional probability can peak at a finite value.
-- A scale predictor is scanned only for an untruncated left-censored level in
-  the mean form of `LogNormalLS`, whose scale always runs off.
-- Elsewhere a scale level censored on one side has a finite estimate only when
-  its rows' bounds lie on both sides of the fitted location. With one shared
-  limit it usually has none, and no warning says so. Ordered-categorical smooths
-are not scanned. The scan does not cover all separation patterns, and
+- A generalized Pareto row with an upper truncation bound anchors its level
+  along the shape, since its conditional probability can peak at a finite
+  shape. Along the scale it does not, so the scale is still scanned.
+- The scale predictor of `GaussianLS` or `LogNormalLS` is scanned only for an
+  untruncated left-censored level in the mean form of `LogNormalLS`, whose
+  scale always runs off.
+- Elsewhere a scale level of those two families censored on one side may or
+  may not have a finite estimate, and only the fit decides which, with no
+  warning. For `GaussianLS` and the location form of `LogNormalLS` it has one
+  only when its rows' bounds lie on both sides of the fitted location, so with
+  one shared limit it usually has none. In the mean form a right-censored
+  level has one when its fitted mean is below at least one of its limits, and
+  none when the mean is above all of them.
+
+Ordered-categorical smooths are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 
