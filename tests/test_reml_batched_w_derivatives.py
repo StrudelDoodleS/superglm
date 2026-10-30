@@ -3,6 +3,7 @@
 import gc
 import math
 import weakref
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
+from superglm._roundoff import gamma
 from superglm.distributions import Binomial, Poisson
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -26,6 +28,7 @@ from superglm.group_matrix import (
 )
 from superglm.links import LogitLink, LogLink
 from superglm.reml import w_derivatives
+from superglm.solvers import centered_system
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
@@ -158,7 +161,7 @@ def test_batched_signed_grams_boundaries_without_materializing_rows(monkeypatch,
             centered_signed_grams(dm=dm, weights=channels, mean_x=mean, chunk_size=chunk_size)
 
 
-def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
+def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=None, units=None):
     rng = np.random.default_rng(123)
     x = np.linspace(-1.5, 1.5, 320)
     X = np.column_stack((x, x**2 - np.mean(x**2), np.sin(3 * x)))[:, :p]
@@ -169,6 +172,12 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
         y = rng.poisson(np.exp(signal)).astype(float)
     else:
         y = (rng.uniform(size=len(x)) < 1.0 / (1.0 + np.exp(-signal))).astype(float)
+    if flat is not None:
+        # the first column nearly constant, its spread ``flat`` of its mean
+        X[:, 0] = 1.0 + flat * X[:, 0]
+    # ``units = (d, mass)``: the first column in units of ``d``, every weight ``mass``
+    d, mass = (1.0, 1.0) if units is None else units
+    X[:, 0] *= d
     matrices = [DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)]
     if storage is not None:
 
@@ -184,7 +193,16 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
             SparseSSPGroupMatrix(sparse.csr_matrix(X[:, 1:2]), np.ones((1, 1))),
             categorical(np.where(X[:, 2], 0, -1), n_levels=1),
         ]
+        if storage == "split":
+            matrices[1] = DenseGroupMatrix(X[:, 1:2] + shift)
+        elif storage == "support":
+            matrices[1] = SupportCompressedSSPGroupMatrix(
+                X[:, 1:2], np.ones((1, 1)), np.arange(len(x))
+            )
     dm = DesignMatrix(matrices, n=len(x), p=p)
+    # a flat column's penalty scaled with its variance, so its coefficient stays free
+    scales = [mass * (flat**2 if flat is not None and i == 0 else 1.0) for i in range(p)]
+    scales[0] = scales[0] * d * d
     groups = [GroupSlice(name=f"x{i}", start=i, end=i + 1) for i in range(p)]
     penalties = [
         PenaltyComponent(
@@ -192,8 +210,8 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
             group_name=g.name,
             group_index=i,
             group_sl=slice(i, i + 1),
-            omega_raw=np.ones((1, 1)),
-            omega_ssp=np.ones((1, 1)),
+            omega_raw=scales[i] * np.ones((1, 1)),
+            omega_ssp=scales[i] * np.ones((1, 1)),
             rank=1.0,
             log_det_omega_plus=0.0,
             eigvals_omega=np.ones(1),
@@ -201,7 +219,7 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
         for i, g in enumerate(groups)
     ]
     lambdas = {g.name: 4.0 + i for i, g in enumerate(groups)}
-    weights, offset = np.ones_like(x), np.zeros_like(x)
+    weights, offset = np.full_like(x, mass), np.zeros_like(x)
     family, link = (Poisson(), LogLink()) if family == "poisson" else (Binomial(), LogitLink())
     result, inverse, _ = fit_irls_direct(
         X=dm,
@@ -286,7 +304,7 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
 
     def counted(self, values):
         nonlocal calls
-        calls += 1
+        calls += self is kwargs["dm"]  # the dense split's cross products are its bounded design's
         return original(self, values)
 
     monkeypatch.setattr(DesignMatrix, "rmatvec", counted)
@@ -295,30 +313,300 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
     assert calls == (0 if order == 1 else 5)  # Two means and three Hessian cross-terms.
 
 
+@pytest.mark.parametrize("moments", ["split", "rows"])
 @pytest.mark.parametrize(
-    "route", ["no_dense", "single", "second_order", "small_budget", "gradient_only"]
+    "route", ["first_order", "single", "second_order", "small_budget", "gradient_only"]
 )
-def test_other_routes_do_not_batch_signed_grams(monkeypatch, route):
-    # The centred-row kernel runs by type, beside a dense column at any offset;
-    # a design without one keeps the execution plan's signed moments.
-    kwargs = (
-        _correction_fixture(p=3, shift=0, storage="mixed")
-        if route == "no_dense"
-        else _correction_fixture(p=1 if route == "single" else 2, shift=1e8)
-    )
+def test_only_the_first_order_route_batches_signed_grams(monkeypatch, route, moments):
+    # Beside a dense column the Grams take the split's moments or centred
+    # rows (``_split_pays``, forced here). On either, the directions batch
+    # only on the first-order route within its budget, all three in one
+    # request; the others form each Gram on its own, or none.
+    monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: moments == "split")
+    kwargs = _correction_fixture(p=3, shift=1e8, storage="split")
+    if route == "single":
+        kwargs["reml_penalties"] = kwargs["reml_penalties"][:1]
     if route == "small_budget":
         monkeypatch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", 1)
+    plan_type = type(kwargs["dm"].execution_plan)
+    channels, grams, batches = plan_type._signed_moments_channels, centered_signed_grams, []
 
-    def forbidden(**kwargs):
-        pytest.fail("this route must not use the batched kernel")
+    def split_batch(plan, weights, owner):
+        batches.append(("split", len(weights)))
+        return channels(plan, weights, owner)
 
-    monkeypatch.setattr(w_derivatives, "centered_signed_grams", forbidden)
+    def rows_batch(**kernel_kwargs):
+        batches.append(("rows", len(kernel_kwargs["weights"])))
+        return grams(**kernel_kwargs)
+
+    monkeypatch.setattr(plan_type, "_signed_moments_channels", split_batch)
+    monkeypatch.setattr(w_derivatives, "centered_signed_grams", rows_batch)
     result = w_derivatives.reml_w_correction(
         **kwargs,
         w_correction_order=2 if route == "second_order" else 1,
         gradient_only=route == "gradient_only",
     )
     assert result is not None
+    assert batches == ([(moments, 3)] if route == "first_order" else [])
+
+
+@pytest.mark.parametrize("storage", ["mixed", "split"])
+def test_only_a_dense_column_splits_the_signed_moments(monkeypatch, storage):
+    # By type, at any offset: beside a dense column the directions' moments
+    # are the bounded design's, in one request, and each Gram joins the dense
+    # column to them; without one the whole design's moments are the Grams'.
+    monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: True)
+    kwargs = _correction_fixture(p=3, shift=0, storage=storage)
+    plan_type = type(kwargs["dm"].execution_plan)
+    original, requests, splits = plan_type._signed_moments_channels, [], []
+    split_gram = w_derivatives._dense_split_signed_gram
+
+    def recorded(plan, weights, owner):
+        requests.append((plan.p, len(weights)))
+        return original(plan, weights, owner)
+
+    def counted(*args):
+        splits.append(args[2].shape)
+        return split_gram(*args)
+
+    monkeypatch.setattr(plan_type, "_signed_moments_channels", recorded)
+    monkeypatch.setattr(w_derivatives, "_dense_split_signed_gram", counted)
+    assert w_derivatives.reml_w_correction(**kwargs) is not None
+    assert requests == ([(2, 3)] if storage == "split" else [(3, 3)])
+    assert splits == ([(320,)] * 3 if storage == "split" else [])
+
+
+def _exact_signed_gram(X, weights, hi, lo):
+    """``sum_r a_r (x_rj - c_j)(x_rk - c_k)`` in rationals, ``c = hi + lo`` exactly, rounded once."""
+    from fractions import Fraction
+
+    centred = [
+        [Fraction(v) - Fraction(h) - Fraction(d) for v, h, d in zip(row, hi, lo)] for row in X
+    ]
+    a = [Fraction(w) for w in weights]
+    p = X.shape[1]
+    return np.array(
+        [
+            [float(sum(w * r[j] * r[k] for w, r in zip(a, centred))) for k in range(p)]
+            for j in range(p)
+        ]
+    )
+
+
+@pytest.mark.parametrize("family", ["poisson", "binomial"])
+@pytest.mark.parametrize("shift", [1e8, 1e16])
+def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift, family):
+    """A dense column at a large offset between bounded ones: each derivative Gram against exact products.
+
+    The Grams take raw signed moments on the bounded columns and centre the
+    dense column's rows explicitly (``_dense_split_signed_gram``, issue #430).
+    The reference is exact, ``sum a (x - c)(x - c)'`` in rationals with the
+    dense centre the pair ``c + d``.  The bound is the corrected two-pass
+    algorithm's with ``|a|`` for the weights: ``gamma_(n+p+8) sum |a| (|x~_j|
+    + |l_j|)(|x~_k| + |l_k|)``, ``x~`` the bounded values and the dense rows
+    ``x - c``, ``l`` their centres.  Control: the raw moments of the whole
+    design, centred after, exceed it; mutation: the dense rows left
+    uncentred, about anchor 0.  Under Poisson/log ``dW/deta = W``, so every
+    direction has ``sum a = 0`` at the mode and the terms that scale with
+    it vanish; binomial/logit directions carry a weight sum.
+    """
+    monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: True)
+    kwargs = _correction_fixture(p=3, shift=shift, storage="split", family=family)
+    calls = []
+    split_gram = w_derivatives._dense_split_signed_gram
+
+    def recorded(split, moments, row_weights, centre_hi, centre_lo, *rest):
+        calls.append((row_weights.copy(), centre_hi.copy(), centre_lo.copy()))
+        return split_gram(split, moments, row_weights, centre_hi, centre_lo, *rest)
+
+    monkeypatch.setattr(w_derivatives, "_dense_split_signed_gram", recorded)
+    correction = w_derivatives.reml_w_correction(**kwargs)
+    assert correction is not None and len(calls) == 3
+    dm = kwargs["dm"]
+    X, n, p = dm.toarray(), dm.n, dm.p
+    dense = np.array([False, True, False])
+    for i, (a, hi, lo) in enumerate(calls):
+        expected = _exact_signed_gram(X, a, hi, lo)
+        size = np.abs(np.where(dense, X - hi, X)) + np.abs(np.where(dense, lo, hi))
+        bound = gamma(n + p + 8) * (size.T @ (np.abs(a)[:, None] * size))
+        assert np.all(np.abs(correction[1][i] - expected) <= bound)
+        moments = dm.execution_plan.moments(a, include_xtw=True, signed=True)
+        raw = w_derivatives._centered_signed_moments(moments, a, hi + lo)
+        assert np.any(np.abs(raw - expected) > bound)
+
+
+@pytest.mark.parametrize("exponent", [-540, 540])
+def test_dense_split_grams_keep_float64_range_at_extreme_exponents(exponent):
+    """Columns at ``2^e`` and weights at ``2^(-5e/3)``: the split's Gram against exact products.
+
+    Every entry of ``sum a (x - c)(x - c)'`` lies near ``2^(e/3)``, but a
+    product of two centres, ``2^(2e)``, leaves float64's range (``e = -540``
+    underflows, ``e = 540`` overflows).  The centring terms must meet the
+    signed mass before the second centre, as centred rows do, to stay within
+    the split's bound, ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| +
+    |l_k|)``.  The reference is exact, in rationals, about ``c = hi + lo``.
+    """
+    rng = np.random.default_rng(29)
+    n, scale, mass = 64, 2.0**exponent, 2.0 ** (-5 * exponent // 3)
+    X = scale * np.column_stack((rng.uniform(-1.0, 2.0, n), rng.uniform(2.0, 3.0, n)))
+    dm = DesignMatrix(
+        [
+            SupportCompressedSSPGroupMatrix(X[:, :1], np.ones((1, 1)), np.arange(n)),
+            DenseGroupMatrix(X[:, 1:]),
+        ],
+        n=n,
+        p=2,
+    )
+    w = mass * rng.uniform(0.5, 2.0, n)
+    _, hi, lo = centered_system.weighted_mean_pair(dm, w, float(np.sum(w)))
+    a = mass * rng.normal(size=n)
+    split = centered_system._dense_split(dm)
+    moments = split.bounded.execution_plan.moments(a, include_xtw=True, signed=True)
+    gram = w_derivatives._dense_split_signed_gram(split, moments, a, hi, lo)
+    expected = _exact_signed_gram(X, a, hi, lo)
+    dense = np.array([False, True])
+    size = np.abs(np.where(dense, X - hi, X)) + np.abs(np.where(dense, lo, hi))
+    bound = gamma(dm.n + dm.p + 8) * (size.T @ (np.abs(a)[:, None] * size))
+    assert np.all(np.isfinite(expected)) and np.all(np.abs(gram - expected) <= bound)
+
+
+def test_second_order_correction_keeps_float64_range_at_extreme_exponents():
+    """A support column in units of ``2^-540`` beside a dense one, weights ``2^900``: the unit fit's correction.
+
+    Scaling a column by ``d`` and every weight by ``mass``, its penalty by
+    ``mass d^2`` and the others' by ``mass``, leaves the fit in its own
+    units, and the gradient and second-order terms, functions of ``rho``,
+    unchanged.  Powers of two scale exactly, so the two agree to rounding,
+    ``gamma_(n+p)`` of the largest entry, while a product of two centres
+    (below ``2^-1022``) or of two masses (above ``2^1024``) leaves float64's
+    range unless the mass meets one factor first.
+    """
+    corrections = []
+    for units in [None, (2.0**-540, 2.0**900)]:
+        kwargs = _correction_fixture(
+            p=3, shift=0.0, storage="split", family="binomial", units=units
+        )
+        gradient, _, second = w_derivatives.reml_w_correction(**kwargs, w_correction_order=2)
+        corrections.append((gradient, second))
+    n, p = kwargs["dm"].n, kwargs["dm"].p
+    for unit, scaled in zip(*corrections, strict=True):
+        tolerance = gamma(n + p) * np.max(np.abs(unit))
+        assert np.all(np.abs(scaled - unit) <= tolerance)
+
+
+def _record_signed_gram_inputs(monkeypatch, p):
+    """``(a, hi, lo)`` of each derivative Gram, in order, whichever route forms it, and each route's calls."""
+    calls, routes = [], Counter()
+
+    def keep(weights, hi, lo):
+        if len(hi) == p and not any(np.array_equal(weights, a) for a, _, _ in calls):
+            calls.append((weights.copy(), hi.copy(), np.zeros(p) if lo is None else lo.copy()))
+
+    def recorder(name, read):
+        original = getattr(w_derivatives, name, None)
+        if original is None:
+            return
+
+        def recorded(*args, **kwargs):
+            routes[name] += 1
+            for weights, hi, lo in read(args, kwargs):
+                keep(weights, hi, lo)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(w_derivatives, name, recorded)
+
+    recorder("_dense_split_signed_gram", lambda a, k: [(a[2], a[3], a[4])])
+    recorder("_centered_signed_moments", lambda a, k: [(a[1], a[2], None)])
+    recorder("centered_gram_rhs", lambda a, k: [(k["W"], k["mean_x"], k.get("mean_lo"))])
+    recorder(
+        "centered_signed_grams",
+        lambda a, k: [(w, k["mean_x"], k.get("mean_lo")) for w in k["weights"]],
+    )
+    recorder("recentred_gram_rows", lambda a, k: [])  # the repair of a rejected column
+    return calls, routes
+
+
+@pytest.mark.parametrize("storage", ["split", "support", "mixed"])
+def test_a_column_the_certificate_rejects_is_centred_before_its_products(monkeypatch, storage):
+    """A nearly constant support column: each derivative Gram against exact centred products.
+
+    The column ``1 + 1e-8 x`` has ``|mean| / RMS`` about ``1e8``, so raw
+    moments' rounding, ``gamma_n sum |a| x^2``, is about ``1e16`` times its
+    centred Gram; its penalty scaled by its variance, the column still moves
+    the fit.  The raw-moment certificate (``|m_j| <= s_j``) rejects it, and
+    it is recentred inside its group about the fixed centre: beside a dense
+    column (``split``, the split forced) and beside a second support
+    (``support``) through the IRLS repair's products, and beside a sparse
+    SSP group, which the repair cannot read, through centred rows
+    (``mixed``).  The bound is the split's, ``gamma_(n+p+8) sum |a| (|x~_j|
+    + |l_j|)(|x~_k| + |l_k|)``, with the rejected column at its centred
+    values, ``x~ = |x - c| + max |x - c|`` (anchoring it and moving it to
+    ``c`` each round at its own spread), and ``l`` zero.  Control: the raw
+    moments, centred after, exceed it.
+    """
+    monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: True, raising=False)
+    kwargs = _correction_fixture(p=3, shift=0.0, storage=storage, family="binomial", flat=1e-8)
+    calls, routes = _record_signed_gram_inputs(monkeypatch, 3)
+    correction = w_derivatives.reml_w_correction(**kwargs)
+    assert correction is not None and len(calls) == 3
+    # Dispatch: the repair serves every direction where it reads the groups,
+    # the split joining the dense column; one batch of centred rows otherwise.
+    assert (
+        routes
+        == {
+            "split": {
+                "_dense_split_signed_gram": 3,
+                "_centered_signed_moments": 3,
+                "recentred_gram_rows": 3,
+            },
+            "support": {"_centered_signed_moments": 3, "recentred_gram_rows": 3},
+            "mixed": {"centered_signed_grams": 1},
+        }[storage]
+    )
+    dm = kwargs["dm"]
+    X, n, p = dm.toarray(), dm.n, dm.p
+    dense = np.array([type(gm) is DenseGroupMatrix for gm in dm.group_matrices])
+    for i, (a, hi, lo) in enumerate(calls):
+        expected = _exact_signed_gram(X, a, hi, lo)
+        centred = np.abs(X - hi - lo)
+        size = np.where(dense, np.abs(X - hi), np.abs(X)) + np.where(dense, np.abs(lo), np.abs(hi))
+        size[:, 0] = centred[:, 0] + centred[:, 0].max()
+        bound = gamma(n + p + 8) * (size.T @ (np.abs(a)[:, None] * size))
+        assert np.all(np.abs(correction[1][i] - expected) <= bound)
+        moments = dm.execution_plan.moments(a, include_xtw=True, signed=True)
+        raw = w_derivatives._centered_signed_moments(moments, a, hi + lo)
+        assert np.any(np.abs(raw - expected) > bound)
+
+
+def test_the_split_forms_signed_grams_where_it_costs_less_than_rows():
+    """Dispatch only: the cost model takes the split beside supports and categoricals, rows beside sparse splines."""
+    rng = np.random.default_rng(5)
+    n = 200_000
+    dense = DenseGroupMatrix(rng.normal(size=(n, 1)))
+    supports = DesignMatrix(
+        [
+            SupportCompressedSSPGroupMatrix(
+                rng.uniform(size=(80, 8)), np.eye(8), rng.integers(0, 80, n)
+            ),
+            CategoricalGroupMatrix(rng.integers(-1, 20, n), n_levels=20),
+            dense,
+        ],
+        n=n,
+        p=29,
+    )
+    splines = DesignMatrix(
+        [
+            SparseSSPGroupMatrix(
+                sparse.random(n, 11, density=0.36, format="csr", random_state=1), np.eye(11)
+            )
+            for _ in range(3)
+        ]
+        + [dense],
+        n=n,
+        p=34,
+    )
+    assert w_derivatives._split_pays(centered_system._dense_split(supports))
+    assert not w_derivatives._split_pays(centered_system._dense_split(splines))
 
 
 def test_derivative_channels_project_each_fixed_support_once(monkeypatch):

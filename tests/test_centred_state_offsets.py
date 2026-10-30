@@ -533,7 +533,7 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     default for binomial/logit exact REML with four or more penalties).
     Centred as ``(x - c) - d`` the two readings agree to the rounding of the
     sums, ``4 gamma_{n+2p+5} M_j`` (``_correction_magnitude``).  Mutation:
-    ``mean_lo`` dropped from ``centered_signed_grams`` or from
+    ``d`` dropped from ``_dense_split_signed_gram`` or ``mean_lo`` from
     ``_leverage_gradient_rhs``.
     """
     from superglm.reml.w_derivatives import reml_w_correction
@@ -2699,3 +2699,61 @@ def test_weight_correction_refuses_incoherent_rank_metadata(source, kind, messag
 
     with pytest.raises(ValueError, match=message):
         reml_w_correction(**_w_correction_inputs_with_metadata(source, **tamper))
+
+
+@pytest.mark.parametrize("route", ["irls", "signed"])
+def test_a_float32_dense_column_meets_the_bounded_design_in_binary64(route):
+    """A float32 dense column at 1e8 beside a categorical: the split's Gram against exact products.
+
+    The cross block forms its rows ``x - a`` in binary64, as the dense pass
+    does (``anchored_dense_moments``); NumPy's weak scalar promotion would
+    otherwise subtract a float32 column and a Python-float anchor in float32,
+    rounding the anchor to a float32 and centring the rows about another
+    point than the dense pass's first moment.  Bound: the split's,
+    ``gamma_(n+p+8) sum |w| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``, ``x~`` the
+    indicator or the dense rows ``x - c``, ``l`` the bounded centre or ``d``.
+    """
+    from superglm.group_matrix import CategoricalGroupMatrix
+    from superglm.reml import w_derivatives
+    from superglm.solvers import centered_system
+    from superglm.solvers.mode_score import dense_columns
+
+    rng = np.random.default_rng(7)
+    n = 320
+    x = (1e8 + rng.normal(0, 50, n)).astype(np.float32)
+    codes = np.where(rng.uniform(size=n) < 0.4, 0, -1)
+    dm = DesignMatrix(
+        [CategoricalGroupMatrix(codes, n_levels=1), DenseGroupMatrix(x[:, None])], n=n, p=2
+    )
+    W = rng.uniform(0.5, 1.5, n)
+    if route == "irls":
+        weights = W
+        system = centered_system.build_centered_system(
+            dm=dm, W=W, z_off=np.zeros(n), penalty=np.zeros((2, 2))
+        )
+        gram, (hi, lo) = system.data_gram, system.centre_pair()
+        lo = np.zeros(2) if lo is None else lo
+    else:
+        weights = W * rng.normal(0, 1, n)
+        sum_w = float(W.sum())
+        pair = centered_system.dense_mean_pair(dm, W, sum_w)
+        dense = dense_columns(dm)
+        hi = np.where(dense, pair[0], dm.rmatvec(W) / sum_w)
+        lo = np.where(dense, pair[1], 0.0)
+        split = centered_system._dense_split(dm)
+        moments = split.bounded.execution_plan.moments(weights, include_xtw=True, signed=True)
+        gram = w_derivatives._dense_split_signed_gram(split, moments, weights, hi, lo)
+    X = dm.toarray().astype(np.float64)
+    rows = [[Fraction(v) - Fraction(h) - Fraction(d) for v, h, d in zip(r, hi, lo)] for r in X]
+    expected = np.array(
+        [
+            [float(sum(Fraction(w) * r[j] * r[k] for w, r in zip(weights, rows))) for k in range(2)]
+            for j in range(2)
+        ]
+    )
+    is_dense = np.array([False, True])
+    size = np.where(is_dense, np.abs(X - hi), np.abs(X)) + np.where(
+        is_dense, np.abs(lo), np.abs(hi)
+    )
+    bound = _gamma(n + 2 + 8) * (size.T @ (np.abs(weights)[:, None] * size))
+    assert np.all(np.abs(gram - expected) <= bound)
