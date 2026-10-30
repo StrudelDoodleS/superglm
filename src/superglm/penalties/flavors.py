@@ -31,7 +31,10 @@ class Adaptive:
         Exponent for the inverse weighting. Higher values increase
         the contrast between large and small groups.
     eps : float
-        Small constant to avoid division by zero for initially-zeroed groups.
+        Floor on a group's initial norm, as a fraction of the largest group's
+        norm, so initially-zeroed groups get a large finite weight.  The floor
+        follows the units of the coefficients, so rescaling the response does
+        not change which groups are weak.
     """
 
     def __init__(self, expon: float = 1.0, eps: float = 1e-6):
@@ -52,16 +55,20 @@ class Adaptive:
         with different reparametrizations (e.g. SSP splines).
 
         Without ``group_matrices``, falls back to coefficient norms:
-        ``new_weight_g = sqrt(p_g) / (||beta_init_g|| + eps)^expon``
+        ``new_weight_g = sqrt(p_g) / (||beta_init_g|| + eps * max_h ||beta_init_h||)^expon``
         """
-        new_groups = []
+        norms = []
         for i, g in enumerate(groups):
             if group_matrices is not None:
                 fitted = group_matrices[i].matvec(beta_init[g.sl])
-                norm_g = np.linalg.norm(fitted) / np.sqrt(len(fitted))
+                norms.append(np.linalg.norm(fitted) / np.sqrt(len(fitted)))
             else:
-                norm_g = np.linalg.norm(beta_init[g.sl])
-            adaptive_w = np.sqrt(g.penalty_size) / (norm_g + self.eps) ** self.expon
+                norms.append(np.linalg.norm(beta_init[g.sl]))
+        # With every group at zero there is no scale to be relative to.
+        floor = self.eps * (max(norms, default=0.0) or 1.0)
+        new_groups = []
+        for g, norm_g in zip(groups, norms, strict=True):
+            adaptive_w = np.sqrt(g.penalty_size) / (norm_g + floor) ** self.expon
             new_g = copy.copy(g)
             new_g.weight = adaptive_w
             new_groups.append(new_g)

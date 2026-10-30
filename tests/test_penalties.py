@@ -445,3 +445,28 @@ class TestSklearnShorthand:
                 pd.DataFrame({"x": [1, 2, 3]}),
                 np.array([1, 2, 3]),
             )
+
+
+class TestAdaptiveUnits:
+    @pytest.mark.parametrize("unit", [1.0, 1e-6, 1e-12])
+    def test_contrast_between_weak_and_strong_groups_ignores_the_units(self, unit):
+        eps = 1e-6
+        groups = [
+            GroupSlice("strong", 0, 3, weight=np.sqrt(3)),
+            GroupSlice("weak", 3, 6, weight=np.sqrt(3)),
+        ]
+        beta_init = unit * np.array([1.0, 1.0, 1.0, 0.01, 0.01, 0.01])
+
+        strong, weak = Adaptive(expon=1, eps=eps).adjust_weights(groups, beta_init)
+
+        norm = np.sqrt(3.0) * unit
+        assert weak.weight / strong.weight == pytest.approx(
+            (norm + eps * norm) / (0.01 * norm + eps * norm), rel=1e-12
+        )
+
+    def test_all_groups_at_zero_get_the_finite_floor_weight(self):
+        groups = [GroupSlice("g", 0, 2, weight=np.sqrt(2))]
+
+        (adjusted,) = Adaptive(expon=1, eps=1e-6).adjust_weights(groups, np.zeros(2))
+
+        assert adjusted.weight == pytest.approx(np.sqrt(2) / 1e-6)
