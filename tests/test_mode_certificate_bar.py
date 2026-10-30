@@ -274,7 +274,7 @@ def test_a_score_that_stops_contracting_ends_the_solve(monkeypatch):
 
 
 def test_a_score_has_stagnated_unless_its_least_value_halved():
-    """Mutation: ``<`` for ``<=`` (exact halving), or finite windows only."""
+    """Mutation: ``<`` for ``<=`` (exact halving), finite windows only, or NaN unmapped."""
     stagnated = mode_score.has_stagnated
     below, above = np.nextafter(4.0, 0.0), np.nextafter(4.0, 8.0)
     # the last two scores against the earlier ones: exactly half is progress
@@ -287,11 +287,14 @@ def test_a_score_has_stagnated_unless_its_least_value_halved():
     # a window past its window's worth of scores is the only one judged
     assert not stagnated([8.0, 4.0], 2) and not stagnated([8.0, 8.0], 2)
     assert stagnated([8.0, 8.0, 8.0], 2)
-    # a window with no finite score has not contracted; one that reaches a finite score has
-    assert stagnated([np.inf] * 4, 2)
-    assert stagnated([1.0, 1.0, np.nan, np.nan], 2)
-    assert stagnated([np.nan, np.nan, 1.0, 1.0], 2)
-    assert not stagnated([np.inf, np.inf, 3.0, np.inf], 2)
+    # a window with no finite score has not contracted; one that reaches a finite score
+    # has, and a score that is not a number counts as an infinite one, wherever it sits
+    for missing in (np.inf, np.nan):
+        assert stagnated([missing] * 4, 2)
+        assert stagnated([1.0, 1.0, missing, missing], 2)
+        assert not stagnated([missing, missing, 1.0, 1.0], 2)
+        assert not stagnated([1.0, missing, 0.25, 0.25], 2)
+        assert not stagnated([missing, missing, 3.0, missing], 2)
 
 
 def test_a_mode_short_of_the_bar_is_published_as_not_converged():

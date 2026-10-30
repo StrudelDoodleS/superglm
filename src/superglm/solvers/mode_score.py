@@ -183,11 +183,14 @@ def has_stagnated(ratios: list[float], window: int) -> bool:
     Once more than ``window`` have been taken, the least of the last ``window``
     must be at most half the least of the earlier ones (``stagnation_window``:
     a score "must at least halve", so exactly half is progress).  A window whose
-    least score is not finite has not contracted.
+    least score is not finite has not contracted.  A score that is not a
+    number counts as an infinite one, wherever it sits: neither is a score.
     """
     if len(ratios) <= window:
         return False
-    recent, earlier = np.min(ratios[-window:]), np.min(ratios[:-window])
+    scores = np.asarray(ratios, dtype=np.float64)
+    scores = np.where(np.isnan(scores), np.inf, scores)
+    recent, earlier = np.min(scores[-window:]), np.min(scores[:-window])
     return not (np.isfinite(recent) and recent <= 0.5 * earlier)
 
 
