@@ -432,7 +432,7 @@ def _design_summary(terms, n_rows) -> dict:
     }
 
 
-_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets")
+_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets", "truncation", "censoring")
 
 
 def _options(params) -> dict:

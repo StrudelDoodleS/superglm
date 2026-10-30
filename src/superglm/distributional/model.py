@@ -12,13 +12,13 @@ from numpy.typing import NDArray
 from superglm._blas_threads import allow_wide_design
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.family import (
-    COMPLETE_OBSERVATION,
     ChunkPreparedLikelihoodFamily,
     DefaultPredictionFamily,
     DistributionalFamily,
     DistributionFunctionFamily,
     FamilyLikelihoodPlan,
     _likelihood_reuse_contract,
+    bounded_observation,
 )
 from superglm.distributional.fit_state import (
     CompactNullModel,
@@ -28,6 +28,11 @@ from superglm.distributional.fit_state import (
 from superglm.distributional.inference import JointInference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
 from superglm.distributional.likelihood_identity import legacy_identifier_problem
+from superglm.distributional.observation import (
+    BoundPair,
+    resolve_response_bounds,
+    unvalidated_bound_arrays,
+)
 from superglm.distributional.prediction_design import (
     _as_contribution,
     _score_feature,
@@ -534,6 +539,8 @@ def _fit_candidate(
     chunk_size: ChunkSize | None = None,
     phase_recorder: FitPhaseRecorder | None = None,
     separation: str = "warn",
+    truncation: BoundPair = None,
+    censoring: BoundPair = None,
 ) -> DistributionalFitState:
     if not isinstance(weight_contract, WeightContract):
         raise TypeError("weight_contract must be a WeightContract")
@@ -541,6 +548,7 @@ def _fit_candidate(
     original_n = len(frame)
     original_y = _unvalidated_response_shape(y, original_n)
     original_offsets = _unvalidated_offset_shapes(offsets, original_n)
+    original_bounds = unvalidated_bound_arrays(truncation, censoring, original_n)
     resolved_weights = resolve_likelihood_weights(
         sample_weight,
         n_observations=original_n,
@@ -550,21 +558,32 @@ def _fit_candidate(
     retained_frame = as_eager_frame(frame.take_rows(positions))
     retained_y = np.array(original_y[positions], copy=True)
     retained_offsets = _take_unvalidated_offsets(original_offsets, positions)
+    observation = bounded_observation(
+        resolve_response_bounds(
+            retained_y,
+            None if original_bounds is None else tuple(a[positions] for a in original_bounds),
+            positions,
+        )
+    )
+    if not observation.is_complete and not family.capabilities.censored_response:
+        raise UnsupportedLikelihoodContractError(
+            f"{type(family).__name__} does not fit truncated or censored rows; GaussianLS, "
+            "LogNormalLS and GeneralizedParetoLSS do, or drop truncation= and censoring= to "
+            "read every row as complete"
+        )
     # Inherited capability must not bypass a custom family's ordinary binder.
+    # Bounded rows are always bound eagerly.
     preparation_contract = _likelihood_reuse_contract(family)
     bind = (
         family.bind_chunked_likelihood
         if chunk_size is not None
+        and observation.is_complete
         and preparation_contract is not None
         and preparation_contract.derived_prepared_fields
         and isinstance(family, ChunkPreparedLikelihoodFamily)
         else family.bind_likelihood
     )
-    likelihood_plan = bind(
-        retained_y,
-        resolved_weights,
-        COMPLETE_OBSERVATION,
-    )
+    likelihood_plan = bind(retained_y, resolved_weights, observation)
     if not isinstance(likelihood_plan, FamilyLikelihoodPlan):
         raise UnsupportedLikelihoodContractError(
             "family.bind_likelihood() must return a FamilyLikelihoodPlan"
@@ -706,6 +725,8 @@ def fit_dense_distributional(
     phase_recorder: FitPhaseRecorder | None = None,
     separation: str = "warn",
     revision: int = 1,
+    truncation: BoundPair = None,
+    censoring: BoundPair = None,
 ) -> DenseDistributionalModel:
     """Compile every terminal artifact privately, then publish one fitted revision.
 
@@ -742,6 +763,8 @@ def fit_dense_distributional(
             chunk_size=chunk_size,
             phase_recorder=phase_recorder,
             separation=separation,
+            truncation=truncation,
+            censoring=censoring,
         )
         return DenseDistributionalModel(family=family, _fit_state=candidate)
 
