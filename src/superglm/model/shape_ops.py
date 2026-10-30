@@ -499,6 +499,16 @@ def _validate_repair_for_publication(
     if grid.ndim != 1 or grid.size < 3 or not np.all(np.isfinite(grid)):
         raise RuntimeError("Unsafe shape repair rejected before publication: invalid repair grid")
     term_beta = np.concatenate([candidate_beta[group.sl] for group in groups])
+    current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
+    fitted_scale = float(np.linalg.norm(current_term_beta))
+    # A term within the slack's rounding of zero at the fitted term's scale is
+    # the zero term, and is published as exactly that: a later call sees only
+    # the published term, and would judge the rounding at its own scale.
+    if float(np.linalg.norm(term_beta)) <= shape_slack_tolerance(term_beta, fitted_scale):
+        candidate_beta = candidate_beta.copy()
+        for group in groups:
+            candidate_beta[group.sl] = 0.0
+        term_beta = np.zeros_like(term_beta)
     fitted_basis = np.asarray(spec.transform(grid), dtype=np.float64)
     if fitted_basis.shape != (grid.size, term_beta.size):
         raise RuntimeError(
@@ -514,10 +524,7 @@ def _validate_repair_for_publication(
         from superglm.constraints import shape_constraint_certificate
 
         certificate = shape_constraint_certificate(spec, term_beta, kind)
-        current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
-        feasibility_tolerance = shape_slack_tolerance(
-            term_beta, float(np.linalg.norm(current_term_beta))
-        )
+        feasibility_tolerance = shape_slack_tolerance(term_beta, fitted_scale)
         if certificate.minimum_scaled_slack < -feasibility_tolerance:
             constraint_name = (
                 "monotonicity" if kind in {"increasing", "decreasing"} else "curvature"
@@ -600,6 +607,7 @@ def _validate_repair_for_publication(
             "than the feasible zero-term fallback"
         )
 
+    repair_result.repaired_beta_reparam = candidate_beta
     repair_result.repaired_log_effect = repaired_curve.copy()
     if kind in {"increasing", "decreasing", "convex", "concave"}:
         repair_result.max_violation_after = certificate.violation

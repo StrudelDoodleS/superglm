@@ -2656,6 +2656,12 @@ def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(mon
 
     assert "x" in model._shape_repairs
 
+    def fail_if_started(*args, **kwargs):
+        raise AssertionError("a repeated repair of a collapsed term started a revision")
+
+    monkeypatch.setattr(shape_ops.FittedStateRevision, "start", fail_if_started)
+    assert model.apply_shape_postfit(X) is model
+
 
 def _log_link_model_and_data(scale):
     rng = np.random.default_rng(20261031)
