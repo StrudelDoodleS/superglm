@@ -270,10 +270,11 @@ rows does the following; `GaussianLS` is the reference.
   (`ResponseWindowFamily`), built from log tails rather than a difference of
   CDF values. The residuals, the checks and the plots read bounded rows
   through it, and refuse them from a family without it.
-- It may declare `censored_recession()` (`CensoredSeparationFamily`): one
-  flag per predictor, true where a level whose rows are all censored on one
-  side has no finite effect. The fit scans only flagged predictors for such
-  levels; a family that declares nothing is not scanned.
+- It may declare `censored_recession(bounds)` (`CensoredSeparationFamily`):
+  one flag per row and predictor, true where that censored row's bound
+  probability nears its supremum only as the predictor walks off one way. A
+  level whose rows are all censored on one side and all flagged is reported;
+  a family that declares nothing is not scanned.
 
 ```python
 from dataclasses import dataclass

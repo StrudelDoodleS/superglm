@@ -195,6 +195,8 @@ def bounded_channels(
 
 
 __all__ = [
+    "LEFT_CENSORED",
+    "ResponseBounds",
     "TailChannels",
     "WindowFunction",
     "bind_observation",

@@ -842,17 +842,20 @@ class ResponseBoundaryFamily(Protocol):
 
 @runtime_checkable
 class CensoredSeparationFamily(Protocol):
-    """Optional declaration of the predictors a one-sided censored level escapes along.
+    """Optional declaration of where a one-sided censored level escapes.
 
-    One flag per natural parameter, in ``parameters`` order.  A categorical
-    level on a flagged predictor whose rows are all censored on the same side
-    has no finite maximum-likelihood effect: each of its rows' bound
-    probabilities is monotone in that parameter.  An unflagged predictor can
-    still have a finite optimum there (a normal scale, for one) and is not
-    scanned.
+    ``censored_recession(bounds)`` gives one flag per row and natural
+    parameter, in ``parameters`` order: true where that row, censored on its
+    side within its truncation window, has a bound probability that nears its
+    supremum only as the parameter walks off in one direction, the same for
+    every row censored on that side.  A categorical level whose rows are all
+    censored on one side and all flagged on a predictor has no finite
+    maximum-likelihood effect there.  Rows left unflagged anchor their level;
+    whether such a level has a finite estimate can depend on the fit, so the
+    scan does not report it.
     """
 
-    def censored_recession(self) -> tuple[bool, ...]: ...
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]: ...
 
 
 def _validated_complete_fit_configuration(

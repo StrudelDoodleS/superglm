@@ -148,8 +148,9 @@ def log_window_channels(
         delta = far_value - near_value
         kappa = 1.0 / np.expm1(-delta)
     # Elsewhere the window is the near end's tail exactly: log(-expm1(delta))
-    # rounds to zero wherever kappa does.
-    rows = np.flatnonzero((far_value > -np.inf) & (kappa > 0.0))
+    # rounds to zero wherever kappa does.  Tails that round equal (kappa
+    # infinite) leave the window unresolved, -inf, unless a caller integrates it.
+    rows = np.flatnonzero((far_value > -np.inf) & (np.abs(kappa) > 0.0))
     if len(rows) == 0:
         return near_value, near_score, near_hessian
     value = np.array(near_value, dtype=FLOAT, copy=True)
@@ -161,14 +162,16 @@ def log_window_channels(
     weight = kappa[rows][:, None]
     difference = near_score[rows] - far_score[rows]
     score = np.array(near_score, dtype=FLOAT, copy=True)
-    score[rows] += weight * difference
+    with np.errstate(invalid="ignore", over="ignore"):
+        score[rows] += weight * difference
     if derivative_order == 1:
         return value, score, None
     assert near_hessian is not None and far_hessian is not None
     hessian = np.array(near_hessian, dtype=FLOAT, copy=True)
-    hessian[rows] += weight * (near_hessian[rows] - far_hessian[rows]) - (
-        weight * (1.0 + weight)
-    ) * _outer_packed(difference, difference)
+    with np.errstate(invalid="ignore", over="ignore"):
+        hessian[rows] += weight * (near_hessian[rows] - far_hessian[rows]) - (
+            weight * (1.0 + weight)
+        ) * _outer_packed(difference, difference)
     return value, score, hessian
 
 

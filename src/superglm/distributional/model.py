@@ -656,9 +656,9 @@ def _fit_candidate(
             scan_censored_separation(
                 compiled,
                 retained_frame,
-                bound_rows.side,
+                bound_rows,
                 resolved_weights.values,
-                recession=censored_recession(family, len(compiled)),
+                recession=censored_recession(family, bound_rows, len(compiled)),
             ),
             separation_policy,
             stacklevel=4,

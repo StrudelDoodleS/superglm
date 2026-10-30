@@ -834,8 +834,16 @@ predictor that moves every such bound probability one way: the location or
 mean of `GaussianLS` and `LogNormalLS`, and both predictors of
 `GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
 term and `CategoricalInteraction` on those predictors for such levels and
-cells, under the same `separation` policy. A scale predictor is not scanned:
-there a level censored on one side can still have a finite estimate. Ordered-categorical smooths
+cells, under the same `separation` policy.
+
+The scan reads only what the data decide before the fit:
+- A generalized Pareto row with an upper truncation bound anchors its level,
+  since its conditional probability can peak at a finite value.
+- A scale predictor is scanned only for an untruncated left-censored level in
+  the mean form of `LogNormalLS`, whose scale always runs off.
+- Elsewhere a scale level censored on one side has a finite estimate only when
+  its rows' bounds lie on both sides of the fitted location. With one shared
+  limit it usually has none, and no warning says so. Ordered-categorical smooths
 are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.

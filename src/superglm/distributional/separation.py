@@ -37,7 +37,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     ResponseBoundaryFamily,
 )
-from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED
+from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED, ResponseBounds
 from superglm.distributional.predictor import CompiledPredictor
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import CategoricalInteraction
@@ -228,43 +228,48 @@ def _scan_design_cells(
     return findings
 
 
-def censored_recession(family: DistributionalFamily, n_predictors: int) -> tuple[bool, ...]:
-    """One flag per predictor; all false without a declaration."""
+def censored_recession(
+    family: DistributionalFamily, bounds: ResponseBounds, n_predictors: int
+) -> NDArray[np.bool_]:
+    """One flag per row and predictor; all false without a declaration."""
+    shape = (bounds.n_rows, n_predictors)
     if not isinstance(family, CensoredSeparationFamily):
-        return (False,) * n_predictors
-    flags = tuple(bool(flag) for flag in family.censored_recession())
-    if len(flags) != n_predictors:
-        raise ValueError("family.censored_recession must return one flag per predictor")
+        return np.zeros(shape, dtype=bool)
+    flags = np.asarray(family.censored_recession(bounds))
+    if flags.shape != shape or flags.dtype != np.bool_:
+        raise ValueError("family.censored_recession must return one boolean per row and predictor")
     return flags
 
 
 def scan_censored_separation(
     compiled: Sequence[CompiledPredictor],
     frame: EagerFrame,
-    side: NDArray,
+    bounds: ResponseBounds,
     weights: NDArray,
     *,
-    recession: Sequence[bool],
+    recession: NDArray[np.bool_],
 ) -> list[SeparatedTerm]:
-    """Levels and crossed cells whose rows are all censored on one side, on flagged predictors.
+    """Levels and crossed cells whose rows are all censored on one side and flagged.
 
     The data bound such a cell's response from one side only, so on a
-    predictor along which every row's bound probability is monotone
-    (``recession``) its likelihood keeps rising as its effect walks off to
-    infinity, as a cell on a response boundary does.  The scan is the
-    response-boundary scan on the indicator of rows not censored on that side.
+    predictor along which each of its rows' bound probabilities nears its
+    supremum only at infinity (``recession``, per row and predictor) its
+    likelihood keeps rising as its effect walks off, as a cell on a response
+    boundary does.  The scan is the response-boundary scan on the indicator of
+    rows that are not both censored on that side and flagged.
     """
-    flagged = [p for p, flag in zip(compiled, recession, strict=True) if flag]
     findings: list[SeparatedTerm] = []
     for value, label in ((RIGHT_CENSORED, "right-censored"), (LEFT_CENSORED, "left-censored")):
-        on_side = np.asarray(side) == value
-        if not np.any(on_side):
-            continue
-        off_side = np.where(on_side, 0.0, 1.0)
-        for predictor in flagged:
+        censored = bounds.side == value
+        for index, predictor in enumerate(compiled):
+            on_side = censored & recession[:, index]
+            if not np.any(on_side):
+                continue
             findings.extend(
                 replace(finding, term=f"{predictor.name}:{finding.term}", boundary=label)
-                for finding in _scan_design_cells(predictor.compiled, frame, off_side, weights)
+                for finding in _scan_design_cells(
+                    predictor.compiled, frame, np.where(on_side, 0.0, 1.0), weights
+                )
             )
     return findings
 

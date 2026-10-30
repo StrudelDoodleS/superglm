@@ -26,6 +26,7 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
 )
 from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
     TailChannels,
     bind_observation,
     bounded_channels,
@@ -412,14 +413,17 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
-    def censored_recession(self) -> tuple[bool, ...]:
-        """A level censored on one side escapes along the location, not the scale.
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the location; none is decided along the scale.
 
-        ``P(Y > c)`` rises and ``P(Y <= c)`` falls with the location at every
-        row; along the scale ``Phi((mu - c)/sigma)`` peaks at a finite value
-        once the rows' ``mu - c`` differ in sign.
+        The normal density is log-concave, so its location family has a
+        monotone likelihood ratio: ``P(Y > c)`` rises and ``P(Y <= c)`` falls
+        with the location within any truncation window.  Along the scale
+        ``Phi((mu - c)/sigma)`` peaks at a finite value once a level's rows'
+        ``mu - c`` differ in sign, which only the fit decides.
         """
-        return (True, False)
+        censored = bounds.side != 0
+        return np.column_stack((censored, np.zeros_like(censored)))
 
     def to_config(self) -> dict[str, Any]:
         """Return JSON-safe complete family configuration."""

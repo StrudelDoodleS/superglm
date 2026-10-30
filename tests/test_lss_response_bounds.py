@@ -1027,6 +1027,77 @@ def test_a_level_censored_on_one_side_of_a_scale_predictor_keeps_its_estimate():
     np.testing.assert_allclose(fitted["scale"], np.exp([log_a, log_b]), rtol=1e-5)
 
 
+def _pareto_shape_levels(truncation_side):
+    # Group a: 1,000 midpoint quantiles of GPD(0.3, 1); group b: 20 rows at 1,
+    # right-censored there and truncated at 3 above or 0.5 below.
+    group_a = stats.genpareto.ppf((np.arange(1_000) + 0.5) / 1_000, 0.3)
+    y = np.concatenate([group_a, np.ones(20)])
+    in_b = np.arange(len(y)) >= len(group_a)
+    censoring = (None, np.where(in_b, 1.0, np.inf))
+    if truncation_side == "upper":
+        truncation = (None, np.where(in_b, 3.0, np.inf))
+    else:
+        truncation = (np.where(in_b, 0.5, -np.inf), None)
+    X = pd.DataFrame({"g": np.where(in_b, "b", "a")})
+    return X, y, group_a, censoring, truncation
+
+
+def test_upper_truncation_anchors_a_censored_pareto_level():
+    # (S(1) - S(3))/(1 - S(3)) peaks at an interior shape, so the level has an
+    # estimate; with only a lower truncation bound it walks to the wall.
+    X, y, group_a, censoring, truncation = _pareto_shape_levels("upper")
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(family, family.scale(), family.shape(cat("g")), separation="error")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", GeneralizedParetoInitializationWarning)
+        model.fit(X, y, censoring=censoring, truncation=truncation)
+
+    def negative(point):
+        scale, xi_a, xi_b = np.exp(point[0]), point[1], point[2]
+        sf = stats.genpareto(c=xi_b, scale=scale).sf
+        return -(
+            stats.genpareto.logpdf(group_a, xi_a, scale=scale).sum()
+            + 20 * np.log((sf(1.0) - sf(3.0)) / (1.0 - sf(3.0)))
+        )
+
+    log_scale, xi_a, xi_b = _mle(negative, np.array([0.0, 0.3, 0.3]))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["shape"], [xi_a, xi_b], rtol=1e-4)
+    np.testing.assert_allclose(fitted["scale"], np.exp([log_scale] * 2), rtol=1e-5)
+
+    X, y, _, censoring, truncation = _pareto_shape_levels("lower")
+    with pytest.warns(SeparationWarning, match=r"'shape:g': 1 of 2 occupied levels"):
+        SuperLSS(family, family.scale(), family.shape(cat("g"))).fit(
+            X, y, censoring=censoring, truncation=truncation
+        )
+
+
+def test_a_left_censored_mean_form_scale_level_is_separated():
+    # P(Y <= c) = Phi(sigma/2 - log(m/c)/sigma) nears one only as sigma grows,
+    # whatever the mean, so the level's scale has no finite estimate.
+    rng = np.random.default_rng(570)
+    group = rng.choice(["a", "b", "c"], 900)
+    y = np.exp(rng.normal(8.0, 1.0, 900))
+    y[group == "c"] = 400.0
+    lower = np.where(group == "c", 400.0, -np.inf)
+    family = LogNormalLS()
+    with pytest.warns(
+        SeparationWarning, match=r"'scale:g': 1 of 3 occupied levels have only left-censored"
+    ):
+        SuperLSS(family, family.mean(), family.scale(cat("g"))).fit(
+            pd.DataFrame({"g": group}), y, censoring=(lower, None)
+        )
+
+
+def test_a_wide_log_window_far_from_overflow_keeps_its_mass():
+    # log1p((upper - lower)/lower) overflows here; the window is 9e-18 sd wide
+    # in log space, and both log tails round to log(1/2).
+    family = LogNormalLS(parametrisation="location")
+    value = family.log_window_probability(1e-200, 1e200, np.array([[0.0, 1e20]]))
+    z = math.log(1e200) / 1e20
+    assert value[0] == pytest.approx(math.log(math.erf(z / math.sqrt(2.0))), rel=1e-12)
+
+
 def test_a_crossed_cell_censored_on_one_side_is_separated():
     from superglm.features import Categorical
     from superglm.features.interaction import CategoricalInteraction
