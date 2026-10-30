@@ -138,8 +138,17 @@ def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
 def _face_decomposition(
     matrix: NDArray, face: NDArray, factor: Callable[[], NDArray]
 ) -> RankDecomposition:
-    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``."""
-    decomposition = decompose_gram_if_authoritative(_on_face(matrix, face))
+    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``.
+
+    ``M`` is a computed Gram of nonnegative weights and a penalty, so a negative
+    eigenvalue of ``Z' M Z`` past the eigensolver's resolution is the rounding of
+    forming ``M`` and not curvature: it can sit beside the other directions
+    when weights of ``1e15`` meet a face they do not reach.  The Gram then
+    cannot certify its spectrum and the factor decides (``psd_by_construction``).
+    """
+    decomposition = decompose_gram_if_authoritative(
+        _on_face(matrix, face), psd_by_construction=True
+    )
     return decompose_factor(factor() @ face) if decomposition is None else decomposition
 
 

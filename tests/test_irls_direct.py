@@ -2582,6 +2582,31 @@ class TestDirectSolverBasic:
         # no domain to keep: the route's refusal itself
         assert trial_refusal(Poisson(), LogLink(), state(1.0, 2.0, 1.0), weights, other) is other
 
+    def test_a_face_gram_that_forming_left_indefinite_is_decided_by_the_factor(self):
+        """A Gram of nonnegative weights cannot be refused as indefinite on its active face.
+
+        With weights near ``1e15`` the formed Hessian carries rounding as large as
+        the face's own entries, and ``Z' M Z`` comes out with a negative
+        eigenvalue ``-1e-3`` beside its unit diagonal.  The Gram then cannot
+        certify its spectrum, and the decomposition of the observation factor
+        on the face stands in its place.
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor
+
+        delta = 1e-3
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.0 + delta], [0.0, 1.0 + delta, 1.0]])
+        factor = np.array([[0.0, 1.0, 1.0], [0.0, 0.0, 1e-2]])
+        decomposition = _face_decomposition(matrix, face, lambda: factor)
+        expected = decompose_factor(factor @ face)
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        assert decomposition.rank == expected.rank == 2
+        scale = np.linalg.norm(exact, 2)
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        assert error <= 64 * np.finfo(float).eps * scale * np.linalg.cond(exact)
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:

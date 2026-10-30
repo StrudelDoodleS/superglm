@@ -279,6 +279,33 @@ class TestSCOPPenaltyInEDF:
         assert model_high._result.effective_df < model_low._result.effective_df
 
 
+class TestMonotoneEdgeOfRange:
+    """A fit whose maximum is at the edge of the link's range never raises."""
+
+    def test_poisson_identity_increasing_pspline_ends_not_converged(self):
+        """Zero counts below ``x = 0.3`` put the maximum at a mean of zero.
+
+        The iterates approach that edge, the Fisher weights ``1 / mu`` reach
+        ``1e15`` and the Hessian restricted to the active face is indefinite by
+        the rounding of forming it, which was a ``ValueError`` out of the
+        finaliser.  The fit now returns the last accepted coefficients, not
+        converged.
+        """
+        rng = np.random.default_rng(3)
+        x = np.sort(rng.uniform(0, 1, 80))
+        y = rng.poisson(np.where(x < 0.3, 0.0, 6 * (x - 0.3))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            link="identity",
+            selection_penalty=0.0,
+            features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
+        )
+        model.fit(pd.DataFrame({"x": x}), y)
+        assert not model.result.converged
+        assert np.all(np.isfinite(model.result.beta))
+        assert np.all(np.diff(model.predict(pd.DataFrame({"x": x}))) >= -1e-9)
+
+
 class TestMonotoneUnsupportedCombinations:
     """Unsupported combinations raise NotImplementedError."""
 
