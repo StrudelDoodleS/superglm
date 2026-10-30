@@ -260,10 +260,7 @@ def _profile_repaired_intercept(
         roundoff = (
             64.0
             * np.finfo(np.float64).eps
-            * max(
-                1.0,
-                float(np.sum(np.abs(weighted_residuals), dtype=np.float64)),
-            )
+            * float(np.sum(np.abs(weighted_residuals), dtype=np.float64))
         )
         shift = 0.0 if abs(residual_sum) <= roundoff else residual_sum / sum_weights
         profiled_eta = eta_base + shift
@@ -304,7 +301,7 @@ def _profile_repaired_intercept(
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
-        score_scale = 1.0 + float(np.sum(np.abs(score_rows), dtype=np.float64))
+        score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
         return deviance, score, score_scale, information
 
     shift = 0.0
@@ -326,15 +323,7 @@ def _profile_repaired_intercept(
                 trial_score_scale,
                 trial_information,
             ) = evaluate(trial_shift)
-            roundoff = (
-                64.0
-                * np.finfo(np.float64).eps
-                * max(
-                    1.0,
-                    abs(deviance),
-                    abs(trial_deviance),
-                )
-            )
+            roundoff = 64.0 * np.finfo(np.float64).eps * max(abs(deviance), abs(trial_deviance))
             if trial_deviance <= deviance + roundoff:
                 shift = trial_shift
                 deviance = trial_deviance
@@ -436,6 +425,8 @@ def _validate_repair_for_publication(
     current_eta,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Certify fitted geometry and objective quality before changing private state."""
+    from superglm.constraints import shape_slack_tolerance, shape_sum_tolerance
+
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     candidate_beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
     if candidate_beta.shape != current_beta.shape or not np.all(np.isfinite(candidate_beta)):
@@ -460,7 +451,10 @@ def _validate_repair_for_publication(
         from superglm.constraints import shape_constraint_certificate
 
         certificate = shape_constraint_certificate(spec, term_beta, kind)
-        feasibility_tolerance = 2e-12 * (1.0 + float(np.linalg.norm(term_beta)))
+        current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
+        feasibility_tolerance = shape_slack_tolerance(
+            term_beta, float(np.linalg.norm(current_term_beta))
+        )
         if certificate.minimum_scaled_slack < -feasibility_tolerance:
             constraint_name = (
                 "monotonicity" if kind in {"increasing", "decreasing"} else "curvature"
@@ -476,7 +470,9 @@ def _validate_repair_for_publication(
         groups,
     )
     mean_shift = float(np.mean(candidate_eta_delta))
-    centering_tolerance = 2e-10 * (1.0 + float(np.max(np.abs(candidate_eta_delta))))
+    centering_tolerance = shape_sum_tolerance(
+        float(np.max(np.abs(candidate_eta_delta))), candidate_eta_delta.size
+    )
     if not np.isfinite(mean_shift):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: fitted centering changed"
@@ -527,8 +523,8 @@ def _validate_repair_for_publication(
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
     )
-    deviance_tolerance = 1e-8 * (1.0 + abs(fallback_deviance))
-    merit_tolerance = 1e-8 * (1.0 + abs(fallback_merit))
+    deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y))
+    merit_tolerance = shape_sum_tolerance(abs(fallback_merit), len(y))
     if (
         candidate_deviance > fallback_deviance + deviance_tolerance
         or candidate_merit > fallback_merit + merit_tolerance

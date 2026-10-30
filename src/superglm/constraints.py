@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
+
 if TYPE_CHECKING:
     from superglm.features.spline import _SplineBase
     from superglm.types import GroupSlice
@@ -372,19 +374,38 @@ def shape_constraint_is_roundoff_feasible(
     beta: NDArray,
     kind: str,
 ) -> bool:
-    """Return whether any violation is no larger than floating-point roundoff."""
+    """Return whether any violation is no larger than the certificate's own rounding."""
     beta_arr = np.asarray(beta, dtype=np.float64)
     certificate = shape_constraint_certificate(spec, beta_arr, kind)
-    tolerance = _shape_roundoff_tolerance(beta_arr)
+    tolerance = shape_slack_tolerance(beta_arr)
     return certificate.minimum_scaled_slack >= -tolerance
 
 
-def _shape_roundoff_tolerance(beta: NDArray) -> float:
-    return (
-        256.0
-        * np.finfo(np.float64).eps
-        * (1.0 + float(np.linalg.norm(np.asarray(beta, dtype=np.float64))))
-    )
+#: Roundings behind one certified slack, per coefficient.  The slack is a unit row
+#: times ``beta``, the row comes from a conditioned basis derivative, and SLSQP
+#: leaves a linear constraint violated by up to about ``1e-12 ||beta||``; the
+#: count keeps a factor of ten over that for a term of ten coefficients.
+_SLACK_STEPS = 2**14
+#: Roundings behind one row of a deviance, merit or predictor sum, beyond the
+#: summation: the predictor, the link and the unit deviance.
+_ROW_STEPS = 16
+
+
+def shape_sum_tolerance(scale: float, terms: int) -> float:
+    """Higham's ``gamma_n * scale`` for a sum of ``terms`` rows, ``scale`` being their absolute total."""
+    return float(gamma(_ROW_STEPS * terms)) * scale
+
+
+def shape_slack_tolerance(beta: NDArray, curve_scale: float = 0.0) -> float:
+    """Higham's ``gamma_n * scale`` for a scaled slack, a unit row times ``beta``.
+
+    The slack carries the units of the coefficients and ``||beta||`` bounds its
+    terms.  ``curve_scale``, the magnitude of the curve ``beta`` approximates,
+    keeps the allowance when an optimizer's result collapses towards zero.
+    """
+    beta_arr = np.asarray(beta, dtype=np.float64)
+    scale = max(float(np.linalg.norm(beta_arr)), curve_scale)
+    return float(gamma(_SLACK_STEPS * beta_arr.size)) * scale
 
 
 class MonotoneRepairer:
@@ -430,7 +451,7 @@ class MonotoneRepairer:
         certificate_before = shape_constraint_certificate(spec, beta_combined, self.direction)
         viol_before = certificate_before.violation
 
-        if certificate_before.minimum_scaled_slack >= -_shape_roundoff_tolerance(beta_combined):
+        if certificate_before.minimum_scaled_slack >= -shape_slack_tolerance(beta_combined):
             return MonotoneRepairResult(
                 feature_name="",  # filled by caller
                 direction=self.direction,
@@ -508,15 +529,18 @@ def _project_shape_in_fitted_basis(
     H = fitted_basis.T @ (fitted_basis * w[:, None])
     g = fitted_basis.T @ (target * w)
     zero_loss = float(np.dot(w, target * target))
-    objective_scale = max(zero_loss, 1.0)
-    H_scaled = H / objective_scale
-    g_scaled = g / objective_scale
+    # The optimizer works in units of the target's weighted RMS, so its
+    # tolerances and step control do not depend on the response's units.
+    total_weight = float(np.sum(w))
+    curve_scale = float(np.sqrt(zero_loss / total_weight)) or 1.0
+    H_scaled = H / total_weight
+    g_scaled = g / (total_weight * curve_scale)
 
-    def objective(beta: NDArray) -> float:
-        return float(0.5 * beta @ H_scaled @ beta - g_scaled @ beta)
+    def objective(coefficients: NDArray) -> float:
+        return float(0.5 * coefficients @ H_scaled @ coefficients - g_scaled @ coefficients)
 
-    def gradient(beta: NDArray) -> NDArray:
-        return H_scaled @ beta - g_scaled
+    def gradient(coefficients: NDArray) -> NDArray:
+        return H_scaled @ coefficients - g_scaled
 
     constraint_points = list(_shape_probe_points(spec, kind))
     beta_projected = np.zeros(fitted_basis.shape[1], dtype=np.float64)
@@ -543,7 +567,7 @@ def _project_shape_in_fitted_basis(
         )
         result = minimize(
             objective,
-            beta_projected,
+            beta_projected / curve_scale,
             jac=gradient,
             method="SLSQP",
             constraints=constraints,
@@ -555,8 +579,8 @@ def _project_shape_in_fitted_basis(
                 f"status={result.status}, message={result.message}"
             )
 
-        beta_projected = np.asarray(result.x, dtype=np.float64)
-        feasibility_tolerance = 2e-12 * (1.0 + float(np.linalg.norm(beta_projected)))
+        beta_projected = curve_scale * np.asarray(result.x, dtype=np.float64)
+        feasibility_tolerance = shape_slack_tolerance(beta_projected, curve_scale)
         violating_points = _violating_shape_constraint_points(
             spec,
             beta_projected,
@@ -589,7 +613,7 @@ def _project_shape_in_fitted_basis(
     if not np.all(np.isfinite(beta_projected)) or not np.all(np.isfinite(repaired_curve)):
         raise RuntimeError(f"{label} projection returned non-finite fitted state")
 
-    feasibility_tolerance = 2e-12 * (1.0 + float(np.linalg.norm(beta_projected)))
+    feasibility_tolerance = shape_slack_tolerance(beta_projected, curve_scale)
     certificate = shape_constraint_certificate(spec, beta_projected, kind)
     if certificate.minimum_scaled_slack < -feasibility_tolerance:
         raise RuntimeError(
@@ -599,7 +623,7 @@ def _project_shape_in_fitted_basis(
 
     residual = repaired_curve - target
     projection_loss = float(np.dot(w, residual * residual))
-    objective_tolerance = 1e-8 * (1.0 + zero_loss)
+    objective_tolerance = shape_sum_tolerance(zero_loss, w.size)
     if not np.isfinite(projection_loss) or projection_loss > zero_loss + objective_tolerance:
         raise RuntimeError(
             f"{label} projection failed its feasible-zero objective certificate: "
@@ -634,7 +658,7 @@ class CurvatureRepairer:
         certificate_before = shape_constraint_certificate(spec, beta_combined, self.kind)
         viol_before = certificate_before.violation
 
-        if certificate_before.minimum_scaled_slack >= -_shape_roundoff_tolerance(beta_combined):
+        if certificate_before.minimum_scaled_slack >= -shape_slack_tolerance(beta_combined):
             return MonotoneRepairResult(
                 feature_name="",
                 direction=self.kind,
