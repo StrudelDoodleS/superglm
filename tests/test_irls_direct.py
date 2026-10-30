@@ -2709,6 +2709,39 @@ class TestDirectSolverBasic:
         bound = 64 * np.finfo(float).eps * np.linalg.norm(exact, 2) * np.linalg.cond(exact)
         assert error <= bound
 
+    @pytest.mark.parametrize("diagonal", [-1e-16, 0.0])
+    def test_a_face_gram_with_a_zero_diagonal_beside_a_nonzero_row_is_decided_by_the_factor(
+        self, diagonal
+    ):
+        """A face Gram of nonnegative weights with a zero diagonal and a nonzero row is decided by the factor.
+
+        A semidefinite matrix with a zero diagonal entry has a zero row
+        (Cauchy-Schwarz).  Equilibration takes a diagonal within ``100 eps``
+        below zero as zero, so such a diagonal beside an off-diagonal entry of
+        rounding is formation rounding, as a materially negative one is.  The
+        event is forced: the face Gram is ``[[1, 1e-16], [1e-16, d]]``, ``d``
+        at or just below zero, where the factor gives ``1e-4``.  A Gram not
+        semidefinite by construction is still refused.  Mutation: an
+        authoritative check that refuses only a materially negative diagonal
+        raises "nonzero offdiagonal entry on a zero diagonal".
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
+
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1e-16], [0.0, 1e-16, diagonal]])
+        factor = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1e-2]])
+        with pytest.raises(ValueError, match="nonzero offdiagonal entry on a zero diagonal"):
+            decompose_gram_if_authoritative(face.T @ matrix @ face)
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
+        assert decomposition.method == decompose_factor(factor @ face).method == "qr_svd"
+        assert decomposition.rank == 2
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        bound = 64 * np.finfo(float).eps * np.linalg.norm(exact, 2) * np.linalg.cond(exact)
+        assert error <= bound
+
     def test_a_face_gram_that_forming_may_have_moved_by_its_spectrum_is_decided_by_the_factor(
         self,
     ):
@@ -2847,6 +2880,79 @@ class TestDirectSolverBasic:
         edf1 = _rank_edf1(record, record.take_data_gram(weights), edf)
         assert 25.0 / 9.0 - 2 * slack <= 1.0 + np.sum(edf1) <= 26.0 / 9.0 + 2 * slack
         assert np.all(edf1 >= -2 * slack) and np.all(edf1 <= 1.0 + 2 * slack)
+
+    def test_a_face_the_heavy_rows_reach_once_is_fitted_when_its_gram_rounds_a_zero_diagonal(
+        self, monkeypatch
+    ):
+        """A face whose Gram rounds a diagonal to zero beside a nonzero row is decided by its rows.
+
+        Two rows of weight ``1e15`` are ``v = (9, 7, 7, 5)`` and ``-v``, the
+        binding row is ``c = (9, 7, 7, 0)``, eight unit rows are ``I`` and
+        ``-I``, and ``S = I``.  On the face ``null(c)`` the heavy rows project
+        to ``a``, ``5 sqrt(w) e_4`` exactly: they reach one direction and
+        cancel the other two, where the formed ``Z' M Z`` keeps rounding of
+        the order of their curvature.  The event is forced: every face Gram's
+        smallest diagonal is set to ``-eps`` times its largest, which
+        equilibration takes as zero, beside an entry of that size in its row.
+        The face fit's influence is ``I - (2aa' + 3I)^-1``, with eigenvalues
+        ``2/3`` twice and ``1 - 1/(2|a|^2 + 3)`` whatever direction rounding
+        turns ``a``, so with the intercept the EDF is ``10/3`` to within
+        ``1/(2|a|^2 + 3)``, below ``1e-16``, and the factor's error: its
+        backward error ``gamma ||B||_F`` moves each of the face's 3 directions
+        by at most twice that over ``sigma_min(B) >= sqrt(3)`` (Wedin).
+        Mutation: an authoritative check that refuses only a materially
+        negative diagonal raises "nonzero offdiagonal entry on a zero
+        diagonal".
+        """
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        from superglm._roundoff import gamma
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        eps = np.finfo(float).eps
+        on_face = irls_finalise._on_face
+        forced = []
+
+        def rounded_to_zero(matrix, face):
+            out = on_face(matrix, face)
+            if face is None:
+                return out
+            out = out.copy()
+            k = int(np.argmin(np.diag(out)))
+            j = (k + 1) % len(out)
+            size = eps * np.max(np.abs(np.diag(out)))
+            out[k, k], out[k, j], out[j, k] = -size, size, size
+            forced.append(k)
+            return out
+
+        monkeypatch.setattr(irls_finalise, "_on_face", rounded_to_zero)
+        v = np.array([9.0, 7.0, 7.0, 5.0])
+        X = np.vstack((v, -v, np.eye(4), -np.eye(4)))
+        y = np.r_[-1.0, 1.0, np.zeros(8)]
+        weights = np.r_[1e15, 1e15, np.ones(8)]
+        constraint = LinearConstraintSet(A=np.array([[9.0, 7.0, 7.0, 0.0]]), b=np.zeros(1))
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(X)], n=10, p=4),
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, 4, constraints=constraint)],
+            lambda2=0.0,
+            S_override=np.eye(4),
+            weight_semantics="frequency",
+        )
+        record = result.rank_info
+        assert forced
+        assert record.face.shape == (4, 3)
+        assert record.face_augmented.method == "qr_svd"
+        n, p, width = 10, 4, 3
+        rows = np.sqrt(2.0 * weights[0]) * (5.0 + gamma(p + 4) * np.sum(np.abs(v)))
+        slack = 2 * width * gamma(n + width) * (rows + np.sqrt(3.0 * width)) / np.sqrt(3.0)
+        assert abs(result.effective_df - 10.0 / 3.0) <= slack
+        assert np.all(record.feature_edf >= -slack)
+        assert np.all(record.feature_edf <= 1.0 + slack)
 
     def test_a_face_reads_its_edf_off_its_own_rows_whatever_layout_the_certified_factor_has(
         self, monkeypatch

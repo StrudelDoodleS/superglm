@@ -1277,30 +1277,56 @@ def _materially_negative_diagonal(diagonal: NDArray) -> bool:
     return scale_reference > 0.0 and bool(np.any(diagonal / scale_reference < -100.0 * _EPS))
 
 
-def _equilibrate_gram(
-    matrix: NDArray, *, allow_indefinite: bool = False
-) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+def _offdiagonal_on_a_zero_diagonal(matrix: NDArray, zero_diagonal: NDArray) -> bool:
+    """Whether a row of ``matrix`` that ``zero_diagonal`` flags has a nonzero off-diagonal entry.
+
+    A semidefinite matrix has ``A_ij^2 <= A_ii A_jj`` (Cauchy-Schwarz on its
+    2 x 2 principal minors), so a zero diagonal entry has a zero row.
+    """
+    rows = matrix[zero_diagonal]
+    rows[np.arange(len(rows)), np.flatnonzero(zero_diagonal)] = 0.0
+    return bool(np.any(rows != 0.0))
+
+
+def _diagonal_refusal(symmetric: NDArray) -> str | None:
+    """Why ``symmetric``'s diagonal is no semidefinite matrix's, as equilibration reads it, else ``None``.
+
+    Equilibration takes a diagonal entry within ``-100 eps`` of its largest
+    (``_materially_negative_diagonal``) as zero, and so refuses it when its
+    row is not zero (``_offdiagonal_on_a_zero_diagonal``).
+    """
+    diagonal = np.diag(symmetric)
+    if _materially_negative_diagonal(diagonal):
+        return "matrix has a materially negative diagonal"
+    if _offdiagonal_on_a_zero_diagonal(symmetric, diagonal <= 0.0):
+        return "matrix has nonzero offdiagonal entry on a zero diagonal"
+    return None
+
+
+def _validated_symmetric(matrix: NDArray) -> NDArray:
+    """The symmetric part of a square, finite ``matrix``."""
     values = np.asarray(matrix, dtype=float)
     if values.ndim != 2 or values.shape[0] != values.shape[1]:
         raise ValueError("matrix must be square")
     if not np.all(np.isfinite(values)):
         raise ValueError("matrix must be finite")
-    symmetric = _symmetric_part(values)
+    return _symmetric_part(values)
+
+
+def _equilibrate_gram(
+    matrix: NDArray, *, allow_indefinite: bool = False
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    symmetric = _validated_symmetric(matrix)
     diagonal = np.diag(symmetric)
-    if not allow_indefinite and _materially_negative_diagonal(diagonal):
-        raise ValueError("matrix has a materially negative diagonal")
     if allow_indefinite:
         # With r_i = max_j |A_ij|, symmetry gives |A_ij| <= sqrt(r_i r_j).
         # This bounds every scaled entry by one even on a zero diagonal.
         diagonal_scale = np.max(np.abs(symmetric), axis=1, initial=0.0)
     else:
+        refusal = _diagonal_refusal(symmetric)
+        if refusal is not None:
+            raise ValueError(refusal)
         diagonal_scale = np.maximum(diagonal, 0.0)
-        zero_diagonal = diagonal_scale == 0.0
-        if np.any(zero_diagonal):
-            off_diagonal = symmetric.copy()
-            np.fill_diagonal(off_diagonal, 0.0)
-            if np.any(off_diagonal[zero_diagonal] != 0.0):
-                raise ValueError("matrix has nonzero offdiagonal entry on a zero diagonal")
     active_columns = np.flatnonzero(diagonal_scale > 0.0)
     column_scale = np.zeros(len(diagonal))
     column_scale[active_columns] = np.sqrt(diagonal_scale[active_columns])
@@ -2129,12 +2155,13 @@ def _decompose_gram(
     """
     # A materially negative diagonal is a negative Rayleigh quotient ``e_k' M
     # e_k``, so the same rounding of a semidefinite Gram as a negative
-    # eigenvalue past the eigensolver's resolution.
+    # eigenvalue past the eigensolver's resolution; so is a diagonal taken as
+    # zero beside a row that is not.
     if (
         omit_uncertifiable
         and psd_by_construction
         and not allow_indefinite
-        and _materially_negative_diagonal(np.diagonal(np.asarray(matrix, dtype=float)))
+        and _diagonal_refusal(_validated_symmetric(matrix)) is not None
     ):
         return None
     equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
@@ -2570,12 +2597,14 @@ def decompose_gram_if_authoritative(
     data sits: the Gram cannot certify its own spectrum there, so this
     returns ``None`` (the caller goes to its observation factor) instead of
     refusing the matrix as indefinite.  So does a materially negative
-    diagonal, a negative Rayleigh quotient: a projection ``Z'MZ`` of such a
-    Gram that cancels its heavy rows can round one below zero.  Measured: an
+    diagonal, a negative Rayleigh quotient, and a diagonal at or just below
+    zero beside a nonzero entry in its row, which no semidefinite matrix has
+    (Cauchy-Schwarz): a projection ``Z'MZ`` of such a Gram that cancels its
+    heavy rows can round either one.  Measured: an
     fs data Gram whose exact null came out at -1.17e-13 on macOS ARM64
     (Accelerate) against a resolution of 8.9e-14, at most -8.7e-15 on
     OpenBLAS; ``gamma_n`` at its 4000 rows is 4.4e-13.  Without the flag a
-    materially negative eigenvalue or diagonal still raises: signed
+    materially negative eigenvalue or either diagonal still raises: signed
     (observed) rows make it real.
     """
     decomposition = _decompose_gram(
@@ -2682,7 +2711,13 @@ def decompose_gram_deflated(
     info: dict[str, float] = {"certified": 0.0}
     gram = np.asarray(gram, dtype=np.float64)
     diagonal = np.diag(gram)
-    if not np.all(np.isfinite(gram)) or np.any(diagonal < 0.0):
+    # A negative diagonal, or a zero one beside a nonzero row, is no
+    # semidefinite Gram's (Cauchy-Schwarz): the rows decide.
+    if (
+        not np.all(np.isfinite(gram))
+        or np.any(diagonal < 0.0)
+        or _offdiagonal_on_a_zero_diagonal(gram, diagonal == 0.0)
+    ):
         return None, info
     scale = np.sqrt(diagonal)
     active = np.flatnonzero(scale > 0.0)
