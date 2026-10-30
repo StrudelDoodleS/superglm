@@ -22,7 +22,11 @@ from superglm.distributional.kernels._response_tails import (
     inverse_mills,
     normal_window_channels,
 )
-from superglm.distributional.kernels.generalized_pareto import window_rows
+from superglm.distributional.kernels.generalized_pareto import (
+    GeneralizedParetoInitializationWarning,
+    window_rows,
+)
+from superglm.distributional.kernels.log_normal import mean_window
 from superglm.distributional.observation import ResponseBounds, resolve_response_bounds
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
@@ -683,3 +687,37 @@ def test_pit_of_left_censored_and_prior_weighted_bounded_rows():
     assert residuals.pit_upper[0] == pytest.approx(edges[0], rel=1e-10)
     assert 0.0 < residuals.pit[0] < edges[0]
     np.testing.assert_allclose(residuals.pit[1:], edges[1:], rtol=1e-10)
+
+
+@pytest.mark.parametrize(("lower", "upper"), [(-np.inf, 900.0), (2.0, np.inf), (300.0, 1500.0)])
+def test_log_normal_mean_form_window_derivatives_match_differences(lower, upper):
+    def channels(mean, sigma):
+        return mean_window(
+            np.array([lower]), np.array([upper]), np.array([mean]), np.array([sigma]),
+            derivative_order=2,
+        )  # fmt: skip
+
+    mean, sigma = 700.0, 0.8
+    _, score, hessian = channels(mean, sigma)
+    for column, (dm, ds) in enumerate(((1e-4 * mean, 0.0), (0.0, 1e-5))):
+        step = dm + ds
+        plus, minus = channels(mean + dm, sigma + ds), channels(mean - dm, sigma - ds)
+        np.testing.assert_allclose(
+            score[0, column], (plus[0][0] - minus[0][0]) / (2 * step), rtol=1e-7, atol=1e-12
+        )
+        packed = (0, 1) if column == 0 else (1, 2)
+        np.testing.assert_allclose(
+            hessian[0, list(packed)], (plus[1][0] - minus[1][0]) / (2 * step), rtol=1e-6,
+            atol=1e-12,
+        )  # fmt: skip
+
+
+def test_censored_generalized_pareto_fit_starts_without_a_warning():
+    rng = np.random.default_rng(564)
+    paid = np.minimum(stats.genpareto(c=0.3, scale=1000.0).rvs(2_000, random_state=rng), 1500.0)
+    family = GeneralizedParetoLSS()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GeneralizedParetoInitializationWarning)
+        SuperLSS(family, family.scale(), family.shape()).fit(
+            _intercepts(len(paid)), paid, censoring=(None, 1500.0)
+        )

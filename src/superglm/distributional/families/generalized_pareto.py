@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -53,6 +54,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoDomainError as GeneralizedParetoDomainError,
 )
 from superglm.distributional.kernels.generalized_pareto import (
+    GeneralizedParetoInitializationWarning,
     expected_information,
     generalized_pareto_cdf,
     generalized_pareto_expected_shortfall,
@@ -334,12 +336,17 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def initialize(self, y, plan) -> InitialParameterState:
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
-        theta = initialize_generalized_pareto(
-            response,
-            bound.multiplier,
-            shape_lower=self.shape_lower,
-            shape_upper=self.shape_upper,
-        )
+        with warnings.catch_warnings():
+            if not bound.observation.is_complete:
+                # Moments of capped or truncated responses miss the tail, so a
+                # start outside the shape walls is expected and not a finding.
+                warnings.simplefilter("ignore", GeneralizedParetoInitializationWarning)
+            theta = initialize_generalized_pareto(
+                response,
+                bound.multiplier,
+                shape_lower=self.shape_lower,
+                shape_upper=self.shape_upper,
+            )
         return InitialParameterState(theta=theta)
 
     def _theta(self, theta, n_observations):

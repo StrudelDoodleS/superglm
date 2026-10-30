@@ -601,6 +601,10 @@ def _lss(model, params, design=True) -> dict:
         "discrete": bool(model._discrete),
         "n_bins": _plain(model._n_bins),
         "options": _options(params),
+        "response_bounds": {
+            "truncation": params.get("truncation") is not None,
+            "censoring": params.get("censoring") is not None,
+        },
         "predictors": [
             {
                 "name": p.name,
