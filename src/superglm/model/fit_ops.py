@@ -1197,6 +1197,44 @@ def _prime_fit_caches(
     release_lookup_plan(getattr(model._dm, "_structured_layout_cache", None))
 
 
+def _publish_fit_statistics(
+    model, y, sample_weight, offset, *, X_ref, y_ref, sample_weight_ref, offset_ref
+) -> None:
+    """Publish the fit statistics of ``model._result`` and prime the fit-data caches."""
+    eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    null_mu = _compute_null_mu(
+        y,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
+    model._fit_stats = _compute_fit_stats(
+        y,
+        mu,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        model._result.phi,
+        null_mu=null_mu,
+        weight_semantics=model_weight_semantics(model),
+    )
+    model._solver_result = model._result
+    _prime_fit_caches(
+        model,
+        X_ref=X_ref,
+        y_ref=y_ref,
+        sample_weight_ref=sample_weight_ref,
+        offset_ref=offset_ref,
+        y_arr=y,
+        mu=mu,
+        null_mu=null_mu,
+    )
+
+
 def _maybe_release_fit_state(model) -> None:
     """Optionally retain only compact post-fit inference state."""
     if getattr(model, "_retain_fit_state", True):
@@ -1666,38 +1704,15 @@ def _fit_in_workspace(
     if scale_known and model._result.phi != 1.0:
         model._result = replace(model._result, phi=1.0)
 
-    eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-
-    null_mu = _compute_null_mu(
-        y,
-        sample_weight,
-        offset,
-        model._distribution,
-        model._link,
-        weight_semantics=model_weight_semantics(model),
-    )
-    model._fit_stats = _compute_fit_stats(
-        y,
-        mu,
-        sample_weight,
-        offset,
-        model._distribution,
-        model._link,
-        model._result.phi,
-        null_mu=null_mu,
-        weight_semantics=model_weight_semantics(model),
-    )
-    model._solver_result = model._result
-    _prime_fit_caches(
+    _publish_fit_statistics(
         model,
+        y,
+        sample_weight,
+        offset,
         X_ref=X_ref,
         y_ref=y_ref,
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
-        y_arr=y,
-        mu=mu,
-        null_mu=null_mu,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     _warn_unresolved_rows(model)
@@ -1814,37 +1829,15 @@ def _fit_path_in_workspace(
     # Set model state to the last (least-regularized) fit
     model._result = result
 
-    eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    null_mu = _compute_null_mu(
-        y,
-        sample_weight,
-        offset,
-        model._distribution,
-        model._link,
-        weight_semantics=model_weight_semantics(model),
-    )
-    model._fit_stats = _compute_fit_stats(
-        y,
-        mu,
-        sample_weight,
-        offset,
-        model._distribution,
-        model._link,
-        result.phi,
-        null_mu=null_mu,
-        weight_semantics=model_weight_semantics(model),
-    )
-    model._solver_result = result
-    _prime_fit_caches(
+    _publish_fit_statistics(
         model,
+        y,
+        sample_weight,
+        offset,
         X_ref=X_ref,
         y_ref=y_ref,
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
-        y_arr=y,
-        mu=mu,
-        null_mu=null_mu,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
@@ -2180,37 +2173,15 @@ def _fit_reml_in_workspace(
             record_diagnostics=False,
             convergence=model._convergence,
         )
-        eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
-        null_mu = _compute_null_mu(
-            y,
-            sample_weight,
-            offset,
-            model._distribution,
-            model._link,
-            weight_semantics=model_weight_semantics(model),
-        )
-        model._fit_stats = _compute_fit_stats(
-            y,
-            mu,
-            sample_weight,
-            offset,
-            model._distribution,
-            model._link,
-            model._result.phi,
-            null_mu=null_mu,
-            weight_semantics=model_weight_semantics(model),
-        )
-        model._solver_result = model._result
-        _prime_fit_caches(
+        _publish_fit_statistics(
             model,
+            y,
+            sample_weight,
+            offset,
             X_ref=X_ref,
             y_ref=y_ref,
             sample_weight_ref=sample_weight_ref,
             offset_ref=offset_ref,
-            y_arr=y,
-            mu=mu,
-            null_mu=null_mu,
         )
         _canonicalize_fitted_model(
             model,
@@ -2273,6 +2244,7 @@ def _fit_reml_in_workspace(
         lam1 = penalty.lambda1
         use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
+        log_message = None
         if _has_monotone and not _any_unfixed_scop and not estimated_names:
             run_fixed_monotone_reml(
                 model,
@@ -2288,33 +2260,8 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
-            model._reporting_support_state = _build_reml_reporting_support_state(
-                model,
-                result=model._solver_result,
-                y=y,
-                sample_weight=sample_weight,
-                offset_arr=offset_arr,
-                durable_retain_fit_state=durable_retain_fit_state,
-            )
-            _prime_fit_caches(
-                model,
-                X_ref=X_ref,
-                y_ref=y_ref,
-                sample_weight_ref=sample_weight_ref,
-                offset_ref=offset_ref,
-                y_arr=y,
-            )
-            _canonicalize_fitted_model(
-                model,
-                _profile,
-                runtime_validation=runtime_validation,
-                n_rows=len(y),
-            )
-            logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
-            _maybe_release_fit_state(model)
-            return debug_recorder
-
-        if _any_unfixed_scop or (_has_scop_monotone and estimated_names):
+            log_message = f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}"
+        elif _any_unfixed_scop or (_has_scop_monotone and estimated_names):
             best = run_scop_efs_reml(
                 model,
                 y=y,
@@ -2336,6 +2283,11 @@ def _fit_reml_in_workspace(
                 compute_fit_stats=_compute_fit_stats,
                 debug_recorder=debug_recorder,
             )
+            log_message = (
+                f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
+                f"lambdas={best.lambdas}"
+            )
+        if log_message is not None:
             model._reporting_support_state = _build_reml_reporting_support_state(
                 model,
                 result=model._solver_result,
@@ -2358,10 +2310,7 @@ def _fit_reml_in_workspace(
                 runtime_validation=runtime_validation,
                 n_rows=len(y),
             )
-            logger.info(
-                f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
-                f"lambdas={best.lambdas}"
-            )
+            logger.info(log_message)
             _maybe_release_fit_state(model)
             return debug_recorder
 

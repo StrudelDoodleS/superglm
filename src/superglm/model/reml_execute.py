@@ -367,53 +367,7 @@ def optimize_reml_best(
         profile["reml_tol_resolved"] = float(reml_tol)
         profile["reml_warm_start_components"] = sorted(warm_lambdas or ())
     trace_run = getattr(debug_recorder, "trace_run", None)
-    if not estimated_names:
-        if use_direct:
-            best = model_optimize_direct_reml(
-                model,
-                y,
-                sample_weight,
-                offset_arr,
-                reml_groups,
-                penalty_ranks,
-                lambdas,
-                max_reml_iter=1,
-                # every lambda fixed: one evaluation, whose modes certify at
-                # the resolved tolerance's bar (``mode_score``)
-                reml_tol=reml_tol,
-                verbose=verbose,
-                penalty_caches=penalty_caches,
-                profile=profile,
-                w_correction_order=w_correction_order,
-                reml_penalties=reml_penalties,
-                estimated_names=estimated_names,
-                pirls_tol=pirls_tol,
-                max_pirls_iter=max_pirls_iter,
-                debug_recorder=debug_recorder,
-                trace_run=trace_run,
-            )
-            _record_non_scop_reml_trace(best, debug_recorder)
-            return best
-        best = model_optimize_efs_reml(
-            model,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=1,
-            reml_tol=1.0,
-            verbose=verbose,
-            penalty_caches=penalty_caches,
-            reml_penalties=reml_penalties,
-            estimated_names=estimated_names,
-            pirls_tol=pirls_tol,
-            max_pirls_iter=max_pirls_iter,
-        )
-        _record_non_scop_reml_trace(best, debug_recorder)
-        return best
-
+    fixed = not estimated_names
     if use_direct:
         best = model_optimize_direct_reml(
             model,
@@ -423,7 +377,9 @@ def optimize_reml_best(
             reml_groups,
             penalty_ranks,
             lambdas,
-            max_reml_iter=max_reml_iter,
+            # every lambda fixed: one evaluation, whose modes certify at
+            # the resolved tolerance's bar (``mode_score``)
+            max_reml_iter=1 if fixed else max_reml_iter,
             reml_tol=reml_tol,
             verbose=verbose,
             penalty_caches=penalty_caches,
@@ -435,26 +391,25 @@ def optimize_reml_best(
             max_pirls_iter=max_pirls_iter,
             debug_recorder=debug_recorder,
             trace_run=trace_run,
-            warm_lambdas=warm_lambdas or None,
+            warm_lambdas=None if fixed else warm_lambdas or None,
         )
-        _record_non_scop_reml_trace(best, debug_recorder)
-        return best
-    best = model_optimize_efs_reml(
-        model,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        penalty_caches=penalty_caches,
-        reml_penalties=reml_penalties,
-        estimated_names=estimated_names,
-        pirls_tol=pirls_tol,
-        max_pirls_iter=max_pirls_iter,
-    )
+    else:
+        best = model_optimize_efs_reml(
+            model,
+            y,
+            sample_weight,
+            offset_arr,
+            reml_groups,
+            penalty_ranks,
+            lambdas,
+            max_reml_iter=1 if fixed else max_reml_iter,
+            reml_tol=1.0 if fixed else reml_tol,
+            verbose=verbose,
+            penalty_caches=penalty_caches,
+            reml_penalties=reml_penalties,
+            estimated_names=estimated_names,
+            pirls_tol=pirls_tol,
+            max_pirls_iter=max_pirls_iter,
+        )
     _record_non_scop_reml_trace(best, debug_recorder)
     return best
