@@ -757,6 +757,16 @@ its truncation window or beyond its censoring bound is refused, naming the
 first such row. Bounds that touch no row leave the fit an ordinary complete
 one.
 
+The diagnostics read the same bounds. `residual_set`, `residuals`, `check`,
+`check_2d`, `scores` and the diagnostic plots take `truncation=` and
+`censoring=`: a truncated row's PIT is read inside its window, and a censored
+row's is drawn at random beyond its bound, so a well-fitted model's PIT is
+uniform again. `scores` gives the log score of a bounded row; the CRPS scores
+are for complete rows and refuse bounded ones, so ask for
+`scores(..., which=("log",))`. `actual_expected`, `calibration` and `compare`
+read every row as complete. Each of these warns when the model was fitted with
+bounds and is called without them.
+
 `GaussianLS`, `LogNormalLS` and `GeneralizedParetoLSS` take these bounds; the
 other families refuse them. Smoothing selection differences the curvature for
 these rows instead of using closed-form third and fourth derivatives, and
@@ -1423,6 +1433,12 @@ order you are likely to meet them.
   response you logged by hand returns the mean of the logged response;
   turning that into a mean of `y` is your modelling decision, and
   `LogNormalLS` is the supported way to make it.
+- **Truncation and censoring cover three families.** `GaussianLS`,
+  `LogNormalLS` and `GeneralizedParetoLSS` take `truncation=` and
+  `censoring=`; the gamma, generalized gamma, two-piece, negative binomial and
+  Tweedie families refuse them.
+- **Bounded rows have no CRPS.** The log score covers truncated and censored
+  rows; the CRPS scores, `actual_expected`, `calibration` and `compare` do not.
 - **Negative binomial has no zero-inflated variant**, and its size parameter
   cannot run to infinity to become an exact Poisson.
 - **Tweedie has no Fisher approximation.** Dense, chunked and discrete

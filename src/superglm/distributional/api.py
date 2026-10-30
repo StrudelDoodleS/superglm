@@ -1146,6 +1146,8 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> ResidualSet:
         """Return the full residual payload of ``y`` under the fitted parameters.
 
@@ -1156,7 +1158,36 @@ class SuperLSS:
         under the model's declared contract: a prior weight is part of each
         row's law, so the transform is the prior-weighted one, while a
         frequency weight is replication that the checks expand.
+        ``truncation`` and ``censoring`` are the bounds the model was fitted
+        with, read as in :meth:`fit`; pass them for rows recorded under them.
         """
+        return self._residual_set(
+            "residual_set",
+            X,
+            y,
+            kind=kind,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
+
+    def _residual_set(
+        self,
+        method: str,
+        X: FrameLike | EagerFrame,
+        y: NDArray,
+        *,
+        kind: ResidualKind = "quantile",
+        sample_weight: NDArray | None,
+        offsets: Mapping[str, NDArray] | None,
+        seed: int,
+        truncation: BoundPair,
+        censoring: BoundPair,
+    ) -> ResidualSet:
+        """The residual payload for ``method``, which warns once if bounds go unread."""
+        self._warn_bounds_unread(method, truncation, censoring, stacklevel=4)
         return compute_residuals(
             self._require_fitted(),
             X,
@@ -1165,6 +1196,37 @@ class SuperLSS:
             sample_weight=sample_weight,
             offsets=offsets,
             seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
+
+    def _warn_bounds_unread(
+        self,
+        method: str,
+        truncation: BoundPair,
+        censoring: BoundPair,
+        *,
+        stacklevel: int = 3,
+        takes_bounds: bool = True,
+    ) -> None:
+        """Warn when a bounded fit's diagnostic is given no bounds to read its rows by."""
+        if truncation is not None or censoring is not None:
+            return
+        state = self._require_fitted().fit_state
+        if state.truncated_row_count + state.censored_row_count == 0:
+            return
+        remedy = (
+            "pass the same truncation= and censoring= for training rows"
+            if takes_bounds
+            else "it does not take truncation= or censoring= yet, so read its training-row "
+            "result with that in mind"
+        )
+        warnings.warn(
+            f"this model was fitted with {state.truncated_row_count} truncated and "
+            f"{state.censored_row_count} censored rows, and {method} reads every row it is "
+            f"given as complete; {remedy} (rows from a complete source need nothing)",
+            UserWarning,
+            stacklevel=stacklevel,
         )
 
     def residuals(
@@ -1176,21 +1238,28 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> NDArray[np.float64]:
         """Return one residual per row: ``"quantile"`` or the raw ``"pit"`` value.
 
         This is :meth:`residual_set` with everything but the array discarded.
         A correct family makes the PIT values uniform and the quantile
         residuals standard normal, so these are the values every distributional
-        diagnostic in the suite is drawn from.
+        diagnostic in the suite is drawn from.  ``truncation`` and ``censoring``
+        are the bounds the model was fitted with, read as in :meth:`fit`; pass
+        them for rows recorded under them.
         """
-        return self.residual_set(
+        return self._residual_set(
+            "residuals",
             X,
             y,
             kind=kind,
             sample_weight=sample_weight,
             offsets=offsets,
             seed=seed,
+            truncation=truncation,
+            censoring=censoring,
         ).values(kind)
 
     def check(
@@ -1203,6 +1272,8 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> BinnedCheck:
         """Return the mean, standard deviation and skewness of the residuals per bin.
@@ -1213,11 +1284,22 @@ class SuperLSS:
         (mean), of one (standard deviation) or of zero (skewness) marks the
         region where the fit is wrong and in which moment.  ``sample_weight``
         is the aggregation weight of the residual payload; further keywords
-        (``n_bins``, ``n_boot``) reach the builder.
+        (``n_bins``, ``n_boot``) reach the builder.  ``truncation`` and
+        ``censoring`` are the bounds the model was fitted with, read as in
+        :meth:`fit`; pass them for rows recorded under them.
         """
         values, label = self._covariate_values(X, covariate, name=name)
         positions = self._retained_positions(len(as_eager_frame(X)), sample_weight)
-        residuals = self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed)
+        residuals = self._residual_set(
+            "check",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
         return binned_check(
             residuals,
             values if positions is None else values[positions],
@@ -1237,6 +1319,8 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> BinnedCheck2D:
         """Return the mean residual on a two-dimensional grid of two covariates.
@@ -1244,7 +1328,9 @@ class SuperLSS:
         Each covariate is a column name of ``X`` or an array with one value per
         row.  The tile means say where in the joint region the fit drifts, which
         a pair of one-dimensional checks cannot show; ``n_bins`` is a pair, one
-        count per axis.
+        count per axis.  ``truncation`` and ``censoring`` are the bounds the
+        model was fitted with, read as in :meth:`fit`; pass them for rows
+        recorded under them.
         """
         first, first_name = self._covariate_values(
             X, covariate, name=None if names is None else names[0]
@@ -1255,7 +1341,16 @@ class SuperLSS:
         positions = self._retained_positions(len(as_eager_frame(X)), sample_weight)
         if positions is not None:
             first, second = first[positions], second[positions]
-        residuals = self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed)
+        residuals = self._residual_set(
+            "check_2d",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
         return binned_check_2d(residuals, first, second, names=(first_name, second_name), **kwargs)
 
     def actual_expected(
@@ -1278,6 +1373,7 @@ class SuperLSS:
         also fixes the standard error's law: prior weights put the weight
         inside each row's distribution, frequency weights replicate the row.
         """
+        self._warn_bounds_unread("actual_expected", None, None, takes_bounds=False)
         values, label = self._covariate_values(X, covariate, name=name)
         return actual_expected_check(
             self._require_fitted(),
@@ -1310,6 +1406,7 @@ class SuperLSS:
         aggregation weight; ``levels``, ``thresholds`` and ``quantile_grid``
         reach the builder.
         """
+        self._warn_bounds_unread("calibration", None, None, takes_bounds=False)
         return calibration_payload(
             self._require_fitted(),
             X,
@@ -1328,6 +1425,8 @@ class SuperLSS:
         thresholds: Sequence[float] = (),
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Return one column of proper scores per requested rule, one row per row.
@@ -1339,7 +1438,11 @@ class SuperLSS:
         column reads ``sample_weight`` under the fitted model's contract: prior
         weights select the row's weighted predictive law, while frequency
         weights return the compressed contribution of the repeated unit law.
+        ``truncation`` and ``censoring`` are the bounds the model was fitted
+        with, read as in :meth:`fit`; only the log score supports truncated or
+        censored rows, so pass ``which=("log",)`` with them.
         """
+        self._warn_bounds_unread("scores", truncation, censoring)
         return score_table(
             self._require_fitted(),
             X,
@@ -1348,6 +1451,8 @@ class SuperLSS:
             thresholds=thresholds,
             sample_weight=sample_weight,
             offsets=offsets,
+            truncation=truncation,
+            censoring=censoring,
             **kwargs,
         )
 
@@ -1378,6 +1483,7 @@ class SuperLSS:
         Use ``a_offsets`` and ``b_offsets`` for different predictor offsets;
         ``offsets`` is shared shorthand and cannot be mixed with either.
         """
+        self._warn_bounds_unread("compare", None, None, takes_bounds=False)
         candidate = other._require_fitted() if isinstance(other, SuperLSS) else other
         return compare_models(
             self._require_fitted(),
@@ -1673,6 +1779,8 @@ class SuperLSS:
         seed: int = 42,
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> Any:
         """Draw the six-panel distributional diagnostic.
 
@@ -1682,11 +1790,22 @@ class SuperLSS:
         of the second's: the first three ask whether the family is right, the
         last three where it is wrong.  ``sample_weight`` is the aggregation
         weight of the residuals underneath; ``engine`` selects matplotlib or
-        plotly, and only the engine asked for is imported.
+        plotly, and only the engine asked for is imported.  ``truncation`` and
+        ``censoring`` are the bounds the model was fitted with, read as in
+        :meth:`fit`; pass them for rows recorded under them.
         """
         render = _renderer(engine, "diagnostics")
         fitted = self._require_fitted()
-        residuals = self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed)
+        residuals = self._residual_set(
+            "plot_diagnostics",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
         frame, resolved_offsets = self._retained_design(X, sample_weight, offsets)
         qq = qq_payload(
             fitted,
@@ -1841,10 +1960,21 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> QQPayload:
         """The Q-Q payload with its simulated envelope, on the retained rows."""
-        residuals = self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed)
+        residuals = self._residual_set(
+            "plot_data('qq')",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
         frame, resolved_offsets = self._retained_design(X, sample_weight, offsets)
         return qq_payload(
             self._require_fitted(),
@@ -1865,10 +1995,21 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> WormPayload:
         """The worm payload, one panel per interval of ``covariate`` when given."""
-        residuals = self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed)
+        residuals = self._residual_set(
+            "plot_data('worm')",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
+        )
         values: NDArray | None = None
         label = covariate_name
         if covariate is not None:
@@ -1886,13 +2027,22 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
         **kwargs: Any,
     ) -> PITPayload:
         """The PIT histogram payload with its binomial band."""
-        return pit_payload(
-            self.residual_set(X, y, sample_weight=sample_weight, offsets=offsets, seed=seed),
-            **kwargs,
+        residuals = self._residual_set(
+            "plot_data('pit')",
+            X,
+            y,
+            sample_weight=sample_weight,
+            offsets=offsets,
+            seed=seed,
+            truncation=truncation,
+            censoring=censoring,
         )
+        return pit_payload(residuals, **kwargs)
 
 
 __all__ = ["SuperLSS", "SuperLSSTrainingTelemetry"]

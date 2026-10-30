@@ -259,6 +259,7 @@ def qq_payload(
             else residuals.prior_weights
         ),
         offsets=offsets,
+        bounds=residuals.bounds,
     )
     sample = _sample_residuals(residuals, seed=seed)
     rows = sample.rows
