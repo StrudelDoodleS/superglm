@@ -153,3 +153,40 @@ class TestCriticalValueUnits:
             return seen[-1]
 
         assert critical_value(unit) == pytest.approx(critical_value(1.0), rel=1e-9)
+
+
+def test_singular_covariance_takes_one_sampler_however_its_cholesky_rounds(
+    spline_model, monkeypatch
+):
+    """Whether Cholesky completes on a singular covariance is a rounding accident."""
+    from superglm.inference._term_covariance import simultaneous_band_and_critical_value
+
+    covariance, active_groups = spline_model._coef_covariance
+    k = covariance.shape[0]
+    # Project out one direction: a singular covariance, as on a constrained fit's face.
+    direction = np.linalg.qr(np.random.default_rng(3).normal(size=(k, 1)))[0]
+    projector = np.eye(k) - direction @ direction.T
+    singular = projector @ covariance @ projector
+    singular = 0.5 * (singular + singular.T)
+    real_cholesky = np.linalg.cholesky
+
+    def critical_value(cholesky):
+        with monkeypatch.context() as patch:
+            patch.setattr(np.linalg, "cholesky", cholesky)
+            _, value = simultaneous_band_and_critical_value(
+                "x",
+                result=spline_model.result,
+                groups=spline_model._groups,
+                specs=spline_model._specs,
+                covariance_fn=lambda: (singular, active_groups),
+                n_sim=2000,
+            )
+        return value
+
+    def pivot_rounded_negative(matrix):
+        raise np.linalg.LinAlgError("Matrix is not positive definite")
+
+    def pivot_rounded_positive(matrix):
+        return real_cholesky(matrix + 1e-14 * np.max(np.diag(matrix)) * np.eye(len(matrix)))
+
+    assert critical_value(pivot_rounded_negative) == critical_value(pivot_rounded_positive)

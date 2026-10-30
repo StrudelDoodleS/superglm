@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-from superglm._roundoff import SQRT_EPS, TINY
+from superglm._roundoff import SQRT_EPS, TINY, UNIT_ROUNDOFF
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
@@ -558,12 +558,20 @@ def simultaneous_band_and_critical_value(
         se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
         f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
     else:
-        try:
+        # The spectrum chooses the root, so rounding cannot.  Cholesky completes
+        # whenever 20 k^1.5 kappa u < 1 (Wilkinson), here with a factor of two
+        # for the eigensolver's own rounding of the smallest eigenvalue.  A
+        # covariance on a constrained fit's active face is singular by
+        # construction and takes its positive-semidefinite root, with each
+        # eigenvector's arbitrary sign fixed so a seed draws the same band on
+        # any LAPACK.
+        values, vectors = np.linalg.eigh(Cov_g)
+        k = Cov_g.shape[0]
+        if values[0] > 40.0 * k**1.5 * UNIT_ROUNDOFF * values[-1]:
             L = np.linalg.cholesky(Cov_g)
-        except np.linalg.LinAlgError:
-            # A covariance on a constrained fit's active face is singular by
-            # construction; simulate from its positive-semidefinite root.
-            values, vectors = np.linalg.eigh(Cov_g)
+        else:
+            pivots = np.argmax(np.abs(vectors), axis=0)
+            vectors = vectors * np.sign(vectors[pivots, np.arange(k)])
             L = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
         beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
         f_sim = beta_sim @ M.T
