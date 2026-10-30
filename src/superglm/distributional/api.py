@@ -764,8 +764,8 @@ class SuperLSS:
         the term's units and the information in the data. Terms with several
         penalties get a separate start for each.
         These starts are clipped to the smoothing bounds. Families without
-        expected information and terms with unresolved numerical rank use 0.1,
-        also clipped to those bounds.
+        expected information, fits with truncated or censored rows, and terms
+        with unresolved numerical rank use 0.1, also clipped to those bounds.
 
         A numeric ``initial_lambda`` supplies a common start. Entries in
         ``lambdas`` override it, and fixed penalty policies take precedence over
@@ -1484,6 +1484,8 @@ class SuperLSS:
         ``offsets`` is shared shorthand and cannot be mixed with either.
         """
         self._warn_bounds_unread("compare", None, None, takes_bounds=False)
+        if isinstance(other, SuperLSS):
+            other._warn_bounds_unread("compare", None, None, takes_bounds=False)
         candidate = other._require_fitted() if isinstance(other, SuperLSS) else other
         return compare_models(
             self._require_fitted(),

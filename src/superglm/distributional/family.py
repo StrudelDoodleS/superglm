@@ -707,6 +707,26 @@ class ExpectedInformationFamily(Protocol):
     ) -> NDArray: ...
 
 
+@runtime_checkable
+class ResponseWindowFamily(Protocol):
+    """Optional tail-safe ``log P(lower < Y <= upper)`` under each row's law.
+
+    ``lower`` may be ``-inf`` and ``upper`` ``+inf``; a row with both is the
+    whole support and returns zero.  ``weights`` are non-unit prior weights,
+    as in ``cdf_prior_weighted``.  A family that binds censored or truncated
+    rows supplies it, so their probabilities never come from a difference of
+    distribution-function values that round to one.
+    """
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]: ...
+
+
 def expected_information_provider(family: object, plan: object) -> ExpectedInformationFamily | None:
     """The family as a Fisher-information provider for ``plan``, or ``None``.
 

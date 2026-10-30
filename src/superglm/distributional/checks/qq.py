@@ -261,6 +261,14 @@ def qq_payload(
         offsets=offsets,
         bounds=residuals.bounds,
     )
+    if parameter_uncertainty and residuals.bounds is not None:
+        # The envelope simulates complete responses; its parameter spread is
+        # not that of truncated or censored observations.
+        raise NotImplementedError(
+            "parameter_uncertainty=True simulates complete responses, so its envelope does not "
+            "describe truncated or censored rows; use the default parameter_uncertainty=False, "
+            "whose envelope does"
+        )
     sample = _sample_residuals(residuals, seed=seed)
     rows = sample.rows
     n_rows = len(rows)

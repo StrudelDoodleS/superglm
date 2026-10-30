@@ -42,6 +42,7 @@ from superglm.distributional.family import (
     AtomFamily,
     DistributionFunctionFamily,
     PriorWeightedDistributionFunctionFamily,
+    ResponseWindowFamily,
     bounded_observation,
     plan_observation,
 )
@@ -274,42 +275,32 @@ class _ResidualEvaluation(NamedTuple):
     bounds: ResponseBounds | None
 
 
-def _window_probability(
-    bounds: ResponseBounds, parent_cdf: Callable[[NDArray, NDArray], NDArray]
-) -> tuple[NDArray, NDArray]:
-    """``(F(lower), F(upper))`` per row, with ``F`` evaluated only at finite bounds."""
-    edges = []
-    for values, absent in ((bounds.lower, 0.0), (bounds.upper, 1.0)):
-        finite = np.isfinite(values)
-        edge = np.full(len(values), absent, dtype=np.float64)
-        if np.any(finite):
-            edge[finite] = parent_cdf(values[finite], finite)
-        edges.append(edge)
-    return edges[0], edges[1]
-
-
 def _bounded_intervals(
+    values: NDArray,
     lower: NDArray,
     upper: NDArray,
     bounds: ResponseBounds,
-    parent_cdf: Callable[[NDArray, NDArray], NDArray],
+    log_window: Callable[[NDArray, NDArray, NDArray], NDArray],
 ) -> tuple[NDArray, NDArray]:
-    """Map the parent CDF interval of each row to its truncated or censored one.
+    """Map the parent CDF interval of each bounded row to its truncated or censored one.
 
-    A window the fitted law gives no mass puts the row at the top of the
-    probability scale, where the clipped count reports it.
+    Each probability is a ratio of tail-safe log window probabilities, so a
+    window far in a tail keeps its mass where distribution-function values
+    round to one.  A window the fitted law gives no mass puts the row at the
+    top of the probability scale, where the clipped count reports it.
     """
-    below, above = _window_probability(bounds, parent_cdf)
-    mass = above - below
-    has_mass = mass > 0.0
-    scale = np.where(has_mass, mass, 1.0)
-    cut_lower = np.where(has_mass, (lower - below) / scale, 1.0)
-    cut_upper = np.where(has_mass, (upper - below) / scale, 1.0)
-    left = bounds.side == LEFT_CENSORED
-    right = bounds.side == RIGHT_CENSORED
-    # A censored row reads the CDF at its response as the edge of its interval.
-    new_lower = np.where(left, 0.0, np.where(right, cut_upper, cut_lower))
-    new_upper = np.where(right, 1.0, cut_upper)
+    new_lower = np.array(lower, dtype=np.float64, copy=True)
+    new_upper = np.array(upper, dtype=np.float64, copy=True)
+    rows = np.union1d(bounds.truncated_rows(), bounds.censored_rows())
+    a, b, y = bounds.lower[rows], bounds.upper[rows], np.asarray(values)[rows]
+    log_mass = log_window(a, b, rows)
+    with np.errstate(invalid="ignore"):
+        edge = np.where(np.isfinite(log_mass), np.exp(log_window(a, y, rows) - log_mass), 1.0)
+    side = bounds.side[rows]
+    # An observed row's interval collapses to its edge; a censored row's
+    # interval runs from its edge to the end beyond its bound.
+    new_lower[rows] = np.where(side == LEFT_CENSORED, 0.0, edge)
+    new_upper[rows] = np.where(side == RIGHT_CENSORED, 1.0, edge)
     return np.clip(new_lower, 0.0, 1.0), np.clip(new_upper, 0.0, 1.0)
 
 
@@ -397,14 +388,12 @@ def _evaluate_residuals(
             "PriorWeightedDistributionFunctionFamily"
         )
 
-    def parent_cdf(points: NDArray, rows: NDArray | slice = slice(None)) -> NDArray:
-        if prior_law is None:
-            return np.asarray(family.cdf(points, theta[rows]), dtype=np.float64)
-        return np.asarray(
-            family.cdf_prior_weighted(points, theta[rows], prior_law[rows]), dtype=np.float64
-        )
-
-    upper = parent_cdf(values)
+    upper = np.asarray(
+        family.cdf(values, theta)
+        if prior_law is None
+        else family.cdf_prior_weighted(values, theta, prior_law),
+        dtype=np.float64,
+    )
 
     lower = upper
     if isinstance(family, AtomFamily):
@@ -415,7 +404,21 @@ def _evaluate_residuals(
             dtype=np.float64,
         )
     if bounds is not None:
-        lower, upper = _bounded_intervals(lower, upper, bounds, parent_cdf)
+        if not isinstance(family, ResponseWindowFamily) or isinstance(family, AtomFamily):
+            raise NotImplementedError(
+                f"{type(family).__name__} has no tail-safe window probability for continuous "
+                "rows, so residuals of its truncated or censored rows are unavailable"
+            )
+
+        def log_window(low: NDArray, high: NDArray, rows: NDArray) -> NDArray:
+            return np.asarray(
+                family.log_window_probability(
+                    low, high, theta[rows], None if prior_law is None else prior_law[rows]
+                ),
+                dtype=np.float64,
+            )
+
+        lower, upper = _bounded_intervals(values, lower, upper, bounds, log_window)
     return _ResidualEvaluation(
         theta=theta,
         eta=eta,

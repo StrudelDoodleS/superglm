@@ -153,6 +153,22 @@ should not claim expected information.
 
 ## 6. Performance
 
+**Measured after stage 1 (PR #545).** All fits are 50,000 rows, `fit_reml` defaults, one
+thread, on the dense backend (`distributional-dense-v1`).
+
+- **Complete fits on all nine families:** master and branch take the same wall time
+  (16.77 s and 16.72 s in total), give bitwise-equal predictions and use the same peak
+  RSS (440-465 MiB).
+- **Log-normal body truncated at its 90% point:** 1.20 s, against 0.77 s for the same rows
+  read as complete.
+  - Smoothing selection takes 12 outer iterations instead of 6.
+  - The likelihood costs 231 ns per row per call instead of 110.
+  - Peak RSS is 442 MiB, against 441 MiB complete.
+- **Censored generalized Pareto:** 1.49 s, against 5.59 s for the complete reading of the
+  capped rows.
+
+The gamma figures below are estimates written before the build; stage 2 measures them.
+
 Measured on master, one thread, 10^6 rows, best of 5:
 
 | per-row operation | ns/row |

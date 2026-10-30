@@ -47,6 +47,7 @@ from superglm.distributional.family import (
     PriorWeightedVarianceFamily,
     VarianceFamily,
     bounded_observation,
+    plan_observation,
     validated_parameter_matrix,
 )
 from superglm.distributional.kernels.generalized_gamma import (
@@ -601,6 +602,12 @@ def _scoring_rows(
         None if shaped_bounds is None else tuple(a[positions] for a in shaped_bounds),
         positions,
     )
+    if bounds is not None:
+        # The family reads the bounds on its support, as the fit does, and
+        # refuses them if it cannot take them; bounds left with no effect are none.
+        bounds = plan_observation(
+            fitted.family.bind_likelihood(retained_response, resolved, bounded_observation(bounds))
+        ).bounds
     predictor_names = tuple(state.name for state in fitted.layout.predictors)
     retained_offsets = _prediction_offsets(
         _take_unvalidated_offsets(shaped_offsets, positions),
@@ -678,7 +685,12 @@ def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
         fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
     )
     evaluation = fitted.family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
-    return -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
+    scores = -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
+    if rows.bounds is not None and evaluation.valid is not None:
+        # A bounded row whose observed window has no mass under the fitted
+        # law is impossible there, not certain: its negative log score is inf.
+        scores = np.where(evaluation.valid, scores, np.inf)
+    return scores
 
 
 def _retained_crps(
