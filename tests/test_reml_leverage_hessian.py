@@ -364,16 +364,12 @@ def _count_row_passes(monkeypatch) -> dict:
         counts["calls"] += 1
         return correction(*args, **kwargs)
 
-    gram = w_derivatives.centered_gram_rhs
-    grams = w_derivatives.centered_signed_grams
+    # every derivative Gram, beside a dense column or not, centres its signed moments once
+    gram = w_derivatives._centered_signed_moments
 
     def counted_gram(*args, **kwargs):
         counts["grams"] += 1
         return gram(*args, **kwargs)
-
-    def counted_grams(*args, **kwargs):
-        counts["grams"] += len(kwargs["weights"])
-        return grams(*args, **kwargs)
 
     passes = getattr(w_derivatives, "solved_row_blocks", None)
 
@@ -382,8 +378,7 @@ def _count_row_passes(monkeypatch) -> dict:
         return passes(*args, **kwargs)
 
     monkeypatch.setattr(direct, "reml_w_correction", counted_correction)
-    monkeypatch.setattr(w_derivatives, "centered_gram_rhs", counted_gram)
-    monkeypatch.setattr(w_derivatives, "centered_signed_grams", counted_grams)
+    monkeypatch.setattr(w_derivatives, "_centered_signed_moments", counted_gram)
     monkeypatch.setattr(w_derivatives, "solved_row_blocks", counted_passes)
     return counts
 

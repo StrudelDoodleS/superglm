@@ -533,7 +533,7 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     default for binomial/logit exact REML with four or more penalties).
     Centred as ``(x - c) - d`` the two readings agree to the rounding of the
     sums, ``4 gamma_{n+2p+5} M_j`` (``_correction_magnitude``).  Mutation:
-    ``mean_lo`` dropped from ``centered_signed_grams`` or from
+    ``d`` dropped from ``_dense_split_signed_gram`` or ``mean_lo`` from
     ``_leverage_gradient_rhs``.
     """
     from superglm.reml.w_derivatives import reml_w_correction

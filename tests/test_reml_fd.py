@@ -1589,14 +1589,14 @@ class TestREMLFiniteDifference:
         )
         lambdas = {"x": 4.0}
         stable_gram_calls = 0
-        original_centered_gram_rhs = w_derivatives.centered_gram_rhs
+        original_split_gram = w_derivatives._dense_split_signed_gram
 
-        def counted_centered_gram_rhs(**kwargs):
+        def counted_split_gram(*args):
             nonlocal stable_gram_calls
             stable_gram_calls += 1
-            return original_centered_gram_rhs(**kwargs)
+            return original_split_gram(*args)
 
-        monkeypatch.setattr(w_derivatives, "centered_gram_rhs", counted_centered_gram_rhs)
+        monkeypatch.setattr(w_derivatives, "_dense_split_signed_gram", counted_split_gram)
 
         def correction_for_shift(shift: float) -> tuple[np.ndarray, np.ndarray]:
             dm = DesignMatrix(

@@ -18,10 +18,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._blas_threads import release_for_serial_row_passes
-from superglm._group_matrix._group_matrix_centered import (
-    centered_gram_rhs,
-    centered_signed_grams,
-)
 from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
 from superglm._parallel import pooled_map
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
@@ -36,9 +32,15 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
 from superglm.solvers.centered_system import (
+    _dense_split,
+    _DenseSplit,
+    anchored_dense_moments,
     dense_mean_pair,
+    dense_split_cross,
+    dense_split_gram,
     grouped_augmented_row_quadratic_forms,
     iter_grouped_design_chunks,
+    two_pass_centred_gram,
 )
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
@@ -396,6 +398,43 @@ def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> 
     result = result - np.outer(mean_x, moments.xtw)
     result = result + sum_weights * np.outer(mean_x, mean_x)
     return 0.5 * (result + result.T)
+
+
+def _dense_split_signed_gram(
+    split: _DenseSplit, moments, row_weights: NDArray, centre_hi: NDArray, centre_lo: NDArray
+) -> NDArray:
+    """``X_c' diag(a) X_c`` beside dense columns, ``moments`` the bounded design's raw signed moments.
+
+    The split of the IRLS Gram (``centered_system._attach_dense_split``), about
+    the fixed centre: the bounded columns from their raw moments, centred
+    after, as on a design without a dense column; every dense column's rows
+    centred explicitly as ``r = x - c`` about the exact pair ``(c, d)``, its
+    block ``G - e d' - d e' + d d' sum a`` from ``e = sum a r`` and ``G = sum
+    a r r'`` (``anchored_dense_moments``, ``two_pass_centred_gram``) and its
+    cross block ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``
+    (``dense_split_cross``), O(n) per dense column.  The algebra is linear in
+    ``a``, and the summation bound holds for terms of any sign (Higham 2002,
+    eq. 3.5), so signed weights change only the error bound of the corrected
+    two-pass algorithm (Chan, Golub & LeVeque 1983), ``|a|`` in place of the
+    weights: per entry ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| +
+    |l_k|)``, with ``x~`` a bounded column's own values or a dense column's
+    rows ``r`` and ``l`` its centre or ``d``.  No dense column's offset meets
+    a product.
+    """
+    dense_index, bounded_index = split.dense_index, split.bounded_index
+    lo = centre_lo[dense_index]
+    mean_bounded = centre_hi[bounded_index]
+    anchor = centre_hi[dense_index]
+    total = float(np.sum(row_weights, dtype=np.float64))
+    first, gram, _ = anchored_dense_moments(split.dense, row_weights, anchor)
+    cross = dense_split_cross(split, row_weights, anchor, mean_bounded)
+    cross -= np.outer(moments.xtw - mean_bounded * total, lo)
+    return dense_split_gram(
+        split,
+        _centered_signed_moments(moments, row_weights, mean_bounded),
+        two_pass_centred_gram(first, gram, lo, total),
+        cross,
+    )
 
 
 def _missing_w_derivative_methods(link: Any, distribution: Any) -> list[str]:
@@ -780,9 +819,10 @@ def reml_w_correction(
     # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
     # off, 17.1% on the leverage route, and exact REML ended
     # line_search_failed).  Without a profiled intercept (``sum_w`` None) the
-    # operator is not centred and the pair is not formed.  The pair decides the
-    # signed-Gram route by type: centred rows beside a dense column, raw
-    # moments, whose entries their type bounds, otherwise.
+    # operator is not centred and the pair is not formed.  The signed Grams
+    # take raw moments on the columns whose entries their type bounds, and
+    # with the pair the dense columns' rows centred explicitly beside them
+    # (``_dense_split_signed_gram``).
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
@@ -815,7 +855,6 @@ def reml_w_correction(
             raise RuntimeError("A dense column formed no centre pair.")
         centre_hi = np.where(dense, pair[0], mean_x)
         centre_lo = np.where(dense, pair[1], 0.0)
-    use_stable_signed_gram = centre_lo is not None
 
     def centered_matvec(values: NDArray) -> NDArray:
         """Apply the profiled-intercept design ``X - 1 mean_x'``."""
@@ -952,36 +991,28 @@ def reml_w_correction(
         grad_correction[:] = centered_rmatvec(0.5 * dW_deta * leverage) @ -factor.solve(penalty_rhs)
         return grad_correction, None, None
 
+    # Beside a dense column the moments are the bounded design's, and each
+    # Gram joins the dense columns to them (``_dense_split_signed_gram``).
+    split = _dense_split(dm) if centre_lo is not None and structured_group_index is None else None
+    moment_dm = dm if split is None else split.bounded
     batch_moments = (
         type(dm) is DesignMatrix
         and type(factor) is DenseHessianFactor
         and w_correction_order == 1
         and m > 1
-        and not use_stable_signed_gram
     )
     # Factors cannot change between these first-order directions. Public moment
     # calls and later correction calls still start with fresh numerical state.
-    fixed_support = dm.execution_plan._fixed_support_cache() if batch_moments else None
+    fixed_support = moment_dm.execution_plan._fixed_support_cache() if batch_moments else None
     # Directions batch only where none keeps its own support projections:
     # beside that shared owner, which projects each support once for all, or
     # when no group projects one. Otherwise every direction would build its
     # own and keep it until the batch returns, which the budget below omits.
     batch_moments = batch_moments and (
-        fixed_support is not None or dm.execution_plan._projects_no_support()
+        fixed_support is not None or moment_dm.execution_plan._projects_no_support()
     )
     batch_size = 0
-    if (
-        use_stable_signed_gram
-        and isinstance(factor, DenseHessianFactor)
-        and w_correction_order == 1
-    ):
-        # Retained weights, Gram accumulators, compensation and outputs.
-        # Row blocks and single-direction scratch retain their chunk-scale cost.
-        bytes_per_direction = np.dtype(np.float64).itemsize * (dm.n + 3 * p * p)
-        batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
-        if batch_size < 2:
-            batch_size = 0
-    elif batch_moments:
+    if batch_moments:
         # One row pass per block serves every direction: retained weights and
         # their stacked copy, the raw moments, and the centred outputs. Support
         # projections, if any, are the shared owner's, held once for all.
@@ -989,27 +1020,25 @@ def reml_w_correction(
         batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
         if batch_size < 2:
             batch_size = 0
-    stable_gram_rhs = (
-        np.zeros(dm.n, dtype=np.float64)
-        if use_stable_signed_gram and not batch_size and structured_group_index is None
-        else None
-    )
     pending: list[tuple[int, NDArray, float]] = []
     fs_pending: list[tuple[int, NDArray]] = []
     fs_layout = structured_layout if isinstance(structured_layout, FactorSmoothLeafLayout) else None
 
+    def signed_gram(moments, row_weights: NDArray) -> NDArray:
+        """``X_c' diag(row_weights) X_c`` from ``moment_dm``'s raw signed moments."""
+        if split is None:
+            return _centered_signed_moments(moments, row_weights, mean_x)
+        # a split is formed only beside the pair
+        lo = cast(NDArray, centre_lo)
+        return _dense_split_signed_gram(split, moments, row_weights, centre_hi, lo)
+
     def flush_signed_grams() -> None:
         weights = [row_weights for _, row_weights, _ in pending]
-        if use_stable_signed_gram:
-            grams = centered_signed_grams(
-                dm=dm, weights=weights, mean_x=centre_hi, mean_lo=centre_lo
-            )
-        else:
-            moments = dm.execution_plan._signed_moments_channels(weights, fixed_support)
-            grams = [
-                _centered_signed_moments(channel, row_weights, mean_x)
-                for channel, row_weights in zip(moments, weights, strict=True)
-            ]
+        moments = moment_dm.execution_plan._signed_moments_channels(weights, fixed_support)
+        grams = [
+            signed_gram(channel, row_weights)
+            for channel, row_weights in zip(moments, weights, strict=True)
+        ]
         for (i, _, dsum_w_j), C_j in zip(pending, grams, strict=True):
             grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
             if sum_w is not None:
@@ -1054,23 +1083,12 @@ def reml_w_correction(
                 total=system.sum_w,
                 center=signed_center,
             )
-        if use_stable_signed_gram:
-            if stable_gram_rhs is None:  # pragma: no cover - serial calls exclude batching
-                raise RuntimeError("Stable signed Gram reached the serial route while batching.")
-            result, _ = centered_gram_rhs(
-                dm=dm,
-                W=row_weights,
-                mean_x=centre_hi,
-                z_centered=stable_gram_rhs,
-                mean_lo=centre_lo,
-            )
-            return result
         moments = (
-            dm.execution_plan.moments(row_weights, include_xtw=True, signed=True)
+            moment_dm.execution_plan.moments(row_weights, include_xtw=True, signed=True)
             if fixed_support is None
-            else dm.execution_plan._signed_moments_fixed_support(row_weights, fixed_support)
+            else moment_dm.execution_plan._signed_moments_fixed_support(row_weights, fixed_support)
         )
-        return _centered_signed_moments(moments, row_weights, mean_x)
+        return signed_gram(moments, row_weights)
 
     # Pre-compute d2W/deta2 for second-order path
     d2W_deta2: NDArray | None = None
@@ -1175,8 +1193,7 @@ def reml_w_correction(
     # -- Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) --
     #
     # Cost: m^2/2 signed centered-Gram operations plus m^2/2 rmatvec +
-    # matvec calls.  Well-scaled designs keep the execution-plan kernels;
-    # only unsafe location/scale geometry uses the stable chunked primitive.
+    # matvec calls, each Gram from the execution plan's signed moments.
     dH2_cross: NDArray | None = None
     if w_correction_order >= 2 and d2W_deta2 is not None:
         dH2_cross = np.zeros((m, m))

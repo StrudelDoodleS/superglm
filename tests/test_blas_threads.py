@@ -1169,10 +1169,7 @@ def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     import superglm.reml._leverage_rows as leverage_rows
     import superglm.reml.w_derivatives as w_derivatives
     from superglm import Categorical, Spline, SuperGLM
-    from superglm._group_matrix._group_matrix_centered import (
-        centered_gram_rhs,
-        centered_signed_grams,
-    )
+    from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     rng = np.random.default_rng(3)
@@ -1197,16 +1194,15 @@ def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     assert released == [True, True]
     ones = np.ones(dm.n)
     centered_gram_rhs(dm=dm, W=ones, mean_x=centre, z_centered=ones)
-    centered_signed_grams(dm=dm, weights=[ones], mean_x=centre)
-    assert released == [True] * 4
+    assert released == [True] * 3
     # The pooled support route runs on the pool and keeps the cap.
     monkeypatch.setattr(leverage_rows, "_support_plan", real_plan)
     assert real_plan(ldm, np.eye(ldm.p), np.zeros(ldm.p), None) is not None
     leverage_rows.solved_row_blocks(
         ldm, np.eye(ldm.p), np.zeros(ldm.p), None, np.ones(ldm.n, dtype=bool)
     )
-    assert released == [True] * 4
+    assert released == [True] * 3
     monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
     monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 10**9)  # a narrow design keeps the cap
     leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
-    assert released == [True] * 4
+    assert released == [True] * 3

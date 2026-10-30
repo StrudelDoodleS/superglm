@@ -1489,42 +1489,23 @@ def _attach_dense_split(
     (``two_pass_centred_gram``), and the right-hand side ``r - l sum W z``.
     ``(a, l)`` is the exact pair of ``dense_mean_pair``, its remainder formed
     in pass two instead of a pass of its own.  The cross block is ``N~' W D~
-    = N' (W (x - a)) - m_N e'``, one transpose product of the bounded design
-    per dense column; ``l``'s share, ``l (N'W - m_N sum W)``, is a product of
-    two roundings.  The bounded columns' raw values never meet a dense
-    column's offset, and the bounded block is the rung's own.  A bounded
-    column the rung recentred (``column_local_centering``) failed the
-    raw-moment certificate, so its raw values would bring its ``kappa`` into
-    the product: it meets ``W (x - a)`` through its centred support instead,
-    ``sum_b c_j[b] sum_(r in b) W (x - a)`` (``recentred_products``), the
-    repair's own product with a failing partner, within the repair's stated
-    envelope with ``A_k = |x - a|``.
+    = N' (W (x - a)) - m_N e'`` (``dense_split_cross``); ``l``'s share, ``l
+    (N'W - m_N sum W)``, is a product of two roundings.  The bounded columns'
+    raw values never meet a dense column's offset, and the bounded block is
+    the rung's own.
     """
     mean_bounded, gram_bounded, rhs_bounded, recentred = packed
-    dense_width = split.dense.p
     anchor = dense_anchor(split.dense, W, sum_w)
     first, gram, response = anchored_dense_moments(split.dense, W, anchor, z_centered)
     assert response is not None
     lo = first / sum_w
     gram_dense = two_pass_centred_gram(first, gram, lo, sum_w)
     rhs_dense = response - lo * float(np.dot(W, z_centered))
-    cross = np.empty((split.bounded.p, dense_width), dtype=np.float64)
-    # one rows-long buffer serves every dense column: W (x_k - a_k)
-    weighted = np.empty(split.dense.n, dtype=np.float64)
-    for column, (values, column_anchor) in enumerate(_dense_columns_of(split.dense, anchor)):
-        np.subtract(values, column_anchor, out=weighted)
-        weighted *= W
-        cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
-        for columns, products in recentred_products(recentred, weighted):
-            cross[columns, column] = products
+    cross = dense_split_cross(split, W, anchor, mean_bounded, recentred)
+    data_gram = dense_split_gram(split, gram_bounded, gram_dense, cross)
     hi = anchor
-    p = dense_width + split.bounded.p
+    p = split.dense.p + split.bounded.p
     dense_index, bounded_index = split.dense_index, split.bounded_index
-    data_gram = np.empty((p, p), dtype=np.float64)
-    data_gram[np.ix_(bounded_index, bounded_index)] = gram_bounded
-    data_gram[np.ix_(dense_index, dense_index)] = gram_dense
-    data_gram[np.ix_(bounded_index, dense_index)] = cross
-    data_gram[np.ix_(dense_index, bounded_index)] = cross.T
     rhs = np.empty(p, dtype=np.float64)
     rhs[bounded_index] = rhs_bounded
     rhs[dense_index] = rhs_dense
@@ -1538,6 +1519,51 @@ def _attach_dense_split(
     return _attach_centered_penalty(
         sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
     )
+
+
+def dense_split_cross(
+    split: _DenseSplit,
+    W: NDArray,
+    anchor: NDArray,
+    mean_bounded: NDArray,
+    recentred: tuple = (),
+) -> NDArray:
+    """``(p_b, p_d)``: ``N' (W (x - a)) - m_N e'`` per dense column, ``e = sum W (x - a)``.
+
+    The bounded design ``N`` centred about ``mean_bounded`` against a dense
+    column's rows about its ``anchor``, one transpose product of the bounded
+    design per dense column, O(n) each; ``W`` may be signed.  A bounded
+    column the raw rung recentred (``column_local_centering``) failed the
+    raw-moment certificate, so its raw values would bring its ``kappa`` into
+    the product: it meets ``W (x - a)`` through its centred support instead,
+    ``sum_b c_j[b] sum_(r in b) W (x - a)`` (``recentred_products``), the
+    repair's own product with a failing partner, within the repair's stated
+    envelope with ``A_k = |x - a|``.
+    """
+    cross = np.empty((split.bounded.p, split.dense.p), dtype=np.float64)
+    # one rows-long buffer serves every dense column: W (x_k - a_k)
+    weighted = np.empty(split.dense.n, dtype=np.float64)
+    for column, (values, column_anchor) in enumerate(_dense_columns_of(split.dense, anchor)):
+        np.subtract(values, column_anchor, out=weighted)
+        weighted *= W
+        cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
+        for columns, products in recentred_products(recentred, weighted):
+            cross[columns, column] = products
+    return cross
+
+
+def dense_split_gram(
+    split: _DenseSplit, bounded: NDArray, dense: NDArray, cross: NDArray
+) -> NDArray:
+    """The ``(p, p)`` Gram in design order from its bounded, dense and cross (bounded by dense) blocks."""
+    p = split.dense.p + split.bounded.p
+    dense_index, bounded_index = split.dense_index, split.bounded_index
+    gram = np.empty((p, p), dtype=np.float64)
+    gram[np.ix_(bounded_index, bounded_index)] = bounded
+    gram[np.ix_(dense_index, dense_index)] = dense
+    gram[np.ix_(bounded_index, dense_index)] = cross
+    gram[np.ix_(dense_index, bounded_index)] = cross.T
+    return gram
 
 
 def _dense_chunks(values: NDArray, n: int):
