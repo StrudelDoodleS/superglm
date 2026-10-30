@@ -472,6 +472,7 @@ def bootstrap_seed_lambdas(
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray,
+    weight_semantics: str,
 ) -> dict[str, float]:
     """The smoothing parameters the Newton engines' bootstrap fit is taken at.
 
@@ -488,7 +489,9 @@ def bootstrap_seed_lambdas(
       children's indicators, or a level its responses separate (all zero
       under a log link) -- so the step's trace term outweighs the squared
       coefficients and it returns about ``lambda`` times a constant, still at
-      the unpenalized end the Newton step then has to leave.
+      the unpenalized end the Newton step then has to leave.  Where the
+      intercept-only fit has no valid mode (``null_fit_eta`` returns None),
+      they keep the cold 1e-4.
 
     A warm start (``warm_lambdas``, a previous fit's estimates) replaces the
     seed of each component it names, and, when present, fixed-policy
@@ -504,14 +507,19 @@ def bootstrap_seed_lambdas(
         and pc.name not in (warm_lambdas or {})
         and isinstance(group_matrices[pc.group_index], RandomEffectGroupMatrix)
     ]
-    if cold_random_effects:
-        eta = null_fit_eta(
+    eta = (
+        null_fit_eta(
             distribution=distribution,
             link=link,
             y=y,
             sample_weight=sample_weight,
             offset=offset,
+            weight_semantics=weight_semantics,
         )
+        if cold_random_effects
+        else None
+    )
+    if eta is not None:
         information = fisher_working_weights(
             distribution=distribution,
             link=link,
@@ -752,6 +760,7 @@ def optimize_discrete_reml_cached_w(
         y=y,
         sample_weight=sample_weight,
         offset=offset_arr,
+        weight_semantics=weight_semantics,
     )
     _t0 = _time.perf_counter()
     dm_boot = rebuild_design_matrix_with_lambdas(

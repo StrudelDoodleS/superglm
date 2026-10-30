@@ -3282,6 +3282,23 @@ class TestColdBootstrapStart:
             moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(shifted, lambdas, names)
             assert moved == base, family
 
+    def test_a_start_with_no_valid_null_mode_is_not_scaled(self, monkeypatch):
+        """Where the intercept-only fit's linear predictor lies on a clip on a
+        weighted row, the curvature read there is the clip's, so no component
+        moves and the retry is not made.  A row whose offset is 100 below the
+        rest sits past the log link's -80.  Mutation: reading the Fisher
+        weights there anyway moves every component.
+        """
+        model, frame, y, weights = _three_kind_fixture(family="poisson")
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        offset = np.zeros(len(y))
+        offset[0] = -100.0
+        clipped = replace(context, offset_arr=offset)
+        assert (
+            scop_efs_module._hessian_scaled_bootstrap_lambdas(clipped, lambdas, set(lambdas))
+            == lambdas
+        )
+
     def test_the_scaled_start_keeps_no_dense_penalty_alive(self, monkeypatch):
         """Each component's p x p penalty is released once its diagonal is read.
 

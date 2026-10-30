@@ -386,3 +386,85 @@ def test_a_zero_weight_fisher_row_contributes_exact_zeros_at_a_sqrt_cusp() -> No
     np.testing.assert_array_equal((rows.weights * rows.response)[:2], [0.0, 0.0])
     np.testing.assert_array_equal((rows.weights * (rows.response - eta))[:2], [0.0, 0.0])
     assert rows.response[2] == eta[2] + (1.0 - mu[2]) / (2.0 * eta[2])
+
+
+def _null_mode_rows(family: str, link: str, n: int = 400):
+    """A response, prior weights and an offset the pair's mean space accepts."""
+    rng = np.random.default_rng(20261030)
+    weights = rng.uniform(0.5, 2.0, n)
+    if link in ("identity", "inverse"):
+        offset = rng.uniform(0.0, 10.0, n)
+        mean = 1.0 / (2.0 + offset) if link == "inverse" else 2.0 + offset
+    elif link == "log":
+        offset = np.log(rng.uniform(0.05, 1.0, n))
+        mean = np.exp(0.5 + offset)
+    else:
+        offset = rng.uniform(-2.0, 1.0, n)
+        mean = 1.0 / (1.0 + np.exp(0.5 - offset))
+    y = {
+        "gaussian": lambda: mean + rng.normal(0.0, 0.3, n),
+        "poisson": lambda: rng.poisson(mean).astype(float),
+        "gamma": lambda: rng.gamma(5.0, mean / 5.0),
+        "tweedie": lambda: rng.gamma(2.0, 0.5, n) * rng.poisson(mean),
+        "nb2": lambda: rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(float),
+        "binomial": lambda: (rng.uniform(size=n) < mean).astype(float),
+    }[family]()
+    return y, weights, offset
+
+
+@pytest.mark.parametrize(
+    "family, link",
+    [
+        ("gaussian", "identity"),
+        ("gaussian", "log"),
+        ("poisson", "log"),
+        ("poisson", "identity"),
+        ("gamma", "log"),
+        ("gamma", "inverse"),
+        ("tweedie", "log"),
+        ("binomial", "logit"),
+        ("binomial", "probit"),
+        ("binomial", "cloglog"),
+        ("nb2", "log"),
+    ],
+)
+def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) -> None:
+    """``null_fit_eta`` is the intercept-only maximum-likelihood fit given the
+    offset, for every pair: its score ``s = sum w (y - mu) mu' / V`` vanishes
+    to the null fit's stop.  Where no closed form exists, the fit stops on a
+    relative deviance change ``r = 1e-10`` after a Fisher step, whose
+    deviance change is ``s**2 / I`` to second order (``I`` the intercept's
+    information) and which leaves a smaller score, so ``|s| <= sqrt(r D I)``
+    for the deviance ``D``, doubled for the second-order terms.  Mutation:
+    4767b8a7 placed the offset-free intercept against the offset for every
+    pair but a log link with a power variance: on the Gamma/inverse and
+    Poisson/identity pairs rows fell on the clips, and the Gaussian/identity,
+    binomial and NB2 scores were of order ``sqrt(D I)``.
+    """
+    from superglm.distributions import NegativeBinomial, resolve_distribution
+    from superglm.links import resolve_link
+    from superglm.solvers.working_rows import null_fit_eta
+
+    distribution = {"tweedie": Tweedie(p=1.5), "nb2": NegativeBinomial(theta=2.0)}.get(
+        family
+    ) or resolve_distribution(family)
+    link_ = resolve_link(link, distribution)
+    y, weights, offset = _null_mode_rows(family, link)
+
+    eta = null_fit_eta(
+        distribution=distribution,
+        link=link_,
+        y=y,
+        sample_weight=weights,
+        offset=offset,
+        weight_semantics="prior",
+    )
+
+    assert eta is not None
+    mu = link_.inverse(eta)
+    dmu = link_.deriv_inverse(eta)
+    variance = distribution.variance(mu)
+    score = float(np.sum(weights * (y - mu) * dmu / variance))
+    information = float(np.sum(weights * dmu**2 / variance))
+    deviance = float(np.sum(weights * distribution.deviance_unit(y, mu)))
+    assert abs(score) <= 2.0 * np.sqrt(1e-10 * deviance * information), (score, information)

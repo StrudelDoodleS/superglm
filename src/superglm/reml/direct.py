@@ -655,6 +655,7 @@ def optimize_direct_reml(
         y=y,
         sample_weight=sample_weight,
         offset=offset_arr,
+        weight_semantics=weight_semantics,
     )
     # After the pre-solve every estimated component starts warm, so the
     # bootstrap would fit the mode the first candidate fits again at the same

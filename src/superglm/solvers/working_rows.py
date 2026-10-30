@@ -18,6 +18,7 @@ from superglm.distributions import (
     Poisson,
     Tweedie,
     _weighted_residual_square,
+    clip_mu,
     initial_mean,
 )
 from superglm.links import (
@@ -127,24 +128,37 @@ def null_fit_eta(
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray,
-) -> NDArray:
-    """The linear predictor of the intercept-only fit, given the offset.
+    weight_semantics: str,
+) -> NDArray | None:
+    """The linear predictor of the intercept-only maximum-likelihood fit given the offset.
 
     The offset is read relative to its largest value on a weighted row,
     ``o~ = o - max o``, so a constant added to every offset, which the
     intercept absorbs, changes nothing here: where ``o + c`` is exact, ``o~``
-    is the same float64 vector.  For a log link and variance ``mu**p``
-    (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the intercept is the
-    maximum-likelihood one given ``o~``.  Its score equation,
-    ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with ``t = e^intercept``,
-    solves to ``t = sum w y e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted
-    mean of the response ``y e^-o~`` under the weights ``w e^((2-p) o~)``,
-    which is what the family's initial intercept of those rows computes (up
-    to its positive floor).  With no offset those are the original rows, bit
-    for bit.  Any other family or link keeps its offset-free initial
-    intercept, still placed against ``o~``, and so does a row set whose
-    rescaled response or weight is not finite.  Only positive-weight rows
-    are read: a zero-weight row's offset moves nothing here.
+    is the same float64 vector.  Where ``o~`` is zero on every weighted row
+    the mean is constant, and the intercept-only score ``sum w (y - mu) mu' /
+    V(mu)`` vanishes at the weighted mean of the response: the family's
+    initial intercept (up to its positive floor).  For a log link and
+    variance ``mu**p`` (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the score
+    equation given ``o~``, ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with
+    ``t = e^intercept``, solves to ``t = sum w y e^((1-p) o~) / sum w
+    e^((2-p) o~)``: the weighted mean of the response ``y e^-o~`` under the
+    weights ``w e^((2-p) o~)``, which is what the family's initial intercept
+    of those rows computes (up to its positive floor).  Any other pair, or a
+    row set whose rescaled response or weight is not finite, has no closed
+    form: its intercept is fitted by the line-searched direct IRLS on an
+    empty design, Fisher scoring on the one coefficient with steps halved
+    back inside the link's domain and the family's mean space (McCullagh &
+    Nelder 1989, sec. 2.5; Marschner 2011, R Journal 3(2)), as R's ``glm``
+    fits the null model with its offset and ``_compute_null_mu`` the sqrt
+    link's.  Only positive-weight rows are read: a zero-weight row's offset
+    moves nothing here.
+
+    None where no valid mode is found: the fit does not converge, or on a
+    positive-weight row the mode's linear predictor or mean lies where
+    ``stabilize_eta`` or ``clip_mu`` moves it.  A curvature read there is the
+    clip's, not the model's: an inverse-link row clipped to ``eta = 1e-12``
+    has the Gamma Fisher weight ``1e24``.
     """
     weights = np.asarray(sample_weight, dtype=np.float64)
     offset = np.asarray(offset, dtype=np.float64)
@@ -152,7 +166,9 @@ def null_fit_eta(
     shifted = offset - (float(np.max(offset[carried])) if np.any(carried) else 0.0)
     y = np.asarray(y, dtype=np.float64)
     power = _log_link_variance_power(distribution, link)
-    if power is not None:
+    varies = bool(np.any(shifted[carried]))
+    rows = None if varies else (y, weights)
+    if varies and power is not None:
         rescaled_y, rescaled_weights = y.copy(), weights.copy()
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             rescaled_y[carried] = y[carried] * np.exp(-shifted[carried])
@@ -160,11 +176,69 @@ def null_fit_eta(
         if np.all(np.isfinite(rescaled_y[carried])) and np.all(
             np.isfinite(rescaled_weights[carried])
         ):
-            y, weights = rescaled_y, rescaled_weights
-    intercept = coefficient_initial_intercept(
-        distribution=distribution, link=link, y=y, sample_weight=weights
+            rows = (rescaled_y, rescaled_weights)
+    if rows is not None:
+        intercept = coefficient_initial_intercept(
+            distribution=distribution, link=link, y=rows[0], sample_weight=rows[1]
+        )
+    else:
+        intercept = _fitted_null_intercept(
+            distribution=distribution,
+            link=link,
+            y=y,
+            sample_weight=weights,
+            offset=shifted,
+            weight_semantics=weight_semantics,
+        )
+        if intercept is None:
+            return None
+    eta = intercept + shifted
+    stabilized = stabilize_eta(eta, link)
+    mean = link.inverse(stabilized)
+    if np.any(stabilized[carried] != eta[carried]) or np.any(
+        clip_mu(mean, distribution)[carried] != mean[carried]
+    ):
+        return None
+    return stabilized
+
+
+def _fitted_null_intercept(
+    *,
+    distribution: Distribution,
+    link: Link,
+    y: NDArray,
+    sample_weight: NDArray,
+    offset: NDArray,
+    weight_semantics: str,
+) -> float | None:
+    """The intercept of the converged intercept-only direct IRLS fit given ``offset``, else None."""
+    from superglm.group_matrix import DesignMatrix
+    from superglm.solvers.irls_direct import fit_irls_direct
+
+    result, _ = fit_irls_direct(
+        X=DesignMatrix([], n=len(y), p=0),
+        y=y,
+        weights=sample_weight,
+        family=distribution,
+        link=link,
+        groups=[],
+        lambda2=0.0,
+        offset=offset,
+        max_iter=100,
+        tol=1e-10,
+        direct_solve="gram",
+        convergence="deviance",
+        compute_rank_info=False,
+        _return_working_system=True,
+        _compute_fit_statistics=False,
+        _compute_reml_geometry=False,
+        _compute_scop_postfit_inference=False,
+        separation="ignore",
+        weight_semantics=weight_semantics,
     )
-    return stabilize_eta(intercept + shifted, link)
+    if not result.converged:
+        return None
+    return float(result.intercept)
 
 
 def fisher_working_weights(

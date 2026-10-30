@@ -405,8 +405,12 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
     the extended budget's limit, ``max_halving`` past the first depth below
     the computed fraction ``t``, which the first inside precedes by at most
     one (the trial at ``2^-j >= t`` is outside but for rounding).  The fit
-    converges.
+    converges.  The creep is met from the near-unpenalized bootstrap (1238
+    refused halvings skipped); the random effect's own seed, its levels' mean
+    information, takes inner solves that meet none, so the bootstrap is held
+    at 1e-4.
     """
+    import superglm.reml.direct as direct
     import superglm.solvers.irls_direct._search as irls_direct_search
     from superglm.solvers.irls_state import _select_irls_trial
 
@@ -418,6 +422,11 @@ def test_a_fit_creeping_to_the_boundary_evaluates_no_refused_halving(
         return decision
 
     monkeypatch.setattr(irls_direct_search, "_select_irls_trial", counted)
+    monkeypatch.setattr(
+        direct,
+        "bootstrap_seed_lambdas",
+        lambda penalties, *_args, **_kwargs: {pc.name: 1e-4 for pc in penalties},
+    )
     rng = np.random.default_rng(3)
     n, levels = 800, 10
     X = pd.DataFrame({"s0": rng.uniform(size=n), "s1": rng.uniform(size=n)})

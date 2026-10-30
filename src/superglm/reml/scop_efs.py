@@ -2550,7 +2550,9 @@ def _hessian_scaled_bootstrap_lambdas(
     SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
     Jacobian one).  Only ``names`` move, clipped to the unit-increment box
     [``LAMBDA_FLOOR``, ``LAMBDA_CEILING``]; a
-    component whose ratio is not a positive finite number keeps its value.
+    component whose ratio is not a positive finite number keeps its value, and
+    every component keeps it where the intercept-only fit has no valid mode
+    (``null_fit_eta`` returns None), so no retry is made.
 
     ``A_ii`` is formed from raw moments, ``diag(X' W X) - sum_w * mean**2``,
     which loses relative accuracy where a column's mean dominates its spread
@@ -2566,7 +2568,10 @@ def _hessian_scaled_bootstrap_lambdas(
         y=context.y,
         sample_weight=context.sample_weight,
         offset=context.offset_arr,
+        weight_semantics=context.weight_semantics,
     )
+    if eta is None:
+        return dict(boot_lambdas)
     mu = clip_mu(context.link.inverse(eta), context.distribution)
     fisher = fisher_working_weights(
         distribution=context.distribution,

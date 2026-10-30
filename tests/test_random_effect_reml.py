@@ -302,3 +302,109 @@ def test_a_random_effect_seed_moves_with_constant_weights(monkeypatch):
         assert c_seed == pytest.approx(c * seed, rel=len(y) * np.finfo(float).eps), c
         assert c_iterations == iterations, (c, fits)
         assert c_estimate == pytest.approx(c * estimate, rel=rounding), c
+
+
+def test_an_offset_random_effect_seed_is_read_at_the_intercept_only_fit(monkeypatch):
+    """Under an inverse link the intercept-only fit given the offset has no
+    closed form, so its mode is fitted, and the random effect's seed is its
+    levels' mean information there.  Gamma's Fisher weight under the inverse
+    link is ``mu**2 = eta**-2``; the oracle solves the intercept's score
+    equation ``sum (1 / eta - y) = 0`` by bisection.  The null fit stops on a
+    relative deviance change ``r = 1e-10``, after a step of at most ``sqrt(r
+    D / I)`` (``D`` its deviance, ``I`` the intercept's information), which
+    bounds the intercept's error; each weight moves by ``2 / eta`` times that,
+    relative, and the seed, quadratic in them, by at most twice as much.  The
+    cold fit's criterion is then no worse than the criterion at any fixed
+    lambda of a half-decade grid, within the stop resolution ``reml_tol (1 +
+    |V|)``.
+
+    Mutation: 4767b8a7 placed the offset-free intercept against the offset,
+    so 271 of the 600 linear predictors fell below zero and were clipped to
+    1e-12, with Fisher weights of 1e24.  The seed went to the box ceiling
+    1e10 and the search stopped there after 2 iterations, 19.9 above the
+    grid's best, with 1 effective degree of freedom against 10.35.
+    """
+    from scipy.optimize import brentq
+
+    import superglm.reml.direct as direct
+    from superglm.distributions import Gamma
+
+    rng = np.random.default_rng(1234)
+    codes = np.repeat(np.arange(12), 50)
+    effect = rng.uniform(-0.5, 0.5, 12)[codes]
+    offset = rng.uniform(0.0, 10.0, len(codes))
+    y = rng.gamma(20.0, (1.0 / (2.0 + effect + offset)) / 20.0)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    bootstraps: list[float] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            bootstraps.append(kwargs["lambda2"]["broker"])
+        return real(*args, **kwargs)
+
+    def fit(effect_spec):
+        model = SuperGLM(
+            family="gamma", link="inverse", features={"broker": effect_spec}, selection_penalty=0
+        )
+        model.fit_reml(X, y, offset=offset)
+        return model
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    cold = fit(RandomEffect())
+    result = cold._reml_result
+    assert result.converged, result.termination_reason
+
+    shifted = offset - offset.max()
+    intercept = brentq(
+        lambda b: float(np.sum(1.0 / (b + shifted) - y)),
+        -shifted.min() + 1e-9,
+        1e3,
+        xtol=1e-14,
+    )
+    eta = intercept + shifted
+    weights = eta**-2.0
+    level = np.bincount(codes, weights=weights)
+    seed = float(np.sum(level * (1.0 - level / weights.sum())) / 12)
+    deviance = float(np.sum(Gamma().deviance_unit(y, 1.0 / eta)))
+    step = np.sqrt(1e-10 * deviance / weights.sum())
+    bound = 4.0 * step / eta.min() + len(y) * np.finfo(float).eps
+    assert bootstraps[0] == pytest.approx(seed, rel=bound)
+
+    grid = [
+        fit(RandomEffect(lambda_policy=LambdaPolicy.fixed(10.0 ** (k / 2))))._reml_result.objective
+        for k in range(-4, 5)
+    ]
+    resolution = cold._reml_profile["reml_tol_resolved"] * (1.0 + abs(min(grid)))
+    assert result.objective <= min(grid) + resolution, (result.objective, grid)
+
+
+def test_a_random_effect_seed_with_no_valid_null_mode_stays_cold(monkeypatch):
+    """Where the intercept-only fit's linear predictor or mean lies on a clip
+    on a weighted row, the curvature read there is the clip's, so the random
+    effect keeps the cold seed 1e-4.  Ten rows with an offset of -40 sit near
+    a logit ``eta`` of -40.5 at the intercept-only fit, past
+    ``stabilize_eta``'s -20.  Mutation: reading the information there anyway
+    seeds the effect at its levels' mean information.
+    """
+    import superglm.reml.direct as direct
+
+    rng = np.random.default_rng(20261030)
+    codes = np.repeat(np.arange(12), 50)
+    offset = np.zeros(len(codes))
+    offset[::60] = -40.0
+    y = (rng.uniform(size=len(codes)) < 1.0 / (1.0 + np.exp(0.5 - offset))).astype(float)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    bootstraps: list[float] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            bootstraps.append(kwargs["lambda2"]["broker"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    model = SuperGLM(family="binomial", features={"broker": RandomEffect()}, selection_penalty=0)
+    model.fit_reml(X, y, offset=offset)
+
+    assert bootstraps[0] == 1e-4
