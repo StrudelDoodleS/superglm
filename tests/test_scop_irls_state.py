@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -747,3 +749,227 @@ def test_the_solver_refuses_scop_beside_linear_constraints() -> None:
             lambda2=1.0,
             weight_semantics="frequency",
         )
+
+
+def _edge_of_range_data(case: str):
+    """A monotone-in-``x`` response whose SCOP start or step meets the edge of the link's range."""
+    rng = np.random.default_rng(3)
+    x = np.sort(rng.uniform(0, 1, 80))
+    if case == "binomial_log":
+        y = (rng.uniform(size=80) < 0.9 + 0.09 * x).astype(float)
+        return x, y, np.full(80, 2.0), "binomial", "log"
+    if case == "gamma_inverse":
+        mu = 1.0 / (0.05 + 1.0 * x)
+        _ = rng.uniform(size=80)
+        return x, rng.gamma(20, mu / 20), None, "gamma", "inverse"
+    mu = np.where(x < 0.3, 0.0, 6 * (x - 0.3))
+    return x, rng.poisson(mu).astype(float), None, "poisson", "identity"
+
+
+def _fit_edge_of_range(case: str) -> tuple[SuperGLM, np.ndarray]:
+    x, y, offset, family, link = _edge_of_range_data(case)
+    model = SuperGLM(
+        family=family,
+        link=link,
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
+    )
+    model.fit(pd.DataFrame({"x": x}), y, offset=offset)
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    return model, eta + (0.0 if offset is None else offset)
+
+
+def test_the_scop_search_refuses_a_trial_that_leaves_the_mean_space(monkeypatch) -> None:
+    """A binomial/log SCOP fit from a start inside the space never leaves it.
+
+    The first proposal's linear predictor is positive on some row, a binomial
+    mean above one; the search refuses it and every trial like it.  Mutation:
+    the search given only its observed-row predicate retains rows at
+    ``eta >= 0`` (41 of 80 after 73 iterations).
+    """
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    real = irls_scop._select_irls_trial
+    proposal_refused: list[bool] = []
+
+    def spy(**kwargs):
+        invalid = kwargs["invalid_state"]
+        proposal_refused.append(invalid is not None and invalid(kwargs["proposal"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    model, eta = _fit_edge_of_range("binomial_log")
+    assert proposal_refused[0]
+    assert float(np.max(eta)) < 0.0
+
+
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
+def test_the_scop_search_refuses_a_trial_that_leaves_the_links_domain(
+    monkeypatch, case: str
+) -> None:
+    """The refusal the SCOP step hands its line search keeps every mean the link allows.
+
+    The event is forced: the refusal is read where the step hands it over and
+    applied to the committed state with one positive-weight row moved to
+    ``eta = 0``, which the identity link gives a Poisson mean of zero and the
+    inverse link none, so no trajectory need propose such a trial.  Mutation:
+    the SCOP search given only the mean-space refusal accepts it, and the
+    characterisation's Poisson/identity SCOP REML fit returns to deviance 2028
+    with an effective df of 1.4e48.
+    """
+    import dataclasses
+
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    real = irls_scop._select_irls_trial
+    handed: list[tuple] = []
+
+    def spy(**kwargs):
+        handed.append((kwargs["committed"], kwargs["invalid_state"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _fit_edge_of_range(case)
+    committed, invalid = handed[0]
+    eta = np.array(committed.eta_unclipped)
+    assert np.all(eta > 0.0)
+    eta[0] = 0.0
+    assert invalid is not None
+    assert invalid(dataclasses.replace(committed, eta_unclipped=eta))
+
+
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse", "binomial_log"])
+def test_the_scop_start_is_put_inside_the_mean_space_and_the_links_domain(
+    monkeypatch, case: str
+) -> None:
+    """The latent start moves the shape term after the start intercept was chosen inside.
+
+    The QP start is steepened (each shape coordinate's increment ``e^3``
+    times its own), so the mapped start leaves the link's domain (identity,
+    inverse: low ``x``) or the binomial mean space (log: high ``x``) on every
+    case.  The start the first iteration commits from is inside both.
+    Mutation: without the second move all three cases start outside.
+    """
+    import superglm.solvers.irls_direct._scop as irls_scop
+    from superglm.solvers.irls_state import link_domain_violation, mean_space_violation
+    from superglm.solvers.scop import SCOPSolverReparam
+
+    real_initialize = SCOPSolverReparam.qp_initialize
+
+    def steepened(self, *args, **kwargs):
+        start = real_initialize(self, *args, **kwargs)
+        start[self.free_dim :] += 3.0
+        return start
+
+    starts: list[np.ndarray] = []
+    real_initial_state = irls_scop._IRLSDirectSCOPStep.initial_state
+
+    def recorded(self, fit, committed):
+        starts.append(np.asarray(committed.eta_unclipped).copy())
+        return real_initial_state(self, fit, committed)
+
+    monkeypatch.setattr(SCOPSolverReparam, "qp_initialize", steepened)
+    monkeypatch.setattr(irls_scop._IRLSDirectSCOPStep, "initial_state", recorded)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model, _ = _fit_edge_of_range(case)
+    family, link = model._distribution, model._link
+    weights = np.ones(starts[0].size)
+    for outside in (mean_space_violation(family, link), link_domain_violation(link, family)):
+        assert outside is None or not outside(starts[0], weights)
+
+
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
+def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(
+    monkeypatch, case: str
+) -> None:
+    """A returned state outside the link's range is no fitted model, whatever stopped the loop.
+
+    The event is forced: the start is left where the latent start put it,
+    outside the range on both fixtures, and every step is rejected, so the
+    fit returns that start.  It ends not converged, with a
+    ``ConvergenceWarning`` that names the cause, and a reason no observed-REML
+    gate reads as a mode short of its certificate.  Mutation: the
+    returned-state verdict removed publishes both fits with no warning; the
+    loop's own reason kept (``step_rejected``) passes those gates.
+    """
+    import superglm.solvers.irls_direct._scop as irls_scop
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.reml.observed_geometry import stopped_on_iteration_budget
+
+    monkeypatch.setattr(
+        irls_scop,
+        "interior_start_intercept",
+        lambda family, link, eta, w, intercept, level: intercept,
+    )
+    monkeypatch.setattr(
+        irls_scop,
+        "_select_irls_trial",
+        lambda **kwargs: _IRLSStepDecision(alpha=0.0, step_halvings=0, step_rejected=True),
+    )
+    with pytest.warns(ConvergenceWarning, match="outside the range"):
+        model, eta = _fit_edge_of_range(case)
+    assert not model.result.converged
+    assert model.result.termination_reason == "link_domain_infeasible"
+    assert not stopped_on_iteration_budget(model.result)
+    # the identity and inverse links both need a positive predictor for a positive mean
+    assert int(np.sum(eta <= 0.0)) > 0
+
+
+def test_a_scop_trial_carries_the_rounding_allowance_of_its_own_merit(monkeypatch) -> None:
+    """The merit's allowance is a field of the trial state, read for the state the search holds.
+
+    The search reads the allowance of the candidate and of the committed state
+    it is handed; each is the one ``_with_merit`` formed for that state, a
+    finite nonnegative number, and a state the search does not hold has none:
+    a ``LookupError``, not the ``StopIteration`` of a bare ``next``, which a
+    caller inside a generator would see as a ``RuntimeError`` (PEP 479).
+    """
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    model, y, weights, offset = _scop_fit_inputs()
+    formed: list[_SCOPTrialState] = []
+    real_with_merit = irls_scop._IRLSDirectSCOPStep._with_merit
+
+    def recording(self, trial):
+        state = real_with_merit(self, trial)
+        formed.append(state)
+        return state
+
+    checked: list[float] = []
+    real_select = irls_scop._select_irls_trial
+
+    def spy(**kwargs):
+        candidate, current = kwargs["proposal"], kwargs["committed"]
+        expected = sum(
+            next(state.merit_error for state in formed if state.irls is held)
+            for held in (candidate, current)
+        )
+        read = kwargs["merit_roundoff"](candidate, current)
+        assert read == expected
+        assert np.isfinite(read) and read >= 0.0
+        checked.append(read)
+        with pytest.raises(LookupError, match="holds no such state"):
+            kwargs["merit_roundoff"](candidate, object())
+        return real_select(**kwargs)
+
+    monkeypatch.setattr(irls_scop._IRLSDirectSCOPStep, "_with_merit", recording)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=3,
+        weight_semantics="frequency",
+    )
+    assert checked

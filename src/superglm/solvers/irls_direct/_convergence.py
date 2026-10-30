@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from superglm.solvers.irls_state import _irls_objective_relative_change
-from superglm.solvers.mode_score import rate_exhausts_budget, stagnation_window
+from superglm.solvers.mode_score import has_stagnated, rate_exhausts_budget, stagnation_window
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -114,9 +114,7 @@ class _IRLSDirectConvergence:
                 score_stagnated = (
                     not converged_this_iter
                     and residual.resolved
-                    and len(_mode_ratios) > _stagnation_window
-                    and min(_mode_ratios[-_stagnation_window:])
-                    > 0.5 * min(_mode_ratios[:-_stagnation_window])
+                    and has_stagnated(_mode_ratios, _stagnation_window)
                 )
                 switched_curvature, curvature = False, fit.curvature
                 if (
@@ -184,7 +182,7 @@ class _IRLSDirectConvergence:
                     _mode_ratios[-1] = residual.ratio()
             elif convergence in ("coefficients", "mode_score"):
                 coef_change = float(
-                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
                 )
                 coef_change = max(
                     coef_change,

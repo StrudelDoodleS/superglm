@@ -24,12 +24,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS_FLOAT
+from superglm._roundoff import gamma
 from superglm.solvers.centered_system import (
     CenteredSystem,
     grouped_augmented_factor,
     grouped_projected_factor,
     grouped_structural_nulls,
     grouped_weighted_factor,
+    penalty_factor,
 )
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.pirls import REMLGeometrySummary
@@ -37,9 +39,11 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
+    _formation_slack,
     decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
+    diagonal_of_square,
     face_pseudo_inverse,
     weights_fingerprint,
 )
@@ -136,11 +140,96 @@ def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
 
 
 def _face_decomposition(
-    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray]
+    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray], rows: int
 ) -> RankDecomposition:
-    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``."""
-    decomposition = decompose_gram_if_authoritative(_on_face(matrix, face))
+    """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``.
+
+    ``M`` is a computed Gram of ``rows`` rows with nonnegative weights, plus a
+    penalty, so a negative eigenvalue or diagonal of ``Z' M Z`` past the
+    eigensolver's resolution, or a diagonal at zero beside a nonzero entry in
+    its row, is the rounding of forming ``M`` and not curvature
+    (``psd_by_construction``).  Nor can a Gram whose formation may have moved
+    it by its smallest eigenvalue certify its spectrum
+    (``_face_formation_unresolved``), even when it factors.  Both happen when
+    weights of ``1e15`` meet a face they do not reach, and the factor decides.
+    """
+    on_face = _on_face(matrix, face)
+    decomposition = decompose_gram_if_authoritative(on_face, psd_by_construction=True)
+    if decomposition is not None and _face_formation_unresolved(matrix, face, on_face, rows):
+        decomposition = None
     return decompose_factor(factor() @ face) if decomposition is None else decomposition
+
+
+def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray, rows: int) -> bool:
+    """Whether forming ``Z' M Z`` may have moved it by as much as its smallest eigenvalue.
+
+    Each entry of a Gram of ``rows`` rows is within ``gamma_rows`` of
+    ``|X|'W|X|`` (Higham 2002, section 3.5), and ``(|X|'W|X|)_ij <=
+    sqrt(M_ii M_jj)`` (Cauchy-Schwarz), so ``Z' M Z`` is within ``gamma_rows
+    r_k r_l`` of its exact value, ``r = |Z|' sqrt(diag M)``:
+    ``rank._formation_slack`` bounds that in ``Z' M Z``'s Jacobi scaling.  By
+    Weyl's inequality a bound that reaches the smallest eigenvalue there
+    leaves the exact face Gram's definiteness, and its inverse, undecided.  A
+    face that combines columns without cancelling them has ``r_k^2`` near
+    ``(Z' M Z)_kk`` and a bound of order ``gamma_rows``; one that cancels
+    curvature the weights put off it has ``r_k^2`` up to their ratio larger.
+    """
+    diagonal = np.diag(on_face)
+    active = diagonal > 0.0
+    if not np.any(active):
+        return False
+    reach = (np.abs(face[:, active]).T @ np.sqrt(np.maximum(np.diag(matrix), 0.0))) ** 2
+    slack = _formation_slack(gamma(rows) * reach, diagonal[active])
+    scale = np.sqrt(diagonal[active])
+    equilibrated = on_face[np.ix_(active, active)] / np.outer(scale, scale)
+    return bool(slack >= np.linalg.eigvalsh(0.5 * (equilibrated + equilibrated.T))[0])
+
+
+def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
+    """``diag(F)`` and ``diag(2F - F^2)``, ``F = Z M Z'``: the face fit's EDF and ``edf1``.
+
+    Both are read off the data rows projected on the face ``Z``.
+
+    ``rows`` is ``R`` with ``R'R = Z'DZ``: the data rows projected on the face
+    and then factored (``grouped_projected_factor``).  With ``P =
+    penalty_factor(S)``, ``B = [R; PZ]`` factors the face Hessian ``Z'(D +
+    S)Z``, and neither ``D`` nor the Hessian is formed.  The face fit is the
+    fit on ``beta = Z theta`` (``_active_face_basis``), and ``Z M Z'``, ``M =
+    B^+ [R; 0] = (Z'(D + S)Z)^+ Z'DZ``, maps its own unpenalized estimate to
+    its penalized one.  Its trace is ``||U_R||_F^2``, the data rows' share of
+    ``B``'s left singular vectors, in ``[0, rank B]``: the influence trace
+    from orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
+    supplement B, in his notation).  The diagonal sums to it.  ``edf1`` is
+    Wood's alternative EDF, ``diag(2F - F^2)`` (Wood 2013, section 2.4), off
+    the same ``F``.
+
+    Two choices make this trace the rows' own.
+
+    - **The rows are projected before they are factored.**  A Householder
+      factor of the whole design is backward stable only columnwise (Higham
+      2002, section 19.3); row-wise stability needs row pivoting or rows
+      sorted by size (section 19.4; Cox and Higham 1998).  Under weights far
+      apart, its light rows can carry an error of order ``u`` times the
+      heaviest column, and that is all of the face's curvature when the face
+      cancels the heavy rows.
+      ``R`` factors the rows ``AZ`` formed one row at a time, each entry
+      within ``gamma_(p + T + 3) |a_r|' |Z|`` of the exact projection.
+    - **``Z M Z'`` leaves out the coupling to the curvature off the face.**
+      That coupling is ``Z (Z'(D + S)Z)^+ Z'D Z_perp Z_perp'``, the
+      difference from the split ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Its trace is
+      zero, and so is its diagonal's sum over each term, because the binding
+      rows of a term touch only that term's coefficients.  So it moves no
+      term's EDF, and the same holds for ``edf1``.  But weights far apart
+      make its entries as large as their ratio, up to ``1e15``, where
+      float64 cannot resolve them.
+    """
+    projected = np.vstack((rows, penalty_factor(penalty) @ face))
+    decomposition = decompose_factor(projected, retain_factor_solve=True)
+    data = np.zeros_like(projected)
+    data[: rows.shape[0]] = rows
+    influence = face @ decomposition.solve_factor_rhs(data) @ face.T
+    edf = np.diag(influence).copy()
+    return edf, 2.0 * edf - diagonal_of_square(influence)
 
 
 def _feature_edf(
@@ -149,12 +238,19 @@ def _feature_edf(
     factor: Callable[[int], NDArray],
     face: NDArray | None = None,
     inverse: NDArray | None = None,
-) -> NDArray:
-    """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
+) -> tuple[NDArray, NDArray | None]:
+    """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom, and its ``edf1``.
 
     On an active face ``Z`` (``_active_face_basis``), ``decomposition``
     factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
-    D)``, whose trace is the face fit's.
+    D)``, whose trace is the face fit's.  When the factor decided that
+    decomposition (``_face_decomposition``), the Gram's formation rounding
+    can be as large as the face's own entries, and ``D`` is as unreliable as
+    the Hessian it was formed with.  The EDF is then the face fit's own,
+    read off the face's projected data rows ``factor(0)``
+    (``_face_factor_edf``), and so is its ``edf1``.  Everywhere else
+    ``edf1`` is ``None``: inference forms it from the data Gram
+    (``state_ops._rank_edf1``).
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -167,29 +263,41 @@ def _feature_edf(
     overflowed, and ``D`` and ``S`` are multiplied by the one power of two
     that brings the Hessian's largest entry into ``[1/2, 1)``, exact for
     normal and subnormal entries alike, and the scaled Hessian is factored
-    again (``factor(exponent)`` when its Gram is not authoritative).  Both
+    again (``factor(exponent)`` when its Gram is not authoritative, read on a
+    face as ``_face_factor_edf`` reads it).  Both
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.  ``inverse`` is ``face_pseudo_inverse(decomposition,
-    face)`` when the caller has formed it already.
+    trace near its limit, 0.  ``factor(exponent)`` holds the rows at a scale
+    of ``2^-exponent``.  Off a face, it is the augmented factor ``[F_D; P]``
+    of ``D`` and ``S``.  On a face it is the data rows projected on it and
+    factored, ``R'R = Z'DZ`` (``grouped_projected_factor``), and the penalty
+    is never among them.  ``inverse`` is
+    ``face_pseudo_inverse(decomposition, face)`` when the caller has formed
+    it already.
     """
+    if face is not None and decomposition.method == "qr_svd":
+        return _face_factor_edf(factor(0), centered.penalty, face)
     if inverse is None:
         inverse = face_pseudo_inverse(decomposition, face)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         unscaled = np.diag(inverse @ centered.data_gram).copy()
     if np.all(np.isfinite(unscaled)):
-        return unscaled
+        return unscaled, None
     hessian = centered.hessian
     largest = float(np.max(np.abs(hessian), initial=0.0))
     if largest == 0.0 or not math.isfinite(largest):
-        return unscaled
+        return unscaled, None
     exponent = math.frexp(largest)[1]
-    scaled = decompose_gram_if_authoritative(_on_face(np.ldexp(hessian, -exponent), face))
+    scaled = decompose_gram_if_authoritative(
+        _on_face(np.ldexp(hessian, -exponent), face), psd_by_construction=True
+    )
+    if scaled is None and face is not None:
+        return _face_factor_edf(factor(exponent), np.ldexp(centered.penalty, -exponent), face)
     if scaled is None:
-        scaled = decompose_factor(factor(exponent) if face is None else factor(exponent) @ face)
+        scaled = decompose_factor(factor(exponent))
     scaled_gram = np.ldexp(centered.data_gram, -exponent)
-    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy()
+    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy(), None
 
 
 def _retained_rank_info(
@@ -197,6 +305,7 @@ def _retained_rank_info(
     W: NDArray,
     augmented_rank: RankDecomposition,
     feature_edf: NDArray,
+    feature_edf1: NDArray | None,
     *,
     dm: DesignMatrix,
     groups: list[GroupSlice],
@@ -285,6 +394,8 @@ def _retained_rank_info(
     selected_columns = np.arange(p, dtype=int)
     selected_columns.setflags(write=False)
     feature_edf.setflags(write=False)
+    if feature_edf1 is not None:
+        feature_edf1.setflags(write=False)
     return RankInfo(
         policy_version=SHARED_RANK_POLICY.version,
         coordinate_space="solver",
@@ -304,7 +415,10 @@ def _retained_rank_info(
         face=face,
         face_rows=face_rows,
         face_augmented=face_rank,
-        face_coefficient=(None if face is None else _face_decomposition(M_beta, face, raw_factor)),
+        face_coefficient=(
+            None if face is None else _face_decomposition(M_beta, face, raw_factor, dm.n)
+        ),
+        feature_edf1=feature_edf1,
     )
 
 
@@ -429,24 +543,34 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             )
         )
         face = None if face_rows is None else _active_face_basis(face_rows)
-        face_rank = (
-            None
-            if face is None
-            else _face_decomposition(
-                centered_final.hessian,
-                face,
-                lambda: fit.certify_centered_factor(final_system, W).factor,
-            )
-        )
-        feature_edf = _feature_edf(
-            centered_final,
-            augmented_rank if face_rank is None else face_rank,
-            lambda exponent: grouped_augmented_factor(
+
+        def augmented_factor(exponent: int = 0) -> NDArray:
+            # unscaled, the certified factor the face decomposition reads
+            if not exponent:
+                return fit.certify_centered_factor(final_system, W).factor
+            return grouped_augmented_factor(
                 dm,
                 np.ldexp(W, -exponent),
                 np.ldexp(final_system.penalty, -exponent),
                 center=final_system.mean_x,
-            ),
+            )
+
+        def projected_rows(exponent: int = 0) -> NDArray:
+            # the data rows on the face, the rows the face's EDF is read off
+            centre, centre_lo = final_system.centre_pair()
+            return grouped_projected_factor(
+                dm, np.ldexp(W, -exponent), face, center=centre, center_lo=centre_lo
+            )[0]
+
+        face_rank = (
+            None
+            if face is None
+            else _face_decomposition(centered_final.hessian, face, augmented_factor, dm.n)
+        )
+        feature_edf, feature_edf1 = _feature_edf(
+            centered_final,
+            augmented_rank if face_rank is None else face_rank,
+            augmented_factor if face is None else projected_rows,
             face,
             # off a face, the inverse the REML geometry formed
             inverse=XtWX_S_inv_beta if face is None else None,
@@ -461,6 +585,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             W,
             augmented_rank,
             feature_edf,
+            feature_edf1,
             dm=dm,
             groups=fit.groups,
             p=fit.p,

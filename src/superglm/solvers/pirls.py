@@ -215,6 +215,9 @@ class REMLGeometrySummary:
 # ``convergence="mode_score"`` solve's, or a binomial/log fit's own score at
 # the stops it refused (``irls_direct``: the iterate is at its limiting
 # accuracy; the mode is published as not converged, never refused).
+# ``link_domain_infeasible`` ends a solve whose returned state has a row outside
+# the link's domain (``irls_state.link_domain_violation``): no fitted model at
+# all, whatever stopped the loop, so no caller reads it as a mode.
 # The gap runs the other way exactly once, and deliberately: the fitted-state
 # invalidation path stamps a synthetic marker of its own over the field through
 # a dynamic ``setattr`` this annotation cannot see, and that records a revision
@@ -230,6 +233,7 @@ type TerminationReason = Literal[
     "continue",
     "score_stagnated",
     "mean_space_boundary",
+    "link_domain_infeasible",
 ]
 
 # The same vocabulary at runtime, for consumers that enumerate the reasons

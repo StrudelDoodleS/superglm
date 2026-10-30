@@ -341,7 +341,17 @@ def _certify_centered_factor(
     *,
     response: NDArray | None = None,
 ) -> _CenteredFactorCertification:
-    """Return a factor certificate for one immutable centered geometry."""
+    """Return a factor certificate for one immutable centered geometry.
+
+    The certificate's ``factor`` is a factor ``F`` of the Hessian, ``F'F = D +
+    S``, and nothing more is promised of its rows.  Asked without a
+    ``response``, it is ``[F_D; P]`` (``grouped_augmented_factor``).  With
+    one, it is the joint QR of ``[F_D, z; P, 0]`` less its response column
+    (``grouped_augmented_factor_rhs``), whose rows mix data and penalty.  The
+    cache returns that one to a later call without a response, so a reader
+    takes ``F``'s Gram, as a face decomposition does, and never its rows: the
+    face's EDF reads its own projected rows (``_finalise._face_factor_edf``).
+    """
     if _fisher_data_reuse is not None:
         _fisher_data_reuse.clear()
     cached = cache[0]
@@ -741,10 +751,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         without SCOP groups, switches to Newton only when its resolved score
         is measured to stall (``_IRLSDirectCurvaturePolicy``) or when
         ``_newton_latch`` is set; no rejected step switches the curvature
-        (one-engine design §3.11). Unsupported pairs and constrained routes
-        retain Fisher scoring, and the fREML performance iteration
-        (``_return_working_system``) takes Newton rows only when
-        ``_working_newton`` asks. Public callers should leave this True.
+        (one-engine design §3.11). As to this switch, unsupported pairs and
+        constrained routes retain Fisher scoring, and the fREML performance
+        iteration (``_return_working_system``) takes Newton rows only when
+        ``_working_newton`` asks.  The binomial/log mean space's Newton steps
+        are separate: they run on the dense, QP and structured routes once its
+        certificate engages them (``_IRLSDirectMeanSpaceOverlay``).  Public
+        callers should leave this True.
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
@@ -1301,8 +1314,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # The fit's one step method, chosen here unless it is structured
         # (``_setup_design``), QP or SCOP (``_setup_routes``): QR materialises the
         # full design once.
-        # Constrained QP / SCOP requires Gram path — force it if constraints present
-        _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
+        # Constrained QP / SCOP requires Gram path — force it if constraints present;
+        # a design with no columns has nothing to factor, and the Gram path solves
+        # its intercept
+        _use_qr = self.direct_solve == "qr" and self.p > 0 and not has_constraints and not _has_scop
         # The binomial/log mean space's overlay, ``None`` for a family and link
         # whose means cannot leave their space: its certificate judges every
         # route, and its Newton steps are available off the QR route (whose
@@ -1541,9 +1556,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
         self.stop_rule = _IRLSDirectConvergence(self.max_iter, mode_bar)
         # the shared line search, unless the step searches its own way
-        self.trial_search = (
-            _IRLSDirectTrialSearch(self.family, self.link) if self.step.search is None else None
-        )
+        self.trial_search = _IRLSDirectTrialSearch() if self.step.search is None else None
         # A warm start's centred state carried to this fit's centre (one-engine
         # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -1632,8 +1645,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.working_eta_unclipped = self.eta_unclipped
         self.working_eta = self.eta
         self.working_mu = self.mu
-        # the separation backstop and the diagnostics read Fisher's weights,
-        # the curvature their bars were set on, on a Newton iteration too
+        # the diagnostics read the working rows' own curvature; the separation
+        # backstop reads Fisher's, which its bar was set on (``_separation_weight_ratio``)
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(
             working_rows.weights
         )
@@ -1758,6 +1771,24 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     "fit_irls_direct: retained coefficient mode has no complete "
                     "constrained-QP KKT certificate; fit is not converged."
                 )
+
+        # A returned state with a row outside the link's domain is no fitted model,
+        # whatever stopped the loop (``link_domain_violation``), and its reason
+        # says so: a caller never reads it as a mode short of its certificate.
+        outside_link_domain = link_domain_violation(link, family)
+        if outside_link_domain is not None and outside_link_domain(eta_unclipped, weights):
+            from superglm.diagnostics.convergence import ConvergenceWarning
+
+            converged, termination_reason = False, "link_domain_infeasible"
+            # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
+            held_warnings.warn(
+                "The coefficient fit returns its last iterate, not converged: some rows' "
+                f"linear predictor lies outside the range the {type(link).__name__} allows "
+                f"a {type(family).__name__} mean. This link may not suit these data; a log "
+                "link cannot leave that range.",
+                ConvergenceWarning,
+                stacklevel=4,
+            )
 
         # the mean space's boundary verdict on the returned state (F04)
         mean_space = self.mean_space

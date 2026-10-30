@@ -998,15 +998,20 @@ class RankDecomposition:
 
         This path avoids re-forming normal equations at the factor-rank
         boundary.  It is available only when ``decompose_factor`` was asked to
-        retain the bounded factor solve.
+        retain the bounded factor solve.  A matrix ``transformed_rhs`` has one
+        solution per column.
         """
         if self.factor_rhs_left_basis is None:
             raise RuntimeError("factor-RHS solve was not retained")
         transformed_rhs = np.asarray(transformed_rhs, dtype=float)
-        if transformed_rhs.shape != (self.factor_rhs_left_basis.shape[0],):
+        if (
+            transformed_rhs.ndim not in (1, 2)
+            or transformed_rhs.shape[0] != (self.factor_rhs_left_basis.shape[0])
+        ):
             raise ValueError("transformed RHS length does not match the certified factor")
+        shape = (self.width, *transformed_rhs.shape[1:])
         if self.rank == 0:
-            return np.zeros(self.width)
+            return np.zeros(shape)
         if self.equilibrated_solution_basis is not None:
             projected_rhs = _exact_array(self.factor_rhs_left_basis.T) @ _exact_array(
                 transformed_rhs
@@ -1018,8 +1023,11 @@ class RankDecomposition:
                 )
             else:
                 solved = _exact_array(self.equilibrated_solution_basis[active]) @ projected_rhs
-            result = np.zeros(self.width)
-            result[active] = _exact_to_float(solved / _exact_array(self.column_scale[active]))
+            scale = _exact_array(self.column_scale[active])
+            result = np.zeros(shape)
+            result[active] = _exact_to_float(
+                solved / scale.reshape((-1,) + (1,) * (len(shape) - 1))
+            )
             return result
         projected_rhs = self.factor_rhs_left_basis.T @ transformed_rhs
         if self.factor_rhs_triangular is not None:
@@ -1029,7 +1037,7 @@ class RankDecomposition:
                 lower=False,
                 check_finite=False,
             )
-            result = np.zeros(self.width)
+            result = np.zeros(shape)
             result[self.active_columns] = active_solution
             return result
         if self.solution_basis is None:
@@ -1200,6 +1208,11 @@ class RankInfo:
     face_rows: NDArray | None = field(default=None, repr=False, compare=False)
     face_augmented: RankDecomposition | None = field(default=None, repr=False, compare=False)
     face_coefficient: RankDecomposition | None = field(default=None, repr=False, compare=False)
+    # On a face the factor decided, Wood's alternative EDF ``diag(2F - F^2)``
+    # of the face fit's influence ``F``, read off its projected rows with
+    # ``feature_edf`` (``irls_direct._face_factor_edf``).  ``None`` elsewhere:
+    # inference forms it from the data Gram.
+    feature_edf1: NDArray | None = field(default=None, repr=False, compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
@@ -1253,38 +1266,67 @@ class RankInfo:
         return result
 
 
-def _equilibrate_gram(
-    matrix: NDArray, *, allow_indefinite: bool = False
-) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+def _materially_negative_diagonal(diagonal: NDArray) -> bool:
+    """Whether an entry of ``diagonal`` is below ``-100 eps`` times its largest magnitude.
+
+    The comparison is of dimensionless diagonals: an absolute unit floor can
+    turn an indefinite matrix into a structural zero merely by rescaling it.
+    Dividing before testing keeps the relative allowance from underflowing.
+    """
+    scale_reference = float(np.max(np.abs(diagonal), initial=0.0))
+    return scale_reference > 0.0 and bool(np.any(diagonal / scale_reference < -100.0 * _EPS))
+
+
+def _offdiagonal_on_a_zero_diagonal(matrix: NDArray, zero_diagonal: NDArray) -> bool:
+    """Whether a row of ``matrix`` that ``zero_diagonal`` flags has a nonzero off-diagonal entry.
+
+    A semidefinite matrix has ``A_ij^2 <= A_ii A_jj`` (Cauchy-Schwarz on its
+    2 x 2 principal minors), so a zero diagonal entry has a zero row.
+    """
+    rows = matrix[zero_diagonal]
+    rows[np.arange(len(rows)), np.flatnonzero(zero_diagonal)] = 0.0
+    return bool(np.any(rows != 0.0))
+
+
+def _diagonal_refusal(symmetric: NDArray) -> str | None:
+    """Why ``symmetric``'s diagonal is no semidefinite matrix's, as equilibration reads it, else ``None``.
+
+    Equilibration takes a diagonal entry within ``-100 eps`` of its largest
+    (``_materially_negative_diagonal``) as zero, and so refuses it when its
+    row is not zero (``_offdiagonal_on_a_zero_diagonal``).
+    """
+    diagonal = np.diag(symmetric)
+    if _materially_negative_diagonal(diagonal):
+        return "matrix has a materially negative diagonal"
+    if _offdiagonal_on_a_zero_diagonal(symmetric, diagonal <= 0.0):
+        return "matrix has nonzero offdiagonal entry on a zero diagonal"
+    return None
+
+
+def _validated_symmetric(matrix: NDArray) -> NDArray:
+    """The symmetric part of a square, finite ``matrix``."""
     values = np.asarray(matrix, dtype=float)
     if values.ndim != 2 or values.shape[0] != values.shape[1]:
         raise ValueError("matrix must be square")
     if not np.all(np.isfinite(values)):
         raise ValueError("matrix must be finite")
-    symmetric = _symmetric_part(values)
+    return _symmetric_part(values)
+
+
+def _equilibrate_gram(
+    matrix: NDArray, *, allow_indefinite: bool = False
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    symmetric = _validated_symmetric(matrix)
     diagonal = np.diag(symmetric)
-    scale_reference = float(np.max(np.abs(diagonal), initial=0.0))
-    # Compare dimensionless diagonals: an absolute unit floor can turn an
-    # indefinite matrix into a structural zero merely by rescaling it. Divide
-    # before testing so the relative allowance does not itself underflow.
-    if (
-        not allow_indefinite
-        and scale_reference > 0.0
-        and np.any(diagonal / scale_reference < -100.0 * _EPS)
-    ):
-        raise ValueError("matrix has a materially negative diagonal")
     if allow_indefinite:
         # With r_i = max_j |A_ij|, symmetry gives |A_ij| <= sqrt(r_i r_j).
         # This bounds every scaled entry by one even on a zero diagonal.
         diagonal_scale = np.max(np.abs(symmetric), axis=1, initial=0.0)
     else:
+        refusal = _diagonal_refusal(symmetric)
+        if refusal is not None:
+            raise ValueError(refusal)
         diagonal_scale = np.maximum(diagonal, 0.0)
-        zero_diagonal = diagonal_scale == 0.0
-        if np.any(zero_diagonal):
-            off_diagonal = symmetric.copy()
-            np.fill_diagonal(off_diagonal, 0.0)
-            if np.any(off_diagonal[zero_diagonal] != 0.0):
-                raise ValueError("matrix has nonzero offdiagonal entry on a zero diagonal")
     active_columns = np.flatnonzero(diagonal_scale > 0.0)
     column_scale = np.zeros(len(diagonal))
     column_scale[active_columns] = np.sqrt(diagonal_scale[active_columns])
@@ -2111,6 +2153,17 @@ def _decompose_gram(
     see :func:`decompose_gram_if_authoritative`.  ``formation_error``: see
     :func:`decompose_gram`.
     """
+    # A materially negative diagonal is a negative Rayleigh quotient ``e_k' M
+    # e_k``, so the same rounding of a semidefinite Gram as a negative
+    # eigenvalue past the eigensolver's resolution; so is a diagonal taken as
+    # zero beside a row that is not.
+    if (
+        omit_uncertifiable
+        and psd_by_construction
+        and not allow_indefinite
+        and _diagonal_refusal(_validated_symmetric(matrix)) is not None
+    ):
+        return None
     equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
     )
@@ -2543,11 +2596,16 @@ def decompose_gram_if_authoritative(
     Gram's formation, not curvature, and it falls where a near-null of the
     data sits: the Gram cannot certify its own spectrum there, so this
     returns ``None`` (the caller goes to its observation factor) instead of
-    refusing the matrix as indefinite.  Measured: an fs data Gram whose
-    exact null came out at -1.17e-13 on macOS ARM64 (Accelerate) against a
-    resolution of 8.9e-14, at most -8.7e-15 on OpenBLAS; ``gamma_n`` at its
-    4000 rows is 4.4e-13.  Without the flag a materially negative
-    eigenvalue still raises: signed (observed) rows make it real.
+    refusing the matrix as indefinite.  So does a materially negative
+    diagonal, a negative Rayleigh quotient, and a diagonal at or just below
+    zero beside a nonzero entry in its row, which no semidefinite matrix has
+    (Cauchy-Schwarz): a projection ``Z'MZ`` of such a Gram that cancels its
+    heavy rows can round either one.  Measured: an
+    fs data Gram whose exact null came out at -1.17e-13 on macOS ARM64
+    (Accelerate) against a resolution of 8.9e-14, at most -8.7e-15 on
+    OpenBLAS; ``gamma_n`` at its 4000 rows is 4.4e-13.  Without the flag a
+    materially negative eigenvalue or either diagonal still raises: signed
+    (observed) rows make it real.
     """
     decomposition = _decompose_gram(
         matrix,
@@ -2653,7 +2711,13 @@ def decompose_gram_deflated(
     info: dict[str, float] = {"certified": 0.0}
     gram = np.asarray(gram, dtype=np.float64)
     diagonal = np.diag(gram)
-    if not np.all(np.isfinite(gram)) or np.any(diagonal < 0.0):
+    # A negative diagonal, or a zero one beside a nonzero row, is no
+    # semidefinite Gram's (Cauchy-Schwarz): the rows decide.
+    if (
+        not np.all(np.isfinite(gram))
+        or np.any(diagonal < 0.0)
+        or _offdiagonal_on_a_zero_diagonal(gram, diagonal == 0.0)
+    ):
         return None, info
     scale = np.sqrt(diagonal)
     active = np.flatnonzero(scale > 0.0)

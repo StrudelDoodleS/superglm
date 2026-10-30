@@ -197,6 +197,54 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
             assert tolerance.rank == full.rank
 
 
+@pytest.mark.parametrize("diagonal", [-1e-3, -np.finfo(float).eps, 0.0])
+def test_a_data_gram_with_a_diagonal_no_semidefinite_gram_has_is_decided_by_the_rows(
+    diagonal, monkeypatch
+):
+    """The fit's data rank, from a Gram whose formation left an impossible diagonal, is the full factor's.
+
+    The data Gram is of rows with nonnegative weights
+    (``psd_by_construction``), so a diagonal materially below zero, or one
+    equilibration takes as zero (within ``100 eps`` below it, or exactly
+    zero) beside a nonzero entry in its row, is its formation's rounding
+    (Cauchy-Schwarz).  The event is forced on the Gram the fit hands
+    ``decide_data_rank``: its smallest diagonal is set to ``d`` times its
+    largest.  The authority check returns ``None``, the grey-subspace route
+    refuses the diagonal too, and the full factor decides, as it does with
+    the grey-subspace route turned off.  Mutation: an authority check that
+    refuses no diagonal raises "materially negative diagonal"; one that
+    refuses only that raises "nonzero offdiagonal entry on a zero diagonal";
+    a grey-subspace route that refuses only a negative diagonal publishes the
+    zeroed column as a structural alias.
+    """
+    import superglm.solvers.irls_direct._finalise as irls_finalise
+
+    decide = rank.decide_data_rank
+    factor_calls = []
+
+    def rounded(gram, factor_decomposition, **kwargs):
+        assert kwargs["psd_by_construction"] and not kwargs["certify"]
+        gram = np.array(gram)
+        k = int(np.argmin(np.diag(gram)))
+        off_diagonal = np.delete(gram[k], k)
+        assert np.any(off_diagonal != 0.0)
+        gram[k, k] = diagonal * np.max(np.diag(gram))
+
+        def counted():
+            factor_calls.append(k)
+            return factor_decomposition()
+
+        return decide(gram, counted, **kwargs)
+
+    monkeypatch.setattr(irls_finalise, "decide_data_rank", rounded)
+    forced = _fit("thin_level_curve", full_factor=False).result.rank_info.data
+    monkeypatch.setattr(irls_finalise, "decide_data_rank", decide)
+    full = _fit("thin_level_curve", full_factor=True).result.rank_info.data
+    _assert_same_decisions(forced, full)
+    assert forced.grey_subspace is None
+    assert factor_calls
+
+
 def test_a_failed_certificate_keeps_the_full_factor(monkeypatch, row_factor_passes):
     """No split for the grey subspace: the full factor decides, bit for bit as it did before."""
     monkeypatch.setattr(rank, "_GREY_FLOOR", float("inf"))

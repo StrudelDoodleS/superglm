@@ -137,6 +137,71 @@ def _force_unresolved_score(monkeypatch, *, resolved=False):
 
 
 # ── Basic solver tests ─────────────────────────────────────────
+def _within_a_newton_step_of_the_intercept_mle(result, y, offset) -> bool:
+    """Whether an intercept-only Poisson/log fit iterated to its maximum, to its last step's square.
+
+    The maximum is ``log(sum(y) / sum(exp(offset)))``.  Newton's method (Fisher
+    scoring, on the canonical link) leaves an error of about half its last
+    step squared, so the fit is within that step squared, plus rounding.
+    """
+    log = result.iteration_log
+    if len(log) < 2:
+        return False
+    mle = np.log(y.sum() / np.exp(offset).sum())
+    last_step = log[-1].intercept - log[-2].intercept
+    return abs(result.intercept - mle) <= last_step**2 + 64 * np.finfo(float).eps * abs(mle)
+
+
+def _fit_on_a_face_that_cancels_its_heavy_rows():
+    """A Gaussian fit whose face cancels its heavy rows, its weights, and its face's rounding allowance.
+
+    Two rows of weight ``1e34`` are ``v = (9, 7, 7)`` and ``-v``.  They ask for
+    ``v'beta = -1`` against the binding row ``v'beta >= 0``.  Six unit rows,
+    ``I`` and ``-I``, carry weight 1, and ``S = I``.  The exact face
+    ``null(v)`` cancels the heavy rows.  The computed face is ``null(v)`` to
+    within ``u``, which at a row scale of ``1e17`` leaves the heavy rows a
+    projection ``c`` of order 100, inside its own rounding.  The light rows
+    give the face the curvature ``2I``, so for every ``c`` the face fit's
+    influence is ``I - (cc' + 3I)^-1``.  The weighted mean is zero, and its
+    rounding is below half an ulp of the heavy rows' entries.  The face's
+    Gram is refused by its formation bound, so the factor decides the face
+    whatever the rounding.
+
+    The allowance: each projected row is within ``gamma_(p + T + 3) |a|' |Z|``
+    of its projection, so ``|c|`` is at most that for the heavy rows.  The
+    factorisation's backward error, ``gamma ||B||_F``, moves each of the
+    face's 2 directions by at most twice that over ``sigma_min(B) >=
+    sqrt(3)`` (Wedin).
+    """
+    from superglm._roundoff import gamma
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+
+    v = np.array([9.0, 7.0, 7.0])
+    X = np.vstack((v, -v, np.eye(3), -np.eye(3)))
+    y = np.array([-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    weights = np.array([1e34, 1e34, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    constraint = LinearConstraintSet(A=v[None, :], b=np.zeros(1))
+    result, _ = fit_irls_direct(
+        DesignMatrix([DenseGroupMatrix(X)], n=8, p=3),
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        [GroupSlice("x", 0, 3, constraints=constraint)],
+        lambda2=0.0,
+        S_override=np.eye(3),
+        weight_semantics="frequency",
+    )
+    assert result.rank_info.face.shape == (3, 2)
+    assert result.rank_info.face_augmented.method == "qr_svd"
+    n, p, width = 8, 3, 2
+    heavy = np.sqrt(2.0) * gamma(p + 4) * np.sqrt(weights[0]) * np.sum(np.abs(v))
+    slack = 2 * width * gamma(n + width) * (heavy + np.sqrt(3.0 * width)) / np.sqrt(3.0)
+    return result, weights, slack
+
+
 class TestDirectSolverBasic:
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
@@ -2389,9 +2454,9 @@ class TestDirectSolverBasic:
         real_edf = irls_direct_finalise._feature_edf
 
         def recorded(*args, **kwargs):
-            edf = real_edf(*args, **kwargs)
+            edf, edf1 = real_edf(*args, **kwargs)
             traces.append(edf.copy())
-            return edf
+            return edf, edf1
 
         monkeypatch.setattr(irls_direct_finalise, "_feature_edf", recorded)
         rng = np.random.default_rng(3)
@@ -2443,6 +2508,518 @@ class TestDirectSolverBasic:
 
         rec = m.reconstruct_feature("DrivAge")
         assert "relativity" in rec
+
+    @pytest.mark.parametrize("direct_solve", ["auto", "qr"])
+    @pytest.mark.parametrize("convergence", ["deviance", "coefficients", "mode_score"])
+    def test_a_design_with_no_columns_fits_its_intercept(self, convergence, direct_solve):
+        """With no column there is no coefficient to change and no factor to take.
+
+        The offset moves the maximum off the default start, ``log(mean(y))``,
+        which is chosen before it, so the intercept has to iterate.
+        """
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        n = 30
+        rng = np.random.default_rng(0)
+        y = rng.poisson(3.0, n).astype(float)
+        offset = rng.normal(0.0, 0.5, n)
+        result, _ = fit_irls_direct(
+            DesignMatrix([], n=n, p=0),
+            y,
+            np.ones(n),
+            Poisson(),
+            LogLink(),
+            [],
+            lambda2=0.0,
+            offset=offset,
+            weight_semantics="frequency",
+            convergence=convergence,
+            direct_solve=direct_solve,
+            record_diagnostics=True,
+        )
+        assert result.converged
+        assert _within_a_newton_step_of_the_intercept_mle(result, y, offset)
+
+    @pytest.mark.filterwarnings("ignore:convergence='coefficients' is experimental")
+    def test_a_model_with_no_features_fits_under_the_coefficient_criterion(self):
+        n = 30
+        rng = np.random.default_rng(0)
+        y = rng.poisson(3.0, n).astype(float)
+        offset = rng.normal(0.0, 0.5, n)
+        model = SuperGLM(
+            family="poisson",
+            link="log",
+            features={},
+            convergence="coefficients",
+            selection_penalty=0.0,
+        )
+        model.fit(pd.DataFrame({"x": np.zeros(n)}), y, offset=offset, record_diagnostics=True)
+        assert model.result.converged
+        assert _within_a_newton_step_of_the_intercept_mle(model.result, y, offset)
+
+    @pytest.mark.parametrize("history", ["halves_exactly", "never_finite"])
+    @pytest.mark.parametrize("rule", ["mode_score", "true_score"])
+    def test_both_stagnation_rules_judge_a_score_history_alike(self, monkeypatch, rule, history):
+        """A score that exactly halves each window is progress; one never finite is not.
+
+        Each rule is fed the scripted scores its certificate would read, on the
+        QR route, where the binomial/log Newton steps are unavailable and a
+        stagnated window ends the fit.  The mode-score rule reads them as
+        resolved, the true-score rule keeps its own resolved flag.
+        """
+        from types import SimpleNamespace
+
+        import superglm.solvers.irls_direct._fit as fit_module
+        import superglm.solvers.irls_direct._mean_space as mean_space_module
+        from superglm.distributions import Binomial, Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, stagnation_window
+
+        max_iter, n = 6, 60
+        window = stagnation_window(max_iter, MODE_CERTIFICATION_BAR)
+        calls: list[int] = []
+
+        def score() -> float:
+            calls.append(0)
+            if history == "never_finite":
+                return float("inf")
+            return 8.0 * 2.0 ** (-((len(calls) - 1) // window))
+
+        rng = np.random.default_rng(1)
+        x = rng.uniform(-1.0, 1.0, n)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        groups = [GroupSlice("x", 0, 1)]
+        if rule == "mode_score":
+            y = rng.poisson(np.exp(0.3 + 0.8 * x)).astype(float)
+
+            def residual(self, beta, intercept, mu, eta, centred_intercept=None, resolve_cap=None):
+                value = score()
+                return SimpleNamespace(ratio=lambda: value, resolved=True)
+
+            monkeypatch.setattr(fit_module._IRLSDirectFit, "mode_residual", residual)
+            kwargs = dict(
+                family=Poisson(), link=LogLink(), convergence="mode_score", offset=np.zeros(n)
+            )
+        else:
+            y = (rng.uniform(size=n) < np.exp(-1.0 + 0.5 * x)).astype(float)
+            certify = mean_space_module._IRLSDirectMeanSpaceOverlay.certify
+
+            def stub(self, fit, beta, intercept, eta, inputs):
+                certify(self, fit, beta, intercept, eta, inputs)  # the overlay's side effects
+                return score(), False
+
+            monkeypatch.setattr(mean_space_module._IRLSDirectMeanSpaceOverlay, "certify", stub)
+            kwargs = dict(family=Binomial(), link=LogLink(), offset=np.full(n, 2.0), tol=0.1)
+        result, _ = fit_irls_direct(
+            dm,
+            y,
+            np.ones(n),
+            groups=groups,
+            lambda2=0.0,
+            weight_semantics="frequency",
+            direct_solve="qr",
+            max_iter=max_iter,
+            **kwargs,
+        )
+        # the scripted scores were read on every iteration
+        assert len(calls) == result.n_iter
+        expected = "max_iter" if history == "halves_exactly" else "score_stagnated"
+        assert result.termination_reason == expected
+
+    def test_a_trial_is_refused_for_each_domain_the_committed_state_is_inside(self):
+        """The line search's shared refusal: mean space, link domain, then the route's own."""
+        from types import SimpleNamespace
+
+        from superglm.distributions import Binomial, Gamma, Poisson
+        from superglm.links import InverseLink, LogLink
+        from superglm.solvers.irls_direct._search import trial_refusal
+
+        weights = np.array([1.0, 1.0, 0.0])
+
+        def state(*eta):
+            return SimpleNamespace(eta_unclipped=np.array(eta))
+
+        # binomial/log: the mean space is eta < 0, on rows that carry weight
+        refusal = trial_refusal(Binomial(), LogLink(), state(-1.0, -2.0, -1.0), weights, None)
+        assert refusal(state(-1.0, 0.5, -1.0)) and not refusal(state(-1.0, -0.5, 3.0))
+        # a committed state outside a domain tests nothing of it
+        assert trial_refusal(Binomial(), LogLink(), state(-1.0, 0.5, -1.0), weights, None) is None
+        # gamma/inverse: the link's domain is eta > 0, and the route's refusal still applies
+        other = lambda candidate: bool(candidate.eta_unclipped[0] > 5.0)  # noqa: E731
+        refusal = trial_refusal(Gamma(), InverseLink(), state(1.0, 2.0, 1.0), weights, other)
+        assert refusal(state(1.0, -0.1, 1.0)) and refusal(state(6.0, 1.0, 1.0))
+        assert not refusal(state(1.0, 1.0, -1.0))
+        # no domain to keep: the route's refusal itself
+        assert trial_refusal(Poisson(), LogLink(), state(1.0, 2.0, 1.0), weights, other) is other
+
+    def test_a_face_gram_that_forming_left_indefinite_is_decided_by_the_factor(self):
+        """A Gram of nonnegative weights cannot be refused as indefinite on its active face.
+
+        With weights near ``1e15`` the formed Hessian carries rounding as large as
+        the face's own entries, and ``Z' M Z`` comes out with a negative
+        eigenvalue ``-1e-3`` beside its unit diagonal.  The Gram then cannot
+        certify its spectrum, and the decomposition of the observation factor
+        on the face stands in its place.
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor
+
+        delta = 1e-3
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.0 + delta], [0.0, 1.0 + delta, 1.0]])
+        factor = np.array([[0.0, 1.0, 1.0], [0.0, 0.0, 1e-2]])
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
+        expected = decompose_factor(factor @ face)
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        assert decomposition.rank == expected.rank == 2
+        scale = np.linalg.norm(exact, 2)
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        assert error <= 64 * np.finfo(float).eps * scale * np.linalg.cond(exact)
+
+    def test_a_face_gram_that_forming_left_a_negative_diagonal_is_decided_by_the_factor(self):
+        """A face Gram of nonnegative weights with a negative diagonal is decided by the factor.
+
+        A diagonal of ``Z' M Z`` is ``z' M z``, and on a face that cancels
+        weights near ``1e15`` its rounding is as large as the face's own
+        curvature.  The event is forced: the face Gram's second diagonal is
+        ``-1e-3`` beside a unit one, where the factor gives ``0.2501``.  That
+        Gram cannot certify its spectrum, so the factor on the face decides.
+        A Gram not semidefinite by construction is still refused.  Mutation:
+        without the diagonal's refusal in the authoritative check, the face
+        decomposition raises "materially negative diagonal".
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
+
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 0.5], [0.0, 0.5, -1e-3]])
+        factor = np.array([[0.0, 1.0, 0.5], [0.0, 0.0, 1e-2]])
+        with pytest.raises(ValueError, match="materially negative diagonal"):
+            decompose_gram_if_authoritative(face.T @ matrix @ face)
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
+        assert decomposition.method == decompose_factor(factor @ face).method == "qr_svd"
+        assert decomposition.rank == 2
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        bound = 64 * np.finfo(float).eps * np.linalg.norm(exact, 2) * np.linalg.cond(exact)
+        assert error <= bound
+
+    @pytest.mark.parametrize("diagonal", [-1e-16, 0.0])
+    def test_a_face_gram_with_a_zero_diagonal_beside_a_nonzero_row_is_decided_by_the_factor(
+        self, diagonal
+    ):
+        """A face Gram of nonnegative weights with a zero diagonal and a nonzero row is decided by the factor.
+
+        A semidefinite matrix with a zero diagonal entry has a zero row
+        (Cauchy-Schwarz).  Equilibration takes a diagonal within ``100 eps``
+        below zero as zero, so such a diagonal beside an off-diagonal entry of
+        rounding is formation rounding, as a materially negative one is.  The
+        event is forced: the face Gram is ``[[1, 1e-16], [1e-16, d]]``, ``d``
+        at or just below zero, where the factor gives ``1e-4``.  A Gram not
+        semidefinite by construction is still refused.  Mutation: an
+        authoritative check that refuses only a materially negative diagonal
+        raises "nonzero offdiagonal entry on a zero diagonal".
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+        from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
+
+        face = np.eye(3)[:, 1:]
+        matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1e-16], [0.0, 1e-16, diagonal]])
+        factor = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1e-2]])
+        with pytest.raises(ValueError, match="nonzero offdiagonal entry on a zero diagonal"):
+            decompose_gram_if_authoritative(face.T @ matrix @ face)
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
+        assert decomposition.method == decompose_factor(factor @ face).method == "qr_svd"
+        assert decomposition.rank == 2
+        exact = np.linalg.inv((factor @ face).T @ (factor @ face))
+        error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
+        # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
+        bound = 64 * np.finfo(float).eps * np.linalg.norm(exact, 2) * np.linalg.cond(exact)
+        assert error <= bound
+
+    def test_a_face_gram_that_forming_may_have_moved_by_its_spectrum_is_decided_by_the_factor(
+        self,
+    ):
+        """A face Gram that factors is still refused when its formation bound reaches its spectrum.
+
+        Two rows with weight-scale ``1e7`` columns give a formed Gram with
+        entries of ``1e15`` whose difference along the face ``(1, -1)`` is the
+        face's whole curvature, about 1.  The face Gram is positive, so it
+        factors, but forming it is uncertain by ``gamma_n 2e15``, more than
+        that curvature, and the factor on the face decides.  Mutation: the
+        formation check removed takes the Gram's Cholesky factor.
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+
+        rows, big, small = 10, 3.0e7, 0.75
+        factor = np.array([[big, big], [small, -small]])
+        face = np.array([[1.0], [-1.0]]) / np.sqrt(2.0)
+        decomposition = _face_decomposition(factor.T @ factor, face, lambda: factor, rows)
+        assert decomposition.method == "qr_svd"
+        on_face = float(np.sum((factor @ face) ** 2))
+        inverse = float(decomposition.pseudo_inverse()[0, 0])
+        assert abs(inverse * on_face - 1.0) <= 64 * np.finfo(float).eps
+
+    def test_a_face_the_factor_decided_reads_its_edf_off_the_factor(self):
+        """The EDF on a face whose Gram could not certify itself never reads the formed Gram.
+
+        The Hessian handed in is indefinite on the face, as forming it with
+        weights near ``1e15`` leaves it, and the data Gram carries a
+        perturbation of ``1/2`` on every entry, the size of that rounding
+        against the face's entries.  The EDF is the face fit's own, read off
+        the data rows projected on the face: ``diag(Z M Z')``, ``M = (Z'HZ)^-1
+        Z'DZ``.  Mutation: the factor's inverse times the data Gram handed in
+        (2b67e8dd) is off by the perturbation's share, 0.25 on one coefficient.
+        """
+        from types import SimpleNamespace
+
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct._finalise import _face_decomposition, _feature_edf
+
+        face = np.eye(3)[:, 1:]
+        data = np.array([[1.0, 0.5, 0.25], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+        penalty = np.diag([0.0, 0.5, 2.0])
+        factor = np.vstack((data, penalty_factor(penalty)))
+        hessian = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.001], [0.0, 1.001, 1.0]])
+        centered = SimpleNamespace(data_gram=data.T @ data + 0.5, hessian=hessian, penalty=penalty)
+        decomposition = _face_decomposition(hessian, face, lambda: factor, len(data))
+        assert decomposition.method == "qr_svd"
+        edf, _ = _feature_edf(centered, decomposition, lambda exponent=0: data @ face, face)
+        on_face = (factor @ face).T @ (factor @ face)
+        exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
+        # an inverse's forward error, kappa eps, on entries of order max |exact|
+        bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
+        assert np.max(np.abs(edf - exact)) <= bound
+
+    def test_a_rescaled_face_gram_that_cannot_certify_itself_reads_the_factor(self):
+        """The overflow rescale treats a face Gram as the face decomposition does.
+
+        At a data scale of ``1e-310`` the face inverse overflows and the EDF is
+        formed again on the Hessian scaled by a power of two.  The event is
+        forced: that Hessian is indefinite on the face, as forming it with
+        weights far apart leaves it, while the decomposition handed in is
+        certified.  The rescaled Gram then cannot certify itself, and the EDF
+        is the face fit's own, ``diag(Z M Z')``, read off the data rows
+        projected on the face, which the scale leaves unchanged.  Mutation:
+        without ``psd_by_construction`` there the scaled Gram raises
+        "materially indefinite".
+        """
+        from types import SimpleNamespace
+
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct._finalise import _face_decomposition, _feature_edf
+
+        scale, face = 1e-310, np.eye(3)[:, 1:]
+        data = np.array([[1.0, 0.5, 0.25], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+        penalty = np.diag([0.0, 0.5, 2.0])
+        factor = np.vstack((data, penalty_factor(penalty)))
+        indefinite = np.array([[2.0, 0.0, 0.0], [0.0, 1.0, 1.001], [0.0, 1.001, 1.0]])
+        centered = SimpleNamespace(
+            data_gram=scale * (data.T @ data), hessian=scale * indefinite, penalty=scale * penalty
+        )
+
+        def scaled_factor() -> np.ndarray:
+            return np.vstack((np.sqrt(scale) * data, penalty_factor(scale * penalty)))
+
+        def projected_rows(exponent: int = 0) -> np.ndarray:
+            return np.sqrt(np.ldexp(scale, -exponent)) * data @ face
+
+        certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor, len(data))
+        assert certified.method != "qr_svd"
+        edf, _ = _feature_edf(centered, certified, projected_rows, face)
+        on_face = (factor @ face).T @ (factor @ face)
+        exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
+        # an inverse's forward error, kappa eps, on entries of order max |exact|
+        bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
+        assert np.max(np.abs(edf - exact)) <= bound
+
+    def test_a_face_whose_rows_the_weights_cancel_publishes_a_trace_its_rows_allow(self):
+        """A face's EDF is the face fit's influence trace, never a sum of shares that cancel.
+
+        The face fit's influence ``I - (cc' + 3I)^-1``
+        (``_fit_on_a_face_that_cancels_its_heavy_rows``) has eigenvalues
+        ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  With the intercept, the EDF lies in
+        ``[7/3, 8/3]``, and ``7/3`` is the exact face's.  The influence is
+        symmetric, so each coefficient's share lies in ``[0, 1]``.
+
+        Mutation: f0077903, whose shares carry the coupling to the curvature
+        off the face, publishes shares of ``6e15`` that sum to 3.0 (2.0 under
+        the Haswell kernel).  The certified factor of the whole design read on
+        the face, in place of the projected rows, publishes 2.666761, above
+        ``8/3``, under the default kernel.
+        """
+        result, _, slack = _fit_on_a_face_that_cancels_its_heavy_rows()
+        record = result.rank_info
+        assert 7.0 / 3.0 - slack <= result.effective_df <= 8.0 / 3.0 + slack
+        assert np.all(record.feature_edf >= -slack)
+        assert np.all(record.feature_edf <= 1.0 + slack)
+
+    def test_a_face_the_factor_decided_reads_its_edf1_off_the_same_rows(self):
+        """Wood's ``edf1`` on such a face is read off the projected rows, never the formed Gram.
+
+        The face fit's influence ``F = I - (cc' + 3I)^-1`` on the face
+        (``_fit_on_a_face_that_cancels_its_heavy_rows``) has eigenvalues
+        ``mu`` of ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  ``2F - F^2`` then has
+        eigenvalues ``2 mu - mu^2`` of ``8/9`` and at most 1, so ``1 + sum
+        edf1`` lies in ``[25/9, 26/9]``, and each share in ``[0, 1]``.
+        Inference reads ``edf1`` with the Gram the fit formed, as
+        ``fit_inference_info`` hands it over.  Mutation: f0077903 forms it
+        from that Gram, whose entries of ``1e36`` round away the face's
+        curvature.
+        """
+        from superglm.model.state_ops import _rank_edf1
+
+        result, weights, slack = _fit_on_a_face_that_cancels_its_heavy_rows()
+        record = result.rank_info
+        edf = record.feature_edf[record.selected_columns].copy()
+        edf1 = _rank_edf1(record, record.take_data_gram(weights), edf)
+        assert 25.0 / 9.0 - 2 * slack <= 1.0 + np.sum(edf1) <= 26.0 / 9.0 + 2 * slack
+        assert np.all(edf1 >= -2 * slack) and np.all(edf1 <= 1.0 + 2 * slack)
+
+    def test_a_face_the_heavy_rows_reach_once_is_fitted_when_its_gram_rounds_a_zero_diagonal(
+        self, monkeypatch
+    ):
+        """A face whose Gram rounds a diagonal to zero beside a nonzero row is decided by its rows.
+
+        Two rows of weight ``1e15`` are ``v = (9, 7, 7, 5)`` and ``-v``, the
+        binding row is ``c = (9, 7, 7, 0)``, eight unit rows are ``I`` and
+        ``-I``, and ``S = I``.  On the face ``null(c)`` the heavy rows project
+        to ``a``, ``5 sqrt(w) e_4`` exactly: they reach one direction and
+        cancel the other two, where the formed ``Z' M Z`` keeps rounding of
+        the order of their curvature.  The event is forced: every face Gram's
+        smallest diagonal is set to ``-eps`` times its largest, which
+        equilibration takes as zero, beside an entry of that size in its row.
+        The face fit's influence is ``I - (2aa' + 3I)^-1``, with eigenvalues
+        ``2/3`` twice and ``1 - 1/(2|a|^2 + 3)`` whatever direction rounding
+        turns ``a``, so with the intercept the EDF is ``10/3`` to within
+        ``1/(2|a|^2 + 3)``, below ``1e-16``, and the factor's error: its
+        backward error ``gamma ||B||_F`` moves each of the face's 3 directions
+        by at most twice that over ``sigma_min(B) >= sqrt(3)`` (Wedin).
+        Mutation: an authoritative check that refuses only a materially
+        negative diagonal raises "nonzero offdiagonal entry on a zero
+        diagonal".
+        """
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        from superglm._roundoff import gamma
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        eps = np.finfo(float).eps
+        on_face = irls_finalise._on_face
+        forced = []
+
+        def rounded_to_zero(matrix, face):
+            out = on_face(matrix, face)
+            if face is None:
+                return out
+            out = out.copy()
+            k = int(np.argmin(np.diag(out)))
+            j = (k + 1) % len(out)
+            size = eps * np.max(np.abs(np.diag(out)))
+            out[k, k], out[k, j], out[j, k] = -size, size, size
+            forced.append(k)
+            return out
+
+        monkeypatch.setattr(irls_finalise, "_on_face", rounded_to_zero)
+        v = np.array([9.0, 7.0, 7.0, 5.0])
+        X = np.vstack((v, -v, np.eye(4), -np.eye(4)))
+        y = np.r_[-1.0, 1.0, np.zeros(8)]
+        weights = np.r_[1e15, 1e15, np.ones(8)]
+        constraint = LinearConstraintSet(A=np.array([[9.0, 7.0, 7.0, 0.0]]), b=np.zeros(1))
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(X)], n=10, p=4),
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, 4, constraints=constraint)],
+            lambda2=0.0,
+            S_override=np.eye(4),
+            weight_semantics="frequency",
+        )
+        record = result.rank_info
+        assert forced
+        assert record.face.shape == (4, 3)
+        assert record.face_augmented.method == "qr_svd"
+        n, p, width = 10, 4, 3
+        rows = np.sqrt(2.0 * weights[0]) * (5.0 + gamma(p + 4) * np.sum(np.abs(v)))
+        slack = 2 * width * gamma(n + width) * (rows + np.sqrt(3.0 * width)) / np.sqrt(3.0)
+        assert abs(result.effective_df - 10.0 / 3.0) <= slack
+        assert np.all(record.feature_edf >= -slack)
+        assert np.all(record.feature_edf <= 1.0 + slack)
+
+    def test_a_face_reads_its_edf_off_its_own_rows_whatever_layout_the_certified_factor_has(
+        self, monkeypatch
+    ):
+        """A face's EDF and edf1 never read the rows of the fit's certified factor.
+
+        That factor is promised only as a factor of the Hessian.  Certified
+        with a response, as the dense step certifies it and the cache then
+        hands to later callers, its rows mix data and penalty.  Both events
+        are forced on a well-conditioned constrained fit.  Every
+        certification carries a response, and the face's Gram is refused, so
+        the factor decides the face.  The EDF and edf1 are then those of the
+        face fit's own influence ``F = Z M Z'``, ``M = B^+ [AZ; 0]``, ``B =
+        [AZ; PZ]``, formed here from the centred rows.  Mutation: f0077903
+        zeroes the factor's last rows as its penalty and is off by 0.98 on
+        one coefficient.  Reading the certified factor's first ``p`` rows on
+        the face as its data rows is off by 4e-4, and right only when the
+        certification carries no response.
+        """
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        import superglm.solvers.irls_direct._fit as irls_fit
+        from superglm._roundoff import gamma
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        real_certify = irls_fit._certify_centered_factor
+        responses: list[bool] = []
+
+        def certify_with_a_response(dm, reuse, cache, system, W, *, response=None):
+            responses.append(response is None)
+            given = np.ones(dm.n) if response is None else response
+            return real_certify(dm, reuse, cache, system, W, response=given)
+
+        monkeypatch.setattr(irls_fit, "_certify_centered_factor", certify_with_a_response)
+        monkeypatch.setattr(irls_finalise, "_face_formation_unresolved", lambda *_: True)
+        rng = np.random.default_rng(5)
+        n, p = 40, 3
+        X = rng.normal(size=(n, p))
+        y = X @ np.array([0.5, -0.5, 0.2]) + 0.1 * rng.normal(size=n)
+        penalty = 0.5 * np.eye(p)
+        # binding: the data put beta_2 below beta_1
+        constraint = LinearConstraintSet(A=np.array([[-1.0, 1.0, 0.0]]), b=np.zeros(1))
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(X)], n=n, p=p),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, p, constraints=constraint)],
+            lambda2=0.0,
+            S_override=penalty,
+            weight_semantics="frequency",
+        )
+        record = result.rank_info
+        assert any(responses) and record.face_augmented.method == "qr_svd"
+        face = record.face
+        rows = (X - X.mean(axis=0)) @ face
+        B = np.vstack((rows, penalty_factor(penalty) @ face))
+        M = np.linalg.pinv(B) @ np.vstack((rows, np.zeros((p, face.shape[1]))))
+        F = face @ M @ face.T
+        edf = np.diag(F)
+        # the rows' and the SVD's backward errors over sigma_min(B), per direction (Wedin)
+        bound = 8 * face.shape[1] * gamma(n + p) * np.linalg.cond(B)
+        assert np.max(np.abs(record.feature_edf - edf)) <= bound
+        assert np.max(np.abs(record.feature_edf1 - (2.0 * edf - np.diag(F @ F)))) <= 2 * bound
 
 
 # ── Select=True tests ──────────────────────────────────────────

@@ -361,6 +361,28 @@ def test_tiny_factor_decomposition_preserves_representable_gram_rhs_solve(
     np.testing.assert_allclose(actual, expected, atol=0.0, rtol=bound)
 
 
+@pytest.mark.parametrize(
+    "factor",
+    [
+        np.array([[2.0, 1.0, 0.0], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0]]),
+        # an exact alias: the truncated factor's representative columns
+        np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.5, 0.2, 0.5], [0.3, 0.1, 0.3]]),
+        # column scales below the reciprocal range: the exact deferred solve
+        1e-309 * np.array([[0.6, 0.8], [-0.8, 0.6]]),
+    ],
+    ids=["full", "aliased", "deferred"],
+)
+def test_a_matrix_factor_rhs_is_solved_one_column_at_a_time(factor: np.ndarray) -> None:
+    decomposition = decompose_factor(factor, retain_factor_solve=True)
+    rhs = factor @ np.arange(1.0, 2 * factor.shape[1] + 1).reshape(factor.shape[1], 2)
+    solved = decomposition.solve_factor_rhs(rhs)
+    columns = np.column_stack([decomposition.solve_factor_rhs(column) for column in rhs.T])
+    assert solved.shape == columns.shape == (factor.shape[1], 2)
+    # the products differ from the vector ones only in their summation order
+    bound = 16.0 * max(factor.shape) * np.finfo(float).eps * np.max(np.abs(columns))
+    assert np.max(np.abs(solved - columns)) <= bound
+
+
 @pytest.mark.parametrize("operation", ["solve_factor_rhs", "pseudo_inverse"])
 def test_tiny_factor_refuses_an_unrepresentable_requested_result(operation: str) -> None:
     decomposition = decompose_factor(1e-309 * np.eye(2), retain_factor_solve=True)

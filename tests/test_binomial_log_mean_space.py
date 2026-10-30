@@ -684,6 +684,67 @@ def test_newton_steps_run_on_the_dense_and_constrained_routes(constrained: bool)
     )
 
 
+def test_the_iteration_diagnostics_read_fishers_weights_on_a_newton_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extrema, their rows and the debug row come from the weights ``w_ratio`` is formed on.
+
+    A Newton iteration's working weights are the observed information's; the
+    ratio, the separation backstop and the logged extrema all read Fisher's.
+    """
+    import superglm.solvers.irls_direct._recorder as recorder_module
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.solvers.pirls import _extreme_weight_indices, _positive_working_weight_stats
+    from superglm.types import GroupSlice
+
+    rows: list[dict] = []
+
+    class Level2:
+        enabled_level = 2
+
+        def append_jsonl(self, name: str, payload: dict) -> None:
+            rows.append(payload)
+
+    seen: list[tuple] = []
+    original = recorder_module._IRLSDirectRecorder.iteration
+
+    def spy(self, fit, it):
+        seen.append((fit.working_rows.weights.copy(), fit.W.copy(), fit.newton_score is not None))
+        return original(self, fit, it)
+
+    monkeypatch.setattr(recorder_module._IRLSDirectRecorder, "iteration", spy)
+    rng = np.random.default_rng(0)
+    x = np.append(rng.uniform(-1.0, 1.0, 200), 0.3)
+    y = np.append((rng.uniform(size=200) < 0.2).astype(np.float64), 1.0)
+    offset = np.append(np.full(200, 2.0), -25.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(x[:, None])], n=201, p=1),
+            y,
+            np.ones(201),
+            Binomial(),
+            LogLink(),
+            [GroupSlice("x", 0, 1)],
+            lambda2=0.0,
+            offset=offset,
+            weight_semantics="frequency",
+            record_diagnostics=True,
+            debug_recorder=Level2(),
+        )
+    log = result.iteration_log
+    assert len(log) == len(seen) == len(rows)
+    # the event: a Newton iteration whose weights are not Fisher's
+    assert any(newton and not np.array_equal(W, fisher) for fisher, W, newton in seen)
+    for diag, row, (fisher, _, _) in zip(log, rows, seen, strict=True):
+        top, bottom = _extreme_weight_indices(fisher)
+        assert diag.w_min == diag.raw_w_min == row["w_min"] == fisher.min()
+        assert diag.w_max == diag.raw_w_max == row["w_max"] == fisher.max()
+        assert np.array_equal(diag.top_w_indices, top)
+        assert np.array_equal(diag.bottom_w_indices, bottom)
+        assert diag.w_ratio == _positive_working_weight_stats(fisher)[2]
+
+
 def _random_offset_fixture(seed: int):
     """Opus's #437 random sweep (``rand_sweep.py``): probabilities near one, offsets in [-0.5, 1)."""
     rng = np.random.default_rng(seed)

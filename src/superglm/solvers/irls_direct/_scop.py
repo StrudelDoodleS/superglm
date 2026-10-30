@@ -36,6 +36,7 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._finalise import _finalise_centred
+from superglm.solvers.irls_direct._search import trial_refusal
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -43,6 +44,9 @@ from superglm.solvers.irls_state import (
     _IRLSState,
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
+    interior_start_intercept,
+    link_domain_violation,
+    mean_space_violation,
 )
 from superglm.solvers.mode_score import centred_matvec
 from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
@@ -51,7 +55,11 @@ from superglm.solvers.scop_newton import (
     SCOPJointNewton,
     _positive_quadratic_roundoff,
 )
-from superglm.solvers.working_rows import coefficient_working_rows, pearson_chi2
+from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
+    coefficient_working_rows,
+    pearson_chi2,
+)
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
@@ -198,6 +206,8 @@ class _SCOPTrialState:
     raw ``irls.intercept`` reads it at ``u |m' beta|``."""
     centre: tuple[NDArray, NDArray | None] | None = None
     """The ordinary system's centre pair ``(hi, lo)`` that ``level`` is about."""
+    merit_error: float = math.nan
+    """The rounding allowance of the merit ``irls.penalized_deviance`` (``_with_merit``)."""
 
 
 @dataclass(frozen=True)
@@ -444,7 +454,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         "_run _state _specs _order _newton _reduced_dm _reduced_to_full _S_reduced"
         " _reduced_tabmat_state _expose_exact_support _curvature _lambda2 _gaussian _columns"
         # the merit (``initial_state``)
-        " _outer_penalty _outer_penalty_abs _merit_errors _merit_gamma"
+        " _outer_penalty _outer_penalty_abs _merit_gamma"
         " _gaussian_response_roundoff _nb2_unit_roundoff"
         # one iteration, from ``propose`` through ``search`` to the stop rules
         " _committed _retained _ordinary _centred_level _results _proposal_eta_unclipped"
@@ -657,6 +667,26 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             gamma_eff = st["reparam"].forward(st["beta_scop"])
             st["gamma_eff"] = gamma_eff.copy()
             fit.beta[groups[gi].sl] = gamma_eff
+        # The latent start moves the SCOP terms' coefficients after the fit put its
+        # start inside the mean space and the link's domain (``_setup_design``),
+        # so the start is put inside them again by the same rule: a default start
+        # into both, a caller's into the link's domain.
+        family, link = fit.family, fit.link
+        lowered = fit.intercept_init is None and mean_space_violation(family, link) is not None
+        if lowered or link_domain_violation(link, family) is not None:
+            start_intercept = interior_start_intercept(
+                family,
+                link,
+                fit.dm.matvec(fit.beta) + fit.intercept + fit.offset,
+                fit.weights,
+                fit.intercept,
+                level=coefficient_initial_intercept(
+                    distribution=family, link=link, y=fit.y, sample_weight=fit.weights
+                ),
+            )
+            if start_intercept != fit.intercept:
+                fit.intercept, fit._deviance_init = start_intercept, None
+                fit._start_lowered = fit._start_lowered or lowered
         self._run, self._state, self._specs, self._order = (
             _scop_run,
             _scop_state,
@@ -703,7 +733,6 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         for spec in self._specs.values():
             scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
         scop_outer_penalty_abs = np.abs(scop_outer_penalty)
-        scop_merit_errors: dict[int, float] = {}
         merit_gamma = _gamma(len(y) + 3 * len(fit.beta) + 4 * len(self._specs) + 16)
         # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
         # This encloses residual formation without an observation-level
@@ -732,7 +761,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             else 0.0
         )
         self._outer_penalty, self._outer_penalty_abs = scop_outer_penalty, scop_outer_penalty_abs
-        self._merit_errors, self._merit_gamma = scop_merit_errors, merit_gamma
+        self._merit_gamma = merit_gamma
         self._gaussian_response_roundoff = gaussian_response_roundoff
         self._nb2_unit_roundoff = nb2_unit_roundoff
 
@@ -752,7 +781,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         return committed
 
     def _with_merit(self, trial: _SCOPTrialState) -> _SCOPTrialState:
-        """Attach deviance plus the latent-coordinate quadratic penalty, and record the merit's rounding allowance by the state's ``id``."""
+        """Attach deviance plus the latent-coordinate quadratic penalty, and the merit's rounding allowance."""
         merit_gamma, lambda2, specs = self._merit_gamma, self._lambda2, self._specs
         # A trial whose mapped coefficients carry its ordinary block past
         # binary64's range has a merit that is not finite, which the line
@@ -775,20 +804,19 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             penalty_roundoff += _positive_quadratic_roundoff(
                 magnitude, latent_penalty, merit_gamma, abs(lam_scop)
             )
-        retained = replace(
-            trial,
-            irls=replace(
-                trial.irls,
-                penalized_deviance=float(trial.irls.deviance + penalty_quad),
-            ),
-        )
         deviance_roundoff = merit_gamma * abs(trial.irls.deviance) + self._nb2_unit_roundoff
         if self._gaussian:
             deviance_roundoff = 8.0 * self._gaussian_response_roundoff + 2.0 * deviance_roundoff
         with np.errstate(over="ignore", invalid="ignore"):
             allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
-        self._merit_errors[id(retained.irls)] = allowance
-        return retained
+        return replace(
+            trial,
+            irls=replace(
+                trial.irls,
+                penalized_deviance=float(trial.irls.deviance + penalty_quad),
+            ),
+            merit_error=allowance,
+        )
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
         """The ordinary solve with the latent coordinates held, then the joint Newton step."""
@@ -941,7 +969,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         recorder, curvature = fit.recorder, fit.curvature
         trace_enabled, trace_run = recorder.trace_enabled, recorder.trace_run
         trace_basis_id, resolved_lambdas = recorder.trace_basis_id, recorder.resolved_lambdas
-        max_halving, scop_merit_errors = fit.max_halving, self._merit_errors
+        max_halving = fit.max_halving
         emit_evaluation, with_scop_merit = recorder.emit_evaluation, self._with_merit
         _t0 = time.perf_counter()
         # as ``_evaluate_scop_trial``: a proposal past the floating-point
@@ -989,6 +1017,13 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         )
         scop_trial_cache: dict[float, _SCOPTrialState] = {1.0: proposal_scop}
 
+        def merit_error(state: _IRLSState) -> float:
+            """The allowance of the committed or trial state the search holds as ``state``."""
+            for trial in (scop_committed, *scop_trial_cache.values()):
+                if trial.irls is state:
+                    return trial.merit_error
+            raise LookupError("the SCOP search holds no such state")
+
         def evaluate_scop_trial(alpha: float) -> _IRLSState:
             if trace_enabled:
                 assert trace_run is not None
@@ -1032,25 +1067,42 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
         shortened = math.ldexp(1.0, -latent_depth)
         search_proposal = evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
+        # A lowered start's halving budget, as the shared search's.  Not its first
+        # halving, which skips the depths a chord from the committed state leaves
+        # the mean space at: a SCOP trial maps its latent coordinates through
+        # ``exp`` and need not follow the chord, so the skip refuses trials
+        # the mean space admits.
+        lowered_budget = None
+        if fit.mean_space is not None:
+            _, lowered_budget, _, _ = fit.mean_space.line_search(
+                fit, scop_committed.irls, search_proposal, None
+            )
         decision = _select_irls_trial(
             committed=scop_committed.irls,
             proposal=search_proposal,
             evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
-            invalid_state=curvature.observed_rows_invalid if curvature.observed else None,
+            invalid_state=trial_refusal(
+                family,
+                link,
+                scop_committed.irls,
+                weights,
+                curvature.observed_rows_invalid if curvature.observed else None,
+            ),
             max_halving=max_halving,
-            extended_max_halving=lambda: _poisson_sqrt_halving_budget(
-                committed=scop_committed.irls,
-                proposal=search_proposal,
-                y=y,
-                weights=weights,
-                family=family,
-                link=link,
-                default=max_halving,
+            extended_max_halving=lambda: max(
+                _poisson_sqrt_halving_budget(
+                    committed=scop_committed.irls,
+                    proposal=search_proposal,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                ),
+                max_halving if lowered_budget is None else lowered_budget(),
             ),
             merit_scale=0.0,
-            merit_roundoff=lambda candidate, current: (
-                scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
-            ),
+            merit_roundoff=lambda candidate, current: merit_error(candidate) + merit_error(current),
         )
         if latent_depth:
             # in fractions of the full step, which was evaluated but not tried
