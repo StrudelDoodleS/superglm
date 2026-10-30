@@ -778,3 +778,45 @@ class TestThinLevelIsACount:
         assert rows["cat[R]"].level_n_obs == 30
         assert rows["cat[R]"].advisory_trigger != "thin_level"
         assert rows["cat[S]"].advisory_trigger == "thin_level"
+
+
+class TestThinLevelUnderTheWeightContract:
+    """Rows are counted as the weight contract counts them (``_thin_levels``)."""
+
+    @staticmethod
+    def _flags(df, y, weights, semantics):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            weight_semantics=semantics,
+            features={"cat": Categorical(base="A")},
+        ).fit(df, y, sample_weight=weights)
+        return {r.name: r.advisory_trigger for r in model.summary()._coef_rows}
+
+    def test_integer_frequency_weights_flag_as_the_replicated_rows(self):
+        rng = np.random.default_rng(3)
+        level = np.array(["A"] * 70 + ["R"] * 30)
+        weights = np.where(level == "A", 100.0, 1.0)
+        y = rng.poisson(np.where(level == "A", 0.2, 0.4)).astype(float)
+        df = pd.DataFrame({"cat": level})
+        replicated = np.repeat(np.arange(len(y)), weights.astype(int))
+
+        compressed = self._flags(df, y, weights, "frequency")
+        expanded = self._flags(
+            df.iloc[replicated].reset_index(drop=True), y[replicated], None, "frequency"
+        )
+
+        assert compressed["cat[R]"] == expanded["cat[R]"] == ""
+
+    def test_rows_without_prior_weight_are_not_counted(self):
+        """A zero prior weight is a row that was not observed."""
+        rng = np.random.default_rng(5)
+        level = np.array(["A"] * 3300 + ["Z"] * 25)
+        weights = np.zeros(len(level))
+        weights[:300] = 1.0
+        weights[3300:3315] = 1.0  # 15 observed rows of Z among its 25
+        y = rng.poisson(0.3, len(level)).astype(float)
+
+        flags = self._flags(pd.DataFrame({"cat": level}), y, weights, "prior")
+
+        assert flags["cat[Z]"] == "thin_level"

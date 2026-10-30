@@ -19,9 +19,40 @@ from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
-#: A level is thin when it holds fewer rows than this, or less exposure than this
-#: many rows of average exposure.
+#: A level is thin when it holds fewer rows than this, or less weight than this
+#: many rows of average weight (``_thin_levels``).
 _THIN_LEVEL_ROWS = 20
+
+
+def _thin_levels(
+    codes: NDArray, n_levels: int, sample_weights: NDArray, weight_semantics: str | None
+) -> NDArray:
+    """Which levels of a categorical are thin: few rows, or little weight.
+
+    A level is thin when it holds fewer than ``_THIN_LEVEL_ROWS`` rows, or less
+    weight than that many rows of average weight.  Rows are counted as the
+    weight contract counts them:
+
+    - ``"frequency"``: a weight is a replication count, so a level's rows are
+      the replications it holds and integer weights flag as the replicated
+      table would.  The two conditions are then the same one.
+    - ``"prior"`` (and no declared contract): a row is one observation of a
+      given precision and a zero weight an unobserved row, so a level's rows
+      are its rows of positive weight, and the average weight is over those.
+      Prior weights are identified only up to a common factor, which neither
+      condition reads.
+
+    Neither condition depends on the book's size or the weights' units, and
+    neither reads the response.
+    """
+    from superglm.solvers.dispersion import FREQUENCY_WEIGHTS
+
+    weights = np.asarray(sample_weights, dtype=np.float64)
+    counted = weights if weight_semantics == FREQUENCY_WEIGHTS else (weights > 0.0) * 1.0
+    rows = np.bincount(codes, weights=counted, minlength=n_levels + 1)[:n_levels]
+    weight = np.bincount(codes, weights=weights, minlength=n_levels + 1)[:n_levels]
+    rows_of_average_weight = weight * (np.sum(counted) / max(float(np.sum(weights)), 1e-300))
+    return (rows < _THIN_LEVEL_ROWS) | (rows_of_average_weight < _THIN_LEVEL_ROWS)
 
 
 def _ordered_piecewise_structural_rows(
@@ -210,8 +241,8 @@ def build_coef_rows(
     )
 
     # ── Per-level diagnostics for categorical features ────────────
-    # Compute observation count and exposure share per non-base level.
-    _level_diag: dict[str, dict[int, tuple[int, float]]] = {}
+    # Compute observation count, exposure share and thinness per non-base level.
+    _level_diag: dict[str, dict[int, tuple[int, float, bool]]] = {}
     if group_matrices is not None and sample_weights is not None:
         total_weight = float(np.sum(sample_weights))
         for gm, g in zip(group_matrices, groups):
@@ -220,7 +251,10 @@ def build_coef_rows(
                 n_per = np.bincount(gm.codes, minlength=K + 1)[:K]
                 exp_per = np.bincount(gm.codes, weights=sample_weights, minlength=K + 1)[:K]
                 exp_share = exp_per / max(total_weight, 1e-300)
-                _level_diag[g.name] = {i: (int(n_per[i]), float(exp_share[i])) for i in range(K)}
+                thin = _thin_levels(gm.codes, K, sample_weights, weight_semantics)
+                _level_diag[g.name] = {
+                    i: (int(n_per[i]), float(exp_share[i]), bool(thin[i])) for i in range(K)
+                }
     phi = result.phi
 
     def _wood_residual_df(edf: NDArray) -> float:
@@ -821,7 +855,7 @@ def build_coef_rows(
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                n_obs_i, exp_share_i = diag.get(i, (None, None))
+                n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
@@ -835,6 +869,8 @@ def build_coef_rows(
                         edf=cat_edf if i == 0 else None,
                         level_n_obs=n_obs_i,
                         level_exposure_share=exp_share_i,
+                        quasi_separated=thin_i,
+                        advisory_trigger="thin_level" if thin_i else "",
                     )
                 )
 
@@ -1256,7 +1292,8 @@ def build_coef_rows(
     # Two disjoint triggers, neither of which is a separation test: neither
     # reads the response, and separation is a joint property of the design and
     # the response (issue #239).
-    # Primary: data-driven — flag categorical levels with too few obs.
+    # Primary: data-driven — categorical levels with too little experience,
+    # flagged as their rows are built (``_thin_levels``).
     # Fallback: SE-based — for non-categorical features or when
     # per-level diagnostics are unavailable. Neither scale-invariant nor purely
     # relative: the threshold is ``max(50 * median_se, 10.0)``, so rescaling ONE
@@ -1264,21 +1301,6 @@ def build_coef_rows(
     # whenever the median parametric SE is under 0.2 -- a coefficient can be
     # hundreds of times the typical width and go unflagged. Splitting the two
     # branches is issue #304.
-    n_rows = 0 if sample_weights is None else len(sample_weights)
-    for r in rows:
-        if r.is_spline or r.name == "Intercept":
-            continue
-        # Data-driven: insufficient observations or exposure
-        if r.level_n_obs is not None and r.level_n_obs < _THIN_LEVEL_ROWS:
-            r.quasi_separated = True
-            r.advisory_trigger = "thin_level"
-        elif (
-            r.level_exposure_share is not None
-            and r.level_exposure_share * n_rows < _THIN_LEVEL_ROWS
-        ):
-            r.quasi_separated = True
-            r.advisory_trigger = "thin_level"
-
     # SE-based fallback for rows without per-level diagnostics
     parametric_ses = [
         r.se
