@@ -202,7 +202,8 @@ def _feature_edf(
     overflowed, and ``D`` and ``S`` are multiplied by the one power of two
     that brings the Hessian's largest entry into ``[1/2, 1)``, exact for
     normal and subnormal entries alike, and the scaled Hessian is factored
-    again (``factor(exponent)`` when its Gram is not authoritative).  Both
+    again (``factor(exponent)`` when its Gram is not authoritative, read on a
+    face as ``_face_factor_edf`` reads it).  Both
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
@@ -225,9 +226,13 @@ def _feature_edf(
     if largest == 0.0 or not math.isfinite(largest):
         return unscaled
     exponent = math.frexp(largest)[1]
-    scaled = decompose_gram_if_authoritative(_on_face(np.ldexp(hessian, -exponent), face))
+    scaled = decompose_gram_if_authoritative(
+        _on_face(np.ldexp(hessian, -exponent), face), psd_by_construction=True
+    )
+    if scaled is None and face is not None:
+        return _face_factor_edf(factor(exponent), np.ldexp(centered.penalty, -exponent), face)
     if scaled is None:
-        scaled = decompose_factor(factor(exponent) if face is None else factor(exponent) @ face)
+        scaled = decompose_factor(factor(exponent))
     scaled_gram = np.ldexp(centered.data_gram, -exponent)
     return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy()
 

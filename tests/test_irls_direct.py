@@ -2638,6 +2638,45 @@ class TestDirectSolverBasic:
         bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
         assert np.max(np.abs(edf - exact)) <= bound
 
+    def test_a_rescaled_face_gram_that_cannot_certify_itself_reads_the_factor(self):
+        """The overflow rescale treats a face Gram as the face decomposition does.
+
+        At a data scale of ``1e-310`` the face inverse overflows and the EDF is
+        formed again on the Hessian scaled by a power of two.  The event is
+        forced: that Hessian is indefinite on the face, as forming it with
+        weights far apart leaves it, while the decomposition handed in is
+        certified.  The rescaled Gram then cannot certify itself, and the EDF
+        is the factor's, ``diag(Z (Z'F'FZ)^-1 Z' F_D'F_D)``, which the scale
+        leaves unchanged.  Mutation: without ``psd_by_construction`` there the
+        scaled Gram raises "materially indefinite".
+        """
+        from types import SimpleNamespace
+
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct._finalise import _face_decomposition, _feature_edf
+
+        scale, face = 1e-310, np.eye(3)[:, 1:]
+        data = np.array([[1.0, 0.5, 0.25], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+        penalty = np.diag([0.0, 0.5, 2.0])
+        factor = np.vstack((data, penalty_factor(penalty)))
+        indefinite = np.array([[2.0, 0.0, 0.0], [0.0, 1.0, 1.001], [0.0, 1.001, 1.0]])
+        centered = SimpleNamespace(
+            data_gram=scale * (data.T @ data), hessian=scale * indefinite, penalty=scale * penalty
+        )
+
+        def scaled_factor(exponent: int = 0) -> np.ndarray:
+            weight = np.ldexp(scale, -exponent)
+            return np.vstack((np.sqrt(weight) * data, penalty_factor(weight * penalty)))
+
+        certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor)
+        assert certified.method != "qr_svd"
+        edf = _feature_edf(centered, certified, scaled_factor, face)
+        on_face = (factor @ face).T @ (factor @ face)
+        exact = np.diag(face @ np.linalg.solve(on_face, face.T @ data.T @ data))
+        # an inverse's forward error, kappa eps, on entries of order max |exact|
+        bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
+        assert np.max(np.abs(edf - exact)) <= bound
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:
