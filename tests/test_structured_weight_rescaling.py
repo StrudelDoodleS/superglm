@@ -41,8 +41,6 @@ follow-ups):
   (``_operator_pair``, ``_rho ** 4``): the Hessian is finite and wrong from
   about ``2^506`` and not finite from ``2^512`` or below ``2^-520`` (those
   cases pass every other check and expect only ``_NonFiniteHessianError``);
-- ``reml_w_correction``'s second-order term divides by the Python float
-  ``sum_w ** 2`` (``OverflowError`` or ``ZeroDivisionError``, every backend);
 - ``fit_reml``'s bootstrap PIRLS runs at absolute lambdas even when every
   lambda is fixed, and at ``2^520`` the ``fs`` factor refuses it.
 
@@ -497,10 +495,6 @@ _NESTED_TRACES = (
     ),
     pytest.mark.filterwarnings("ignore::RuntimeWarning"),
 )
-_SECOND_ORDER = _xfail(
-    "reml_w_correction's second-order term divides by the Python float sum_w ** 2",
-    (OverflowError, ZeroDivisionError),
-)
 _BOOTSTRAP = _xfail(
     "fit_reml's bootstrap PIRLS runs at absolute lambdas (1.0 and 1e-4) with every "
     "lambda fixed; at prior weights 2^520 they leave the fs level intercepts "
@@ -524,7 +518,7 @@ def _case(route: str, exponent: int, order: int | None = None, marks=()):
         *(_case(route, k, 1, _NESTED_TRACES) for route in _NESTED for k in (-600, 520)),
         *(_case(route, k, 1) for route in ("fs", "sz") for k in (-600, 520)),
         _case("fs", 200, 2),
-        *(_case("fs", k, 2, _SECOND_ORDER) for k in (-600, 520)),
+        *(_case("fs", k, 2) for k in (-600, 520)),
     ],
 )
 def test_route_factor_is_invariant_under_weight_rescaling(
@@ -534,9 +528,11 @@ def test_route_factor_is_invariant_under_weight_rescaling(
 
     Mutations: restoring ``np.outer(totals, totals) / self.sum_w ** 2`` with a
     Python-float ``sum_w`` in ``ProfiledNestedSchurFactor._cross_matrix``
-    raises ``OverflowError`` at ``2^502``; an absolute floor in a route's
-    pivot or rank decision (the nested tree pivot, the ``fs`` super-root, the
-    ``sz`` border rank) refuses the fit or changes its rank at the small scale.
+    raises ``OverflowError`` at ``2^502``, and restoring ``dsum_i dsum_j /
+    sum_w ** 2`` in ``reml_w_correction``'s second-order term fails both
+    order-2 cases beyond ``2^+-512``; an absolute floor in a route's pivot or
+    rank decision (the nested tree pivot, the ``fs`` super-root, the ``sz``
+    border rank) refuses the fit or changes its rank at the small scale.
     """
     scaled = _factor_layer(_reference(route), exponent, order, ROUTES[route][0])
     _assert_factor_layer(_reference_layer(route, order), scaled)
