@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import LambdaPolicy, RandomEffect, SuperGLM
 
@@ -197,9 +198,12 @@ def test_gamma_structured_observed_reml_matches_dense():
 
 
 def test_a_nested_chain_starts_within_a_newton_step_of_its_optimum(monkeypatch):
-    """A random effect's bootstrap fit is penalized (lambda = 1, lme4's start),
-    so the Fellner-Schall step from it places every level of a nested chain
-    within one Newton step bound (5 in log lambda) of its REML optimum.
+    """A random effect's bootstrap fit is penalized at its levels' mean
+    information, so the Fellner-Schall step from it places every level of a
+    nested chain within one Newton step bound (5 in log lambda) of its REML
+    optimum.  Here the intercept-only fit's working weight is the mean
+    response on every row, so a level's information is that mean times its
+    rows, less its share of the intercept.
 
     Almost unpenalized, a parent's indicators lie in the span of its
     children's, so along each parent-minus-children direction the curvature
@@ -246,5 +250,55 @@ def test_a_nested_chain_starts_within_a_newton_step_of_its_optimum(monkeypatch):
     bootstrap = next(lambdas for phase, lambdas in fits if phase == "bootstrap")
     first = next(lambdas for phase, lambdas in fits if phase == "candidate")
     optimum = model._reml_lambdas
-    assert bootstrap == {"make": 1.0, "make_model": 1.0}
+    information = {
+        name: y.mean() * np.sum(counts * (1.0 - counts / len(y))) / len(counts)
+        for name, counts in (("make", np.bincount(parent)), ("make_model", np.bincount(child)))
+    }
+    assert bootstrap == pytest.approx(information, rel=len(y) * np.finfo(float).eps)
     assert all(abs(np.log(first[name] / optimum[name])) < 5.0 for name in optimum), (first, optimum)
+
+
+def test_a_random_effect_seed_moves_with_constant_weights(monkeypatch):
+    """Gaussian identity with prior weights ``c`` multiplies the REML
+    criterion's information and its optimum ``phi / sigma_b**2`` by ``c``, and
+    the random effect's bootstrap seed, its levels' mean information, moves
+    with them: the seed, every Newton iterate and the estimate are ``c``
+    times the unit-weight fit's, in as many iterations.  ``c`` is a power of
+    two, so the weights scale exactly and the fits differ by rounding alone,
+    at most ``n u`` relative in each of the iterations taken.  Mutation: a
+    fixed seed (1e-4 or 1.0) bootstraps every ``c`` alike and fails the first
+    assert; with it removed, the iteration counts differ.
+    """
+    import superglm.reml.direct as direct
+
+    rng = np.random.default_rng(20260724)
+    codes = np.repeat(np.arange(12), 20)
+    y = 1.5 + rng.normal(scale=0.7, size=12)[codes] + rng.normal(scale=0.4, size=len(codes))
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    bootstraps: list[float] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            bootstraps.append(kwargs["lambda2"]["broker"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    fits = {}
+    for c in (1.0, 2.0**-8, 2.0**8):
+        model = SuperGLM(
+            family="gaussian",
+            features={"broker": RandomEffect()},
+            selection_penalty=0,
+            direct_solve="gram",
+        )
+        model.fit_reml(X, y, sample_weight=np.full(len(y), c))
+        assert model._reml_result.converged, model._reml_result.termination_reason
+        fits[c] = (bootstraps[-1], model._reml_result.n_reml_iter, model._reml_lambdas["broker"])
+
+    seed, iterations, estimate = fits[1.0]
+    rounding = iterations * len(y) * np.finfo(float).eps
+    for c, (c_seed, c_iterations, c_estimate) in fits.items():
+        assert c_seed == pytest.approx(c * seed, rel=len(y) * np.finfo(float).eps), c
+        assert c_iterations == iterations, (c, fits)
+        assert c_estimate == pytest.approx(c * estimate, rel=rounding), c

@@ -227,16 +227,17 @@ def test_reml_reaches_the_interior_maximum_on_both_backends(monkeypatch) -> None
     ``"auto"`` is asserted to take the structured solver, so a change of the
     crossover or of the fixture cannot quietly compare gram with gram, and
     the bootstrap's boundary start is asserted to run the restoration loop
-    (#425, r4154948497 and r4154950836).  A random effect bootstraps at
-    ``lambda = 1``, where these levels are interior, so the bootstrap is held
-    at the near-unpenalized seed that puts them on the boundary.
+    (#425, r4154948497 and r4154950836).  A random effect bootstraps at its
+    levels' mean information, where these levels are interior, so the
+    bootstrap is held at the near-unpenalized seed that puts them on the
+    boundary.
     """
     import superglm.reml.direct as direct
 
     monkeypatch.setattr(
         direct,
         "bootstrap_seed_lambdas",
-        lambda penalties, *_args: {pc.name: 1e-4 for pc in penalties},
+        lambda penalties, *_args, **_kwargs: {pc.name: 1e-4 for pc in penalties},
     )
     fits = {direct_solve: _fit(direct_solve) for direct_solve in ("auto", "gram")}
     for model in fits.values():

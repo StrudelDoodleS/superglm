@@ -640,11 +640,21 @@ def optimize_direct_reml(
                     profile[f"presolve_{key}"] = value
 
     # === Bootstrap: one FP step from the seeds ===
-    # Main effects bootstrap almost unpenalized; interaction components and
-    # random effects from a materially stronger seed, and a warm start at its
-    # own lambdas (``bootstrap_seed_lambdas``).
+    # Main effects bootstrap almost unpenalized, interaction components from a
+    # materially stronger seed, random effects at their levels' mean
+    # information, and a warm start at its own lambdas
+    # (``bootstrap_seed_lambdas``).
     boot_lambdas = bootstrap_seed_lambdas(
-        penalties, warm_lambdas, lambdas, estimated_mask, dm.group_matrices
+        penalties,
+        warm_lambdas,
+        lambdas,
+        estimated_mask,
+        dm.group_matrices,
+        distribution=distribution,
+        link=link,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset_arr,
     )
     # After the pre-solve every estimated component starts warm, so the
     # bootstrap would fit the mode the first candidate fits again at the same
