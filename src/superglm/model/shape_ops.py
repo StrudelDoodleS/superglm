@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -227,14 +228,68 @@ def _smooth_penalty_value(
     return float(value)
 
 
+def _residual_rounding(y, mu, eta, dmu_deta) -> np.ndarray:
+    """Higham's ``gamma_n`` times the terms a residual ``y - mu`` is formed from.
+
+    The response, the mean and the rounded predictor (through ``dmu/deta``) each
+    carry rounding that the residual keeps however well they cancel.
+    """
+    from superglm._roundoff import gamma
+    from superglm.constraints import _ROW_STEPS
+
+    return float(gamma(_ROW_STEPS)) * (np.abs(y) + np.abs(mu) + np.abs(dmu_deta * eta))
+
+
+def _deviance_rounding(model, eta, *, y, weights) -> float:
+    """The rounding a weighted deviance keeps from its residuals.
+
+    Each unit deviance is evaluated without cancellation given its mean, and its
+    derivative in the mean is ``-2 (y - mu) / V(mu)``.  It keeps each residual's
+    rounding times that, which near a perfect fit is proportional to the
+    residual, not to its square as the deviance is.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    carried = np.asarray(weights) != 0.0
+    response, mass = np.asarray(y)[carried], np.asarray(weights)[carried]
+    eta_safe = stabilize_eta(np.asarray(eta, dtype=np.float64)[carried], model._link)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+        variance = np.maximum(
+            np.asarray(model._distribution.variance(mu), dtype=np.float64),
+            _VARIANCE_FLOOR,
+        )
+        dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
+        rows = np.abs(mass * (response - mu) / variance) * _residual_rounding(
+            response, mu, eta_safe, dmu_deta
+        )
+    return 2.0 * float(np.sum(rows, dtype=np.float64))
+
+
+class _InterceptState(NamedTuple):
+    """The profiled deviance and score at one intercept shift."""
+
+    deviance: float
+    deviance_rounding: float
+    score: float
+    score_scale: float
+    score_rounding: float
+    information: float
+
+
 def _profile_repaired_intercept(
     model,
     eta,
     *,
     y,
     weights,
-) -> tuple[np.ndarray, float]:
-    """Minimize deviance over the unpenalized intercept for fixed coefficients."""
+) -> tuple[np.ndarray, float, float]:
+    """Minimize deviance over the unpenalized intercept for fixed coefficients.
+
+    Returns the profiled predictor, its shift and the deviance's rounding there
+    (``_deviance_rounding``), which each evaluation already holds.
+    """
     from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
     from superglm.links import IdentityLink, stabilize_eta
 
@@ -260,10 +315,7 @@ def _profile_repaired_intercept(
         roundoff = (
             64.0
             * np.finfo(np.float64).eps
-            * max(
-                1.0,
-                float(np.sum(np.abs(weighted_residuals), dtype=np.float64)),
-            )
+            * float(np.sum(np.abs(weighted_residuals), dtype=np.float64))
         )
         shift = 0.0 if abs(residual_sum) <= roundoff else residual_sum / sum_weights
         profiled_eta = eta_base + shift
@@ -271,9 +323,15 @@ def _profile_repaired_intercept(
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
-        return profiled_eta, shift
+        return (
+            profiled_eta,
+            shift,
+            _deviance_rounding(model, profiled_eta, y=y_arr, weights=weights_arr),
+        )
 
-    def evaluate(shift: float) -> tuple[float, float, float, float]:
+    carried = weights_arr != 0.0
+
+    def evaluate(shift: float) -> _InterceptState:
         eta_safe = stabilize_eta(eta_base + shift, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
@@ -283,6 +341,13 @@ def _profile_repaired_intercept(
             )
             dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
+            residual_rounding = _residual_rounding(y_arr, mu, eta_safe, dmu_deta)
+            score_rounding = np.abs(weights_arr * dmu_deta / variance) * residual_rounding
+            # ``_deviance_rounding`` from this pass's rows, over the carried rows.
+            deviance_rows = np.abs(weights_arr * (y_arr - mu) / variance)[carried]
+            deviance_rounding = 2.0 * float(
+                np.sum(deviance_rows * residual_rounding[carried], dtype=np.float64)
+            )
             information_rows = fisher_working_weights(
                 distribution=model._distribution,
                 link=model._link,
@@ -304,54 +369,54 @@ def _profile_repaired_intercept(
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
-        score_scale = 1.0 + float(np.sum(np.abs(score_rows), dtype=np.float64))
-        return deviance, score, score_scale, information
+        return _InterceptState(
+            deviance=deviance,
+            deviance_rounding=deviance_rounding,
+            score=score,
+            score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
+            score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
+            information=information,
+        )
+
+    def stationary(state: _InterceptState, relative: float) -> bool:
+        # Relative to the scores' own size, and never tighter than the rounding
+        # their residuals carry.
+        return abs(state.score) <= relative * state.score_scale + state.score_rounding
 
     shift = 0.0
-    deviance, score, score_scale, information = evaluate(shift)
+    state = evaluate(shift)
     for _ in range(50):
-        if abs(score) <= 1e-11 * score_scale:
-            return eta_base + shift, shift
+        if stationary(state, 1e-11):
+            return eta_base + shift, shift, state.deviance_rounding
 
-        proposal = score / information
+        proposal = state.score / state.information
         if not np.isfinite(proposal):
             break
 
         accepted = False
         for halving in range(21):
             trial_shift = shift + proposal * (2.0**-halving)
-            (
-                trial_deviance,
-                trial_score,
-                trial_score_scale,
-                trial_information,
-            ) = evaluate(trial_shift)
+            trial = evaluate(trial_shift)
+            # Two deviances' rounding: relative to each sum, and what each keeps
+            # from its residuals.
             roundoff = (
-                64.0
-                * np.finfo(np.float64).eps
-                * max(
-                    1.0,
-                    abs(deviance),
-                    abs(trial_deviance),
-                )
+                64.0 * np.finfo(np.float64).eps * max(abs(state.deviance), abs(trial.deviance))
+                + state.deviance_rounding
+                + trial.deviance_rounding
             )
-            if trial_deviance <= deviance + roundoff:
-                shift = trial_shift
-                deviance = trial_deviance
-                score = trial_score
-                score_scale = trial_score_scale
-                information = trial_information
+            if trial.deviance <= state.deviance + roundoff:
+                shift, state = trial_shift, trial
                 accepted = True
                 break
         if not accepted:
             break
 
-    if abs(score) > 1e-9 * score_scale:
+    if not stationary(state, 1e-9):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"
         )
-    return eta_base + shift, shift
+    return eta_base + shift, shift, state.deviance_rounding
 
 
 def _shape_candidate_objective(
@@ -436,6 +501,8 @@ def _validate_repair_for_publication(
     current_eta,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Certify fitted geometry and objective quality before changing private state."""
+    from superglm.constraints import shape_slack_tolerance, shape_sum_tolerance
+
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     candidate_beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
     if candidate_beta.shape != current_beta.shape or not np.all(np.isfinite(candidate_beta)):
@@ -445,6 +512,16 @@ def _validate_repair_for_publication(
     if grid.ndim != 1 or grid.size < 3 or not np.all(np.isfinite(grid)):
         raise RuntimeError("Unsafe shape repair rejected before publication: invalid repair grid")
     term_beta = np.concatenate([candidate_beta[group.sl] for group in groups])
+    current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
+    fitted_scale = float(np.linalg.norm(current_term_beta))
+    # A term within the slack's rounding of zero at the fitted term's scale is
+    # the zero term, and is published as exactly that: a later call sees only
+    # the published term, and would judge the rounding at its own scale.
+    if float(np.linalg.norm(term_beta)) <= shape_slack_tolerance(term_beta, fitted_scale):
+        candidate_beta = candidate_beta.copy()
+        for group in groups:
+            candidate_beta[group.sl] = 0.0
+        term_beta = np.zeros_like(term_beta)
     fitted_basis = np.asarray(spec.transform(grid), dtype=np.float64)
     if fitted_basis.shape != (grid.size, term_beta.size):
         raise RuntimeError(
@@ -460,7 +537,7 @@ def _validate_repair_for_publication(
         from superglm.constraints import shape_constraint_certificate
 
         certificate = shape_constraint_certificate(spec, term_beta, kind)
-        feasibility_tolerance = 2e-12 * (1.0 + float(np.linalg.norm(term_beta)))
+        feasibility_tolerance = shape_slack_tolerance(term_beta, fitted_scale)
         if certificate.minimum_scaled_slack < -feasibility_tolerance:
             constraint_name = (
                 "monotonicity" if kind in {"increasing", "decreasing"} else "curvature"
@@ -476,7 +553,9 @@ def _validate_repair_for_publication(
         groups,
     )
     mean_shift = float(np.mean(candidate_eta_delta))
-    centering_tolerance = 2e-10 * (1.0 + float(np.max(np.abs(candidate_eta_delta))))
+    centering_tolerance = shape_sum_tolerance(
+        float(np.max(np.abs(candidate_eta_delta))), candidate_eta_delta.size
+    )
     if not np.isfinite(mean_shift):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: fitted centering changed"
@@ -497,13 +576,13 @@ def _validate_repair_for_publication(
         fallback_beta,
         groups,
     )
-    candidate_eta, candidate_intercept_shift = _profile_repaired_intercept(
+    candidate_eta, candidate_intercept_shift, candidate_rounding = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
         y=y,
         weights=scoring_weights,
     )
-    fallback_eta, _ = _profile_repaired_intercept(
+    fallback_eta, _, fallback_rounding = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + fallback_eta_delta,
         y=y,
@@ -527,8 +606,9 @@ def _validate_repair_for_publication(
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
     )
-    deviance_tolerance = 1e-8 * (1.0 + abs(fallback_deviance))
-    merit_tolerance = 1e-8 * (1.0 + abs(fallback_merit))
+    deviance_rounding = candidate_rounding + fallback_rounding
+    deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y)) + deviance_rounding
+    merit_tolerance = shape_sum_tolerance(abs(fallback_merit), len(y)) + deviance_rounding
     if (
         candidate_deviance > fallback_deviance + deviance_tolerance
         or candidate_merit > fallback_merit + merit_tolerance
@@ -538,6 +618,7 @@ def _validate_repair_for_publication(
             "than the feasible zero-term fallback"
         )
 
+    repair_result.repaired_beta_reparam = candidate_beta
     repair_result.repaired_log_effect = repaired_curve.copy()
     if kind in {"increasing", "decreasing", "convex", "concave"}:
         repair_result.max_violation_after = certificate.violation

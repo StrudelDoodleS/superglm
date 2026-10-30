@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS, SQRT_EPS, TINY
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
@@ -446,6 +447,62 @@ def simultaneous_bands(
 ) -> pd.DataFrame:
     """Simultaneous confidence bands for a spline feature.
 
+    The band is ``simultaneous_band_and_critical_value``'s; see it for the
+    simulation.
+    """
+    bands, _ = simultaneous_band_and_critical_value(
+        feature,
+        result=result,
+        groups=groups,
+        specs=specs,
+        covariance_fn=covariance_fn,
+        alpha=alpha,
+        n_sim=n_sim,
+        n_points=n_points,
+        seed=seed,
+        center=center,
+        interaction_specs=interaction_specs,
+    )
+    return bands
+
+
+def _principal_root(covariance: NDArray) -> NDArray:
+    """The principal square root ``V diag(sqrt(lambda)) V'`` of a covariance.
+
+    A positive-semidefinite matrix has exactly one positive-semidefinite square
+    root (Higham, *Functions of Matrices*, ch. 6), so normal draws ``z @ root``
+    follow the covariance alone: not the basis an eigensolver picks inside a
+    repeated eigenvalue's eigenspace, nor the eigenvectors' signs, nor whether
+    a factorisation completes; rescaling the covariance by ``c^2`` rescales the
+    root by ``c``.  An eigenvalue within ``k eps lambda_max`` of zero, the
+    eigensolver's resolution (LAPACK Users' Guide, sec. 4.7.1), is a null
+    direction: the root is only Hoelder-1/2 in its eigenvalues there, so their
+    rounding would otherwise reach ``sqrt(eps)`` of the draws.
+    """
+    values, vectors = np.linalg.eigh(covariance)
+    resolved = values > covariance.shape[0] * EPS * values[-1]
+    return (vectors * np.sqrt(np.where(resolved, values, 0.0))) @ vectors.T
+
+
+def simultaneous_band_and_critical_value(
+    feature: str,
+    *,
+    result: PIRLSResult,
+    groups: list[GroupSlice],
+    specs: dict[str, Any],
+    covariance_fn,
+    alpha: float = 0.05,
+    n_sim: int = 10_000,
+    n_points: int = 200,
+    seed: int = 42,
+    center: bool = False,
+    interaction_specs: Mapping[Any, Any] | None = None,
+) -> tuple[pd.DataFrame, float]:
+    """Simultaneous confidence bands for a spline feature, and their critical value.
+
+    The critical value is the simulated quantile itself: backing it out of the
+    exponentiated endpoints loses it once ``c * se`` is below their rounding.
+
     ``center=True`` bands the MEAN-CENTERED curve.  The critical value is the
     quantile of ``max_x |f(x)| / se(x)`` over the whole grid, and centering
     changes both the numerator and the denominator, so it is a different
@@ -453,8 +510,8 @@ def simultaneous_bands(
     it is computed here through the centered map rather than reused.  A curve
     an ``sz`` term moves onto its population curve (``interaction_specs``,
     #432) is banded on that curve: its values carry ``b(x)' c`` and its
-    draws the curve's covariance ``V_f`` (``_population_curve_map``),
-    simulated through ``V_f``'s eigendecomposition.
+    draws the curve's covariance ``V_f`` (``_population_curve_map``).  Every
+    covariance is drawn through its principal square root (``_principal_root``).
     """
     from scipy.stats import norm
 
@@ -514,28 +571,21 @@ def simultaneous_bands(
         shift = population_curve_shift(feature, x_grid, interaction_specs, groups, beta)
         assert shift is not None
         log_rel = log_rel + (shift - shift.mean() if center else shift)
-        values, vectors = np.linalg.eigh(mapped[1])
-        root = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
         se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
-        f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
+        f_sim = rng.standard_normal((n_sim, se.size)) @ _principal_root(mapped[1])
     else:
-        try:
-            L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
-        except np.linalg.LinAlgError:
-            # A covariance on a constrained fit's active face is singular by
-            # construction; simulate from its positive-semidefinite root.
-            values, vectors = np.linalg.eigh(Cov_g)
-            L = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
-        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
+        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ _principal_root(Cov_g)
         f_sim = beta_sim @ M.T
 
-    se_safe = np.maximum(se, 1e-20)
+    # A standard error below the rounding of the largest one carries no
+    # information; the floor is relative, so rescaling the response moves it too.
+    se_safe = np.maximum(se, max(SQRT_EPS * float(np.max(se)), TINY))
     T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
     c_sim = float(np.quantile(T_sim, 1.0 - alpha))
 
     z = norm.ppf(1.0 - alpha / 2.0)
 
-    return pd.DataFrame(
+    bands = pd.DataFrame(
         {
             "x": x_grid,
             "log_relativity": log_rel,
@@ -547,10 +597,12 @@ def simultaneous_bands(
             "ci_upper_simultaneous": _safe_exp(log_rel + c_sim * se),
         }
     )
+    return bands, c_sim
 
 
 __all__ = [
     "feature_se_from_cov",
     "piecewise_knot_covariance",
+    "simultaneous_band_and_critical_value",
     "simultaneous_bands",
 ]

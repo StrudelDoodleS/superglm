@@ -300,3 +300,23 @@ class TestBinomialMetrics:
         # Should be roughly standard normal
         assert abs(np.mean(r)) < 0.3
         assert 0.5 < np.std(r) < 1.5
+
+
+class TestNullModelOfRareEvents:
+    def test_null_mean_is_the_observed_rate_below_one_in_a_thousand(self):
+        from superglm.links import LogitLink
+        from superglm.model.fit_ops import _compute_null_mu
+        from superglm.solvers.dispersion import PRIOR_WEIGHTS
+
+        y = np.zeros(50_000)
+        y[:10] = 1.0
+        null_mu = _compute_null_mu(
+            y,
+            np.ones_like(y),
+            None,
+            Binomial(),
+            LogitLink(),
+            weight_semantics=PRIOR_WEIGHTS,
+        )
+
+        assert_allclose(null_mu, 2e-4, rtol=1e-12)

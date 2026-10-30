@@ -445,3 +445,51 @@ class TestSklearnShorthand:
                 pd.DataFrame({"x": [1, 2, 3]}),
                 np.array([1, 2, 3]),
             )
+
+
+class TestAdaptiveUnits:
+    @pytest.mark.parametrize("unit", [1.0, 1e-6, 1e-12])
+    def test_contrast_between_weak_and_strong_groups_ignores_the_units(self, unit):
+        eps = 1e-6
+        groups = [
+            GroupSlice("strong", 0, 3, weight=np.sqrt(3)),
+            GroupSlice("weak", 3, 6, weight=np.sqrt(3)),
+        ]
+        beta_init = unit * np.array([1.0, 1.0, 1.0, 0.01, 0.01, 0.01])
+
+        strong, weak = Adaptive(expon=1, eps=eps).adjust_weights(groups, beta_init)
+
+        norm = np.sqrt(3.0) * unit
+        assert weak.weight / strong.weight == pytest.approx(
+            (norm + eps * norm) / (0.01 * norm + eps * norm), rel=1e-12
+        )
+
+    @pytest.mark.parametrize("unit", [1e-6, 1e-12])
+    def test_contrast_between_fitted_contributions_ignores_the_units(self, unit):
+        """Through the fitted-value norms ``||X_g beta_g|| / sqrt(n)``, as a fit passes them."""
+        from types import SimpleNamespace
+
+        rng = np.random.default_rng(4)
+        designs = [rng.normal(size=(50, 3)), rng.normal(size=(50, 3))]
+        matrices = [SimpleNamespace(matvec=lambda b, X=X: X @ b) for X in designs]
+        groups = [
+            GroupSlice("strong", 0, 3, weight=np.sqrt(3)),
+            GroupSlice("weak", 3, 6, weight=np.sqrt(3)),
+        ]
+        beta_init = np.array([1.0, 1.0, 1.0, 0.01, 0.01, 0.01])
+
+        def contrast(scale):
+            strong, weak = Adaptive(expon=1, eps=1e-6).adjust_weights(
+                groups, scale * beta_init, group_matrices=matrices
+            )
+            return weak.weight / strong.weight
+
+        # Rescaling rounds each fitted value a few times: well inside 1e-12.
+        assert contrast(unit) == pytest.approx(contrast(1.0), rel=1e-12)
+
+    def test_all_groups_at_zero_get_the_finite_floor_weight(self):
+        groups = [GroupSlice("g", 0, 2, weight=np.sqrt(2))]
+
+        (adjusted,) = Adaptive(expon=1, eps=1e-6).adjust_weights(groups, np.zeros(2))
+
+        assert adjusted.weight == pytest.approx(np.sqrt(2) / 1e-6)

@@ -834,3 +834,28 @@ class TestTermInferenceConstructorContract:
         """A caller that predates the field gets the value that means "untouched"."""
         ti = TermInference("f", "numeric", True)
         assert ti.centering_shift == 0.0
+
+
+@pytest.mark.parametrize("units", [1.0, 1e-19])
+def test_critical_value_is_the_simulated_quantile_in_any_units(monkeypatch, units):
+    """Reported as simulated, though the interval endpoints round to one at tiny units."""
+    rng = np.random.default_rng(42)
+    x = rng.uniform(0, 10, 500)
+    y = units * (np.sin(x) + 0.1 * rng.normal(size=500))
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={"x": Spline(n_knots=6)}
+    ).fit(pd.DataFrame({"x": x}), y)
+    simulated = []
+    real_quantile = np.quantile
+
+    def spy(values, q, *args, **kwargs):
+        simulated.append(float(real_quantile(values, q, *args, **kwargs)))
+        return simulated[-1]
+
+    monkeypatch.setattr(np, "quantile", spy)
+    ti = model.term_inference("x", simultaneous=True, centering="mean", n_sim=1000)
+
+    assert ti.critical_value_simultaneous == simulated[-1]
+    lower = ti.log_relativity - ti.critical_value_simultaneous * ti.se_log_relativity
+    upper = ti.log_relativity + ti.critical_value_simultaneous * ti.se_log_relativity
+    assert np.all(lower <= upper)

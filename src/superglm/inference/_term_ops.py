@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
     piecewise_knot_covariance,
-    simultaneous_bands,
+    simultaneous_band_and_critical_value,
 )
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
@@ -484,7 +484,7 @@ def term_inference(
             ci_hi = _safe_exp(log_rel + z_alpha * se)
 
             if simultaneous:
-                bands = simultaneous_bands(
+                bands, c_sim = simultaneous_band_and_critical_value(
                     name,
                     result=result,
                     groups=groups,
@@ -499,18 +499,6 @@ def term_inference(
                 )
                 ci_lo_sim = bands["ci_lower_simultaneous"].values
                 ci_hi_sim = bands["ci_upper_simultaneous"].values
-                # Back out the critical value: ci_upper_sim = exp(log_rel + c*se).
-                # Under centering the band was simulated through the centered
-                # map, so it is backed out against the scale it was built on --
-                # the outer `se` and `log_rel` are still the against-base pair.
-                band_se = bands["se"].to_numpy() if centering == "mean" else se
-                band_log_rel = (
-                    bands["log_relativity"].to_numpy() if centering == "mean" else log_rel
-                )
-                safe_se = np.maximum(band_se, 1e-20)
-                c_vals = (np.log(ci_hi_sim) - band_log_rel) / safe_se
-                live = safe_se > 1e-15
-                c_sim = float(np.median(c_vals[live])) if live.any() else None
 
         spline_meta = _build_spline_metadata(spec)
 

@@ -396,8 +396,8 @@ def _editor_row(model, name):
 class TestTheFlagIsAdvisoryOnEveryRenderer:
     """The flag says "thin cell"; no renderer may report it as a verdict.
 
-    Its primary rule reads ``level_n_obs`` and ``level_exposure_share`` and
-    nothing else -- not the coefficient, not its p-value, not the link -- and
+    Its primary rule reads a level's rows and weights and nothing else -- not
+    the coefficient, not its p-value, not the link -- and
     the fallback beside it reads a standard error and nothing else.  Neither
     reads the response.  A level can therefore be both strongly significant
     and flagged, and the console has always said so while the export and the
@@ -499,11 +499,16 @@ class TestTheLegendDescribesTheRuleThatExists:
 
     def test_every_surface_states_the_rule_and_what_it_licenses(self):
         model = _thin_but_cleanly_estimated()
+        from superglm.inference.coef_tables import _THIN_LEVEL_ROWS
+
+        rule = f"{_THIN_LEVEL_ROWS} rows and less weight than {_THIN_LEVEL_ROWS} rows of average weight"
         for surface, text in self._surfaces(model).items():
-            lowered = text.lower()
-            assert "20 observations" in lowered, f"{surface} does not state the count trigger"
-            assert "0.05%" in lowered, f"{surface} does not state the exposure trigger"
+            # The renderers wrap the note differently; the rule must read the same.
+            lowered = " ".join(text.lower().replace("<br>", " ").split())
+            assert rule in lowered, f"{surface} does not state the thin-level rule"
             assert "credibility" in lowered, f"{surface} does not say what the flag means"
+            for stale in ("observations or under", "0.05%", "exposure share"):
+                assert stale not in lowered, f"{surface} still states the old rule: {stale!r}"
 
 
 class TestTheNoteIsTrueOfTheSecondTriggerToo:
@@ -754,3 +759,84 @@ class TestColumnAlignment:
         if box_lines:
             widths = {len(line) for line in box_lines}
             assert len(widths) == 1, f"Inconsistent line widths: {widths}"
+
+
+class TestThinLevelIsACount:
+    """A thin level is one with few rows, however large the book around it is."""
+
+    def test_rows_in_a_large_book_are_not_thin_by_their_share(self):
+        rng = np.random.default_rng(20261030)
+        n = 100_000
+        level = rng.choice(["A", "B"], size=n)
+        level[:30] = "R"  # 3e-4 of the rows, but thirty of them
+        level[30:40] = "S"  # ten rows
+        y = rng.poisson(np.where(np.isin(level, ["R", "S"]), 0.5, 0.2)).astype(float)
+        df = pd.DataFrame({"cat": level})
+        m = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="A")},
+        ).fit(df, y)
+
+        rows = {r.name: r for r in m.summary()._coef_rows}
+
+        assert rows["cat[R]"].level_n_obs == 30
+        assert rows["cat[R]"].advisory_trigger != "thin_level"
+        assert rows["cat[S]"].advisory_trigger == "thin_level"
+
+
+class TestThinLevelUnderTheWeightContract:
+    """Rows are counted as the weight contract counts them (``_thin_levels``)."""
+
+    @staticmethod
+    def _flags(df, y, weights, semantics):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            weight_semantics=semantics,
+            features={"cat": Categorical(base="A")},
+        ).fit(df, y, sample_weight=weights)
+        return {r.name: r.advisory_trigger for r in model.summary()._coef_rows}
+
+    def test_integer_frequency_weights_flag_as_the_replicated_rows(self):
+        rng = np.random.default_rng(3)
+        level = np.array(["A"] * 70 + ["R"] * 30)
+        weights = np.where(level == "A", 100.0, 1.0)
+        y = rng.poisson(np.where(level == "A", 0.2, 0.4)).astype(float)
+        df = pd.DataFrame({"cat": level})
+        replicated = np.repeat(np.arange(len(y)), weights.astype(int))
+
+        compressed = self._flags(df, y, weights, "frequency")
+        expanded = self._flags(
+            df.iloc[replicated].reset_index(drop=True), y[replicated], None, "frequency"
+        )
+
+        assert compressed["cat[R]"] == expanded["cat[R]"] == ""
+
+    def test_a_level_with_a_large_share_of_an_aggregated_book_is_not_thin(self):
+        """One row per rating cell: experience is in the weights, however few cells hold it."""
+        rng = np.random.default_rng(3)
+        level = np.array(["A"] * 200 + ["B"] * 175 + ["C"] * 25 + ["D"] * 5 + ["E"] * 5)
+        exposure = rng.uniform(2000, 6000, len(level))
+        exposure[level == "C"] = rng.uniform(400, 600, 25)  # 25 small cells, about 0.8% of the book
+        exposure[level == "D"] = 20_000.0  # 5 cells, 6% of the book
+        exposure[level == "E"] = 500.0  # 5 small cells: little of either
+        claims = rng.poisson(0.12 * exposure)
+        flags = self._flags(pd.DataFrame({"cat": level}), claims / exposure, exposure, "prior")
+
+        assert flags["cat[C]"] == ""
+        assert flags["cat[D]"] == ""
+        assert flags["cat[E]"] == "thin_level"
+
+    def test_rows_without_prior_weight_are_not_counted(self):
+        """A zero prior weight is a row that was not observed."""
+        rng = np.random.default_rng(5)
+        level = np.array(["A"] * 3300 + ["Z"] * 25)
+        weights = np.zeros(len(level))
+        weights[:300] = 1.0
+        weights[3300:3315] = 1.0  # 15 observed rows of Z among its 25
+        y = rng.poisson(0.3, len(level)).astype(float)
+
+        flags = self._flags(pd.DataFrame({"cat": level}), y, weights, "prior")
+
+        assert flags["cat[Z]"] == "thin_level"

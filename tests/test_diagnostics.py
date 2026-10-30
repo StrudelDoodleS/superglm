@@ -496,3 +496,21 @@ class TestSplineRedundancy:
         if total > 0:
             top3_frac = np.sum(np.sort(energy)[-3:]) / total
             assert top3_frac > 0.3  # concentrated
+
+
+class TestTermImportanceUnits:
+    def test_terms_are_not_zero_because_the_coefficients_are_small(self, fitted_model):
+        """Coefficients of a response in tiny units are small, not zero."""
+        m, X, y, sample_weight = fitted_model
+        reference = m.term_importance(X, sample_weight=sample_weight)
+        unit = 1e-13
+        scaled = m.result._mutable_copy()
+        scaled.beta = unit * scaled.beta
+        m._result = scaled
+
+        rescaled = m.term_importance(X, sample_weight=sample_weight)
+
+        assert (reference["variance_eta"] > 0.0).any()
+        np.testing.assert_allclose(
+            rescaled["variance_eta"], unit**2 * reference["variance_eta"], rtol=1e-9
+        )

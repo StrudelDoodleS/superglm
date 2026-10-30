@@ -184,14 +184,19 @@ _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 # likelihood estimates", Biometrika 80(1), 1993, 27-38).  That is what a reader
 # may act on, so that is what the note says.
 _LOW_CREDIBILITY_TAG = "LC"
+#: A level is thin when it holds fewer rows than this and less weight than this
+#: many rows of average weight (``coef_tables._thin_levels``).
+_THIN_LEVEL_ROWS = 20
 # Split so the workbook can carry the note without the column tag: ``LC`` is a
 # column on the console and in the editor and does not exist in the workbook,
 # whose advisory lives in a Warning cell.
 _LOW_CREDIBILITY_NOTE_BODY = (
     "Low credibility — flagged when a categorical level carries fewer than\n"
-    "20 observations or under 0.05% of exposure, or, for a row that has no\n"
-    "per-level counts, when its standard error is both far above this model's\n"
-    "typical one and above a fixed floor. The estimate, interval and p-value\n"
+    f"{_THIN_LEVEL_ROWS} rows and less weight than {_THIN_LEVEL_ROWS} rows of average weight (under\n"
+    "frequency weights a row counts once per replication; otherwise only a row\n"
+    "of positive weight counts), or, for a row that has no per-level counts,\n"
+    "when its standard error is both far above this model's typical one and\n"
+    "above a fixed floor. The estimate, interval and p-value\n"
     "beside it are unchanged and are the ones the fit produced. A flagged LEVEL\n"
     "is thin: treat it as partially credible and pool it, or blend it toward the\n"
     "portfolio, before pricing on it. A flagged COEFFICIENT is wide in absolute\n"

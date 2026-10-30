@@ -104,7 +104,8 @@ def _gaussian_repair_bound(edited, columns, beta_edit, beta_repaired, y, w, refe
     The repair profiles its intercept from the solver predictor moved by the
     term's change (``_evaluation_bound``).  The weighted residual sum adds
     ``gamma_(n+1) sum |w r|``, and the profile skips a sum below ``64 eps
-    max(1, sum |w r|)`` (``shape_ops._profile_repaired_intercept``).
+    sum |w r|`` (``shape_ops._profile_repaired_intercept``); the bound floors
+    ``sum |w r|`` at one, which only loosens it.
     """
     residual = max(1.0, math.fsum(np.abs(w * (y - reference))))
     return _evaluation_bound(edited, columns, beta_edit, beta_repaired) + (

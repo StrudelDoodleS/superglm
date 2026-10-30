@@ -483,6 +483,7 @@ def _compute_null_mu(
     weight_semantics: str,
 ) -> NDArray:
     """Null model prediction: intercept-only MLE, offset-aware."""
+    from superglm._roundoff import TINY
     from superglm.distributions import Binomial, Gaussian, clip_mu
     from superglm.links import SqrtLink
 
@@ -524,12 +525,14 @@ def _compute_null_mu(
     # the weighted mean to the rounding of its own value (np.average alone sat
     # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
     y_bar = compensated_weighted_mean(y, weights)
-    if isinstance(distribution, Binomial):
-        y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
-    elif isinstance(distribution, Gaussian):
-        y_bar = float(y_bar)
+    if y_bar == 0.0 and not isinstance(distribution, (Binomial, Gaussian)):
+        # An all-zero response of a positive family has no positive mean in
+        # any units; it keeps the stand-in it always had.
+        y_bar = 1e-10
     else:
-        y_bar = max(y_bar, 1e-10)
+        # The family's own clip, as the fitted means get: the weighted mean in
+        # whatever units the response has, however small.
+        y_bar = float(clip_mu(np.asarray(y_bar), distribution))
 
     if not has_offset:
         return np.full(len(y), y_bar)
@@ -543,9 +546,13 @@ def _compute_null_mu(
         V = distribution.variance(mu_null)
         score = float(np.sum(weights * (y - mu_null) * dmu / V))
         info = float(np.sum(weights * dmu**2 / V))
-        step = score / max(info, 1e-10)
+        step = score / max(info, TINY)
         b0 += step
-        if abs(step) < 1e-8:
+        # The step's change in the means, relative to their size: unit-free
+        # under every link, and |step| itself under the log link.
+        if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
+            np.sum(weights * np.abs(mu_null))
+        ):
             break
 
     eta_null = stabilize_eta(b0 + offset, link)
