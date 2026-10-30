@@ -3,6 +3,7 @@
 import gc
 import math
 import weakref
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -494,8 +495,8 @@ def test_second_order_correction_keeps_float64_range_at_extreme_exponents():
 
 
 def _record_signed_gram_inputs(monkeypatch, p):
-    """``(a, hi, lo)`` of each derivative Gram, in order, whichever route forms it."""
-    calls = []
+    """``(a, hi, lo)`` of each derivative Gram, in order, whichever route forms it, and each route's calls."""
+    calls, routes = [], Counter()
 
     def keep(weights, hi, lo):
         if len(hi) == p and not any(np.array_equal(weights, a) for a, _, _ in calls):
@@ -507,6 +508,7 @@ def _record_signed_gram_inputs(monkeypatch, p):
             return
 
         def recorded(*args, **kwargs):
+            routes[name] += 1
             for weights, hi, lo in read(args, kwargs):
                 keep(weights, hi, lo)
             return original(*args, **kwargs)
@@ -520,7 +522,8 @@ def _record_signed_gram_inputs(monkeypatch, p):
         "centered_signed_grams",
         lambda a, k: [(w, k["mean_x"], k.get("mean_lo")) for w in k["weights"]],
     )
-    return calls
+    recorder("recentred_gram_rows", lambda a, k: [])  # the repair of a rejected column
+    return calls, routes
 
 
 @pytest.mark.parametrize("storage", ["split", "support", "mixed"])
@@ -543,9 +546,23 @@ def test_a_column_the_certificate_rejects_is_centred_before_its_products(monkeyp
     """
     monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: True, raising=False)
     kwargs = _correction_fixture(p=3, shift=0.0, storage=storage, family="binomial", flat=1e-8)
-    calls = _record_signed_gram_inputs(monkeypatch, 3)
+    calls, routes = _record_signed_gram_inputs(monkeypatch, 3)
     correction = w_derivatives.reml_w_correction(**kwargs)
     assert correction is not None and len(calls) == 3
+    # Dispatch: the repair serves every direction where it reads the groups,
+    # the split joining the dense column; one batch of centred rows otherwise.
+    assert (
+        routes
+        == {
+            "split": {
+                "_dense_split_signed_gram": 3,
+                "_centered_signed_moments": 3,
+                "recentred_gram_rows": 3,
+            },
+            "support": {"_centered_signed_moments": 3, "recentred_gram_rows": 3},
+            "mixed": {"centered_signed_grams": 1},
+        }[storage]
+    )
     dm = kwargs["dm"]
     X, n, p = dm.toarray(), dm.n, dm.p
     dense = np.array([type(gm) is DenseGroupMatrix for gm in dm.group_matrices])
