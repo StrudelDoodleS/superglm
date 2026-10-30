@@ -418,9 +418,10 @@ class GaussianLS(LocationPredictor, ScalePredictor):
 
         The normal density is log-concave, so its location family has a
         monotone likelihood ratio: ``P(Y > c)`` rises and ``P(Y <= c)`` falls
-        with the location within any truncation window.  Along the scale
-        ``Phi((mu - c)/sigma)`` peaks at a finite value once a level's rows'
-        ``mu - c`` differ in sign, which only the fit decides.
+        with the location within any truncation window.  Along the scale an
+        untruncated level right-censored at ``c_i`` has a finite estimate only
+        when ``sum (mu_i - c_i) > 0`` while some ``mu_i < c_i`` (mirrored for
+        left-censored rows), which only the fit decides.
         """
         censored = bounds.side != 0
         return np.column_stack((censored, np.zeros_like(censored)))

@@ -845,11 +845,13 @@ The scan reads only what the data decide before the fit:
   scale always runs off.
 - Elsewhere a scale level of those two families censored on one side may or
   may not have a finite estimate, and only the fit decides which, with no
-  warning. For `GaussianLS` and the location form of `LogNormalLS` it has one
-  only when its rows' bounds lie on both sides of the fitted location, so with
-  one shared limit it usually has none. In the mean form a right-censored
-  level has one when its fitted mean is below at least one of its limits, and
-  none when the mean is above all of them.
+  warning. For `GaussianLS` and the location form of `LogNormalLS` a
+  right-censored level has one only when its fitted location lies below at
+  least one of its limits and above their average, both read on the log scale
+  for `LogNormalLS` (mirrored for left-censored rows), so with one shared limit
+  it has none. In the mean form a right-censored level has one when its fitted
+  mean is below at least one of its limits, and none when the mean is above all
+  of them.
 
 Ordered-categorical smooths are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
