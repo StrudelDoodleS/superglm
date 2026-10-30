@@ -240,10 +240,38 @@ def _residual_rounding(y, mu, eta, dmu_deta) -> np.ndarray:
     return float(gamma(_ROW_STEPS)) * (np.abs(y) + np.abs(mu) + np.abs(dmu_deta * eta))
 
 
+def _deviance_rounding(model, eta, *, y, weights) -> float:
+    """The rounding a weighted deviance keeps from its residuals.
+
+    Each unit deviance is evaluated without cancellation given its mean, and its
+    derivative in the mean is ``-2 (y - mu) / V(mu)``.  It keeps each residual's
+    rounding times that, which near a perfect fit is proportional to the
+    residual, not to its square as the deviance is.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    carried = np.asarray(weights) != 0.0
+    response, mass = np.asarray(y)[carried], np.asarray(weights)[carried]
+    eta_safe = stabilize_eta(np.asarray(eta, dtype=np.float64)[carried], model._link)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+        variance = np.maximum(
+            np.asarray(model._distribution.variance(mu), dtype=np.float64),
+            _VARIANCE_FLOOR,
+        )
+        dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
+        rows = np.abs(mass * (response - mu) / variance) * _residual_rounding(
+            response, mu, eta_safe, dmu_deta
+        )
+    return 2.0 * float(np.sum(rows, dtype=np.float64))
+
+
 class _InterceptState(NamedTuple):
     """The profiled deviance and score at one intercept shift."""
 
     deviance: float
+    deviance_rounding: float
     score: float
     score_scale: float
     score_rounding: float
@@ -328,6 +356,9 @@ def _profile_repaired_intercept(
             )
         return _InterceptState(
             deviance=deviance,
+            deviance_rounding=_deviance_rounding(
+                model, eta_base + shift, y=y_arr, weights=weights_arr
+            ),
             score=score,
             score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
             score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
@@ -353,8 +384,12 @@ def _profile_repaired_intercept(
         for halving in range(21):
             trial_shift = shift + proposal * (2.0**-halving)
             trial = evaluate(trial_shift)
+            # Two deviances' rounding: relative to each sum, and what each keeps
+            # from its residuals.
             roundoff = (
                 64.0 * np.finfo(np.float64).eps * max(abs(state.deviance), abs(trial.deviance))
+                + state.deviance_rounding
+                + trial.deviance_rounding
             )
             if trial.deviance <= state.deviance + roundoff:
                 shift, state = trial_shift, trial
@@ -551,8 +586,11 @@ def _validate_repair_for_publication(
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
     )
-    deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y))
-    merit_tolerance = shape_sum_tolerance(abs(fallback_merit), len(y))
+    deviance_rounding = _deviance_rounding(
+        model, candidate_eta, y=y, weights=scoring_weights
+    ) + _deviance_rounding(model, fallback_eta, y=y, weights=scoring_weights)
+    deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y)) + deviance_rounding
+    merit_tolerance = shape_sum_tolerance(abs(fallback_merit), len(y)) + deviance_rounding
     if (
         candidate_deviance > fallback_deviance + deviance_tolerance
         or candidate_merit > fallback_merit + merit_tolerance

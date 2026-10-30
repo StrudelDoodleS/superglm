@@ -24,7 +24,7 @@ from superglm.constraints import (
     shape_constraint_is_roundoff_feasible,
     shape_derivative_matrix,
 )
-from superglm.distributions import Gamma, Gaussian
+from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogLink
 from superglm.model import shape_ops
 from superglm.model.fit_state import fitted_lambda2
@@ -2734,6 +2734,38 @@ def test_curvature_repair_of_a_near_constant_response_is_published(scale):
         selection_penalty=0.0,
         features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.convex)},
     ).fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+
+
+@pytest.mark.parametrize("family", ["gamma", "poisson"])
+@pytest.mark.parametrize("offset", [1e-3, -1e-6])
+def test_intercept_profile_reaches_a_perfect_fit_from_a_shifted_start(family, offset):
+    """The last steps change the deviance by less than its rounding; they are not refused."""
+    rng = np.random.default_rng(20261034)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    y = np.exp(1.0 + 0.3 * rng.normal(size=n))
+    eta = np.log(y)
+    distribution = Gamma() if family == "gamma" else Poisson()
+    model = SimpleNamespace(_distribution=distribution, _link=LogLink())
+
+    _, shift = shape_ops._profile_repaired_intercept(model, eta + offset, y=y, weights=weights)
+
+    assert abs(shift + offset) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
+
+
+def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():
+    rng = np.random.default_rng(240)
+    x = np.sort(rng.uniform(0.0, 1.0, 240))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.convex)},
+    ).fit(X, np.exp(1.0 + 0.5 * x))
 
     model.apply_shape_postfit(X)
 
