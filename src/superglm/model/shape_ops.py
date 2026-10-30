@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -227,6 +228,28 @@ def _smooth_penalty_value(
     return float(value)
 
 
+def _residual_rounding(y, mu, eta, dmu_deta) -> np.ndarray:
+    """Higham's ``gamma_n`` times the terms a residual ``y - mu`` is formed from.
+
+    The response, the mean and the rounded predictor (through ``dmu/deta``) each
+    carry rounding that the residual keeps however well they cancel.
+    """
+    from superglm._roundoff import gamma
+    from superglm.constraints import _ROW_STEPS
+
+    return float(gamma(_ROW_STEPS)) * (np.abs(y) + np.abs(mu) + np.abs(dmu_deta * eta))
+
+
+class _InterceptState(NamedTuple):
+    """The profiled deviance and score at one intercept shift."""
+
+    deviance: float
+    score: float
+    score_scale: float
+    score_rounding: float
+    information: float
+
+
 def _profile_repaired_intercept(
     model,
     eta,
@@ -270,7 +293,7 @@ def _profile_repaired_intercept(
             )
         return profiled_eta, shift
 
-    def evaluate(shift: float) -> tuple[float, float, float, float]:
+    def evaluate(shift: float) -> _InterceptState:
         eta_safe = stabilize_eta(eta_base + shift, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
@@ -280,6 +303,8 @@ def _profile_repaired_intercept(
             )
             dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
+            residual_rounding = _residual_rounding(y_arr, mu, eta_safe, dmu_deta)
+            score_rounding = np.abs(weights_arr * dmu_deta / variance) * residual_rounding
             information_rows = fisher_working_weights(
                 distribution=model._distribution,
                 link=model._link,
@@ -301,41 +326,44 @@ def _profile_repaired_intercept(
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
-        score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
-        return deviance, score, score_scale, information
+        return _InterceptState(
+            deviance=deviance,
+            score=score,
+            score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
+            score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
+            information=information,
+        )
+
+    def stationary(state: _InterceptState, relative: float) -> bool:
+        # Relative to the scores' own size, and never tighter than the rounding
+        # their residuals carry.
+        return abs(state.score) <= relative * state.score_scale + state.score_rounding
 
     shift = 0.0
-    deviance, score, score_scale, information = evaluate(shift)
+    state = evaluate(shift)
     for _ in range(50):
-        if abs(score) <= 1e-11 * score_scale:
+        if stationary(state, 1e-11):
             return eta_base + shift, shift
 
-        proposal = score / information
+        proposal = state.score / state.information
         if not np.isfinite(proposal):
             break
 
         accepted = False
         for halving in range(21):
             trial_shift = shift + proposal * (2.0**-halving)
-            (
-                trial_deviance,
-                trial_score,
-                trial_score_scale,
-                trial_information,
-            ) = evaluate(trial_shift)
-            roundoff = 64.0 * np.finfo(np.float64).eps * max(abs(deviance), abs(trial_deviance))
-            if trial_deviance <= deviance + roundoff:
-                shift = trial_shift
-                deviance = trial_deviance
-                score = trial_score
-                score_scale = trial_score_scale
-                information = trial_information
+            trial = evaluate(trial_shift)
+            roundoff = (
+                64.0 * np.finfo(np.float64).eps * max(abs(state.deviance), abs(trial.deviance))
+            )
+            if trial.deviance <= state.deviance + roundoff:
+                shift, state = trial_shift, trial
                 accepted = True
                 break
         if not accepted:
             break
 
-    if abs(score) > 1e-9 * score_scale:
+    if not stationary(state, 1e-9):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"

@@ -16,13 +16,15 @@ from superglm import (
     RandomEffect,
     SuperGLM,
 )
+from superglm._roundoff import gamma
 from superglm.constraints import (
+    _ROW_STEPS,
     MonotoneRepairResult,
     shape_constraint_certificate,
     shape_constraint_is_roundoff_feasible,
     shape_derivative_matrix,
 )
-from superglm.distributions import Gaussian
+from superglm.distributions import Gamma, Gaussian
 from superglm.links import IdentityLink, LogLink
 from superglm.model import shape_ops
 from superglm.model.fit_state import fitted_lambda2
@@ -2703,3 +2705,36 @@ def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     assert abs(np.sum(residual_rows)) <= 64 * np.finfo(np.float64).eps * np.sum(
         np.abs(residual_rows)
     )
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+def test_intercept_profile_of_a_perfect_fit_stops_at_its_rounding(scale):
+    """Residuals that are only rounding cannot cancel further: that is stationary."""
+    rng = np.random.default_rng(20261033)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    y = scale * np.exp(1.0 + 0.3 * rng.normal(size=n))
+    eta = np.log(y)
+    model = SimpleNamespace(_distribution=Gamma(), _link=LogLink())
+
+    _, shift = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    # The predictor of a perfect fit, to within the rounding of the predictor.
+    assert abs(shift) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+def test_curvature_repair_of_a_near_constant_response_is_published(scale):
+    """The repaired fit is close to perfect; its intercept profile still converges."""
+    x = np.linspace(0.0, 1.0, 240)
+    X = pd.DataFrame({"x": x})
+    y = scale * 0.1 * np.exp(-1e-6 * (x - 0.4) ** 2)
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.convex)},
+    ).fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
