@@ -294,13 +294,14 @@ def _bounded_intervals(
     rows = np.union1d(bounds.truncated_rows(), bounds.censored_rows())
     a, b, y = bounds.lower[rows], bounds.upper[rows], np.asarray(values)[rows]
     log_mass = log_window(a, b, rows)
+    has_mass = np.isfinite(log_mass)
     with np.errstate(invalid="ignore"):
-        edge = np.where(np.isfinite(log_mass), np.exp(log_window(a, y, rows) - log_mass), 1.0)
+        edge = np.where(has_mass, np.exp(log_window(a, y, rows) - log_mass), 1.0)
     side = bounds.side[rows]
     # An observed row's interval collapses to its edge; a censored row's
     # interval runs from its edge to the end beyond its bound.
-    new_lower[rows] = np.where(side == LEFT_CENSORED, 0.0, edge)
-    new_upper[rows] = np.where(side == RIGHT_CENSORED, 1.0, edge)
+    new_lower[rows] = np.where(has_mass & (side == LEFT_CENSORED), 0.0, edge)
+    new_upper[rows] = np.where(has_mass & (side == RIGHT_CENSORED), 1.0, edge)
     return np.clip(new_lower, 0.0, 1.0), np.clip(new_upper, 0.0, 1.0)
 
 
