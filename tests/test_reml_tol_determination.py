@@ -1427,6 +1427,68 @@ class TestDeadSearchNewtonDecrement:
         assert classified[0]["predicted_decrease"] is None
         assert model._reml_result.termination_reason == "line_search_failed"
 
+    def test_a_rejected_full_step_below_the_stop_resolution_ends_the_search(self, monkeypatch):
+        """Where the Newton model's whole predicted decrease is below the stop
+        resolution and the dead-search certificate holds, a rejected full step
+        ends the search: no shorter step is tried, and the candidate is
+        certified ``converged_at_precision``.
+
+        The event is forced: every full-step trial's evaluated objective is
+        raised by the stop resolution ``reml_tol (1 + |V|)``, an evaluation
+        error of the size the inner solves are certified to, while shorter
+        steps and candidates are evaluated exactly, as a warm-started solve's
+        error shrinks with its step.  An early full step decreases the
+        objective by far more and is accepted.  Mutation: without the rule the
+        search accepts the half step, and keeps stepping at half the Newton
+        step until the score test ends it.
+        """
+        import dataclasses
+
+        import superglm.reml.direct as direct
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        tol = 1e-9
+        pending: list[float | None] = [None]
+        trials: list[tuple[int, float]] = []
+        real_fit, real_objective = direct.fit_irls_direct, direct.reml_laml_objective
+
+        def fit(*args, **kwargs):
+            context = kwargs.get("debug_context") or {}
+            if context.get("phase") == "line_search":
+                pending[0] = context["trial_alpha"]
+                trials.append((context["reml_iteration"], context["trial_alpha"]))
+            return real_fit(*args, **kwargs)
+
+        def objective(*args, **kwargs):
+            evaluation = real_objective(*args, **kwargs)
+            alpha, pending[0] = pending[0], None
+            if alpha != 1.0:
+                return evaluation
+            raised = evaluation.value + tol * (1.0 + abs(evaluation.value))
+            return dataclasses.replace(evaluation, value=raised)
+
+        monkeypatch.setattr(direct, "fit_irls_direct", fit)
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        model = SuperGLM(
+            family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
+        )
+        model.fit_reml(pd.DataFrame({"x": x}), y, reml_tol=tol, runtime_validation="skip")
+
+        result = model._reml_result
+        assert result.converged, result.termination_reason
+        assert result.termination_reason == "converged_at_precision"
+        assert model._reml_profile["reml_dead_line_search"]["full_step_unresolved"]
+        by_iteration: dict[int, list[float]] = {}
+        for iteration, alpha in trials:
+            by_iteration.setdefault(iteration, []).append(alpha)
+        # an earlier iteration took its full step; the last tried nothing shorter
+        assert any(
+            alphas == [1.0] for it, alphas in by_iteration.items() if it < result.n_reml_iter
+        )
+        assert by_iteration[result.n_reml_iter] == [1.0]
+
     def test_an_undetermined_dead_search_still_reports_not_converged(self):
         """#439's documented undetermined model: the panel book under a
         noncanonical sqrt link. Its search dies at the first iteration with

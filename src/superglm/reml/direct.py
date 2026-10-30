@@ -623,12 +623,13 @@ def optimize_direct_reml(
                 if key.startswith(("irls_", "reml_", "dm_")) and isinstance(value, int | float):
                     profile[f"presolve_{key}"] = value
 
-    # === Bootstrap: one FP step from conservative interaction penalties ===
-    # Rich tensor interactions can explode under an almost-unpenalized
-    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed. A warm
-    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
-    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
+    # === Bootstrap: one FP step from the seeds ===
+    # Main effects bootstrap almost unpenalized; interaction components and
+    # random effects from a materially stronger seed, and a warm start at its
+    # own lambdas (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(
+        penalties, warm_lambdas, lambdas, estimated_mask, dm.group_matrices
+    )
     # After the pre-solve every estimated component starts warm, so the
     # bootstrap would fit the mode the first candidate fits again at the same
     # lambdas: the candidate starts from the pre-solve's mode instead.
@@ -1746,6 +1747,8 @@ def optimize_direct_reml(
         # and that rounding
         unresolved_decrease: float | None = None
         stall_roundoff: float | None = None
+        # a rejected full step whose model decrease the stop cannot resolve
+        full_step_unresolved = False
         # The synchronous search owns fixed design coordinates and warm state.
         # Its rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
@@ -2010,6 +2013,36 @@ def optimize_direct_reml(
                 else 0.0
             )
             if (
+                not trial_accepted
+                and step == 1.0
+                and dead_predicted_decrease is not None
+                and dead_predicted_decrease < _tol * score_scale
+                and classify_dead_feasible_exit(
+                    active_grad_norm,
+                    objective=obj,
+                    tolerance=_tol,
+                    evaluated_trial=evaluated_feasible_trial
+                    and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
+                    predicted_decrease=dead_predicted_decrease,
+                )
+                == "converged_at_precision"
+            ):
+                # Where the Newton model's whole predicted decrease is below the
+                # stop resolution and the dead-search certificate holds, a
+                # rejected full step ends the search as a dead one does.  A
+                # shorter step's model decrease is smaller still, below the
+                # resolution the inner solves certify the objective to
+                # (``mode_certification_bar``), and a warm-started solve's error
+                # in the objective shrinks with the step: an accepted shorter
+                # step is the evaluations' error, not the criterion's, and
+                # taking it moves a fraction of the Newton step an iteration, a
+                # linear crawl the score test cannot end (Shi, Xie, Byrd &
+                # Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1: where errors are
+                # large relative to the gradient the line search is expected to
+                # fail).
+                full_step_unresolved = True
+                break
+            if (
                 trial_accepted
                 and presolve_beta is not None
                 and obj - trial_obj <= obj_roundoff + trial_roundoff
@@ -2169,6 +2202,8 @@ def optimize_direct_reml(
                     "objective_roundoff": (
                         float(obj_roundoff) if stall_roundoff is None else stall_roundoff
                     ),
+                    # the search ended at its rejected full step, no shorter one tried
+                    "full_step_unresolved": full_step_unresolved,
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,

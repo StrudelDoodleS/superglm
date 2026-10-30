@@ -194,3 +194,57 @@ def test_gamma_structured_observed_reml_matches_dense():
         dense._reml_result.objective,
         atol=2e-8,
     )
+
+
+def test_a_nested_chain_starts_within_a_newton_step_of_its_optimum(monkeypatch):
+    """A random effect's bootstrap fit is penalized (lambda = 1, lme4's start),
+    so the Fellner-Schall step from it places every level of a nested chain
+    within one Newton step bound (5 in log lambda) of its REML optimum.
+
+    Almost unpenalized, a parent's indicators lie in the span of its
+    children's, so along each parent-minus-children direction the curvature
+    is the penalties alone and the posterior variance is of order 1/lambda.
+    The step's trace term then outweighs the squared coefficients and returns
+    about lambda times a constant for parent and child alike: from a 1e-4
+    seed the first iterate sits 8.7 to 10 log units below the optimum here
+    (on the 1M-row make/model/year chain, which then held the parent
+    alternating by the step cap for twenty iterations, 11.6 units).
+    Mutation: seeding random effects at 1e-4 again fails both asserts.
+    """
+    import superglm.reml.direct as direct
+
+    rng = np.random.default_rng(20261030)
+    n_parent, children, rows = 8, 6, 40
+    child = np.repeat(np.arange(n_parent * children), rows)
+    parent = child // children
+    eta = (
+        1.0 + rng.normal(0.0, 0.5, n_parent)[parent] + rng.normal(0.0, 0.3, child.max() + 1)[child]
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    X = pd.DataFrame(
+        {
+            "make": np.array([f"m{p}" for p in parent], dtype=object),
+            "make_model": np.array([f"m{p}|{c}" for p, c in zip(parent, child)], dtype=object),
+        }
+    )
+    fits: list[tuple[str | None, dict[str, float]]] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        fits.append(((kwargs.get("debug_context") or {}).get("phase"), dict(kwargs["lambda2"])))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    model = SuperGLM(
+        family="poisson",
+        features={"make": RandomEffect(), "make_model": RandomEffect(nested_in="make")},
+        selection_penalty=0,
+    )
+    model.fit_reml(X, y)
+
+    assert model._reml_result.converged, model._reml_result.termination_reason
+    bootstrap = next(lambdas for phase, lambdas in fits if phase == "bootstrap")
+    first = next(lambdas for phase, lambdas in fits if phase == "candidate")
+    optimum = model._reml_lambdas
+    assert bootstrap == {"make": 1.0, "make_model": 1.0}
+    assert all(abs(np.log(first[name] / optimum[name])) < 5.0 for name in optimum), (first, optimum)

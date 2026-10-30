@@ -65,7 +65,7 @@ def _thin_event_levels() -> tuple[pd.DataFrame, np.ndarray]:
     An event row's log-likelihood ``eta`` is linear, so its level's coefficient
     at a penalty ``lambda`` is ``1 / lambda`` and the row's mode is interior only
     while ``1 / lambda`` is below its distance ``|eta_0| ~ 2.3`` to the boundary:
-    the near-unpenalized REML bootstrap (``lambda = 1e-4``) puts it there.
+    a near-unpenalized bootstrap (``lambda = 1e-4``) puts it there.
     """
     rng = np.random.default_rng(7)
     n, levels = 1500, 60
@@ -219,7 +219,7 @@ def test_a_boundary_state_the_qp_contract_also_refuses_is_published_at_the_bound
     assert result.termination_reason == "mean_space_boundary"
 
 
-def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
+def test_reml_reaches_the_interior_maximum_on_both_backends(monkeypatch) -> None:
     """The REML optimum's mode is interior: REML reaches it, certified, on structured and gram.
 
     The two backends stop within the REML stopping rule ``reml_tol (1 + |V|)``
@@ -227,8 +227,17 @@ def test_reml_reaches_the_interior_maximum_on_both_backends() -> None:
     ``"auto"`` is asserted to take the structured solver, so a change of the
     crossover or of the fixture cannot quietly compare gram with gram, and
     the bootstrap's boundary start is asserted to run the restoration loop
-    (#425, r4154948497 and r4154950836).
+    (#425, r4154948497 and r4154950836).  A random effect bootstraps at
+    ``lambda = 1``, where these levels are interior, so the bootstrap is held
+    at the near-unpenalized seed that puts them on the boundary.
     """
+    import superglm.reml.direct as direct
+
+    monkeypatch.setattr(
+        direct,
+        "bootstrap_seed_lambdas",
+        lambda penalties, *_args: {pc.name: 1e-4 for pc in penalties},
+    )
     fits = {direct_solve: _fit(direct_solve) for direct_solve in ("auto", "gram")}
     for model in fits.values():
         assert model._reml_result.converged

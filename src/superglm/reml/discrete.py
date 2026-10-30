@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import time as _time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -27,7 +27,11 @@ from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
-from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
+from superglm.group_matrix import (
+    DesignMatrix,
+    DiscretizedTensorGroupMatrix,
+    RandomEffectGroupMatrix,
+)
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -431,18 +435,43 @@ def bootstrap_seed_lambdas(
     warm_lambdas: Mapping[str, float] | None,
     lambdas: Mapping[str, float],
     estimated_mask: NDArray,
+    group_matrices: Sequence[Any],
 ) -> dict[str, float]:
     """The smoothing parameters the Newton engines' bootstrap fit is taken at.
 
-    Cold, these are fixed seeds: a strong 1.0 for interaction components, whose
-    rich tensor bases can explode under an almost-unpenalized fit, and 1e-4 for
-    everything else, followed by one Fellner-Schall step from that fit.  A warm
-    start (``warm_lambdas``, a previous fit's estimates) replaces the seed of
-    each component it names, and, when present, fixed-policy components are
-    bootstrapped at their fixed value, so the bootstrap fit is the warm start's
-    own coefficient mode and the first Newton step is taken from there.
+    Cold, these are fixed seeds, followed by one Fellner-Schall step from that
+    fit: 1e-4, an almost-unpenalized fit, except for a strong 1.0 on
+
+    - interaction components, whose rich tensor bases can explode under an
+      almost-unpenalized fit;
+    - random effects (``RandomEffectGroupMatrix``): lme4's start, a relative
+      standard deviation of one (``lambda = phi / sigma_b**2 = 1``; Bates,
+      Maechler, Bolker & Walker 2015, JSS 67(1), sec. 2.3.2).  Unpenalized, a
+      level its own rows do not identify has a posterior variance of order
+      ``1 / lambda`` -- a parent of a nested effect, aliased with its
+      children's indicators, or a level its responses separate (all zero
+      under a log link) -- so the step's trace term outweighs the squared
+      coefficients and it returns about ``lambda`` times a constant, still
+      at an unpenalized end the Newton step then has to leave (Wood, Pya &
+      Saefken 2016, JASA 111, sec. 3.1: start each term's effective degrees
+      of freedom away from its maximum).  The step from 1.0 is the EM update
+      from a penalized mode, which the data identify.
+
+    A warm start (``warm_lambdas``, a previous fit's estimates) replaces the
+    seed of each component it names, and, when present, fixed-policy
+    components are bootstrapped at their fixed value, so the bootstrap fit is
+    the warm start's own coefficient mode and the first Newton step is taken
+    from there.
     """
-    seeds = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    seeds = {
+        pc.name: (
+            1.0
+            if ":" in pc.group_name
+            or isinstance(group_matrices[pc.group_index], RandomEffectGroupMatrix)
+            else 1e-4
+        )
+        for pc in penalties
+    }
     if not warm_lambdas:
         return seeds
     for index, pc in enumerate(penalties):
@@ -656,12 +685,13 @@ def optimize_discrete_reml_cached_w(
     _outer_step_stats: list[dict[str, Any]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
-    # === Bootstrap: one FP step from conservative interaction penalties ===
-    # Rich tensor interactions can explode under an almost-unpenalized
-    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed. A warm
-    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
-    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
+    # === Bootstrap: one FP step from the seeds ===
+    # Main effects bootstrap almost unpenalized; interaction components and
+    # random effects from a materially stronger seed, and a warm start at its
+    # own lambdas (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(
+        penalties, warm_lambdas, lambdas, estimated_mask, dm.group_matrices
+    )
     _t0 = _time.perf_counter()
     dm_boot = rebuild_design_matrix_with_lambdas(
         dm,
