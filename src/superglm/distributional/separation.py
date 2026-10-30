@@ -32,7 +32,11 @@ from superglm.diagnostics.separation import (
     scan_categorical_term,
     scan_interaction_term,
 )
-from superglm.distributional.family import DistributionalFamily, ResponseBoundaryFamily
+from superglm.distributional.family import (
+    CensoredSeparationFamily,
+    DistributionalFamily,
+    ResponseBoundaryFamily,
+)
 from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED
 from superglm.distributional.predictor import CompiledPredictor
 from superglm.features.categorical import Categorical
@@ -224,26 +228,40 @@ def _scan_design_cells(
     return findings
 
 
+def censored_recession(family: DistributionalFamily, n_predictors: int) -> tuple[bool, ...]:
+    """One flag per predictor; all false without a declaration."""
+    if not isinstance(family, CensoredSeparationFamily):
+        return (False,) * n_predictors
+    flags = tuple(bool(flag) for flag in family.censored_recession())
+    if len(flags) != n_predictors:
+        raise ValueError("family.censored_recession must return one flag per predictor")
+    return flags
+
+
 def scan_censored_separation(
     compiled: Sequence[CompiledPredictor],
     frame: EagerFrame,
     side: NDArray,
     weights: NDArray,
+    *,
+    recession: Sequence[bool],
 ) -> list[SeparatedTerm]:
-    """Levels and crossed cells, on every predictor, whose rows are all censored on one side.
+    """Levels and crossed cells whose rows are all censored on one side, on flagged predictors.
 
-    The data bound such a cell's response from one side only, so its
-    likelihood can keep rising as its effect walks off to infinity, as a cell
-    on a response boundary does.  The scan is the response-boundary scan on
-    the indicator of rows not censored on that side.
+    The data bound such a cell's response from one side only, so on a
+    predictor along which every row's bound probability is monotone
+    (``recession``) its likelihood keeps rising as its effect walks off to
+    infinity, as a cell on a response boundary does.  The scan is the
+    response-boundary scan on the indicator of rows not censored on that side.
     """
+    flagged = [p for p, flag in zip(compiled, recession, strict=True) if flag]
     findings: list[SeparatedTerm] = []
     for value, label in ((RIGHT_CENSORED, "right-censored"), (LEFT_CENSORED, "left-censored")):
         on_side = np.asarray(side) == value
         if not np.any(on_side):
             continue
         off_side = np.where(on_side, 0.0, 1.0)
-        for predictor in compiled:
+        for predictor in flagged:
             findings.extend(
                 replace(finding, term=f"{predictor.name}:{finding.term}", boundary=label)
                 for finding in _scan_design_cells(predictor.compiled, frame, off_side, weights)
@@ -257,8 +275,8 @@ def format_censored_separation_message(findings: list[SeparatedTerm]) -> str:
     lines = [
         f"Censoring separation: {n_total} categorical cell(s) have rows censored on one side "
         "only, so the data bound their response from that side and their maximum-likelihood "
-        "effects can run to infinity. The fit stops at an arbitrary value for them, and their "
-        "predictions are not estimates."
+        "effects on the predictors named below run to infinity. The fit stops at an arbitrary "
+        "value for them, and their predictions are not estimates."
     ]
     for f in findings:
         unit = "occupied cells" if f.kind == "cells" else "occupied levels"
@@ -295,6 +313,7 @@ __all__ = [
     "SEPARATION_POLICIES",
     "SeparationPolicy",
     "apply_separation_policy",
+    "censored_recession",
     "format_censored_separation_message",
     "predictor_response_boundaries",
     "record_factor_smooth_levels",

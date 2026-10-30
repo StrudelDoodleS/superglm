@@ -239,6 +239,15 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self) -> tuple[bool, ...]:
+        """A level censored on one side escapes along both predictors.
+
+        ``log S(c) = -log1p(xi c/psi)/xi`` rises with ``psi`` (``t/(psi s) > 0``)
+        and with ``xi`` (``t^2 D(z) > 0``), so ``S`` and ``F = 1 - S`` are
+        monotone in each; the shape walks to its wall.
+        """
+        return (True, True)
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": "GeneralizedParetoLSS",
@@ -573,7 +582,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
             return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
 
-        return readonly(log_window_values(lower, upper, len(values), window))
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y, theta) -> NDArray[np.float64]:
         values = self._theta(theta, None)

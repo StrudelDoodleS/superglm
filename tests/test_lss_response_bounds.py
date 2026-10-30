@@ -827,11 +827,15 @@ def test_narrow_generalized_pareto_windows_keep_their_mass(shape):
     [
         ("normal", 2.0, 2.0 + 1e-3),
         ("normal", -0.8, -0.8 + 1e-9),
+        ("normal", 2.0, 2.016),
         ("pareto", 50.0, 50.0 + 1e-3),
         ("pareto", 900.0, 900.0 + 1e-8),
+        ("pareto", 50.0, 54.0),
     ],
 )
 def test_narrow_window_derivatives_match_differences(kernel, lower, upper):
+    # (2.0, 2.016) and (50, 54) sit at about 0.04 of the 0.05 switch, where the
+    # spread of the node scores is about 3e-5 of the Hessian.
     root = np.array([1.7])
 
     def channels(first, second):
@@ -998,6 +1002,113 @@ def test_a_level_censored_on_one_side_only_is_disclosed_as_separated():
         )
 
 
+def test_a_level_censored_on_one_side_of_a_scale_predictor_keeps_its_estimate():
+    # Group b's two rows are right-censored at -10 and 1 about a location set
+    # by group a, so P(Y > c) peaks at a finite group-b scale: no separation.
+    complete = np.tile([-1.0, 1.0], 10)
+    limits = np.array([-10.0, 1.0])
+    y = np.concatenate([complete, limits])
+    upper = np.concatenate([np.full(len(complete), np.inf), limits])
+    X = pd.DataFrame({"g": ["a"] * len(complete) + ["b"] * len(limits)})
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(), family.scale(cat("g")), separation="error")
+    model.fit(X, y, censoring=(None, upper))
+
+    def negative(point):
+        mu, log_a, log_b = point
+        return -(
+            stats.norm.logpdf(complete, mu, np.exp(log_a)).sum()
+            + stats.norm.logsf(limits, mu, np.exp(log_b)).sum()
+        )
+
+    mu, log_a, log_b = _mle(negative, np.array([0.0, 0.0, 1.0]))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["location"], [mu, mu], rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(fitted["scale"], np.exp([log_a, log_b]), rtol=1e-5)
+
+
+def test_a_crossed_cell_censored_on_one_side_is_separated():
+    from superglm.features import Categorical
+    from superglm.features.interaction import CategoricalInteraction
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    rng = np.random.default_rng(569)
+    n = 1_600
+    X = pd.DataFrame({"g": rng.choice(["a", "b"], n), "h": rng.choice(["x", "y"], n)})
+    limit = 5000.0
+    paid = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
+    paid[(X.g == "b").to_numpy() & (X.h == "y").to_numpy()] = limit
+    model = model_from_templates(
+        family=LogNormalLS(parametrisation="location"),
+        predictors=(
+            distributional.Predictor(
+                "location",
+                {"g": Categorical(), "h": Categorical()},
+                interaction_specs={"g:h": CategoricalInteraction("g", "h")},
+            ),
+            distributional.Predictor("scale", {}),
+        ),
+    )
+    # Only the (b, y) cell is all at the limit; its parents' levels are not.
+    with pytest.warns(SeparationWarning, match=r"'location:g:h': 1 of 4 occupied cells") as seen:
+        model.fit(X, paid, censoring=(None, limit))
+    message = str(seen[0].message)
+    assert "('b' x 'y')" in message and "'location:g'" not in message
+
+
+def test_a_level_censored_on_one_side_of_a_pareto_shape_is_separated():
+    # S(c) rises with the shape, so the level's shape walks to its wall.
+    rng = np.random.default_rng(568)
+    group = rng.choice(["a", "b"], 1_200)
+    paid = np.minimum(stats.genpareto(c=0.3, scale=1000.0).rvs(1_200, random_state=rng), 3000.0)
+    paid[group == "b"] = 3000.0
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(family, family.scale(), family.shape(cat("g")))
+    with pytest.warns(SeparationWarning, match=r"'shape:g': 1 of 2 occupied levels"):
+        model.fit(pd.DataFrame({"g": group}), paid, censoring=(None, 3000.0))
+
+
+def test_window_probabilities_at_or_below_the_support_are_empty():
+    # Empty on an infinite end, or so far out that both log tails underflow.
+    gaussian_lower = np.array([np.inf, -np.inf, 1e300, -np.inf])
+    gaussian_upper = np.array([np.inf, -np.inf, np.inf, -1e300])
+    np.testing.assert_array_equal(
+        GaussianLS().log_window_probability(
+            gaussian_lower, gaussian_upper, np.tile((0.0, 1.0), (4, 1))
+        ),
+        -np.inf,
+    )
+    windows = [(-2.0, -1.0), (-np.inf, 0.0), (0.0, 0.0), (3.0, 3.0), (np.inf, np.inf)]
+    lower = np.array([lo for lo, _ in windows])
+    upper = np.array([hi for _, hi in windows])
+    for family, row in (
+        (LogNormalLS(), (700.0, 0.8)),
+        (LogNormalLS(parametrisation="location"), (6.2, 0.8)),
+        (GeneralizedParetoLSS(), (120.0, 0.3)),
+    ):
+        theta = np.tile(row, (len(windows), 1))
+        np.testing.assert_array_equal(
+            family.log_window_probability(lower, upper, theta), np.full(len(windows), -np.inf)
+        )
+        whole = family.log_window_probability(np.array([-5.0, 0.0]), np.inf, theta[:2])
+        np.testing.assert_array_equal(whole, [0.0, 0.0])
+        below = family.log_window_probability(np.array([-5.0, 0.0]), 40.0, theta[:2])
+        assert below[0] == below[1] < 0.0
+
+
+def test_narrow_normal_windows_do_not_depend_on_the_origin():
+    # A window and location sharing a large offset are the same law as both
+    # at zero; nodes formed before the offset cancels round it away.
+    def channels(origin):
+        return normal_window_channels(
+            np.array([origin]), np.array([origin + 2.0]), np.array([origin]), np.array([100.0]),
+            np.ones(1), derivative_order=2,
+        )  # fmt: skip
+
+    for shifted, centred in zip(channels(1e16), channels(0.0), strict=True):
+        np.testing.assert_allclose(shifted, centred, rtol=1e-13)
+
+
 def test_window_probabilities_match_scipy_for_every_family_form():
     lower = np.array([-np.inf, 2.0, 300.0, 0.0])
     upper = np.array([900.0, np.inf, 1500.0, 40.0])
@@ -1038,9 +1149,11 @@ def test_window_probability_takes_a_number_or_one_per_row():
 
 
 def test_bounds_contracts_are_public():
-    assert {"ResponseBounds", "ResponseWindowFamily"} <= set(distributional.__all__)
+    names = {"CensoredSeparationFamily", "ResponseBounds", "ResponseWindowFamily"}
+    assert names <= set(distributional.__all__)
     for family in (GaussianLS(), LogNormalLS(), GeneralizedParetoLSS()):
         assert isinstance(family, distributional.ResponseWindowFamily)
+        assert isinstance(family, distributional.CensoredSeparationFamily)
 
 
 def test_generalized_pareto_above_a_deductible_recovers_the_parent_law():

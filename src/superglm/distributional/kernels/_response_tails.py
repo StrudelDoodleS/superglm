@@ -114,7 +114,7 @@ def normal_log_cdf_channels(
         return log_cdf, None, None
     # Where Phi(x) rounds to one the tail is flat in float64 and its
     # derivatives are zero, though x's own derivatives may have overflowed.
-    flat = ratio == 0.0
+    flat = np.flatnonzero(ratio == 0.0)
     with np.errstate(over="ignore", invalid="ignore"):
         score = ratio[:, None] * x_score
         hessian = (
@@ -122,9 +122,10 @@ def normal_log_cdf_channels(
             if derivative_order == 2
             else None
         )
-    score[flat] = 0.0
-    if hessian is not None:
-        hessian[flat] = 0.0
+    if len(flat):
+        score[flat] = 0.0
+        if hessian is not None:
+            hessian[flat] = 0.0
     return log_cdf, score, hessian
 
 
@@ -145,44 +146,47 @@ def log_window_channels(
     far_value, far_score, far_hessian = far
     with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
         delta = far_value - near_value
-        value = near_value + np.log(-np.expm1(delta))
         kappa = 1.0 / np.expm1(-delta)
-    weighted = (far_value > -np.inf) & (kappa > 0.0)
-    kappa = np.where(weighted, kappa, 0.0)
+    # Elsewhere the window is the near end's tail exactly: log(-expm1(delta))
+    # rounds to zero wherever kappa does.
+    rows = np.flatnonzero((far_value > -np.inf) & (kappa > 0.0))
+    if len(rows) == 0:
+        return near_value, near_score, near_hessian
+    value = np.array(near_value, dtype=FLOAT, copy=True)
+    with np.errstate(divide="ignore"):
+        value[rows] += np.log(-np.expm1(delta[rows]))
     if derivative_order == 0:
         return value, None, None
     assert near_score is not None and far_score is not None
-    with np.errstate(invalid="ignore", over="ignore"):
-        difference = np.where(weighted[:, None], near_score - far_score, 0.0)
-    score = near_score + kappa[:, None] * difference
+    weight = kappa[rows][:, None]
+    difference = near_score[rows] - far_score[rows]
+    score = np.array(near_score, dtype=FLOAT, copy=True)
+    score[rows] += weight * difference
     if derivative_order == 1:
         return value, score, None
     assert near_hessian is not None and far_hessian is not None
-    with np.errstate(invalid="ignore", over="ignore"):
-        spread = np.where(weighted[:, None], near_hessian - far_hessian, 0.0)
-    hessian = (
-        near_hessian
-        + kappa[:, None] * spread
-        - (kappa * (1.0 + kappa))[:, None] * _outer_packed(difference, difference)
-    )
+    hessian = np.array(near_hessian, dtype=FLOAT, copy=True)
+    hessian[rows] += weight * (near_hessian[rows] - far_hessian[rows]) - (
+        weight * (1.0 + weight)
+    ) * _outer_packed(difference, difference)
     return value, score, hessian
 
 
 def quadrature_window_channels(
-    lower: NDArray,
     half_width: NDArray,
-    log_density: Callable[[NDArray], TailChannels],
+    log_density: Callable[[float], TailChannels],
     *,
     derivative_order: int,
 ) -> TailChannels:
-    """``log P(lower < Y <= lower + 2 half_width)`` by Gauss-Legendre quadrature.
+    """``log P`` of a window ``2 half_width`` wide by Gauss-Legendre quadrature.
 
-    ``log_density(points)`` gives the log density at ``points`` with its score
-    and packed Hessian.  With node weights ``p_i`` proportional to
-    ``omega_i f(y_i)``, the score is ``sum p_i g_i`` and the Hessian
-    ``sum p_i (H_i + (g_i - g)(g_i - g)^T)``.
+    ``log_density(fraction)`` gives the log density with its score and packed
+    Hessian at the point that far across each row's window, ``0 < fraction <
+    1``; the caller forms that point in coordinates where it does not round
+    away.  With node weights ``p_i`` proportional to ``omega_i f(y_i)``, the
+    score is ``sum p_i g_i`` and the Hessian ``sum p_i (H_i + (g_i - g)(g_i - g)^T)``.
     """
-    nodes = [log_density(lower + half_width * (1.0 + t)) for t in _LEGENDRE_NODES]
+    nodes = [log_density(0.5 * (1.0 + float(t))) for t in _LEGENDRE_NODES]
     logs = np.column_stack(
         [np.log(omega) + node[0] for omega, node in zip(_LEGENDRE_WEIGHTS, nodes, strict=True)]
     )
@@ -264,20 +268,31 @@ def normal_window_channels(
             if target is not None and source is not None:
                 target[far_present] = source
     channels = log_window_channels(near, far, derivative_order=derivative_order)
-    span = hi - lo if width is None else np.asarray(width, dtype=FLOAT)
+    # Only a window with two finite ends can be narrow; an infinite end is
+    # always the far one.
+    rows = np.flatnonzero(far_present)
+    rows = rows[np.isfinite(near_z[rows])]
+    if len(rows) == 0:
+        return channels
+    span = (hi - lo if width is None else np.asarray(width, dtype=FLOAT))[rows]
     with np.errstate(invalid="ignore", over="ignore"):
-        reach = span * root * inverse * np.maximum(1.0, 0.5 * np.abs(z_lo + z_hi))
-    rows = np.flatnonzero(reach <= NARROW_WINDOW)
+        reach = span * (root * inverse * np.maximum(1.0, 0.5 * np.abs(z_lo + z_hi)))[rows]
+    narrow = reach <= NARROW_WINDOW
+    rows, span = rows[narrow], span[narrow]
     if len(rows) == 0:
         return channels
 
-    def log_density(points: NDArray) -> TailChannels:
+    # Nodes are placed in standardised coordinates, where a large common
+    # offset of the window and the location has already cancelled.
+    start, extent = z_lo[rows], span * (root * inverse)[rows]
+
+    def log_density(fraction: float) -> TailChannels:
         return _normal_log_density(
-            points, mu[rows], root[rows], inverse[rows], derivative_order=derivative_order
+            start + fraction * extent, root[rows], inverse[rows], derivative_order=derivative_order
         )
 
     quadrature = quadrature_window_channels(
-        lo[rows], 0.5 * span[rows], log_density, derivative_order=derivative_order
+        0.5 * span, log_density, derivative_order=derivative_order
     )
     for target, source in zip(channels, quadrature, strict=True):
         if target is not None and source is not None:
@@ -303,10 +318,12 @@ def _standardized(
 
 
 def _normal_log_density(
-    points: NDArray, location: NDArray, root: NDArray, inverse: NDArray, *, derivative_order: int
+    z: NDArray, root: NDArray, inverse: NDArray, *, derivative_order: int
 ) -> TailChannels:
-    """``log`` of the ``N(location, (scale/root)^2)`` density at ``points``, in ``(location, scale)``."""
-    z = (points - location) * root * inverse
+    """``log`` of the ``N(location, (scale/root)^2)`` density, in ``(location, scale)``.
+
+    ``z = (y - location) root/scale`` is the point, standardised.
+    """
     value = np.log(root * inverse) - _HALF_LOG_TWO_PI - 0.5 * z * z
     if derivative_order == 0:
         return value, None, None

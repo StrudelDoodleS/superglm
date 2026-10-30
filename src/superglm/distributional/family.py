@@ -840,6 +840,21 @@ class ResponseBoundaryFamily(Protocol):
     def response_boundaries(self, links: Sequence[Link]) -> tuple[tuple[str, ...], ...]: ...
 
 
+@runtime_checkable
+class CensoredSeparationFamily(Protocol):
+    """Optional declaration of the predictors a one-sided censored level escapes along.
+
+    One flag per natural parameter, in ``parameters`` order.  A categorical
+    level on a flagged predictor whose rows are all censored on the same side
+    has no finite maximum-likelihood effect: each of its rows' bound
+    probabilities is monotone in that parameter.  An unflagged predictor can
+    still have a finite optimum there (a normal scale, for one) and is not
+    scanned.
+    """
+
+    def censored_recession(self) -> tuple[bool, ...]: ...
+
+
 def _validated_complete_fit_configuration(
     family: object,
 ) -> Mapping[str, object]:
