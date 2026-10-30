@@ -998,15 +998,20 @@ class RankDecomposition:
 
         This path avoids re-forming normal equations at the factor-rank
         boundary.  It is available only when ``decompose_factor`` was asked to
-        retain the bounded factor solve.
+        retain the bounded factor solve.  A matrix ``transformed_rhs`` has one
+        solution per column.
         """
         if self.factor_rhs_left_basis is None:
             raise RuntimeError("factor-RHS solve was not retained")
         transformed_rhs = np.asarray(transformed_rhs, dtype=float)
-        if transformed_rhs.shape != (self.factor_rhs_left_basis.shape[0],):
+        if (
+            transformed_rhs.ndim not in (1, 2)
+            or transformed_rhs.shape[0] != (self.factor_rhs_left_basis.shape[0])
+        ):
             raise ValueError("transformed RHS length does not match the certified factor")
+        shape = (self.width, *transformed_rhs.shape[1:])
         if self.rank == 0:
-            return np.zeros(self.width)
+            return np.zeros(shape)
         if self.equilibrated_solution_basis is not None:
             projected_rhs = _exact_array(self.factor_rhs_left_basis.T) @ _exact_array(
                 transformed_rhs
@@ -1018,8 +1023,11 @@ class RankDecomposition:
                 )
             else:
                 solved = _exact_array(self.equilibrated_solution_basis[active]) @ projected_rhs
-            result = np.zeros(self.width)
-            result[active] = _exact_to_float(solved / _exact_array(self.column_scale[active]))
+            scale = _exact_array(self.column_scale[active])
+            result = np.zeros(shape)
+            result[active] = _exact_to_float(
+                solved / scale.reshape((-1,) + (1,) * (len(shape) - 1))
+            )
             return result
         projected_rhs = self.factor_rhs_left_basis.T @ transformed_rhs
         if self.factor_rhs_triangular is not None:
@@ -1029,7 +1037,7 @@ class RankDecomposition:
                 lower=False,
                 check_finite=False,
             )
-            result = np.zeros(self.width)
+            result = np.zeros(shape)
             result[self.active_columns] = active_solution
             return result
         if self.solution_basis is None:

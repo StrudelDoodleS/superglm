@@ -30,6 +30,7 @@ from superglm.solvers.centered_system import (
     grouped_projected_factor,
     grouped_structural_nulls,
     grouped_weighted_factor,
+    penalty_factor,
 )
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.pirls import REMLGeometrySummary
@@ -152,6 +153,27 @@ def _face_decomposition(
     return decompose_factor(factor() @ face) if decomposition is None else decomposition
 
 
+def _face_factor_edf(factor: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
+    """``diag(Z (FZ)^+ [F_D; 0])``: the EDF on the face ``Z`` read off the factor ``F = [F_D; P]``.
+
+    ``F_D'F_D = D`` and ``P'P = S``, ``P = penalty_factor(S)`` the factor's
+    last rows (``grouped_augmented_factor``), so this is ``diag(Z (Z'(D +
+    S)Z)^+ Z'D)`` with neither ``D`` nor the Hessian formed.  With ``FZ = U
+    Sigma V'`` it is ``diag(Z V Sigma^-1 U_D' F_D)``, whose trace is
+    ``||U_D||_F^2``, the data rows' share of ``U``: the influence trace from
+    orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
+    supplement B, in his notation), accurate to the factor's backward error,
+    where a product with the formed ``D`` carries the normal equations'
+    (Higham 2002, chapter 20).  The split of that trace among the
+    coefficients is resolved only as well as the data resolve it: weights far
+    apart couple the face to curvature off it that no float64 factor holds.
+    """
+    decomposition = decompose_factor(factor @ face, retain_factor_solve=True)
+    data_rows = factor.copy()
+    data_rows[factor.shape[0] - penalty_factor(penalty).shape[0] :] = 0.0
+    return np.diag(face @ decomposition.solve_factor_rhs(data_rows)).copy()
+
+
 def _feature_edf(
     centered: CenteredSystem,
     decomposition: RankDecomposition,
@@ -163,7 +185,11 @@ def _feature_edf(
 
     On an active face ``Z`` (``_active_face_basis``), ``decomposition``
     factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
-    D)``, whose trace is the face fit's.
+    D)``, whose trace is the face fit's.  When the factor decided that
+    decomposition (``_face_decomposition``), the Gram's formation rounding
+    can be as large as the face's own entries, and ``D`` is as unreliable as
+    the Hessian it was formed with: the EDF is read off the factor
+    ``factor(0)`` the decomposition was taken of (``_face_factor_edf``).
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -180,9 +206,14 @@ def _feature_edf(
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.  ``inverse`` is ``face_pseudo_inverse(decomposition,
-    face)`` when the caller has formed it already.
+    trace near its limit, 0.  ``factor(exponent)`` is the augmented factor
+    ``[F_D; P]`` of ``D`` and ``S`` scaled by ``2^-exponent``; ``factor(0)``
+    is the one a face decomposition was taken of.  ``inverse`` is
+    ``face_pseudo_inverse(decomposition, face)`` when the caller has formed
+    it already.
     """
+    if face is not None and decomposition.method == "qr_svd":
+        return _face_factor_edf(factor(0), centered.penalty, face)
     if inverse is None:
         inverse = face_pseudo_inverse(decomposition, face)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -438,24 +469,27 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             )
         )
         face = None if face_rows is None else _active_face_basis(face_rows)
-        face_rank = (
-            None
-            if face is None
-            else _face_decomposition(
-                centered_final.hessian,
-                face,
-                lambda: fit.certify_centered_factor(final_system, W).factor,
-            )
-        )
-        feature_edf = _feature_edf(
-            centered_final,
-            augmented_rank if face_rank is None else face_rank,
-            lambda exponent: grouped_augmented_factor(
+
+        def augmented_factor(exponent: int = 0) -> NDArray:
+            # unscaled, the certified factor the face decomposition reads
+            if not exponent:
+                return fit.certify_centered_factor(final_system, W).factor
+            return grouped_augmented_factor(
                 dm,
                 np.ldexp(W, -exponent),
                 np.ldexp(final_system.penalty, -exponent),
                 center=final_system.mean_x,
-            ),
+            )
+
+        face_rank = (
+            None
+            if face is None
+            else _face_decomposition(centered_final.hessian, face, augmented_factor)
+        )
+        feature_edf = _feature_edf(
+            centered_final,
+            augmented_rank if face_rank is None else face_rank,
+            augmented_factor,
             face,
             # off a face, the inverse the REML geometry formed
             inverse=XtWX_S_inv_beta if face is None else None,

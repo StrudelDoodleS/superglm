@@ -2607,6 +2607,37 @@ class TestDirectSolverBasic:
         # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
         assert error <= 64 * np.finfo(float).eps * scale * np.linalg.cond(exact)
 
+    def test_a_face_the_factor_decided_reads_its_edf_off_the_factor(self):
+        """The EDF on a face whose Gram could not certify itself never reads the formed Gram.
+
+        The Hessian handed in is indefinite on the face, as forming it with
+        weights near ``1e15`` leaves it, and the data Gram carries a
+        perturbation of ``1/2`` on every entry, the size of that rounding
+        against the face's entries.  The EDF is the one the factor ``[F_D; P]``
+        defines, ``diag(Z (Z'F'FZ)^-1 Z' F_D'F_D)``.  Mutation: the factor's
+        inverse times the data Gram handed in (2b67e8dd) is off by the
+        perturbation's share, 0.25 on one coefficient.
+        """
+        from types import SimpleNamespace
+
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct._finalise import _face_decomposition, _feature_edf
+
+        face = np.eye(3)[:, 1:]
+        data = np.array([[1.0, 0.5, 0.25], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+        penalty = np.diag([0.0, 0.5, 2.0])
+        factor = np.vstack((data, penalty_factor(penalty)))
+        hessian = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.001], [0.0, 1.001, 1.0]])
+        centered = SimpleNamespace(data_gram=data.T @ data + 0.5, hessian=hessian, penalty=penalty)
+        decomposition = _face_decomposition(hessian, face, lambda: factor)
+        assert decomposition.method == "qr_svd"
+        edf = _feature_edf(centered, decomposition, lambda exponent=0: factor, face)
+        on_face = (factor @ face).T @ (factor @ face)
+        exact = np.diag(face @ np.linalg.solve(on_face, face.T @ data.T @ data))
+        # an inverse's forward error, kappa eps, on entries of order max |exact|
+        bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
+        assert np.max(np.abs(edf - exact)) <= bound
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:
