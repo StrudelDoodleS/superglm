@@ -1245,34 +1245,7 @@ class ModelMetrics:
         penalized estimate. They do not account for model selection
         uncertainty (same convention as glmnet / mgcv).
         """
-        _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        dispersion = self._coefficient_dispersion
-        selected_names = selected_group_name_set(
-            self._result,
-            self._groups,
-            penalty=fitted_penalty(self._model),
-        )
-
-        result: dict[str, NDArray] = {}
-        for g in self._groups:
-            if g.name not in selected_names:
-                result[g.name] = np.zeros(g.size)
-            else:
-                # Find corresponding active group
-                ag = next(ag for ag in active_groups if ag.name == g.name)
-                augmented_indices = np.arange(
-                    1 + ag.start,
-                    1 + ag.end,
-                    dtype=np.intp,
-                )
-                var_diag = dispersion * covariance_selected_diagonal(
-                    XtWX_inv_aug,
-                    augmented_indices,
-                )
-                values = np.sqrt(np.maximum(var_diag, 0.0))
-                values[~self._current_coefficient_estimable[g.sl]] = np.nan
-                result[g.name] = values
-        return result
+        return self._group_standard_errors(scaled=True)
 
     @cached_property
     def coefficient_se_raw(self) -> dict[str, NDArray]:
@@ -1286,7 +1259,12 @@ class ModelMetrics:
 
         Inactive groups get all-zero SEs.
         """
+        return self._group_standard_errors(scaled=False)
+
+    def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
+        """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
+        dispersion = self._coefficient_dispersion if scaled else None
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1308,6 +1286,8 @@ class ModelMetrics:
                     XtWX_inv_aug,
                     augmented_indices,
                 )
+                if dispersion is not None:
+                    var_diag = dispersion * var_diag
                 values = np.sqrt(np.maximum(var_diag, 0.0))
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values
