@@ -111,6 +111,21 @@ def _frequency_weights(sample_weight, n: int) -> tuple[NDArray, float]:
     return weights, likelihood_size
 
 
+def _log_likelihood_spread(ll_a: NDArray, ll_b: NDArray, measure: NDArray) -> float:
+    """Each model's mean absolute deviation of its per-row log-likelihood, summed.
+
+    ``measure`` weights the rows as the Vuong moments do; a row it gives no
+    weight does not enter.
+    """
+    carried = measure > 0.0
+    mass = measure[carried]
+    spread = 0.0
+    for ll in (ll_a[carried], ll_b[carried]):
+        centre = float(np.sum(mass * ll)) / float(np.sum(mass))
+        spread += float(np.sum(mass * np.abs(ll - centre))) / float(np.sum(mass))
+    return spread
+
+
 def _per_obs_ll_poisson(y: NDArray, mu: NDArray) -> NDArray:
     """Per-observation Poisson log-likelihood."""
     return y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1)
@@ -556,6 +571,7 @@ def vuong_test(
         # ``prior_weights`` is None when no sample_weight was supplied, in
         # which case every row carries weight and there is nothing to exclude.
         d = ll_a - ll_b
+        measure = np.ones(n) if prior_weights is None else (prior_weights > 0.0).astype(float)
         if prior_weights is not None:
             d = d[prior_weights > 0.0]
         likelihood_size = (
@@ -576,6 +592,7 @@ def vuong_test(
         # unit weights. Those still define a lattice for whichever model is
         # the counting one, which is why this arm is checked like the others.
         contract_weights = np.ones(n, dtype=np.float64)
+        measure = contract_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -584,7 +601,7 @@ def vuong_test(
         likelihood_size = float(n)
     else:
         frequency_weights, likelihood_size = _frequency_weights(sample_weight, n)
-        contract_weights = frequency_weights
+        contract_weights = measure = frequency_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -629,9 +646,11 @@ def vuong_test(
         mean_m -= (p_a - p_b) * np.log(likelihood_size) / (2 * likelihood_size)
 
     # Essentially identical: the per-row differences are small beside the
-    # magnitude of the log-likelihoods themselves, in whatever units those
-    # (and the weights that multiply them) are.
-    if omega < 1e-10 * float(np.mean(np.abs(ll_a) + np.abs(ll_b))):
+    # per-row spread of the log-likelihoods themselves, over the rows and
+    # weights the moments read.  The spread is what a change of the response's
+    # units leaves alone (it adds a constant to every row) and what weights
+    # multiply.
+    if omega <= 1e-10 * _log_likelihood_spread(ll_a, ll_b, measure):
         return VuongTestResult(
             statistic=0.0,
             p_value=1.0,

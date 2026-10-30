@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import Numeric, Spline, SuperGLM
+from superglm._roundoff import UNIT_ROUNDOFF, gamma
 from superglm.distributions import Gamma, NegativeBinomial
 from superglm.stats.model_tests import (
     DispersionTestResult,
@@ -489,3 +490,66 @@ class TestVuongTestUnits:
 
         assert rescaled.statistic == pytest.approx(reference.statistic, rel=1e-9)
         assert rescaled.preferred == reference.preferred
+
+    @pytest.mark.parametrize("units", [1e-30, 1e30])
+    def test_identical_models_threshold_ignores_a_change_of_response_units(
+        self, monkeypatch, units
+    ):
+        """A change of units adds -log(units) to every row's log-likelihood of both models."""
+        from superglm.stats import model_tests
+
+        rng = np.random.default_rng(7)
+        n = 1000
+        x = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model_a = _fit_poisson_numeric(X, y)
+        model_b = _fit_poisson_numeric(X, y)
+        real_rows = model_tests._per_obs_log_likelihood
+        # model_b differs from model_a by a per-row amount far below the rows' spread.
+        nudge = 1e-9 * (1.0 + rng.normal(size=n))
+        # Shifting a row rounds its difference by at most 2u(|ll| + |shift|), a
+        # fraction of the nudge that bounds the change in its mean and spread.
+        largest = float(np.max(np.abs(real_rows(model_a, X, y, None)))) + abs(np.log(units))
+        rel = 4.0 * 2.0 * UNIT_ROUNDOFF * largest / 1e-9
+
+        def rows(shift):
+            def per_obs(model, *args, **kwargs):
+                ll = real_rows(model, *args, **kwargs) + shift
+                return ll + nudge if model is model_b else ll
+
+            return per_obs
+
+        monkeypatch.setattr(model_tests, "_per_obs_log_likelihood", rows(0.0))
+        reference = vuong_test(model_a, model_b, X, y, correction="none")
+        monkeypatch.setattr(model_tests, "_per_obs_log_likelihood", rows(-np.log(units)))
+        shifted = vuong_test(model_a, model_b, X, y, correction="none")
+
+        assert reference.preferred == "model_b"
+        assert shifted.statistic == pytest.approx(reference.statistic, rel=rel)
+        assert shifted.preferred == reference.preferred
+
+    def test_a_row_without_frequency_weight_does_not_set_the_threshold(self):
+        """A zero frequency weight is no replication: the row enters no moment."""
+        rng = np.random.default_rng(7)
+        n = 500
+        x, z, noise = rng.normal(size=(3, n))
+        y = 2.0 + 3.0 * x + noise
+        X = pd.DataFrame({"x": x, "z": z})
+        common = dict(family="gaussian", selection_penalty=0.0, weight_semantics="frequency")
+        model_x = SuperGLM(features={"x": Numeric()}, **common).fit(X[["x"]], y)
+        model_z = SuperGLM(features={"z": Numeric()}, **common).fit(X[["z"]], y)
+        reference = vuong_test(model_x, model_z, X, y, sample_weight=np.ones(n))
+
+        padded = vuong_test(
+            model_x,
+            model_z,
+            pd.concat([X, X.iloc[[0]]], ignore_index=True),
+            np.append(y, 1e8),
+            sample_weight=np.append(np.ones(n), 0.0),
+        )
+
+        assert reference.preferred == "model_a"
+        # The zero-weight row adds exact zeros to each sum: a reordering's gamma_n at most.
+        assert padded.statistic == pytest.approx(reference.statistic, rel=4 * gamma(n + 1))
+        assert padded.preferred == reference.preferred
