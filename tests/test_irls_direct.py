@@ -137,6 +137,21 @@ def _force_unresolved_score(monkeypatch, *, resolved=False):
 
 
 # ── Basic solver tests ─────────────────────────────────────────
+def _within_a_newton_step_of_the_intercept_mle(result, y, offset) -> bool:
+    """Whether an intercept-only Poisson/log fit iterated to its maximum, to its last step's square.
+
+    The maximum is ``log(sum(y) / sum(exp(offset)))``.  Newton's method (Fisher
+    scoring, on the canonical link) leaves an error of about half its last
+    step squared, so the fit is within that step squared, plus rounding.
+    """
+    log = result.iteration_log
+    if len(log) < 2:
+        return False
+    mle = np.log(y.sum() / np.exp(offset).sum())
+    last_step = log[-1].intercept - log[-2].intercept
+    return abs(result.intercept - mle) <= last_step**2 + 64 * np.finfo(float).eps * abs(mle)
+
+
 class TestDirectSolverBasic:
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
@@ -2447,13 +2462,19 @@ class TestDirectSolverBasic:
     @pytest.mark.parametrize("direct_solve", ["auto", "qr"])
     @pytest.mark.parametrize("convergence", ["deviance", "coefficients", "mode_score"])
     def test_a_design_with_no_columns_fits_its_intercept(self, convergence, direct_solve):
-        """With no column there is no coefficient to change and no factor to take."""
+        """With no column there is no coefficient to change and no factor to take.
+
+        The offset moves the maximum off the default start, ``log(mean(y))``,
+        which is chosen before it, so the intercept has to iterate.
+        """
         from superglm.distributions import Poisson
         from superglm.links import LogLink
         from superglm.solvers.irls_direct import fit_irls_direct
 
         n = 30
-        y = np.random.default_rng(0).poisson(3.0, n).astype(float)
+        rng = np.random.default_rng(0)
+        y = rng.poisson(3.0, n).astype(float)
+        offset = rng.normal(0.0, 0.5, n)
         result, _ = fit_irls_direct(
             DesignMatrix([], n=n, p=0),
             y,
@@ -2462,19 +2483,21 @@ class TestDirectSolverBasic:
             LogLink(),
             [],
             lambda2=0.0,
+            offset=offset,
             weight_semantics="frequency",
             convergence=convergence,
             direct_solve=direct_solve,
+            record_diagnostics=True,
         )
         assert result.converged
-        # the Poisson/log intercept-only maximum is the log of the mean response
-        mle = np.log(y.mean())
-        assert abs(result.intercept - mle) <= 64 * np.finfo(float).eps * abs(mle)
+        assert _within_a_newton_step_of_the_intercept_mle(result, y, offset)
 
     @pytest.mark.filterwarnings("ignore:convergence='coefficients' is experimental")
     def test_a_model_with_no_features_fits_under_the_coefficient_criterion(self):
         n = 30
-        y = np.random.default_rng(0).poisson(3.0, n).astype(float)
+        rng = np.random.default_rng(0)
+        y = rng.poisson(3.0, n).astype(float)
+        offset = rng.normal(0.0, 0.5, n)
         model = SuperGLM(
             family="poisson",
             link="log",
@@ -2482,9 +2505,9 @@ class TestDirectSolverBasic:
             convergence="coefficients",
             selection_penalty=0.0,
         )
-        model.fit(pd.DataFrame({"x": np.zeros(n)}), y)
+        model.fit(pd.DataFrame({"x": np.zeros(n)}), y, offset=offset, record_diagnostics=True)
         assert model.result.converged
-        assert model.result.intercept == pytest.approx(np.log(y.mean()), rel=1e-12)
+        assert _within_a_newton_step_of_the_intercept_mle(model.result, y, offset)
 
     @pytest.mark.parametrize("history", ["halves_exactly", "never_finite"])
     @pytest.mark.parametrize("rule", ["mode_score", "true_score"])
