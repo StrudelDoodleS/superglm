@@ -363,6 +363,62 @@ class LeafRows:
     generic: tuple = ()
 
 
+def _border_leaf_rows(layout, one_hot_types: tuple, *, sparse_indicators: bool) -> LeafRows:
+    """The ``LeafRows`` of a layout's border blocks in its leaf order.
+
+    Blocks are told apart by exact type, never by their data: a table spline,
+    a one-hot block (an exact type in ``one_hot_types``), a dense block, a
+    sparse spline, or generic rows.  With ``sparse_indicators`` the layout's
+    sparse indicator blocks are left out.
+    """
+    order = layout.leaf_order
+    empty = np.zeros(0, dtype=np.intp)
+    if layout.dense_small_matrix is not None:
+        gathered = ((0, layout.dense_small_matrix),)
+        codes = np.zeros((len(order), 0), dtype=np.int32)
+        return LeafRows(codes, np.zeros(0), empty, empty, empty, empty, empty, gathered)
+    skip = {cells.block for cells in layout.sparse_indicators} if sparse_indicators else set()
+    tables, one_hot, gathered, sparse, generic, column = [], [], [], [], [], 0
+    for block, matrix in enumerate(layout.small_matrices):
+        if block in skip:
+            continue
+        # isinstance narrows; the exact type keeps a subclass's own rows generic
+        kind = type(matrix)
+        if isinstance(matrix, DiscretizedSSPGroupMatrix) and kind in _TABLE_TYPES:
+            table = np.asarray(matrix.B_unique @ matrix.R_inv, dtype=np.float64)
+            tables.append((column, matrix.bin_idx, table))
+        elif isinstance(matrix, CategoricalGroupMatrix) and kind in one_hot_types:
+            one_hot.append((column, matrix.codes, matrix.shape[1]))
+        elif isinstance(matrix, DenseGroupMatrix) and kind is DenseGroupMatrix:
+            gathered.append((column, matrix.M))
+        elif isinstance(matrix, SparseSSPGroupMatrix) and kind is SparseSSPGroupMatrix:
+            basis = np.ascontiguousarray(matrix.R_inv, dtype=np.float64)
+            sparse.append((column, matrix.B[order], basis))
+        else:
+            generic.append((column, matrix))
+        column += matrix.shape[1]
+    sources = tuple(values for _, values, _ in tables + one_hot)
+    codes = _lineage_entry(
+        layout.lineage_cache,
+        "leaf_codes",
+        (*sources, order),
+        0,
+        lambda: _leaf_codes(sources, order),
+    )
+    return LeafRows(
+        codes=codes,
+        tables=np.concatenate([np.ravel(table) for *_, table in tables] + [np.zeros(0)]),
+        table_start=np.cumsum([0] + [table.size for *_, table in tables])[:-1].astype(np.intp),
+        table_width=np.array([table.shape[1] for *_, table in tables], dtype=np.intp),
+        table_column=np.array([column for column, *_ in tables], dtype=np.intp),
+        one_hot_width=np.array([width for *_, width in one_hot], dtype=np.intp),
+        one_hot_column=np.array([column for column, *_ in one_hot], dtype=np.intp),
+        gathered=tuple(gathered),
+        sparse=tuple(sparse),
+        generic=tuple(generic),
+    )
+
+
 @dataclass(frozen=True, eq=False)
 class NestedStructuredLayout:
     """Design partition for one nested chain beside a dense border (§4).
@@ -517,52 +573,7 @@ class NestedStructuredLayout:
         the leaf-ordered codes, integer arrays a lambda rebuild passes through
         unchanged, come from the lineage cache (``_lineage_entry``).
         """
-        order = self.leaf_order
-        empty = np.zeros(0, dtype=np.intp)
-        if self.dense_small_matrix is not None:
-            gathered = ((0, self.dense_small_matrix),)
-            codes = np.zeros((len(order), 0), dtype=np.int32)
-            return LeafRows(codes, np.zeros(0), empty, empty, empty, empty, empty, gathered)
-        skip = {cells.block for cells in self.sparse_indicators}
-        tables, one_hot, gathered, sparse, generic, column = [], [], [], [], [], 0
-        for block, matrix in enumerate(self.small_matrices):
-            if block in skip:
-                continue
-            # isinstance narrows; the exact type keeps a subclass's own rows generic
-            kind = type(matrix)
-            if isinstance(matrix, DiscretizedSSPGroupMatrix) and kind in _TABLE_TYPES:
-                table = np.asarray(matrix.B_unique @ matrix.R_inv, dtype=np.float64)
-                tables.append((column, matrix.bin_idx, table))
-            elif isinstance(matrix, CategoricalGroupMatrix) and kind in _ONE_HOT_TYPES:
-                one_hot.append((column, matrix.codes, matrix.shape[1]))
-            elif isinstance(matrix, DenseGroupMatrix) and kind is DenseGroupMatrix:
-                gathered.append((column, matrix.M))
-            elif isinstance(matrix, SparseSSPGroupMatrix) and kind is SparseSSPGroupMatrix:
-                basis = np.ascontiguousarray(matrix.R_inv, dtype=np.float64)
-                sparse.append((column, matrix.B[order], basis))
-            else:
-                generic.append((column, matrix))
-            column += matrix.shape[1]
-        sources = tuple(values for _, values, _ in tables + one_hot)
-        codes = _lineage_entry(
-            self.lineage_cache,
-            "leaf_codes",
-            (*sources, order),
-            0,
-            lambda: _leaf_codes(sources, order),
-        )
-        return LeafRows(
-            codes=codes,
-            tables=np.concatenate([np.ravel(table) for *_, table in tables] + [np.zeros(0)]),
-            table_start=np.cumsum([0] + [table.size for *_, table in tables])[:-1].astype(np.intp),
-            table_width=np.array([table.shape[1] for *_, table in tables], dtype=np.intp),
-            table_column=np.array([column for column, *_ in tables], dtype=np.intp),
-            one_hot_width=np.array([width for *_, width in one_hot], dtype=np.intp),
-            one_hot_column=np.array([column for column, *_ in one_hot], dtype=np.intp),
-            gathered=tuple(gathered),
-            sparse=tuple(sparse),
-            generic=tuple(generic),
-        )
+        return _border_leaf_rows(self, _ONE_HOT_TYPES, sparse_indicators=True)
 
 
 @dataclass(frozen=True, eq=False)
