@@ -892,11 +892,14 @@ def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(
     The event is forced: the start is left where the latent start put it,
     outside the range on both fixtures, and every step is rejected, so the
     fit returns that start.  It ends not converged, with a
-    ``ConvergenceWarning`` that names the cause.  Mutation: the
-    returned-state verdict removed publishes both fits with no warning.
+    ``ConvergenceWarning`` that names the cause, and a reason no observed-REML
+    gate reads as a mode short of its certificate.  Mutation: the
+    returned-state verdict removed publishes both fits with no warning; the
+    loop's own reason kept (``step_rejected``) passes those gates.
     """
     import superglm.solvers.irls_direct._scop as irls_scop
     from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.reml.observed_geometry import stopped_on_iteration_budget
 
     monkeypatch.setattr(
         irls_scop,
@@ -911,6 +914,8 @@ def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(
     with pytest.warns(ConvergenceWarning, match="outside the range"):
         model, eta = _fit_edge_of_range(case)
     assert not model.result.converged
+    assert model.result.termination_reason == "link_domain_infeasible"
+    assert not stopped_on_iteration_budget(model.result)
     # the identity and inverse links both need a positive predictor for a positive mean
     assert int(np.sum(eta <= 0.0)) > 0
 

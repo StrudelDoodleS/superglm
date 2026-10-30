@@ -1763,14 +1763,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 )
 
         # A returned state with a row outside the link's domain is no fitted model,
-        # whatever stopped the loop: the state a shape-constrained start leaves it
-        # at when no step can move it in (``link_domain_violation``).
+        # whatever stopped the loop (``link_domain_violation``), and its reason
+        # says so: a caller never reads it as a mode short of its certificate.
         outside_link_domain = link_domain_violation(link, family)
         if outside_link_domain is not None and outside_link_domain(eta_unclipped, weights):
             from superglm.diagnostics.convergence import ConvergenceWarning
 
-            if converged:
-                converged, termination_reason = False, "score_stagnated"
+            converged, termination_reason = False, "link_domain_infeasible"
             # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
             held_warnings.warn(
                 "The coefficient fit returns its last iterate, not converged: some rows' "

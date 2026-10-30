@@ -736,7 +736,8 @@ def stopped_on_iteration_budget(result: Any) -> bool:
 
     Every OTHER termination reason names something the mode score cannot
     judge -- an infeasible constrained mode, a missing inner-QP KKT
-    certificate, a non-finite deviance -- and keeps its own door.
+    certificate, a non-finite deviance, a state outside the link's domain --
+    and keeps its own door.
 
     ``reml/scop_efs.py`` runs its own criterion and does not defer here.
     """
