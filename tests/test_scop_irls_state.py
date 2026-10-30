@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -803,18 +805,72 @@ def test_the_scop_search_refuses_a_trial_that_leaves_the_mean_space(monkeypatch)
     assert float(np.max(eta)) < 0.0
 
 
-@pytest.mark.filterwarnings("ignore:IRLS stopped:UserWarning")
-@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
-def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(case: str) -> None:
-    """The SCOP start can lie outside the link's range, and no step can move it in.
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse", "binomial_log"])
+def test_the_scop_start_is_put_inside_the_mean_space_and_the_links_domain(
+    monkeypatch, case: str
+) -> None:
+    """The latent start moves the shape term after the start intercept was chosen inside.
 
-    The fit then ends not converged, with a ``ConvergenceWarning`` that names
-    the cause, never converged at a mean that is not positive.  Mutation: the
-    returned-state verdict removed publishes the Poisson/identity fit converged
-    after one iteration with 15 of its 80 rows at a non-positive mean.
+    The QP start is steepened (each shape coordinate's increment ``e^3``
+    times its own), so the mapped start leaves the link's domain (identity,
+    inverse: low ``x``) or the binomial mean space (log: high ``x``) on every
+    case.  The start the first iteration commits from is inside both.
+    Mutation: without the second move all three cases start outside.
     """
+    import superglm.solvers.irls_direct._scop as irls_scop
+    from superglm.solvers.irls_state import link_domain_violation, mean_space_violation
+    from superglm.solvers.scop import SCOPSolverReparam
+
+    real_initialize = SCOPSolverReparam.qp_initialize
+
+    def steepened(self, *args, **kwargs):
+        start = real_initialize(self, *args, **kwargs)
+        start[self.free_dim :] += 3.0
+        return start
+
+    starts: list[np.ndarray] = []
+    real_initial_state = irls_scop._IRLSDirectSCOPStep.initial_state
+
+    def recorded(self, fit, committed):
+        starts.append(np.asarray(committed.eta_unclipped).copy())
+        return real_initial_state(self, fit, committed)
+
+    monkeypatch.setattr(SCOPSolverReparam, "qp_initialize", steepened)
+    monkeypatch.setattr(irls_scop._IRLSDirectSCOPStep, "initial_state", recorded)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model, _ = _fit_edge_of_range(case)
+    family, link = model._distribution, model._link
+    weights = np.ones(starts[0].size)
+    for outside in (mean_space_violation(family, link), link_domain_violation(link, family)):
+        assert outside is None or not outside(starts[0], weights)
+
+
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
+def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(
+    monkeypatch, case: str
+) -> None:
+    """A returned state outside the link's range is no fitted model, whatever stopped the loop.
+
+    The event is forced: the start is left where the latent start put it,
+    outside the range on both fixtures, and every step is rejected, so the
+    fit returns that start.  It ends not converged, with a
+    ``ConvergenceWarning`` that names the cause.  Mutation: the
+    returned-state verdict removed publishes both fits with no warning.
+    """
+    import superglm.solvers.irls_direct._scop as irls_scop
     from superglm.diagnostics.convergence import ConvergenceWarning
 
+    monkeypatch.setattr(
+        irls_scop,
+        "interior_start_intercept",
+        lambda family, link, eta, w, intercept, level: intercept,
+    )
+    monkeypatch.setattr(
+        irls_scop,
+        "_select_irls_trial",
+        lambda **kwargs: _IRLSStepDecision(alpha=0.0, step_halvings=0, step_rejected=True),
+    )
     with pytest.warns(ConvergenceWarning, match="outside the range"):
         model, eta = _fit_edge_of_range(case)
     assert not model.result.converged

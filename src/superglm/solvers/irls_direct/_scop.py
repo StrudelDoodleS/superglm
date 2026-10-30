@@ -44,6 +44,9 @@ from superglm.solvers.irls_state import (
     _IRLSState,
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
+    interior_start_intercept,
+    link_domain_violation,
+    mean_space_violation,
 )
 from superglm.solvers.mode_score import centred_matvec
 from superglm.solvers.rank import decompose_factor, decompose_gram_if_authoritative
@@ -52,7 +55,11 @@ from superglm.solvers.scop_newton import (
     SCOPJointNewton,
     _positive_quadratic_roundoff,
 )
-from superglm.solvers.working_rows import coefficient_working_rows, pearson_chi2
+from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
+    coefficient_working_rows,
+    pearson_chi2,
+)
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
@@ -660,6 +667,26 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
             gamma_eff = st["reparam"].forward(st["beta_scop"])
             st["gamma_eff"] = gamma_eff.copy()
             fit.beta[groups[gi].sl] = gamma_eff
+        # The latent start moves the SCOP terms' coefficients after the fit put its
+        # start inside the mean space and the link's domain (``_setup_design``),
+        # so the start is put inside them again by the same rule: a default start
+        # into both, a caller's into the link's domain.
+        family, link = fit.family, fit.link
+        lowered = fit.intercept_init is None and mean_space_violation(family, link) is not None
+        if lowered or link_domain_violation(link, family) is not None:
+            start_intercept = interior_start_intercept(
+                family,
+                link,
+                fit.dm.matvec(fit.beta) + fit.intercept + fit.offset,
+                fit.weights,
+                fit.intercept,
+                level=coefficient_initial_intercept(
+                    distribution=family, link=link, y=fit.y, sample_weight=fit.weights
+                ),
+            )
+            if start_intercept != fit.intercept:
+                fit.intercept, fit._deviance_init = start_intercept, None
+                fit._start_lowered = fit._start_lowered or lowered
         self._run, self._state, self._specs, self._order = (
             _scop_run,
             _scop_state,
