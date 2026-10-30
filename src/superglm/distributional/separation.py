@@ -199,18 +199,34 @@ def record_factor_smooth_levels(
         share_group_levels(interactions[key] for key in predictor.compiled.interaction_order)
 
 
+def _without(findings: list[SeparatedTerm], pinned: object) -> list[SeparatedTerm]:
+    """``findings`` less the ``pinned`` label; a term left with none is dropped."""
+    kept = [replace(f, labels=[label for label in f.labels if label != pinned]) for f in findings]
+    return [f for f in kept if f.labels]
+
+
 def _scan_design_cells(
-    design: CompiledPredictorDesign, frame: EagerFrame, off_side: NDArray, weights: NDArray
+    design: CompiledPredictorDesign,
+    frame: EagerFrame,
+    off_side: NDArray,
+    weights: NDArray,
+    *,
+    intercept: bool,
 ) -> list[SeparatedTerm]:
-    """The response-boundary scan of one design's categorical terms, with ``off_side`` as response."""
-    findings = [
-        finding
-        for name, spec in design.specs.items()
-        if isinstance(spec, Categorical)
-        for finding in scan_categorical_term(
+    """The response-boundary scan of one design's categorical terms, with ``off_side`` as response.
+
+    The scan walks a reference level along the intercept, so without one the
+    reference level, and the cell of two reference levels, are pinned at the
+    offset and not reported.
+    """
+    findings: list[SeparatedTerm] = []
+    for name, spec in design.specs.items():
+        if not isinstance(spec, Categorical):
+            continue
+        found = scan_categorical_term(
             name, spec, frame.column_array(name), off_side, weights, ("zero",)
         )
-    ]
+        findings.extend(found if intercept else _without(found, spec._base_level))
     for name in design.interaction_order:
         ispec = design.interaction_specs[name]
         if not isinstance(ispec, CategoricalInteraction):
@@ -222,9 +238,11 @@ def _scan_design_cells(
         spec2, x2 = resolve_interaction_parent_of(
             ispec, design.specs.get(p2), frame.column_array(p2)
         )
-        findings.extend(
-            scan_interaction_term(name, spec1, spec2, x1, x2, p1, p2, off_side, weights, ("zero",))
+        found = scan_interaction_term(
+            name, spec1, spec2, x1, x2, p1, p2, off_side, weights, ("zero",)
         )
+        pinned = (getattr(spec1, "_base_level", None), getattr(spec2, "_base_level", None))
+        findings.extend(found if intercept else _without(found, pinned))
     return findings
 
 
@@ -268,7 +286,11 @@ def scan_censored_separation(
             findings.extend(
                 replace(finding, term=f"{predictor.name}:{finding.term}", boundary=label)
                 for finding in _scan_design_cells(
-                    predictor.compiled, frame, np.where(on_side, 0.0, 1.0), weights
+                    predictor.compiled,
+                    frame,
+                    np.where(on_side, 0.0, 1.0),
+                    weights,
+                    intercept=predictor.intercept,
                 )
             )
     return findings

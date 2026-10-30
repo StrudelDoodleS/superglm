@@ -1089,6 +1089,38 @@ def test_a_left_censored_mean_form_scale_level_is_separated():
         )
 
 
+def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated():
+    # Level b is the reference of a scale predictor with no intercept, so its
+    # scale is pinned and cannot run off, however its rows are censored.
+    y_a = np.exp(np.linspace(-1.0, 1.0, 20))
+    y = np.concatenate([y_a, np.full(5, 0.5)])
+    group = np.array(["a"] * 20 + ["b"] * 5)
+    lower = np.where(group == "b", 0.5, -np.inf)
+    family = LogNormalLS()
+    model = SuperLSS(
+        family,
+        family.mean(),
+        family.scale(cat("g", base="b"), intercept=False),
+        separation="error",
+    )
+    model.fit(pd.DataFrame({"g": group}), y, censoring=(lower, None))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    pinned = float(fitted["scale"].iloc[1])
+
+    def negative(point):
+        mean, scale = np.exp(point)
+        location = np.log(mean) - 0.5 * scale**2
+        return -(
+            stats.norm.logpdf(np.log(y_a), location, scale).sum()
+            - np.log(y_a).sum()
+            + 5 * stats.norm.logcdf(np.log(0.5), np.log(mean) - 0.5 * pinned**2, pinned)
+        )
+
+    mean, scale = np.exp(_mle(negative, np.array([0.0, np.log(0.5)])))
+    np.testing.assert_allclose(fitted["mean"], [mean, mean], rtol=1e-5)
+    assert float(fitted["scale"].iloc[0]) == pytest.approx(scale, rel=1e-5)
+
+
 def test_a_wide_log_window_far_from_overflow_keeps_its_mass():
     # log1p((upper - lower)/lower) overflows here; the window is 9e-18 sd wide
     # in log space, and both log tails round to log(1/2).
