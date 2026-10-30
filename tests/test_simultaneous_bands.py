@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm._roundoff import EPS, gamma
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 
@@ -211,6 +212,24 @@ def _rotated_within_repeated_eigenvalues(eigh, mix):
     return changed
 
 
+def _null_eigenvalues_under_the_cut(eigh, nullity):
+    """``eigh`` with its ``nullity`` smallest eigenvalues placed at half the principal root's cut.
+
+    The exact-zero eigenvalues of a constructed covariance come back as rounding
+    of order ``u lambda_max``, whose sign and size depend on the BLAS kernel and
+    on the units, so whether each lands under the cut is the platform's.  The
+    test places them instead; ``test_the_principal_root_drops_...`` pins the cut.
+    """
+
+    def placed(matrix, *args, **kwargs):
+        values, vectors = eigh(matrix, *args, **kwargs)
+        values = values.copy()
+        values[:nullity] = 0.5 * matrix.shape[0] * EPS * values[-1]
+        return values, vectors
+
+    return placed
+
+
 def _reversal(size):
     return np.eye(size)[::-1]
 
@@ -235,11 +254,12 @@ def test_a_repeated_eigenvalue_draws_one_band_in_any_eigenbasis_and_units(
     rounding at other response units does, leaves the critical value alone at
     units 1, 10 and 1e-19.  The principal root moves with the eigensolver's
     backward error, ``k gamma_k`` of the covariance, amplified at most by the
-    resolved condition number.  Mutation: the sign-fixed root ``V Lambda^1/2``
-    moves it by 1e-4 to 3e-2 once ``nullity > 0``, and the root without its
-    null-direction cut by about 1e-9.
+    resolved condition number.  The null eigenvalues are placed under the
+    root's cut (``_null_eigenvalues_under_the_cut``), so the comparison does not
+    depend on where a platform's eigensolver rounds them.  Mutation: the
+    sign-fixed root ``V Lambda^1/2`` moves it by 1e-4 to 3e-2 once
+    ``nullity > 0``.
     """
-    from superglm._roundoff import gamma
     from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 
     covariance, active_groups = spline_model._coef_covariance
@@ -267,11 +287,38 @@ def test_a_repeated_eigenvalue_draws_one_band_in_any_eigenbasis_and_units(
             )
         return value
 
-    reference = critical_value(1.0, real_eigh)
-    changed = _rotated_within_repeated_eigenvalues(real_eigh, mix)
+    placed = _null_eigenvalues_under_the_cut(real_eigh, nullity)
+    reference = critical_value(1.0, placed)
+    changed = _rotated_within_repeated_eigenvalues(placed, mix)
     tolerance = k * gamma(k) * values.max() / values[values > 0].min()
     for units in (1.0, 10.0, 1e-19):
         assert critical_value(units, changed) == pytest.approx(reference, rel=tolerance, abs=0.0)
+
+
+def test_the_principal_root_drops_the_eigenvalues_within_its_cut(monkeypatch):
+    """An eigenvalue within ``k eps lambda_max`` of zero is a null direction; one above it is kept.
+
+    The decision is on the eigenvalues the eigensolver returns, so the test
+    supplies them, at a factor of two either side of the cut: a negative one,
+    one at half the cut and one at twice it, beside three resolved ones.  The
+    root ``V diag(sqrt(lambda)) V'`` then has the square roots of the resolved
+    and kept ones on its diagonal in ``V``'s basis, to ``k gamma_k`` of its norm.
+    Mutation: dropping only the non-positive eigenvalues keeps the one at half
+    the cut, 5e-8 of the root's diagonal against a tolerance of 1e-15.
+    """
+    from superglm.inference._term_covariance import _principal_root
+
+    k = 6
+    basis, _ = np.linalg.qr(np.random.default_rng(5).standard_normal((k, k)))
+    cut = k * EPS * 4.0
+    values = np.array([-cut, 0.5 * cut, 2.0 * cut, 1.0, 2.0, 4.0])
+    monkeypatch.setattr(np.linalg, "eigh", lambda matrix: (values, basis))
+
+    root = _principal_root((basis * values) @ basis.T)
+
+    kept = np.sqrt(np.where(values > cut, values, 0.0))
+    tolerance = k * gamma(k) * kept.max()
+    np.testing.assert_allclose(basis.T @ root @ basis, np.diag(kept), rtol=0.0, atol=tolerance)
 
 
 def test_a_failing_cholesky_cannot_reach_term_inference(spline_model, monkeypatch):
