@@ -35,6 +35,7 @@ WindowFunction = Callable[[NDArray, NDArray, NDArray[np.intp]], TailChannels]
 def bind_observation(
     observation: ObservationContract,
     response: NDArray,
+    weights: object,
     *,
     support_lower: float,
     family_name: str,
@@ -42,7 +43,8 @@ def bind_observation(
     """The contract a bounds-aware family stores: complete, or bounds on its support.
 
     Bounds left with no effect once read on the support make the contract
-    complete, so the plan is the complete one.
+    complete, so the plan is the complete one.  Refusals name input rows
+    through the resolved weights' ``input_positions``.
     """
     if observation == COMPLETE_OBSERVATION:
         return observation
@@ -64,25 +66,45 @@ def bind_observation(
         (bounds.side == LEFT_CENSORED) & (response <= support_lower)
     )
     if np.any(impossible):
+        positions = getattr(weights, "input_positions", None)
+        first = int(np.flatnonzero(impossible)[0])
+        if positions is not None and len(positions) == n_rows:
+            first = int(positions[first])
         raise ValueError(
             f"{int(np.count_nonzero(impossible))} row(s) are censored or truncated at or below "
-            f"the start of the {family_name} response support, so they have zero probability; "
-            "drop those bounds or those rows"
+            f"the start of the {family_name} response support, so they have zero probability "
+            f"(first at input row {first}); drop those bounds or those rows"
         )
     if len(bounds.truncated_rows()) == 0 and len(bounds.censored_rows()) == 0:
         return COMPLETE_OBSERVATION
     return bounded_observation(bounds)
 
 
+def _window_side(values: object, n_rows: int, name: str) -> NDArray[np.float64]:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim > 1 or array.size not in (1, n_rows):
+        raise ValueError(f"{name} must be a number or one number per row ({n_rows} rows)")
+    if np.any(np.isnan(array)):
+        raise ValueError(f"{name} must not be NaN; use -inf or inf for an open end")
+    return np.broadcast_to(array.reshape(-1), (n_rows,))
+
+
 def log_window_values(
     lower: NDArray,
     upper: NDArray,
+    n_rows: int,
     window: WindowFunction,
 ) -> NDArray[np.float64]:
-    """``log P(lower < Y <= upper)`` per row; zero where both ends are open."""
-    lo = np.asarray(lower, dtype=np.float64)
-    hi = np.asarray(upper, dtype=np.float64)
-    values = np.zeros(len(lo), dtype=np.float64)
+    """``log P(lower < Y <= upper)`` per row; zero where both ends are open.
+
+    Each end is a number or one number per row, with ``lower <= upper``; an
+    empty window (``lower == upper``) has log probability ``-inf``.
+    """
+    lo = _window_side(lower, n_rows, "lower")
+    hi = _window_side(upper, n_rows, "upper")
+    if np.any(lo > hi):
+        raise ValueError("each window must have lower <= upper")
+    values = np.zeros(n_rows, dtype=np.float64)
     rows = np.flatnonzero((lo > -np.inf) | (hi < np.inf))
     if len(rows):
         values[rows] = window(lo[rows], hi[rows], rows)[0]

@@ -17,8 +17,10 @@ from superglm.distributional.family import (
     DistributionalFamily,
     DistributionFunctionFamily,
     FamilyLikelihoodPlan,
+    ObservationContract,
     _likelihood_reuse_contract,
     bounded_observation,
+    plan_observation,
 )
 from superglm.distributional.fit_state import (
     CompactNullModel,
@@ -56,8 +58,10 @@ from superglm.distributional.result import (
 )
 from superglm.distributional.separation import (
     apply_separation_policy,
+    format_censored_separation_message,
     predictor_response_boundaries,
     record_factor_smooth_levels,
+    scan_censored_separation,
     scan_predictor_separation,
     validate_separation_policy,
 )
@@ -565,7 +569,9 @@ def _fit_candidate(
             positions,
         )
     )
-    if not observation.is_complete and not family.capabilities.censored_response:
+    if not observation.is_complete and not getattr(
+        getattr(family, "capabilities", None), "censored_response", False
+    ):
         raise UnsupportedLikelihoodContractError(
             f"{type(family).__name__} does not fit truncated or censored rows; GaussianLS, "
             "LogNormalLS and GeneralizedParetoLSS do, or drop truncation= and censoring= to "
@@ -595,6 +601,14 @@ def _fit_candidate(
     if likelihood_plan.weights.root_digest != resolved_weights.root_digest:
         raise UnsupportedLikelihoodContractError(
             "the family likelihood changed the fitted likelihood weights"
+        )
+    if not observation.is_complete and not isinstance(
+        getattr(likelihood_plan, "observation", None), ObservationContract
+    ):
+        raise UnsupportedLikelihoodContractError(
+            f"{type(family).__name__} bound truncated or censored rows into a plan with no "
+            "observation contract; a bounds-aware plan exposes it as plan.observation, which "
+            "the diagnostics, the corrected covariance and the curvature choice read"
         )
     certificate_problem = legacy_identifier_problem(likelihood_plan)
     if certificate_problem is not None:
@@ -634,6 +648,16 @@ def _fit_candidate(
             ),
             separation_policy,
             stacklevel=4,
+        )
+    bound_rows = plan_observation(likelihood_plan).bounds
+    if bound_rows is not None and separation_policy != "ignore":
+        apply_separation_policy(
+            scan_censored_separation(
+                compiled, retained_frame, bound_rows.side, resolved_weights.values
+            ),
+            separation_policy,
+            stacklevel=4,
+            formatter=format_censored_separation_message,
         )
     if len(family.parameters) == len(templates):
         # Recorded under every policy, as SuperGLM records them: "ignore"

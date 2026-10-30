@@ -188,11 +188,9 @@ Measured on master, one thread, 10^6 rows, best of 5:
 - Predictor compilation: 1.68 s.
 - The search took 6 EFS iterations.
 
-**Estimates (not measured in a fit).**
+**Estimates (not measured in a fit).** The Gaussian, log-normal and generalized Pareto
+estimates written here before the build are superseded by the measurements above.
 
-- **Gaussian / log-normal truncation:** about 50 ns per truncated row per call, or roughly
-  0.3 s on the 8.9 s fit.
-- **Generalized Pareto censoring:** negligible.
 - **Gamma truncation:**
   - The sweep's vectorised numpy prototype took 13.5 µs/row; a numba kernel is estimated
     at 1-3 µs/row.

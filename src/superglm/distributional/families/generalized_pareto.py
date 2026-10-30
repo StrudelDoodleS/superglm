@@ -257,7 +257,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def bind_likelihood(self, y, weights, observation) -> GeneralizedParetoLikelihoodPlan:
         response = _validated_response(y)
         observation = bind_observation(
-            observation, response, support_lower=0.0, family_name="GeneralizedParetoLSS"
+            observation, response, weights, support_lower=0.0, family_name="GeneralizedParetoLSS"
         )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
@@ -573,7 +573,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
             return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
 
-        return readonly(log_window_values(lower, upper, window))
+        return readonly(log_window_values(lower, upper, len(values), window))
 
     def cdf(self, y, theta) -> NDArray[np.float64]:
         values = self._theta(theta, None)

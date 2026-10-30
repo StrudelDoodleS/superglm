@@ -825,7 +825,14 @@ predictor the family says can escape (mean and dispersion for `TweedieLSS`,
 mean and theta for `NegativeBinomialLS`) before any coefficient is fitted and
 emits a `SeparationWarning` naming the levels and the remedies; `"error"`
 refuses the design; `"ignore"` skips the scan. `GaussianLS` and `GammaLS`
-have no reachable boundary and are never scanned. Ordered-categorical smooths
+have no reachable boundary and are never scanned for it.
+
+Censoring has the same failure. A level whose rows are all censored on the
+same side, such as a policy type whose every claim was paid at its limit, has
+only a bound on its response, so its effect can walk to infinity too. A fit
+with censored rows scans every `Categorical` term and `CategoricalInteraction`
+on every predictor for such levels and cells, under the same `separation`
+policy. Ordered-categorical smooths
 are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
