@@ -1405,6 +1405,26 @@ class TestDeviance:
         assert metrics.explained_deviance == 0.0
         assert model._fit_stats.explained_deviance == 0.0
 
+    @pytest.mark.parametrize("units", [1e-11, 1e-30])
+    def test_gamma_null_mean_is_the_weighted_mean_in_any_units(self, units):
+        """A Gamma/log fit and its deviance are unit-free, so its explained deviance is too."""
+        rng = np.random.default_rng(12)
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 2000)})
+        y = rng.gamma(3.0, np.exp(0.5 + 0.8 * X["x"].to_numpy()) / 3.0)
+
+        def explained(scale):
+            model = SuperGLM(family="gamma", selection_penalty=0.0, features={"x": Numeric()})
+            model.fit(X, scale * y)
+            return model.metrics(X, scale * y).explained_deviance, model
+
+        reference, _ = explained(1.0)
+        rescaled, model = explained(units)
+
+        # Two converged fits differ in their coefficients by up to the solver's
+        # tol (1e-6); the deviance is stationary there, so it moves by O(tol^2).
+        assert rescaled == pytest.approx(reference, rel=1e-9)
+        assert model._fit_stats.explained_deviance == pytest.approx(reference, rel=1e-9)
+
     def test_constant_response_null_within_eight_ulps_is_the_exact_null(self):
         """The 8-ulp exact-null branch of ``_explained_deviance``, both ways.
 
