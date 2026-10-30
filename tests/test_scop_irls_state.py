@@ -820,3 +820,56 @@ def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(case: 
     assert not model.result.converged
     # the identity and inverse links both need a positive predictor for a positive mean
     assert int(np.sum(eta <= 0.0)) > 0
+
+
+def test_a_scop_trial_carries_the_rounding_allowance_of_its_own_merit(monkeypatch) -> None:
+    """The merit's allowance is a field of the trial state, read for the state the search holds.
+
+    The search reads the allowance of the candidate and of the committed state
+    it is handed; each is the one ``_with_merit`` formed for that state, a
+    finite nonnegative number, and a state the search does not hold has none.
+    """
+    import superglm.solvers.irls_direct._fit as irls_direct
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    model, y, weights, offset = _scop_fit_inputs()
+    formed: list[_SCOPTrialState] = []
+    real_with_merit = irls_scop._IRLSDirectSCOPStep._with_merit
+
+    def recording(self, trial):
+        state = real_with_merit(self, trial)
+        formed.append(state)
+        return state
+
+    checked: list[float] = []
+    real_select = irls_scop._select_irls_trial
+
+    def spy(**kwargs):
+        candidate, current = kwargs["proposal"], kwargs["committed"]
+        expected = sum(
+            next(state.merit_error for state in formed if state.irls is held)
+            for held in (candidate, current)
+        )
+        read = kwargs["merit_roundoff"](candidate, current)
+        assert read == expected
+        assert np.isfinite(read) and read >= 0.0
+        checked.append(read)
+        with pytest.raises(StopIteration):
+            kwargs["merit_roundoff"](candidate, object())
+        return real_select(**kwargs)
+
+    monkeypatch.setattr(irls_scop._IRLSDirectSCOPStep, "_with_merit", recording)
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=3,
+        weight_semantics="frequency",
+    )
+    assert checked
