@@ -31,33 +31,18 @@ _LINE_COLOR = _PLOTLY_LINE_COLOR
 
 def _validated_density_weights(model, sample_weight, n_rows: int) -> NDArray:
     """Validate weights used only to display the empirical row density."""
-    from superglm.distributions import Tweedie
-    from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
+    from superglm._utils import contract_weights
+    from superglm.solvers.dispersion import model_weight_semantics
 
     if n_rows == 0:
         raise ValueError("X must be non-empty")
-    if sample_weight is None:
-        weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie) and (
-        # Strict positivity is a Tweedie DENSITY requirement under the prior
-        # contract only; read as replication counts, a zero weight is a row
-        # that appears no times, which fitting accepts and so must this.
-        model_weight_semantics(model) == PRIOR_WEIGHTS
-    ):
-        from superglm._utils import _validate_strict_prior_weights
-
-        weights = _validate_strict_prior_weights(sample_weight, n_rows)
-    else:
-        from superglm.model.input_validation import _finite_vector
-
-        weights = _finite_vector("sample_weight", sample_weight, n_rows)
-        if np.any(weights < 0.0):
-            raise ValueError("sample_weight must be nonnegative")
-        if not np.any(weights > 0.0):
-            raise ValueError("sample_weight must not be all zero")
-    if not np.isfinite(np.sum(weights, dtype=np.float64)):
-        raise ValueError("sample_weight must have a finite sum")
-    return weights
+    return contract_weights(
+        sample_weight,
+        n_rows,
+        family=model._distribution,
+        weight_semantics=model_weight_semantics(model),
+        finite_sum=True,
+    )
 
 
 def plot_interaction(

@@ -15,29 +15,18 @@ from superglm._frame import FrameLike, as_eager_frame
 
 def _redundancy_geometry_weights(model, sample_weight, n_rows: int) -> NDArray:
     """Validate weights and return the row mass used by spline geometry."""
-    from superglm.distributions import Tweedie
+    from superglm._utils import contract_weights
     from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
     if n_rows == 0:
         raise ValueError("X must be non-empty")
     weight_semantics = model_weight_semantics(model)
-    if sample_weight is None:
-        weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
-        from superglm._utils import _validate_strict_prior_weights
-
-        weights = _validate_strict_prior_weights(sample_weight, n_rows)
-    else:
-        from superglm.model.input_validation import _finite_vector
-
-        # The weights are validated under either contract; only what counts as
-        # admissible differs, and only for Tweedie above.  What the contract
-        # decides here is the row mass the geometry follows, below.
-        weights = _finite_vector("sample_weight", sample_weight, n_rows)
-        if np.any(weights < 0.0):
-            raise ValueError("sample_weight must be nonnegative")
-        if not np.any(weights > 0.0):
-            raise ValueError("sample_weight must not be all zero")
+    weights = contract_weights(
+        sample_weight,
+        n_rows,
+        family=model._distribution,
+        weight_semantics=weight_semantics,
+    )
 
     if weight_semantics == PRIOR_WEIGHTS:
         # Prior weights are precision, not replicated design rows, so learned

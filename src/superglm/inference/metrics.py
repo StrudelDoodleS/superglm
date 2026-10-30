@@ -410,35 +410,15 @@ class ModelMetrics:
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
 
+        from superglm._utils import contract_weights
         from superglm.solvers.dispersion import model_weight_semantics
 
         self._weight_semantics = model_weight_semantics(model)
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
-        if sample_weight is None:
-            self._weights = np.ones(n)
-        else:
-            from superglm.distributions import Tweedie
-
-            if isinstance(self._family, Tweedie) and self._weight_semantics == "prior":
-                from superglm._utils import _validate_strict_prior_weights
-
-                self._weights = _validate_strict_prior_weights(sample_weight, n)
-            else:
-                from superglm.model.input_validation import _finite_vector
-
-                self._weights = _finite_vector("sample_weight", sample_weight, n)
-                if np.any(self._weights < 0.0):
-                    raise ValueError("sample_weight must be nonnegative")
-                if not np.any(self._weights > 0.0):
-                    raise ValueError("sample_weight must not be all zero")
-            # Evaluation takes its OWN rows and weights, so the fit-time
-            # lattice check does not cover it: a clean fitted model can be
-            # scored on holdout rows whose `w * y` is not integral, and both
-            # the reported log-likelihood and the randomized quantile
-            # residuals would then be silently fabricated -- the residual
-            # rounds the impossible count onto a neighbouring lattice point
-            # and inverts the CDF there. Re-check at this boundary.
+        self._weights = contract_weights(
+            sample_weight, n, family=self._family, weight_semantics=self._weight_semantics
+        )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)

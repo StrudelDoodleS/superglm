@@ -55,26 +55,15 @@ def term_importance(
     frame = as_eager_frame(X)
     beta = model.result.beta
     n = len(frame)
-    if sample_weight is None:
-        weights = np.ones(n, dtype=np.float64)
-    else:
-        from superglm.distributions import Tweedie
-        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
+    from superglm._utils import contract_weights
+    from superglm.solvers.dispersion import model_weight_semantics
 
-        if isinstance(model._distribution, Tweedie) and (
-            model_weight_semantics(model) == PRIOR_WEIGHTS
-        ):
-            from superglm._utils import _validate_strict_prior_weights
-
-            weights = _validate_strict_prior_weights(sample_weight, n)
-        else:
-            from superglm.model.input_validation import _finite_vector
-
-            weights = _finite_vector("sample_weight", sample_weight, n)
-            if np.any(weights < 0.0):
-                raise ValueError("sample_weight must be nonnegative")
-            if not np.any(weights > 0.0):
-                raise ValueError("sample_weight must not be all zero")
+    weights = contract_weights(
+        sample_weight,
+        n,
+        family=model._distribution,
+        weight_semantics=model_weight_semantics(model),
+    )
     w_sum = float(np.sum(weights, dtype=np.float64))
     if not np.isfinite(w_sum):
         raise ValueError("sample_weight must have a finite sum")
@@ -304,10 +293,12 @@ def _drop_term_holdout(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
+    from superglm._utils import contract_weights
     from superglm.distributions import clip_mu, validate_response
     from superglm.links import stabilize_eta
     from superglm.model import base
     from superglm.model.input_validation import _finite_vector
+    from superglm.solvers.dispersion import model_weight_semantics
 
     beta = model.result.beta
     dist = model._distribution
@@ -320,27 +311,13 @@ def _drop_term_holdout(
         check_finite=False,
     )
     validate_response(y_arr, dist)
-    if sample_weight_val is None:
-        w = np.ones(n_val, dtype=np.float64)
-    else:
-        from superglm.distributions import Tweedie
-        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
-
-        # Strict positivity is a Tweedie density requirement under the prior
-        # contract only -- read as replication the weight never enters the
-        # compound-Poisson normalizer. Scoping this on the family alone made
-        # holdout reject zero weights that the fit itself accepts, and
-        # ``term_importance`` above already gets it right.
-        if isinstance(dist, Tweedie) and model_weight_semantics(model) == PRIOR_WEIGHTS:
-            from superglm._utils import _validate_strict_prior_weights
-
-            w = _validate_strict_prior_weights(sample_weight_val, n_val)
-        else:
-            w = _finite_vector("sample_weight_val", sample_weight_val, n_val)
-            if np.any(w < 0.0):
-                raise ValueError("sample_weight_val must be nonnegative")
-            if not np.any(w > 0.0):
-                raise ValueError("sample_weight_val must not be all zero")
+    w = contract_weights(
+        sample_weight_val,
+        n_val,
+        family=dist,
+        weight_semantics=model_weight_semantics(model),
+        name="sample_weight_val",
+    )
     offset_arr = (
         np.zeros(n_val, dtype=np.float64)
         if offset_val is None

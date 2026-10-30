@@ -94,17 +94,9 @@ def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:
 
 def _frequency_weights(sample_weight, n: int) -> tuple[NDArray, float]:
     """Validate replication weights and return their likelihood size."""
-    from superglm.model.input_validation import _finite_vector
+    from superglm._utils import contract_weights
 
-    if sample_weight is None:
-        weights = np.ones(n, dtype=np.float64)
-    else:
-        weights = _finite_vector("sample_weight", sample_weight, n)
-        if np.any(weights < 0.0):
-            raise ValueError("sample_weight must be nonnegative")
-        if not np.any(weights > 0.0):
-            raise ValueError("sample_weight must not be all zero")
-
+    weights = contract_weights(sample_weight, n)
     likelihood_size = float(np.sum(weights, dtype=np.float64))
     if not np.isfinite(likelihood_size):
         raise ValueError("sample_weight must have a finite sum")
@@ -507,6 +499,7 @@ def vuong_test(
     if correction not in {"none", "aic", "bic"}:
         raise ValueError(f"correction must be 'none', 'aic', or 'bic', got {correction!r}.")
 
+    from superglm._utils import contract_weights
     from superglm.distributions import Tweedie
     from superglm.model.input_validation import _finite_vector
 
@@ -531,22 +524,16 @@ def vuong_test(
         )
 
     if contract_a == PRIOR_WEIGHTS and contract_b == PRIOR_WEIGHTS:
-        strict_prior = isinstance(getattr(model_a, "_distribution"), Tweedie) or isinstance(
-            getattr(model_b, "_distribution"), Tweedie
+        # Either model being Tweedie makes the weights strictly positive.
+        family = getattr(model_a, "_distribution")
+        if not isinstance(family, Tweedie):
+            family = getattr(model_b, "_distribution")
+        prior_weights = (
+            None
+            if sample_weight is None
+            else contract_weights(sample_weight, n, family=family, weight_semantics=PRIOR_WEIGHTS)
         )
-        if sample_weight is None:
-            prior_weights = None
-        elif strict_prior:
-            from superglm._utils import _validate_strict_prior_weights
-
-            prior_weights = _validate_strict_prior_weights(sample_weight, n)
-        else:
-            prior_weights = _finite_vector("sample_weight", sample_weight, n)
-            if np.any(prior_weights < 0.0):
-                raise ValueError("sample_weight must be nonnegative")
-            if not np.any(prior_weights > 0.0):
-                raise ValueError("sample_weight must not be all zero")
-        contract_weights = np.ones(n, dtype=np.float64) if prior_weights is None else prior_weights
+        evaluated_weights = np.ones(n, dtype=np.float64) if prior_weights is None else prior_weights
         ll_a = _per_obs_log_likelihood(
             model_a,
             X,
@@ -591,8 +578,8 @@ def vuong_test(
         # mixed-contract comparison legal at all -- so the evaluation carries
         # unit weights. Those still define a lattice for whichever model is
         # the counting one, which is why this arm is checked like the others.
-        contract_weights = np.ones(n, dtype=np.float64)
-        measure = contract_weights
+        evaluated_weights = np.ones(n, dtype=np.float64)
+        measure = evaluated_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -601,7 +588,7 @@ def vuong_test(
         likelihood_size = float(n)
     else:
         frequency_weights, likelihood_size = _frequency_weights(sample_weight, n)
-        contract_weights = measure = frequency_weights
+        evaluated_weights = measure = frequency_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -630,7 +617,7 @@ def vuong_test(
     for compared in (model_a, model_b):
         check_weight_contract(
             y_arr,
-            contract_weights,
+            evaluated_weights,
             compared._distribution,
             model_weight_semantics(compared),
         )

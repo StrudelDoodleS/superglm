@@ -38,21 +38,9 @@ def _validate_evaluation_weights(sample_weight, n_obs: int, *, family=None, weig
     if sample_weight is None:
         return None
 
-    from superglm.distributions import Tweedie
+    from superglm._utils import contract_weights
 
-    if isinstance(family, Tweedie) and weight_semantics == "prior":
-        from superglm._utils import _validate_strict_prior_weights
-
-        return _validate_strict_prior_weights(sample_weight, n_obs)
-
-    from superglm.model.input_validation import _finite_vector
-
-    weights = _finite_vector("sample_weight", sample_weight, n_obs)
-    if np.any(weights < 0.0):
-        raise ValueError("sample_weight must be nonnegative")
-    if not np.any(weights > 0.0):
-        raise ValueError("sample_weight must not be all zero")
-    return weights
+    return contract_weights(sample_weight, n_obs, family=family, weight_semantics=weight_semantics)
 
 
 def coerce_evaluation_data(

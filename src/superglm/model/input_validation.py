@@ -12,13 +12,12 @@ from numpy.typing import NDArray
 
 from superglm import _count_lattice as _count_lattice_module
 from superglm._frame import EagerFrame, as_eager_frame
-from superglm._utils import _validate_strict_prior_weights
+from superglm._utils import contract_weights
 from superglm.distributions import (
     Binomial,
     Distribution,
     NegativeBinomial,
     Poisson,
-    Tweedie,
     validate_response,
 )
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
@@ -413,22 +412,9 @@ def validate_fit_input(
     # validate_response() performs the universal finite check together with the
     # family-domain check, so avoid scanning the response twice here.
     y_arr = _finite_vector("y", y, n_rows, require_nonempty=True, check_finite=False)
-    if sample_weight is None:
-        weight_arr = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
-        # Strict positivity is a Tweedie density requirement, not a statement
-        # about the weight contract: the compound-Poisson normalizer carries
-        # ``log w``, so a zero prior weight is an unevaluable density rather
-        # than an uninformative row.  Read as a replication count the weight
-        # never enters that normalizer, and zero means what it means for every
-        # other family -- a row that appears no times.
-        weight_arr = _validate_strict_prior_weights(sample_weight, n_rows)
-    else:
-        weight_arr = _finite_vector("sample_weight", sample_weight, n_rows)
-    if np.any(weight_arr < 0.0):
-        raise ValueError("sample_weight must be nonnegative")
-    if not np.any(weight_arr > 0.0):
-        raise ValueError("sample_weight must not be all zero")
+    weight_arr = contract_weights(
+        sample_weight, n_rows, family=family, weight_semantics=weight_semantics
+    )
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
     # Both contract checks run only once every ordinary validation has passed.
