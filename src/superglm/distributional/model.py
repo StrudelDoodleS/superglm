@@ -783,8 +783,14 @@ def refit_dense_distributional(
     retain_rows: bool | None = None,
     phase_recorder: FitPhaseRecorder | None = None,
     separation: str = "warn",
+    truncation: BoundPair = None,
+    censoring: BoundPair = None,
 ) -> DenseDistributionalModel:
-    """Replace a fitted revision only after its complete candidate validates."""
+    """Replace a fitted revision only after its complete candidate validates.
+
+    Bounds describe the rows being fitted, so a refit takes the caller's
+    ``truncation`` and ``censoring`` as ``fit`` does; none are carried over.
+    """
     if not isinstance(model, DenseDistributionalModel):
         raise TypeError("model must be a DenseDistributionalModel")
     with measure_phase(phase_recorder, "fit_total"):
@@ -826,6 +832,8 @@ def refit_dense_distributional(
             # The fit state records no separation policy, so a refit takes
             # the caller's argument rather than re-stating a stored one.
             separation=separation,
+            truncation=truncation,
+            censoring=censoring,
         )
         model._publish(candidate)
         return model

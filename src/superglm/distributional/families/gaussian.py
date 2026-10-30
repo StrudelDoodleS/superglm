@@ -30,6 +30,7 @@ from superglm.distributional.families._response_bounds import (
     bind_observation,
     bounded_channels,
     censored_carrier,
+    log_window_values,
     refuse_bounded,
 )
 from superglm.distributional.families._variance import _variance_product
@@ -443,7 +444,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     ) -> GaussianLikelihoodPlan:
         response = _validated_response(y)
         observation = bind_observation(
-            observation, len(response), support_lower=-np.inf, family_name="GaussianLS"
+            observation, response, support_lower=-np.inf, family_name="GaussianLS"
         )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
@@ -657,6 +658,28 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             family_name="GaussianLS",
         )
         return readonly(parameters[:, 0])
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` under each row's law, from the tail-safe window kernel."""
+        values = _validated_parameter_matrix(
+            theta, n_observations=None, parameters=self.parameters, family_name="GaussianLS"
+        )
+        law = (
+            np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
+        )
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return gaussian_window(
+                lo, hi, values[rows, 0], values[rows, 1], law[rows], "prior", derivative_order=0
+            )
+
+        return readonly(log_window_values(lower, upper, window))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``P(Y <= y)`` per row from ``(location, scale)``."""

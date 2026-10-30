@@ -26,7 +26,7 @@ from superglm.distributional.family import (
     bounded_observation,
 )
 from superglm.distributional.kernels._response_tails import TailChannels
-from superglm.distributional.observation import ResponseBounds
+from superglm.distributional.observation import LEFT_CENSORED, ResponseBounds
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
 WindowFunction = Callable[[NDArray, NDArray, NDArray[np.intp]], TailChannels]
@@ -34,14 +34,19 @@ WindowFunction = Callable[[NDArray, NDArray, NDArray[np.intp]], TailChannels]
 
 def bind_observation(
     observation: ObservationContract,
-    n_rows: int,
+    response: NDArray,
     *,
     support_lower: float,
     family_name: str,
 ) -> ObservationContract:
-    """The contract a bounds-aware family stores: complete, or bounds on its support."""
+    """The contract a bounds-aware family stores: complete, or bounds on its support.
+
+    Bounds left with no effect once read on the support make the contract
+    complete, so the plan is the complete one.
+    """
     if observation == COMPLETE_OBSERVATION:
         return observation
+    n_rows = len(response)
     if (
         not isinstance(observation, ObservationContract)
         or observation.kind != "censored_truncated"
@@ -54,7 +59,34 @@ def bind_observation(
         raise UnsupportedLikelihoodContractError(
             f"{family_name} response rows do not match the response-bound rows"
         )
-    return bounded_observation(observation.bounds.on_support(support_lower))
+    bounds = observation.bounds.on_support(support_lower)
+    impossible = (bounds.upper <= support_lower) | (
+        (bounds.side == LEFT_CENSORED) & (response <= support_lower)
+    )
+    if np.any(impossible):
+        raise ValueError(
+            f"{int(np.count_nonzero(impossible))} row(s) are censored or truncated at or below "
+            f"the start of the {family_name} response support, so they have zero probability; "
+            "drop those bounds or those rows"
+        )
+    if len(bounds.truncated_rows()) == 0 and len(bounds.censored_rows()) == 0:
+        return COMPLETE_OBSERVATION
+    return bounded_observation(bounds)
+
+
+def log_window_values(
+    lower: NDArray,
+    upper: NDArray,
+    window: WindowFunction,
+) -> NDArray[np.float64]:
+    """``log P(lower < Y <= upper)`` per row; zero where both ends are open."""
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    values = np.zeros(len(lo), dtype=np.float64)
+    rows = np.flatnonzero((lo > -np.inf) | (hi < np.inf))
+    if len(rows):
+        values[rows] = window(lo[rows], hi[rows], rows)[0]
+    return values
 
 
 def refuse_bounded(observation: ObservationContract, what: str) -> None:
@@ -141,5 +173,6 @@ __all__ = [
     "bind_observation",
     "bounded_channels",
     "censored_carrier",
+    "log_window_values",
     "refuse_bounded",
 ]

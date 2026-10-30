@@ -13,7 +13,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import optimize, stats
+from scipy import optimize, special, stats
 
 from superglm import GammaLS, GaussianLS, GeneralizedParetoLSS, LogNormalLS, SuperLSS, s
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
@@ -526,3 +526,160 @@ def test_diagnostics_warn_once_when_a_bounded_fit_gets_no_bounds():
         bounded.check(X, body, "x", truncation=(None, u))
         complete.check(X, body, "x")
         complete.residuals(X, body)
+
+
+# -- review regressions -------------------------------------------------------
+
+
+def _intercept_gaussian(n=2_000, seed=560):
+    rng = np.random.default_rng(seed)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(), family.scale())
+    model.fit(_intercepts(n), rng.normal(0.0, 1.0, n))
+    row = model.predict_parameters(_intercepts(1)).iloc[0]
+    return model, float(row["location"]), float(row["scale"])
+
+
+@pytest.mark.parametrize(("start", "position"), [(9.0, 9.01), (9.0, 9.1), (8.0, 8.1), (5.0, 5.1)])
+def test_pit_of_a_row_truncated_far_in_the_upper_tail_keeps_its_window(start, position):
+    # The window's mass is a difference of CDF values that both round to one
+    # beyond about 8 sd; the PIT must come from the survival side instead.
+    model, mu, sigma = _intercept_gaussian()
+    lower, y = mu + start * sigma, mu + position * sigma
+    residuals = model.residual_set(_intercepts(1), np.array([y]), truncation=(lower, None))
+    law = stats.norm(mu, sigma)
+    expected = 1.0 - law.sf(y) / law.sf(lower)
+    assert residuals.pit[0] == pytest.approx(expected, rel=1e-9)
+
+
+def test_bounds_with_no_effect_on_the_support_leave_the_fit_complete():
+    y = np.exp(np.linspace(-1.0, 1.0, 30))
+    family = LogNormalLS(parametrisation="location")
+
+    def fitted(**kwargs):
+        model = SuperLSS(family, family.location(), family.scale(), coefficient_curvature="fisher")
+        return model.fit(_intercepts(30), y, **kwargs)
+
+    no_op = fitted(truncation=(0.0, None))
+    plain = fitted()
+    state = no_op._require_fitted().fit_state
+    assert state.truncated_row_count == 0
+    assert (
+        state.family_likelihood_plan_identifier
+        == plain._require_fitted().fit_state.family_likelihood_plan_identifier
+    )
+    # Scoring reads the bounds on the support too, so the CRPS stays available.
+    table = no_op.scores(_intercepts(30), y, truncation=(0.0, None))
+    assert np.all(np.isfinite(table["crps"].to_numpy()))
+
+
+def test_rows_with_zero_probability_on_the_support_are_refused():
+    excess = np.array([0.0, 0.5, 1.0, 2.0, 4.0, 8.0])
+    with pytest.raises(ValueError, match="zero probability"):
+        _fit(GeneralizedParetoLSS(), excess, censoring=(0.0, None))
+
+
+def test_parameter_uncertainty_envelope_refuses_bounded_rows():
+    X, paid, limit = _smooth_problem(n=1_500, seed=561)
+    family = LogNormalLS(parametrisation="location")
+    model = SuperLSS(family, family.location(s("x")), family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, paid, censoring=(None, limit))
+    with pytest.raises(NotImplementedError, match="parameter_uncertainty=True"):
+        model.plot_data("qq", X=X, y=paid, censoring=(None, limit), parameter_uncertainty=True)
+    payload = model.plot_data("qq", X=X, y=paid, censoring=(None, limit))
+    assert payload is not None
+
+
+def test_mills_gap_agrees_with_the_direct_ratio_between_three_and_six():
+    # Below -3 the gap comes from the continued fraction; down to -6 the direct
+    # phi/Phi ratio cancels by under two digits, so it is an independent check.
+    x = -np.linspace(3.0 + 1e-9, 6.0, 25)
+    _, _, gap = inverse_mills(x)
+    direct = x + np.exp(-0.5 * x * x - 0.5 * np.log(2.0 * np.pi) - special.log_ndtr(x))
+    np.testing.assert_allclose(gap, direct, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "shape"),
+    [(50.0, np.inf, 0.2), (900.0, np.inf, 0.35), (50.0, 400.0, 0.2), (0.0, 700.0, 0.6)],
+)
+def test_generalized_pareto_window_derivatives_match_differences(lower, upper, shape):
+    # (50, 0.2) stays inside the |z| < 0.5 series; (900, 0.35) and the upper
+    # ends reach the positive-shape tail branch.
+    def channels(scale, xi):
+        return window_rows(
+            np.array([lower]), np.array([upper]), np.array([scale]), np.array([xi]),
+            derivative_order=2,
+        )  # fmt: skip
+
+    scale = 120.0
+    _, score, hessian = channels(scale, shape)
+    for column, (ds, dx) in enumerate(((1e-4 * scale, 0.0), (0.0, 1e-6))):
+        step = ds + dx
+        plus, minus = channels(scale + ds, shape + dx), channels(scale - ds, shape - dx)
+        np.testing.assert_allclose(
+            score[0, column], (plus[0][0] - minus[0][0]) / (2 * step), rtol=1e-7, atol=1e-12
+        )
+        packed = (0, 1) if column == 0 else (1, 2)
+        np.testing.assert_allclose(
+            hessian[0, list(packed)], (plus[1][0] - minus[1][0]) / (2 * step), rtol=1e-6,
+            atol=1e-12,
+        )  # fmt: skip
+
+
+def test_censored_fit_standard_errors_are_the_inverse_observed_information():
+    rng = np.random.default_rng(562)
+    excess = stats.genpareto(c=0.3, scale=1000.0).rvs(8_000, random_state=rng)
+    limit = 4000.0
+    paid = np.minimum(excess, limit)
+    hit = paid == limit
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(family, family.scale(), family.shape())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(_intercepts(len(paid)), paid, censoring=(None, limit))
+    links = [parameter.default_link for parameter in family.parameters]
+    eta = np.asarray(model.predict_link(_intercepts(1)), dtype=np.float64)[0]
+
+    def negative(point):
+        scale, xi = (float(link.inverse(np.array([value]))[0]) for link, value in zip(links, point))
+        return -(
+            stats.genpareto.logpdf(paid[~hit], xi, scale=scale).sum()
+            + hit.sum() * stats.genpareto.logsf(limit, xi, scale=scale)
+        )
+
+    h = 1e-4
+    hessian = np.empty((2, 2))
+    for i in range(2):
+        for j in range(2):
+            ei, ej = np.eye(2)[i] * h, np.eye(2)[j] * h
+            hessian[i, j] = (
+                negative(eta + ei + ej) - negative(eta + ei - ej)
+                - negative(eta - ei + ej) + negative(eta - ei - ej)
+            ) / (4 * h * h)  # fmt: skip
+    np.testing.assert_allclose(model.covariance_, np.linalg.inv(hessian), rtol=2e-3)
+
+
+def test_pit_of_left_censored_and_prior_weighted_bounded_rows():
+    rng = np.random.default_rng(563)
+    weights = rng.choice([0.5, 2.0], 3_000)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(), family.scale())
+    model.fit(_intercepts(3_000), rng.normal(0.0, 1.0 / np.sqrt(weights)), sample_weight=weights)
+    row = model.predict_parameters(_intercepts(1)).iloc[0]
+    mu, sigma = float(row["location"]), float(row["scale"])
+    y = np.array([-0.5, 0.2, 1.1])
+    w = np.array([2.0, 0.5, 2.0])
+    residuals = model.residual_set(
+        _intercepts(3), y, sample_weight=w, censoring=(-0.5, None), truncation=(-2.0, 1.5)
+    )
+    law = [stats.norm(mu, sigma / np.sqrt(value)) for value in w]
+    mass = [d.cdf(1.5) - d.cdf(-2.0) for d in law]
+    edges = [(d.cdf(v) - d.cdf(-2.0)) / m for d, v, m in zip(law, y, mass, strict=True)]
+    # Row 0 is left-censored at -0.5: its PIT is drawn on (0, edge).
+    assert residuals.pit_lower[0] == 0.0
+    assert residuals.pit_upper[0] == pytest.approx(edges[0], rel=1e-10)
+    assert 0.0 < residuals.pit[0] < edges[0]
+    np.testing.assert_allclose(residuals.pit[1:], edges[1:], rtol=1e-10)

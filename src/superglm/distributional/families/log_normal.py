@@ -30,6 +30,7 @@ from superglm.distributional.families._response_bounds import (
     bind_observation,
     bounded_channels,
     censored_carrier,
+    log_window_values,
     refuse_bounded,
 )
 from superglm.distributional.families._variance import _variance_product
@@ -288,7 +289,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ) -> LogNormalLikelihoodPlan:
         response = _validated_response(y)
         observation = bind_observation(
-            observation, len(response), support_lower=0.0, family_name=_FAMILY_NAME
+            observation, response, support_lower=0.0, family_name=_FAMILY_NAME
         )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
@@ -588,6 +589,27 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                     log_variance = 2.0 * (values[index, 0] + scale_square[index])
                 result[index] = np.exp(log_variance)
         return readonly(result)
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` under each row's law, from the tail-safe window kernel."""
+        if weights is not None and not np.all(np.asarray(weights, dtype=np.float64) == 1.0):
+            raise UnsupportedLikelihoodContractError(
+                "LogNormalLS has no prior-weighted row law, so its window probability takes no "
+                "non-unit prior weights"
+            )
+        values = self._theta(theta, None)
+        window_rows = mean_window if self.parametrisation == "mean" else location_window
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
+
+        return readonly(log_window_values(lower, upper, window))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)
