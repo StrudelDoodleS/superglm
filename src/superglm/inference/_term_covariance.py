@@ -447,6 +447,44 @@ def simultaneous_bands(
 ) -> pd.DataFrame:
     """Simultaneous confidence bands for a spline feature.
 
+    The band is ``simultaneous_band_and_critical_value``'s; see it for the
+    simulation.
+    """
+    bands, _ = simultaneous_band_and_critical_value(
+        feature,
+        result=result,
+        groups=groups,
+        specs=specs,
+        covariance_fn=covariance_fn,
+        alpha=alpha,
+        n_sim=n_sim,
+        n_points=n_points,
+        seed=seed,
+        center=center,
+        interaction_specs=interaction_specs,
+    )
+    return bands
+
+
+def simultaneous_band_and_critical_value(
+    feature: str,
+    *,
+    result: PIRLSResult,
+    groups: list[GroupSlice],
+    specs: dict[str, Any],
+    covariance_fn,
+    alpha: float = 0.05,
+    n_sim: int = 10_000,
+    n_points: int = 200,
+    seed: int = 42,
+    center: bool = False,
+    interaction_specs: Mapping[Any, Any] | None = None,
+) -> tuple[pd.DataFrame, float]:
+    """Simultaneous confidence bands for a spline feature, and their critical value.
+
+    The critical value is the simulated quantile itself: backing it out of the
+    exponentiated endpoints loses it once ``c * se`` is below their rounding.
+
     ``center=True`` bands the MEAN-CENTERED curve.  The critical value is the
     quantile of ``max_x |f(x)| / se(x)`` over the whole grid, and centering
     changes both the numerator and the denominator, so it is a different
@@ -538,7 +576,7 @@ def simultaneous_bands(
 
     z = norm.ppf(1.0 - alpha / 2.0)
 
-    return pd.DataFrame(
+    bands = pd.DataFrame(
         {
             "x": x_grid,
             "log_relativity": log_rel,
@@ -550,10 +588,12 @@ def simultaneous_bands(
             "ci_upper_simultaneous": _safe_exp(log_rel + c_sim * se),
         }
     )
+    return bands, c_sim
 
 
 __all__ = [
     "feature_se_from_cov",
     "piecewise_knot_covariance",
+    "simultaneous_band_and_critical_value",
     "simultaneous_bands",
 ]
