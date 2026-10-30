@@ -184,7 +184,7 @@ class _IRLSDirectConvergence:
                     _mode_ratios[-1] = residual.ratio()
             elif convergence in ("coefficients", "mode_score"):
                 coef_change = float(
-                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)))
+                    np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
                 )
                 coef_change = max(
                     coef_change,

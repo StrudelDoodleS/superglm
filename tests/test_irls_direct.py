@@ -2444,6 +2444,48 @@ class TestDirectSolverBasic:
         rec = m.reconstruct_feature("DrivAge")
         assert "relativity" in rec
 
+    @pytest.mark.parametrize("direct_solve", ["auto", "qr"])
+    @pytest.mark.parametrize("convergence", ["deviance", "coefficients", "mode_score"])
+    def test_a_design_with_no_columns_fits_its_intercept(self, convergence, direct_solve):
+        """With no column there is no coefficient to change and no factor to take."""
+        from superglm.distributions import Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        n = 30
+        y = np.random.default_rng(0).poisson(3.0, n).astype(float)
+        result, _ = fit_irls_direct(
+            DesignMatrix([], n=n, p=0),
+            y,
+            np.ones(n),
+            Poisson(),
+            LogLink(),
+            [],
+            lambda2=0.0,
+            weight_semantics="frequency",
+            convergence=convergence,
+            direct_solve=direct_solve,
+        )
+        assert result.converged
+        # the Poisson/log intercept-only maximum is the log of the mean response
+        mle = np.log(y.mean())
+        assert abs(result.intercept - mle) <= 64 * np.finfo(float).eps * abs(mle)
+
+    @pytest.mark.filterwarnings("ignore:convergence='coefficients' is experimental")
+    def test_a_model_with_no_features_fits_under_the_coefficient_criterion(self):
+        n = 30
+        y = np.random.default_rng(0).poisson(3.0, n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            link="log",
+            features={},
+            convergence="coefficients",
+            selection_penalty=0.0,
+        )
+        model.fit(pd.DataFrame({"x": np.zeros(n)}), y)
+        assert model.result.converged
+        assert model.result.intercept == pytest.approx(np.log(y.mean()), rel=1e-12)
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:

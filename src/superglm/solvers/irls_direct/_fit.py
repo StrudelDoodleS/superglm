@@ -1301,8 +1301,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # The fit's one step method, chosen here unless it is structured
         # (``_setup_design``), QP or SCOP (``_setup_routes``): QR materialises the
         # full design once.
-        # Constrained QP / SCOP requires Gram path — force it if constraints present
-        _use_qr = self.direct_solve == "qr" and not has_constraints and not _has_scop
+        # Constrained QP / SCOP requires Gram path — force it if constraints present;
+        # a design with no columns has nothing to factor, and the Gram path solves
+        # its intercept
+        _use_qr = self.direct_solve == "qr" and self.p > 0 and not has_constraints and not _has_scop
         # The binomial/log mean space's overlay, ``None`` for a family and link
         # whose means cannot leave their space: its certificate judges every
         # route, and its Newton steps are available off the QR route (whose
