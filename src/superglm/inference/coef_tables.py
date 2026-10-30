@@ -46,6 +46,13 @@ def _thin_levels(
 
     Neither condition depends on the book's size or the weights' units, and
     neither reads the response.
+
+    A level with ``_THIN_LEVEL_ROWS`` rows or more is therefore never thin,
+    however little weight they carry: 40 policies of a month's exposure each,
+    in a book averaging six months, hold under 7 rows of average weight and
+    are not flagged.  Without the response or absolute weights, such a level
+    looks the same as 40 large rating cells holding as small a share of their
+    book.
     """
     from superglm.solvers.dispersion import FREQUENCY_WEIGHTS
 
