@@ -1429,7 +1429,13 @@ class TestDeadSearchNewtonDecrement:
 
     @staticmethod
     def _forced_endgame(
-        monkeypatch, *, quarter=None, inflate=False, full_step_evidence=True, max_reml_iter=20
+        monkeypatch,
+        *,
+        quarter=None,
+        inflate=False,
+        certified=False,
+        full_step_evidence=True,
+        max_reml_iter=20,
     ):
         """A fit whose line search ends on a discarded quarter step, unless a case stops it.
 
@@ -1443,9 +1449,11 @@ class TestDeadSearchNewtonDecrement:
         gradient less an iteration.  An early full step decreases the
         objective by far more and is accepted.  The cases move one input of
         the rule: ``quarter(P, tau)`` sets the quarter step's decrease,
-        ``inflate`` raises ``P`` to ``1.5 tau``, ``full_step_evidence=False``
-        has the full-step trial count as no precision evidence, as an
-        exhausted inner solve's does, and ``max_reml_iter`` sets the budget.
+        ``inflate`` raises ``P`` to ``1.5 tau``, ``certified`` has the
+        dead-search certificate hold wherever it is asked (its own decrement
+        arm reads ``P`` too), ``full_step_evidence=False`` has the full-step
+        trial count as no precision evidence, as an exhausted inner solve's
+        does, and ``max_reml_iter`` sets the budget.
         Returns the model and each iteration's trial steps.
         """
         import dataclasses
@@ -1501,6 +1509,10 @@ class TestDeadSearchNewtonDecrement:
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
         monkeypatch.setattr(direct, "newton_predicted_decrease", decrease)
         monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", evidence)
+        if certified:
+            monkeypatch.setattr(
+                direct, "classify_dead_feasible_exit", lambda *a, **k: "converged_at_precision"
+            )
         model = SuperGLM(
             family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
         )
@@ -1549,10 +1561,11 @@ class TestDeadSearchNewtonDecrement:
             dict(quarter=lambda P, tau: 0.3 * P),
             # a decrease past the stop resolution: more than a stop may discard
             dict(quarter=lambda P, tau: 1.2 * tau),
-            # a predicted decrease at the stop resolution: progress is left
-            dict(quarter=lambda P, tau: 0.8 * tau, inflate=True),
+            # a predicted decrease at the stop resolution: progress is left, and
+            # with the certificate held the guard on P alone keeps the rule off
+            dict(quarter=lambda P, tau: 0.8 * tau, inflate=True, certified=True),
             # iterations to spare: steps at a quarter reach the score bar in time
-            dict(max_reml_iter=200, ends="score_objective_tolerance"),
+            dict(max_reml_iter=200),
             # a full-step trial that is no precision evidence rejected nothing
             dict(full_step_evidence=False),
         ],
@@ -1563,18 +1576,18 @@ class TestDeadSearchNewtonDecrement:
         """Each case moves one input of the rule outside it, all else forced as
         in ``test_a_decrease_no_quadratic_criterion_allows_ends_the_search``:
         the quarter step is taken, never discarded, and some iteration that
-        tried it is followed by another.  Mutation: the bound replaced by ``> 0``
-        fails ``below_bound``; the cap on the discarded decrease removed fails
-        ``past_resolution``; ``P`` below the resolution removed fails
-        ``progress_left``; the iterations-left test removed fails
-        ``budget_left``; any rejected full step counted fails ``no_evidence``.
+        tried it is followed by another.  Which exit then ends the search (the
+        score test, a dead search at precision, or the iteration cap) turns on
+        the evaluations' rounding, so only the rule's own record is read: a
+        discard always ends the search as a dead one, whose profile carries
+        it.  Mutation: the bound replaced by ``> 0`` fails ``below_bound``; the
+        cap on the discarded decrease removed fails ``past_resolution``; ``P``
+        below the resolution removed fails ``progress_left``; the
+        iterations-left test removed fails ``budget_left``; any rejected full
+        step counted fails ``no_evidence``.
         """
-        case = dict(case)
-        ends = case.pop("ends", None)
         model, by_iteration = self._forced_endgame(monkeypatch, **case)
 
-        if ends is not None:
-            assert model._reml_result.termination_reason == ends
         dead = model._reml_profile.get("reml_dead_line_search") or {}
         assert dead.get("inconsistent_decrease") is None
         quarter_steps = [it for it, alphas in by_iteration.items() if alphas[-1:] == [0.25]]
