@@ -1773,8 +1773,9 @@ def optimize_direct_reml(
         # and that rounding
         unresolved_decrease: float | None = None
         stall_roundoff: float | None = None
-        # an accepted shorter step's decrease that no quadratic criterion
-        # rejecting the full step allows
+        # whether a stationary full-step trial was rejected, and an accepted
+        # shorter step's decrease that no quadratic criterion rejecting it
+        # allows
         full_step_rejected = False
         inconsistent_decrease: float | None = None
         # The synchronous search owns fixed design coordinates and warm state.
@@ -2040,15 +2041,20 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else 0.0
             )
-            if not trial_accepted and step == 1.0:
+            if (
+                not trial_accepted
+                and step == 1.0
+                and trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj)
+            ):
                 full_step_rejected = True
             if (
                 trial_accepted
                 and full_step_rejected
                 and dead_predicted_decrease is not None
                 and dead_predicted_decrease < _tol * score_scale
-                and obj - trial_obj
-                > 2.0 * dead_predicted_decrease * step * (1.0 - (1.0 - armijo_c) * step)
+                and 2.0 * dead_predicted_decrease * step * (1.0 - (1.0 - armijo_c) * step)
+                < obj - trial_obj
+                <= _tol * score_scale
                 and _backtracked_rate_cannot_finish(
                     active_grad_norm, _tol * score_scale, step, max_reml_iter - n_iter
                 )
@@ -2063,21 +2069,42 @@ def optimize_direct_reml(
                 == "converged_at_precision"
             ):
                 # Along the Newton step, ``g' delta = -2 P`` with ``P`` the
-                # model's predicted decrease, so a quadratic criterion that
-                # rejected the full step has curvature above ``4 P (1 - c)``
-                # and decreases by at most ``2 P alpha (1 - (1 - c) alpha)`` at
-                # step ``alpha``.  A shorter step accepted with a larger
-                # decrease contradicts every smooth criterion: the evaluations'
-                # error decided it, as a warm-started inner solve's error in the
-                # objective grows with its step.  Where ``P`` is below the stop
-                # resolution and the dead-search certificate holds, that step is
-                # discarded and the search ends as a dead one does, when taking
-                # it -- a fraction of the Newton step an iteration, a linear
-                # rate -- cannot reach the score bar in the iterations left
-                # (Shi, Xie, Byrd & Nocedal 2022, SIAM J. Optim. 32(1), sec.
-                # 4.1: where errors are large relative to the gradient the line
-                # search is expected to fail).
+                # model's predicted decrease, so a quadratic criterion whose
+                # stationary trial rejected the full step has curvature above
+                # ``4 P (1 - c)`` and decreases by at most ``2 P alpha (1 - (1 -
+                # c) alpha)`` at step ``alpha``.  A shorter step accepted with
+                # a larger decrease is then taken as the evaluations' error, as
+                # a warm-started inner solve's error in the objective grows
+                # with its step.  A criterion that is not quadratic along the
+                # step can decrease by more, so the decrease discarded is at
+                # most the stop resolution, which the score test treats as no
+                # change.  Where ``P`` is below that resolution too and the
+                # dead-search certificate holds, the step is discarded and the
+                # search ends as a dead one does, when taking it -- a fraction
+                # of the Newton step an iteration, a linear rate -- cannot
+                # reach the score bar in the iterations left (Shi, Xie, Byrd &
+                # Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1: where errors
+                # are large relative to the gradient the line search is
+                # expected to fail).
                 inconsistent_decrease = float(obj - trial_obj)
+                if trace_run is not None and trace_run.enabled:
+                    # The trial's evaluation event above reads accepted; this
+                    # records that the stop discarded it.
+                    trace_run.emit_lazy(
+                        "step_decision",
+                        lambda: {
+                            "solver": "direct_reml",
+                            "phase": "line_search",
+                            "outer_iteration": n_iter,
+                            "line_search_iteration": _ls + 1,
+                            "trial_alpha": float(step),
+                            "inconsistent_decrease": inconsistent_decrease,
+                            "predicted_decrease": dead_predicted_decrease,
+                        },
+                        channel="reml",
+                        purpose="reml_inconsistent_decrease",
+                        authoritative=False,
+                    )
                 break
             if (
                 trial_accepted
@@ -2240,7 +2267,8 @@ def optimize_direct_reml(
                         float(obj_roundoff) if stall_roundoff is None else stall_roundoff
                     ),
                     # a discarded shorter step's decrease, past what the rejected
-                    # full step leaves a quadratic criterion
+                    # full step leaves a quadratic criterion and within the
+                    # stop resolution
                     "inconsistent_decrease": inconsistent_decrease,
                 }
             # The second-order check (``concave_live_directions``) gates the
