@@ -484,14 +484,14 @@ class SplineCategorical:
     def parent_names(self) -> tuple[str, str]:
         return (self.spline_name, self.cat_name)
 
-    def build(
+    def _resolve_build(
         self,
         x_spline: NDArray,
         x_cat: NDArray,
         parent_specs: dict,
-        sample_weight: NDArray | None = None,
-        separation: tuple | None = None,
-    ) -> list[GroupInfo]:
+        sample_weight: NDArray | None,
+    ) -> tuple[Any, NDArray, NDArray]:
+        """Record the parents' resolved state and return the spline spec and both columns."""
         from superglm.features.categorical import Categorical
         from superglm.features.spline import _SplineBase
 
@@ -527,6 +527,19 @@ class SplineCategorical:
             x_cat,
             cat_spec,
             context=self.cat_name,
+        )
+        return spline_spec, x_spline, x_cat
+
+    def build(
+        self,
+        x_spline: NDArray,
+        x_cat: NDArray,
+        parent_specs: dict,
+        sample_weight: NDArray | None = None,
+        separation: tuple | None = None,
+    ) -> list[GroupInfo]:
+        spline_spec, x_spline, x_cat = self._resolve_build(
+            x_spline, x_cat, parent_specs, sample_weight
         )
 
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
@@ -595,40 +608,8 @@ class SplineCategorical:
         separation: tuple | None = None,
     ) -> list[GroupInfo]:
         """Build spline-by-category groups from compressed spline support."""
-        from superglm.features.categorical import Categorical
-        from superglm.features.spline import _SplineBase
-
-        spline_spec = parent_specs[self.spline_name]
-        cat_spec = parent_specs[self.cat_name]
-        if not isinstance(spline_spec, _SplineBase):
-            raise TypeError(f"Expected a spline spec for {self.spline_name}")
-        if not isinstance(cat_spec, Categorical):
-            raise TypeError(f"Expected Categorical spec for {self.cat_name}")
-
-        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        # Same resolution as build(); see _varying_coefficient_spline_spec.
-        spline_spec = _varying_coefficient_spline_spec(
-            spline_spec,
-            x_spline,
-            sample_weight,
-        )
-
-        self._spline_spec = spline_spec
-        self._knots = spline_spec._knots
-        self._n_basis = spline_spec._n_basis
-        self._degree = spline_spec.degree
-        self._lo = spline_spec._lo
-        self._hi = spline_spec._hi
-        self._non_base = list(cat_spec._non_base)
-        self._base_level = cat_spec._base_level
-        self._projection = getattr(spline_spec, "_interaction_projection", None)
-        self._cat_grouping = cat_spec._grouping
-        self._cat_levels = list(cat_spec._levels)
-        self._cat_unseen = cat_spec.unseen
-        x_cat = _categorical_build_labels(
-            x_cat,
-            cat_spec,
-            context=self.cat_name,
+        spline_spec, x_spline, x_cat = self._resolve_build(
+            x_spline, x_cat, parent_specs, sample_weight
         )
 
         support, bin_idx = _discretize_column(x_spline, int(n_bins))
