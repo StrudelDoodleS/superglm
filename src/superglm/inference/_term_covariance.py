@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-from superglm._roundoff import SQRT_EPS, TINY, UNIT_ROUNDOFF
+from superglm._roundoff import EPS, SQRT_EPS, TINY
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
@@ -466,6 +466,24 @@ def simultaneous_bands(
     return bands
 
 
+def _principal_root(covariance: NDArray) -> NDArray:
+    """The principal square root ``V diag(sqrt(lambda)) V'`` of a covariance.
+
+    A positive-semidefinite matrix has exactly one positive-semidefinite square
+    root (Higham, *Functions of Matrices*, ch. 6), so normal draws ``z @ root``
+    follow the covariance alone: not the basis an eigensolver picks inside a
+    repeated eigenvalue's eigenspace, nor the eigenvectors' signs, nor whether
+    a factorisation completes; rescaling the covariance by ``c^2`` rescales the
+    root by ``c``.  An eigenvalue within ``k eps lambda_max`` of zero, the
+    eigensolver's resolution (LAPACK Users' Guide, sec. 4.7.1), is a null
+    direction: the root is only Hoelder-1/2 in its eigenvalues there, so their
+    rounding would otherwise reach ``sqrt(eps)`` of the draws.
+    """
+    values, vectors = np.linalg.eigh(covariance)
+    resolved = values > covariance.shape[0] * EPS * values[-1]
+    return (vectors * np.sqrt(np.where(resolved, values, 0.0))) @ vectors.T
+
+
 def simultaneous_band_and_critical_value(
     feature: str,
     *,
@@ -492,8 +510,8 @@ def simultaneous_band_and_critical_value(
     it is computed here through the centered map rather than reused.  A curve
     an ``sz`` term moves onto its population curve (``interaction_specs``,
     #432) is banded on that curve: its values carry ``b(x)' c`` and its
-    draws the curve's covariance ``V_f`` (``_population_curve_map``),
-    simulated through ``V_f``'s eigendecomposition.
+    draws the curve's covariance ``V_f`` (``_population_curve_map``).  Every
+    covariance is drawn through its principal square root (``_principal_root``).
     """
     from scipy.stats import norm
 
@@ -553,27 +571,10 @@ def simultaneous_band_and_critical_value(
         shift = population_curve_shift(feature, x_grid, interaction_specs, groups, beta)
         assert shift is not None
         log_rel = log_rel + (shift - shift.mean() if center else shift)
-        values, vectors = np.linalg.eigh(mapped[1])
-        root = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
         se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
-        f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
+        f_sim = rng.standard_normal((n_sim, se.size)) @ _principal_root(mapped[1])
     else:
-        # The spectrum chooses the root, so rounding cannot.  Cholesky completes
-        # whenever 20 k^1.5 kappa u < 1 (Wilkinson), here with a factor of two
-        # for the eigensolver's own rounding of the smallest eigenvalue.  A
-        # covariance on a constrained fit's active face is singular by
-        # construction and takes its positive-semidefinite root, with each
-        # eigenvector's arbitrary sign fixed so a seed draws the same band on
-        # any LAPACK.
-        values, vectors = np.linalg.eigh(Cov_g)
-        k = Cov_g.shape[0]
-        if values[0] > 40.0 * k**1.5 * UNIT_ROUNDOFF * values[-1]:
-            L = np.linalg.cholesky(Cov_g)
-        else:
-            pivots = np.argmax(np.abs(vectors), axis=0)
-            vectors = vectors * np.sign(vectors[pivots, np.arange(k)])
-            L = vectors * np.sqrt(np.maximum(values, 0.0))[None, :]
-        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
+        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ _principal_root(Cov_g)
         f_sim = beta_sim @ M.T
 
     # A standard error below the rounding of the largest one carries no

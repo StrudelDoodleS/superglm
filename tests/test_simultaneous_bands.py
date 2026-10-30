@@ -92,10 +92,9 @@ class TestSimultaneousBands:
         """A constrained fit's active-face covariance is singular by construction.
 
         Rounding can leave its zero eigenvalue slightly negative. The term's
-        block here has scale 1e6 and one eigenvalue at -1e-9 of it, so the
-        Cholesky factor does not exist and the spectrum sends the bands to the
-        positive-semidefinite root. Mutation: without that root the call raises
-        ``LinAlgError``.
+        block here has scale 1e6 and one eigenvalue at -1e-9 of it, so no
+        Cholesky factor exists; the principal root takes it as a null
+        direction. Mutation: a Cholesky root raises ``LinAlgError``.
         """
         from superglm.inference._term_covariance import simultaneous_bands
 
@@ -190,3 +189,86 @@ def test_singular_covariance_takes_one_sampler_however_its_cholesky_rounds(
         return real_cholesky(matrix + 1e-14 * np.max(np.diag(matrix)) * np.eye(len(matrix)))
 
     assert critical_value(pivot_rounded_negative) == critical_value(pivot_rounded_positive)
+
+
+def _rotated_within_repeated_eigenvalues(eigh, mix):
+    """``eigh`` with each repeated eigenvalue's eigenvectors mixed by ``mix``.
+
+    Any orthonormal basis of an eigenspace is an eigensolver's valid output;
+    which one LAPACK returns depends on its driver and on the matrix's rounding.
+    """
+
+    def changed(matrix, *args, **kwargs):
+        values, vectors = eigh(matrix, *args, **kwargs)
+        vectors = vectors.copy()
+        repeated = np.isclose(values[:, None], values[None, :], rtol=1e-8, atol=0.0)
+        for i in np.flatnonzero(repeated.sum(axis=1) > 1):
+            block = np.flatnonzero(repeated[i])
+            if block[0] == i and values[i] > 0.0:
+                vectors[:, block] = vectors[:, block] @ mix(len(block))
+        return values, vectors
+
+    return changed
+
+
+def _reversal(size):
+    return np.eye(size)[::-1]
+
+
+def _rotation(size):
+    rotation = np.eye(size)
+    c, s = np.cos(0.7), np.sin(0.7)
+    rotation[:2, :2] = [[c, s], [-s, c]]
+    return rotation
+
+
+@pytest.mark.parametrize("nullity", [0, 1, 4])
+@pytest.mark.parametrize("mix", [_reversal, _rotation], ids=["permuted", "rotated"])
+def test_a_repeated_eigenvalue_draws_one_band_in_any_eigenbasis_and_units(
+    spline_model, monkeypatch, nullity, mix
+):
+    """The draws follow the covariance, not the eigenbasis LAPACK picks for it.
+
+    The term's covariance has repeated positive eigenvalues and ``nullity``
+    null directions, as on a constrained fit's active face.  Mixing each
+    repeated eigenvalue's eigenvectors, as another driver or the matrix's
+    rounding at other response units does, leaves the critical value alone at
+    units 1, 10 and 1e-19.  The principal root moves with the eigensolver's
+    backward error, ``k gamma_k`` of the covariance, amplified at most by the
+    resolved condition number.  Mutation: the sign-fixed root ``V Lambda^1/2``
+    moves it by 1e-4 to 3e-2 once ``nullity > 0``, and the root without its
+    null-direction cut by about 1e-9.
+    """
+    from superglm._roundoff import gamma
+    from superglm.inference._term_covariance import simultaneous_band_and_critical_value
+
+    covariance, active_groups = spline_model._coef_covariance
+    idx = np.concatenate(
+        [np.arange(g.start, g.end) for g in active_groups if g.feature_name == "x"]
+    )
+    k = len(idx)
+    values = np.concatenate([np.zeros(nullity), [1.0, 1, 1, 2, 2, 2, 3, 3], 4.0 + np.arange(k)])[:k]
+    basis, _ = np.linalg.qr(np.random.default_rng(7).standard_normal((k, k)))
+    crafted = np.zeros_like(covariance)
+    crafted[np.ix_(idx, idx)] = (basis * values) @ basis.T
+    crafted = 0.5 * (crafted + crafted.T)
+    real_eigh = np.linalg.eigh
+
+    def critical_value(units, eigh):
+        with monkeypatch.context() as patch:
+            patch.setattr(np.linalg, "eigh", eigh)
+            _, value = simultaneous_band_and_critical_value(
+                "x",
+                result=spline_model.result,
+                groups=spline_model._groups,
+                specs=spline_model._specs,
+                covariance_fn=lambda: (units**2 * crafted, active_groups),
+                n_sim=2000,
+            )
+        return value
+
+    reference = critical_value(1.0, real_eigh)
+    changed = _rotated_within_repeated_eigenvalues(real_eigh, mix)
+    tolerance = k * gamma(k) * values.max() / values[values > 0].min()
+    for units in (1.0, 10.0, 1e-19):
+        assert critical_value(units, changed) == pytest.approx(reference, rel=tolerance, abs=0.0)
