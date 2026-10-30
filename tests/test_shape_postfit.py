@@ -2288,8 +2288,8 @@ def _profiled_eta_with_fault(monkeypatch, mutate):
     real = shape_ops._profile_repaired_intercept
 
     def profiled(*args, **kwargs):
-        eta, shift = real(*args, **kwargs)
-        return mutate(eta), shift
+        eta, shift, rounding = real(*args, **kwargs)
+        return mutate(eta), shift, rounding
 
     monkeypatch.setattr(shape_ops, "_profile_repaired_intercept", profiled)
 
@@ -2687,7 +2687,7 @@ def test_intercept_profile_takes_the_same_steps_in_any_units(monkeypatch):
             return real_weights(**kwargs)
 
         monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
-        profiled_eta, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+        profiled_eta, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
         path[scale] = evaluated
         mu = np.exp(profiled_eta)
         score_rows = weights * (y - mu) * mu
@@ -2697,6 +2697,62 @@ def test_intercept_profile_takes_the_same_steps_in_any_units(monkeypatch):
     np.testing.assert_allclose(path[1e-9], path[1.0], rtol=0.0, atol=1e-9)
 
 
+def test_intercept_profile_passes_over_the_rows_once_per_shift(monkeypatch):
+    """Each shift's deviance rounding comes from the pass that evaluates its deviance.
+
+    Zero-weight rows are left out of it, as ``_deviance_rounding`` leaves them.
+    Mutation: ``_deviance_rounding`` called per shift doubles the inverse-link
+    passes.
+    """
+    model, eta, y, weights = _log_link_model_and_data(1.0)
+    weights[::7] = 0.0
+    passes, shifts = [], []
+    inverse = model._link.inverse
+    information = shape_ops.fisher_working_weights
+    monkeypatch.setattr(model._link, "inverse", lambda e: (passes.append(1), inverse(e))[1])
+    monkeypatch.setattr(
+        shape_ops,
+        "fisher_working_weights",
+        lambda **kwargs: (shifts.append(1), information(**kwargs))[1],
+    )
+
+    profiled_eta, _, rounding = shape_ops._profile_repaired_intercept(
+        model, eta, y=y, weights=weights
+    )
+
+    assert len(shifts) > 2
+    assert len(passes) == len(shifts)
+    expected = shape_ops._deviance_rounding(model, profiled_eta, y=y, weights=weights)
+    assert rounding == pytest.approx(expected, rel=gamma(len(y)), abs=0.0)
+
+
+def test_repair_publication_reuses_the_profiled_deviance_rounding(monkeypatch):
+    """Publication reads each intercept profile's deviance rounding; it makes no pass of its own.
+
+    Mutation: recomputing it at the candidate and fallback predictors.
+    """
+    rng = np.random.default_rng(240)
+    x = np.sort(rng.uniform(0.0, 1.0, 240))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.convex)},
+    ).fit(X, np.exp(1.0 + 0.5 * x))
+    recomputed = []
+    real = shape_ops._deviance_rounding
+    monkeypatch.setattr(
+        shape_ops,
+        "_deviance_rounding",
+        lambda *args, **kwargs: (recomputed.append(1), real(*args, **kwargs))[1],
+    )
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    assert recomputed == []
+
+
 def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     rng = np.random.default_rng(20261032)
     n = 240
@@ -2704,7 +2760,7 @@ def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     y = 1e-17 * (1.0 + 0.1 * rng.normal(size=n))
     model = SimpleNamespace(_distribution=Gaussian(), _link=IdentityLink())
 
-    profiled_eta, _ = shape_ops._profile_repaired_intercept(
+    profiled_eta, _, _ = shape_ops._profile_repaired_intercept(
         model, np.zeros(n), y=y, weights=weights
     )
 
@@ -2724,7 +2780,7 @@ def test_intercept_profile_of_a_perfect_fit_stops_at_its_rounding(scale):
     eta = np.log(y)
     model = SimpleNamespace(_distribution=Gamma(), _link=LogLink())
 
-    _, shift = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
 
     # The predictor of a perfect fit, to within the rounding of the predictor.
     assert abs(shift) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
@@ -2759,7 +2815,7 @@ def test_intercept_profile_reaches_a_perfect_fit_from_a_shifted_start(family, of
     distribution = Gamma() if family == "gamma" else Poisson()
     model = SimpleNamespace(_distribution=distribution, _link=LogLink())
 
-    _, shift = shape_ops._profile_repaired_intercept(model, eta + offset, y=y, weights=weights)
+    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta + offset, y=y, weights=weights)
 
     assert abs(shift + offset) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
 

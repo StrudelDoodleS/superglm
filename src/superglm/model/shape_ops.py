@@ -284,8 +284,12 @@ def _profile_repaired_intercept(
     *,
     y,
     weights,
-) -> tuple[np.ndarray, float]:
-    """Minimize deviance over the unpenalized intercept for fixed coefficients."""
+) -> tuple[np.ndarray, float, float]:
+    """Minimize deviance over the unpenalized intercept for fixed coefficients.
+
+    Returns the profiled predictor, its shift and the deviance's rounding there
+    (``_deviance_rounding``), which each evaluation already holds.
+    """
     from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
     from superglm.links import IdentityLink, stabilize_eta
 
@@ -319,7 +323,13 @@ def _profile_repaired_intercept(
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
-        return profiled_eta, shift
+        return (
+            profiled_eta,
+            shift,
+            _deviance_rounding(model, profiled_eta, y=y_arr, weights=weights_arr),
+        )
+
+    carried = weights_arr != 0.0
 
     def evaluate(shift: float) -> _InterceptState:
         eta_safe = stabilize_eta(eta_base + shift, model._link)
@@ -333,6 +343,11 @@ def _profile_repaired_intercept(
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
             residual_rounding = _residual_rounding(y_arr, mu, eta_safe, dmu_deta)
             score_rounding = np.abs(weights_arr * dmu_deta / variance) * residual_rounding
+            # ``_deviance_rounding`` from this pass's rows, over the carried rows.
+            deviance_rows = np.abs(weights_arr * (y_arr - mu) / variance)[carried]
+            deviance_rounding = 2.0 * float(
+                np.sum(deviance_rows * residual_rounding[carried], dtype=np.float64)
+            )
             information_rows = fisher_working_weights(
                 distribution=model._distribution,
                 link=model._link,
@@ -356,9 +371,7 @@ def _profile_repaired_intercept(
             )
         return _InterceptState(
             deviance=deviance,
-            deviance_rounding=_deviance_rounding(
-                model, eta_base + shift, y=y_arr, weights=weights_arr
-            ),
+            deviance_rounding=deviance_rounding,
             score=score,
             score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
             score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
@@ -374,7 +387,7 @@ def _profile_repaired_intercept(
     state = evaluate(shift)
     for _ in range(50):
         if stationary(state, 1e-11):
-            return eta_base + shift, shift
+            return eta_base + shift, shift, state.deviance_rounding
 
         proposal = state.score / state.information
         if not np.isfinite(proposal):
@@ -403,7 +416,7 @@ def _profile_repaired_intercept(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"
         )
-    return eta_base + shift, shift
+    return eta_base + shift, shift, state.deviance_rounding
 
 
 def _shape_candidate_objective(
@@ -563,13 +576,13 @@ def _validate_repair_for_publication(
         fallback_beta,
         groups,
     )
-    candidate_eta, candidate_intercept_shift = _profile_repaired_intercept(
+    candidate_eta, candidate_intercept_shift, candidate_rounding = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
         y=y,
         weights=scoring_weights,
     )
-    fallback_eta, _ = _profile_repaired_intercept(
+    fallback_eta, _, fallback_rounding = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + fallback_eta_delta,
         y=y,
@@ -593,9 +606,7 @@ def _validate_repair_for_publication(
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
     )
-    deviance_rounding = _deviance_rounding(
-        model, candidate_eta, y=y, weights=scoring_weights
-    ) + _deviance_rounding(model, fallback_eta, y=y, weights=scoring_weights)
+    deviance_rounding = candidate_rounding + fallback_rounding
     deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y)) + deviance_rounding
     merit_tolerance = shape_sum_tolerance(abs(fallback_merit), len(y)) + deviance_rounding
     if (
