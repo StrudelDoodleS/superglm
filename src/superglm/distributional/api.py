@@ -60,6 +60,7 @@ from superglm.distributional.model import (
     _unvalidated_offset_shapes,
     fit_dense_distributional,
 )
+from superglm.distributional.observation import BoundPair
 from superglm.distributional.posterior import (
     CovarianceKind,
     PosteriorDraws,
@@ -567,6 +568,8 @@ class SuperLSS:
         efs_config: DistributionalEFSConfig | None,
         retain_rows: bool,
         phase_recorder: FitPhaseRecorder | None = None,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> SuperLSS:
         next_revision = 1 if self._model is None else self._model.fit_state.revision + 1
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
@@ -591,6 +594,8 @@ class SuperLSS:
                 phase_recorder=recorder,
                 separation=self._separation,
                 revision=next_revision,
+                truncation=truncation,
+                censoring=censoring,
             )
         phase_snapshot = window.snapshot()
         self._model = candidate
@@ -630,6 +635,8 @@ class SuperLSS:
         max_inner_iter: int = 100,
         inner_tol: float = 1.0e-7,
         retain_rows: bool = True,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> SuperLSS:
         """Fit coefficients while holding smoothing parameters fixed.
 
@@ -654,11 +661,30 @@ class SuperLSS:
             Coefficient convergence tolerance.
         retain_rows : bool, default=True
             Retain fitted row arrays for training diagnostics.
+        truncation : (lower, upper), optional
+            Bounds outside which a row could not have been recorded, such as
+            a splice body kept at or below a threshold, ``(None, u)``, or
+            losses reported above a deductible, ``(d, None)``. Each side is
+            ``None``, one number, or one number per row. A truncated row
+            contributes its density divided by the probability of its window.
+        censoring : (lower, upper), optional
+            Bounds at which a response was capped. A response equal to its
+            upper bound, such as a claim paid at a policy limit, is read as
+            "at least this"; one equal to its lower bound as "at most this".
+            Record capped responses as the bound itself, for example
+            ``np.minimum(loss, limit)``.
 
         Returns
         -------
         SuperLSS
             This model, with its fitted state replaced by the new fit.
+
+        Notes
+        -----
+        With ``truncation`` or ``censoring`` the fit estimates the parent law
+        of the uncut response, so ``predict`` and the distribution functions
+        describe that law, not the law within the bounds. ``GaussianLS``,
+        ``LogNormalLS`` and ``GeneralizedParetoLSS`` support them.
 
         See Also
         --------
@@ -678,6 +704,8 @@ class SuperLSS:
                 ),
                 efs_config=None,
                 retain_rows=retain_rows,
+                truncation=truncation,
+                censoring=censoring,
             )
 
     def fit_reml(
@@ -706,14 +734,16 @@ class SuperLSS:
         reml_plateau_tol: float = 1.0e-7,
         outer: Literal["efs", "efs+newton"] = "efs",
         phase_recorder: FitPhaseRecorder | None = None,
+        truncation: BoundPair = None,
+        censoring: BoundPair = None,
     ) -> SuperLSS:
         """Fit coefficients and estimate smoothing parameters jointly.
 
         ``X`` supplies the declared columns and ``y`` supplies the response
         in the same row order. ``sample_weight`` follows the model's
         ``weight_semantics``. ``offsets`` maps family parameter names to
-        known additions on the link scale. This method updates the model and
-        returns it.
+        known additions on the link scale. ``truncation`` and ``censoring``
+        are as in :meth:`fit`. This method updates the model and returns it.
 
         ``outer`` selects the smoothing optimiser.  The default ``"efs"`` runs
         generalised Fellner-Schall updates. ``"efs+newton"`` adds Newton
@@ -784,6 +814,8 @@ class SuperLSS:
                 ),
                 retain_rows=retain_rows,
                 phase_recorder=phase_recorder,
+                truncation=truncation,
+                censoring=censoring,
             )
 
     def _require_fitted(self) -> DenseDistributionalModel:

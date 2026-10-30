@@ -21,6 +21,7 @@ from superglm.distributional.family import (
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
+from superglm.distributional.observation import ResponseBounds
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
@@ -36,6 +37,7 @@ _DATACLASSES = (
     WeightProvenance,
     WeightContract,
     ObservationContract,
+    ResponseBounds,
 )
 _SCALARS = (type(None), bool, int, float, str)
 _MAX_ENTRIES = 256

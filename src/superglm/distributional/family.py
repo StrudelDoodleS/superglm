@@ -12,6 +12,7 @@ from typing import Literal, Protocol, runtime_checkable
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional.observation import ResponseBounds
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -21,21 +22,60 @@ from superglm.links import Link
 CurvatureKind = Literal["observed", "fisher", "hybrid"]
 
 
+ObservationKind = Literal["complete", "censored_truncated"]
+
+
 @dataclass(frozen=True)
 class ObservationContract:
-    """Versioned shape of one family observation."""
+    """Versioned shape of one family observation.
 
-    kind: Literal["complete"]
+    ``"complete"`` rows contribute their density.  ``"censored_truncated"``
+    carries per-row :class:`ResponseBounds`; a family that has not
+    implemented them refuses the contract at ``bind_likelihood``.
+    """
+
+    kind: ObservationKind
     schema_version: int
+    bounds: ResponseBounds | None = None
 
     def __post_init__(self) -> None:
-        if self.kind != "complete" or self.schema_version != 1:
+        if self.kind not in ("complete", "censored_truncated") or self.schema_version != 1:
             raise UnsupportedLikelihoodContractError(
-                "only complete observations under schema version 1 are supported"
+                "only complete or censored/truncated observations under schema version 1 "
+                "are supported"
             )
+        if (self.kind == "complete") != (self.bounds is None):
+            raise UnsupportedLikelihoodContractError(
+                "censored/truncated observations carry response bounds; complete ones do not"
+            )
+        if self.bounds is not None and not isinstance(self.bounds, ResponseBounds):
+            raise UnsupportedLikelihoodContractError("observation bounds must be ResponseBounds")
+
+    @property
+    def is_complete(self) -> bool:
+        return self.bounds is None
+
+    def take(self, indices: NDArray[np.integer]) -> ObservationContract:
+        """The contract of the selected rows."""
+        if self.bounds is None:
+            return self
+        return ObservationContract(self.kind, self.schema_version, self.bounds.take(indices))
 
 
 COMPLETE_OBSERVATION = ObservationContract(kind="complete", schema_version=1)
+
+
+def bounded_observation(bounds: ResponseBounds | None) -> ObservationContract:
+    """The contract for resolved bounds; complete when there are none."""
+    if bounds is None:
+        return COMPLETE_OBSERVATION
+    return ObservationContract(kind="censored_truncated", schema_version=1, bounds=bounds)
+
+
+def plan_observation(plan: object) -> ObservationContract:
+    """A plan's observation contract; complete for a plan that declares none."""
+    observation = getattr(plan, "observation", COMPLETE_OBSERVATION)
+    return observation if isinstance(observation, ObservationContract) else COMPLETE_OBSERVATION
 
 
 @runtime_checkable
@@ -226,7 +266,11 @@ class ParameterSpec:
 
 @dataclass(frozen=True)
 class FamilyCapabilities:
-    """Operations and derivative orders implemented by a family."""
+    """Operations and derivative orders implemented by a family.
+
+    ``censored_response`` declares that the family binds the
+    ``"censored_truncated"`` observation contract: truncated and censored rows.
+    """
 
     max_derivative_order: int
     expected_information: bool
@@ -661,6 +705,17 @@ class ExpectedInformationFamily(Protocol):
         theta: NDArray,
         plan: FamilyLikelihoodPlan,
     ) -> NDArray: ...
+
+
+def expected_information_provider(family: object, plan: object) -> ExpectedInformationFamily | None:
+    """The family as a Fisher-information provider for ``plan``, or ``None``.
+
+    Expected information is the complete-row law's; no family supplies it for
+    truncated or censored rows, so a bounded plan has none.
+    """
+    if not isinstance(family, ExpectedInformationFamily):
+        return None
+    return family if plan_observation(plan).is_complete else None
 
 
 @runtime_checkable

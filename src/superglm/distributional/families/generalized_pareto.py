@@ -30,6 +30,12 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
     ShapePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    refuse_bounded,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -55,6 +61,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     scale_fourth,
     scale_hessian_direction,
     scale_rows,
+    window_rows,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -73,6 +80,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 
@@ -136,6 +144,7 @@ class GeneralizedParetoLikelihoodPlan:
                 self.weights.digest,
                 self.response_digest,
                 self.carrier_digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"GeneralizedParetoLSS/v1:{hashlib.sha256(payload).hexdigest()}"
@@ -145,7 +154,7 @@ class GeneralizedParetoLikelihoodPlan:
             weights=self.weights.take(indices),
             row_law=self.row_law,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -244,10 +253,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
     def bind_likelihood(self, y, weights, observation) -> GeneralizedParetoLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "GeneralizedParetoLSS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, len(response), support_lower=0.0, family_name="GeneralizedParetoLSS"
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedParetoLSS requires resolved likelihood weights"
@@ -298,7 +306,10 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def validate_likelihood_plan(self, y, plan) -> NDArray[np.float64]:
         response = _validated_response(y)
         candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
+        observation = candidate.observation
+        if observation != COMPLETE_OBSERVATION and (
+            observation.bounds is None or observation.bounds.n_rows != len(response)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedParetoLSS likelihood has an unsupported observation contract"
             )
@@ -348,12 +359,41 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         evaluated = scale_rows(
             response, values[:, 0], values[:, 1], bound.multiplier, derivative_order=order
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        bounds = bound.observation.bounds
+        if bounds is not None:
+
+            def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
+                return window_rows(
+                    lower,
+                    upper,
+                    values[selected, 0],
+                    values[selected, 1],
+                    derivative_order=order,
+                )
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bounds,
+                multiplier=bound.multiplier,
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=bound.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
         )
 
     def predictor_curvature_directional_derivative(
@@ -363,6 +403,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             return scale_hessian_direction(
@@ -380,6 +421,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
             third = natural_third_from_direction(
@@ -399,6 +441,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def expected_information_natural(self, theta, plan) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS expected information")
         return expected_information(values[:, 0], values[:, 1], bound.multiplier)
 
     def default_prediction(self, theta) -> NDArray[np.float64]:

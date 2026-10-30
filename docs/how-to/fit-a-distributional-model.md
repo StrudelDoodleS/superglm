@@ -605,10 +605,21 @@ shortfall is available for the unit excess law.
 
 **Splice recipe.** A severity model for the whole book is three fits, not one:
 
-1. a body model on `y` for the rows at or below `u` (`GammaLS`,
-   `GeneralizedGammaLSS`, or a log-scale Gaussian);
+1. a body model on `y` for the rows at or below `u`, fitted as truncated at
+   `u`: `LogNormalLS` or `GaussianLS` with `truncation=(None, u)`;
 2. the exceedance probability `P(Y > u | x)` from a binary GLM;
-3. `GeneralizedParetoLSS` on `y - u` for the rows above `u`.
+3. `GeneralizedParetoLSS` on `y - u` for the rows above `u`, with
+   `censoring=(None, limit - u)` where policy limits cap the largest claims.
+
+The three likelihoods do not overlap, so fitting them separately is the
+maximum-likelihood splice. The body must be the truncated fit: a body fitted
+to the rows below `u` as if they were a complete sample keeps their mean but
+not their shape, and its law cut at `u` comes out too light. On a gamma
+sample cut at its 90% point, that complete-row body's mean below `u` is 14%
+low. `GammaLS` and `GeneralizedGammaLSS` do not take truncation yet; use
+their body fits for the mean below `u` only, not as a distribution there.
+The fitted body describes the uncut law, so the spliced law below `u` is
+`(1 - P(Y > u | x)) * predict_cdf(X, y) / predict_cdf(X, u)`.
 
 The spliced survival above the threshold is
 `P(Y > u | x) * (1 - predict_cdf(X, y - u))`, and a spliced quantile above `u`
@@ -752,6 +763,46 @@ model.fit(
 
 Offsets enter their named linear predictors. An ambiguous scalar `offset=` keyword
 is deliberately unavailable.
+
+## Truncated and censored rows
+
+Some rows are only part of an observation. `fit` and `fit_reml` take two
+optional pairs, each side `None`, one number, or one number per row:
+
+- `truncation=(lower, upper)`: the row could only have been recorded inside
+  this window. A splice body kept at or below a threshold is
+  `truncation=(None, u)`; losses reported only above a deductible are
+  `truncation=(d, None)`. The row contributes its density divided by the
+  probability of its window.
+- `censoring=(lower, upper)`: the response was capped at a bound. A response
+  equal to its upper bound, such as a claim paid at its policy limit, reads
+  as "at least this"; one equal to its lower bound as "at most this". Record a
+  capped response as the bound itself, for example `np.minimum(loss, limit)`.
+
+```python
+from superglm import LogNormalLS, SuperLSS, s
+
+family = LogNormalLS()
+body = SuperLSS(family, family.mean(s("age")), family.scale())
+body.fit_reml(X_body, y_body, truncation=(None, u))
+
+paid = np.minimum(loss, limit)
+capped = SuperLSS(family, family.mean(s("age")), family.scale())
+capped.fit_reml(X, paid, censoring=(None, limit))
+```
+
+The fit estimates the uncut law, so `predict`, `predict_cdf` and
+`predict_quantile` describe it, not the law inside the bounds: after the
+truncated body fit, `predict` is the mean of the uncut law. A response outside
+its truncation window or beyond its censoring bound is refused, naming the
+first such row. Bounds that touch no row leave the fit an ordinary complete
+one.
+
+`GaussianLS`, `LogNormalLS` and `GeneralizedParetoLSS` take these bounds; the
+other families refuse them. Smoothing selection differences the curvature for
+these rows instead of using closed-form third and fourth derivatives, and
+`coefficient_curvature="fisher"` is refused for them, because expected
+information describes complete rows.
 
 ## Separated cells
 
