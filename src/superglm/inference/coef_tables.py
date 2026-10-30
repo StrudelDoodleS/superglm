@@ -15,13 +15,14 @@ from superglm.inference.covariance import (
     covariance_selected_diagonal,
     covariance_slope_view,
 )
-from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_stats
+from superglm.inference.summary import (
+    _THIN_LEVEL_ROWS,
+    _BasisDetailRow,
+    _CoefRow,
+    _compute_coef_stats,
+)
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
-
-#: A level is thin when it holds fewer rows than this and less weight than this
-#: many rows of average weight (``_thin_levels``).
-_THIN_LEVEL_ROWS = 20
 
 
 def _thin_levels(

@@ -315,7 +315,7 @@ def _significance(p_value: float | None) -> str:
     The low-credibility advisory used to be returned from here instead of the
     stars, which made the exported workbook say that a flagged row had no
     significance to report.  It is not a verdict on the estimate -- the rule
-    behind it reads a level's observation count and exposure share, or a
+    behind it reads a level's rows and weight, or a
     standard error's size against the model's typical one, and never the
     p-value -- so a level can legitimately be both ``***`` and flagged.  The
     console has always shown them as independent columns; the payload now

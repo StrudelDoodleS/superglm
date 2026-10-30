@@ -396,8 +396,8 @@ def _editor_row(model, name):
 class TestTheFlagIsAdvisoryOnEveryRenderer:
     """The flag says "thin cell"; no renderer may report it as a verdict.
 
-    Its primary rule reads ``level_n_obs`` and ``level_exposure_share`` and
-    nothing else -- not the coefficient, not its p-value, not the link -- and
+    Its primary rule reads a level's rows and weights and nothing else -- not
+    the coefficient, not its p-value, not the link -- and
     the fallback beside it reads a standard error and nothing else.  Neither
     reads the response.  A level can therefore be both strongly significant
     and flagged, and the console has always said so while the export and the
@@ -499,11 +499,16 @@ class TestTheLegendDescribesTheRuleThatExists:
 
     def test_every_surface_states_the_rule_and_what_it_licenses(self):
         model = _thin_but_cleanly_estimated()
+        from superglm.inference.coef_tables import _THIN_LEVEL_ROWS
+
+        rule = f"{_THIN_LEVEL_ROWS} rows and less weight than {_THIN_LEVEL_ROWS} rows of average weight"
         for surface, text in self._surfaces(model).items():
-            lowered = text.lower()
-            assert "20 observations" in lowered, f"{surface} does not state the count trigger"
-            assert "0.05%" in lowered, f"{surface} does not state the exposure trigger"
+            # The renderers wrap the note differently; the rule must read the same.
+            lowered = " ".join(text.lower().replace("<br>", " ").split())
+            assert rule in lowered, f"{surface} does not state the thin-level rule"
             assert "credibility" in lowered, f"{surface} does not say what the flag means"
+            for stale in ("observations or under", "0.05%", "exposure share"):
+                assert stale not in lowered, f"{surface} still states the old rule: {stale!r}"
 
 
 class TestTheNoteIsTrueOfTheSecondTriggerToo:
