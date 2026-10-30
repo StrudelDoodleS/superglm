@@ -23,9 +23,9 @@ from numpy.typing import NDArray
 from superglm import _held_warnings as held_warnings
 from superglm._lambda_box import LAMBDA_BOX, LAMBDA_CEILING, LAMBDA_FLOOR, scaled_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR, PENALTY_RANK_CUT
-from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
+from superglm.distributions import clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import IdentityLink, LogLink, stabilize_eta
+from superglm.links import IdentityLink, stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
@@ -77,7 +77,7 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram_if_authoritative,
 )
-from superglm.solvers.working_rows import coefficient_initial_intercept, fisher_working_weights
+from superglm.solvers.working_rows import fisher_working_weights, null_fit_eta
 from superglm.types import GroupSlice, PenaltyComponent
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
@@ -2521,55 +2521,6 @@ def _scop_flat_components(mode: _SCOPREMLMode, names: set[str], phi: float) -> l
     return sorted(flat)
 
 
-def _log_link_variance_power(distribution: Any, link: Any) -> float | None:
-    """``p`` of a built-in log-link family whose variance is ``mu**p``, else None."""
-    if type(link) is not LogLink:
-        return None
-    if type(distribution) is Tweedie:
-        return float(distribution.p)
-    return {Gaussian: 0.0, Poisson: 1.0, Gamma: 2.0}.get(type(distribution))
-
-
-def _null_fit_eta(context: _SCOPREMLFitContext) -> NDArray:
-    """The linear predictor of the intercept-only fit, given the offset.
-
-    The offset is read relative to its largest value on a weighted row,
-    ``o~ = o - max o``, so a constant added to every offset, which the
-    intercept absorbs, changes nothing here: where ``o + c`` is exact, ``o~``
-    is the same float64 vector.  For a log link and variance ``mu**p``
-    (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the intercept is the
-    maximum-likelihood one given ``o~``.  Its score equation,
-    ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with ``t = e^intercept``,
-    solves to ``t = sum w y e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted
-    mean of the response ``y e^-o~`` under the weights ``w e^((2-p) o~)``,
-    which is what the family's initial intercept of those rows computes (up
-    to its positive floor).  With no offset those are the original rows, bit
-    for bit.  Any other family or link keeps its offset-free initial
-    intercept, still placed against ``o~``, and so does a row set whose
-    rescaled response or weight is not finite.  Only positive-weight rows
-    are read: a zero-weight row's offset moves nothing here.
-    """
-    weights = np.asarray(context.sample_weight, dtype=np.float64)
-    offset = np.asarray(context.offset_arr, dtype=np.float64)
-    carried = weights > 0.0
-    shifted = offset - (float(np.max(offset[carried])) if np.any(carried) else 0.0)
-    y = np.asarray(context.y, dtype=np.float64)
-    power = _log_link_variance_power(context.distribution, context.link)
-    if power is not None:
-        rescaled_y, rescaled_weights = y.copy(), weights.copy()
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            rescaled_y[carried] = y[carried] * np.exp(-shifted[carried])
-            rescaled_weights[carried] = weights[carried] * np.exp((2.0 - power) * shifted[carried])
-        if np.all(np.isfinite(rescaled_y[carried])) and np.all(
-            np.isfinite(rescaled_weights[carried])
-        ):
-            y, weights = rescaled_y, rescaled_weights
-    intercept = coefficient_initial_intercept(
-        distribution=context.distribution, link=context.link, y=y, sample_weight=weights
-    )
-    return stabilize_eta(intercept + shifted, context.link)
-
-
 def _hessian_scaled_bootstrap_lambdas(
     context: _SCOPREMLFitContext,
     boot_lambdas: Mapping[str, float],
@@ -2593,7 +2544,7 @@ def _hessian_scaled_bootstrap_lambdas(
     The crude approximation here is the diagonal one, ``edf_i = A_ii / (A_ii
     + lambda_j S_j,ii)``, with ``A`` the intercept-centred Fisher Gram at the
     cold start: every coefficient zero, the linear predictor that of the
-    intercept-only fit given the offset (``_null_fit_eta``), so a constant
+    intercept-only fit given the offset (``null_fit_eta``), so a constant
     added to the offset moves no value.  ``lambda_j = sum A_ii / sum S_j,ii``
     over the coefficients ``S_j`` penalizes puts the typical one at 1/2.  A
     SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
@@ -2609,7 +2560,13 @@ def _hessian_scaled_bootstrap_lambdas(
     """
     groups = context.groups
     dm = context.dm
-    eta = _null_fit_eta(context)
+    eta = null_fit_eta(
+        distribution=context.distribution,
+        link=context.link,
+        y=context.y,
+        sample_weight=context.sample_weight,
+        offset=context.offset_arr,
+    )
     mu = clip_mu(context.link.inverse(eta), context.distribution)
     fisher = fisher_working_weights(
         distribution=context.distribution,

@@ -28,6 +28,7 @@ from superglm.links import (
     LogLink,
     ProbitLink,
     SqrtLink,
+    stabilize_eta,
 )
 
 
@@ -108,6 +109,62 @@ def coefficient_initial_intercept(
         return float(np.sqrt(max(mean, 0.0)))
     mean = initial_mean(y, sample_weight, distribution)
     return float(link.link(np.atleast_1d(mean))[0])
+
+
+def _log_link_variance_power(distribution: object, link: object) -> float | None:
+    """``p`` of a built-in log-link family whose variance is ``mu**p``, else None."""
+    if type(link) is not LogLink:
+        return None
+    if type(distribution) is Tweedie:
+        return float(distribution.p)
+    return {Gaussian: 0.0, Poisson: 1.0, Gamma: 2.0}.get(type(distribution))
+
+
+def null_fit_eta(
+    *,
+    distribution: Distribution,
+    link: Link,
+    y: NDArray,
+    sample_weight: NDArray,
+    offset: NDArray,
+) -> NDArray:
+    """The linear predictor of the intercept-only fit, given the offset.
+
+    The offset is read relative to its largest value on a weighted row,
+    ``o~ = o - max o``, so a constant added to every offset, which the
+    intercept absorbs, changes nothing here: where ``o + c`` is exact, ``o~``
+    is the same float64 vector.  For a log link and variance ``mu**p``
+    (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the intercept is the
+    maximum-likelihood one given ``o~``.  Its score equation,
+    ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with ``t = e^intercept``,
+    solves to ``t = sum w y e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted
+    mean of the response ``y e^-o~`` under the weights ``w e^((2-p) o~)``,
+    which is what the family's initial intercept of those rows computes (up
+    to its positive floor).  With no offset those are the original rows, bit
+    for bit.  Any other family or link keeps its offset-free initial
+    intercept, still placed against ``o~``, and so does a row set whose
+    rescaled response or weight is not finite.  Only positive-weight rows
+    are read: a zero-weight row's offset moves nothing here.
+    """
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    offset = np.asarray(offset, dtype=np.float64)
+    carried = weights > 0.0
+    shifted = offset - (float(np.max(offset[carried])) if np.any(carried) else 0.0)
+    y = np.asarray(y, dtype=np.float64)
+    power = _log_link_variance_power(distribution, link)
+    if power is not None:
+        rescaled_y, rescaled_weights = y.copy(), weights.copy()
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            rescaled_y[carried] = y[carried] * np.exp(-shifted[carried])
+            rescaled_weights[carried] = weights[carried] * np.exp((2.0 - power) * shifted[carried])
+        if np.all(np.isfinite(rescaled_y[carried])) and np.all(
+            np.isfinite(rescaled_weights[carried])
+        ):
+            y, weights = rescaled_y, rescaled_weights
+    intercept = coefficient_initial_intercept(
+        distribution=distribution, link=link, y=y, sample_weight=weights
+    )
+    return stabilize_eta(intercept + shifted, link)
 
 
 def fisher_working_weights(
