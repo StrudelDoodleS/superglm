@@ -322,7 +322,7 @@ def face_record_at(model, W: NDArray):
         face_coefficient = _face_decomposition(
             raw, face, lambda: grouped_augmented_factor(design, W, curvature), design.n
         )
-    feature_edf = _feature_edf(
+    feature_edf, feature_edf1 = _feature_edf(
         centered,
         augmented if face is None else face_augmented,
         factor if face is None else projected_rows,
@@ -330,6 +330,8 @@ def face_record_at(model, W: NDArray):
     )
     feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
     feature_edf.setflags(write=False)
+    if feature_edf1 is not None:
+        feature_edf1.setflags(write=False)
     return replace(
         record,
         sum_w=centered.sum_w,
@@ -343,6 +345,7 @@ def face_record_at(model, W: NDArray):
         data_gram_weights=weights_fingerprint(W),
         face_augmented=face_augmented,
         face_coefficient=face_coefficient,
+        feature_edf1=feature_edf1,
     )
 
 
@@ -362,9 +365,15 @@ def _rank_centered_data_gram(X_active: DesignMatrix, W: NDArray) -> NDArray:
 
 
 def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
-    """Alternative EDF in the decomposition's retained coefficient space."""
+    """Alternative EDF in the decomposition's retained coefficient space.
+
+    On a face the factor decided, the record holds it, read off the face's
+    projected rows with the EDF; the formed Gram is not read there.
+    """
     import scipy.linalg
 
+    if rank_info.face is not None and rank_info.feature_edf1 is not None:
+        return rank_info.feature_edf1[rank_info.selected_columns].copy()
     decomposition = rank_info.augmented
     if decomposition.rank == 0:
         return np.zeros_like(edf)

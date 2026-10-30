@@ -152,6 +152,56 @@ def _within_a_newton_step_of_the_intercept_mle(result, y, offset) -> bool:
     return abs(result.intercept - mle) <= last_step**2 + 64 * np.finfo(float).eps * abs(mle)
 
 
+def _fit_on_a_face_that_cancels_its_heavy_rows():
+    """A Gaussian fit whose face cancels its heavy rows, its weights, and its face's rounding allowance.
+
+    Two rows of weight ``1e34`` are ``v = (9, 7, 7)`` and ``-v``.  They ask for
+    ``v'beta = -1`` against the binding row ``v'beta >= 0``.  Six unit rows,
+    ``I`` and ``-I``, carry weight 1, and ``S = I``.  The exact face
+    ``null(v)`` cancels the heavy rows.  The computed face is ``null(v)`` to
+    within ``u``, which at a row scale of ``1e17`` leaves the heavy rows a
+    projection ``c`` of order 100, inside its own rounding.  The light rows
+    give the face the curvature ``2I``, so for every ``c`` the face fit's
+    influence is ``I - (cc' + 3I)^-1``.  The weighted mean is zero, and its
+    rounding is below half an ulp of the heavy rows' entries.  The face's
+    Gram is refused by its formation bound, so the factor decides the face
+    whatever the rounding.
+
+    The allowance: each projected row is within ``gamma_(p + T + 3) |a|' |Z|``
+    of its projection, so ``|c|`` is at most that for the heavy rows.  The
+    factorisation's backward error, ``gamma ||B||_F``, moves each of the
+    face's 2 directions by at most twice that over ``sigma_min(B) >=
+    sqrt(3)`` (Wedin).
+    """
+    from superglm._roundoff import gamma
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+
+    v = np.array([9.0, 7.0, 7.0])
+    X = np.vstack((v, -v, np.eye(3), -np.eye(3)))
+    y = np.array([-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    weights = np.array([1e34, 1e34, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    constraint = LinearConstraintSet(A=v[None, :], b=np.zeros(1))
+    result, _ = fit_irls_direct(
+        DesignMatrix([DenseGroupMatrix(X)], n=8, p=3),
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        [GroupSlice("x", 0, 3, constraints=constraint)],
+        lambda2=0.0,
+        S_override=np.eye(3),
+        weight_semantics="frequency",
+    )
+    assert result.rank_info.face.shape == (3, 2)
+    assert result.rank_info.face_augmented.method == "qr_svd"
+    n, p, width = 8, 3, 2
+    heavy = np.sqrt(2.0) * gamma(p + 4) * np.sqrt(weights[0]) * np.sum(np.abs(v))
+    slack = 2 * width * gamma(n + width) * (heavy + np.sqrt(3.0 * width)) / np.sqrt(3.0)
+    return result, weights, slack
+
+
 class TestDirectSolverBasic:
     def test_state_evaluation_accepts_in_place_custom_link(self):
         """Custom link methods may mutate writable arrays supplied by the solver."""
@@ -2404,9 +2454,9 @@ class TestDirectSolverBasic:
         real_edf = irls_direct_finalise._feature_edf
 
         def recorded(*args, **kwargs):
-            edf = real_edf(*args, **kwargs)
+            edf, edf1 = real_edf(*args, **kwargs)
             traces.append(edf.copy())
-            return edf
+            return edf, edf1
 
         monkeypatch.setattr(irls_direct_finalise, "_feature_edf", recorded)
         rng = np.random.default_rng(3)
@@ -2677,7 +2727,7 @@ class TestDirectSolverBasic:
         centered = SimpleNamespace(data_gram=data.T @ data + 0.5, hessian=hessian, penalty=penalty)
         decomposition = _face_decomposition(hessian, face, lambda: factor, len(data))
         assert decomposition.method == "qr_svd"
-        edf = _feature_edf(centered, decomposition, lambda exponent=0: data @ face, face)
+        edf, _ = _feature_edf(centered, decomposition, lambda exponent=0: data @ face, face)
         on_face = (factor @ face).T @ (factor @ face)
         exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
         # an inverse's forward error, kappa eps, on entries of order max |exact|
@@ -2719,7 +2769,7 @@ class TestDirectSolverBasic:
 
         certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor, len(data))
         assert certified.method != "qr_svd"
-        edf = _feature_edf(centered, certified, projected_rows, face)
+        edf, _ = _feature_edf(centered, certified, projected_rows, face)
         on_face = (factor @ face).T @ (factor @ face)
         exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
         # an inverse's forward error, kappa eps, on entries of order max |exact|
@@ -2729,57 +2779,45 @@ class TestDirectSolverBasic:
     def test_a_face_whose_rows_the_weights_cancel_publishes_a_trace_its_rows_allow(self):
         """A face's EDF is the face fit's influence trace, never a sum of shares that cancel.
 
-        Two rows of weight ``1e34`` are ``v = (9, 7, 7)`` and ``-v``, and they ask
-        for ``v'beta = -1`` against the binding row ``v'beta >= 0``.  Six unit
-        rows, ``I`` and ``-I``, carry weight 1.  The exact face ``null(v)``
-        cancels the heavy rows.  The computed face is ``null(v)`` to within
-        ``u``, which at a row scale of ``1e17`` leaves the heavy rows a
-        projection ``c`` of order 100, inside its own rounding.  The light rows
-        give the face the curvature ``2I``, and ``S = I``.  So for every ``c``
-        the face fit's influence is ``I - (cc' + 3I)^-1``, symmetric with
-        eigenvalues ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  With the intercept, the
-        EDF lies in ``[7/3, 8/3]``, and ``7/3`` is the exact face's.  Each
-        coefficient's share lies in ``[0, 1]``.  The weighted mean is zero, and
-        its rounding is below half an ulp of the heavy rows' entries.
+        The face fit's influence ``I - (cc' + 3I)^-1``
+        (``_fit_on_a_face_that_cancels_its_heavy_rows``) has eigenvalues
+        ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  With the intercept, the EDF lies in
+        ``[7/3, 8/3]``, and ``7/3`` is the exact face's.  The influence is
+        symmetric, so each coefficient's share lies in ``[0, 1]``.
 
         Mutation: f0077903, whose shares carry the coupling to the curvature
         off the face, publishes shares of ``6e15`` that sum to 3.0 (2.0 under
-        the Haswell kernel).
+        the Haswell kernel).  The certified factor of the whole design read on
+        the face, in place of the projected rows, publishes 2.666761, above
+        ``8/3``, under the default kernel.
         """
-        from superglm._roundoff import gamma
-        from superglm.distributions import Gaussian
-        from superglm.links import IdentityLink
-        from superglm.solvers.irls_direct import fit_irls_direct
-
-        v = np.array([9.0, 7.0, 7.0])
-        X = np.vstack((v, -v, np.eye(3), -np.eye(3)))
-        y = np.array([-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        weights = np.array([1e34, 1e34, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-        constraint = LinearConstraintSet(A=v[None, :], b=np.zeros(1))
-        result, _ = fit_irls_direct(
-            DesignMatrix([DenseGroupMatrix(X)], n=8, p=3),
-            y,
-            weights,
-            Gaussian(),
-            IdentityLink(),
-            [GroupSlice("x", 0, 3, constraints=constraint)],
-            lambda2=0.0,
-            S_override=np.eye(3),
-            weight_semantics="frequency",
-        )
+        result, _, slack = _fit_on_a_face_that_cancels_its_heavy_rows()
         record = result.rank_info
-        assert record.face.shape == (3, 2)
-        assert record.face_augmented.method == "qr_svd"
-        # Each projected row is within gamma_(p + T + 3) |a|'|Z| of its projection,
-        # so |c| <= that bound for the heavy rows.  The factorisation's backward
-        # error, gamma ||B||_F, moves each of the face's 2 directions by at most
-        # twice that over sigma_min(B) >= sqrt(3) (Wedin).
-        n, p, width = 8, 3, 2
-        heavy = np.sqrt(2.0) * gamma(p + 4) * np.sqrt(weights[0]) * np.sum(np.abs(v))
-        slack = 2 * width * gamma(n + width) * (heavy + np.sqrt(3.0 * width)) / np.sqrt(3.0)
         assert 7.0 / 3.0 - slack <= result.effective_df <= 8.0 / 3.0 + slack
         assert np.all(record.feature_edf >= -slack)
         assert np.all(record.feature_edf <= 1.0 + slack)
+
+    def test_a_face_the_factor_decided_reads_its_edf1_off_the_same_rows(self):
+        """Wood's ``edf1`` on such a face is read off the projected rows, never the formed Gram.
+
+        The face fit's influence ``F = I - (cc' + 3I)^-1`` on the face
+        (``_fit_on_a_face_that_cancels_its_heavy_rows``) has eigenvalues
+        ``mu`` of ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  ``2F - F^2`` then has
+        eigenvalues ``2 mu - mu^2`` of ``8/9`` and at most 1, so ``1 + sum
+        edf1`` lies in ``[25/9, 26/9]``, and each share in ``[0, 1]``.
+        Inference reads ``edf1`` with the Gram the fit formed, as
+        ``fit_inference_info`` hands it over.  Mutation: f0077903 forms it
+        from that Gram, whose entries of ``1e36`` round away the face's
+        curvature.
+        """
+        from superglm.model.state_ops import _rank_edf1
+
+        result, weights, slack = _fit_on_a_face_that_cancels_its_heavy_rows()
+        record = result.rank_info
+        edf = record.feature_edf[record.selected_columns].copy()
+        edf1 = _rank_edf1(record, record.take_data_gram(weights), edf)
+        assert 25.0 / 9.0 - 2 * slack <= 1.0 + np.sum(edf1) <= 26.0 / 9.0 + 2 * slack
+        assert np.all(edf1 >= -2 * slack) and np.all(edf1 <= 1.0 + 2 * slack)
 
 
 # ── Select=True tests ──────────────────────────────────────────

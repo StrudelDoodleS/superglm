@@ -43,6 +43,7 @@ from superglm.solvers.rank import (
     decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
+    diagonal_of_square,
     face_pseudo_inverse,
     weights_fingerprint,
 )
@@ -183,8 +184,10 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
     return bool(slack >= np.linalg.eigvalsh(0.5 * (equilibrated + equilibrated.T))[0])
 
 
-def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
-    """``diag(Z M Z')``: the face fit's EDF, read off its data rows projected on the face ``Z``.
+def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
+    """``diag(F)`` and ``diag(2F - F^2)``, ``F = Z M Z'``: the face fit's EDF and ``edf1``.
+
+    Both are read off the data rows projected on the face ``Z``.
 
     ``rows`` is ``R`` with ``R'R = Z'DZ``: the data rows projected on the face
     and then factored (``grouped_projected_factor``).  With ``P =
@@ -195,16 +198,19 @@ def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
     its penalized one.  Its trace is ``||U_R||_F^2``, the data rows' share of
     ``B``'s left singular vectors, in ``[0, rank B]``: the influence trace
     from orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
-    supplement B, in his notation).  The diagonal sums to it.
+    supplement B, in his notation).  The diagonal sums to it.  ``edf1`` is
+    Wood's alternative EDF, ``diag(2F - F^2)`` (Wood 2013, section 2.4), off
+    the same ``F``.
 
     Two choices make this trace the rows' own.
 
     - **The rows are projected before they are factored.**  A Householder
       factor of the whole design is backward stable only columnwise (Higham
       2002, section 19.3); row-wise stability needs row pivoting or rows
-      sorted by size (section 19.4; Cox and Higham 1998).  Under weights far apart, its light rows can
-      carry an error of order ``u`` times the heaviest column, and that is
-      all of the face's curvature when the face cancels the heavy rows.
+      sorted by size (section 19.4; Cox and Higham 1998).  Under weights far
+      apart, its light rows can carry an error of order ``u`` times the
+      heaviest column, and that is all of the face's curvature when the face
+      cancels the heavy rows.
       ``R`` factors the rows ``AZ`` formed one row at a time, each entry
       within ``gamma_(p + T + 3) |a_r|' |Z|`` of the exact projection.
     - **``Z M Z'`` leaves out the coupling to the curvature off the face.**
@@ -212,14 +218,17 @@ def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
       difference from the split ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Its trace is
       zero, and so is its diagonal's sum over each term, because the binding
       rows of a term touch only that term's coefficients.  So it moves no
-      term's EDF.  But weights far apart make its entries as large as their
-      ratio, up to ``1e15``, where float64 cannot resolve them.
+      term's EDF, and the same holds for ``edf1``.  But weights far apart
+      make its entries as large as their ratio, up to ``1e15``, where
+      float64 cannot resolve them.
     """
     projected = np.vstack((rows, penalty_factor(penalty) @ face))
     decomposition = decompose_factor(projected, retain_factor_solve=True)
     data = np.zeros_like(projected)
     data[: rows.shape[0]] = rows
-    return np.diag(face @ decomposition.solve_factor_rhs(data) @ face.T).copy()
+    influence = face @ decomposition.solve_factor_rhs(data) @ face.T
+    edf = np.diag(influence).copy()
+    return edf, 2.0 * edf - diagonal_of_square(influence)
 
 
 def _feature_edf(
@@ -228,8 +237,8 @@ def _feature_edf(
     factor: Callable[[int], NDArray],
     face: NDArray | None = None,
     inverse: NDArray | None = None,
-) -> NDArray:
-    """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom.
+) -> tuple[NDArray, NDArray | None]:
+    """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom, and its ``edf1``.
 
     On an active face ``Z`` (``_active_face_basis``), ``decomposition``
     factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
@@ -238,7 +247,9 @@ def _feature_edf(
     can be as large as the face's own entries, and ``D`` is as unreliable as
     the Hessian it was formed with.  The EDF is then the face fit's own,
     read off the face's projected data rows ``factor(0)``
-    (``_face_factor_edf``).
+    (``_face_factor_edf``), and so is its ``edf1``.  Everywhere else
+    ``edf1`` is ``None``: inference forms it from the data Gram
+    (``state_ops._rank_edf1``).
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -271,11 +282,11 @@ def _feature_edf(
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         unscaled = np.diag(inverse @ centered.data_gram).copy()
     if np.all(np.isfinite(unscaled)):
-        return unscaled
+        return unscaled, None
     hessian = centered.hessian
     largest = float(np.max(np.abs(hessian), initial=0.0))
     if largest == 0.0 or not math.isfinite(largest):
-        return unscaled
+        return unscaled, None
     exponent = math.frexp(largest)[1]
     scaled = decompose_gram_if_authoritative(
         _on_face(np.ldexp(hessian, -exponent), face), psd_by_construction=True
@@ -285,7 +296,7 @@ def _feature_edf(
     if scaled is None:
         scaled = decompose_factor(factor(exponent))
     scaled_gram = np.ldexp(centered.data_gram, -exponent)
-    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy()
+    return np.diag(face_pseudo_inverse(scaled, face) @ scaled_gram).copy(), None
 
 
 def _retained_rank_info(
@@ -293,6 +304,7 @@ def _retained_rank_info(
     W: NDArray,
     augmented_rank: RankDecomposition,
     feature_edf: NDArray,
+    feature_edf1: NDArray | None,
     *,
     dm: DesignMatrix,
     groups: list[GroupSlice],
@@ -381,6 +393,8 @@ def _retained_rank_info(
     selected_columns = np.arange(p, dtype=int)
     selected_columns.setflags(write=False)
     feature_edf.setflags(write=False)
+    if feature_edf1 is not None:
+        feature_edf1.setflags(write=False)
     return RankInfo(
         policy_version=SHARED_RANK_POLICY.version,
         coordinate_space="solver",
@@ -403,6 +417,7 @@ def _retained_rank_info(
         face_coefficient=(
             None if face is None else _face_decomposition(M_beta, face, raw_factor, dm.n)
         ),
+        feature_edf1=feature_edf1,
     )
 
 
@@ -551,7 +566,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             if face is None
             else _face_decomposition(centered_final.hessian, face, augmented_factor, dm.n)
         )
-        feature_edf = _feature_edf(
+        feature_edf, feature_edf1 = _feature_edf(
             centered_final,
             augmented_rank if face_rank is None else face_rank,
             augmented_factor if face is None else projected_rows,
@@ -569,6 +584,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             W,
             augmented_rank,
             feature_edf,
+            feature_edf1,
             dm=dm,
             groups=fit.groups,
             p=fit.p,

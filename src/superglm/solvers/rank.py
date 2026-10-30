@@ -1208,6 +1208,11 @@ class RankInfo:
     face_rows: NDArray | None = field(default=None, repr=False, compare=False)
     face_augmented: RankDecomposition | None = field(default=None, repr=False, compare=False)
     face_coefficient: RankDecomposition | None = field(default=None, repr=False, compare=False)
+    # On a face the factor decided, Wood's alternative EDF ``diag(2F - F^2)``
+    # of the face fit's influence ``F``, read off its projected rows with
+    # ``feature_edf`` (``irls_direct._face_factor_edf``).  ``None`` elsewhere:
+    # inference forms it from the data Gram.
+    feature_edf1: NDArray | None = field(default=None, repr=False, compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
