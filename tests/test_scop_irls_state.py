@@ -747,3 +747,76 @@ def test_the_solver_refuses_scop_beside_linear_constraints() -> None:
             lambda2=1.0,
             weight_semantics="frequency",
         )
+
+
+def _edge_of_range_data(case: str):
+    """A monotone-in-``x`` response whose SCOP start or step meets the edge of the link's range."""
+    rng = np.random.default_rng(3)
+    x = np.sort(rng.uniform(0, 1, 80))
+    if case == "binomial_log":
+        y = (rng.uniform(size=80) < 0.9 + 0.09 * x).astype(float)
+        return x, y, np.full(80, 2.0), "binomial", "log"
+    if case == "gamma_inverse":
+        mu = 1.0 / (0.05 + 1.0 * x)
+        _ = rng.uniform(size=80)
+        return x, rng.gamma(20, mu / 20), None, "gamma", "inverse"
+    mu = np.where(x < 0.3, 0.0, 6 * (x - 0.3))
+    return x, rng.poisson(mu).astype(float), None, "poisson", "identity"
+
+
+def _fit_edge_of_range(case: str) -> tuple[SuperGLM, np.ndarray]:
+    x, y, offset, family, link = _edge_of_range_data(case)
+    model = SuperGLM(
+        family=family,
+        link=link,
+        selection_penalty=0.0,
+        features={
+            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+        },
+    )
+    model.fit(pd.DataFrame({"x": x}), y, offset=offset)
+    eta = model._dm.matvec(model.result.beta) + model.result.intercept
+    return model, eta + (0.0 if offset is None else offset)
+
+
+def test_the_scop_search_refuses_a_trial_that_leaves_the_mean_space(monkeypatch) -> None:
+    """A binomial/log SCOP fit from a start inside the space never leaves it.
+
+    The first proposal's linear predictor is positive on some row, a binomial
+    mean above one; the search refuses it and every trial like it.  Mutation:
+    the search given only its observed-row predicate retains rows at
+    ``eta >= 0`` (41 of 80 after 73 iterations).
+    """
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    real = irls_scop._select_irls_trial
+    proposal_refused: list[bool] = []
+
+    def spy(**kwargs):
+        invalid = kwargs["invalid_state"]
+        proposal_refused.append(invalid is not None and invalid(kwargs["proposal"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    model, eta = _fit_edge_of_range("binomial_log")
+    assert proposal_refused[0]
+    assert float(np.max(eta)) < 0.0
+
+
+@pytest.mark.filterwarnings("ignore:IRLS stopped:UserWarning")
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
+def test_a_scop_fit_left_outside_the_links_range_says_it_is_not_converged(case: str) -> None:
+    """The SCOP start can lie outside the link's range, and no step can move it in.
+
+    The fit then ends not converged, with a ``ConvergenceWarning`` that names
+    the cause, never converged at a mean that is not positive.  Mutation: the
+    returned-state verdict removed publishes the Poisson/identity fit converged
+    after one iteration with 15 of its 80 rows at a non-positive mean.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with pytest.warns(ConvergenceWarning, match="outside the range"):
+        model, eta = _fit_edge_of_range(case)
+    assert not model.result.converged
+    # the identity and inverse links both need a positive predictor for a positive mean
+    assert int(np.sum(eta <= 0.0)) > 0

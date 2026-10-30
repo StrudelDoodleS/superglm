@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from superglm.solvers.constrained_qp import _homogeneous_feasible_start
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 from superglm.solvers.irls_state import (
+    StateInvalid,
     _IRLSState,
     _IRLSStepDecision,
     _poisson_sqrt_halving_budget,
@@ -31,6 +33,38 @@ if TYPE_CHECKING:
 
 # the package's logger: its records keep the name they had when the solver was one module
 logger = logging.getLogger(__package__)
+
+
+def trial_refusal(
+    family: Distribution,
+    link: Link,
+    committed: _IRLSState,
+    weights: NDArray,
+    other: StateInvalid | None,
+) -> StateInvalid | None:
+    """The line search's refusal of a trial that leaves what the committed state is inside, else ``other``.
+
+    The family's mean space (``mean_space_violation``) and the link's own
+    domain (``link_domain_violation``) are each convex, so halving from a state
+    inside one finds a trial inside it (Nocedal & Wright 2006, section 3.1,
+    backtracking with a feasibility test).  A committed state outside one has
+    no such guarantee, and that domain is not tested.  ``other`` is the
+    route's own refusal, the feasible set or finite observed rows.
+    """
+    refusal = other
+    for outside in (mean_space_violation(family, link), link_domain_violation(link, family)):
+        if outside is not None and not outside(committed.eta_unclipped, weights):
+            refusal = _refuses(outside, weights, refusal)
+    return refusal
+
+
+def _refuses(
+    outside: Callable[[NDArray, NDArray], bool], weights: NDArray, other: StateInvalid | None
+) -> StateInvalid:
+    def invalid(candidate: _IRLSState) -> bool:
+        return outside(candidate.eta_unclipped, weights) or (other is not None and other(candidate))
+
+    return invalid
 
 
 class _IRLSDirectTrialSearch:
@@ -61,26 +95,17 @@ class _IRLSDirectTrialSearch:
     ``search(fit, it)`` writes what the SCOP step's own search writes: the
     retained state and its ``eta``, ``mu`` and deviance, ``beta`` and
     ``intercept``, the decision, ``n_halvings``, ``step_rejected`` and
-    ``proposal_state``.  The unit keeps the two domain predicates, fixed for
-    the fit, and no reference to the fit.
+    ``proposal_state``.  The unit keeps nothing: no reference to the fit.
     """
 
-    __slots__ = ("_mean_space_invalid", "_link_domain_invalid")
-
-    def __init__(self, family: Distribution, link: Link) -> None:
-        # The family's mean space, when the link's inverse can leave it (declared
-        # by the family and link, ``irls_state.mean_space_violation``).
-        self._mean_space_invalid = mean_space_violation(family, link)
-        # The link inverse's own domain (``irls_state.link_domain_violation``).
-        self._link_domain_invalid = link_domain_violation(link, family)
+    __slots__ = ()
 
     def search(self, fit: _IRLSDirectFit, it: int) -> None:
         """Iteration ``it``'s line search from the committed state to the step's proposal."""
         beta, intercept, committed = fit.beta, fit.intercept, fit.committed
         qp, newton_score, mean_space = fit.qp, fit.newton_score, fit.mean_space
         y, weights = fit.y, fit.weights
-        family, link, _mean_space_invalid = fit.family, fit.link, self._mean_space_invalid
-        _link_domain_invalid = self._link_domain_invalid
+        family, link = fit.family, fit.link
         max_halving, penalty_matvec = fit.max_halving, fit.penalty_matvec
         evaluate_state, recorder = fit.evaluate_state, fit.recorder
         _t0 = time.perf_counter()
@@ -141,29 +166,9 @@ class _IRLSDirectTrialSearch:
             def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
                 return not qp.feasible(candidate.beta)
 
-        trial_is_invalid = constraint_trial_is_invalid
-        if _mean_space_invalid is not None and not _mean_space_invalid(
-            committed.eta_unclipped, weights
-        ):
-            # A feasible committed state keeps every accepted trial in the
-            # family's mean space (``mean_space_violation``).
-            def trial_is_invalid(candidate: _IRLSState, other=constraint_trial_is_invalid) -> bool:
-                assert _mean_space_invalid is not None
-                if _mean_space_invalid(candidate.eta_unclipped, weights):
-                    return True
-                return other is not None and other(candidate)
-
-        if _link_domain_invalid is not None and not _link_domain_invalid(
-            committed.eta_unclipped, weights
-        ):
-            # A committed state inside the link's domain keeps every
-            # accepted trial inside it (``link_domain_violation``).
-            def trial_is_invalid(candidate: _IRLSState, other=trial_is_invalid) -> bool:
-                assert _link_domain_invalid is not None
-                if _link_domain_invalid(candidate.eta_unclipped, weights):
-                    return True
-                return other is not None and other(candidate)
-
+        trial_is_invalid = trial_refusal(
+            family, link, committed, weights, constraint_trial_is_invalid
+        )
         # the mean space's hooks (``_IRLSDirectMeanSpaceOverlay.line_search``):
         # its first halving, a lowered start's budget and, under Newton steps,
         # the merit on the model's own deviance
@@ -243,7 +248,8 @@ class _IRLSDirectTrialSearch:
             # this proposal is committed, convexity of A beta >= b and the
             # invalid-state predicate above preserve feasibility on every
             # subsequent accepted line-search segment.
-            if _link_domain_invalid is not None and _link_domain_invalid(
+            outside_link_domain = link_domain_violation(link, family)
+            if outside_link_domain is not None and outside_link_domain(
                 proposal.eta_unclipped, weights
             ):
                 # Outside the link's domain the proposal is no state of

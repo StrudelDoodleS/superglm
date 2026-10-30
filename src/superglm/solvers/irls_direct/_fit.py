@@ -1543,9 +1543,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
         self.stop_rule = _IRLSDirectConvergence(self.max_iter, mode_bar)
         # the shared line search, unless the step searches its own way
-        self.trial_search = (
-            _IRLSDirectTrialSearch(self.family, self.link) if self.step.search is None else None
-        )
+        self.trial_search = _IRLSDirectTrialSearch() if self.step.search is None else None
         # A warm start's centred state carried to this fit's centre (one-engine
         # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -1760,6 +1758,25 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     "fit_irls_direct: retained coefficient mode has no complete "
                     "constrained-QP KKT certificate; fit is not converged."
                 )
+
+        # A returned state with a row outside the link's domain is no fitted model,
+        # whatever stopped the loop: the state a shape-constrained start leaves it
+        # at when no step can move it in (``link_domain_violation``).
+        outside_link_domain = link_domain_violation(link, family)
+        if outside_link_domain is not None and outside_link_domain(eta_unclipped, weights):
+            from superglm.diagnostics.convergence import ConvergenceWarning
+
+            if converged:
+                converged, termination_reason = False, "score_stagnated"
+            # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
+            held_warnings.warn(
+                "The coefficient fit returns its last iterate, not converged: some rows' "
+                f"linear predictor lies outside the range the {type(link).__name__} allows "
+                f"a {type(family).__name__} mean. This link may not suit these data; a log "
+                "link cannot leave that range.",
+                ConvergenceWarning,
+                stacklevel=4,
+            )
 
         # the mean space's boundary verdict on the returned state (F04)
         mean_space = self.mean_space

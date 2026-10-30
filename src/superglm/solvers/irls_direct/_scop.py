@@ -36,6 +36,7 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._finalise import _finalise_centred
+from superglm.solvers.irls_direct._search import trial_refusal
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -1032,20 +1033,39 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         latent_depth = _latent_step_depth(scop_committed, proposal_scop, _scop_specs)
         shortened = math.ldexp(1.0, -latent_depth)
         search_proposal = evaluate_scop_trial(shortened) if latent_depth else proposal_scop.irls
+        # A lowered start's halving budget, as the shared search's.  Not its first
+        # halving, which skips the depths a chord from the committed state leaves
+        # the mean space at: a SCOP trial maps its latent coordinates through
+        # ``exp`` and need not follow the chord, so the skip refuses trials
+        # the mean space admits.
+        lowered_budget = None
+        if fit.mean_space is not None:
+            _, lowered_budget, _, _ = fit.mean_space.line_search(
+                fit, scop_committed.irls, search_proposal, None
+            )
         decision = _select_irls_trial(
             committed=scop_committed.irls,
             proposal=search_proposal,
             evaluate_state=lambda alpha: evaluate_scop_trial(alpha * shortened),
-            invalid_state=curvature.observed_rows_invalid if curvature.observed else None,
+            invalid_state=trial_refusal(
+                family,
+                link,
+                scop_committed.irls,
+                weights,
+                curvature.observed_rows_invalid if curvature.observed else None,
+            ),
             max_halving=max_halving,
-            extended_max_halving=lambda: _poisson_sqrt_halving_budget(
-                committed=scop_committed.irls,
-                proposal=search_proposal,
-                y=y,
-                weights=weights,
-                family=family,
-                link=link,
-                default=max_halving,
+            extended_max_halving=lambda: max(
+                _poisson_sqrt_halving_budget(
+                    committed=scop_committed.irls,
+                    proposal=search_proposal,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                ),
+                max_halving if lowered_budget is None else lowered_budget(),
             ),
             merit_scale=0.0,
             merit_roundoff=lambda candidate, current: (

@@ -2556,6 +2556,32 @@ class TestDirectSolverBasic:
         expected = "max_iter" if history == "halves_exactly" else "score_stagnated"
         assert result.termination_reason == expected
 
+    def test_a_trial_is_refused_for_each_domain_the_committed_state_is_inside(self):
+        """The line search's shared refusal: mean space, link domain, then the route's own."""
+        from types import SimpleNamespace
+
+        from superglm.distributions import Binomial, Gamma, Poisson
+        from superglm.links import InverseLink, LogLink
+        from superglm.solvers.irls_direct._search import trial_refusal
+
+        weights = np.array([1.0, 1.0, 0.0])
+
+        def state(*eta):
+            return SimpleNamespace(eta_unclipped=np.array(eta))
+
+        # binomial/log: the mean space is eta < 0, on rows that carry weight
+        refusal = trial_refusal(Binomial(), LogLink(), state(-1.0, -2.0, -1.0), weights, None)
+        assert refusal(state(-1.0, 0.5, -1.0)) and not refusal(state(-1.0, -0.5, 3.0))
+        # a committed state outside a domain tests nothing of it
+        assert trial_refusal(Binomial(), LogLink(), state(-1.0, 0.5, -1.0), weights, None) is None
+        # gamma/inverse: the link's domain is eta > 0, and the route's refusal still applies
+        other = lambda candidate: bool(candidate.eta_unclipped[0] > 5.0)  # noqa: E731
+        refusal = trial_refusal(Gamma(), InverseLink(), state(1.0, 2.0, 1.0), weights, other)
+        assert refusal(state(1.0, -0.1, 1.0)) and refusal(state(6.0, 1.0, 1.0))
+        assert not refusal(state(1.0, 1.0, -1.0))
+        # no domain to keep: the route's refusal itself
+        assert trial_refusal(Poisson(), LogLink(), state(1.0, 2.0, 1.0), weights, other) is other
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:
