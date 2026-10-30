@@ -47,7 +47,7 @@ import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 import scipy.linalg
@@ -70,7 +70,7 @@ from superglm.solvers._structured.border import (
     BorderGenerators,
     factor_border,
 )
-from superglm.solvers._structured.factors import _penalty_product
+from superglm.solvers._structured.factors import _penalty_product, _ProfiledInterceptFactor
 from superglm.solvers._structured.operators import (
     CenteredBlockOperator,
     LowRankSymmetricOperator,
@@ -2808,7 +2808,7 @@ class NestedSchurFactor:
         return self._scaled_eigenvalues_cache
 
 
-class ProfiledNestedSchurFactor:
+class ProfiledNestedSchurFactor(_ProfiledInterceptFactor):
     """Slope inverse of a nested fit with the intercept profiled out (§3.6, §6).
 
     ``augmented_factor`` factors ``H_aug`` on ``[1, X]`` (``intercept=True``);
@@ -2868,10 +2868,11 @@ class ProfiledNestedSchurFactor:
     ``structured_indices`` (slope coordinates, ``augmented - 1`` without the
     intercept), ``max_structured_inverse_block``.  ``logdet()`` is
     ``augmented logdet - log(sum_w)``.  ``ValueError`` when ``sum_w`` is not
-    positive and finite or the widths disagree.
+    positive and finite or the widths disagree.  Its augmented ``solve`` runs
+    in the raw coordinates.
     """
 
-    backend = "structured"
+    _solve_options: ClassVar[dict] = {}
     shape: tuple[int, int]
     augmented_factor: NestedSchurFactor
     sum_w: float
@@ -2954,13 +2955,6 @@ class ProfiledNestedSchurFactor:
             xtw=state["xtw"],
             data_operator=state["data_operator"],
         )
-
-    @staticmethod
-    def _shift_component(component: PenaltyComponent) -> PenaltyComponent:
-        start, stop = component.group_sl.start, component.group_sl.stop
-        if start is None or stop is None:
-            raise ValueError("Penalty component slices must have explicit bounds.")
-        return replace(component, group_sl=slice(start + 1, stop + 1, component.group_sl.step))
 
     def _augment(self, operator: CenteredBlockOperator) -> NestedDataOperator:
         """``O_aug`` of a centred slope operator, checked like any augmented-factor operator.
@@ -3048,50 +3042,6 @@ class ProfiledNestedSchurFactor:
         means = totals / self.sum_w
         traces = traces + np.outer(means, means)
         return 0.5 * (traces + traces.T) + _low_rank_matrix(self.solve, slopes)
-
-    def solve(self, rhs: NDArray) -> NDArray:
-        """Return ``H_c^-1 rhs``: the augmented solve of ``[0; rhs]``, intercept row dropped."""
-        values = np.asarray(rhs, dtype=np.float64)
-        columns = values[:, None] if values.ndim == 1 else values
-        if columns.ndim != 2 or columns.shape[0] != self.shape[0]:
-            raise ValueError(
-                f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m), "
-                f"got {values.shape}."
-            )
-        augmented = np.zeros((self.shape[0] + 1, columns.shape[1]))
-        augmented[1:] = columns
-        solution = self.augmented_factor.solve(augmented)[1:]
-        return solution[:, 0] if values.ndim == 1 else solution
-
-    def logdet(self) -> float:
-        """Return ``augmented_factor.logdet() - log(sum_w)``."""
-        return float(self.augmented_factor.logdet() - np.log(self.sum_w))
-
-    def selected_inverse_diagonal(self, indices: NDArray) -> NDArray:
-        """Augmented ``selected_inverse_diagonal`` at ``indices + 1``."""
-        return self.augmented_factor.selected_inverse_diagonal(
-            np.asarray(indices, dtype=np.intp) + 1
-        )
-
-    def selected_inverse_block(self, indices: NDArray) -> NDArray:
-        """Augmented ``selected_inverse_block`` at ``indices + 1`` (same cap)."""
-        return self.augmented_factor.selected_inverse_block(np.asarray(indices, dtype=np.intp) + 1)
-
-    def trace_inverse_penalty(self, component: PenaltyComponent) -> float:
-        """Augmented ``trace_inverse_penalty`` of the component shifted by one."""
-        return self.augmented_factor.trace_inverse_penalty(self._shift_component(component))
-
-    def penalty_cross_trace(
-        self,
-        left: PenaltyComponent,
-        right: PenaltyComponent,
-        left_scale: float,
-        right_scale: float,
-    ) -> float:
-        """Augmented ``penalty_cross_trace`` of the shifted components."""
-        return self.augmented_factor.penalty_cross_trace(
-            self._shift_component(left), self._shift_component(right), left_scale, right_scale
-        )
 
     def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
         """Return ``tr(H_c^-1 O_c)`` by the class-docstring identity."""

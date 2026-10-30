@@ -141,6 +141,7 @@ from superglm.solvers._structured.border import (
     BorderGenerators,
     factor_border,
 )
+from superglm.solvers._structured.factors import _ProfiledLeafFactor
 from superglm.solvers._structured.leaf_kernels import _absolute, _add, _add_scaled, _assign
 from superglm.solvers._structured.nested import _super_root_inverse
 from superglm.solvers._structured.operators import (
@@ -3015,7 +3016,7 @@ class SumToZeroTreeFactor:
         )
 
 
-class ProfiledSumToZeroTreeFactor:
+class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
     """Slope inverse ``M_ss`` of an ``sz`` fit with the intercept profiled out.
 
     ``M_ss`` is the slope block of ``H_aug^-1``, the same in the raw and the
@@ -3025,27 +3026,8 @@ class ProfiledSumToZeroTreeFactor:
     augmented ``logdet - log(sum_w)``.
     """
 
-    backend = "structured"
-
     def __init__(self, *, augmented_factor: SumToZeroTreeFactor, sum_w: float, xtw: NDArray):
-        self.augmented_factor = augmented_factor
-        self.sum_w = float(sum_w)
-        self.xtw = np.asarray(xtw, dtype=np.float64)
-        if not np.isfinite(self.sum_w) or self.sum_w <= 0.0:
-            raise ValueError("sum_w must be positive and finite.")
-        if augmented_factor.shape != (len(self.xtw) + 1, len(self.xtw) + 1):
-            raise ValueError("Augmented factor width does not match xtw.")
-        self.shape = (len(self.xtw), len(self.xtw))
-        self.mean_x = self.xtw / self.sum_w
-        self.rank = max(int(augmented_factor.rank) - 1, 0)
-        self.rank_truncated = self.rank < self.shape[0]
-        self.schur_condition_estimate = augmented_factor.schur_condition_estimate
-        self.minimum_local_diagonal = augmented_factor.minimum_local_diagonal
-        self.dominant_group_name = augmented_factor.dominant_group_name
-        self.n_levels = augmented_factor.n_levels
-        self.block_size = augmented_factor.block_size
-        self.max_structured_inverse_block = augmented_factor.max_structured_inverse_block
-        self.border_certificate = augmented_factor.border_certificate
+        self._adopt(augmented_factor, sum_w, xtw)
         self.thin_levels = augmented_factor.thin_levels
         self.weakly_identified_slopes = tuple(
             index - 1 for index in augmented_factor.weakly_identified_coefficients if index > 0
@@ -3055,28 +3037,6 @@ class ProfiledSumToZeroTreeFactor:
         )
         self.small_indices = augmented_factor.small_indices[1:] - 1
         self.structured_indices = augmented_factor.structured_indices - 1
-
-    def published(self, system: SumToZeroLeafSystem | None = None):
-        """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""
-        import copy
-
-        augmented = self.augmented_factor
-        clone = copy.copy(self)
-        clone.augmented_factor = augmented.published(
-            augmented.system.published() if system is None else system
-        )
-        return clone
-
-    @staticmethod
-    def _shift_component(component: PenaltyComponent) -> PenaltyComponent:
-        import dataclasses
-
-        start, stop = component.group_sl.start, component.group_sl.stop
-        if start is None or stop is None:
-            raise ValueError("Penalty component slices must have explicit bounds.")
-        return dataclasses.replace(
-            component, group_sl=slice(start + 1, stop + 1, component.group_sl.step)
-        )
 
     def _is_own_data(self, operator) -> bool:
         from superglm.solvers._structured.block_leaves import _is_own_centred_data
@@ -3134,48 +3094,12 @@ class ProfiledSumToZeroTreeFactor:
         core = np.array([[0.0, -1.0], [-1.0, total]])
         return _LevelForm(raw.D, Cx, Ax, raw.low + ((Ul, Ux, core),))
 
-    def solve(self, rhs: NDArray) -> NDArray:
-        values = np.asarray(rhs, dtype=np.float64)
-        vector_rhs = values.ndim == 1
-        if vector_rhs:
-            values = values[:, None]
-        if values.ndim != 2 or values.shape[0] != self.shape[0]:
-            raise ValueError(
-                f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m), "
-                f"got {np.asarray(rhs).shape}."
-            )
-        augmented_rhs = np.zeros((self.shape[0] + 1, values.shape[1]))
-        augmented_rhs[1:] = values
-        solution = self.augmented_factor.solve(augmented_rhs, centred=True)[1:]
-        return solution[:, 0] if vector_rhs else solution
-
-    def logdet(self) -> float:
-        return float(self.augmented_factor.logdet() - np.log(self.sum_w))
-
     def coefficient_estimable(self) -> NDArray:
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
 
-    def selected_inverse_block(self, indices: NDArray) -> NDArray:
-        return self.augmented_factor.selected_inverse_block(np.asarray(indices, dtype=np.intp) + 1)
-
-    def selected_inverse_diagonal(self, indices: NDArray) -> NDArray:
-        return self.augmented_factor.selected_inverse_diagonal(
-            np.asarray(indices, dtype=np.intp) + 1
-        )
-
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)
-
-    def trace_inverse_penalty(self, component: PenaltyComponent) -> float:
-        return self.augmented_factor.trace_inverse_penalty(self._shift_component(component))
-
-    def penalty_cross_trace(
-        self, left: PenaltyComponent, right: PenaltyComponent, left_scale: float, right_scale: float
-    ) -> float:
-        return self.augmented_factor.penalty_cross_trace(
-            self._shift_component(left), self._shift_component(right), left_scale, right_scale
-        )
 
     def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
         if operator.shape != self.shape:
