@@ -176,6 +176,21 @@ def stagnation_window(max_iter: int, bar: float = MODE_CERTIFICATION_BAR) -> int
     return max(2, math.ceil(math.log(2.0) * max(int(max_iter), 1) / ratio))
 
 
+def has_stagnated(ratios: list[float], window: int) -> bool:
+    """Whether the score has stopped contracting: its least value did not halve over ``window``.
+
+    ``ratios`` are the iterations' scores over their bar (``ModeResidual.ratio``).
+    Once more than ``window`` have been taken, the least of the last ``window``
+    must be at most half the least of the earlier ones (``stagnation_window``:
+    a score "must at least halve", so exactly half is progress).  A window whose
+    least score is not finite has not contracted.
+    """
+    if len(ratios) <= window:
+        return False
+    recent, earlier = np.min(ratios[-window:]), np.min(ratios[:-window])
+    return not (np.isfinite(recent) and recent <= 0.5 * earlier)
+
+
 def rate_exhausts_budget(ratios: list[float], window: int, done: int, max_iter: int) -> bool:
     """Whether the score's measured linear rate cannot reach the bar in the iterations left.
 

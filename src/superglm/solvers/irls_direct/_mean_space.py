@@ -37,6 +37,7 @@ from superglm.solvers.mode_score import (
     MODE_RESOLVE_CAP,
     ModeResidual,
     centred_data_score,
+    has_stagnated,
     null_basis_angle,
     penalized_mode_residual,
     row_set_quadratics,
@@ -379,10 +380,7 @@ class _IRLSDirectMeanSpaceOverlay:
             if not true_ratio <= 1.0:
                 converged_this_iter = False
                 _true_ratios.append(true_ratio)
-                score_stagnated = len(_true_ratios) > stagnation_window and not (
-                    min(_true_ratios[-stagnation_window:])
-                    < 0.5 * min(_true_ratios[:-stagnation_window])
-                )
+                score_stagnated = has_stagnated(_true_ratios, stagnation_window)
                 if self.available and not engaged and (true_resolved or score_stagnated):
                     # Fisher scoring has carried the fit to where its own
                     # stop passes but the model's score does not: near the

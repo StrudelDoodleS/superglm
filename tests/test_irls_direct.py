@@ -2486,6 +2486,76 @@ class TestDirectSolverBasic:
         assert model.result.converged
         assert model.result.intercept == pytest.approx(np.log(y.mean()), rel=1e-12)
 
+    @pytest.mark.parametrize("history", ["halves_exactly", "never_finite"])
+    @pytest.mark.parametrize("rule", ["mode_score", "true_score"])
+    def test_both_stagnation_rules_judge_a_score_history_alike(self, monkeypatch, rule, history):
+        """A score that exactly halves each window is progress; one never finite is not.
+
+        Each rule is fed the scripted scores its certificate would read, on the
+        QR route, where the binomial/log Newton steps are unavailable and a
+        stagnated window ends the fit.  The mode-score rule reads them as
+        resolved, the true-score rule keeps its own resolved flag.
+        """
+        from types import SimpleNamespace
+
+        import superglm.solvers.irls_direct._fit as fit_module
+        import superglm.solvers.irls_direct._mean_space as mean_space_module
+        from superglm.distributions import Binomial, Poisson
+        from superglm.links import LogLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+        from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR, stagnation_window
+
+        max_iter, n = 6, 60
+        window = stagnation_window(max_iter, MODE_CERTIFICATION_BAR)
+        calls: list[int] = []
+
+        def score() -> float:
+            calls.append(0)
+            if history == "never_finite":
+                return float("inf")
+            return 8.0 * 2.0 ** (-((len(calls) - 1) // window))
+
+        rng = np.random.default_rng(1)
+        x = rng.uniform(-1.0, 1.0, n)
+        dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=n, p=1)
+        groups = [GroupSlice("x", 0, 1)]
+        if rule == "mode_score":
+            y = rng.poisson(np.exp(0.3 + 0.8 * x)).astype(float)
+
+            def residual(self, beta, intercept, mu, eta, centred_intercept=None, resolve_cap=None):
+                value = score()
+                return SimpleNamespace(ratio=lambda: value, resolved=True)
+
+            monkeypatch.setattr(fit_module._IRLSDirectFit, "mode_residual", residual)
+            kwargs = dict(
+                family=Poisson(), link=LogLink(), convergence="mode_score", offset=np.zeros(n)
+            )
+        else:
+            y = (rng.uniform(size=n) < np.exp(-1.0 + 0.5 * x)).astype(float)
+            certify = mean_space_module._IRLSDirectMeanSpaceOverlay.certify
+
+            def stub(self, fit, beta, intercept, eta, inputs):
+                certify(self, fit, beta, intercept, eta, inputs)  # the overlay's side effects
+                return score(), False
+
+            monkeypatch.setattr(mean_space_module._IRLSDirectMeanSpaceOverlay, "certify", stub)
+            kwargs = dict(family=Binomial(), link=LogLink(), offset=np.full(n, 2.0), tol=0.1)
+        result, _ = fit_irls_direct(
+            dm,
+            y,
+            np.ones(n),
+            groups=groups,
+            lambda2=0.0,
+            weight_semantics="frequency",
+            direct_solve="qr",
+            max_iter=max_iter,
+            **kwargs,
+        )
+        # the scripted scores were read on every iteration
+        assert len(calls) == result.n_iter
+        expected = "max_iter" if history == "halves_exactly" else "score_stagnated"
+        assert result.termination_reason == expected
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:
