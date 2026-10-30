@@ -2819,6 +2819,73 @@ class TestDirectSolverBasic:
         assert 25.0 / 9.0 - 2 * slack <= 1.0 + np.sum(edf1) <= 26.0 / 9.0 + 2 * slack
         assert np.all(edf1 >= -2 * slack) and np.all(edf1 <= 1.0 + 2 * slack)
 
+    def test_a_face_reads_its_edf_off_its_own_rows_whatever_layout_the_certified_factor_has(
+        self, monkeypatch
+    ):
+        """A face's EDF and edf1 never read the rows of the fit's certified factor.
+
+        That factor is promised only as a factor of the Hessian.  Certified
+        with a response, as the dense step certifies it and the cache then
+        hands to later callers, its rows mix data and penalty.  Both events
+        are forced on a well-conditioned constrained fit.  Every
+        certification carries a response, and the face's Gram is refused, so
+        the factor decides the face.  The EDF and edf1 are then those of the
+        face fit's own influence ``F = Z M Z'``, ``M = B^+ [AZ; 0]``, ``B =
+        [AZ; PZ]``, formed here from the centred rows.  Mutation: f0077903
+        zeroes the factor's last rows as its penalty and is off by 0.98 on
+        one coefficient.  Reading the certified factor's first ``p`` rows on
+        the face as its data rows is off by 4e-4, and right only when the
+        certification carries no response.
+        """
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        import superglm.solvers.irls_direct._fit as irls_fit
+        from superglm._roundoff import gamma
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        real_certify = irls_fit._certify_centered_factor
+        responses: list[bool] = []
+
+        def certify_with_a_response(dm, reuse, cache, system, W, *, response=None):
+            responses.append(response is None)
+            given = np.ones(dm.n) if response is None else response
+            return real_certify(dm, reuse, cache, system, W, response=given)
+
+        monkeypatch.setattr(irls_fit, "_certify_centered_factor", certify_with_a_response)
+        monkeypatch.setattr(irls_finalise, "_face_formation_unresolved", lambda *_: True)
+        rng = np.random.default_rng(5)
+        n, p = 40, 3
+        X = rng.normal(size=(n, p))
+        y = X @ np.array([0.5, -0.5, 0.2]) + 0.1 * rng.normal(size=n)
+        penalty = 0.5 * np.eye(p)
+        # binding: the data put beta_2 below beta_1
+        constraint = LinearConstraintSet(A=np.array([[-1.0, 1.0, 0.0]]), b=np.zeros(1))
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(X)], n=n, p=p),
+            y,
+            np.ones(n),
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, p, constraints=constraint)],
+            lambda2=0.0,
+            S_override=penalty,
+            weight_semantics="frequency",
+        )
+        record = result.rank_info
+        assert any(responses) and record.face_augmented.method == "qr_svd"
+        face = record.face
+        rows = (X - X.mean(axis=0)) @ face
+        B = np.vstack((rows, penalty_factor(penalty) @ face))
+        M = np.linalg.pinv(B) @ np.vstack((rows, np.zeros((p, face.shape[1]))))
+        F = face @ M @ face.T
+        edf = np.diag(F)
+        # the rows' and the SVD's backward errors over sigma_min(B), per direction (Wedin)
+        bound = 8 * face.shape[1] * gamma(n + p) * np.linalg.cond(B)
+        assert np.max(np.abs(record.feature_edf - edf)) <= bound
+        assert np.max(np.abs(record.feature_edf1 - (2.0 * edf - np.diag(F @ F)))) <= 2 * bound
+
 
 # ── Select=True tests ──────────────────────────────────────────
 class TestDirectSolverSelect:

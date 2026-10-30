@@ -341,7 +341,17 @@ def _certify_centered_factor(
     *,
     response: NDArray | None = None,
 ) -> _CenteredFactorCertification:
-    """Return a factor certificate for one immutable centered geometry."""
+    """Return a factor certificate for one immutable centered geometry.
+
+    The certificate's ``factor`` is a factor ``F`` of the Hessian, ``F'F = D +
+    S``, and nothing more is promised of its rows.  Asked without a
+    ``response``, it is ``[F_D; P]`` (``grouped_augmented_factor``).  With
+    one, it is the joint QR of ``[F_D, z; P, 0]`` less its response column
+    (``grouped_augmented_factor_rhs``), whose rows mix data and penalty.  The
+    cache returns that one to a later call without a response, so a reader
+    takes ``F``'s Gram, as a face decomposition does, and never its rows: the
+    face's EDF reads its own projected rows (``_finalise._face_factor_edf``).
+    """
     if _fisher_data_reuse is not None:
         _fisher_data_reuse.clear()
     cached = cache[0]
