@@ -91,11 +91,11 @@ class TestSimultaneousBands:
     def test_a_singular_face_covariance_still_gives_finite_bands(self, spline_model):
         """A constrained fit's active-face covariance is singular by construction.
 
-        Rounding can leave its zero eigenvalue slightly negative, below the
-        Cholesky jitter once the covariance is large. The term's block here has
-        scale 1e6 and one eigenvalue at -1e-9 of it, so the Cholesky factor
-        does not exist and the bands come from the positive-semidefinite root.
-        Mutation: without that root the call raises ``LinAlgError``.
+        Rounding can leave its zero eigenvalue slightly negative. The term's
+        block here has scale 1e6 and one eigenvalue at -1e-9 of it, so the
+        Cholesky factor does not exist and the spectrum sends the bands to the
+        positive-semidefinite root. Mutation: without that root the call raises
+        ``LinAlgError``.
         """
         from superglm.inference._term_covariance import simultaneous_bands
 
