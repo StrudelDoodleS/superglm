@@ -2636,8 +2636,9 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
     # The same scale-free problem solved twice agrees to the optimizer's own tolerance
     # (ftol = 1e-12 of the zero loss), with headroom for a diverging path.
     np.testing.assert_allclose(rescaled, reference, rtol=0.0, atol=1e-9 * np.max(np.abs(reference)))
-    # The slack carries the response's units, so its tolerance does too.
-    np.testing.assert_allclose(rescaled_tolerances, reference_tolerances, rtol=1e-6)
+    # The slack carries the response's units, so its tolerance does too. Only the
+    # first solve's is compared: how many span refinements follow is a trajectory.
+    assert rescaled_tolerances[0] == pytest.approx(reference_tolerances[0], rel=1e-6)
 
 
 def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(monkeypatch):
