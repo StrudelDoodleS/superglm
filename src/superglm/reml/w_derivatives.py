@@ -18,6 +18,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._blas_threads import release_for_serial_row_passes
+from superglm._group_matrix._column_local_centering import (
+    recentred_about,
+    recentred_gram_rows,
+    recentred_products,
+)
+from superglm._group_matrix._group_matrix_centered import (
+    _raw_centering_admitted,
+    centered_gram_rhs,
+)
 from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
 from superglm._parallel import pooled_map
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
@@ -67,6 +76,7 @@ from superglm.solvers.structured import (
     build_block_structured_system,
     build_nested_structured_system,
     centred_data_operator,
+    compact_operator_diagonal,
     get_nested_structured_layout,
     get_structured_layout,
     structured_design_matvec,
@@ -400,8 +410,82 @@ def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> 
     return 0.5 * (result + result.T)
 
 
+def _centred_scale(geometry, pirls_result, sum_w: float | None, p: int) -> NDArray | None:
+    """Per column ``sqrt(diag(X_c' W X_c) / sum_w)`` at the weights ``W`` the centre is the mean of.
+
+    Read from the record ``reml_w_correction`` reads ``mean_x`` from, in the
+    same order: the geometry's centred data Gram, the rank record's data
+    decomposition (``column_scale``, the root of that Gram's diagonal, on
+    its selected columns) or the geometry summary's column scales.  ``None``
+    without a profiled intercept or a record that carries them.
+    """
+    if sum_w is None:
+        return None
+    if geometry is not None:
+        gram = geometry.centered_data_gram
+        diagonal = (
+            np.diag(gram) if isinstance(gram, np.ndarray) else compact_operator_diagonal(gram)
+        )
+        scale = np.sqrt(np.abs(diagonal))
+    elif pirls_result.rank_info is not None:
+        record = pirls_result.rank_info
+        selected = np.asarray(record.selected_columns, dtype=np.intp)
+        if record.data.column_scale.shape != selected.shape:
+            return None
+        scale = np.zeros(p, dtype=np.float64)
+        scale[selected] = record.data.column_scale
+    elif pirls_result.reml_geometry is not None:
+        carried = getattr(pirls_result.reml_geometry, "column_scale", None)
+        if carried is None:
+            return None
+        scale = np.asarray(carried, dtype=np.float64)
+    else:
+        return None
+    if scale.shape != (p,):
+        return None
+    with np.errstate(invalid="ignore", over="ignore"):
+        scale = scale / np.sqrt(sum_w)
+    return np.where(np.isfinite(scale), scale, 0.0)
+
+
+@dataclass(frozen=True)
+class _ColumnRepair:
+    """The moment design's columns the raw-moment certificate rejected, recentred about the fixed centre.
+
+    ``recentred`` and ``readers`` as ``recentred_about`` returns them,
+    ``kept`` the admitted columns.  Owner: one ``reml_w_correction`` call,
+    whose directions share ``formed``, the projections the readers form.
+    """
+
+    recentred: tuple
+    readers: list
+    kept: NDArray
+    formed: dict
+
+    def apply(
+        self, group_matrices, gram: NDArray, row_weights: NDArray, centre: NDArray
+    ) -> NDArray:
+        """``gram``, raw-moment centred, with the recentred columns' rows and columns formed again."""
+        recentred_gram_rows(
+            group_matrices,
+            self.readers,
+            row_weights,
+            gram,
+            centre,
+            self.kept,
+            self.recentred,
+            formed=self.formed,
+        )
+        return gram
+
+
 def _dense_split_signed_gram(
-    split: _DenseSplit, moments, row_weights: NDArray, centre_hi: NDArray, centre_lo: NDArray
+    split: _DenseSplit,
+    moments,
+    row_weights: NDArray,
+    centre_hi: NDArray,
+    centre_lo: NDArray,
+    repair: _ColumnRepair | None = None,
 ) -> NDArray:
     """``X_c' diag(a) X_c`` beside dense columns, ``moments`` the bounded design's raw signed moments.
 
@@ -419,7 +503,10 @@ def _dense_split_signed_gram(
     weights: per entry ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| +
     |l_k|)``, with ``x~`` a bounded column's own values or a dense column's
     rows ``r`` and ``l`` its centre or ``d``.  No dense column's offset meets
-    a product.
+    a product.  A bounded column the certificate rejected (``repair``) meets
+    every partner, the dense rows and ``d`` included, through its centred
+    support instead (``recentred_gram_rows``, ``recentred_products``), so
+    ``x~`` is its centred value ``c_j`` there and ``l_j`` is zero.
     """
     dense_index, bounded_index = split.dense_index, split.bounded_index
     lo = centre_lo[dense_index]
@@ -427,14 +514,17 @@ def _dense_split_signed_gram(
     anchor = centre_hi[dense_index]
     total = float(np.sum(row_weights, dtype=np.float64))
     first, gram, _ = anchored_dense_moments(split.dense, row_weights, anchor)
-    cross = dense_split_cross(split, row_weights, anchor, mean_bounded)
-    cross -= np.outer(moments.xtw - mean_bounded * total, lo)
-    return dense_split_gram(
-        split,
-        _centered_signed_moments(moments, row_weights, mean_bounded),
-        two_pass_centred_gram(first, gram, lo, total),
-        cross,
-    )
+    bounded = _centered_signed_moments(moments, row_weights, mean_bounded)
+    centred_xtw = moments.xtw - mean_bounded * total
+    recentred: tuple = ()
+    if repair is not None:
+        bounded = repair.apply(split.bounded.group_matrices, bounded, row_weights, mean_bounded)
+        recentred = repair.recentred
+        for columns, products in recentred_products(recentred, row_weights):
+            centred_xtw[columns] = products
+    cross = dense_split_cross(split, row_weights, anchor, mean_bounded, recentred)
+    cross -= np.outer(centred_xtw, lo)
+    return dense_split_gram(split, bounded, two_pass_centred_gram(first, gram, lo, total), cross)
 
 
 def _missing_w_derivative_methods(link: Any, distribution: Any) -> list[str]:
@@ -806,6 +896,19 @@ def reml_w_correction(
         else:
             mean_x = np.asarray(factor_mean, dtype=np.float64)
             sum_w = float(factor_sum_w)
+    centred_scale = _centred_scale(geometry, pirls_result, sum_w, p)
+
+    def centre_weights() -> NDArray:
+        """The weights ``mean_x`` is the mean of: the geometry's, else the Fisher weights at the mode."""
+        if geometry is not None:
+            return np.asarray(geometry.weights, dtype=np.float64)
+        return fisher_working_weights(
+            distribution=distribution,
+            link=link,
+            mu=mu,
+            eta=eta,
+            sample_weight=np.ones(dm.n) if sample_weight is None else np.asarray(sample_weight),
+        )
 
     # Every dense column is centred about an exact pair, by type (issue #430):
     # ``(x - c) - d`` with ``c`` the rounded mean and ``d`` the remainder formed
@@ -820,9 +923,9 @@ def reml_w_correction(
     # off, 17.1% on the leverage route, and exact REML ended
     # line_search_failed).  Without a profiled intercept (``sum_w`` None) the
     # operator is not centred and the pair is not formed.  The signed Grams
-    # take raw moments on the columns whose entries their type bounds, and
-    # with the pair the dense columns' rows centred explicitly beside them
-    # (``_dense_split_signed_gram``).
+    # take raw moments, certified per column, on the columns whose entries
+    # their type bounds, and with the pair the dense columns' rows centred
+    # explicitly beside them (``_dense_split_signed_gram``).
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
@@ -837,20 +940,7 @@ def reml_w_correction(
         centre_hi = np.where(dense, np.asarray(carried_hi, dtype=np.float64), mean_x)
         centre_lo = np.where(dense, np.asarray(carried_lo, dtype=np.float64), 0.0)
     elif sum_w is not None and np.any(dense):
-        mean_weights = (
-            np.asarray(geometry.weights, dtype=np.float64)
-            if geometry is not None
-            else fisher_working_weights(
-                distribution=distribution,
-                link=link,
-                mu=mu,
-                eta=eta,
-                sample_weight=(
-                    np.ones(dm.n) if sample_weight is None else np.asarray(sample_weight)
-                ),
-            )
-        )
-        pair = dense_mean_pair(dm, mean_weights, sum_w)
+        pair = dense_mean_pair(dm, centre_weights(), sum_w)
         if pair is None:  # pragma: no cover - a dense column is present
             raise RuntimeError("A dense column formed no centre pair.")
         centre_hi = np.where(dense, pair[0], mean_x)
@@ -995,11 +1085,37 @@ def reml_w_correction(
     # Gram joins the dense columns to them (``_dense_split_signed_gram``).
     split = _dense_split(dm) if centre_lo is not None and structured_group_index is None else None
     moment_dm = dm if split is None else split.bounded
+    # The raw moments are certified per column as the IRLS Gram's are
+    # (``_raw_centering_admitted``), at the weights the centre is the mean of:
+    # with ``|m_j| <= s_j`` and ``|a| <= rho W`` a raw entry lies within
+    # ``6 gamma rho S s_j s_k``, the centred rows' own ``gamma rho S s_j s_k`` up
+    # to the constant.  A rejected column is recentred inside its group about
+    # the fixed centre (``recentred_about``, the IRLS repair), and where the
+    # repair declines every Gram takes centred rows.
+    repair: _ColumnRepair | None = None
+    stable_rows = False
+    if structured_group_index is None and sum_w is not None:
+        moment_centre = mean_x if split is None else centre_hi[split.bounded_index]
+        admitted = (
+            moment_centre == 0.0
+            if centred_scale is None
+            else _raw_centering_admitted(
+                moment_centre,
+                centred_scale if split is None else centred_scale[split.bounded_index],
+            )
+        )
+        if not admitted.all():
+            recentred = recentred_about(moment_dm, admitted, centre_weights(), sum_w, moment_centre)
+            if recentred is None:
+                stable_rows = True
+            else:
+                repair = _ColumnRepair(*recentred, np.flatnonzero(admitted), {})
     batch_moments = (
         type(dm) is DesignMatrix
         and type(factor) is DenseHessianFactor
         and w_correction_order == 1
         and m > 1
+        and not stable_rows
     )
     # Factors cannot change between these first-order directions. Public moment
     # calls and later correction calls still start with fresh numerical state.
@@ -1027,10 +1143,13 @@ def reml_w_correction(
     def signed_gram(moments, row_weights: NDArray) -> NDArray:
         """``X_c' diag(row_weights) X_c`` from ``moment_dm``'s raw signed moments."""
         if split is None:
-            return _centered_signed_moments(moments, row_weights, mean_x)
+            gram = _centered_signed_moments(moments, row_weights, mean_x)
+            if repair is not None:
+                repair.apply(dm.group_matrices, gram, row_weights, mean_x)
+            return gram
         # a split is formed only beside the pair
         lo = cast(NDArray, centre_lo)
-        return _dense_split_signed_gram(split, moments, row_weights, centre_hi, lo)
+        return _dense_split_signed_gram(split, moments, row_weights, centre_hi, lo, repair)
 
     def flush_signed_grams() -> None:
         weights = [row_weights for _, row_weights, _ in pending]
@@ -1083,6 +1202,15 @@ def reml_w_correction(
                 total=system.sum_w,
                 center=signed_center,
             )
+        if stable_rows:
+            gram, _ = centered_gram_rhs(
+                dm=dm,
+                W=row_weights,
+                mean_x=centre_hi,
+                z_centered=np.zeros(dm.n),
+                mean_lo=centre_lo,
+            )
+            return gram
         moments = (
             moment_dm.execution_plan.moments(row_weights, include_xtw=True, signed=True)
             if fixed_support is None

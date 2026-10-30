@@ -154,8 +154,8 @@ def _admitted_products(group_matrices, readers, weighted: NDArray, formed: dict)
 
 def _anchor_centred_columns(
     gm, local: NDArray, W: NDArray, weighted_z: NDArray, sum_w: float
-) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray] | None:
-    """``(centred, codes, mean, mass, response)`` for ``gm``'s columns ``local``.
+) -> tuple[NDArray, NDArray, tuple[NDArray, NDArray], NDArray, NDArray] | None:
+    """``(centred, codes, (anchor, shift), mass, response)`` for ``gm``'s columns ``local``.
 
     ``_anchor_center_support``'s anchoring on those columns alone: the
     support rows less the heaviest one, less their weighted mean, then
@@ -170,8 +170,8 @@ def _anchor_centred_columns(
     float32 and for integers up to ``2**53``, which round alike in all of
     them), and an integer difference would wrap.  ``None`` for a support or
     transform ``_reads_as_float64`` declines (complex, object, and the extended
-    float on every platform).  ``mean`` projects the
-    anchor and the shift apart (``column_local_centering``, **Centre**).
+    float on every platform).  The centre is the projected anchor and shift,
+    apart (``column_local_centering``, **Centre**): their sum is ``mu~``.
     """
     from superglm.group_matrix import CategoricalGroupMatrix
 
@@ -201,8 +201,8 @@ def _anchor_centred_columns(
     for start in range(0, rows, step):
         block = (np.asarray(values[start : start + step], dtype=np.float64) - anchor) - shift
         centred[start : start + step] = block if transform is None else block @ transform
-    mean = anchor + shift if transform is None else anchor @ transform + shift @ transform
-    return centred, codes, mean, mass, response
+    parts = (anchor, shift) if transform is None else (anchor @ transform, shift @ transform)
+    return centred, codes, parts, mass, response
 
 
 def column_local_centering(
@@ -321,6 +321,35 @@ def column_local_centering(
         or not np.all(np.isfinite(rhs[kept]))
     ):
         return None
+    repair = _recentre_columns(dm, admitted, W, weighted_z, sum_w, rejected.supports)
+    if repair is None:
+        return None
+    centred, readers = repair
+    recentred = tuple(
+        RecentredColumns(columns, values, codes) for columns, values, codes, *_ in centred.values()
+    )
+    masses = [mass for *_, mass, _ in centred.values()]
+    recentred_gram_rows(dm.group_matrices, readers, W, gram, mean_x, kept, recentred, masses)
+    for columns, values, _, (anchor, shift), _, response in centred.values():
+        rhs[columns] = values.T @ response
+        mean_x[columns] = anchor + shift
+    if not (np.all(np.isfinite(gram)) and np.all(np.isfinite(rhs)) and np.all(np.isfinite(mean_x))):
+        return None
+    return mean_x, gram, rhs, recentred
+
+
+def _recentre_columns(
+    dm, admitted: NDArray, W: NDArray, weighted_z: NDArray, sum_w: float, supports
+):
+    """``(centred, readers)`` for the columns ``admitted`` rejects, else ``None``.
+
+    ``centred`` maps each group holding a failing column to ``(columns,
+    centred, codes, mean, mass, response)``, its failing columns anchored and
+    centred inside the group about the weights ``W``
+    (``_anchor_centred_columns``); ``readers`` reads every group's admitted
+    columns (``_admitted_readers``).  ``None`` where the repair declines (see
+    ``column_local_centering``).
+    """
     widths = [gm.shape[1] for gm in dm.group_matrices]
     starts = np.concatenate([np.zeros(1, dtype=np.intp), np.cumsum(widths, dtype=np.intp)])
     failing = np.flatnonzero(~admitted)
@@ -334,10 +363,9 @@ def column_local_centering(
         held += 8 * rows * len(columns)
     if held > _MAX_CENTRED_COLUMN_BYTES:
         return None
-    readers = _admitted_readers(dm.group_matrices, rejected.supports)
+    readers = _admitted_readers(dm.group_matrices, supports)
     if readers is None:
         return None
-
     centred = {}
     for g, columns in by_group.items():
         anchored = _anchor_centred_columns(
@@ -346,37 +374,89 @@ def column_local_centering(
         if anchored is None:
             return None
         centred[g] = (columns, *anchored)
-    first = {g: mass @ values for g, (_, values, _, _, mass, _) in centred.items()}
-    pending = [(g, i) for g, (columns, *_) in centred.items() for i in range(len(columns))]
-    step = max(1, _MAX_CENTRED_COLUMN_BYTES // (8 * len(W)))
-    formed: dict = {}
+    return centred, readers
+
+
+def recentred_gram_rows(
+    group_matrices,
+    readers,
+    weights: NDArray,
+    gram: NDArray,
+    mean_x: NDArray,
+    kept: NDArray,
+    recentred: tuple[RecentredColumns, ...],
+    masses: list[NDArray] | None = None,
+    formed: dict | None = None,
+) -> None:
+    """Write ``gram``'s rows and columns at the recentred columns, from their centred supports.
+
+    A recentred column ``j`` (centred rows ``c_j``) against an admitted column
+    ``k`` (``kept``, read as ``readers`` says, ``_admitted_products``) is
+    ``sum w c_j x_k - mean_x[k] sum w c_j``; against a failing column of
+    another group, ``w c_j`` summed by that group's codes against its centred
+    support (``recentred_products``); within its group, ``sum_b mass_b c_j
+    c_k`` over support rows, ``mass`` the group's ``weights`` summed by its
+    codes (``masses``, formed here when ``None``).  The arithmetic holds for
+    weights of any sign.  ``formed`` holds the projections the readers form,
+    for a caller that reads the same factors again; without it they are
+    released before the own blocks.
+    """
+    if masses is None:
+        masses = [
+            np.bincount(group.codes, weights=weights, minlength=group.values.shape[0])
+            for group in recentred
+        ]
+    if formed is None:
+        formed = {}
+    first = [mass @ group.values for group, mass in zip(recentred, masses, strict=True)]
+    pending = [(g, i) for g, group in enumerate(recentred) for i in range(len(group.columns))]
+    step = max(1, _MAX_CENTRED_COLUMN_BYTES // (8 * len(weights)))
     for start in range(0, len(pending), step):
         chunk = pending[start : start + step]
-        weighted = np.stack([W * centred[g][1][:, i][centred[g][2]] for g, i in chunk])
-        products = _admitted_products(dm.group_matrices, readers, weighted, formed)
+        weighted = np.stack(
+            [weights * recentred[g].values[:, i][recentred[g].codes] for g, i in chunk]
+        )
+        products = _admitted_products(group_matrices, readers, weighted, formed)
         for row, (g, i) in enumerate(chunk):
-            column = centred[g][0][i]
+            column = recentred[g].columns[i]
             cross = products[row, kept] - mean_x[kept] * first[g][i]
             gram[column, kept] = cross
             gram[kept, column] = cross
-            for h, (partner, partner_values, partner_codes, *_) in centred.items():
-                if h <= g:
-                    continue
-                summed = np.bincount(
-                    partner_codes, weights=weighted[row], minlength=partner_values.shape[0]
-                )
-                block = summed @ partner_values
+            for partner, block in recentred_products(recentred[g + 1 :], weighted[row]):
                 gram[column, partner] = block
                 gram[partner, column] = block
     del formed, weighted, products  # the own blocks below run without them
-    for columns, values, _, mean, mass, response in centred.values():
-        own = values.T @ (mass[:, None] * values)
-        gram[np.ix_(columns, columns)] = 0.5 * (own + own.T)
-        rhs[columns] = values.T @ response
-        mean_x[columns] = mean
-    if not (np.all(np.isfinite(gram)) and np.all(np.isfinite(rhs)) and np.all(np.isfinite(mean_x))):
+    for group, mass in zip(recentred, masses, strict=True):
+        own = group.values.T @ (mass[:, None] * group.values)
+        gram[np.ix_(group.columns, group.columns)] = 0.5 * (own + own.T)
+
+
+def recentred_about(
+    dm, admitted: NDArray, W: NDArray, sum_w: float, centre: NDArray
+) -> tuple[tuple[RecentredColumns, ...], list] | None:
+    """``(recentred, readers)``: the columns ``admitted`` rejects, centred about a given ``centre``.
+
+    The repair of ``column_local_centering`` for a caller that holds its
+    centre already, the weighted mean ``centre`` at the weights ``W`` (sum
+    ``sum_w``), and forms products with other weights from it
+    (``recentred_gram_rows``): each failing column anchored and centred inside
+    its group about ``W`` (``_anchor_centred_columns``, about ``mu~ = a +
+    s``, its projected anchor and shift), then moved to ``centre`` by the
+    difference of the two centres, ``c_j + ((a_j - centre_j) + s_j)``.
+    ``a_j - centre_j`` is exact where they lie within a factor two of each
+    other (Sterbenz), as they do for a rejected column, whose spread is
+    below its mean, so the move adds one rounding of ``c_j``'s own size;
+    adding the rounded ``mu~_j`` instead would carry its rounding, ``u
+    |mu~_j|``, into every row, an error ``kappa_j`` times the spread against
+    a signed sum that does not cancel it.  ``None`` where the repair
+    declines.
+    """
+    repair = _recentre_columns(dm, admitted, W, np.zeros_like(W), sum_w, None)
+    if repair is None:
         return None
+    centred, readers = repair
     recentred = tuple(
-        RecentredColumns(columns, values, codes) for columns, values, codes, *_ in centred.values()
+        RecentredColumns(columns, values + ((anchor - centre[columns]) + shift), codes)
+        for columns, values, codes, (anchor, shift), *_ in centred.values()
     )
-    return mean_x, gram, rhs, recentred
+    return recentred, readers

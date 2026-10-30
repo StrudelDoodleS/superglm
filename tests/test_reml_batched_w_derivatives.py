@@ -34,7 +34,7 @@ def _gram_bound(centered, weights):
     return 8 * gamma * (np.abs(centered).T @ (np.abs(weights)[:, None] * np.abs(centered)))
 
 
-def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
+def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=None):
     rng = np.random.default_rng(123)
     x = np.linspace(-1.5, 1.5, 320)
     X = np.column_stack((x, x**2 - np.mean(x**2), np.sin(3 * x)))[:, :p]
@@ -45,6 +45,9 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
         y = rng.poisson(np.exp(signal)).astype(float)
     else:
         y = (rng.uniform(size=len(x)) < 1.0 / (1.0 + np.exp(-signal))).astype(float)
+    if flat is not None:
+        # the first column nearly constant, its spread ``flat`` of its mean
+        X[:, 0] = 1.0 + flat * X[:, 0]
     matrices = [DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)]
     if storage is not None:
 
@@ -62,7 +65,13 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
         ]
         if storage == "split":
             matrices[1] = DenseGroupMatrix(X[:, 1:2] + shift)
+        elif storage == "support":
+            matrices[1] = SupportCompressedSSPGroupMatrix(
+                X[:, 1:2], np.ones((1, 1)), np.arange(len(x))
+            )
     dm = DesignMatrix(matrices, n=len(x), p=p)
+    # a flat column's penalty scaled with its variance, so its coefficient stays free
+    scales = [flat**2 if flat is not None and i == 0 else 1.0 for i in range(p)]
     groups = [GroupSlice(name=f"x{i}", start=i, end=i + 1) for i in range(p)]
     penalties = [
         PenaltyComponent(
@@ -70,8 +79,8 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson"):
             group_name=g.name,
             group_index=i,
             group_sl=slice(i, i + 1),
-            omega_raw=np.ones((1, 1)),
-            omega_ssp=np.ones((1, 1)),
+            omega_raw=scales[i] * np.ones((1, 1)),
+            omega_ssp=scales[i] * np.ones((1, 1)),
             rank=1.0,
             log_det_omega_plus=0.0,
             eigvals_omega=np.ones(1),
@@ -256,9 +265,9 @@ def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift):
     calls = []
     split_gram = w_derivatives._dense_split_signed_gram
 
-    def recorded(split, moments, row_weights, centre_hi, centre_lo):
+    def recorded(split, moments, row_weights, centre_hi, centre_lo, *rest):
         calls.append((row_weights.copy(), centre_hi.copy(), centre_lo.copy()))
-        return split_gram(split, moments, row_weights, centre_hi, centre_lo)
+        return split_gram(split, moments, row_weights, centre_hi, centre_lo, *rest)
 
     monkeypatch.setattr(w_derivatives, "_dense_split_signed_gram", recorded)
     correction = w_derivatives.reml_w_correction(**kwargs)
@@ -269,6 +278,73 @@ def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift):
     for i, (a, hi, lo) in enumerate(calls):
         expected = _exact_signed_gram(X, a, hi, lo)
         size = np.abs(np.where(dense, X - hi, X)) + np.abs(np.where(dense, lo, hi))
+        bound = gamma(n + p + 8) * (size.T @ (np.abs(a)[:, None] * size))
+        assert np.all(np.abs(correction[1][i] - expected) <= bound)
+        moments = dm.execution_plan.moments(a, include_xtw=True, signed=True)
+        raw = w_derivatives._centered_signed_moments(moments, a, hi + lo)
+        assert np.any(np.abs(raw - expected) > bound)
+
+
+def _record_signed_gram_inputs(monkeypatch, p):
+    """``(a, hi, lo)`` of each derivative Gram, in order, whichever route forms it."""
+    calls = []
+
+    def keep(weights, hi, lo):
+        if len(hi) == p and not any(np.array_equal(weights, a) for a, _, _ in calls):
+            calls.append((weights.copy(), hi.copy(), np.zeros(p) if lo is None else lo.copy()))
+
+    def recorder(name, read):
+        original = getattr(w_derivatives, name, None)
+        if original is None:
+            return
+
+        def recorded(*args, **kwargs):
+            for weights, hi, lo in read(args, kwargs):
+                keep(weights, hi, lo)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(w_derivatives, name, recorded)
+
+    recorder("_dense_split_signed_gram", lambda a, k: [(a[2], a[3], a[4])])
+    recorder("_centered_signed_moments", lambda a, k: [(a[1], a[2], None)])
+    recorder("centered_gram_rhs", lambda a, k: [(k["W"], k["mean_x"], k.get("mean_lo"))])
+    recorder(
+        "centered_signed_grams",
+        lambda a, k: [(w, k["mean_x"], k.get("mean_lo")) for w in k["weights"]],
+    )
+    return calls
+
+
+@pytest.mark.parametrize("storage", ["split", "support", "mixed"])
+def test_a_column_the_certificate_rejects_is_centred_before_its_products(monkeypatch, storage):
+    """A nearly constant support column: each derivative Gram against exact centred products.
+
+    The column ``1 + 1e-8 x`` has ``|mean| / RMS`` about ``1e8``, so raw
+    moments' rounding, ``gamma_n sum |a| x^2``, is about ``1e16`` times its
+    centred Gram; its penalty scaled by its variance, the column still moves
+    the fit.  The raw-moment certificate (``|m_j| <= s_j``) rejects it, and
+    it is recentred inside its group about the fixed centre: beside a dense
+    column (``split``) and beside a second support
+    (``support``) through the IRLS repair's products, and beside a sparse
+    SSP group, which the repair cannot read, through centred rows
+    (``mixed``).  The bound is the split's, ``gamma_(n+p+8) sum |a| (|x~_j|
+    + |l_j|)(|x~_k| + |l_k|)``, with the rejected column at its centred
+    values, ``x~ = |x - c| + max |x - c|`` (anchoring it and moving it to
+    ``c`` each round at its own spread), and ``l`` zero.  Control: the raw
+    moments, centred after, exceed it.
+    """
+    kwargs = _correction_fixture(p=3, shift=0.0, storage=storage, family="binomial", flat=1e-8)
+    calls = _record_signed_gram_inputs(monkeypatch, 3)
+    correction = w_derivatives.reml_w_correction(**kwargs)
+    assert correction is not None and len(calls) == 3
+    dm = kwargs["dm"]
+    X, n, p = dm.toarray(), dm.n, dm.p
+    dense = np.array([type(gm) is DenseGroupMatrix for gm in dm.group_matrices])
+    for i, (a, hi, lo) in enumerate(calls):
+        expected = _exact_signed_gram(X, a, hi, lo)
+        centred = np.abs(X - hi - lo)
+        size = np.where(dense, np.abs(X - hi), np.abs(X)) + np.where(dense, np.abs(lo), np.abs(hi))
+        size[:, 0] = centred[:, 0] + centred[:, 0].max()
         bound = gamma(n + p + 8) * (size.T @ (np.abs(a)[:, None] * size))
         assert np.all(np.abs(correction[1][i] - expected) <= bound)
         moments = dm.execution_plan.moments(a, include_xtw=True, signed=True)
