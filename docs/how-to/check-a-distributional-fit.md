@@ -554,6 +554,18 @@ remains shared shorthand; mixing it with either candidate-specific mapping
 raises `ValueError`. Both candidates remove the same zero-weight rows before
 validating retained offset values and computing scores or Murphy forecasts.
 
+## Truncated and censored rows
+
+A model fitted with `truncation=` or `censoring=` (see
+[Truncated and censored rows](fit-a-distributional-model.md#truncated-and-censored-rows))
+needs the same bounds when its training rows are checked. Pass them to
+`residual_set`, `residuals`, `check`, `check_2d`, `scores` and the diagnostic
+plots. A truncated row's PIT is then read inside its window and a censored
+row's is drawn at random beyond its bound, so the PIT of a well-fitted model is
+uniform. Without them every row reads as complete and the PIT is not uniform
+even for the right family; each method warns when that happens. For bounded
+rows `scores` gives the log score only, so ask for `which=("log",)`.
+
 ## Payloads without figures
 
 Every payload is JSON-clean, so a front end can draw what the model computed

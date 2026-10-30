@@ -252,7 +252,12 @@ public family contracts, not import private kernel modules.
 This complete public-only example is the extensibility regression. It supplies
 four natural parameters and therefore ten packed Hessian channels, explicitly
 admits only the complete observation contract, and provides nonempty
-complete-fit configuration:
+complete-fit configuration. A family that also takes truncated and censored
+rows declares `FamilyCapabilities(censored_response=True)`, binds the
+`"censored_truncated"` contract whose `bounds` are `ResponseBounds`, includes the
+bounds in its plan identifier, and refuses expected information and analytic
+third and fourth derivatives for such a plan with
+`UnsupportedLikelihoodContractError`; `GaussianLS` is the reference.
 
 ```python
 from dataclasses import dataclass

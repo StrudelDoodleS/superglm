@@ -426,3 +426,103 @@ def test_resolution_reads_a_response_at_its_bound_as_censored():
     bounds = resolve_response_bounds(y, arrays, np.arange(4))
     assert bounds is not None
     np.testing.assert_array_equal(bounds.side, [0, 0, 1, -1])
+
+
+# -- diagnostics read bounded rows ------------------------------------------
+
+
+def _bounded_model(y, **bounds) -> SuperLSS:
+    family = LogNormalLS(parametrisation="location")
+    model = SuperLSS(family, family.location(), family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(_intercepts(len(y)), y, **bounds)
+    return model
+
+
+def _truncated_body(n: int, seed: int) -> tuple[np.ndarray, float]:
+    rng = np.random.default_rng(seed)
+    y = np.exp(rng.normal(8.0, 1.2, n))
+    u = float(np.exp(8.0 + 1.2 * stats.norm.ppf(0.9)))
+    return y[y <= u], u
+
+
+def test_truncated_pit_is_uniform_only_when_the_bounds_are_passed():
+    body, u = _truncated_body(5_600, seed=560)
+    model = _bounded_model(body, truncation=(None, u))
+    X = _intercepts(len(body))
+
+    read = model.residuals(X, body, kind="pit", truncation=(None, u))
+    assert stats.kstest(read, "uniform").pvalue > 1e-3
+    with pytest.warns(UserWarning, match="reads every row it is given as complete"):
+        unread = model.residuals(X, body, kind="pit")
+    # Read as complete, a body cut at the 90th percentile stops short of 0.9.
+    assert stats.kstest(unread, "uniform").pvalue < 1e-6
+
+
+def test_censored_rows_are_randomised_within_their_interval():
+    rng = np.random.default_rng(561)
+    y = np.exp(rng.normal(8.0, 1.2, 4_000))
+    limit = float(np.quantile(y, 0.8))
+    paid = np.minimum(y, limit)
+    hit = paid == limit
+    model = _bounded_model(paid, censoring=(None, limit))
+    X = _intercepts(len(paid))
+
+    payload = model.residual_set(X, paid, censoring=(None, limit))
+    row = model.predict_parameters(_intercepts(1)).iloc[0]
+    at_limit = stats.norm.cdf(np.log(limit), row["location"], row["scale"])
+    assert payload.randomised_rows == hit.sum()
+    assert np.all(payload.pit[hit] >= at_limit - 1e-12)
+    assert np.all(payload.pit[~hit] == payload.pit_upper[~hit])
+    assert stats.kstest(payload.pit, "uniform").pvalue > 1e-3
+    # The Q-Q envelope validates the same bounded evaluation.
+    qq = model.plot_data("qq", X=X, y=paid, censoring=(None, limit), n_sim=20)
+    assert qq["n_rows"] == len(paid)
+
+
+def test_bounded_log_score_is_the_bounded_log_likelihood():
+    body, u = _truncated_body(3_000, seed=562)
+    cap = float(np.quantile(body, 0.7))
+    paid = np.minimum(body, cap)
+    capped = paid == cap
+    bounds = {"truncation": (None, u), "censoring": (None, cap)}
+    model = _bounded_model(paid, **bounds)
+    row = model.predict_parameters(_intercepts(1)).iloc[0]
+    mu, sigma = row["location"], row["scale"]
+
+    scores = model.scores(_intercepts(len(paid)), paid, which=("log",), **bounds)["log"]
+    window = stats.norm.logcdf(np.log(u), mu, sigma)
+    observed = stats.norm.logpdf(np.log(paid), mu, sigma) - np.log(paid) - window
+    beyond = np.log(stats.norm.cdf(np.log(u), mu, sigma) - stats.norm.cdf(np.log(cap), mu, sigma))
+    expected = -np.where(capped, beyond - window, observed)
+    np.testing.assert_allclose(scores.to_numpy(), expected, rtol=1e-10, atol=1e-10)
+
+
+def test_crps_refuses_bounded_rows_and_names_the_log_score():
+    body, u = _truncated_body(500, seed=563)
+    model = _bounded_model(body, truncation=(None, u))
+    X = _intercepts(len(body))
+    with pytest.raises(NotImplementedError, match="log score supports"):
+        model.scores(X, body, truncation=(None, u))
+    with pytest.raises(NotImplementedError, match="log score supports"):
+        model.scores(X, body, which=("log",), thresholds=(1.0,), truncation=(None, u))
+    assert np.all(np.isfinite(model.scores(X, body, which=("log",), truncation=(None, u))["log"]))
+
+
+def test_diagnostics_warn_once_when_a_bounded_fit_gets_no_bounds():
+    body, u = _truncated_body(800, seed=564)
+    X = _intercepts(len(body)).assign(x=np.linspace(0.0, 1.0, len(body)))
+    bounded = _bounded_model(body, truncation=(None, u))
+    complete = _bounded_model(body)
+
+    with pytest.warns(UserWarning, match="fitted with .* truncated and 0 censored rows") as seen:
+        bounded.check(X, body, "x", truncation=None)
+    assert len(seen) == 1
+    with pytest.warns(UserWarning, match="actual_expected reads every row"):
+        bounded.actual_expected(X, body, "x")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        bounded.check(X, body, "x", truncation=(None, u))
+        complete.check(X, body, "x")
+        complete.residuals(X, body)
