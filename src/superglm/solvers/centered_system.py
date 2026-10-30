@@ -1568,7 +1568,8 @@ def dense_split_cross(
         stop = start + len(block)
         rows = np.empty((n, len(block)), dtype=np.float64)
         for column, (values, column_anchor) in enumerate(block):
-            np.subtract(values, column_anchor, out=rows[:, column])
+            # in binary64 whatever the column's storage, as the dense pass forms them
+            np.subtract(values, column_anchor, out=rows[:, column], dtype=np.float64)
         cross[:, start:stop] = _bounded_transpose_products(split.bounded, rows, W, formed)
         cross[:, start:stop] -= np.outer(mean_bounded, first[start:stop])
         for group in recentred:
