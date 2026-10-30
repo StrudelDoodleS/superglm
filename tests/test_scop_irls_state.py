@@ -805,6 +805,43 @@ def test_the_scop_search_refuses_a_trial_that_leaves_the_mean_space(monkeypatch)
     assert float(np.max(eta)) < 0.0
 
 
+@pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse"])
+def test_the_scop_search_refuses_a_trial_that_leaves_the_links_domain(
+    monkeypatch, case: str
+) -> None:
+    """The refusal the SCOP step hands its line search keeps every mean the link allows.
+
+    The event is forced: the refusal is read where the step hands it over and
+    applied to the committed state with one positive-weight row moved to
+    ``eta = 0``, which the identity link gives a Poisson mean of zero and the
+    inverse link none, so no trajectory need propose such a trial.  Mutation:
+    the SCOP search given only the mean-space refusal accepts it, and the
+    characterisation's Poisson/identity SCOP REML fit returns to deviance 2028
+    with an effective df of 1.4e48.
+    """
+    import dataclasses
+
+    import superglm.solvers.irls_direct._scop as irls_scop
+
+    real = irls_scop._select_irls_trial
+    handed: list[tuple] = []
+
+    def spy(**kwargs):
+        handed.append((kwargs["committed"], kwargs["invalid_state"]))
+        return real(**kwargs)
+
+    monkeypatch.setattr(irls_scop, "_select_irls_trial", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _fit_edge_of_range(case)
+    committed, invalid = handed[0]
+    eta = np.array(committed.eta_unclipped)
+    assert np.all(eta > 0.0)
+    eta[0] = 0.0
+    assert invalid is not None
+    assert invalid(dataclasses.replace(committed, eta_unclipped=eta))
+
+
 @pytest.mark.parametrize("case", ["poisson_identity", "gamma_inverse", "binomial_log"])
 def test_the_scop_start_is_put_inside_the_mean_space_and_the_links_domain(
     monkeypatch, case: str
