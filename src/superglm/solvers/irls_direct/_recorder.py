@@ -199,8 +199,9 @@ class _IRLSDirectRecorder:
         convergence_tolerance = fit.convergence_tolerance
         termination_reason, working_rows = fit.termination_reason, fit.working_rows
         newton_score = fit.newton_score
-        # the weights extrema and their rows are Fisher's, the weights ``w_ratio`` is
-        # formed on, on a Newton iteration too (``_IRLSDirectFit._working``)
+        # the weight extrema and their rows read the working rows' own curvature, the
+        # weights ``w_ratio`` is formed on (``_IRLSDirectFit._working``): observed
+        # under observed-Newton curvature, never the mean space's Newton rows
         W = working_rows.weights
         if self.trace_enabled:
             assert self.trace_run is not None

@@ -1635,8 +1635,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.working_eta_unclipped = self.eta_unclipped
         self.working_eta = self.eta
         self.working_mu = self.mu
-        # the separation backstop and the diagnostics read Fisher's weights,
-        # the curvature their bars were set on, on a Newton iteration too
+        # the diagnostics read the working rows' own curvature; the separation
+        # backstop reads Fisher's, which its bar was set on (``_separation_weight_ratio``)
         positive_w_min, positive_w_max, w_ratio = _positive_working_weight_stats(
             working_rows.weights
         )
