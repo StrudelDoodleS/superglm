@@ -282,28 +282,98 @@ class TestSCOPPenaltyInEDF:
 class TestMonotoneEdgeOfRange:
     """A fit whose maximum is at the edge of the link's range never raises."""
 
-    def test_poisson_identity_increasing_pspline_ends_not_converged(self):
+    @pytest.mark.parametrize("seed", [3, 8])
+    def test_poisson_identity_increasing_pspline_publishes_its_faces_edf(self, monkeypatch, seed):
         """Zero counts below ``x = 0.3`` put the maximum at a mean of zero.
 
-        The iterates approach that edge, the Fisher weights ``1 / mu`` reach
-        ``1e15`` and the Hessian restricted to the active face is indefinite by
-        the rounding of forming it, which was a ``ValueError`` out of the
-        finaliser.  The fit now returns the last accepted coefficients, not
-        converged.
+        The iterates approach that edge and the Fisher weights ``1 / mu`` reach
+        ``1e15``.  Whether the inner QP completes its KKT certificate there
+        before the line search runs out of representable descent is rounding,
+        and so is which face it holds and whether forming that face's Gram
+        leaves it indefinite: on one OpenBLAS thread seed 3 ends
+        ``constraint_kkt_incomplete`` and seed 8 converges, and seed 3
+        converges on CI's Windows and version-floor shards.  This checks what
+        holds for every outcome: no raise, a named stop, an increasing curve,
+        and the EDF of the face it holds, the influence trace of the observation
+        rows on that face, within the error of whichever decomposition decided
+        it.  The decisions themselves are forced in ``test_irls_direct``'s face
+        tests.  Mutation: 2b67e8dd publishes 1.86 and 6.25 against 4.26 and
+        4.15, and -112.5 against 4.15 under the Haswell kernel.
         """
-        rng = np.random.default_rng(3)
+        import superglm.solvers.irls_direct._finalise as irls_finalise
+        from superglm._roundoff import gamma
+        from superglm.solvers.centered_system import penalty_factor
+        from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+
+        # the rows the finaliser was handed and the face it found, not its Gram
+        handed: list = []
+        real_system, real_feature_edf = (
+            irls_finalise._final_centred_system,
+            irls_finalise._feature_edf,
+        )
+
+        def system(fit):
+            centered, *rest = real_system(fit)
+            handed.append((np.array(fit.W), np.array(centered.mean_x), np.array(centered.penalty)))
+            return (centered, *rest)
+
+        def feature_edf(centered, decomposition, factor, face=None, inverse=None):
+            handed.append(face)
+            return real_feature_edf(centered, decomposition, factor, face, inverse)
+
+        monkeypatch.setattr(irls_finalise, "_final_centred_system", system)
+        monkeypatch.setattr(irls_finalise, "_feature_edf", feature_edf)
+        rng = np.random.default_rng(seed)
         x = np.sort(rng.uniform(0, 1, 80))
         y = rng.poisson(np.where(x < 0.3, 0.0, 6 * (x - 0.3))).astype(float)
+        frame = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
             link="identity",
             selection_penalty=0.0,
             features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
         )
-        model.fit(pd.DataFrame({"x": x}), y)
-        assert not model.result.converged
-        assert np.all(np.isfinite(model.result.beta))
-        assert np.all(np.diff(model.predict(pd.DataFrame({"x": x}))) >= -1e-9)
+        model.fit(frame, y)
+        result = model.result
+        assert np.all(np.isfinite(result.beta))
+        assert result.converged == (result.termination_reason == "converged")
+        assert result.termination_reason in (
+            "converged",
+            "constraint_kkt_incomplete",
+            "step_rejected",
+            "max_iter",
+        )
+
+        # within the QP's feasibility tolerance and the predictor's rounding,
+        # each relative to at most sum |beta| + |intercept|
+        n, p = len(y), result.beta.size
+        scale = float(np.sum(np.abs(result.beta)) + abs(result.intercept))
+        slack = 4.0 * (_QP_FEASIBILITY_TOL + gamma(p + 1)) * scale
+        assert np.all(np.diff(model.predict(frame)) >= -slack)
+
+        # the centred observation rows and the penalty's root, on the face
+        (weights, mean_x, penalty), face = handed[-2:]
+        assert face is not None
+        X = model._dm.toarray()
+        factor = np.vstack((np.sqrt(weights)[:, None] * (X - mean_x), penalty_factor(penalty)))
+        on_face = factor @ face
+        left, singular, _ = np.linalg.svd(on_face, full_matrices=False)
+        trace = 1.0 + float(np.sum(left[:n] ** 2))
+        width = face.shape[1]
+        # the factor's route: a backward error of the rows of at most gamma ||F||_F
+        # moves the face's range by that over sigma_min (Wedin), the trace by twice
+        # that per direction
+        bound = 2.0 * width * gamma(n + p) * np.linalg.norm(factor) / singular[-1]
+        # the Gram's route, taken while its formation bound leaves the face's
+        # spectrum resolved: a relative error of slack / (lambda_min - slack) per
+        # direction (Weyl)
+        diagonal = np.sum(on_face**2, axis=0)
+        reach = (np.abs(face).T @ np.sqrt(np.sum(factor**2, axis=0))) ** 2
+        slack = gamma(n) * float(np.sum(reach / diagonal))
+        smallest = float(np.linalg.svd(on_face / np.sqrt(diagonal), compute_uv=False)[-1] ** 2)
+        if slack < smallest:
+            bound += width * slack / (smallest - slack)
+        assert abs(result.effective_df - trace) <= bound
 
 
 class TestMonotoneUnsupportedCombinations:
