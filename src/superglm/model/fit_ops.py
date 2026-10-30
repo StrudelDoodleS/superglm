@@ -525,7 +525,7 @@ def _compute_null_mu(
     # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
     y_bar = compensated_weighted_mean(y, weights)
     if isinstance(distribution, Binomial):
-        y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+        y_bar = float(clip_mu(np.asarray(y_bar), distribution))
     elif isinstance(distribution, Gaussian):
         y_bar = float(y_bar)
     else:
