@@ -312,24 +312,41 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
     assert calls == (0 if order == 1 else 5)  # Two means and three Hessian cross-terms.
 
 
-@pytest.mark.parametrize("route", ["single", "second_order", "small_budget", "gradient_only"])
-def test_other_routes_do_not_batch_signed_grams(monkeypatch, route):
-    # Beside a dense column the directions batch only on the first-order
-    # route within its budget; the others form each Gram on its own, or none.
-    kwargs = _correction_fixture(p=1 if route == "single" else 2, shift=1e8)
+@pytest.mark.parametrize("moments", ["split", "rows"])
+@pytest.mark.parametrize(
+    "route", ["first_order", "single", "second_order", "small_budget", "gradient_only"]
+)
+def test_only_the_first_order_route_batches_signed_grams(monkeypatch, route, moments):
+    # Beside a dense column the Grams take the split's moments or centred
+    # rows (``_split_pays``, forced here). On either, the directions batch
+    # only on the first-order route within its budget, all three in one
+    # request; the others form each Gram on its own, or none.
+    monkeypatch.setattr(w_derivatives, "_split_pays", lambda split: moments == "split")
+    kwargs = _correction_fixture(p=3, shift=1e8, storage="split")
+    if route == "single":
+        kwargs["reml_penalties"] = kwargs["reml_penalties"][:1]
     if route == "small_budget":
         monkeypatch.setattr(w_derivatives, "_SIGNED_GRAM_BATCH_BYTES", 1)
+    plan_type = type(kwargs["dm"].execution_plan)
+    channels, grams, batches = plan_type._signed_moments_channels, centered_signed_grams, []
 
-    def forbidden(*args):
-        pytest.fail("this route must not batch the directions")
+    def split_batch(plan, weights, owner):
+        batches.append(("split", len(weights)))
+        return channels(plan, weights, owner)
 
-    monkeypatch.setattr(type(kwargs["dm"].execution_plan), "_signed_moments_channels", forbidden)
+    def rows_batch(**kernel_kwargs):
+        batches.append(("rows", len(kernel_kwargs["weights"])))
+        return grams(**kernel_kwargs)
+
+    monkeypatch.setattr(plan_type, "_signed_moments_channels", split_batch)
+    monkeypatch.setattr(w_derivatives, "centered_signed_grams", rows_batch)
     result = w_derivatives.reml_w_correction(
         **kwargs,
         w_correction_order=2 if route == "second_order" else 1,
         gradient_only=route == "gradient_only",
     )
     assert result is not None
+    assert batches == ([(moments, 3)] if route == "first_order" else [])
 
 
 @pytest.mark.parametrize("storage", ["mixed", "split"])
