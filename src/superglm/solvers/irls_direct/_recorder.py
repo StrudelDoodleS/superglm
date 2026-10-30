@@ -198,7 +198,10 @@ class _IRLSDirectRecorder:
         convergence_label, convergence_value = fit.convergence_label, fit.convergence_value
         convergence_tolerance = fit.convergence_tolerance
         termination_reason, working_rows = fit.termination_reason, fit.working_rows
-        newton_score, W = fit.newton_score, fit.W
+        newton_score = fit.newton_score
+        # the weights extrema and their rows are Fisher's, the weights ``w_ratio`` is
+        # formed on, on a Newton iteration too (``_IRLSDirectFit._working``)
+        W = working_rows.weights
         if self.trace_enabled:
             assert self.trace_run is not None
             self.trace_run.emit_lazy(
@@ -326,8 +329,8 @@ class _IRLSDirectRecorder:
                 else None,
                 "convergence": self.convergence,
                 "converged": bool(fit.converged_this_iter),
-                "w_min": float(fit.W.min()),
-                "w_max": float(fit.W.max()),
+                "w_min": float(fit.working_rows.weights.min()),
+                "w_max": float(fit.working_rows.weights.max()),
                 "w_ratio": float(fit.w_ratio),
                 "mu_min": float(fit.mu.min()),
                 "mu_max": float(fit.mu.max()),
