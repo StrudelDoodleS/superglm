@@ -120,3 +120,36 @@ class TestSimultaneousBands:
         assert np.isfinite(
             bands[["ci_lower_simultaneous", "ci_upper_simultaneous"]].to_numpy()
         ).all()
+
+
+class TestCriticalValueUnits:
+    @pytest.mark.parametrize("unit", [1e-5, 1e-19])
+    def test_critical_value_ignores_the_units_of_the_covariance(
+        self, spline_model, monkeypatch, unit
+    ):
+        """Rescaling the response rescales the covariance by its square, not the critical value."""
+        from superglm.inference._term_covariance import simultaneous_bands
+
+        covariance, active_groups = spline_model._coef_covariance
+        real_quantile = np.quantile
+
+        def critical_value(scale):
+            seen = []
+
+            def spy(values, q, *args, **kwargs):
+                seen.append(real_quantile(values, q, *args, **kwargs))
+                return seen[-1]
+
+            with monkeypatch.context() as patch:
+                patch.setattr(np, "quantile", spy)
+                simultaneous_bands(
+                    "x",
+                    result=spline_model.result,
+                    groups=spline_model._groups,
+                    specs=spline_model._specs,
+                    covariance_fn=lambda: (scale**2 * covariance, active_groups),
+                    n_sim=2000,
+                )
+            return seen[-1]
+
+        assert critical_value(unit) == pytest.approx(critical_value(1.0), rel=1e-9)

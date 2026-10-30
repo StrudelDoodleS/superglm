@@ -834,3 +834,24 @@ class TestTermInferenceConstructorContract:
         """A caller that predates the field gets the value that means "untouched"."""
         ti = TermInference("f", "numeric", True)
         assert ti.centering_shift == 0.0
+
+
+def test_critical_value_is_reported_when_every_standard_error_is_tiny(fitted_model, monkeypatch):
+    """A standard error below any absolute floor still backs out its critical value."""
+    from superglm.inference import _term_ops
+
+    ulp = np.finfo(np.float64).eps
+    se = np.full(200, 2.0 * ulp / 3.0)
+    bands = pd.DataFrame(
+        {
+            "se": se,
+            "log_relativity": np.zeros(200),
+            "ci_lower_simultaneous": np.full(200, 1.0 - 2.0 * ulp),
+            "ci_upper_simultaneous": np.full(200, 1.0 + 2.0 * ulp),
+        }
+    )
+    monkeypatch.setattr(_term_ops, "simultaneous_bands", lambda *args, **kwargs: bands)
+
+    ti = fitted_model.term_inference("age", simultaneous=True, centering="mean")
+
+    assert ti.critical_value_simultaneous == pytest.approx(3.0, rel=1e-9)

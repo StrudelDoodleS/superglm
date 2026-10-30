@@ -628,8 +628,10 @@ def vuong_test(
     elif correction == "bic":
         mean_m -= (p_a - p_b) * np.log(likelihood_size) / (2 * likelihood_size)
 
-    if omega < 1e-10:
-        # Models are essentially identical
+    # Essentially identical: the per-row differences are small beside the
+    # magnitude of the log-likelihoods themselves, in whatever units those
+    # (and the weights that multiply them) are.
+    if omega < 1e-10 * float(np.mean(np.abs(ll_a) + np.abs(ll_b))):
         return VuongTestResult(
             statistic=0.0,
             p_value=1.0,

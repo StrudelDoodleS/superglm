@@ -19,6 +19,10 @@ from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
+#: A level is thin when it holds fewer rows than this, or less exposure than this
+#: many rows of average exposure.
+_THIN_LEVEL_ROWS = 20
+
 
 def _ordered_piecewise_structural_rows(
     spec: Any,
@@ -1260,14 +1264,18 @@ def build_coef_rows(
     # whenever the median parametric SE is under 0.2 -- a coefficient can be
     # hundreds of times the typical width and go unflagged. Splitting the two
     # branches is issue #304.
+    n_rows = 0 if sample_weights is None else len(sample_weights)
     for r in rows:
         if r.is_spline or r.name == "Intercept":
             continue
         # Data-driven: insufficient observations or exposure
-        if r.level_n_obs is not None and r.level_n_obs < 20:
+        if r.level_n_obs is not None and r.level_n_obs < _THIN_LEVEL_ROWS:
             r.quasi_separated = True
             r.advisory_trigger = "thin_level"
-        elif r.level_exposure_share is not None and r.level_exposure_share < 0.0005:
+        elif (
+            r.level_exposure_share is not None
+            and r.level_exposure_share * n_rows < _THIN_LEVEL_ROWS
+        ):
             r.quasi_separated = True
             r.advisory_trigger = "thin_level"
 

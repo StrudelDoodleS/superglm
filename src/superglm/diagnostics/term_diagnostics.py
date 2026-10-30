@@ -105,7 +105,7 @@ def term_importance(
         b_g = beta[g.sl]
         norm_g = float(np.linalg.norm(b_g))
 
-        if norm_g < 1e-12:
+        if not np.any(b_g):
             rows.append(
                 {
                     "term": g.name,

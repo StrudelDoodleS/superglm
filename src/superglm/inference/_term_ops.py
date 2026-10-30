@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import SQRT_EPS
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
     piecewise_knot_covariance,
@@ -507,10 +508,9 @@ def term_inference(
                 band_log_rel = (
                     bands["log_relativity"].to_numpy() if centering == "mean" else log_rel
                 )
-                safe_se = np.maximum(band_se, 1e-20)
-                c_vals = (np.log(ci_hi_sim) - band_log_rel) / safe_se
-                live = safe_se > 1e-15
-                c_sim = float(np.median(c_vals[live])) if live.any() else None
+                live = band_se > SQRT_EPS * float(np.max(band_se))
+                c_vals = (np.log(ci_hi_sim) - band_log_rel)[live] / band_se[live]
+                c_sim = float(np.median(c_vals)) if live.any() else None
 
         spline_meta = _build_spline_metadata(spec)
 

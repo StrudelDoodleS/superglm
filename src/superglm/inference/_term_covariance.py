@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._roundoff import SQRT_EPS, TINY
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
@@ -520,7 +521,7 @@ def simultaneous_bands(
         f_sim = rng.standard_normal((n_sim, len(values))) @ root.T
     else:
         try:
-            L = np.linalg.cholesky(Cov_g + 1e-12 * np.eye(Cov_g.shape[0]))
+            L = np.linalg.cholesky(Cov_g)
         except np.linalg.LinAlgError:
             # A covariance on a constrained fit's active face is singular by
             # construction; simulate from its positive-semidefinite root.
@@ -529,7 +530,9 @@ def simultaneous_bands(
         beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ L.T
         f_sim = beta_sim @ M.T
 
-    se_safe = np.maximum(se, 1e-20)
+    # A standard error below the rounding of the largest one carries no
+    # information; the floor is relative, so rescaling the response moves it too.
+    se_safe = np.maximum(se, max(SQRT_EPS * float(np.max(se)), TINY))
     T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
     c_sim = float(np.quantile(T_sim, 1.0 - alpha))
 

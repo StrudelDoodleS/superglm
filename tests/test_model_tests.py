@@ -463,3 +463,29 @@ class TestVuongTestWeighted:
         # Uniform weights should give identical results
         assert abs(r_w.statistic - r_uw.statistic) < 1e-10
         assert abs(r_w.omega - r_uw.omega) < 1e-10
+
+
+class TestVuongTestUnits:
+    @pytest.mark.parametrize("unit", [1e-12, 1e9])
+    def test_statistic_ignores_the_units_of_the_log_likelihood(self, monkeypatch, unit):
+        """Rescaling the per-row log-likelihoods (by weights) leaves the test unchanged."""
+        from superglm.stats import model_tests
+
+        rng = np.random.default_rng(7)
+        n = 1000
+        x1 = rng.uniform(0, 5, n)
+        x2 = rng.uniform(0, 5, n)
+        y = rng.poisson(np.exp(0.5 + 0.3 * x1 + 0.1 * x2)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        full = _fit_poisson_numeric(X, y, features={"x1": Numeric(), "x2": Numeric()})
+        reduced = _fit_poisson_numeric(X, y, features={"x1": Numeric()})
+        reference = vuong_test(full, reduced, X, y, correction="none")
+        real_rows = model_tests._per_obs_log_likelihood
+        monkeypatch.setattr(
+            model_tests, "_per_obs_log_likelihood", lambda *a, **k: unit * real_rows(*a, **k)
+        )
+
+        rescaled = vuong_test(full, reduced, X, y, correction="none")
+
+        assert rescaled.statistic == pytest.approx(reference.statistic, rel=1e-9)
+        assert rescaled.preferred == reference.preferred

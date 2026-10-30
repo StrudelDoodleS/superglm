@@ -754,3 +754,27 @@ class TestColumnAlignment:
         if box_lines:
             widths = {len(line) for line in box_lines}
             assert len(widths) == 1, f"Inconsistent line widths: {widths}"
+
+
+class TestThinLevelIsACount:
+    """A thin level is one with few rows, however large the book around it is."""
+
+    def test_rows_in_a_large_book_are_not_thin_by_their_share(self):
+        rng = np.random.default_rng(20261030)
+        n = 100_000
+        level = rng.choice(["A", "B"], size=n)
+        level[:30] = "R"  # 3e-4 of the rows, but thirty of them
+        level[30:40] = "S"  # ten rows
+        y = rng.poisson(np.where(np.isin(level, ["R", "S"]), 0.5, 0.2)).astype(float)
+        df = pd.DataFrame({"cat": level})
+        m = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="A")},
+        ).fit(df, y)
+
+        rows = {r.name: r for r in m.summary()._coef_rows}
+
+        assert rows["cat[R]"].level_n_obs == 30
+        assert rows["cat[R]"].advisory_trigger != "thin_level"
+        assert rows["cat[S]"].advisory_trigger == "thin_level"
