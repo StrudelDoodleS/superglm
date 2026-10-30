@@ -38,9 +38,11 @@ from numpy.typing import NDArray
 
 from superglm.distributional.kernels._common import readonly, readonly_bool
 from superglm.distributional.kernels._response_tails import (
+    NARROW_WINDOW,
     TailChannels,
     absent_tail,
     log_window_channels,
+    quadrature_window_channels,
 )
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
@@ -369,6 +371,9 @@ def window_rows(
     ``lower`` at or below zero means the support's start (``S = 1``) and
     ``upper = +inf`` an open window.  Both ends come from the survival
     function, which no window on ``y >= 0`` rounds to one at its far end.
+    The log density varies on the scale ``(psi + xi y)/(1 + |xi|)``; a window
+    at most :data:`NARROW_WINDOW` of that scale wide at its steeper end is
+    integrated by quadrature instead.
     """
     lo = np.maximum(np.asarray(lower, dtype=_FLOAT), 0.0)
     hi = np.asarray(upper, dtype=_FLOAT)
@@ -384,7 +389,28 @@ def window_rows(
         for target, source in zip(far, channels, strict=True):
             if target is not None and source is not None:
                 target[present] = source
-    return log_window_channels(near, far, derivative_order=derivative_order)
+    window = log_window_channels(near, far, derivative_order=derivative_order)
+    span = hi - lo
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        support = psi + xi * np.where(xi < 0.0, hi, lo)
+        reach = span * (1.0 + np.abs(xi)) / support
+    rows = np.flatnonzero((support > 0.0) & (reach <= NARROW_WINDOW))
+    if len(rows) == 0:
+        return window
+
+    def log_density(points: NDArray) -> TailChannels:
+        evaluation = scale_rows(
+            points, psi[rows], xi[rows], np.ones(len(rows)), derivative_order=derivative_order
+        )
+        return evaluation.optimizing_log_likelihood, evaluation.score, evaluation.hessian_packed
+
+    quadrature = quadrature_window_channels(
+        lo[rows], 0.5 * span[rows], log_density, derivative_order=derivative_order
+    )
+    for target, source in zip(window, quadrature, strict=True):
+        if target is not None and source is not None:
+            target[rows] = source
+    return window
 
 
 def series_f(z: NDArray) -> NDArray[np.float64]:

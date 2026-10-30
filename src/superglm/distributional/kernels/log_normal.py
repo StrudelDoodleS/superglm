@@ -361,9 +361,13 @@ def location_window(
     The normal window on ``log Y``; a lower end at or below zero is the
     support's start and ``upper = +inf`` an open window.
     """
-    with np.errstate(divide="ignore"):
-        log_lower = np.log(np.maximum(np.asarray(lower, dtype=_FLOAT), 0.0))
-        log_upper = np.log(np.asarray(upper, dtype=_FLOAT))
+    lo = np.asarray(lower, dtype=_FLOAT)
+    hi = np.asarray(upper, dtype=_FLOAT)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        log_lower = np.log(np.maximum(lo, 0.0))
+        log_upper = np.log(hi)
+        # The log-scale width without the cancellation of log(upper) - log(lower).
+        width = np.log1p((hi - lo) / lo)
     return normal_window_channels(
         log_lower,
         log_upper,
@@ -371,6 +375,7 @@ def location_window(
         sigma,
         np.ones(len(np.asarray(mu))),
         derivative_order=derivative_order,
+        width=width,
     )
 
 

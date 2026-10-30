@@ -1208,11 +1208,16 @@ class SuperLSS:
         *,
         stacklevel: int = 3,
         takes_bounds: bool = True,
+        fitted: DenseDistributionalModel | None = None,
+        subject: str = "this model",
     ) -> None:
-        """Warn when a bounded fit's diagnostic is given no bounds to read its rows by."""
+        """Warn when a bounded fit's diagnostic is given no bounds to read its rows by.
+
+        ``fitted`` is the model whose rows are read, this one by default.
+        """
         if truncation is not None or censoring is not None:
             return
-        state = self._require_fitted().fit_state
+        state = (self._require_fitted() if fitted is None else fitted).fit_state
         if state.truncated_row_count + state.censored_row_count == 0:
             return
         remedy = (
@@ -1222,7 +1227,7 @@ class SuperLSS:
             "result with that in mind"
         )
         warnings.warn(
-            f"this model was fitted with {state.truncated_row_count} truncated and "
+            f"{subject} was fitted with {state.truncated_row_count} truncated and "
             f"{state.censored_row_count} censored rows, and {method} reads every row it is "
             f"given as complete; {remedy} (rows from a complete source need nothing)",
             UserWarning,
@@ -1484,9 +1489,11 @@ class SuperLSS:
         ``offsets`` is shared shorthand and cannot be mixed with either.
         """
         self._warn_bounds_unread("compare", None, None, takes_bounds=False)
-        if isinstance(other, SuperLSS):
-            other._warn_bounds_unread("compare", None, None, takes_bounds=False)
         candidate = other._require_fitted() if isinstance(other, SuperLSS) else other
+        if isinstance(candidate, DenseDistributionalModel):
+            self._warn_bounds_unread(
+                "compare", None, None, takes_bounds=False, fitted=candidate, subject="other"
+            )
         return compare_models(
             self._require_fitted(),
             candidate,

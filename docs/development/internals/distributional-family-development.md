@@ -253,11 +253,23 @@ This complete public-only example is the extensibility regression. It supplies
 four natural parameters and therefore ten packed Hessian channels, explicitly
 admits only the complete observation contract, and provides nonempty
 complete-fit configuration. A family that also takes truncated and censored
-rows declares `FamilyCapabilities(censored_response=True)`, binds the
-`"censored_truncated"` contract whose `bounds` are `ResponseBounds`, includes the
-bounds in its plan identifier, and refuses expected information and analytic
-third and fourth derivatives for such a plan with
-`UnsupportedLikelihoodContractError`; `GaussianLS` is the reference.
+rows does the following; `GaussianLS` is the reference.
+
+- It declares `FamilyCapabilities(censored_response=True)` and binds the
+  `"censored_truncated"` contract, whose `bounds` are `ResponseBounds`.
+- It reads lower bounds at or below the start of its response support as
+  absent. A contract left with no bounded row binds as the complete one, so
+  `truncation=(0, None)` on a positive response is an ordinary fit.
+- Its plan exposes the bound contract as `plan.observation`, and its plan
+  identifier includes the bounds. The diagnostics, the corrected covariance
+  and the solver's curvature choice read `plan.observation`, and a fit with
+  bounds refuses a plan without it.
+- It refuses expected information and analytic third and fourth derivatives
+  for a bounded plan with `UnsupportedLikelihoodContractError`.
+- It supplies `log_window_probability(lower, upper, theta, weights=None)`
+  (`ResponseWindowFamily`), built from log tails rather than a difference of
+  CDF values. The residuals, the checks and the plots read bounded rows
+  through it, and refuse them from a family without it.
 
 ```python
 from dataclasses import dataclass

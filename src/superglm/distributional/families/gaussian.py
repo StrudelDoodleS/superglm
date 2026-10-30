@@ -444,7 +444,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     ) -> GaussianLikelihoodPlan:
         response = _validated_response(y)
         observation = bind_observation(
-            observation, response, support_lower=-np.inf, family_name="GaussianLS"
+            observation, response, weights, support_lower=-np.inf, family_name="GaussianLS"
         )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
@@ -679,7 +679,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 lo, hi, values[rows, 0], values[rows, 1], law[rows], "prior", derivative_order=0
             )
 
-        return readonly(log_window_values(lower, upper, window))
+        return readonly(log_window_values(lower, upper, len(values), window))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``P(Y <= y)`` per row from ``(location, scale)``."""

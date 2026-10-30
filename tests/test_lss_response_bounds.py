@@ -7,6 +7,7 @@ same rows is the unfixed behaviour each fit test also rejects.
 
 from __future__ import annotations
 
+import math
 import pickle
 import warnings
 
@@ -15,7 +16,18 @@ import pandas as pd
 import pytest
 from scipy import optimize, special, stats
 
-from superglm import GammaLS, GaussianLS, GeneralizedParetoLSS, LogNormalLS, SuperLSS, s
+from superglm import (
+    GammaLS,
+    GaussianLS,
+    GeneralizedParetoLSS,
+    LogNormalLS,
+    SeparationError,
+    SeparationWarning,
+    SuperLSS,
+    cat,
+    distributional,
+    s,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import COMPLETE_OBSERVATION, bounded_observation
 from superglm.distributional.kernels._response_tails import (
@@ -26,7 +38,8 @@ from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
     window_rows,
 )
-from superglm.distributional.kernels.log_normal import mean_window
+from superglm.distributional.kernels.log_normal import location_window, mean_window
+from superglm.distributional.model import refit_dense_distributional
 from superglm.distributional.observation import ResponseBounds, resolve_response_bounds
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
@@ -34,6 +47,8 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.links import IdentityLink
+
+_U = 2.0**-53
 
 
 def _intercepts(n: int) -> pd.DataFrame:
@@ -596,13 +611,15 @@ def test_parameter_uncertainty_envelope_refuses_bounded_rows():
     assert payload is not None
 
 
-def test_mills_gap_agrees_with_the_direct_ratio_between_three_and_six():
-    # Below -3 the gap comes from the continued fraction; down to -6 the direct
-    # phi/Phi ratio cancels by under two digits, so it is an independent check.
-    x = -np.linspace(3.0 + 1e-9, 6.0, 25)
-    _, _, gap = inverse_mills(x)
-    direct = x + np.exp(-0.5 * x * x - 0.5 * np.log(2.0 * np.pi) - special.log_ndtr(x))
-    np.testing.assert_allclose(gap, direct, rtol=1e-12)
+def test_mills_gap_agrees_with_an_erfcx_reference_between_three_and_forty():
+    # Below -3 the gap comes from the continued fraction.  The reference forms
+    # r = sqrt(2/pi)/erfcx(t/sqrt(2)) to a few u, and its gap r - t cancels by
+    # a factor of t^2, so it is good to a small multiple of u t^2.
+    t = np.linspace(3.0 + 1e-9, 40.0, 200)
+    _, ratio, gap = inverse_mills(-t)
+    reference = np.sqrt(2.0 / np.pi) / special.erfcx(t / np.sqrt(2.0))
+    np.testing.assert_allclose(ratio, reference, rtol=16 * _U)
+    assert np.all(np.abs(gap - (reference - t)) <= 16 * _U * t * t * np.abs(reference - t))
 
 
 @pytest.mark.parametrize(
@@ -721,3 +738,376 @@ def test_censored_generalized_pareto_fit_starts_without_a_warning():
         SuperLSS(family, family.scale(), family.shape()).fit(
             _intercepts(len(paid)), paid, censoring=(None, 1500.0)
         )
+
+
+# -- review regressions, round 2 ----------------------------------------------
+
+
+def _normal_window_reference(lower: float, h: float) -> float:
+    # The mass of (m - h/2, m + h/2] is h phi(m) sum_j He_2j(m) (h/2)^2j/(2j+1)!,
+    # since phi^(n) = (-1)^n He_n phi; the series is entire and converges fast
+    # for h max(1, |m|) <= 1.  The width is passed, not differenced.
+    m = lower + 0.5 * h
+    series = math.fsum(
+        special.eval_hermitenorm(2 * j, m) * (0.5 * h) ** (2 * j) / math.factorial(2 * j + 1)
+        for j in range(25)
+    )
+    return math.log(h) - 0.5 * m * m - 0.5 * math.log(2.0 * math.pi) + math.log(series)
+
+
+@pytest.mark.parametrize("centre", [0.0, 2.5, 12.0, 30.0])
+def test_narrow_normal_windows_keep_their_mass_on_both_sides_of_the_switch(centre):
+    # Widths times max(1, |centre|): a few float spacings, then either side of
+    # the 0.05 switch to quadrature.
+    reaches = (1e-16, 1e-9, 1e-3, 0.049, 0.051, 0.5)
+    lower = np.full(len(reaches), centre)
+    upper = np.array(
+        [max(centre + r / max(1.0, centre), np.nextafter(centre, np.inf)) for r in reaches]
+    )
+    ones = np.ones(len(reaches))
+    value, _, _ = normal_window_channels(lower, upper, 0.0 * ones, ones, ones, derivative_order=0)
+    expected = [_normal_window_reference(lo, hi - lo) for lo, hi in zip(lower, upper, strict=True)]
+    # Above the switch the difference of the two log tails keeps the mass to
+    # about 10 u centre^2; below it the quadrature's error is under 2e-13.
+    np.testing.assert_allclose(value, expected, rtol=0.0, atol=2e-13 + 40 * _U * centre**2)
+
+
+@pytest.mark.parametrize("relative_width", [1e-14, 1e-10, 1e-6])
+def test_narrow_log_normal_windows_keep_their_width(relative_width):
+    # log(upper) - log(lower) would lose the width to the rounding of log(lower).
+    lower = math.exp(5.0)
+    upper = lower * (1.0 + relative_width)
+    mu, sigma = 4.0, 0.7
+    value, _, _ = location_window(
+        np.array([lower]), np.array([upper]), np.array([mu]), np.array([sigma]),
+        derivative_order=0,
+    )  # fmt: skip
+    z_lower = (math.log(lower) - mu) / sigma
+    z_width = math.log1p((upper - lower) / lower) / sigma
+    expected = _normal_window_reference(z_lower, z_width)
+    assert value[0] == pytest.approx(expected, rel=1e-13)
+
+
+def _pareto_window_reference(lower: float, upper: float, scale: float, shape: float) -> float:
+    # f^(n)(y) = (-1)^n f(y) prod_{k<=n} (1 + k xi)/(scale + xi y)^n, so the mass
+    # is w f(m) sum_j prod_{k<=2j} (1 + k xi) (rho/2)^2j/(2j+1)!, rho = w/(scale + xi m).
+    w = upper - lower
+    m = lower + 0.5 * w
+    rho = w / (scale + shape * m)
+    terms = [
+        math.prod(1.0 + k * shape for k in range(1, 2 * j + 1))
+        * (0.5 * rho) ** (2 * j)
+        / math.factorial(2 * j + 1)
+        for j in range(20)
+    ]
+    log_density = -math.log(scale) - (1.0 / shape + 1.0) * math.log1p(shape * m / scale)
+    return math.log(w) + log_density + math.log(math.fsum(terms))
+
+
+@pytest.mark.parametrize("shape", [0.05, 0.3, 0.9])
+def test_narrow_generalized_pareto_windows_keep_their_mass(shape):
+    scale = 100.0
+    rows = [(lo, reach) for lo in (0.0, 10.0, 1e5) for reach in (1e-12, 1e-6, 0.04, 0.06, 0.2)]
+    lower = np.array([lo for lo, _ in rows])
+    upper = np.array([lo + reach * (scale + shape * lo) / (1.0 + shape) for lo, reach in rows])
+    n = len(rows)
+    value, _, _ = window_rows(
+        lower, upper, np.full(n, scale), np.full(n, shape), derivative_order=0
+    )
+    expected = [
+        _pareto_window_reference(lo, hi, scale, shape) for lo, hi in zip(lower, upper, strict=True)
+    ]
+    # The two log tails' difference keeps about u |log S|/0.05 here, the
+    # quadrature about 1e-13.
+    np.testing.assert_allclose(value, expected, rtol=0.0, atol=5e-13)
+
+
+@pytest.mark.parametrize(
+    ("kernel", "lower", "upper"),
+    [
+        ("normal", 2.0, 2.0 + 1e-3),
+        ("normal", -0.8, -0.8 + 1e-9),
+        ("pareto", 50.0, 50.0 + 1e-3),
+        ("pareto", 900.0, 900.0 + 1e-8),
+    ],
+)
+def test_narrow_window_derivatives_match_differences(kernel, lower, upper):
+    root = np.array([1.7])
+
+    def channels(first, second):
+        if kernel == "normal":
+            return normal_window_channels(
+                np.array([lower]), np.array([upper]), np.array([first]), np.array([second]),
+                root, derivative_order=2,
+            )  # fmt: skip
+        return window_rows(
+            np.array([lower]), np.array([upper]), np.array([first]), np.array([second]),
+            derivative_order=2,
+        )  # fmt: skip
+
+    point = (0.3, 1.4) if kernel == "normal" else (120.0, 0.35)
+    steps = (1e-5, 1e-5) if kernel == "normal" else (1e-4 * point[0], 1e-6)
+    _, score, hessian = channels(*point)
+    for column in range(2):
+        step = np.eye(2)[column] * steps[column]
+        plus, minus = channels(*(point + step)), channels(*(point - step))
+        np.testing.assert_allclose(
+            score[0, column], (plus[0][0] - minus[0][0]) / (2 * steps[column]), rtol=1e-7,
+            atol=1e-12,
+        )  # fmt: skip
+        packed = (0, 1) if column == 0 else (1, 2)
+        np.testing.assert_allclose(
+            hessian[0, list(packed)], (plus[1][0] - minus[1][0]) / (2 * steps[column]),
+            rtol=1e-6, atol=1e-12,
+        )  # fmt: skip
+
+
+def test_a_window_narrower_than_float_spacing_keeps_its_mass():
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(), family.scale())
+    model.fit(_intercepts(2), np.array([-1.0, 1.0]))
+    window = (-1e-16, 1e-16)
+    table = model.scores(_intercepts(1), np.array([0.0]), truncation=window, which=("log",))
+    # The row's density cancels against the window's mass, which is the width
+    # times that density to second order in the width.
+    assert table["log"].iloc[0] == pytest.approx(np.log(2e-16), rel=1e-12)
+    residuals = model.residual_set(_intercepts(1), np.array([0.0]), truncation=window)
+    assert residuals.pit[0] == pytest.approx(0.5, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper"),
+    [
+        (-np.inf, 1e200),
+        (-np.inf, np.finfo(np.float64).max),
+        (-np.finfo(np.float64).max, np.inf),
+        (-1e200, 1e200),
+    ],
+)
+def test_huge_finite_bounds_read_as_open_ends(lower, upper):
+    value, score, hessian = normal_window_channels(
+        np.array([lower]), np.array([upper]), np.array([0.3]), np.array([0.7]), np.ones(1),
+        derivative_order=2,
+    )  # fmt: skip
+    np.testing.assert_array_equal(value, [0.0])
+    np.testing.assert_array_equal(score, [[0.0, 0.0]])
+    np.testing.assert_array_equal(hessian, [[0.0, 0.0, 0.0]])
+
+
+@pytest.mark.parametrize("lower", [-1e100, -1e150, -5e153])
+def test_a_far_end_with_a_negligible_tail_is_the_open_end(lower):
+    # The far end's log tail is finite but its derivatives overflow; it
+    # carries no weight, so the window is the one-sided one exactly.
+    def channels(lo):
+        return normal_window_channels(
+            np.array([lo]), np.array([1.0]), np.array([0.3]), np.array([0.5]), np.ones(1),
+            derivative_order=2,
+        )  # fmt: skip
+
+    for bounded, open_ended in zip(channels(lower), channels(-np.inf), strict=True):
+        np.testing.assert_array_equal(bounded, open_ended)
+
+
+@pytest.mark.parametrize("upper", [1e200, np.finfo(np.float64).max])
+def test_fits_with_a_huge_finite_upper_bound_are_the_unbounded_fits(upper):
+    y = np.linspace(-1.0, 1.0, 30)
+    assert _fit(GaussianLS(), y, truncation=(None, upper)) == pytest.approx(
+        _fit(GaussianLS(), y), rel=1e-8, abs=1e-12
+    )
+    excess = stats.genpareto(c=0.3, scale=100.0).rvs(500, random_state=np.random.default_rng(5))
+    assert _fit(GeneralizedParetoLSS(), excess, truncation=(None, upper)) == pytest.approx(
+        _fit(GeneralizedParetoLSS(), excess), rel=1e-6
+    )
+
+
+def test_zero_probability_rows_are_refused_by_input_row_on_either_branch():
+    excess = np.array([0.5, 1.0, 0.0, 2.0, 0.0, 4.0])
+    upper = np.array([np.inf, np.inf, np.inf, np.inf, 0.0, np.inf])
+    weights = np.array([1.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+    # Row 4 is truncated at zero from above; row 1 carries no weight, so the
+    # bound rows are not the input rows.
+    with pytest.raises(ValueError, match=r"zero probability \(first at input row 4\)"):
+        _fit(
+            GeneralizedParetoLSS(), excess, weight_semantics="frequency", sample_weight=weights,
+            truncation=(None, upper),
+        )  # fmt: skip
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(family, family.scale(), family.shape())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(_intercepts(4), np.array([0.5, 1.0, 2.0, 4.0]))
+    for bounds in ({"truncation": (None, 0.0)}, {"censoring": (0.0, None)}):
+        with pytest.raises(ValueError, match="zero probability"):
+            model.scores(_intercepts(1), np.array([0.0]), which=("log",), **bounds)
+
+
+def test_a_bounded_row_whose_window_has_no_mass_scores_inf(monkeypatch):
+    # No float64 input reaches a massless window here: the row's own density
+    # overflows first.  The event is forced on the window kernel instead.
+    from superglm.distributional.families import gaussian as gaussian_family
+
+    real = gaussian_family.gaussian_window
+
+    def massless(*args, **kwargs):
+        value, score, hessian = real(*args, **kwargs)
+        return np.full_like(value, -np.inf), score, hessian
+
+    model, _, _ = _intercept_gaussian()
+    monkeypatch.setattr(gaussian_family, "gaussian_window", massless)
+    table = model.scores(
+        _intercepts(2), np.array([0.0, 3.0]), censoring=(None, 3.0), which=("log",)
+    )
+    assert np.isfinite(table["log"].iloc[0])
+    assert table["log"].iloc[1] == np.inf
+
+
+def _all_censored_level(n=1_500, seed=567, keep_one=False):
+    rng = np.random.default_rng(seed)
+    group = rng.choice(["a", "b", "c"], n)
+    limit = 5000.0
+    paid = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
+    paid[group == "c"] = limit
+    if keep_one:
+        paid[np.flatnonzero(group == "c")[0]] = 0.5 * limit
+    return pd.DataFrame({"g": group}), paid, limit
+
+
+def test_a_level_censored_on_one_side_only_is_disclosed_as_separated():
+    X, paid, limit = _all_censored_level()
+    family = LogNormalLS(parametrisation="location")
+    with pytest.warns(
+        SeparationWarning, match=r"'location:g': 1 of 3 occupied levels have only right-censored"
+    ):
+        SuperLSS(family, family.location(cat("g")), family.scale()).fit(
+            X, paid, censoring=(None, limit)
+        )
+    strict = SuperLSS(family, family.location(cat("g")), family.scale(), separation="error")
+    with pytest.raises(SeparationError, match="Censoring separation"):
+        strict.fit(X, paid, censoring=(None, limit))
+    # Tobit: a level whose rows are all at the lower limit.
+    gaussian = GaussianLS()
+    with pytest.warns(SeparationWarning, match="only left-censored rows: 'c'"):
+        SuperLSS(gaussian, gaussian.location(cat("g")), gaussian.scale()).fit(
+            X, limit - paid, censoring=(0.0, None)
+        )
+    X, paid, limit = _all_censored_level(keep_one=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        SuperLSS(family, family.location(cat("g")), family.scale()).fit(
+            X, paid, censoring=(None, limit)
+        )
+
+
+def test_window_probabilities_match_scipy_for_every_family_form():
+    lower = np.array([-np.inf, 2.0, 300.0, 0.0])
+    upper = np.array([900.0, np.inf, 1500.0, 40.0])
+    sigma = 0.8
+    mean = 700.0
+    location = np.log(mean) - 0.5 * sigma**2
+    law = stats.lognorm(s=sigma, scale=np.exp(location))
+    expected = np.log(law.cdf(upper) - law.cdf(lower))
+    # 1 - cdf(2) loses digits to a mass of 2e-12 below 2; logsf keeps them.
+    expected[1] = law.logsf(lower[1])
+    for family, row in (
+        (LogNormalLS(), (mean, sigma)),
+        (LogNormalLS(parametrisation="location"), (location, sigma)),
+    ):
+        value = family.log_window_probability(lower, upper, np.tile(row, (4, 1)))
+        np.testing.assert_allclose(value, expected, rtol=1e-12)
+    pareto = stats.genpareto(c=0.3, scale=120.0)
+    value = GeneralizedParetoLSS().log_window_probability(
+        lower, upper, np.tile((120.0, 0.3), (4, 1))
+    )
+    np.testing.assert_allclose(
+        value, np.log(pareto.sf(np.maximum(lower, 0.0)) - pareto.sf(upper)), rtol=1e-12
+    )
+
+
+def test_window_probability_takes_a_number_or_one_per_row():
+    theta = np.tile((0.0, 1.0), (3, 1))
+    family = GaussianLS()
+    value = family.log_window_probability(-1.0, 1.0, theta)
+    np.testing.assert_allclose(value, np.full(3, np.log(2.0 * stats.norm.cdf(1.0) - 1.0)))
+    assert np.all(family.log_window_probability(0.5, 0.5, theta) == -np.inf)
+    with pytest.raises(ValueError, match="one number per row"):
+        family.log_window_probability(np.zeros(2), np.ones(2), theta)
+    with pytest.raises(ValueError, match="lower <= upper"):
+        family.log_window_probability(1.0, -1.0, theta)
+    with pytest.raises(ValueError, match="must not be NaN"):
+        family.log_window_probability(np.nan, 1.0, theta)
+
+
+def test_bounds_contracts_are_public():
+    assert {"ResponseBounds", "ResponseWindowFamily"} <= set(distributional.__all__)
+    for family in (GaussianLS(), LogNormalLS(), GeneralizedParetoLSS()):
+        assert isinstance(family, distributional.ResponseWindowFamily)
+
+
+def test_generalized_pareto_above_a_deductible_recovers_the_parent_law():
+    excess = stats.genpareto(c=0.3, scale=1000.0).rvs(6_000, random_state=np.random.default_rng(8))
+    deductible = 500.0
+    kept = excess[excess > deductible]
+    fitted = _fit(GeneralizedParetoLSS(), kept, truncation=(deductible, None))
+
+    # By threshold stability the excess over the deductible is GPD with scale
+    # scale + xi d, which the reference fits directly.
+    def negative(point):
+        return -stats.genpareto.logpdf(kept - deductible, point[1], scale=np.exp(point[0])).sum()
+
+    log_excess_scale, xi = _mle(negative, np.array([np.log(1150.0), 0.3]))
+    scale = np.exp(log_excess_scale) - xi * deductible
+    assert fitted["scale"] == pytest.approx(scale, rel=1e-5)
+    assert fitted["shape"] == pytest.approx(xi, rel=1e-4)
+    complete = _fit(GeneralizedParetoLSS(), kept)
+    assert abs(complete["scale"] - scale) > 0.1 * scale
+
+
+def test_refit_takes_the_bounds_of_the_rows_it_fits():
+    body, u = _truncated_body(800, seed=566)
+    X = _intercepts(len(body))
+    dense = _bounded_model(body, truncation=(None, u))._require_fitted()
+    refit_dense_distributional(dense, X, body, truncation=(None, u))
+    assert dense.fit_state.truncated_row_count == len(body)
+    refit_dense_distributional(dense, X, body)
+    assert dense.fit_state.truncated_row_count == 0
+
+
+def test_compare_warns_when_either_model_is_bounded():
+    body, u = _truncated_body(800, seed=565)
+    X = _intercepts(len(body))
+    bounded = _bounded_model(body, truncation=(None, u))
+    complete = _bounded_model(body)
+    for other in (bounded, bounded._require_fitted()):
+        with pytest.warns(UserWarning, match="other was fitted with") as seen:
+            complete.compare(other, X, body)
+        assert len(seen) == 1
+
+
+class _HiddenObservationPlan:
+    """A bound Gaussian plan that does not expose its observation contract."""
+
+    def __init__(self, plan):
+        self._plan = plan
+
+    @property
+    def weights(self):
+        return self._plan.weights
+
+    @property
+    def plan_identifier(self):
+        return self._plan.plan_identifier
+
+    def take(self, indices):
+        return _HiddenObservationPlan(self._plan.take(indices))
+
+
+class _HiddenObservationGaussian(GaussianLS):
+    def bind_likelihood(self, y, weights, observation):
+        return _HiddenObservationPlan(super().bind_likelihood(y, weights, observation))
+
+
+def test_a_bounded_plan_must_expose_its_observation():
+    family = _HiddenObservationGaussian()
+    model = SuperLSS(family, family.location(), family.scale())
+    with pytest.raises(UnsupportedLikelihoodContractError, match="plan.observation"):
+        model.fit(_intercepts(30), np.linspace(-1.0, 1.0, 30), truncation=(None, 2.0))

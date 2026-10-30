@@ -86,6 +86,8 @@ _EXPORTS = {
         "NaturalLikelihoodEvaluation",
     ),
     "ObservationContract": ("superglm.distributional.family", "ObservationContract"),
+    "ResponseBounds": ("superglm.distributional.observation", "ResponseBounds"),
+    "ResponseWindowFamily": ("superglm.distributional.family", "ResponseWindowFamily"),
     "ParameterSpec": ("superglm.distributional.family", "ParameterSpec"),
     "ParameterSupport": ("superglm.distributional.family", "ParameterSupport"),
     "PredictorCurvatureDirectionalFamily": (
