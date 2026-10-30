@@ -1427,20 +1427,24 @@ class TestDeadSearchNewtonDecrement:
         assert classified[0]["predicted_decrease"] is None
         assert model._reml_result.termination_reason == "line_search_failed"
 
-    def test_a_rejected_full_step_below_the_stop_resolution_ends_the_search(self, monkeypatch):
-        """Where the Newton model's whole predicted decrease is below the stop
-        resolution and the dead-search certificate holds, a rejected full step
-        ends the search: no shorter step is tried, and the candidate is
-        certified ``converged_at_precision``.
+    def test_a_decrease_no_smooth_criterion_allows_ends_the_search(self, monkeypatch):
+        """After a rejected full step, a shorter step whose decrease exceeds what
+        any quadratic criterion rejecting the full step allows, ``2 P alpha (1 -
+        (1 - c) alpha)`` for a predicted decrease ``P``, is discarded where ``P``
+        is below the stop resolution, the dead-search certificate holds and
+        steps at that fraction cannot reach the score bar in the iterations
+        left: the search ends there, ``converged_at_precision``.
 
-        The event is forced: every full-step trial's evaluated objective is
-        raised by the stop resolution ``reml_tol (1 + |V|)``, an evaluation
-        error of the size the inner solves are certified to, while shorter
-        steps and candidates are evaluated exactly, as a warm-started solve's
-        error shrinks with its step.  An early full step decreases the
-        objective by far more and is accepted.  Mutation: without the rule the
-        search accepts the half step, and keeps stepping at half the Newton
-        step until the score test ends it.
+        The event is forced: every trial of at least half the Newton step has
+        its evaluated objective raised by the stop resolution ``reml_tol (1 +
+        |V|)``, an evaluation error of the size the inner solves are certified
+        to, while shorter steps and candidates are evaluated exactly, as a
+        warm-started solve's error shrinks with its step.  The quarter step
+        then decreases the objective by about ``7 P / 16`` against a bound of
+        ``3 P / 8``, and leaves a quarter of the gradient less an iteration.
+        An early full step decreases the objective by far more and is
+        accepted.  Mutation: without the rule the search accepts the quarter
+        step, and crawls at a rate of 3/4 to ``max_reml_iter``.
         """
         import dataclasses
 
@@ -1464,7 +1468,7 @@ class TestDeadSearchNewtonDecrement:
         def objective(*args, **kwargs):
             evaluation = real_objective(*args, **kwargs)
             alpha, pending[0] = pending[0], None
-            if alpha != 1.0:
+            if alpha is None or alpha < 0.5:
                 return evaluation
             raised = evaluation.value + tol * (1.0 + abs(evaluation.value))
             return dataclasses.replace(evaluation, value=raised)
@@ -1479,15 +1483,15 @@ class TestDeadSearchNewtonDecrement:
         result = model._reml_result
         assert result.converged, result.termination_reason
         assert result.termination_reason == "converged_at_precision"
-        assert model._reml_profile["reml_dead_line_search"]["full_step_unresolved"]
+        assert model._reml_profile["reml_dead_line_search"]["inconsistent_decrease"] is not None
         by_iteration: dict[int, list[float]] = {}
         for iteration, alpha in trials:
             by_iteration.setdefault(iteration, []).append(alpha)
-        # an earlier iteration took its full step; the last tried nothing shorter
+        # an earlier iteration took its full step; the last discarded its quarter step
         assert any(
             alphas == [1.0] for it, alphas in by_iteration.items() if it < result.n_reml_iter
         )
-        assert by_iteration[result.n_reml_iter] == [1.0]
+        assert by_iteration[result.n_reml_iter] == [1.0, 0.5, 0.25]
 
     def test_an_undetermined_dead_search_still_reports_not_converged(self):
         """#439's documented undetermined model: the panel book under a

@@ -243,6 +243,22 @@ def _escalates_to_exact_hessian(
     return steps > iterations_left
 
 
+def _backtracked_rate_cannot_finish(
+    gradient_norm: float, score_bar: float, step: float, iterations_left: int
+) -> bool:
+    """Whether Newton steps taken at fraction ``step`` cannot reach the score bar in time.
+
+    A Newton step taken at ``step`` leaves about ``1 - step`` of the gradient,
+    a linear rate; the score bar is then ``ln(bar / |g|) / ln(1 - step)``
+    iterations away, as ``_escalates_to_exact_hessian`` reasons from a measured
+    rate.  A rate that finishes within the iterations left is left to the
+    score test.
+    """
+    if gradient_norm <= score_bar or not 0.0 < step < 1.0:
+        return False
+    return math.log(score_bar / gradient_norm) / math.log(1.0 - step) > iterations_left
+
+
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
     """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
 
@@ -1747,8 +1763,10 @@ def optimize_direct_reml(
         # and that rounding
         unresolved_decrease: float | None = None
         stall_roundoff: float | None = None
-        # a rejected full step whose model decrease the stop cannot resolve
-        full_step_unresolved = False
+        # an accepted shorter step's decrease that no quadratic criterion
+        # rejecting the full step allows
+        full_step_rejected = False
+        inconsistent_decrease: float | None = None
         # The synchronous search owns fixed design coordinates and warm state.
         # Its rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
@@ -2012,11 +2030,18 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else 0.0
             )
+            if not trial_accepted and step == 1.0:
+                full_step_rejected = True
             if (
-                not trial_accepted
-                and step == 1.0
+                trial_accepted
+                and full_step_rejected
                 and dead_predicted_decrease is not None
                 and dead_predicted_decrease < _tol * score_scale
+                and obj - trial_obj
+                > 2.0 * dead_predicted_decrease * step * (1.0 - (1.0 - armijo_c) * step)
+                and _backtracked_rate_cannot_finish(
+                    active_grad_norm, _tol * score_scale, step, max_reml_iter - n_iter
+                )
                 and classify_dead_feasible_exit(
                     active_grad_norm,
                     objective=obj,
@@ -2027,20 +2052,22 @@ def optimize_direct_reml(
                 )
                 == "converged_at_precision"
             ):
-                # Where the Newton model's whole predicted decrease is below the
-                # stop resolution and the dead-search certificate holds, a
-                # rejected full step ends the search as a dead one does.  A
-                # shorter step's model decrease is smaller still, below the
-                # resolution the inner solves certify the objective to
-                # (``mode_certification_bar``), and a warm-started solve's error
-                # in the objective shrinks with the step: an accepted shorter
-                # step is the evaluations' error, not the criterion's, and
-                # taking it moves a fraction of the Newton step an iteration, a
-                # linear crawl the score test cannot end (Shi, Xie, Byrd &
-                # Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1: where errors are
-                # large relative to the gradient the line search is expected to
-                # fail).
-                full_step_unresolved = True
+                # Along the Newton step, ``g' delta = -2 P`` with ``P`` the
+                # model's predicted decrease, so a quadratic criterion that
+                # rejected the full step has curvature above ``4 P (1 - c)``
+                # and decreases by at most ``2 P alpha (1 - (1 - c) alpha)`` at
+                # step ``alpha``.  A shorter step accepted with a larger
+                # decrease contradicts every smooth criterion: the evaluations'
+                # error decided it, as a warm-started inner solve's error in the
+                # objective grows with its step.  Where ``P`` is below the stop
+                # resolution and the dead-search certificate holds, that step is
+                # discarded and the search ends as a dead one does, when taking
+                # it -- a fraction of the Newton step an iteration, a linear
+                # rate -- cannot reach the score bar in the iterations left
+                # (Shi, Xie, Byrd & Nocedal 2022, SIAM J. Optim. 32(1), sec.
+                # 4.1: where errors are large relative to the gradient the line
+                # search is expected to fail).
+                inconsistent_decrease = float(obj - trial_obj)
                 break
             if (
                 trial_accepted
@@ -2202,8 +2229,9 @@ def optimize_direct_reml(
                     "objective_roundoff": (
                         float(obj_roundoff) if stall_roundoff is None else stall_roundoff
                     ),
-                    # the search ended at its rejected full step, no shorter one tried
-                    "full_step_unresolved": full_step_unresolved,
+                    # a discarded shorter step's decrease, past what the rejected
+                    # full step leaves a quadratic criterion
+                    "inconsistent_decrease": inconsistent_decrease,
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,
