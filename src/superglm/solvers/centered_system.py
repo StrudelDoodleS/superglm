@@ -14,10 +14,7 @@ import numpy as np
 import scipy.sparse
 from numpy.typing import NDArray
 
-from superglm._group_matrix._column_local_centering import (
-    column_local_centering,
-    recentred_products,
-)
+from superglm._group_matrix._column_local_centering import column_local_centering
 from superglm._group_matrix._group_matrix_centered import (
     RawMomentRejection,
     _compensated_add,
@@ -29,10 +26,25 @@ from superglm._group_matrix._group_matrix_centered import (
     packed_centered_gram_rhs,
     try_raw_moment_centering,
 )
+from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES
+from superglm._group_matrix._group_matrix_kernels import (
+    _native,
+    _ssp_gram_needs_exact,
+    _weighted_bincount_2d,
+)
 from superglm._group_matrix._lookup_tables import table_centred_system, table_gram_plan
 from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
-from superglm.group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DesignMatrix,
+    DiscretizedSCOPGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    SparseGroupMatrix,
+    SparseSSPGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
+)
 from superglm.solvers.mode_score import (
     corrected_two_pass_pair,
     dense_centred_rmatvec,
@@ -1501,7 +1513,7 @@ def _attach_dense_split(
     lo = first / sum_w
     gram_dense = two_pass_centred_gram(first, gram, lo, sum_w)
     rhs_dense = response - lo * float(np.dot(W, z_centered))
-    cross = dense_split_cross(split, W, anchor, mean_bounded, recentred)
+    cross = dense_split_cross(split, W, anchor, mean_bounded, first, recentred)
     data_gram = dense_split_gram(split, gram_bounded, gram_dense, cross)
     hi = anchor
     p = split.dense.p + split.bounded.p
@@ -1526,30 +1538,95 @@ def dense_split_cross(
     W: NDArray,
     anchor: NDArray,
     mean_bounded: NDArray,
+    first: NDArray,
     recentred: tuple = (),
+    formed: dict | None = None,
 ) -> NDArray:
-    """``(p_b, p_d)``: ``N' (W (x - a)) - m_N e'`` per dense column, ``e = sum W (x - a)``.
+    """``(p_b, p_d)``: ``N' (W (x - a)) - m_N e'``, ``e = sum W (x - a)`` the dense pass's ``first``.
 
-    The bounded design ``N`` centred about ``mean_bounded`` against a dense
-    column's rows about its ``anchor``, one transpose product of the bounded
-    design per dense column, O(n) each; ``W`` may be signed.  A bounded
-    column the raw rung recentred (``column_local_centering``) failed the
-    raw-moment certificate, so its raw values would bring its ``kappa`` into
-    the product: it meets ``W (x - a)`` through its centred support instead,
-    ``sum_b c_j[b] sum_(r in b) W (x - a)`` (``recentred_products``), the
-    repair's own product with a failing partner, within the repair's stated
-    envelope with ``A_k = |x - a|``.
+    The bounded design ``N`` centred about ``mean_bounded`` against the dense
+    columns' rows about their ``anchor``; ``W`` may be signed.  The rows are
+    formed in blocks of columns of at most ``_FACTOR_CHUNK_BYTES``, and each
+    block meets every bounded group in one pass
+    (``_bounded_transpose_products``), O(n) per group and block, a support
+    group's projected support before any product.  A bounded column the raw
+    rung recentred (``column_local_centering``) failed the raw-moment
+    certificate, so its raw values would bring its ``kappa`` into the
+    product: it meets ``W (x - a)`` through its centred support instead,
+    ``sum_b c_j[b] sum_(r in b) W (x - a)``, the repair's own product with a
+    failing partner (``recentred_products``), within the repair's stated
+    envelope with ``A_k = |x - a|``.  ``formed`` holds the projected supports
+    for a caller that forms the block again with the same factors.
     """
-    cross = np.empty((split.bounded.p, split.dense.p), dtype=np.float64)
-    # one rows-long buffer serves every dense column: W (x_k - a_k)
-    weighted = np.empty(split.dense.n, dtype=np.float64)
-    for column, (values, column_anchor) in enumerate(_dense_columns_of(split.dense, anchor)):
-        np.subtract(values, column_anchor, out=weighted)
-        weighted *= W
-        cross[:, column] = split.bounded.rmatvec(weighted) - mean_bounded * float(np.sum(weighted))
-        for columns, products in recentred_products(recentred, weighted):
-            cross[columns, column] = products
+    formed = {} if formed is None else formed
+    columns = list(_dense_columns_of(split.dense, anchor))
+    n = split.dense.n
+    cross = np.empty((split.bounded.p, len(columns)), dtype=np.float64)
+    width = max(1, _FACTOR_CHUNK_BYTES // (8 * max(n, 1)))
+    for start in range(0, len(columns), width):
+        block = columns[start : start + width]
+        stop = start + len(block)
+        rows = np.empty((n, len(block)), dtype=np.float64)
+        for column, (values, column_anchor) in enumerate(block):
+            np.subtract(values, column_anchor, out=rows[:, column])
+        cross[:, start:stop] = _bounded_transpose_products(split.bounded, rows, W, formed)
+        cross[:, start:stop] -= np.outer(mean_bounded, first[start:stop])
+        for group in recentred:
+            sums = _weighted_bincount_2d(group.codes, _native(W), rows, group.values.shape[0])
+            cross[group.columns, start:stop] = group.values.T @ sums
     return cross
+
+
+def _bounded_transpose_products(
+    dm: DesignMatrix, rows: NDArray, W: NDArray, formed: dict
+) -> NDArray:
+    """``X' diag(W) rows`` for an ``(n, k)`` block of rows, one pass of each group.
+
+    A discretized SSP group (``B_unique``, ``R_inv`` float64 and in range)
+    meets ``W rows`` summed by bin through its projected support ``B_unique
+    R_inv``, formed once into ``formed``, as its raw moments do: its
+    ``rmatvec`` sums ``B_unique`` first, so the projection multiplies that
+    sum's rounding, ``gamma_n |R_inv|' |B_unique|' |W rows|``, which cancels
+    where ``|B_unique| |R_inv|`` dwarfs the column (Higham 2002, eq. 3.13);
+    projected first, the rows' sums meet only the column's own values.  A
+    one-hot group sums by level, a SCOP group by bin against its support,
+    and a sparse group multiplies its sparse basis by the block; any other
+    group takes its ``rmatvec`` of each weighted column.
+    """
+    W = _native(W)
+    products = np.empty((dm.p, rows.shape[1]), dtype=np.float64)
+    weighted = None
+    offset = 0
+    for gm in dm.group_matrices:
+        target = products[offset : offset + gm.shape[1]]
+        offset += gm.shape[1]
+        if type(gm) in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+            if gm not in formed:
+                in_range = (
+                    gm.B_unique.dtype == gm.R_inv.dtype == np.float64
+                    and not _ssp_gram_needs_exact(gm.B_unique, gm.R_inv)
+                )
+                formed[gm] = gm.B_unique @ gm.R_inv if in_range else None
+            if formed[gm] is not None:
+                target[:] = formed[gm].T @ _weighted_bincount_2d(gm.bin_idx, W, rows, gm.n_bins)
+                continue
+        elif type(gm) in ONE_HOT_CODE_TYPES:
+            target[:] = _weighted_bincount_2d(gm.codes, W, rows, gm.n_levels + 1)[: gm.n_levels]
+            continue
+        elif type(gm) is DiscretizedSCOPGroupMatrix:
+            sums = _weighted_bincount_2d(gm.bin_idx, W, rows, gm.n_bins)
+            target[:] = gm.B_scop_unique.T @ sums
+            continue
+        if weighted is None:
+            weighted = rows * W[:, None]
+        if type(gm) is SparseSSPGroupMatrix:
+            target[:] = gm.R_inv.T @ np.asarray(gm.B.T @ weighted)
+        elif type(gm) is SparseGroupMatrix:
+            target[:] = np.asarray(gm.M.T @ weighted)
+        else:
+            for column in range(rows.shape[1]):
+                target[:, column] = gm.rmatvec(np.ascontiguousarray(weighted[:, column]))
+    return products
 
 
 def dense_split_gram(

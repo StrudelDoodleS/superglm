@@ -221,3 +221,58 @@ def test_projected_support_is_reused_only_within_an_assembly(signed):
     design = np.hstack([group.toarray() for group in groups])
     target = design.T @ (weights[rows, None] * design)
     np.testing.assert_allclose(result, target, atol=bound, rtol=0)
+
+
+@pytest.mark.parametrize("route", ["irls", "signed"])
+def test_a_cancelling_support_meets_the_dense_rows_through_its_projected_values(route):
+    """A support whose projection cancels beside a dense column: the split's Gram against exact products.
+
+    ``B = [[1e16 + 2, 1e16], [1e16 - 2, 1e16]]`` and ``R = [1, -1]'`` project
+    exactly to the column ``[2, -2]``; summing ``B`` first (``rmatvec``)
+    rounds ``B' (W (x - a))`` at ``1e16`` before ``R`` cancels it, and the
+    cross entry came out 0 against an exact -2 (the review's weights, W(rho)
+    route) or -8.46 against -8.92 (IRLS).  The cross block now meets the
+    projected support, as the raw moments do, so the Gram lies within the
+    split's bound ``gamma_(n+p+8) sum |w| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``:
+    ``x~`` the projected column (exact here) or the dense rows ``x - c``,
+    ``l`` the bounded centre or the remainder ``d``.
+    """
+    from fractions import Fraction
+
+    from superglm._roundoff import gamma
+    from superglm.group_matrix import DesignMatrix
+    from superglm.reml import w_derivatives
+    from superglm.solvers import centered_system
+
+    B = np.array([[1e16 + 2, 1e16], [1e16 - 2, 1e16]])
+    support = DiscretizedSSPGroupMatrix(B, np.array([[1.0], [-1.0]]), np.array([0, 0, 1, 1]))
+    dense = DenseGroupMatrix(np.array([[-1.0], [0.0], [1.0], [2.0]]))
+    dm = DesignMatrix([support, dense], n=4, p=2)
+    if route == "irls":
+        weights = np.array([1.0, 3.0, 2.0, 0.5])
+        system = build_centered_system(
+            dm=dm, W=weights, z_off=np.zeros(4), penalty=np.zeros((2, 2))
+        )
+        gram, (hi, lo) = system.data_gram, system.centre_pair()
+        lo = np.zeros(2) if lo is None else lo
+    else:
+        weights = np.array([-1.0, 1.0, 1.0, 1.0])
+        hi, lo = np.array([0.0, 0.5]), np.zeros(2)
+        split = centered_system._dense_split(dm)
+        moments = split.bounded.execution_plan.moments(weights, include_xtw=True, signed=True)
+        gram = w_derivatives._dense_split_signed_gram(split, moments, weights, hi, lo)
+    X = dm.toarray()
+    np.testing.assert_array_equal(X[:, 0], [2.0, 2.0, -2.0, -2.0])
+    rows = [[Fraction(v) - Fraction(h) - Fraction(d) for v, h, d in zip(r, hi, lo)] for r in X]
+    expected = np.array(
+        [
+            [float(sum(Fraction(w) * r[j] * r[k] for w, r in zip(weights, rows))) for k in range(2)]
+            for j in range(2)
+        ]
+    )
+    is_dense = np.array([False, True])
+    size = np.where(is_dense, np.abs(X - hi), np.abs(X)) + np.where(
+        is_dense, np.abs(lo), np.abs(hi)
+    )
+    bound = gamma(4 + 2 + 8) * (size.T @ (np.abs(weights)[:, None] * size))
+    assert np.all(np.abs(gram - expected) <= bound)

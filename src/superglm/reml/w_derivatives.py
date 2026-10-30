@@ -486,6 +486,7 @@ def _dense_split_signed_gram(
     centre_hi: NDArray,
     centre_lo: NDArray,
     repair: _ColumnRepair | None = None,
+    formed: dict | None = None,
 ) -> NDArray:
     """``X_c' diag(a) X_c`` beside dense columns, ``moments`` the bounded design's raw signed moments.
 
@@ -496,17 +497,20 @@ def _dense_split_signed_gram(
     block ``G - e d' - d e' + d d' sum a`` from ``e = sum a r`` and ``G = sum
     a r r'`` (``anchored_dense_moments``, ``two_pass_centred_gram``) and its
     cross block ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``
-    (``dense_split_cross``), O(n) per dense column.  The algebra is linear in
-    ``a``, and the summation bound holds for terms of any sign (Higham 2002,
-    eq. 3.5), so signed weights change only the error bound of the corrected
-    two-pass algorithm (Chan, Golub & LeVeque 1983), ``|a|`` in place of the
-    weights: per entry ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| +
-    |l_k|)``, with ``x~`` a bounded column's own values or a dense column's
-    rows ``r`` and ``l`` its centre or ``d``.  No dense column's offset meets
-    a product.  A bounded column the certificate rejected (``repair``) meets
-    every partner, the dense rows and ``d`` included, through its centred
-    support instead (``recentred_gram_rows``, ``recentred_products``), so
-    ``x~`` is its centred value ``c_j`` there and ``l_j`` is zero.
+    (``dense_split_cross``), O(n) per bounded group and block of dense
+    columns.  The algebra is linear in ``a``, and the summation bound holds
+    for terms of any sign (Higham 2002, eq. 3.5), so signed weights change
+    only the error bound of the corrected two-pass algorithm (Chan, Golub &
+    LeVeque 1983), ``|a|`` in place of the weights: per entry
+    ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``, with ``x~`` a
+    bounded column's own values (a support group's projected support
+    ``fl(B_unique R_inv)``, as every reader of the column forms it) or a
+    dense column's rows ``r`` and ``l`` its centre or ``d``.  No dense
+    column's offset meets a product.  A bounded column the certificate
+    rejected (``repair``) meets every partner, the dense rows and ``d``
+    included, through its centred support instead (``recentred_gram_rows``,
+    ``recentred_products``), so ``x~`` is its centred value ``c_j`` there and
+    ``l_j`` is zero.
     """
     dense_index, bounded_index = split.dense_index, split.bounded_index
     lo = centre_lo[dense_index]
@@ -522,7 +526,7 @@ def _dense_split_signed_gram(
         recentred = repair.recentred
         for columns, products in recentred_products(recentred, row_weights):
             centred_xtw[columns] = products
-    cross = dense_split_cross(split, row_weights, anchor, mean_bounded, recentred)
+    cross = dense_split_cross(split, row_weights, anchor, mean_bounded, first, recentred, formed)
     cross -= np.outer(centred_xtw, lo)
     return dense_split_gram(split, bounded, two_pass_centred_gram(first, gram, lo, total), cross)
 
@@ -1094,6 +1098,8 @@ def reml_w_correction(
     # repair declines every Gram takes centred rows.
     repair: _ColumnRepair | None = None
     stable_rows = False
+    # the bounded supports the cross blocks project, formed once for every direction
+    cross_supports: dict = {}
     if structured_group_index is None and sum_w is not None:
         moment_centre = mean_x if split is None else centre_hi[split.bounded_index]
         admitted = (
@@ -1149,7 +1155,9 @@ def reml_w_correction(
             return gram
         # a split is formed only beside the pair
         lo = cast(NDArray, centre_lo)
-        return _dense_split_signed_gram(split, moments, row_weights, centre_hi, lo, repair)
+        return _dense_split_signed_gram(
+            split, moments, row_weights, centre_hi, lo, repair, cross_supports
+        )
 
     def flush_signed_grams() -> None:
         weights = [row_weights for _, row_weights, _ in pending]
