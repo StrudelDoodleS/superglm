@@ -26,6 +26,8 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
 )
 from superglm.distributional.families._response_bounds import (
+    LEFT_CENSORED,
+    ResponseBounds,
     TailChannels,
     bind_observation,
     bounded_channels,
@@ -266,15 +268,26 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
-    def censored_recession(self) -> tuple[bool, ...]:
-        """A level censored on one side escapes along the location or mean, not the scale.
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the location or mean; an untruncated
+        left-censored row also escapes along the mean form's scale.
 
-        ``P(Y > c)`` rises with ``mu`` and with the mean at fixed ``sigma``;
-        along ``sigma`` it can peak at a finite value, as in the mean form
-        below a limit, where ``(log(m/c) - sigma^2/2)/sigma`` peaks at
-        ``sigma = sqrt(2 log(c/m))``.
+        On ``log Y`` the law is normal, so the location (or the mean at fixed
+        ``sigma``) moves every bound probability one way within any truncation
+        window.  In the mean form ``P(Y <= c) = Phi(sigma/2 - log(m/c)/sigma)``
+        nears one only as ``sigma`` grows, whatever ``m``.  ``P(Y > c)`` instead
+        peaks at ``sigma = sqrt(2 log(c/m))`` below a limit, and in the location
+        form the scale's direction depends on the fitted ``mu``.
         """
-        return (True, False)
+        censored = bounds.side != 0
+        scale = np.zeros_like(censored)
+        if self.parametrisation == "mean":
+            scale = (
+                (bounds.side == LEFT_CENSORED)
+                & ~np.isfinite(bounds.lower)
+                & ~np.isfinite(bounds.upper)
+            )
+        return np.column_stack((censored, scale))
 
     def to_config(self) -> dict[str, Any]:
         return {

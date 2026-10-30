@@ -366,13 +366,20 @@ def location_window(
     with np.errstate(divide="ignore"):
         log_lower = np.log(np.maximum(lo, 0.0))
         log_upper = np.log(hi)
-    # The log-scale width of a two-sided window, without the cancellation of
-    # log(upper) - log(lower); a one-sided window has none to keep.
+    # The log-scale width of a two-sided window: log1p of the relative width
+    # where log(upper) - log(lower) would cancel, that difference where the
+    # ratio is large (or overflows); a one-sided window has none to keep.
     width = None
     two_sided = np.flatnonzero((lo > 0.0) & np.isfinite(hi))
     if len(two_sided):
         width = np.full(len(lo), np.inf)
-        width[two_sided] = np.log1p((hi[two_sided] - lo[two_sided]) / lo[two_sided])
+        with np.errstate(over="ignore"):
+            relative = (hi[two_sided] - lo[two_sided]) / lo[two_sided]
+        width[two_sided] = np.where(
+            relative <= 1.0,
+            np.log1p(np.minimum(relative, 1.0)),
+            log_upper[two_sided] - log_lower[two_sided],
+        )
     return normal_window_channels(
         log_lower,
         log_upper,

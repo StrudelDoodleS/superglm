@@ -32,6 +32,7 @@ from superglm.distributional.families._predictors import (
     ShapePredictor,
 )
 from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
     TailChannels,
     bind_observation,
     bounded_channels,
@@ -238,14 +239,20 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
-    def censored_recession(self) -> tuple[bool, ...]:
-        """A level censored on one side escapes along both predictors.
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """A censored row with no upper truncation escapes along both predictors.
 
         ``log S(c) = -log1p(xi c/psi)/xi`` rises with ``psi`` (``t/(psi s) > 0``)
-        and with ``xi`` (``t^2 D(z) > 0``), so ``S`` and ``F = 1 - S`` are
-        monotone in each; the shape walks to its wall.
+        and with ``xi`` (``t^2 D(z) > 0``), and so does ``S(c)/S(a)`` above a
+        lower truncation bound ``a``: its ``psi`` derivative is
+        ``1/(psi + xi a) - 1/(psi + xi c) > 0`` over ``xi``, and its ``xi``
+        derivative ``(L - (u - v))/xi^2 >= 0`` with ``u, v`` the ``xi y/(psi + xi y)``
+        of ``c, a`` and ``L = log((1 - v)/(1 - u))``.  The shape walks to its
+        wall.  An upper truncation bound ``b`` breaks this: ``(S(c) - S(b))/(1 - S(b))``
+        can peak at an interior shape.
         """
-        return (True, True)
+        flags = (bounds.side != 0) & ~np.isfinite(bounds.upper)
+        return np.column_stack((flags, flags))
 
     def to_config(self) -> dict[str, Any]:
         return {
