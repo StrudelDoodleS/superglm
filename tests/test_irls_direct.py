@@ -2598,7 +2598,7 @@ class TestDirectSolverBasic:
         face = np.eye(3)[:, 1:]
         matrix = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.0 + delta], [0.0, 1.0 + delta, 1.0]])
         factor = np.array([[0.0, 1.0, 1.0], [0.0, 0.0, 1e-2]])
-        decomposition = _face_decomposition(matrix, face, lambda: factor)
+        decomposition = _face_decomposition(matrix, face, lambda: factor, len(factor))
         expected = decompose_factor(factor @ face)
         exact = np.linalg.inv((factor @ face).T @ (factor @ face))
         assert decomposition.rank == expected.rank == 2
@@ -2606,6 +2606,29 @@ class TestDirectSolverBasic:
         error = np.linalg.norm(decomposition.pseudo_inverse() - exact, 2)
         # forward error of an inverse: kappa(A'A) eps, with kappa = |A'A| |inv(A'A)|
         assert error <= 64 * np.finfo(float).eps * scale * np.linalg.cond(exact)
+
+    def test_a_face_gram_that_forming_may_have_moved_by_its_spectrum_is_decided_by_the_factor(
+        self,
+    ):
+        """A face Gram that factors is still refused when its formation bound reaches its spectrum.
+
+        Two rows with weight-scale ``1e7`` columns give a formed Gram with
+        entries of ``1e15`` whose difference along the face ``(1, -1)`` is the
+        face's whole curvature, about 1.  The face Gram is positive, so it
+        factors, but forming it is uncertain by ``gamma_n 2e15``, more than
+        that curvature, and the factor on the face decides.  Mutation: the
+        formation check removed takes the Gram's Cholesky factor.
+        """
+        from superglm.solvers.irls_direct._finalise import _face_decomposition
+
+        rows, big, small = 10, 3.0e7, 0.75
+        factor = np.array([[big, big], [small, -small]])
+        face = np.array([[1.0], [-1.0]]) / np.sqrt(2.0)
+        decomposition = _face_decomposition(factor.T @ factor, face, lambda: factor, rows)
+        assert decomposition.method == "qr_svd"
+        on_face = float(np.sum((factor @ face) ** 2))
+        inverse = float(decomposition.pseudo_inverse()[0, 0])
+        assert abs(inverse * on_face - 1.0) <= 64 * np.finfo(float).eps
 
     def test_a_face_the_factor_decided_reads_its_edf_off_the_factor(self):
         """The EDF on a face whose Gram could not certify itself never reads the formed Gram.
@@ -2629,7 +2652,7 @@ class TestDirectSolverBasic:
         factor = np.vstack((data, penalty_factor(penalty)))
         hessian = np.array([[1e15, 0.0, 0.0], [0.0, 1.0, 1.001], [0.0, 1.001, 1.0]])
         centered = SimpleNamespace(data_gram=data.T @ data + 0.5, hessian=hessian, penalty=penalty)
-        decomposition = _face_decomposition(hessian, face, lambda: factor)
+        decomposition = _face_decomposition(hessian, face, lambda: factor, len(data))
         assert decomposition.method == "qr_svd"
         edf = _feature_edf(centered, decomposition, lambda exponent=0: factor, face)
         on_face = (factor @ face).T @ (factor @ face)
@@ -2668,7 +2691,7 @@ class TestDirectSolverBasic:
             weight = np.ldexp(scale, -exponent)
             return np.vstack((np.sqrt(weight) * data, penalty_factor(weight * penalty)))
 
-        certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor)
+        certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor, len(data))
         assert certified.method != "qr_svd"
         edf = _feature_edf(centered, certified, scaled_factor, face)
         on_face = (factor @ face).T @ (factor @ face)

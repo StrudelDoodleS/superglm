@@ -312,10 +312,10 @@ def face_record_at(model, W: NDArray):
 
     face_augmented = face_coefficient = None
     if face is not None:
-        face_augmented = _face_decomposition(centered.hessian, face, factor)
+        face_augmented = _face_decomposition(centered.hessian, face, factor, design.n)
         raw = centered.hessian + centered.sum_w * np.outer(centered.mean_x, centered.mean_x)
         face_coefficient = _face_decomposition(
-            raw, face, lambda: grouped_augmented_factor(design, W, curvature)
+            raw, face, lambda: grouped_augmented_factor(design, W, curvature), design.n
         )
     feature_edf = _feature_edf(
         centered, augmented if face is None else face_augmented, factor, face

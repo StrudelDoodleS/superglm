@@ -24,6 +24,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS_FLOAT
+from superglm._roundoff import gamma
 from superglm.solvers.centered_system import (
     CenteredSystem,
     grouped_augmented_factor,
@@ -38,6 +39,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankInfo,
+    _formation_slack,
     decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
@@ -137,20 +139,48 @@ def _on_face(matrix: NDArray, face: NDArray | None) -> NDArray:
 
 
 def _face_decomposition(
-    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray]
+    matrix: NDArray, face: NDArray, factor: Callable[[], NDArray], rows: int
 ) -> RankDecomposition:
     """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``.
 
-    ``M`` is a computed Gram of nonnegative weights and a penalty, so a negative
-    eigenvalue of ``Z' M Z`` past the eigensolver's resolution is the rounding of
-    forming ``M`` and not curvature: it can sit beside the other directions
-    when weights of ``1e15`` meet a face they do not reach.  The Gram then
-    cannot certify its spectrum and the factor decides (``psd_by_construction``).
+    ``M`` is a computed Gram of ``rows`` rows with nonnegative weights, plus a
+    penalty, so a negative eigenvalue of ``Z' M Z`` past the eigensolver's
+    resolution is the rounding of forming ``M`` and not curvature
+    (``psd_by_construction``).  Nor can a Gram whose formation may have moved
+    it by its smallest eigenvalue certify its spectrum
+    (``_face_formation_unresolved``), even when it factors.  Both happen when
+    weights of ``1e15`` meet a face they do not reach, and the factor decides.
     """
-    decomposition = decompose_gram_if_authoritative(
-        _on_face(matrix, face), psd_by_construction=True
-    )
+    on_face = _on_face(matrix, face)
+    decomposition = decompose_gram_if_authoritative(on_face, psd_by_construction=True)
+    if decomposition is not None and _face_formation_unresolved(matrix, face, on_face, rows):
+        decomposition = None
     return decompose_factor(factor() @ face) if decomposition is None else decomposition
+
+
+def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray, rows: int) -> bool:
+    """Whether forming ``Z' M Z`` may have moved it by as much as its smallest eigenvalue.
+
+    Each entry of a Gram of ``rows`` rows is within ``gamma_rows`` of
+    ``|X|'W|X|`` (Higham 2002, section 3.5), and ``(|X|'W|X|)_ij <=
+    sqrt(M_ii M_jj)`` (Cauchy-Schwarz), so ``Z' M Z`` is within ``gamma_rows
+    r_k r_l`` of its exact value, ``r = |Z|' sqrt(diag M)``:
+    ``rank._formation_slack`` bounds that in ``Z' M Z``'s Jacobi scaling.  By
+    Weyl's inequality a bound that reaches the smallest eigenvalue there
+    leaves the exact face Gram's definiteness, and its inverse, undecided.  A
+    face that combines columns without cancelling them has ``r_k^2`` near
+    ``(Z' M Z)_kk`` and a bound of order ``gamma_rows``; one that cancels
+    curvature the weights put off it has ``r_k^2`` up to their ratio larger.
+    """
+    diagonal = np.diag(on_face)
+    active = diagonal > 0.0
+    if not np.any(active):
+        return False
+    reach = (np.abs(face[:, active]).T @ np.sqrt(np.maximum(np.diag(matrix), 0.0))) ** 2
+    slack = _formation_slack(gamma(rows) * reach, diagonal[active])
+    scale = np.sqrt(diagonal[active])
+    equilibrated = on_face[np.ix_(active, active)] / np.outer(scale, scale)
+    return bool(slack >= np.linalg.eigvalsh(0.5 * (equilibrated + equilibrated.T))[0])
 
 
 def _face_factor_edf(factor: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
@@ -349,7 +379,9 @@ def _retained_rank_info(
         face=face,
         face_rows=face_rows,
         face_augmented=face_rank,
-        face_coefficient=(None if face is None else _face_decomposition(M_beta, face, raw_factor)),
+        face_coefficient=(
+            None if face is None else _face_decomposition(M_beta, face, raw_factor, dm.n)
+        ),
     )
 
 
@@ -489,7 +521,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
         face_rank = (
             None
             if face is None
-            else _face_decomposition(centered_final.hessian, face, augmented_factor)
+            else _face_decomposition(centered_final.hessian, face, augmented_factor, dm.n)
         )
         feature_edf = _feature_edf(
             centered_final,
