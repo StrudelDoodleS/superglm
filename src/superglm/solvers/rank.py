@@ -1314,8 +1314,9 @@ def _validated_symmetric(matrix: NDArray) -> NDArray:
 
 
 def _equilibrate_gram(
-    matrix: NDArray, *, allow_indefinite: bool = False
-) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    matrix: NDArray, *, allow_indefinite: bool = False, on_refusal: str = "raise"
+) -> tuple[NDArray, NDArray, NDArray, NDArray] | None:
+    """A Gram's equilibration; a refused diagonal raises, or returns ``None`` if ``on_refusal="none"``."""
     symmetric = _validated_symmetric(matrix)
     diagonal = np.diag(symmetric)
     if allow_indefinite:
@@ -1325,6 +1326,8 @@ def _equilibrate_gram(
     else:
         refusal = _diagonal_refusal(symmetric)
         if refusal is not None:
+            if on_refusal == "none":
+                return None
             raise ValueError(refusal)
         diagonal_scale = np.maximum(diagonal, 0.0)
     active_columns = np.flatnonzero(diagonal_scale > 0.0)
@@ -2142,16 +2145,14 @@ def _decompose_gram(
     # e_k``, so the same rounding of a semidefinite Gram as a negative
     # eigenvalue past the eigensolver's resolution; so is a diagonal taken as
     # zero beside a row that is not.
-    if (
-        omit_uncertifiable
-        and psd_by_construction
-        and not allow_indefinite
-        and _diagonal_refusal(_validated_symmetric(matrix)) is not None
-    ):
-        return None
-    equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
-        matrix, allow_indefinite=allow_indefinite
+    equilibration = _equilibrate_gram(
+        matrix,
+        allow_indefinite=allow_indefinite,
+        on_refusal="none" if omit_uncertifiable and psd_by_construction else "raise",
     )
+    if equilibration is None:
+        return None
+    equilibrated, column_scale, active_columns, symmetric = equilibration
     width = len(column_scale)
     structural_aliases = column_scale == 0.0
     if active_columns.size == 0:
