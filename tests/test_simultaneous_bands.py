@@ -272,3 +272,21 @@ def test_a_repeated_eigenvalue_draws_one_band_in_any_eigenbasis_and_units(
     tolerance = k * gamma(k) * values.max() / values[values > 0].min()
     for units in (1.0, 10.0, 1e-19):
         assert critical_value(units, changed) == pytest.approx(reference, rel=tolerance, abs=0.0)
+
+
+def test_a_failing_cholesky_cannot_reach_term_inference(spline_model, monkeypatch):
+    """The band sampler factorises nothing that can fail.
+
+    Wilkinson's completion bound for Cholesky assumes no underflow, so a
+    covariance at a subnormal scale can fail it however well conditioned it is.
+    The bands draw through the principal root instead.  Mutation: the
+    spectrum-chosen Cholesky root raises ``LinAlgError`` from ``term_inference``.
+    """
+
+    def fails(matrix, *args, **kwargs):
+        raise np.linalg.LinAlgError("Matrix is not positive definite")
+
+    monkeypatch.setattr(np.linalg, "cholesky", fails)
+    inference = spline_model.term_inference("x", simultaneous=True, n_sim=500)
+    assert np.isfinite(inference.critical_value_simultaneous)
+    assert np.all(inference.ci_lower_simultaneous <= inference.ci_upper_simultaneous)
