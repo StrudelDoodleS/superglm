@@ -183,25 +183,43 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
     return bool(slack >= np.linalg.eigvalsh(0.5 * (equilibrated + equilibrated.T))[0])
 
 
-def _face_factor_edf(factor: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
-    """``diag(Z (FZ)^+ [F_D; 0])``: the EDF on the face ``Z`` read off the factor ``F = [F_D; P]``.
+def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> NDArray:
+    """``diag(Z M Z')``: the face fit's EDF, read off its data rows projected on the face ``Z``.
 
-    ``F_D'F_D = D`` and ``P'P = S``, ``P = penalty_factor(S)`` the factor's
-    last rows (``grouped_augmented_factor``), so this is ``diag(Z (Z'(D +
-    S)Z)^+ Z'D)`` with neither ``D`` nor the Hessian formed.  With ``FZ = U
-    Sigma V'`` it is ``diag(Z V Sigma^-1 U_D' F_D)``, whose trace is
-    ``||U_D||_F^2``, the data rows' share of ``U``: the influence trace from
-    orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
-    supplement B, in his notation), accurate to the factor's backward error,
-    where a product with the formed ``D`` carries the normal equations'
-    (Higham 2002, chapter 20).  The split of that trace among the
-    coefficients is resolved only as well as the data resolve it: weights far
-    apart couple the face to curvature off it that no float64 factor holds.
+    ``rows`` is ``R`` with ``R'R = Z'DZ``: the data rows projected on the face
+    and then factored (``grouped_projected_factor``).  With ``P =
+    penalty_factor(S)``, ``B = [R; PZ]`` factors the face Hessian ``Z'(D +
+    S)Z``, and neither ``D`` nor the Hessian is formed.  The face fit is the
+    fit on ``beta = Z theta`` (``_active_face_basis``), and ``Z M Z'``, ``M =
+    B^+ [R; 0] = (Z'(D + S)Z)^+ Z'DZ``, maps its own unpenalized estimate to
+    its penalized one.  Its trace is ``||U_R||_F^2``, the data rows' share of
+    ``B``'s left singular vectors, in ``[0, rank B]``: the influence trace
+    from orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
+    supplement B, in his notation).  The diagonal sums to it.
+
+    Two choices make this trace the rows' own.
+
+    - **The rows are projected before they are factored.**  A Householder
+      factor of the whole design is backward stable only columnwise (Higham
+      2002, section 19.3); row-wise stability needs row pivoting or rows
+      sorted by size (section 19.4; Cox and Higham 1998).  Under weights far apart, its light rows can
+      carry an error of order ``u`` times the heaviest column, and that is
+      all of the face's curvature when the face cancels the heavy rows.
+      ``R`` factors the rows ``AZ`` formed one row at a time, each entry
+      within ``gamma_(p + T + 3) |a_r|' |Z|`` of the exact projection.
+    - **``Z M Z'`` leaves out the coupling to the curvature off the face.**
+      That coupling is ``Z (Z'(D + S)Z)^+ Z'D Z_perp Z_perp'``, the
+      difference from the split ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Its trace is
+      zero, and so is its diagonal's sum over each term, because the binding
+      rows of a term touch only that term's coefficients.  So it moves no
+      term's EDF.  But weights far apart make its entries as large as their
+      ratio, up to ``1e15``, where float64 cannot resolve them.
     """
-    decomposition = decompose_factor(factor @ face, retain_factor_solve=True)
-    data_rows = factor.copy()
-    data_rows[factor.shape[0] - penalty_factor(penalty).shape[0] :] = 0.0
-    return np.diag(face @ decomposition.solve_factor_rhs(data_rows)).copy()
+    projected = np.vstack((rows, penalty_factor(penalty) @ face))
+    decomposition = decompose_factor(projected, retain_factor_solve=True)
+    data = np.zeros_like(projected)
+    data[: rows.shape[0]] = rows
+    return np.diag(face @ decomposition.solve_factor_rhs(data) @ face.T).copy()
 
 
 def _feature_edf(
@@ -218,8 +236,9 @@ def _feature_edf(
     D)``, whose trace is the face fit's.  When the factor decided that
     decomposition (``_face_decomposition``), the Gram's formation rounding
     can be as large as the face's own entries, and ``D`` is as unreliable as
-    the Hessian it was formed with: the EDF is read off the factor
-    ``factor(0)`` the decomposition was taken of (``_face_factor_edf``).
+    the Hessian it was formed with.  The EDF is then the face fit's own,
+    read off the face's projected data rows ``factor(0)``
+    (``_face_factor_edf``).
 
     ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
     Hessian ``decomposition`` factors.  The trace is invariant under scaling
@@ -237,9 +256,11 @@ def _feature_edf(
     are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
     + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
     that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.  ``factor(exponent)`` is the augmented factor
-    ``[F_D; P]`` of ``D`` and ``S`` scaled by ``2^-exponent``; ``factor(0)``
-    is the one a face decomposition was taken of.  ``inverse`` is
+    trace near its limit, 0.  ``factor(exponent)`` holds the rows at a scale
+    of ``2^-exponent``.  Off a face, it is the augmented factor ``[F_D; P]``
+    of ``D`` and ``S``.  On a face it is the data rows projected on it and
+    factored, ``R'R = Z'DZ`` (``grouped_projected_factor``), and the penalty
+    is never among them.  ``inverse`` is
     ``face_pseudo_inverse(decomposition, face)`` when the caller has formed
     it already.
     """
@@ -518,6 +539,13 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
                 center=final_system.mean_x,
             )
 
+        def projected_rows(exponent: int = 0) -> NDArray:
+            # the data rows on the face, the rows the face's EDF is read off
+            centre, centre_lo = final_system.centre_pair()
+            return grouped_projected_factor(
+                dm, np.ldexp(W, -exponent), face, center=centre, center_lo=centre_lo
+            )[0]
+
         face_rank = (
             None
             if face is None
@@ -526,7 +554,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
         feature_edf = _feature_edf(
             centered_final,
             augmented_rank if face_rank is None else face_rank,
-            augmented_factor,
+            augmented_factor if face is None else projected_rows,
             face,
             # off a face, the inverse the REML geometry formed
             inverse=XtWX_S_inv_beta if face is None else None,

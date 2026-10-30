@@ -289,7 +289,7 @@ def face_record_at(model, W: NDArray):
     """
     from dataclasses import replace
 
-    from superglm.solvers.centered_system import grouped_augmented_factor
+    from superglm.solvers.centered_system import grouped_augmented_factor, grouped_projected_factor
     from superglm.solvers.irls_direct import _face_decomposition, _feature_edf
     from superglm.solvers.rank import weights_fingerprint
 
@@ -310,6 +310,11 @@ def face_record_at(model, W: NDArray):
             center_lo=centre_lo,
         )
 
+    def projected_rows(exponent: int = 0) -> NDArray:
+        return grouped_projected_factor(
+            design, np.ldexp(W, -exponent), face, center=centre, center_lo=centre_lo
+        )[0]
+
     face_augmented = face_coefficient = None
     if face is not None:
         face_augmented = _face_decomposition(centered.hessian, face, factor, design.n)
@@ -318,7 +323,10 @@ def face_record_at(model, W: NDArray):
             raw, face, lambda: grouped_augmented_factor(design, W, curvature), design.n
         )
     feature_edf = _feature_edf(
-        centered, augmented if face is None else face_augmented, factor, face
+        centered,
+        augmented if face is None else face_augmented,
+        factor if face is None else projected_rows,
+        face,
     )
     feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
     feature_edf.setflags(write=False)

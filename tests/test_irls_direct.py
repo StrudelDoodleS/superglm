@@ -2659,10 +2659,10 @@ class TestDirectSolverBasic:
         The Hessian handed in is indefinite on the face, as forming it with
         weights near ``1e15`` leaves it, and the data Gram carries a
         perturbation of ``1/2`` on every entry, the size of that rounding
-        against the face's entries.  The EDF is the one the factor ``[F_D; P]``
-        defines, ``diag(Z (Z'F'FZ)^-1 Z' F_D'F_D)``.  Mutation: the factor's
-        inverse times the data Gram handed in (2b67e8dd) is off by the
-        perturbation's share, 0.25 on one coefficient.
+        against the face's entries.  The EDF is the face fit's own, read off
+        the data rows projected on the face: ``diag(Z M Z')``, ``M = (Z'HZ)^-1
+        Z'DZ``.  Mutation: the factor's inverse times the data Gram handed in
+        (2b67e8dd) is off by the perturbation's share, 0.25 on one coefficient.
         """
         from types import SimpleNamespace
 
@@ -2677,9 +2677,9 @@ class TestDirectSolverBasic:
         centered = SimpleNamespace(data_gram=data.T @ data + 0.5, hessian=hessian, penalty=penalty)
         decomposition = _face_decomposition(hessian, face, lambda: factor, len(data))
         assert decomposition.method == "qr_svd"
-        edf = _feature_edf(centered, decomposition, lambda exponent=0: factor, face)
+        edf = _feature_edf(centered, decomposition, lambda exponent=0: data @ face, face)
         on_face = (factor @ face).T @ (factor @ face)
-        exact = np.diag(face @ np.linalg.solve(on_face, face.T @ data.T @ data))
+        exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
         # an inverse's forward error, kappa eps, on entries of order max |exact|
         bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
         assert np.max(np.abs(edf - exact)) <= bound
@@ -2692,9 +2692,10 @@ class TestDirectSolverBasic:
         forced: that Hessian is indefinite on the face, as forming it with
         weights far apart leaves it, while the decomposition handed in is
         certified.  The rescaled Gram then cannot certify itself, and the EDF
-        is the factor's, ``diag(Z (Z'F'FZ)^-1 Z' F_D'F_D)``, which the scale
-        leaves unchanged.  Mutation: without ``psd_by_construction`` there the
-        scaled Gram raises "materially indefinite".
+        is the face fit's own, ``diag(Z M Z')``, read off the data rows
+        projected on the face, which the scale leaves unchanged.  Mutation:
+        without ``psd_by_construction`` there the scaled Gram raises
+        "materially indefinite".
         """
         from types import SimpleNamespace
 
@@ -2710,18 +2711,75 @@ class TestDirectSolverBasic:
             data_gram=scale * (data.T @ data), hessian=scale * indefinite, penalty=scale * penalty
         )
 
-        def scaled_factor(exponent: int = 0) -> np.ndarray:
-            weight = np.ldexp(scale, -exponent)
-            return np.vstack((np.sqrt(weight) * data, penalty_factor(weight * penalty)))
+        def scaled_factor() -> np.ndarray:
+            return np.vstack((np.sqrt(scale) * data, penalty_factor(scale * penalty)))
+
+        def projected_rows(exponent: int = 0) -> np.ndarray:
+            return np.sqrt(np.ldexp(scale, -exponent)) * data @ face
 
         certified = _face_decomposition(scale * (factor.T @ factor), face, scaled_factor, len(data))
         assert certified.method != "qr_svd"
-        edf = _feature_edf(centered, certified, scaled_factor, face)
+        edf = _feature_edf(centered, certified, projected_rows, face)
         on_face = (factor @ face).T @ (factor @ face)
-        exact = np.diag(face @ np.linalg.solve(on_face, face.T @ data.T @ data))
+        exact = np.diag(face @ np.linalg.solve(on_face, (data @ face).T @ (data @ face)) @ face.T)
         # an inverse's forward error, kappa eps, on entries of order max |exact|
         bound = 64 * np.finfo(float).eps * np.linalg.cond(on_face) * np.max(np.abs(exact))
         assert np.max(np.abs(edf - exact)) <= bound
+
+    def test_a_face_whose_rows_the_weights_cancel_publishes_a_trace_its_rows_allow(self):
+        """A face's EDF is the face fit's influence trace, never a sum of shares that cancel.
+
+        Two rows of weight ``1e34`` are ``v = (9, 7, 7)`` and ``-v``, and they ask
+        for ``v'beta = -1`` against the binding row ``v'beta >= 0``.  Six unit
+        rows, ``I`` and ``-I``, carry weight 1.  The exact face ``null(v)``
+        cancels the heavy rows.  The computed face is ``null(v)`` to within
+        ``u``, which at a row scale of ``1e17`` leaves the heavy rows a
+        projection ``c`` of order 100, inside its own rounding.  The light rows
+        give the face the curvature ``2I``, and ``S = I``.  So for every ``c``
+        the face fit's influence is ``I - (cc' + 3I)^-1``, symmetric with
+        eigenvalues ``2/3`` and ``1 - 1/(|c|^2 + 3)``.  With the intercept, the
+        EDF lies in ``[7/3, 8/3]``, and ``7/3`` is the exact face's.  Each
+        coefficient's share lies in ``[0, 1]``.  The weighted mean is zero, and
+        its rounding is below half an ulp of the heavy rows' entries.
+
+        Mutation: f0077903, whose shares carry the coupling to the curvature
+        off the face, publishes shares of ``6e15`` that sum to 3.0 (2.0 under
+        the Haswell kernel).
+        """
+        from superglm._roundoff import gamma
+        from superglm.distributions import Gaussian
+        from superglm.links import IdentityLink
+        from superglm.solvers.irls_direct import fit_irls_direct
+
+        v = np.array([9.0, 7.0, 7.0])
+        X = np.vstack((v, -v, np.eye(3), -np.eye(3)))
+        y = np.array([-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        weights = np.array([1e34, 1e34, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        constraint = LinearConstraintSet(A=v[None, :], b=np.zeros(1))
+        result, _ = fit_irls_direct(
+            DesignMatrix([DenseGroupMatrix(X)], n=8, p=3),
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            [GroupSlice("x", 0, 3, constraints=constraint)],
+            lambda2=0.0,
+            S_override=np.eye(3),
+            weight_semantics="frequency",
+        )
+        record = result.rank_info
+        assert record.face.shape == (3, 2)
+        assert record.face_augmented.method == "qr_svd"
+        # Each projected row is within gamma_(p + T + 3) |a|'|Z| of its projection,
+        # so |c| <= that bound for the heavy rows.  The factorisation's backward
+        # error, gamma ||B||_F, moves each of the face's 2 directions by at most
+        # twice that over sigma_min(B) >= sqrt(3) (Wedin).
+        n, p, width = 8, 3, 2
+        heavy = np.sqrt(2.0) * gamma(p + 4) * np.sqrt(weights[0]) * np.sum(np.abs(v))
+        slack = 2 * width * gamma(n + width) * (heavy + np.sqrt(3.0 * width)) / np.sqrt(3.0)
+        assert 7.0 / 3.0 - slack <= result.effective_df <= 8.0 / 3.0 + slack
+        assert np.all(record.feature_edf >= -slack)
+        assert np.all(record.feature_edf <= 1.0 + slack)
 
 
 # ── Select=True tests ──────────────────────────────────────────
