@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -1270,6 +1271,47 @@ def centered_gram_rhs(
 
     gram = 0.5 * (gram + gram.T)
     return gram, rhs
+
+
+def centered_signed_grams(
+    *,
+    dm,
+    weights: Sequence[NDArray],
+    mean_x: NDArray,
+    chunk_size: int = 8192,
+    mean_lo: NDArray | None = None,
+) -> list[NDArray]:
+    """Reuse centered row chunks across signed Gram products in input order.
+
+    ``mean_lo``, when given, is the low half of the centre as an exact pair
+    ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
+    centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
+    centred about its anchor exactly and then by the small remainder.
+    """
+    n, p = dm.shape
+    release_for_serial_row_passes(p)  # a serial n·p² pass: nothing runs beside it
+    weights = [np.asarray(channel, dtype=float) for channel in weights]
+    mean_x = np.asarray(mean_x, dtype=float)
+    if any(channel.shape != (n,) for channel in weights):
+        raise ValueError("weights must match the design row count")
+    if mean_x.shape != (p,):
+        raise ValueError("mean_x must match the design column count")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    grams = [np.zeros((p, p), dtype=float) for _ in weights]
+    if not weights or p == 0:
+        return grams
+    compensations = [np.zeros_like(gram) for gram in grams]
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        block = np.asarray(dm.row_subset(np.arange(start, stop)).toarray(), dtype=float)
+        block -= mean_x
+        if mean_lo is not None:
+            block -= mean_lo
+        for weights_j, gram, compensation in zip(weights, grams, compensations, strict=True):
+            contribution = block.T @ (weights_j[start:stop, None] * block)
+            _compensated_add(gram, compensation, contribution)
+    return [0.5 * (gram + gram.T) for gram in grams]
 
 
 def _compact_centered_rmatvec(

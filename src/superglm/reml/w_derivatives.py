@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._blas_threads import release_for_serial_row_passes
+from superglm._group_matrix._block_queue import _side, block_cost, diagonal_cost
 from superglm._group_matrix._column_local_centering import (
     recentred_about,
     recentred_gram_rows,
@@ -26,8 +27,14 @@ from superglm._group_matrix._column_local_centering import (
 from superglm._group_matrix._group_matrix_centered import (
     _raw_centering_admitted,
     centered_gram_rhs,
+    centered_signed_grams,
 )
-from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_rmatvec
+from superglm._group_matrix._lookup_tables import (
+    _P_SPACE_WEIGHT,
+    lookup_plan,
+    table_leverages,
+    table_rmatvec,
+)
 from superglm._parallel import pooled_map
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
@@ -477,6 +484,35 @@ class _ColumnRepair:
             formed=self.formed,
         )
         return gram
+
+
+def _split_pays(split: _DenseSplit) -> bool:
+    """Whether a signed Gram costs less through the dense split than through centred rows.
+
+    Centred rows (``centered_signed_grams``) are one ``n p^2`` BLAS product
+    per direction.  The split is the bounded design's raw moments (the block
+    queue's estimate, ``diagonal_cost`` and ``block_cost``: row visits and
+    kernel multiply-adds), the dense block's ``n p_d^2`` BLAS product, and
+    the cross block's pass of every bounded group for each dense column,
+    ``n p_d (1 + r)`` with ``r`` the group's row work.  A BLAS multiply-add
+    counts ``_P_SPACE_WEIGHT`` of a row visit.  The split must estimate at
+    most half the rows' cost: on one core its kernels ran up to 2.3 times
+    their estimate relative to the rows' (ten designs, 34 to 128 columns, 1
+    to 80 dense).  Per Gram there, rows against split: supports and
+    categoricals beside one dense column (300,000 rows, p = 67) 0.105 s
+    against 0.015 s; three sparse splines beside one dense column (60,000
+    rows, p = 34) 0.010 s against 0.015 s.
+    """
+    n = split.dense.n
+    groups = split.bounded.group_matrices
+    moments = sum(diagonal_cost(gm, n) for gm in groups) + sum(
+        block_cost(left, right, n)
+        for index, left in enumerate(groups)
+        for right in groups[index + 1 :]
+    )
+    p_d, p = split.dense.p, split.dense.p + split.bounded.p
+    cross = n * p_d * sum(1.0 + _side(gm, n)[0] for gm in groups)
+    return 2.0 * (moments + cross + _P_SPACE_WEIGHT * n * p_d * p_d) < _P_SPACE_WEIGHT * n * p * p
 
 
 def _dense_split_signed_gram(
@@ -1085,9 +1121,16 @@ def reml_w_correction(
         grad_correction[:] = centered_rmatvec(0.5 * dW_deta * leverage) @ -factor.solve(penalty_rhs)
         return grad_correction, None, None
 
-    # Beside a dense column the moments are the bounded design's, and each
+    # Beside a dense column the Grams take the split where it costs less than
+    # centred rows (``_split_pays``): the bounded design's moments, and each
     # Gram joins the dense columns to them (``_dense_split_signed_gram``).
+    # Otherwise every Gram takes the rows centred about the pair.
     split = _dense_split(dm) if centre_lo is not None and structured_group_index is None else None
+    stable_rows = split is not None and not _split_pays(split)
+    if stable_rows:
+        split = None
+    elif split is not None:
+        release_for_serial_row_passes(split.dense.p)  # the dense block, n p_d^2 per direction
     moment_dm = dm if split is None else split.bounded
     # The raw moments are certified per column as the IRLS Gram's are
     # (``_raw_centering_admitted``), at the weights the centre is the mean of:
@@ -1097,10 +1140,9 @@ def reml_w_correction(
     # the fixed centre (``recentred_about``, the IRLS repair), and where the
     # repair declines every Gram takes centred rows.
     repair: _ColumnRepair | None = None
-    stable_rows = False
     # the bounded supports the cross blocks project, formed once for every direction
     cross_supports: dict = {}
-    if structured_group_index is None and sum_w is not None:
+    if structured_group_index is None and sum_w is not None and not stable_rows:
         moment_centre = mean_x if split is None else centre_hi[split.bounded_index]
         admitted = (
             moment_centre == 0.0
@@ -1134,7 +1176,14 @@ def reml_w_correction(
         fixed_support is not None or moment_dm.execution_plan._projects_no_support()
     )
     batch_size = 0
-    if batch_moments:
+    if stable_rows and isinstance(factor, DenseHessianFactor) and w_correction_order == 1:
+        # Retained weights, Gram accumulators, compensation and outputs.
+        # Row blocks and single-direction scratch retain their chunk-scale cost.
+        bytes_per_direction = np.dtype(np.float64).itemsize * (dm.n + 3 * p * p)
+        batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
+        if batch_size < 2:
+            batch_size = 0
+    elif batch_moments:
         # One row pass per block serves every direction: retained weights and
         # their stacked copy, the raw moments, and the centred outputs. Support
         # projections, if any, are the shared owner's, held once for all.
@@ -1161,11 +1210,16 @@ def reml_w_correction(
 
     def flush_signed_grams() -> None:
         weights = [row_weights for _, row_weights, _ in pending]
-        moments = moment_dm.execution_plan._signed_moments_channels(weights, fixed_support)
-        grams = [
-            signed_gram(channel, row_weights)
-            for channel, row_weights in zip(moments, weights, strict=True)
-        ]
+        if stable_rows:
+            grams = centered_signed_grams(
+                dm=dm, weights=weights, mean_x=centre_hi, mean_lo=centre_lo
+            )
+        else:
+            moments = moment_dm.execution_plan._signed_moments_channels(weights, fixed_support)
+            grams = [
+                signed_gram(channel, row_weights)
+                for channel, row_weights in zip(moments, weights, strict=True)
+            ]
         for (i, _, dsum_w_j), C_j in zip(pending, grams, strict=True):
             grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
             if sum_w is not None:
