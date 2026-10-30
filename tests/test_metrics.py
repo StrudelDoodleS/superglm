@@ -1425,6 +1425,60 @@ class TestDeviance:
         assert rescaled == pytest.approx(reference, rel=1e-9)
         assert model._fit_stats.explained_deviance == pytest.approx(reference, rel=1e-9)
 
+    @pytest.mark.parametrize("link", ["identity", "inverse"])
+    @pytest.mark.parametrize("units", [1e-11, 1e11])
+    def test_offset_null_intercept_takes_the_same_steps_in_any_units(self, link, units):
+        """The offset null model stops on the step's change in the means, not on its size.
+
+        Under the identity and inverse links the intercept carries the
+        response's units or their inverse.  A fixed ``|step| < 1e-8`` stopped a
+        Gamma null model after one step, 7e-4 (identity, units 1e-11) and 8e-3
+        (inverse, units 1e11) from its mean, and ran the other way to the
+        25-step cap.  The score and information are sums of ``n`` rows, so the
+        rescaled means agree to ``gamma_n``.  Mutation: ``abs(step) < 1e-8``.
+        """
+        from superglm._roundoff import gamma
+        from superglm.links import IdentityLink, InverseLink
+        from superglm.model.fit_ops import _compute_null_mu
+
+        rng = np.random.default_rng(20261030)
+        n = 500
+        x = rng.uniform(0.0, 1.0, n)
+        weights = rng.uniform(0.5, 2.0, n)
+        wave = np.sin(6.0 * x)
+        if link == "identity":
+            link_fn, power = IdentityLink(), 1.0
+            mean, offset = 2.0 + 0.8 * wave + 0.6 * x, 0.8 * wave
+        else:
+            link_fn, power = InverseLink(), -1.0
+            mean, offset = 1.0 / (0.5 + 0.2 * wave + 0.1 * x), 0.2 * wave
+        y = rng.gamma(4.0, mean / 4.0)
+        steps = []
+        derivative = link_fn.deriv_inverse
+
+        def counted(eta):
+            steps.append(eta)
+            return derivative(eta)
+
+        link_fn.deriv_inverse = counted
+
+        def null_mean(scale):
+            steps.clear()
+            mu = _compute_null_mu(
+                scale * y,
+                weights,
+                scale**power * offset,
+                Gamma(),
+                link_fn,
+                weight_semantics="prior",
+            )
+            return mu / scale, len(steps)
+
+        reference, reference_steps = null_mean(1.0)
+        rescaled, rescaled_steps = null_mean(units)
+        assert rescaled_steps == reference_steps
+        np.testing.assert_allclose(rescaled, reference, rtol=gamma(n), atol=0.0)
+
     def test_constant_response_null_within_eight_ulps_is_the_exact_null(self):
         """The 8-ulp exact-null branch of ``_explained_deviance``, both ways.
 

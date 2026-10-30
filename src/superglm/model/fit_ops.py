@@ -548,7 +548,11 @@ def _compute_null_mu(
         info = float(np.sum(weights * dmu**2 / V))
         step = score / max(info, TINY)
         b0 += step
-        if abs(step) < 1e-8:
+        # The step's change in the means, relative to their size: unit-free
+        # under every link, and |step| itself under the log link.
+        if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
+            np.sum(weights * np.abs(mu_null))
+        ):
             break
 
     eta_null = stabilize_eta(b0 + offset, link)
