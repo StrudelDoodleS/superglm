@@ -1755,9 +1755,11 @@ def two_pass_centred_gram(
     eq. 1.7); about the rounded mean ``a`` the remainder is pass one's
     rounding, so the correction is a second-order term and the Gram keeps the
     two-pass bound, ``n u (1 + n^2 u^2 kappa^2)`` relative (their Table 1).
+    The mass meets one remainder before the other, ``(l_j sum W) l_k``, so no
+    intermediate leaves float64's range ahead of the term itself.
     """
     centred = gram - np.outer(first, remainder) - np.outer(remainder, first)
-    centred = centred + sum_w * np.outer(remainder, remainder)
+    centred = centred + np.outer(sum_w * remainder, remainder)
     return 0.5 * (centred + centred.T)
 
 

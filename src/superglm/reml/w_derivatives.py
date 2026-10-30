@@ -406,14 +406,20 @@ def _leverage_cross_batches(
 
 
 def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> NDArray:
-    """``X_c' diag(row_weights) X_c`` from raw signed moments about ``mean_x``."""
+    """``X_c' diag(row_weights) X_c`` from raw signed moments about ``mean_x``.
+
+    The mass meets one mean before the other, ``(S m_j) m_k``: ``|S m_j|``
+    lies between ``|S|`` and ``|S m_j^2|`` and ``|S m_j m_k|`` is the
+    geometric mean of two diagonal terms, so no intermediate leaves float64's
+    range where the raw moments do not, as ``m_j m_k`` would.
+    """
     if moments.xtw is None:
         raise RuntimeError("centered signed moments omitted X'W1")
     sum_weights = float(np.sum(row_weights, dtype=np.float64))
     result = moments.gram
     result = result - np.outer(moments.xtw, mean_x)
     result = result - np.outer(mean_x, moments.xtw)
-    result = result + sum_weights * np.outer(mean_x, mean_x)
+    result = result + np.outer(sum_weights * mean_x, mean_x)
     return 0.5 * (result + result.T)
 
 
@@ -1431,13 +1437,13 @@ def reml_w_correction(
                 d2w_drho_ij = d2W_deta2 * deta_vectors[i] * deta_vectors[j] + dW_deta * d2eta_ij
 
                 # Differentiate X_c' diag(dw_i) X_c: the centered d2w Gram
-                # plus the two negative weighted-mean outer products.
+                # plus the two negative weighted-mean outer products, the mass
+                # on one mean first (``_centered_signed_moments``).
                 C_ij = centered_signed_gram(d2w_drho_ij)
                 if sum_w is not None:
                     if isinstance(C_ij, np.ndarray):
-                        C_ij -= sum_w * (
-                            np.outer(dmean_vectors[i], dmean_vectors[j])
-                            + np.outer(dmean_vectors[j], dmean_vectors[i])
+                        C_ij -= np.outer(sum_w * dmean_vectors[i], dmean_vectors[j]) + np.outer(
+                            sum_w * dmean_vectors[j], dmean_vectors[i]
                         )
                     else:
                         C_ij = SumBlockOperator(
@@ -1467,7 +1473,7 @@ def reml_w_correction(
                 if sum_w is not None:
                     d2sum_w_ij = float(np.sum(d2w_drho_ij, dtype=np.float64))
                     val += 0.5 * (
-                        d2sum_w_ij / sum_w - dsum_w_values[i] * dsum_w_values[j] / sum_w**2
+                        d2sum_w_ij / sum_w - (dsum_w_values[i] / sum_w) * (dsum_w_values[j] / sum_w)
                     )
                 dH2_cross[i, j] = val
                 dH2_cross[j, i] = val

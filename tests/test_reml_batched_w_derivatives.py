@@ -160,7 +160,7 @@ def test_batched_signed_grams_boundaries_without_materializing_rows(monkeypatch,
             centered_signed_grams(dm=dm, weights=channels, mean_x=mean, chunk_size=chunk_size)
 
 
-def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=None):
+def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=None, units=None):
     rng = np.random.default_rng(123)
     x = np.linspace(-1.5, 1.5, 320)
     X = np.column_stack((x, x**2 - np.mean(x**2), np.sin(3 * x)))[:, :p]
@@ -174,6 +174,9 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=N
     if flat is not None:
         # the first column nearly constant, its spread ``flat`` of its mean
         X[:, 0] = 1.0 + flat * X[:, 0]
+    # ``units = (d, mass)``: the first column in units of ``d``, every weight ``mass``
+    d, mass = (1.0, 1.0) if units is None else units
+    X[:, 0] *= d
     matrices = [DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)]
     if storage is not None:
 
@@ -197,7 +200,8 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=N
             )
     dm = DesignMatrix(matrices, n=len(x), p=p)
     # a flat column's penalty scaled with its variance, so its coefficient stays free
-    scales = [flat**2 if flat is not None and i == 0 else 1.0 for i in range(p)]
+    scales = [mass * (flat**2 if flat is not None and i == 0 else 1.0) for i in range(p)]
+    scales[0] = scales[0] * d * d
     groups = [GroupSlice(name=f"x{i}", start=i, end=i + 1) for i in range(p)]
     penalties = [
         PenaltyComponent(
@@ -214,7 +218,7 @@ def _correction_fixture(p=2, shift=1.0e8, storage=None, family="poisson", flat=N
         for i, g in enumerate(groups)
     ]
     lambdas = {g.name: 4.0 + i for i, g in enumerate(groups)}
-    weights, offset = np.ones_like(x), np.zeros_like(x)
+    weights, offset = np.full_like(x, mass), np.zeros_like(x)
     family, link = (Poisson(), LogLink()) if family == "poisson" else (Binomial(), LogitLink())
     result, inverse, _ = fit_irls_direct(
         X=dm,
@@ -411,6 +415,65 @@ def test_dense_split_grams_match_exact_centred_products(monkeypatch, shift, fami
         moments = dm.execution_plan.moments(a, include_xtw=True, signed=True)
         raw = w_derivatives._centered_signed_moments(moments, a, hi + lo)
         assert np.any(np.abs(raw - expected) > bound)
+
+
+@pytest.mark.parametrize("exponent", [-540, 540])
+def test_dense_split_grams_keep_float64_range_at_extreme_exponents(exponent):
+    """Columns at ``2^e`` and weights at ``2^(-5e/3)``: the split's Gram against exact products.
+
+    Every entry of ``sum a (x - c)(x - c)'`` lies near ``2^(e/3)``, but a
+    product of two centres, ``2^(2e)``, leaves float64's range (``e = -540``
+    underflows, ``e = 540`` overflows).  The centring terms must meet the
+    signed mass before the second centre, as centred rows do, to stay within
+    the split's bound, ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| +
+    |l_k|)``.  The reference is exact, in rationals, about ``c = hi + lo``.
+    """
+    rng = np.random.default_rng(29)
+    n, scale, mass = 64, 2.0**exponent, 2.0 ** (-5 * exponent // 3)
+    X = scale * np.column_stack((rng.uniform(-1.0, 2.0, n), rng.uniform(2.0, 3.0, n)))
+    dm = DesignMatrix(
+        [
+            SupportCompressedSSPGroupMatrix(X[:, :1], np.ones((1, 1)), np.arange(n)),
+            DenseGroupMatrix(X[:, 1:]),
+        ],
+        n=n,
+        p=2,
+    )
+    w = mass * rng.uniform(0.5, 2.0, n)
+    _, hi, lo = centered_system.weighted_mean_pair(dm, w, float(np.sum(w)))
+    a = mass * rng.normal(size=n)
+    split = centered_system._dense_split(dm)
+    moments = split.bounded.execution_plan.moments(a, include_xtw=True, signed=True)
+    gram = w_derivatives._dense_split_signed_gram(split, moments, a, hi, lo)
+    expected = _exact_signed_gram(X, a, hi, lo)
+    dense = np.array([False, True])
+    size = np.abs(np.where(dense, X - hi, X)) + np.abs(np.where(dense, lo, hi))
+    bound = gamma(dm.n + dm.p + 8) * (size.T @ (np.abs(a)[:, None] * size))
+    assert np.all(np.isfinite(expected)) and np.all(np.abs(gram - expected) <= bound)
+
+
+def test_second_order_correction_keeps_float64_range_at_extreme_exponents():
+    """A support column in units of ``2^-540`` beside a dense one, weights ``2^900``: the unit fit's correction.
+
+    Scaling a column by ``d`` and every weight by ``mass``, its penalty by
+    ``mass d^2`` and the others' by ``mass``, leaves the fit in its own
+    units, and the gradient and second-order terms, functions of ``rho``,
+    unchanged.  Powers of two scale exactly, so the two agree to rounding,
+    ``gamma_(n+p)`` of the largest entry, while a product of two centres
+    (below ``2^-1022``) or of two masses (above ``2^1024``) leaves float64's
+    range unless the mass meets one factor first.
+    """
+    corrections = []
+    for units in [None, (2.0**-540, 2.0**900)]:
+        kwargs = _correction_fixture(
+            p=3, shift=0.0, storage="split", family="binomial", units=units
+        )
+        gradient, _, second = w_derivatives.reml_w_correction(**kwargs, w_correction_order=2)
+        corrections.append((gradient, second))
+    n, p = kwargs["dm"].n, kwargs["dm"].p
+    for unit, scaled in zip(*corrections, strict=True):
+        tolerance = gamma(n + p) * np.max(np.abs(unit))
+        assert np.all(np.abs(scaled - unit) <= tolerance)
 
 
 def _record_signed_gram_inputs(monkeypatch, p):
