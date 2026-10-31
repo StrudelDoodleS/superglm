@@ -1,6 +1,7 @@
 # Large-loss (peaks-over-threshold) modelling: literature sweep and staged plan
 
-2026-10-31, against master `72c60b21`. PR #545 (per-row `truncation=` and
+2026-10-31, against master `72c60b21`. Section 8, on threshold choice for the
+layer method, was added the same day. PR #545 (per-row `truncation=` and
 `censoring=`, head `90b0eb46`, unmerged and on hold) is read as the next state
 of the code. This note is research input for the roadmap (C11, C12, C13 and
 the generalized Pareto shape note). It changes no code.
@@ -38,6 +39,16 @@ the generalized Pareto shape note). It changes no code.
 
   Covariate thresholds and a jointly estimated threshold (C13) come later,
   behind gates.
+- **For the layer method Max has chosen, `u` is a joint body–tail choice**
+  (section 8).
+  - The held-out log score of the whole layer density is a proper way to
+    compare thresholds, but the body dominates it.
+  - The censored log score at a high validation threshold (Northrop,
+    Attalides and Jonathan 2017) targets the tail, but separates thresholds
+    only weakly.
+  - In a simulation neither score picked the threshold that priced an
+    excess layer best. The practical check is a stability plot of each
+    priced quantity against `u`.
 
 ## 0. What the problem is, in standard vocabulary
 
@@ -598,7 +609,8 @@ liability. The lower wall excludes light-tailed and bounded property excess.
     the wall.
   - This is a silently wrong number in something a user reads. AGENTS.md
     treats that as always required to prevent, so it is listed below as a
-    follow-up to fix, independent of any new capability.
+    follow-up to fix, independent of any new capability. A fix is on branch
+    `claude/gpd-wall-disclosure` (`fa5daa3d`), unmerged.
 - **Lower wall (exponential).**
   - The only signal is `GeneralizedParetoInitializationWarning`, which says
     the method-of-moments start is unusable and the fit starts from 0.25.
@@ -661,6 +673,10 @@ Independent of Stage 0.
     parameter-stability plots (shape and modified scale `σ − ξu` with
     profile intervals), drawn from a loop of intercept-only fits over a
     quantile grid.
+  - For the layer method (section 8), two more checks at each candidate `u`:
+    - a stability plot of each priced quantity, with intervals;
+    - the body's predicted exceedance count `Σ S_B(u | x_i)` against the
+      observed count.
 - **Depends on:** nothing new. The stability plot's shape track is honest
   only down to 0 until Stage F. It should mark the wall, not hide it.
 - **Gate.**
@@ -679,7 +695,13 @@ Independent of Stage 0.
   - the spliced mean where finite;
   - posterior intervals from block-diagonal joint draws;
   - a held-out log score and PIT over all rows, so a spliced model can be
-    compared with a single-family fit.
+    compared with a single-family fit;
+  - both constructions: the layer method (body censored at `u`) and the
+    split method (body truncated at `u`). The exceedance probability comes
+    from the body's survival or from a separate model; in the second case
+    the body is renormalised below `u`, so the density stays proper
+    (section 8);
+  - the whole-density and censored log scores used in section 8.
 - **Depends on:** Stage 0. Log-normal and Gaussian bodies work now; gamma
   bodies wait for issue #544 stage 2.
 - **Gate.**
@@ -748,10 +770,16 @@ Independent of Stage 0.
 **Stage G: joint threshold (C13).**
 
 - **Payoff.** The threshold is chosen, and its uncertainty carried, by a
-  rule that compares thresholds on the same rows. First a profile over a
-  grid with the held-out full-data log score, reusing three-fit refits.
-  Then averaging over thresholds. An extended-GPD family follows only if
-  thresholds prove unstable.
+  rule that compares thresholds on the same rows.
+  - First, a K-fold scan over the candidate thresholds. It reports the
+    whole-density log score and the censored log score at the highest
+    candidate, each with paired standard errors, beside the
+    decision-quantity stability plot (section 8). It reuses existing fits:
+    about candidates × folds × 2 fits, roughly a minute for 10 × 5 at
+    50,000 rows.
+  - Then averaging over thresholds with weights proportional to the
+    exponentiated held-out score (Northrop, Attalides and Jonathan 2017).
+  - An extended-GPD family follows only if thresholds prove unstable.
 - **Depends on:** Stage B.
 - **Gate:** the roadmap's existing C13 gate. Threshold uncertainty must
   change a held-out decision (a layer price interval or a tail score) on at
@@ -778,6 +806,259 @@ Independent of Stage 0.
 - **C11.** Record `aggregate` as the established engine, behind an optional
   import, exported per segment.
 
+## 8. Threshold choice for the layer method
+
+Max has chosen the layer method (2026-10-31). It differs from the split
+recipe of section 3 in how the body is fitted and where `P(Y > u | x)` comes
+from:
+
+| | layer method | split method (section 3) |
+|---|---|---|
+| body | every claim, as `min(y, u)`, right-censored at `u` | claims at or below `u`, truncated at `u` |
+| tail | GPD on `y − u` above `u` | the same |
+| `P(Y > u \| x)` | the body's own survival `S_B(u \| x)`, or a separate exceedance model | a separate exceedance model `p(x)` |
+| whole-range density | `f_B(y)` below `u`, `S_B(u) g(y − u)` above | `(1 − p) f_B(y) / F_B(u)` below, `p g(y − u)` above |
+
+**The density is proper only in some combinations.** With the body's own
+survival, the layer density integrates to `F_B(u) + S_B(u) = 1` for every
+`u`. With a separate exceedance model, `f_B(y)` below and `p(x) g(y − u)`
+above integrate to `F_B(u) + p(x)`, which is not one. The body must then be
+renormalised below `u` to `(1 − p(x)) f_B(y) / F_B(u)` before any score is
+compared across thresholds.
+
+**superglm with PR #545 fits the layer method directly:**
+
+- the body is `LogNormalLS` or `GaussianLS` on `np.minimum(y, u)` with
+  `censoring=(None, u)`;
+- the tail is `GeneralizedParetoLSS` on `y − u` above `u`;
+- the exceedance probability is `1 − body.predict_cdf(X, u)`.
+
+**The whole-density log score needs nothing new.** It is the body's censored
+log score (`log f_B(y)` below `u`, `log S_B(u)` for a censored row), which
+PR #545's `scores(..., which=("log",))` returns per row, plus the GPD's log
+score on the exceedances.
+
+**Why `u` is a joint choice.** It sets how much of the range the body has to
+describe and how much data the tail gets, so it cannot be chosen from the
+tail alone. Each part of Max's concern is covered below.
+
+### 8.1 Cross-validated comparison and averaging over thresholds
+
+Northrop, Attalides and Jonathan (2017), read in full (arXiv:1504.06653).
+
+**What they do** (sections 2.1–2.2):
+
+- At each candidate `u` they fit a binomial–GPD model: the exceedance
+  probability, the GPD scale and the shape. Below `u` the model is just
+  `1 − p_u`.
+- Each held-out observation is scored by the model's implied law above a
+  fixed validation threshold `v`: `1 − p_v` for an observation at or below
+  `v`, and `p_v g(x − v)` above, with `σ_v = σ_u + ξ(v − u)` (their equation
+  3).
+- The sum `T_v(u)` of leave-one-out log predictive densities estimates, up
+  to a constant, the negated Kullback–Leibler divergence at `v`. The best
+  `u` maximises it.
+- They set `v` to the highest candidate: a higher `v` loses validation
+  information and gains nothing.
+
+**Averaging** (section 3):
+
+- Each threshold gets the weight `exp(T_v(u_i))`, normalised over the
+  candidates. These are pseudo-Bayes factors (Geisser and Eddy 1979), with
+  a uniform prior on candidates equally spaced in probability.
+- Predictions are averaged with those weights (their equations 15–17).
+- On their Gulf of Mexico data, averaging protected against the implausible
+  extrapolations of single high thresholds.
+
+**What it assumes:**
+
+- Independent, identically distributed data. Covariates are named as
+  ongoing work.
+- A Bayesian fit, with leave-one-out by importance sampling.
+- A reference prior, or a weakly informative one: a Cauchy prior on the
+  shape truncated to ξ > −1 (their section 3.3).
+
+The results are sensitive to `v` and to the candidate set (their section 2.5;
+Murphy, Tawn and Varty 2025 report the same).
+
+**What it judges: the tail only.** The body never enters. Their criterion is
+the censored likelihood score at `v` (section 8.2). `threshr`, which
+implements it, is GPL (≥ 2), so it is usable only as a black-box oracle; its
+source was not opened.
+
+**Where superglm stands.** It is outside the method as written, which is
+Bayesian and iid. The frequentist analogue is a loop of existing fits: K-fold
+refits at each `u`, then held-out scores from `predict_cdf` and the log
+density.
+
+### 8.2 Is the held-out log score of the whole layer density a sound criterion?
+
+**It is valid.**
+
+- The logarithmic score is a proper scoring rule (Allen 2023, section 2.1).
+- Every candidate's layer density, built on the body's survival, is a
+  proper density on the same outcome space. Held-out log scores on the same
+  rows therefore compare the candidates on equal terms.
+- This is the "extended model" route that Belzile and Davison (2026, section
+  8.1.1) say makes a threshold selectable by likelihood-based criteria. Fits
+  above different `u` alone cannot be compared, because their samples
+  differ.
+- **Covariates change nothing in principle.** Each held-out row is scored
+  under its own conditional density, and the mean over rows compares the
+  conditional models. Everything, including smoothing selection, is refit
+  inside each fold. The threshold may be a constant or `u(x)`.
+
+**It answers a different question from the tail's.**
+
+- It asks which `u` gives the best whole-range law. Most rows lie below `u`,
+  so the body dominates the score.
+- In the simulation below it picks the lowest candidate, at 3–5 standard
+  errors. The cause is that the log-normal body misfits the Burr body, so
+  handing more of the range to the GPD improves the body's share of the
+  score. The tail is not better there.
+
+**The tail-focused alternative is the censored likelihood score at `v`.**
+
+- It is `log f(y)` for `y > v` and `log F(v)` for `y ≤ v` (Diks, Panchenko
+  and van Dijk 2011, as defined in Allen 2023, section 2.2).
+- It is proper, and it scores both the tail and the probability of reaching
+  it.
+- It is exactly Northrop et al.'s criterion.
+- Its weakness is power: only the rows above `v` discriminate. In the
+  simulation the thresholds differ by 1–2 standard errors on it.
+
+**Recommendation.**
+
+- Report both scores, paired, with standard errors of the differences.
+  superglm's `compare` already reports paired standard errors for its
+  scores.
+- Choose by the score that matches the decision: the whole-density score
+  for a whole-range severity, and the censored score at a `v` near the
+  attachment or limit for layer pricing.
+- Never compare thresholds by scoring only the claims above each `u` with
+  an unweighted score: the samples differ across `u`.
+
+### 8.3 Checking the body below `u` when it is censored at `u`
+
+**What the censored body claims.** It describes its law below `u` and the
+mass `S_B(u)` above. It says nothing about the shape above `u`, which is the
+GPD's job, so the checks target those two parts.
+
+**Below `u`:**
+
+- **Randomised quantile residuals.** Each censored row's PIT is drawn
+  uniformly on `(F_B(u), 1)` (Dunn and Smyth 1996, as implemented by PR
+  #545's `residual_set` and diagnostic plots). Read the Q-Q and worm plots
+  of the rows below `u`, and the residuals against each covariate.
+- **Without covariates.** Censoring at a single fixed `u` makes the
+  Kaplan–Meier estimate below `u` equal to the empirical distribution
+  function. A plain P-P or Q-Q plot of the rows below `u` against the
+  fitted body is then the nonparametric check. Reynkens et al. (2017) and
+  Albrecher and Beirlant (2025) use Kaplan–Meier and Turnbull versions for
+  general censoring.
+
+**At `u`.** The layer method uses `S_B(u | x)` as the exceedance probability,
+so a body misfit near `u` moves tail mass.
+
+- Compare `Σ S_B(u | x_i)` with the observed count above `u`, overall and
+  by segment. `calibration.tails` does exactly this for any threshold.
+- In the simulation, the body's own survival overstated the exceedance
+  share by 2–11%, depending on `u`.
+- A separate exceedance model removes that dependence, at the cost of
+  renormalising the body.
+
+### 8.4 How sensitive the decision quantities are to `u`
+
+**The practitioner's check is a decision-quantity stability plot.** Plot
+each priced quantity against `u`, with intervals:
+
+- the capped mean `E[min(Y, L)]`;
+- the excess cost per claim `E[(Y − M)+]`;
+- a high quantile.
+
+It is the decision version of the parameter-stability plot. Northrop et al.
+(2017, Figure 7) plot return levels against the training threshold in the
+same way. Belzile and Davison (2026, section 1) note that the best threshold
+can depend on the quantity being estimated.
+
+**What moved in the simulation:**
+
+- **Quantities the body sets barely moved.** A capped mean with its limit at
+  the 95% point stayed within 2% of the truth (0.984–1.014) across every
+  candidate and both variants.
+- **Quantities the tail sets moved most.** The excess cost per claim above
+  the 99% point ranged from 0.83 to 1.24 of the truth with the body's
+  survival, and from 0.81 to 1.19 with the empirical exceedance share.
+- **The 99.5% quantile moved less:** 0.98–1.07.
+- **The fitted shape never settled.** It rose steadily from 0.30 to 0.49
+  across the candidates (the Burr's limit is 0.4). A parameter-stability
+  plot would not have settled the choice either.
+
+**Neither score picked the threshold that priced the excess best.**
+
+- The excess cost was closest to the truth with `u` between the 70% and 85%
+  points.
+- The whole-density score preferred the 50% point; the censored score
+  preferred the 95–97% points.
+- So price from a stable stretch of the decision plot, or average over
+  thresholds, rather than from the single best-scoring `u`.
+
+### Measured: a layer-method threshold scan
+
+**Set-up.**
+
+- **Data.** 20,000 Burr XII losses (`c = 2`, `d = 1.25`, scale 1,000), so
+  the tail limit is ξ = 0.4. The body is deliberately misspecified as
+  log-normal.
+- **Fits.** At each candidate `u`, both by scipy maximum likelihood,
+  independent of superglm:
+  - the log-normal body on `min(y, u)`, right-censored at `u`;
+  - a GPD on `y − u` above `u`.
+- **Scores.** Five-fold cross-validated mean held-out log score per row
+  (higher is better), shown as the difference from the best candidate with
+  its paired standard error. The censored score is taken at `v` = the 98%
+  point.
+- **Decision quantities.** Fitted on all rows, as ratios to the Burr truth:
+  - the capped mean at `L` = the 95% point (truth 1,085.4);
+  - the excess cost per claim over `M` = the 99% point (truth 42.29);
+  - the 99.5% quantile (truth 8,265).
+- **Run** through `benchboard heavy pot_sweep-layer_threshold --cores 1`.
+
+Exceedance from the body's own survival `S_B(u)`:
+
+| `u` (point) | whole-density log score | censored score at `v` | ξ̂ | `S_B(u)` / observed share | capped mean | excess cost | q99.5 |
+|---|---|---|---|---|---|---|---|
+| 50% | best | −0.00029 ± 0.00018 | 0.302 | 1.024 | 1.008 | 0.825 | 0.986 |
+| 60% | −0.00223 ± 0.00060 | −0.00026 ± 0.00016 | 0.316 | 1.040 | 1.009 | 0.892 | 1.005 |
+| 70% | −0.00337 ± 0.00073 | −0.00023 ± 0.00014 | 0.334 | 1.060 | 1.010 | 0.972 | 1.027 |
+| 80% | −0.00413 ± 0.00078 | −0.00025 ± 0.00013 | 0.351 | 1.086 | 1.011 | 1.050 | 1.047 |
+| 85% | −0.00413 ± 0.00079 | −0.00024 ± 0.00012 | 0.364 | 1.097 | 1.011 | 1.095 | 1.056 |
+| 90% | −0.00406 ± 0.00079 | −0.00020 ± 0.00011 | 0.385 | 1.109 | 1.012 | 1.160 | 1.067 |
+| 92.5% | −0.00405 ± 0.00079 | −0.00016 ± 0.00009 | 0.400 | 1.107 | 1.012 | 1.186 | 1.067 |
+| 95% | −0.00406 ± 0.00080 | −0.00006 ± 0.00006 | 0.434 | 1.091 | 1.013 | 1.225 | 1.059 |
+| 97% | −0.00411 ± 0.00080 | best | 0.475 | 1.052 | 1.013 | 1.236 | 1.035 |
+| 98% | −0.00415 ± 0.00080 | −0.000004 ± 0.00004 | 0.488 | 1.015 | 1.014 | 1.209 | 1.017 |
+
+Exceedance from the observed share, with the body renormalised below `u` (the
+fitted shapes are the same as above):
+
+| `u` (point) | whole-density log score | censored score at `v` | capped mean | excess cost | q99.5 |
+|---|---|---|---|---|---|
+| 50% | best | −0.00029 ± 0.00017 | 0.995 | 0.806 | 0.978 |
+| 60% | −0.00198 ± 0.00049 | −0.00022 ± 0.00015 | 0.989 | 0.857 | 0.991 |
+| 70% | −0.00292 ± 0.00060 | −0.00015 ± 0.00011 | 0.986 | 0.917 | 1.004 |
+| 80% | −0.00353 ± 0.00065 | −0.00011 ± 0.00009 | 0.984 | 0.967 | 1.014 |
+| 85% | −0.00364 ± 0.00068 | −0.00009 ± 0.00007 | 0.986 | 0.998 | 1.018 |
+| 90% | −0.00376 ± 0.00071 | −0.00004 ± 0.00005 | 0.991 | 1.046 | 1.023 |
+| 92.5% | −0.00392 ± 0.00072 | −0.00003 ± 0.00003 | 0.996 | 1.071 | 1.023 |
+| 95% | −0.00415 ± 0.00073 | best | 1.003 | 1.123 | 1.020 |
+| 97% | −0.00436 ± 0.00074 | −0.000001 ± 0.00003 | 1.010 | 1.175 | 1.013 |
+| 98% | −0.00442 ± 0.00074 | −0.00003 ± 0.00005 | 1.013 | 1.191 | 1.010 |
+
+This is one law, one seed and one sample size: an illustration of how the
+criteria behave, not a simulation study. A real-book version needs PR #545
+for the censored body. The script is in the second appendix.
+
 ## Licences checked (2026-10-31)
 
 | package | licence (source) | use here |
@@ -799,6 +1080,10 @@ No GPL source was opened.
 Papers and documentation read in this sweep. Works marked "via" were not
 read directly; their claims come from the named source.
 
+- Allen, S. (2023). Weighted scoringRules: emphasising particular outcomes
+  when evaluating probabilistic forecasts. arXiv:2305.07312. Via it: Diks,
+  Panchenko and van Dijk (2011), *J. Econometrics* 163(2), 215–230 (the
+  censored and conditional likelihood scores); Holzmann and Klar (2017).
 - Albrecher, H. and Beirlant, J. (2025). Statistics of extremes for the
   insurance industry. arXiv:2511.22272 (to appear in *Handbook of Statistics
   of Extremes*). Via it: Guevara-Alarcón et al. (2020); Stupfler (2019);
@@ -834,6 +1119,10 @@ read directly; their claims come from the named source.
 - Murphy, C., Tawn, J. A. and Varty, Z. (2025). Automated threshold
   selection and associated inference uncertainty for univariate extremes.
   *Technometrics* 67, 215–224; arXiv:2310.17999.
+- Northrop, P. J., Attalides, N. and Jonathan, P. (2017). Cross-validatory
+  extreme value threshold selection and uncertainty with application to
+  ocean storm severity. *JRSS C* 66(1), 93–120, doi:10.1111/rssc.12159;
+  arXiv:1504.06653. Via it: Geisser and Eddy (1979).
 - Reynkens, T., Verbelen, R., Beirlant, J. and Antonio, K. (2017).
   Modelling censored losses using splicing: a global fit strategy with mixed
   Erlang and extreme value distributions. *IME* 77, 65–77;
@@ -850,6 +1139,8 @@ read directly; their claims come from the named source.
 - The issue-544 assessment on PR #545
   (`notes/research/2026-10-issue-544-truncated-censored-assessment.md` on
   that branch). Via it: Fung, Tzougas and Wüthrich (2021), arXiv:2103.07200.
+  Via PR #545's description: Dunn and Smyth (1996), randomised quantile
+  residuals.
 
 ## Appendix: the wall experiment
 
@@ -888,4 +1179,112 @@ for name, y in cases.items():
     xi_fit = np.asarray(model.predict_parameters(X.iloc[:1]))[0, 1]
     print(name, xi_scipy, xi_fit, model.smoothing_convergence_reason_,
           model.smoothing_certified_, model.result_.n_inner_iter)
+```
+
+## Appendix: the layer-method threshold scan
+
+Run from a scratch directory through `benchboard heavy pot_sweep-layer_threshold --cores 1 --
+timeout 600 uv run python <script>`; it uses numpy and scipy only.
+
+```python
+"""Threshold choice for the layer method, by scipy maximum likelihood (independent of superglm).
+
+Truth: Burr XII ground-up losses, tail shape 1/(c d) = 0.4. Layer method at threshold u:
+log-normal body fitted to min(y, u) right-censored at u; GPD fitted to y - u above u;
+P(Y > u) from the body's own survival. The whole-range density is f_B below u and
+S_B(u) g(y - u) above, proper for every u. Five-fold CV compares thresholds by
+(a) the whole-density log score and (b) the censored likelihood score at v, the highest
+candidate (Diks, Panchenko and van Dijk 2011; Northrop, Attalides and Jonathan 2017).
+"""
+import numpy as np
+from scipy import integrate, optimize, stats
+
+truth = stats.burr12(c=2.0, d=1.25, scale=1000.0)
+rng = np.random.default_rng(20261031)
+n = 20_000
+y_all = truth.rvs(n, random_state=rng)
+levels = (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.925, 0.95, 0.97, 0.98)
+limit, retention, p_high = truth.ppf(0.95), truth.ppf(0.99), 0.995
+true_capped = integrate.quad(truth.sf, 0, limit, limit=200)[0]
+true_excess = integrate.quad(truth.sf, retention, np.inf, limit=200)[0]
+true_q = truth.ppf(p_high)
+
+
+def fit_layer(y, u, separate_frequency=False):
+    below, above = y[y <= u], y[y > u]
+    def nll(par):
+        mu, log_s = par
+        s = np.exp(log_s)
+        return -(stats.norm.logpdf(np.log(below), mu, s).sum() - np.log(below).sum()
+                 + len(above) * stats.norm.logsf(np.log(u), mu, s))
+    start = (np.log(below).mean(), np.log(np.log(below).std()))
+    mu, log_s = optimize.minimize(nll, start, method="Nelder-Mead",
+                                  options={"xatol": 1e-9, "fatol": 1e-9, "maxiter": 4000}).x
+    body = stats.lognorm(np.exp(log_s), scale=np.exp(mu))
+    xi, _, sigma = stats.genpareto.fit(above - u, floc=0.0)
+    p_u = len(above) / len(y) if separate_frequency else float(body.sf(u))
+    return u, body, stats.genpareto(xi, scale=sigma), p_u
+
+
+def logpdf(model, y):
+    # below u the body is renormalised to carry 1 - p_u; with p_u = S_B(u) that is the body itself
+    u, body, tail, p_u = model
+    out = body.logpdf(y) + np.log1p(-p_u) - body.logcdf(u)
+    hi = y > u
+    out[hi] = np.log(p_u) + tail.logpdf(y[hi] - u)
+    return out
+
+
+def logcdf_at(model, v):
+    u, body, tail, p_u = model
+    if v > u:
+        return np.log1p(-p_u * tail.sf(v - u))
+    return np.log1p(-p_u) + body.logcdf(v) - body.logcdf(u)
+
+
+def sf(model, z):
+    u, body, tail, p_u = model
+    z = np.asarray(z, dtype=float)
+    below = 1.0 - (1.0 - p_u) * body.cdf(z) / body.cdf(u)
+    return np.where(z <= u, below, p_u * tail.sf(z - u))
+
+
+def decisions(model):
+    # every retention and quantile below sits above every candidate u
+    u, body, tail, p_u = model
+    capped = integrate.quad(lambda z: float(sf(model, z)), 0, limit, points=[u] if u < limit else None, limit=200)[0]
+    excess = p_u * integrate.quad(tail.sf, retention - u, np.inf, limit=200)[0]
+    q = u + tail.isf((1.0 - p_high) / p_u)
+    return capped / true_capped, excess / true_excess, q / true_q
+
+
+folds = rng.permutation(n) % 5
+thresholds = {q: np.quantile(y_all, q) for q in levels}
+v = thresholds[levels[-1]]
+print(f"truth: capped mean at L=q95 {true_capped:.1f}, excess per claim over M=q99 {true_excess:.2f}, q99.5 {true_q:.0f}")
+for separate in (False, True):
+    print("P(Y>u) from", "the empirical exceedance share, body renormalised below u" if separate else "the body's own survival")
+    rows, per_row = [], {}
+    for q, u in thresholds.items():
+        logs_rows, cels_rows = np.empty(n), np.empty(n)
+        for k in range(5):
+            test_idx = np.flatnonzero(folds == k)
+            model = fit_layer(y_all[folds != k], u, separate)
+            test = y_all[test_idx]
+            logs_rows[test_idx] = logpdf(model, test)
+            hi = test > v
+            c = np.full(len(test), logcdf_at(model, v))
+            c[hi] = logpdf(model, test[hi])
+            cels_rows[test_idx] = c
+        per_row[q] = (logs_rows, cels_rows)
+        model = fit_layer(y_all, u, separate)
+        rows.append((q, u, model[2].args[0], model[3] / np.mean(y_all > u), *decisions(model)))
+    best = {j: max(per_row, key=lambda q: per_row[q][j].mean()) for j in (0, 1)}
+    print(f"{'u level':>8} {'u':>6} {'dlogS':>8} {'se':>7} {'dCeLS':>9} {'se':>8} {'xi':>6} {'p_u/emp':>7} {'capped':>7} {'excess':>7} {'q99.5':>7}")
+    for q, u, xi, ratio, c, e, qq in rows:
+        out = []
+        for j in (0, 1):
+            d = per_row[q][j] - per_row[best[j]][j]
+            out += [d.mean(), d.std(ddof=1) / np.sqrt(n)]
+        print(f"{q:8.3f} {u:6.0f} {out[0]:8.5f} {out[1]:7.5f} {out[2]:9.6f} {out[3]:8.6f} {xi:6.3f} {ratio:7.3f} {c:7.3f} {e:7.3f} {qq:7.3f}")
 ```
