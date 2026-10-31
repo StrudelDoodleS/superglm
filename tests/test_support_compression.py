@@ -468,7 +468,8 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
     # (deviance), 1.4e-9 (edf).
     compressed = fit(1e-6)
     compressed_default = fit(None)
-    monkeypatch.setattr(_group_matrix_support, "detect_row_support", lambda *a, **k: None)
+    for detect in ("detect_row_support", "detect_cell_support"):
+        monkeypatch.setattr(_group_matrix_support, detect, lambda *a, **k: None)
     uncompressed = fit(1e-6)
     uncompressed_default = fit(None)
 
@@ -2552,13 +2553,14 @@ def test_decomposed_exact_tensor_detects_and_stores_one_support(monkeypatch):
         {"a": gen.integers(0, 60, n).astype(float), "b": gen.integers(0, 25, n).astype(float)}
     )
     widths = []
-    detect = _group_matrix_support.detect_row_support
+    for name in ("detect_row_support", "detect_cell_support"):
+        detect = getattr(_group_matrix_support, name)
 
-    def counted(basis, **kwargs):
-        widths.append(basis.shape[1])
-        return detect(basis, **kwargs)
+        def counted(basis, *args, detect=detect, **kwargs):
+            widths.append(basis.shape[1])
+            return detect(basis, *args, **kwargs)
 
-    monkeypatch.setattr(_group_matrix_support, "detect_row_support", counted)
+        monkeypatch.setattr(_group_matrix_support, name, counted)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0,
@@ -2580,3 +2582,407 @@ def test_decomposed_exact_tensor_detects_and_stores_one_support(monkeypatch):
     assert widths.count(bilinear.B_unique.shape[1]) == 1
     # Null plus range space: the subgroups' Gram products total one block.
     assert bilinear.shape[1] + wiggly.shape[1] == bilinear.B_unique.shape[1]
+
+
+# ── exact build on distinct values and occupied cells ─────────────
+#
+# An exact spline basis is evaluated once per distinct covariate value and a
+# tensor's rows once per occupied cell, then indexed back to the rows (Wood,
+# Li, Shaddick & Augustin 2017; Li & Wood 2020).  ``distinct_values``
+# declining restores the build over every row, whose design and fit the
+# distinct build must reproduce bit for bit.
+
+
+def _distinct_build_case(seed=31, n=6000):
+    import pandas as pd
+
+    from superglm import Categorical, Spline, SuperGLM
+
+    gen = np.random.default_rng(seed)
+    frame = pd.DataFrame(
+        {
+            "a": gen.integers(18, 90, n).astype(float),
+            "b": gen.integers(0, 30, n).astype(float),
+            "c": np.round(gen.gamma(2.0, 3.0, n), 1),
+            # "s" is a declared level no training row carries.
+            "g": pd.Categorical(gen.choice(["p", "q", "r"], n), categories=["p", "q", "r", "s"]),
+        }
+    )
+    y = gen.poisson(np.exp(0.3 * np.sin(frame["a"].to_numpy() / 9.0))).astype(float)
+    weight = gen.uniform(0.5, 2.0, n)
+    offset = np.log(gen.uniform(0.2, 1.0, n))
+
+    def model():
+        built = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=False,
+            features={
+                # The boundary clips both tails, so distinct values share rows.
+                "a": Spline(kind="cr", n_knots=6, boundary=(25.0, 80.0)),
+                "b": Spline(kind="ps", n_knots=5),
+                "c": Spline(kind="bs", n_knots=5),
+                "g": Categorical(unseen="base"),
+            },
+            interactions=[("a", "b"), ("a", "g")],
+        )
+        built._add_interaction("c", "b", decompose=True)
+        return built
+
+    return frame, y, weight, offset, model
+
+
+def _assert_same_state(a, b, path="", depth=0):
+    """Equal types, and arrays equal in dtype, shape and bits, all the way down."""
+    assert type(a) is type(b), path
+    if isinstance(a, np.ndarray):
+        assert (a.dtype, a.shape) == (b.dtype, b.shape), path
+        if a.dtype == object:
+            assert a.tolist() == b.tolist(), path
+        else:
+            assert a.tobytes() == b.tobytes(), path
+    elif sp.issparse(a):
+        assert (a.format, a.shape) == (b.format, b.shape), path
+        for part in ("data", "indices", "indptr"):
+            _assert_same_state(getattr(a, part), getattr(b, part), f"{path}.{part}", depth)
+    elif isinstance(a, float):
+        assert a.hex() == b.hex(), path
+    elif isinstance(a, dict):
+        assert a.keys() == b.keys(), path
+        for key in a:
+            _assert_same_state(a[key], b[key], f"{path}[{key!r}]", depth + 1)
+    elif isinstance(a, list | tuple):
+        assert len(a) == len(b), path
+        for i, (x, z) in enumerate(zip(a, b, strict=True)):
+            _assert_same_state(x, z, f"{path}[{i}]", depth + 1)
+    elif callable(a):
+        return
+    elif depth < 6 and (state := _object_state(a)) is not None:
+        _assert_same_state(state, _object_state(b), path, depth + 1)
+    else:
+        assert a == b, path
+
+
+def _object_state(obj) -> dict | None:
+    """An object's attributes, from its ``__dict__`` and every class's ``__slots__``."""
+    state = dict(getattr(obj, "__dict__", {}))
+    for klass in type(obj).__mro__:
+        slots = getattr(klass, "__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot not in ("__dict__", "__weakref__") and hasattr(obj, slot):
+                state[slot] = getattr(obj, slot)
+    return state or None
+
+
+def test_exact_build_on_distinct_values_is_the_row_build(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    distinct, rows = model(), model()
+    distinct.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=3)
+    with monkeypatch.context() as patch:
+        patch.setattr(_group_matrix_support, "distinct_values", lambda x: None)
+        rows.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=3)
+
+    # Support rows, row index, R_inv and penalty of every group, and the specs.
+    _assert_same_state(distinct._dm.group_matrices, rows._dm.group_matrices, "groups")
+    _assert_same_state(dict(distinct._specs), dict(rows._specs), "specs")
+    _assert_same_state(
+        dict(distinct._interaction_specs), dict(rows._interaction_specs), "interactions"
+    )
+    np.testing.assert_array_equal(distinct.result.beta, rows.result.beta)
+    # New rows: a level unseen at fit, and covariates past every knot.
+    new = frame.iloc[:600].copy()
+    new["g"] = new["g"].cat.add_categories("t")
+    new.loc[new.index[::3], "g"] = "t"
+    new.loc[new.index[::4], "a"] = 150.0
+    new.loc[new.index[::5], "c"] = 90.0
+    new.loc[new.index[::7], "b"] = -10.0
+    np.testing.assert_array_equal(
+        distinct.predict(new, offset=offset[:600]), rows.predict(new, offset=offset[:600])
+    )
+
+
+def _force_margin_rows_to_repeat(monkeypatch):
+    """Give each tensor margin row its value's first row, so equal values give equal rows.
+
+    The centred margins are n-row BLAS products, and whether a kernel rounds a
+    row alike wherever it sits is its own business: forced, the cell route
+    does not depend on it.
+    """
+    from superglm.features import interaction
+
+    prepare = interaction.TensorInteraction._prepare_centered_marginals
+
+    def repeated(self, x1, x2, *args, **kwargs):
+        B1, B2, *rest = prepare(self, x1, x2, *args, **kwargs)
+        margins = []
+        for B, x in ((B1, x1), (B2, x2)):
+            _, first, index = np.unique(np.asarray(x), return_index=True, return_inverse=True)
+            margins.append(B[first][index.ravel()])
+        return (*margins, *rest)
+
+    monkeypatch.setattr(interaction.TensorInteraction, "_prepare_centered_marginals", repeated)
+
+
+def test_exact_build_never_forms_a_basis_over_every_row(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.features import _spline_cardinal_spec, _spline_runtime, interaction
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    _force_margin_rows_to_repeat(monkeypatch)
+    evaluated, kronecker_rows, scanned_rows, cell_rows = [], [], [], []
+
+    def spy(module, name, record, rows_of):
+        original = getattr(module, name)
+
+        def counted(*args, **kwargs):
+            record.append(rows_of(*args))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+
+    for module in (_spline_runtime, _spline_cardinal_spec):
+        for name in ("basis_matrix", "raw_basis_matrix"):
+            spy(module, name, evaluated, lambda spec, x: np.size(x))
+    spy(interaction, "_row_kron", kronecker_rows, lambda b1, b2: b1.shape[0])
+    spy(_group_matrix_support, "detect_row_support", scanned_rows, lambda b: b.shape[0])
+    spy(_group_matrix_support, "detect_cell_support", cell_rows, lambda b, index: b.shape[0])
+    built = model()
+    built._build_design_matrix(frame, y, weight, offset)
+
+    n = len(frame)
+    assert evaluated and max(evaluated) < n
+    assert kronecker_rows and max(kronecker_rows) < n
+    assert cell_rows and max(cell_rows) < n
+    assert all(rows < n for rows in scanned_rows)
+    kinds = {group.name: type(gm) for group, gm in zip(built._groups, built._dm.group_matrices)}
+    assert {kinds[name] for name in ("a", "b", "c", "a:b", "c:b:bilinear", "c:b:wiggly")} == {
+        SupportCompressedSSPGroupMatrix
+    }
+    assert kinds["a:g[p]"] is SupportCompressedSplineCategoricalGroupMatrix
+
+
+def _built_groups(model, frame, y, weight, offset, *, rows=False):
+    """The design's group matrices, built as shipped or (``rows``) on every row."""
+    from superglm._group_matrix import _group_matrix_support
+
+    built = model()
+    if rows:
+        original = _group_matrix_support.distinct_values
+        _group_matrix_support.distinct_values = lambda x: None
+    try:
+        built._build_design_matrix(frame, y, weight, offset)
+    finally:
+        if rows:
+            _group_matrix_support.distinct_values = original
+    return built._dm.group_matrices
+
+
+def _spied(monkeypatch, module, name):
+    """Record each call's first argument and result while ``module.name`` runs."""
+    calls = []
+    original = getattr(module, name)
+
+    def recorded(first, *args, **kwargs):
+        result = original(first, *args, **kwargs)
+        calls.append((first, result))
+        return result
+
+    monkeypatch.setattr(module, name, recorded)
+    return calls
+
+
+def test_distinct_values_gates_on_the_share_of_rows_that_are_distinct():
+    from superglm._group_matrix._group_matrix_support import distinct_values
+
+    gen = np.random.default_rng(3)
+    n = 20_000
+    # 3,000 values (15% of the rows): an even 4,096-row sample of them is mostly distinct.
+    x = gen.permutation(np.arange(n) % 3_000) * 0.25
+    values, index = distinct_values(x)
+    assert values.size == 3_000
+    assert values[index].tobytes() == x.tobytes()
+    # Exactly half the rows distinct still groups; one more value does not.
+    assert distinct_values(gen.permutation(np.arange(n) % (n // 2)) * 1.0) is not None
+    assert distinct_values(gen.permutation(np.arange(n) % (n // 2 + 1)) * 1.0) is None
+
+
+def test_distinct_values_declines_values_it_cannot_group_bit_for_bit():
+    from superglm._group_matrix._group_matrix_support import distinct_values
+
+    x = np.repeat([0.0, 1.0, 2.0], 4)
+    negative = np.where(x == 0.0, -0.0, x)
+    values, index = distinct_values(negative)
+    assert values[index].tobytes() == negative.tobytes()  # one sign of zero groups
+    mixed = negative.copy()
+    mixed[0] = 0.0
+    assert distinct_values(mixed) is None  # -0.0 == 0.0 would merge them
+    with_nan = x.copy()
+    with_nan[[1, 2]] = np.nan
+    assert distinct_values(with_nan) is None
+
+
+def test_gather_counts_in_int64_once_int32_cannot_hold_the_entries():
+    from superglm._group_matrix._group_matrix_support import gather_index_dtype, gather_rows
+
+    # SciPy counts a gather's entries in its source's index dtype.
+    rows_per_int32 = np.iinfo(np.int32).max // 4
+    assert gather_index_dtype(rows_per_int32, 4) is np.int32
+    assert gather_index_dtype(rows_per_int32 + 1, 4) is np.int64
+    # Widened, the gather is the same matrix, its indices sized to its entries.
+    source = sp.csr_matrix(np.random.default_rng(1).normal(size=(5, 4)) * (np.arange(4) < 3))
+    index = np.random.default_rng(2).integers(0, 5, 40)
+    widened = source.copy()
+    widened.indptr, widened.indices = (a.astype(np.int64) for a in (source.indptr, source.indices))
+    for gathered in (gather_rows(source, index), widened[index]):
+        _assert_same_state(gathered, source[index], "gathered")
+
+
+def test_rows_repeat_compares_every_block():
+    from superglm.features.interaction import _rows_repeat
+
+    index = np.arange(10) % 3
+    basis = np.random.default_rng(4).normal(size=(3, 2))[index]
+    assert _rows_repeat(basis, index, block_rows=3)
+    basis[-1, 1] = np.nextafter(basis[-1, 1], np.inf)  # the last block's last row
+    assert not _rows_repeat(basis, index, block_rows=3)
+    assert not _rows_repeat(basis, index)
+
+
+def test_a_margin_row_that_differs_within_its_value_takes_the_product_over_every_row(
+    monkeypatch,
+):
+    from superglm.features import interaction
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    _force_margin_rows_to_repeat(monkeypatch)
+    prepare = interaction.TensorInteraction._prepare_centered_marginals
+
+    def nudged(self, *args, **kwargs):
+        B1, *rest = prepare(self, *args, **kwargs)
+        # The last row is not the first of its value: only a row-by-row check sees it.
+        B1[-1, 0] = np.nextafter(B1[-1, 0], np.inf)
+        return (B1, *rest)
+
+    monkeypatch.setattr(interaction.TensorInteraction, "_prepare_centered_marginals", nudged)
+    products = _spied(monkeypatch, interaction, "_row_kron")
+    groups = _built_groups(model, frame, y, weight, offset)
+
+    assert len(frame) in [first.shape[0] for first, _ in products]
+    _assert_same_state(groups, _built_groups(model, frame, y, weight, offset, rows=True), "groups")
+
+
+def test_a_cell_hash_collision_falls_back_to_the_scan_of_every_row(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    _force_margin_rows_to_repeat(monkeypatch)
+    # Every row hashes alike, so every grouping of more than one row collides.
+    monkeypatch.setattr(
+        _group_matrix_support,
+        "_row_hash_multipliers",
+        lambda p_b: np.zeros(max(p_b, 1), dtype=np.uint64),
+    )
+    cells = _spied(monkeypatch, _group_matrix_support, "detect_cell_support")
+    scans = _spied(monkeypatch, _group_matrix_support, "detect_row_support")
+    groups = _built_groups(model, frame, y, weight, offset)
+
+    assert cells and all(result is None for _, result in cells)
+    assert len(frame) in [first.shape[0] for first, _ in scans]
+    _assert_same_state(groups, _built_groups(model, frame, y, weight, offset, rows=True), "groups")
+
+
+def test_a_support_its_gates_decline_on_the_cells_is_not_scanned_again(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+    from superglm.features import interaction
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    _force_margin_rows_to_repeat(monkeypatch)
+    monkeypatch.setattr(_group_matrix_support, "DEFAULT_MIN_SPEEDUP", np.inf)
+    cells = _spied(monkeypatch, _group_matrix_support, "detect_cell_support")
+    scans = _spied(monkeypatch, _group_matrix_support, "detect_row_support")
+    tensors = _spied(monkeypatch, interaction, "_tensor_cell_support")
+    groups = _built_groups(model, frame, y, weight, offset)
+
+    assert cells and {result for _, result in cells} == {_group_matrix_support.DECLINED}
+    assert [result for _, result in tensors] == [_group_matrix_support.DECLINED] * 2
+    assert scans == []
+    _assert_same_state(groups, _built_groups(model, frame, y, weight, offset, rows=True), "groups")
+
+
+def test_tensor_build_returns_its_product_over_every_row(monkeypatch):
+    from superglm import Spline
+    from superglm._group_matrix import _group_matrix_support
+    from superglm.features.interaction import TensorInteraction
+
+    gen = np.random.default_rng(12)
+    n = 3_000  # above the support gates' row floor, with cells that repeat
+    x1, x2 = gen.integers(0, 30, n).astype(float), gen.integers(0, 20, n).astype(float)
+
+    def build():
+        specs = {"a": Spline(kind="ps", n_knots=5), "b": Spline(kind="cr", n_knots=4)}
+        specs["a"].build(x1)
+        specs["b"].build(x2)
+        return TensorInteraction("a", "b").build(x1, x2, specs)
+
+    info = build()
+    with monkeypatch.context() as patch:
+        patch.setattr(_group_matrix_support, "distinct_values", lambda x: None)
+        rows = build()
+    assert sp.issparse(info.columns) and info.row_support is None
+    _assert_same_state(info.columns, rows.columns, "columns")
+
+
+def test_a_spline_subclass_that_rescales_its_basis_in_place_is_fitted_on_it():
+    import pandas as pd
+
+    from superglm import PSpline, SuperGLM
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    class Rescaled(PSpline):
+        def build(self, x, sample_weight=None):
+            info = super().build(x, sample_weight)
+            info.columns.data *= 2.0
+            self.built = info.columns
+            return info
+
+    x = np.tile(np.linspace(0.0, 1.0, 20), 200)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0, discrete=False, features={"x": Rescaled(n_knots=5)}
+    )
+    model._build_design_matrix(pd.DataFrame({"x": x}), 2.0 + np.sin(4.0 * x), np.ones(x.size), None)
+
+    (group,) = model._dm.group_matrices
+    assert type(group) is SupportCompressedSSPGroupMatrix
+    _assert_same_state(group.B_unique[group.bin_idx], model._specs["x"].built.toarray(), "basis")
+
+
+def test_a_spline_subclass_that_replaces_its_basis_with_a_dense_one_keeps_it():
+    import dataclasses
+
+    import pandas as pd
+
+    from superglm import PSpline, SuperGLM
+    from superglm.group_matrix import DenseGroupMatrix
+
+    class Densified(PSpline):
+        def build(self, x, sample_weight=None):
+            info = super().build(x, sample_weight)
+            return dataclasses.replace(info, columns=info.columns.toarray())
+
+    x = np.tile(np.linspace(0.0, 1.0, 20), 200)
+    frame, y = pd.DataFrame({"x": x}), 2.0 + np.sin(4.0 * x)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0, discrete=False, features={"x": Densified(n_knots=5)}
+    )
+    model.fit(frame, y)
+
+    (group,) = model._dm.group_matrices
+    assert type(group) is DenseGroupMatrix

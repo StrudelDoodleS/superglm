@@ -255,7 +255,9 @@ def _varying_coefficient_spline_spec(
     return resolved
 
 
-def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_levels: int):
+def _plan_spline_cat_support(
+    B: sp.spmatrix, x: NDArray, active: NDArray, *, n_levels: int, index: NDArray | None = None
+):
     """Lossless row-support compression for a shared ``spline_cat`` basis.
 
     A varying-coefficient term stores one CSR basis shared by its levels plus a
@@ -285,6 +287,11 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
     scan a support wider than it can use.  Both errors point the same way, so
     the gate is derived from the union of the non-base masks.
 
+    ``index`` reads ``B`` as one row per distinct value of ``x``
+    (``distinct_values``) and each row's index into them.  The support is then
+    the rows of the values the active rows hold, in increasing order of value
+    as the codes above number them, and needs no check: each value has one row.
+
     Returns ``None`` when the gate declines, leaving CSR in place.
     """
     # Function-local ON PURPOSE, not merely to dodge a circular import: these
@@ -305,12 +312,18 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
     if n_levels <= 0 or active.size == 0:
         return None
 
-    codes = np.unique(np.asarray(x, dtype=np.float64).ravel()[active], return_inverse=True)[1]
+    if index is None:
+        codes = np.unique(np.asarray(x, dtype=np.float64).ravel()[active], return_inverse=True)[1]
+        row_of = active
+    else:
+        used = np.bincount(index[active], minlength=B.shape[0]) > 0
+        codes = (np.cumsum(used) - 1)[index[active]]
+        row_of = index[active]
     codes = np.ravel(codes).astype(np.intp, copy=False)
     # Active nnz off the indptr rather than off a slice: the gate has to be
     # cheap on the DECLINED path, which is every continuous covariate, and
     # slicing the basis there would cost a copy of most of it.
-    nnz_active = int(np.diff(B.indptr)[active].sum())
+    nnz_active = int(np.diff(B.indptr)[row_of].sum())
     # One resolution feeds BOTH gates.  These are read here at call time, so
     # without passing them through, the pre-gate below would see a patched
     # threshold while the gate inside plan_verified_row_support saw the frozen
@@ -329,19 +342,22 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
     ):
         return None
 
-    planned = plan_verified_row_support(
-        sp.csr_matrix(B)[active],
-        codes,
-        min_speedup=min_speedup,
-        max_support_bytes=max_support_bytes,
-        gram_repeats=n_levels,
-    )
+    if index is None:
+        planned = plan_verified_row_support(
+            sp.csr_matrix(B)[active],
+            codes,
+            min_speedup=min_speedup,
+            max_support_bytes=max_support_bytes,
+            gram_repeats=n_levels,
+        )
+    else:
+        planned = sp.csr_matrix(B)[np.flatnonzero(used)].toarray(), codes
     if planned is None:
         return None
     b_unique, active_codes = planned
     # Full-length, because the builder indexes it by each level's own row ids.
     # Base-level entries are never read; zero is simply a valid index.
-    row_index = np.zeros(B.shape[0], dtype=np.intp)
+    row_index = np.zeros(B.shape[0] if index is None else index.size, dtype=np.intp)
     row_index[active] = active_codes
     return b_unique, row_index
 
@@ -538,16 +554,32 @@ class SplineCategorical:
         sample_weight: NDArray | None = None,
         separation: tuple | None = None,
     ) -> list[GroupInfo]:
+        from superglm._group_matrix._group_matrix_support import distinct_values
+
         spline_spec, x_spline, x_cat = self._resolve_build(
             x_spline, x_cat, parent_specs, sample_weight
         )
 
-        B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
         # Union of the non-base masks: exactly the rows some emitted block owns.
         active_rows = np.flatnonzero(np.isin(x_cat, self._non_base))
-        compressed = _plan_spline_cat_support(
-            B, x_spline, active_rows, n_levels=len(self._non_base)
-        )
+        # The basis once per distinct covariate value; its rows only on a decline.
+        distinct = distinct_values(x_spline)
+        if distinct is None:
+            B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
+            compressed = _plan_spline_cat_support(
+                B, x_spline, active_rows, n_levels=len(self._non_base)
+            )
+        else:
+            values, index = distinct
+            values_basis = spline_spec._raw_basis_matrix(values)
+            compressed = _plan_spline_cat_support(
+                sp.csr_matrix(values_basis),
+                x_spline,
+                active_rows,
+                n_levels=len(self._non_base),
+                index=index,
+            )
+            B = None if compressed is not None else sp.csr_matrix(values_basis[index])
 
         omega = spline_spec._build_penalty()
 
@@ -1969,7 +2001,7 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     counts = np.zeros(n + 1, dtype=np.int64)
     _row_kron_counts(*args, counts)
     indptr = np.cumsum(counts)
-    index_dtype = np.int32 if max(int(indptr[-1]), k1 * k2) <= np.iinfo(np.int32).max else np.int64
+    index_dtype = _row_kron_index_dtype(int(indptr[-1]), k1 * k2)
     # The fill writes the final index dtype: no int64 copy at the build's peak.
     indices = np.empty(int(indptr[-1]), dtype=index_dtype)
     data = np.empty(int(indptr[-1]), dtype=np.float64)
@@ -1977,6 +2009,70 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     T = sp.csr_matrix((data, indices, indptr.astype(index_dtype)), shape=(n, k1 * k2))
     T.has_sorted_indices = True
     return T
+
+
+def _row_kron_index_dtype(nnz: int, n_cols: int) -> type:
+    """The index dtype ``_row_kron`` stores: int32 while the entries and columns fit in it."""
+    return np.int32 if max(nnz, n_cols) <= np.iinfo(np.int32).max else np.int64
+
+
+def _rows_repeat(basis: NDArray, index: NDArray, block_rows: int = 65_536) -> bool:
+    """Whether the rows of ``basis`` sharing an ``index`` value are bit for bit equal.
+
+    Compared ``block_rows`` rows at a time, so the check copies no more of
+    the basis than one block.
+    """
+    first = np.empty(int(index.max()) + 1, dtype=np.intp)
+    first[index[::-1]] = np.arange(index.size - 1, -1, -1, dtype=np.intp)
+    bits = np.ascontiguousarray(basis, dtype=np.float64).view(np.uint64)
+    return all(
+        np.array_equal(
+            bits[first[index[start : start + block_rows]]], bits[start : start + block_rows]
+        )
+        for start in range(0, index.size, block_rows)
+    )
+
+
+def _tensor_cell_support(basis1: NDArray, distinct1, basis2: NDArray, distinct2):
+    """The row support of ``_row_kron(basis1, basis2)``, formed on its occupied cells.
+
+    A margin's row is a function of its covariate, so the row Kronecker
+    product's rows repeat by occupied cell, the distinct ``(x1, x2)`` pairs
+    of the margins' groupings (``TensorMarginalInfo.distinct``), and each is
+    formed once (Wood, Li, Shaddick & Augustin 2017; Li & Wood 2020).  The
+    support is found on those rows (``detect_cell_support``) and is the one
+    scanning the full product finds; ``DECLINED`` when the gates decline
+    it, as they do below their row floor whatever the support.  ``None``
+    leaves the scan to the builder: a margin without a grouping, or whose
+    projected rows differ within one covariate value; cells that do not
+    repeat, or whose dense support over the byte budget would hold more
+    than half the rows, where only the scan's merging of bit-identical
+    cells can decide; and a hash collision.
+    """
+    from superglm._group_matrix import _group_matrix_support as support
+
+    n = basis1.shape[0]
+    if n == 0 or distinct1 is None or distinct2 is None:
+        return None
+    if n < support._MIN_CALIBRATED_ROWS:
+        return support.DECLINED
+    _, first, cell = np.unique(
+        distinct1[1] * distinct2[0].size + distinct2[1], return_index=True, return_inverse=True
+    )
+    support_bytes = 8 * first.size * basis1.shape[1] * basis2.shape[1]
+    if first.size == n or (
+        2 * first.size > n and support_bytes > support.DEFAULT_MAX_SUPPORT_BYTES
+    ):
+        return None
+    if not (_rows_repeat(basis1, distinct1[1]) and _rows_repeat(basis2, distinct2[1])):
+        return None
+    rows = _row_kron(sp.csr_matrix(basis1[first]), sp.csr_matrix(basis2[first]))
+    cell = np.asarray(cell, dtype=np.intp).ravel()
+    nnz = int(np.bincount(cell, minlength=first.size) @ np.diff(rows.indptr))
+    width = np.dtype(_row_kron_index_dtype(nnz, rows.shape[1])).itemsize
+    return support.detect_cell_support(
+        rows, cell, nnz=nnz, replaced_bytes=nnz * (8 + width) + (n + 1) * width
+    )
 
 
 def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
@@ -2356,7 +2452,8 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
         geometry_weight: NDArray | None,
-    ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
+    ) -> tuple[NDArray, NDArray, NDArray, NDArray, Any, Any]:
+        """The centred margin bases on the rows, their penalties, and each margin's ``distinct``."""
         m1, m2 = self._prepare_marginal_infos(
             x1,
             x2,
@@ -2364,8 +2461,8 @@ class TensorInteraction:
             geometry_weight=geometry_weight,
         )
 
-        B1 = sp.csr_matrix(m1.basis)
-        B2 = sp.csr_matrix(m2.basis)
+        B1 = np.asarray(m1.basis, dtype=np.float64)
+        B2 = np.asarray(m2.basis, dtype=np.float64)
         # The training-row bases are now B1 and B2, and the design is built from
         # them. Scoring evaluates new rows from ``raw_basis_eval`` and
         # ``projection``, so the spec keeps no (n, K) copy of its own: it was
@@ -2374,7 +2471,7 @@ class TensorInteraction:
         self._marginal2 = replace(m2, basis=np.empty((0, m2.K_eff)))
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
-        return B1, B2, S1, S2
+        return B1, B2, S1, S2, getattr(m1, "distinct", None), getattr(m2, "distinct", None)
 
     def _structural_tensor_penalty(self) -> NDArray | None:
         """The tensor penalty built from margins without knot-spacing spread, if any margin has one.
@@ -2527,24 +2624,40 @@ class TensorInteraction:
         parent_specs: dict,
         sample_weight: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        B1, B2, S1, S2 = self._prepare_centered_marginals(
+        return self._build_exact(x1, x2, parent_specs, sample_weight, on_cells=False)
+
+    def _build_exact(
+        self,
+        x1: NDArray,
+        x2: NDArray,
+        parent_specs: dict,
+        sample_weight: NDArray | None = None,
+        *,
+        on_cells: bool,
+    ) -> GroupInfo | list[GroupInfo]:
+        """``build``; ``on_cells`` also finds the row support on the occupied cells.
+
+        That is the design builder's build (``GroupInfo.row_support``): with a
+        support found, ``columns`` stays ``None`` and the product over every
+        row is never formed.
+        """
+        B1, B2, S1, S2, distinct1, distinct2 = self._prepare_centered_marginals(
             x1,
             x2,
             parent_specs,
             sample_weight,
         )
-        # Row-wise Kronecker product
-        T = _row_kron(B1, B2)
+        support = _tensor_cell_support(B1, distinct1, B2, distinct2) if on_cells else None
+        # The row-wise Kronecker product, unless the support stands in for it.
+        T = None if isinstance(support, tuple) else _row_kron(sp.csr_matrix(B1), sp.csr_matrix(B2))
 
         # Tensor product penalty on the centered marginal spaces.
         omega_1 = np.kron(S1, np.eye(self._p2))
         omega_2 = np.kron(np.eye(self._p1), S2)
         infos = self._build_group_infos(omega_1, omega_2)
-        if isinstance(infos, list):
-            for info in infos:
-                info.columns = T
-            return infos
-        infos.columns = T
+        for info in infos if isinstance(infos, list) else [infos]:
+            info.columns = T
+            info.row_support = support
         return infos
 
     def build_discrete(

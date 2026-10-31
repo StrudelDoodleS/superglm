@@ -358,6 +358,16 @@ class _SplineBase:
         """Build B-spline basis and penalty matrix."""
         return _spline_build.build_group_info(self, x, sample_weight)
 
+    def _build_with_row_support(
+        self, x: NDArray, sample_weight: NDArray | None = None
+    ) -> GroupInfo | list[GroupInfo]:
+        """``build``, with the basis's row support found on its rows per value.
+
+        The design builder's build: it stores ``GroupInfo.row_support`` in
+        place of scanning the basis.
+        """
+        return _spline_build.build_group_info(self, x, sample_weight, find_row_support=True)
+
     def build_knots_and_penalty(
         self, x: NDArray, sample_weight: NDArray | None = None, n_bins: int | None = None
     ) -> tuple[NDArray | None, int, NDArray | None]:
