@@ -556,7 +556,7 @@ validating retained offset values and computing scores or Murphy forecasts.
 
 ## Truncated and censored rows
 
-A model fitted with `truncation=` or `censoring=` (see
+A model fitted with `truncation=` or `censored=` (see
 [Truncated and censored rows](fit-a-distributional-model.md#truncated-and-censored-rows))
 needs the same bounds when its training rows are checked. Pass them to
 `residual_set`, `residuals`, `check`, `check_2d`, `scores` and the diagnostic
