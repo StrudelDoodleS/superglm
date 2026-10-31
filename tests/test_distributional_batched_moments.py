@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from superglm._parallel import parallel_config
+from tests._traced_memory import own_traced_peak
 
 
 def _module():
@@ -136,27 +137,40 @@ def test_last_worker_count_is_the_threads_that_ran_a_target(monkeypatch):
 
 def test_accumulate_reads_fortran_and_strided_channels_in_place():
     """The workspace budget counts no copy of a chunk's channels, so the reducer makes none:
-    Fortran and strided channel matrices are read where they are."""
-    import tracemalloc
+    Fortran and strided channel matrices are read where they are.
 
+    One-off process setup, such as the BLAS thread controller the worker pool builds on its
+    first section (which peaks near one column's bytes), runs on a throwaway reducer first.
+    The traced window is then each measured reducer's construction and first call, where a
+    copy made then, or kept for later calls, would show.
+    """
     module = _module()
     module._warmup_batched_moments()
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    warm = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    with parallel_config(n_jobs=1):
+        for weights in (np.ones((11, 3), order="F"), np.ones((11, 6))[:, ::2]):
+            warm.accumulate(weights, 11)
     capacity = 1 << 14
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture(capacity=capacity)
     bins.fill(0)
     for panel in ordinary:
         panel.fill(1.0)
-    batch = module._BatchedMomentReducers(
-        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
-    )
+
+    def first_call(weights):
+        batch = module._BatchedMomentReducers(
+            histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+        )
+        return batch.accumulate(weights, capacity)
+
     for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
         with parallel_config(n_jobs=1):
-            tracemalloc.start()
-            try:
-                batch.accumulate(weights, capacity)
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
+            peak, _ = own_traced_peak(first_call, weights)
         assert peak < weights[:, 0].nbytes, peak  # a copy holds all three columns
 
 
