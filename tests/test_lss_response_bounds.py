@@ -317,13 +317,46 @@ def test_per_row_bounds_and_zero_weight_rows_follow_the_retained_rows():
     weights = np.ones(len(y))
     weights[:10] = 0.0
     censored = np.where(y >= limits, "right", "none").astype(object)
-    # Dropped rows may carry any flags; their values are never read.
+    # Dropped rows may carry any flags and bounds; their values are never read.
     flags_with_junk = censored.copy()
-    flags_with_junk[:10] = "left"
+    flags_with_junk[:10] = [np.nan, None, pd.NA, "Right", 2.5, "x", 1, np.nan, None, "?"]
+    lower_with_junk = np.where(np.arange(len(y)) < 10, np.nan, -np.inf)
     family = LogNormalLS(parametrisation="location")
-    dropped = _fit(family, paid, sample_weight=weights, censored=flags_with_junk)
+    dropped = _fit(
+        family, paid, sample_weight=weights, censored=flags_with_junk,
+        truncation=(lower_with_junk, None),
+    )  # fmt: skip
     reference = _fit(family, paid[10:], censored=censored[10:])
     assert dropped == pytest.approx(reference, rel=1e-10)
+
+
+def test_flags_on_rows_the_fit_drops_are_never_read():
+    # Rows 0 and 5 carry zero weight and invalid flags; the fit, its scores
+    # and its residuals are those of the retained rows alone.
+    rng = np.random.default_rng(573)
+    y = rng.normal(0.0, 1.0, 400)
+    paid = np.minimum(y, 1.0)
+    flags = (y >= 1.0).astype(object)
+    weights = np.ones(len(y))
+    weights[[0, 5]] = 0.0
+    keep = weights > 0
+    junk = flags.copy()
+    junk[[0, 5]] = [np.nan, "Right"]
+    family = GaussianLS()
+    dropped = _fit(family, paid, sample_weight=weights, censored=junk)
+    assert dropped == pytest.approx(_fit(family, paid[keep], censored=flags[keep]), rel=1e-10)
+
+    model = SuperLSS(family, family.location(), family.scale())
+    model.fit(_intercepts(int(keep.sum())), paid[keep], censored=flags[keep])
+    scores = model.scores(
+        _intercepts(len(y)), paid, sample_weight=weights, censored=junk, which=("log",)
+    )
+    retained = model.scores(_intercepts(int(keep.sum())), paid[keep], censored=flags[keep],
+                            which=("log",))  # fmt: skip
+    np.testing.assert_allclose(scores["log"].to_numpy()[keep], retained["log"].to_numpy())
+    residuals = model.residuals(_intercepts(len(y)), paid, sample_weight=weights, censored=junk)
+    reference = model.residuals(_intercepts(int(keep.sum())), paid[keep], censored=flags[keep])
+    np.testing.assert_allclose(residuals, reference)
 
 
 # -- smoothing, inference and persistence ------------------------------------
@@ -507,7 +540,7 @@ def test_invalid_bounds_name_the_problem(truncation, censored, message):
 
 def test_resolution_takes_each_side_from_the_flag():
     y = np.array([1.0, 2.0, 5.0, 0.0])
-    arrays = unvalidated_bound_arrays(None, ["none", None, "right", "left"], 4)
+    arrays = unvalidated_bound_arrays(None, ["none", False, "right", "left"], 4)
     bounds = resolve_response_bounds(y, arrays, np.arange(4))
     assert bounds is not None
     np.testing.assert_array_equal(bounds.side, [0, 0, 1, -1])
@@ -519,9 +552,13 @@ def test_resolution_takes_each_side_from_the_flag():
     ("censored", "error", "message"),
     [
         ([True, False], ValueError, r"shape \(2,\) for 3 rows; pass one flag per row"),
-        (["right", "Right", None], ValueError, r"unknown flag 'Right' .*first at input row 1"),
-        (np.array([1.0, np.nan, 0.0]), ValueError, r"missing \(NaN\) .*first at input row 1"),
-        (pd.Series([True, None, False], dtype="boolean"), ValueError, r"missing \(NaN\)"),
+        (["right", "Right", "none"], ValueError, r"unknown flag 'Right' .*first at input row 1"),
+        ([True, "False", False], ValueError, r"unknown flag 'False' .*first at input row 1"),
+        (np.array([1.0, np.nan, 0.0]), ValueError, r"missing \(NaN, NA or None\) .*input row 1"),
+        (pd.Series([True, None, False], dtype="boolean"), ValueError, r"missing .*input row 1"),
+        # A nullable column's missing values arrive as None: never "not censored".
+        (pd.Series([True, None, False]), ValueError, r"missing .*first at input row 1"),
+        (["right", None, "none"], ValueError, r"missing .*first at input row 1"),
         (np.array([1, 0, 0]), TypeError, "values, which do not say which rows are censored"),
         (np.array([1.0, 0.0, 0.0]), TypeError, "for example censored=\\(flag == 1\\)"),
     ],
@@ -529,6 +566,21 @@ def test_resolution_takes_each_side_from_the_flag():
 def test_invalid_censored_flags_name_the_problem(censored, error, message):
     with pytest.raises(error, match=message):
         _fit(GaussianLS(), np.array([1.0, 2.0, 3.0]), censored=censored)
+
+
+def test_a_mixed_list_of_flags_is_read_entry_by_entry():
+    # NumPy would promote [False, "left"] to the strings ['False', 'left'].
+    rng = np.random.default_rng(574)
+    y = rng.normal(0.0, 1.0, 200)
+    mixed = [False, "left", True, "none"] * 50
+    labels = np.array(["none", "left", "right", "none"] * 50)
+    family = GaussianLS()
+    assert _fit(family, y, censored=mixed) == pytest.approx(
+        _fit(family, y, censored=labels), rel=1e-12
+    )
+    assert _fit(family, y, censored=tuple(mixed)) == pytest.approx(
+        _fit(family, y, censored=labels), rel=1e-12
+    )
 
 
 @pytest.mark.parametrize(
@@ -1222,6 +1274,113 @@ def test_a_right_censored_mean_form_scale_level_below_its_limit_keeps_its_estima
     fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
     np.testing.assert_allclose(fitted["mean"], [mean, mean], rtol=1e-5)
     np.testing.assert_allclose(fitted["scale"], [scale_a, scale_b], rtol=1e-5)
+
+
+def _deductible_scale_levels(anchored):
+    # Group a: complete rows at -1 and 1.  Group b: five rows at 1, right-censored
+    # above a lower truncation bound 0, so P(Y > 1 | Y > 0) nears one only as the
+    # scale grows; or, anchored, rows at -10 and 1 censored inside (-11, -9] and
+    # (0, 2], whose probabilities pull the scale in opposite directions.
+    complete = np.tile([-1.0, 1.0], 10)
+    if anchored:
+        limits, lower, upper = np.array([-10.0, 1.0]), [-11.0, 0.0], [-9.0, 2.0]
+    else:
+        limits, lower, upper = np.ones(5), [0.0] * 5, [np.inf] * 5
+    n = len(complete)
+    y = np.concatenate([complete, limits])
+    truncation = (np.concatenate([np.full(n, -np.inf), lower]),
+                  np.concatenate([np.full(n, np.inf), upper]))  # fmt: skip
+    X = pd.DataFrame({"g": ["a"] * n + ["b"] * len(limits)})
+    return X, y, np.arange(len(y)) >= n, truncation, complete, limits, lower, upper
+
+
+@pytest.mark.parametrize("family", [GaussianLS(), LogNormalLS(parametrisation="location")])
+def test_a_scale_level_censored_beyond_its_only_truncation_bound_is_separated(family):
+    log_scale = isinstance(family, LogNormalLS)
+    lift = np.exp if log_scale else (lambda values: values)
+    X, y, censored, truncation, *_ = _deductible_scale_levels(anchored=False)
+    with pytest.warns(
+        SeparationWarning, match=r"'scale:g': 1 of 2 occupied levels have only right-censored"
+    ):
+        SuperLSS(family, family.location(), family.scale(cat("g"))).fit(
+            X, lift(y), censored=censored, truncation=tuple(lift(b) for b in truncation)
+        )
+
+    # With both truncation bounds the probabilities tend to (b - c)/(b - a) < 1,
+    # and these two rows give the level a finite scale.
+    X, y, censored, truncation, complete, limits, lower, upper = _deductible_scale_levels(True)
+    model = SuperLSS(family, family.location(), family.scale(cat("g")), separation="error")
+    model.fit(X, lift(y), censored=censored, truncation=tuple(lift(b) for b in truncation))
+
+    def negative(point):
+        mu, log_a, log_b = point
+        window = stats.norm(mu, np.exp(log_b)).cdf
+        return -(
+            stats.norm.logpdf(complete, mu, np.exp(log_a)).sum()
+            + np.log((window(upper) - window(limits)) / (window(upper) - window(lower))).sum()
+        )
+
+    mu, log_a, log_b = _mle(negative, np.array([0.0, 0.0, 1.0]))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["location"], [mu, mu], rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(fitted["scale"], np.exp([log_a, log_b]), rtol=1e-5)
+
+
+def test_a_left_censored_mean_form_scale_level_below_an_upper_bound_is_separated():
+    # P(Y <= c | Y <= b) also nears one only as sigma grows, whatever the mean.
+    y_a = np.exp(8.0 + stats.norm.ppf((np.arange(200) + 0.5) / 200))
+    y = np.concatenate([y_a, np.full(20, 400.0)])
+    group = np.array(["a"] * 200 + ["b"] * 20)
+    upper = np.where(group == "b", 1000.0, np.inf)
+    family = LogNormalLS()
+    with pytest.warns(
+        SeparationWarning, match=r"'scale:g': 1 of 2 occupied levels have only left-censored"
+    ):
+        SuperLSS(family, family.mean(), family.scale(cat("g"))).fit(
+            pd.DataFrame({"g": group}), y, censored=np.where(group == "b", "left", "none"),
+            truncation=(None, upper),
+        )  # fmt: skip
+    # A lower bound keeps the probability below one as sigma grows, so the
+    # level is not scanned; these limits, either side of the mean, anchor it.
+    limits = np.repeat([20_000.0, 4_000.0], 10)
+    y = np.concatenate([y_a, limits])
+    in_b = group == "b"
+    model = SuperLSS(family, family.mean(), family.scale(cat("g")), separation="error")
+    model.fit(
+        pd.DataFrame({"g": group}), y, censored=np.where(in_b, "left", "none"),
+        truncation=(np.where(in_b, 1_000.0, -np.inf), np.where(in_b, 40_000.0, np.inf)),
+    )  # fmt: skip
+
+    def negative(point):
+        mean, scale_a, scale_b = np.exp(point)
+        cdf = stats.norm(np.log(mean) - 0.5 * scale_b**2, scale_b).cdf
+        window = cdf(np.log(40_000.0)) - cdf(np.log(1_000.0))
+        return -(
+            stats.norm.logpdf(np.log(y_a), np.log(mean) - 0.5 * scale_a**2, scale_a).sum()
+            + np.log((cdf(np.log(limits)) - cdf(np.log(1_000.0))) / window).sum()
+        )
+
+    mean, scale_a, scale_b = np.exp(_mle(negative, np.array([8.5, 0.0, 0.0])))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["mean"], [mean, mean], rtol=1e-5)
+    np.testing.assert_allclose(fitted["scale"], [scale_a, scale_b], rtol=1e-5)
+
+
+def test_every_row_censored_on_one_side_separates_the_intercept():
+    # An intercept-only location has no categorical level to scan; its
+    # intercept is the level holding every row.
+    y = np.linspace(-1.0, 1.0, 40)
+    family = GaussianLS()
+    with pytest.warns(SeparationWarning, match=r"'location': every row is right-censored"):
+        SuperLSS(family, family.location(), family.scale()).fit(_intercepts(40), y, censored=True)
+    strict = SuperLSS(family, family.location(), family.scale(), separation="error")
+    with pytest.raises(SeparationError, match="intercept"):
+        strict.fit(_intercepts(40), y, censored=np.ones(40, dtype=bool))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        SuperLSS(family, family.location(), family.scale()).fit(
+            _intercepts(40), y, censored=np.arange(40) > 0
+        )
 
 
 def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated():

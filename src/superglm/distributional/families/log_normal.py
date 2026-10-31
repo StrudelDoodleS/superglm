@@ -36,7 +36,10 @@ from superglm.distributional.families._response_bounds import (
     refuse_bounded,
 )
 from superglm.distributional.families._variance import _variance_product
-from superglm.distributional.families.gaussian import LowerBoundedLogLink
+from superglm.distributional.families.gaussian import (
+    LowerBoundedLogLink,
+    _normal_censored_recession,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -269,25 +272,25 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         return _CAPABILITIES
 
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
-        """Every censored row escapes along the location or mean; an untruncated
-        left-censored row also escapes along the mean form's scale.
+        """Every censored row escapes along the location or mean; some escape along the scale.
 
         On ``log Y`` the law is normal, so the location (or the mean at fixed
         ``sigma``) moves every bound probability one way within any truncation
-        window.  In the mean form ``P(Y <= c) = Phi(sigma/2 - log(m/c)/sigma)``
-        nears one only as ``sigma`` grows, whatever ``m``.  ``P(Y > c)`` instead
-        peaks at ``sigma = sqrt(2 log(c/m))`` below a limit, and in the location
-        form the scale's direction depends on the fitted ``mu``.
+        window.  In the location form the scale is the normal one: a row
+        right-censored above a lower truncation bound with no upper bound, or
+        left-censored below an upper bound with no lower one, escapes along it.
+        In the mean form ``P(Y <= c) = Phi(sigma/2 - log(m/c)/sigma)`` nears one
+        only as ``sigma`` grows, whatever ``m``, and so does
+        ``P(Y <= c | Y <= b)``, so a left-censored row with no lower truncation
+        bound escapes along the scale.  ``P(Y > c)`` instead peaks at
+        ``sigma = sqrt(2 log(c/m))`` below a limit, a lower bound keeps a
+        left-censored row's probability below one as ``sigma`` grows, and
+        elsewhere the scale's direction depends on the fitted mean or location.
         """
-        censored = bounds.side != 0
-        scale = np.zeros_like(censored)
-        if self.parametrisation == "mean":
-            scale = (
-                (bounds.side == LEFT_CENSORED)
-                & ~np.isfinite(bounds.lower)
-                & ~np.isfinite(bounds.upper)
-            )
-        return np.column_stack((censored, scale))
+        if self.parametrisation == "location":
+            return _normal_censored_recession(bounds)
+        scale = (bounds.side == LEFT_CENSORED) & ~np.isfinite(bounds.lower)
+        return np.column_stack((bounds.side != 0, scale))
 
     def to_config(self) -> dict[str, Any]:
         return {
